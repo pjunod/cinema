@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""Install private Sharing reconciliation for one local Linux Compose Cinema.
+
+This is an explicit one-time host installation. Native managed Macs reconcile
+inside Cinema and do not need this Linux Docker component.
+"""
+from __future__ import annotations
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import ipaddress
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import time
+import tomllib
+
+ROOT = Path(__file__).resolve().parents[1]
+LOADER = importlib.machinery.SourceFileLoader("sharing_host_installer_worker", str(ROOT / "scripts/plurx-sharing-host"))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+worker = importlib.util.module_from_spec(SPEC)
+LOADER.exec_module(worker)
+
+
+def mapped_file(container, path):
+    matches = []
+    for mount in container["Mounts"]:
+        try:
+            suffix = Path(path).relative_to(mount["Destination"])
+        except ValueError:
+            continue
+        if mount["Type"] != "bind":
+            raise ValueError("Sharing host setup requires a persistent bind-mounted data directory")
+        matches.append((len(mount["Destination"]), Path(mount["Source"]) / suffix))
+    return max(matches, default=(0, None))[1]
+
+
+def node_config(source, address):
+    """Preserve all unrelated TOML bytes; replace only complete Sharing tables."""
+    parsed = tomllib.loads(source)
+    kept = []
+    sharing = False
+    for line in source.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("["):
+            sharing = re.match(r"\[sharing(?:\.[A-Za-z0-9_-]+)*\]\s*(?:#.*)?$", stripped.strip()) is not None
+        if not sharing:
+            kept.append(line)
+    base = "".join(kept).rstrip()
+    if "sharing" in tomllib.loads(base):
+        raise ValueError("Sharing uses an inline or quoted TOML table; convert it to [sharing] before host installation")
+    result = base + ('\n\n[sharing]\nlistener_profile = "docker_bridge"\nbind = "0.0.0.0:32444"\nrequire_host_egress_guard = true\n'
+                     '\n[sharing.egress]\nmode = "local_address"\naddress = "' + address + '"\n')
+    output = tomllib.loads(result)
+    assert {k: v for k, v in parsed.items() if k != "sharing"} == {k: v for k, v in output.items() if k != "sharing"}
+    return result
+
+
+def select_subnet(networks):
+    occupied = [ipaddress.ip_network(row["Subnet"]) for network in networks
+                for row in network.get("IPAM", {}).get("Config") or [] if row.get("Subnet")]
+    for index in range(44, 255):
+        subnet = ipaddress.ip_network(f"172.30.{index}.0/24")
+        if not any(subnet.overlaps(other) for other in occupied if other.version == 4):
+            return str(subnet), str(subnet.network_address + 2)
+    raise ValueError("No free private Sharing bridge subnet was found")
+
+
+def environment_with_files(source, files):
+    names = [str(path) for path in files]
+    if any(any(c in name for c in "\n\r:'") for name in names):
+        raise ValueError("Compose paths contain unsupported separator characters")
+    lines = [line for line in source.splitlines(keepends=True)
+             if not re.match(r"\s*(?:COMPOSE_FILE|COMPOSE_PATH_SEPARATOR)\s*=", line)]
+    return "".join(lines).rstrip() + "\nCOMPOSE_FILE='" + ":".join(names) + "'\nCOMPOSE_PATH_SEPARATOR=':'\n"
+
+
+def unit_quote(value):
+    if any(ord(c) < 32 for c in str(value)):
+        raise ValueError("A host installation path contains unsupported control characters")
+    return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+
+
+def original_config(container, command, environment):
+    arguments = (container["Config"].get("Entrypoint") or []) + (container["Config"].get("Cmd") or [])
+    if any(arg == "--config" or arg.startswith("--config=") for arg in arguments):
+        raise ValueError("This deployment selects --config explicitly; host setup will not replace that choice")
+    selected = environment.get("PLURX_CONFIG")
+    paths = [selected] if selected else [str(Path(container["Config"].get("WorkingDir") or "/") / "plurx.toml"), "/etc/plurx/plurx.toml"]
+    for name in paths:
+        mapped = mapped_file(container, name)
+        if mapped is not None and mapped.is_file():
+            return mapped.read_text()
+        try:
+            archive = worker.run([*command, "cp", "-L", container["Id"] + ":" + name, "-"])
+        except worker.SetupError:
+            if selected:
+                raise ValueError("The active node config could not be read; host setup has preserved it")
+            continue
+        with tarfile.open(fileobj=io.BytesIO(archive)) as content:
+            members = content.getmembers()
+            if len(members) != 1 or not members[0].isfile() or members[0].size > worker.LIMIT:
+                raise ValueError("The active node config is not a bounded regular file")
+            return content.extractfile(members[0]).read().decode("utf-8")
+    return ""
+
+
+def validate_service_hash(expected, output):
+    rows = output.strip().splitlines()
+    if len(rows) != 1 or rows[0].split() != ["plurxd", expected]:
+        raise ValueError("The original Compose environment could not be reproduced. Host setup has not changed the running container; rerun with its original environment selection")
+
+
+def write_file(path, data, mode, uid=None):
+    path = Path(path)
+    temporary = path.with_name(path.name + ".install-" + str(os.getpid()))
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as target:
+            target.write(data if isinstance(data, bytes) else data.encode())
+            target.flush()
+            os.fsync(fd)
+        os.fchmod(fd, mode)
+        if uid is not None:
+            os.fchown(fd, uid, -1)
+        os.rename(temporary, path)
+    finally:
+        os.close(fd)
+        temporary.unlink(missing_ok=True)
+
+
+def install(container_name, ensure=False):
+    if sys.platform != "linux" or not Path("/run/systemd/system").is_dir():
+        if ensure:
+            return
+        raise ValueError("The Docker sharing host installer requires a local Linux systemd host")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", container_name):
+        raise ValueError("Invalid registered Cinema container name")
+    docker = worker.trusted_program(["/usr/bin/docker", "/usr/local/bin/docker"])
+    iptables = worker.trusted_program(["/usr/sbin/iptables", "/sbin/iptables"])
+    command = [docker, "--host", "unix:///var/run/docker.sock"]
+    inspect = lambda: json.loads(worker.run([*command, "inspect", container_name]))[0]
+    container = inspect()
+    try:
+        capability = json.loads(worker.run([*command, "exec", container_name, "plurxd", "sharing", "host-capabilities"]))
+    except (worker.SetupError, ValueError):
+        raise ValueError("Upgrade Cinema to a build supporting managed sharing before installing its host component") from None
+    if capability != {"schema_version": 1, "managed_host_egress_guard": True}:
+        raise ValueError("Upgrade Cinema to a build supporting managed sharing before installing its host component")
+    labels = container["Config"].get("Labels") or {}
+    project = labels.get("com.docker.compose.project")
+    if labels.get("com.docker.compose.service") != "plurxd" or not project:
+        raise ValueError("Selected container is not a Compose Cinema service")
+    environment = dict(value.split("=", 1) for value in container["Config"]["Env"])
+    inside = environment.get("PLURX_DATA_DIR", "/var/lib/plurx")
+    data_dir = mapped_file(container, inside)
+    if data_dir is None or not data_dir.is_dir() or data_dir.is_symlink():
+        raise ValueError("Cannot bind host setup to this Cinema's persistent data directory")
+    # Pin the exact bind, not a path newly supplied by a daemon request.
+    data_dir = data_dir.resolve()
+    metadata = data_dir.stat()
+    try:
+        source_uid = worker.container_uid(container)
+    except worker.SetupError:
+        raise ValueError("Managed host setup requires a nonroot numeric container user without privileged mode or added capabilities") from None
+    security_options = json.loads(worker.run([*command, "info", "--format", "{{json .SecurityOptions}} "]))
+    if any("name=rootless" in value or "name=userns" in value for value in security_options or []):
+        raise ValueError("Managed host setup requires an unprivileged container on a rootful Docker host without user-namespace remapping")
+    key = hashlib.sha256(str(data_dir).encode()).hexdigest()[:16]
+    unit = "plurx-sharing-host-" + key + ".service"
+    registration_path = Path("/etc/plurx/sharing-host.d") / (key + ".json")
+    state_dir = Path("/var/lib/plurx-sharing-host") / key
+    installed = Path("/usr/local/libexec/plurx-sharing-host") / key / "agent"
+    registration = {"schema_version": 1, "kind": "docker", "docker": docker, "iptables": iptables, "private_egress_guard": True, "container": container_name,
+                    "project": project, "data_dir": str(data_dir), "container_data_dir": inside,
+                    "source_uid": source_uid, "data_identity": [metadata.st_dev, metadata.st_ino]}
+    # Common deployments need no new authorization or mutations on later runs.
+    if registration_path.is_file() and installed.is_file():
+        record_meta = registration_path.lstat()
+        installed_meta = installed.lstat()
+        if (record_meta.st_uid == installed_meta.st_uid == 0 and not (record_meta.st_mode | installed_meta.st_mode) & 0o022
+                and json.loads(registration_path.read_bytes()) == registration
+                and installed.read_bytes() == (ROOT / "scripts/plurx-sharing-host").read_bytes()):
+            try:
+                worker.run(["/usr/bin/systemctl", "is-active", "--quiet", unit])
+                return
+            except worker.SetupError:
+                pass
+    if os.geteuid() != 0:
+        if ensure and not sys.stdin.isatty():
+            print("Sharing host setup needs one local administrator authorization; run scripts/install-sharing-host --container " + container_name + " on this host.", file=sys.stderr)
+            return
+        os.execv("/usr/bin/sudo", ["sudo", "--", "/usr/bin/python3", str(Path(__file__).resolve()), "--container", container_name])
+    state_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(state_dir, 0o700)
+    backup = state_dir / ("install-" + time.strftime("%Y%m%d-%H%M%S"))
+    backup.mkdir(mode=0o700)
+    write_file(backup / "container.json", json.dumps(container), 0o600)
+    original = original_config(container, command, environment)
+    request_dir = data_dir / "sharing-host"
+    if request_dir.exists():
+        rmeta = request_dir.lstat()
+        if not stat.S_ISDIR(rmeta.st_mode) or rmeta.st_uid != source_uid or rmeta.st_mode & 0o077:
+            raise ValueError("Existing sharing host directory has an unexpected owner, type or permissions")
+    else:
+        request_dir.mkdir(mode=0o700)
+        os.chown(request_dir, source_uid, -1)
+    deploy = Path(labels["com.docker.compose.project.working_dir"]).resolve()
+    files = []
+    for name in labels["com.docker.compose.project.config_files"].split(","):
+        path = Path(name)
+        if not path.is_file():
+            if re.fullmatch(r"plurx-hardware\.[A-Za-z0-9]+", path.name):
+                continue
+            raise ValueError("An active Compose input is missing; restore it before host setup")
+        files.append(path)
+    # Replace only a final generated hardware overlay, then require Compose's
+    # full service hash to match the running service before any deployment edit.
+    if files:
+        try:
+            hardware_document = json.loads(files[-1].read_bytes())
+        except (ValueError, OSError):
+            hardware_document = None
+        if (hardware_document and set(hardware_document) == {"services"}
+                and set(hardware_document["services"]) == {"plurxd"}
+                and set(hardware_document["services"]["plurxd"]) <= {"devices", "gpus", "deploy", "runtime", "security_opt", "ports"}
+                and files[-1].name != "docker-compose.sharing-host.json"):
+            files.pop()
+    original_env_files = labels.get("com.docker.compose.project.environment_file", "")
+    if original_env_files and original_env_files != str(deploy / ".env"):
+        raise ValueError("This deployment uses an explicit environment file. Host setup requires its original environment selection before changing Compose")
+    baseline_env = dict(os.environ, COMPOSE_FILE=":".join(map(str, files)), COMPOSE_PATH_SEPARATOR=":",
+                        PLURX_IMAGE=container["Config"]["Image"],
+                        PLURX_HEALTH_START_PERIOD=str(container["Config"]["Healthcheck"]["StartPeriod"]) + "ns",
+                        PLURX_CONTAINER_RESTART_POLICY=container["HostConfig"]["RestartPolicy"]["Name"])
+    if "PLURX_NODE_HOSTNAME" in environment:
+        baseline_env["PLURX_NODE_HOSTNAME"] = environment["PLURX_NODE_HOSTNAME"]
+    baseline_hardware = backup / "baseline-hardware.json"
+    generated = subprocess.run(["/usr/bin/python3", str(ROOT / "scripts/docker-hardware"), "--output", str(baseline_hardware)], cwd=deploy, env=baseline_env, check=True, capture_output=True, text=True, timeout=60)
+    baseline_env["COMPOSE_FILE"] = generated.stdout.strip()
+    expected_hash = labels.get("com.docker.compose.config-hash")
+    if not expected_hash:
+        raise ValueError("The active service has no Compose configuration identity; host setup has preserved it")
+    actual_hash = subprocess.check_output([*command, "compose", "config", "--hash", "plurxd"], cwd=deploy, env=baseline_env, text=True, timeout=60)
+    validate_service_hash(expected_hash, actual_hash)
+    resolved = json.loads(subprocess.check_output([*command, "compose", "config", "--format", "json"], cwd=deploy, env=baseline_env, timeout=60))
+    existing_publication = (container["HostConfig"].get("PortBindings") or {}).get("32444/tcp")
+    if existing_publication and existing_publication != [{"HostIp": "127.0.0.1", "HostPort": "32444"}]:
+        raise ValueError("An existing sharing port publication conflicts with private loopback setup; it has been preserved")
+    overlay_path = deploy / "docker-compose.sharing-host.json"
+    existing_overlay = json.loads(overlay_path.read_bytes()) if overlay_path.exists() else None
+    if existing_overlay:
+        subnet = existing_overlay["networks"]["cinema_sharing_host"]["ipam"]["config"][0]["subnet"]
+        address = existing_overlay["services"]["plurxd"]["networks"]["cinema_sharing_host"]["ipv4_address"]
+    else:
+        ids = worker.run([*command, "network", "ls", "-q"]).decode().split()
+        networks = json.loads(worker.run([*command, "network", "inspect", *ids]))
+        ip = worker.trusted_program(["/usr/sbin/ip", "/usr/bin/ip", "/sbin/ip"])
+        routes = json.loads(worker.run([ip, "-j", "route", "show", "table", "main"]))
+        networks.append({"IPAM": {"Config": [{"Subnet": row["dst"]} for row in routes if row.get("dst") and row["dst"] != "default"]}})
+        subnet, address = select_subnet(networks)
+    write_file(backup / "node-config.before", original, 0o600)
+    node_path = request_dir / "node.toml"
+    write_file(node_path, node_config(original, address), 0o600, source_uid)
+    networks = {name: value or {} for name, value in resolved["services"]["plurxd"].get("networks", {}).items() if name != "cinema_sharing_host"}
+    priority = max([int(n.get("gw_priority", 0)) for n in networks.values()] + [0]) + 1
+    networks["cinema_sharing_host"] = {"ipv4_address": address, "gw_priority": priority}
+    overlay = {"services": {"plurxd": {"ports": ["127.0.0.1:32444:32444/tcp"],
+                "environment": {"PLURX_CONFIG": "/etc/plurx/sharing-host.toml"},
+                "volumes": [{"type": "bind", "source": str(node_path), "target": "/etc/plurx/sharing-host.toml", "read_only": True}],
+                "networks": networks}}, "networks": {"cinema_sharing_host": {"driver": "bridge", "ipam": {"config": [{"subnet": subnet}]}}}}
+    if "PLURX_NODE_HOSTNAME" in environment:
+        overlay["services"]["plurxd"]["environment"]["PLURX_NODE_HOSTNAME"] = environment["PLURX_NODE_HOSTNAME"]
+    write_file(overlay_path, json.dumps(overlay, indent=2) + "\n", 0o644)
+    files = [path for path in files if path != overlay_path] + [overlay_path]
+    env_path = deploy / ".env"
+    before_env = env_path.read_text() if env_path.exists() else ""
+    write_file(backup / "environment.before", before_env, 0o600)
+    env_meta = env_path.stat() if env_path.exists() else None
+    write_file(env_path, environment_with_files(before_env, files), stat.S_IMODE(env_meta.st_mode) if env_meta else 0o600, env_meta.st_uid if env_meta else 0)
+    # Keep the current immutable image. Normal deployment remains responsible
+    # for selecting/upgrading software; this installer changes host plumbing.
+    deploy_env = dict(baseline_env, PLURX_IMAGE=container["Image"], COMPOSE_FILE=":".join(map(str, files)), COMPOSE_PATH_SEPARATOR=":")
+    hardware = backup / "hardware.json"
+    result = subprocess.run(["/usr/bin/python3", str(ROOT / "scripts/docker-hardware"), "--output", str(hardware)], cwd=deploy, env=deploy_env, check=True, capture_output=True, text=True, timeout=60)
+    deploy_env["COMPOSE_FILE"] = result.stdout.strip()
+    period = subprocess.check_output(["/usr/bin/python3", str(ROOT / "scripts/validate-docker-startup-budget"), "--emit-start-period"], cwd=deploy, env=deploy_env, text=True, timeout=60).strip()
+    deploy_env["PLURX_HEALTH_START_PERIOD"] = period
+    subprocess.run(["/usr/bin/python3", str(ROOT / "scripts/validate-docker-startup-budget")], cwd=deploy, env=deploy_env, check=True, timeout=60)
+    subprocess.run([*command, "compose", "up", "-d", "--no-build", "--pull", "never", "--no-deps", "plurxd"], cwd=deploy, env=deploy_env, check=True, timeout=180)
+    after = inspect()
+    if after["Image"] != container["Image"]:
+        raise ValueError("The container image changed unexpectedly; inspect the retained installation backup")
+    for field in ("User", "Entrypoint", "Cmd"):
+        if after["Config"][field] != container["Config"][field]:
+            raise ValueError("Unexpected startup identity change; inspect the retained installation backup")
+    before_environment = {k: v for k, v in environment.items() if k != "PLURX_CONFIG"}
+    after_environment = dict(value.split("=", 1) for value in after["Config"]["Env"])
+    if before_environment != {k: v for k, v in after_environment.items() if k != "PLURX_CONFIG"}:
+        raise ValueError("Unexpected environment change; inspect the retained installation backup")
+    mounts = lambda value: {(m["Source"], m["Destination"], m["RW"]) for m in value["Mounts"]}
+    if not mounts(container).issubset(mounts(after)) or mounts(after) - mounts(container) - {(str(node_path), "/etc/plurx/sharing-host.toml", False)}:
+        raise ValueError("Unexpected storage mount change; inspect the retained installation backup")
+    for field in ("Devices", "GroupAdd"):
+        if after["HostConfig"][field] != container["HostConfig"][field]:
+            raise ValueError("Unexpected hardware change; inspect the retained installation backup")
+    for port, bindings in container["HostConfig"]["PortBindings"].items():
+        if after["HostConfig"]["PortBindings"].get(port) != bindings:
+            raise ValueError("Unexpected existing port change; inspect the retained installation backup")
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    write_file(installed, (ROOT / "scripts/plurx-sharing-host").read_bytes(), 0o755)
+    registration_path.parent.mkdir(parents=True, exist_ok=True)
+    write_file(registration_path, json.dumps(registration), 0o644)
+    unit_path = Path("/etc/systemd/system") / unit
+    service = ("[Unit]\nDescription=Cinema private sharing host setup\nAfter=docker.service tailscaled.service\n"
+               "[Service]\nType=simple\nExecStart=" + unit_quote(installed) + " --registration " + unit_quote(registration_path) + " --state-directory " + unit_quote(state_dir) +
+               "\nRestart=on-failure\nRestartSec=5\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\nReadWritePaths=" + unit_quote(state_dir) + " " + unit_quote(request_dir) +
+               "\n[Install]\nWantedBy=multi-user.target\n")
+    write_file(unit_path, service, 0o644)
+    worker.run(["/usr/bin/systemctl", "daemon-reload"])
+    worker.run(["/usr/bin/systemctl", "enable", unit])
+    worker.run(["/usr/bin/systemctl", "restart", unit])
+    print("Cinema private sharing host setup installed. Sharing enable/disable will reconcile automatically.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--container", default="plurxd")
+    parser.add_argument("--ensure", action="store_true")
+    args = parser.parse_args()
+    try:
+        install(args.container, args.ensure)
+    except (ValueError, OSError, KeyError, worker.SetupError, subprocess.SubprocessError) as error:
+        detail = str(error) if type(error) is ValueError else "Check the local Docker/systemd setup and rerun scripts/install-sharing-host."
+        print("Sharing host installation did not complete. Existing backup files are retained. " + detail, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

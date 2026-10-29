@@ -8,6 +8,12 @@ cluster, topology and device work, and the
 
 ## Prepare the private listener
 
+Managed native installations can prepare the private connection when sharing
+is enabled. Supported Linux Compose hosts use a separately installed host
+component; its installer prepares the bridge and its worker follows the switch.
+See [automatic host setup](SHARING-HOST-SETUP.md) for installation, observations
+and source qualification. The configuration below describes the manual path.
+
 The default hosting profile accepts a loopback sharing listener. On a Linux
 bare host, the node-local configuration is:
 

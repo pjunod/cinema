@@ -31,6 +31,11 @@ contact a support service. A ZIP contains `summary.txt`, `manifest.json`, the
 user's `description.txt`, bounded structured client events, and available
 user-scoped server evidence. Title and platform attachments stay opt-in.
 
+Credential sign-in forms omit the reporting action (issue #1321). Server
+selection, first-account setup, saved-session connection recovery, and
+signed-in Help/player reporting retain their existing entry points. Anonymous
+capture remains available from the connection/setup paths.
+
 Native TVs expose their selected ZIP only after the physically controlled
 report screen's “Save TV ZIP on a phone” action. A temporary listener binds a
 private IPv4 interface, uses a random capability with at least 128 bits of

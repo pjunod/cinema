@@ -198,6 +198,10 @@ pub(crate) fn bound_tcp_socket(
             socket
                 .bind(std::net::SocketAddr::new(*ip, 0))
                 .map_err(|_| unavailable())?;
+            #[cfg(target_os = "macos")]
+            if crate::sharing::is_tailnet_address(*ip) {
+                pin_macos_source_interface(&socket, *ip)?;
+            }
         }
         PinnedEgress::Interface(interface) => {
             if interface.is_empty() || interface.len() > 15 || interface.as_bytes().contains(&0) {
@@ -212,6 +216,84 @@ pub(crate) fn bound_tcp_socket(
         }
     }
     Ok(socket)
+}
+
+/// Darwin's source-address bind alone does not pin the outgoing interface.
+/// Bind the socket to the interface currently owning that address as well,
+/// so losing the private route cannot fall back to an ordinary interface.
+#[cfg(target_os = "macos")]
+fn pin_macos_source_interface(
+    socket: &tokio::net::TcpSocket,
+    source: std::net::IpAddr,
+) -> Result<(), StoreError> {
+    use std::os::fd::AsRawFd;
+    struct Addresses(*mut libc::ifaddrs);
+    impl Drop for Addresses {
+        fn drop(&mut self) {
+            // SAFETY: the list came from successful getifaddrs and is freed once.
+            unsafe {
+                libc::freeifaddrs(self.0);
+            }
+        }
+    }
+    let mut head = std::ptr::null_mut();
+    // SAFETY: head is an initialized writable output pointer.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 || head.is_null() {
+        return Err(unavailable());
+    }
+    let addresses = Addresses(head);
+    let mut current = addresses.0;
+    while !current.is_null() {
+        // SAFETY: current belongs to the live OS-provided linked list.
+        let entry = unsafe { &*current };
+        if !entry.ifa_addr.is_null() && !entry.ifa_name.is_null() {
+            // SAFETY: the OS supplies an address with a readable family tag.
+            let family = unsafe { (*entry.ifa_addr).sa_family } as libc::c_int;
+            let matches = match (source, family) {
+                (std::net::IpAddr::V4(ip), libc::AF_INET) => {
+                    // SAFETY: AF_INET identifies a complete sockaddr_in.
+                    let address = unsafe { &*entry.ifa_addr.cast::<libc::sockaddr_in>() };
+                    ip.octets() == address.sin_addr.s_addr.to_ne_bytes()
+                }
+                (std::net::IpAddr::V6(ip), libc::AF_INET6) => {
+                    // SAFETY: AF_INET6 identifies a complete sockaddr_in6.
+                    let address = unsafe { &*entry.ifa_addr.cast::<libc::sockaddr_in6>() };
+                    ip.octets() == address.sin6_addr.s6_addr
+                }
+                _ => false,
+            };
+            if matches {
+                // SAFETY: ifa_name is an OS-provided NUL-terminated interface name.
+                let index = unsafe { libc::if_nametoindex(entry.ifa_name) };
+                if index == 0 {
+                    return Err(unavailable());
+                }
+                let (level, option) = if source.is_ipv4() {
+                    (libc::IPPROTO_IP, libc::IP_BOUND_IF)
+                } else {
+                    (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF)
+                };
+                // SAFETY: a live socket and initialized interface index are passed
+                // with the exact Darwin option size; no pointer is retained.
+                let result = unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        level,
+                        option,
+                        (&index as *const libc::c_uint).cast(),
+                        std::mem::size_of_val(&index) as libc::socklen_t,
+                    )
+                };
+                return if result == 0 {
+                    Ok(())
+                } else {
+                    Err(unavailable())
+                };
+            }
+        }
+        current = entry.ifa_next;
+    }
+    Err(unavailable())
 }
 
 /// A node-local leaf and server config. Only status fields may be serialized.
@@ -485,6 +567,44 @@ impl SharingTlsListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sharing_tls_macos_source_interface_is_pinned_and_missing_sources_refuse() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("synthetic source-interface fixture");
+        let socket = tokio::net::TcpSocket::new_v4().expect("synthetic source-interface fixture");
+        socket
+            .bind(
+                "127.0.0.1:0"
+                    .parse()
+                    .expect("synthetic source-interface fixture"),
+            )
+            .expect("synthetic source-interface fixture");
+        pin_macos_source_interface(
+            &socket,
+            "127.0.0.1"
+                .parse()
+                .expect("synthetic source-interface fixture"),
+        )
+        .expect("synthetic source-interface fixture");
+        socket
+            .connect(
+                listener
+                    .local_addr()
+                    .expect("synthetic source-interface fixture"),
+            )
+            .await
+            .expect("synthetic source-interface fixture");
+        let socket = tokio::net::TcpSocket::new_v4().expect("synthetic source-interface fixture");
+        assert!(pin_macos_source_interface(
+            &socket,
+            "192.0.2.254"
+                .parse()
+                .expect("synthetic source-interface fixture")
+        )
+        .is_err());
+    }
     const NOW: i64 = 1_800_000_000;
     /// `NodeTls` refuses a group- or world-writable key directory by design,
     /// and a temporary directory inherits the runner umask (002 on some

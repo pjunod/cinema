@@ -2,17 +2,21 @@
 const fs=require("node:fs"),vm=require("node:vm"),assert=require("node:assert/strict"),{test}=require("node:test");
 const artworkSource=fs.readFileSync("crates/plurxd/src/web/pages/shared-artwork.js","utf8");
 const source=fs.readFileSync("crates/plurxd/src/web/pages/shared-libraries.js","utf8");
+const detailSources=["detail/helpers.js","detail/dynamic-range.js","detail/track-facts.js","detail/edit.js"].map(path=>fs.readFileSync("crates/plurxd/src/web/"+path,"utf8"));
+const hdrLabelSource=fs.readFileSync("crates/plurxd/src/web/player/stats.js","utf8").match(/^function hdrLabel\(.*$/m)[0];
 const ref={import_id:"11111111-1111-4111-8111-111111111111",server_id:"22222222-2222-4222-8222-222222222222",catalogue_epoch:"33333333-3333-4333-8333-333333333333",library_id:"9007199254740993",item_id:"9223372036854775807"};
 function harness(read){
  const elements=new Map(),requests=[];
  const context=vm.createContext({TextDecoder,Uint8Array,URLSearchParams,URL,AbortController,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/shared",href:"https://b.test/#/shared"},
   PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,HTMLButtonElement:class{},
-  esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),fmtDur:String,
+  esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),fmtDur:String,fmtSize:String,langName:String,
   api:async(path)=>{requests.push(path);const response=await read(path);Object.defineProperty(response,"url",{value:new URL("/api/v1"+path,"https://b.test").href});return response;},layoutChrome(){},setPagePhase(){},
   document:{getElementById(id){if(!elements.has(id))elements.set(id,{innerHTML:"",more:null,querySelector(){return this.more;},querySelectorAll(){return [];},insertAdjacentHTML(where,html){this.innerHTML+=html;},appendChild(button){this.more=button;button.remove=()=>{this.more=null;};}});return elements.get(id);},createElement(){return {dataset:{}};}}
  });
  vm.runInContext(artworkSource,context);
- vm.runInContext(source+"\nthis.shared={id:sharedCatalogueId,key:sharedCatalogueGroupKey,href:sharedCatalogueHref,route:sharedCatalogueRoute,item:sharedCatalogueItemHtml,read:sharedCatalogueRead,view:viewSharedCatalogue,page:sharedCatalogueLoadPage};",context);
+ for(const detailSource of detailSources)vm.runInContext(detailSource,context);
+ vm.runInContext(hdrLabelSource,context);
+ vm.runInContext(source+"\nthis.shared={id:sharedCatalogueId,key:sharedCatalogueGroupKey,href:sharedCatalogueHref,route:sharedCatalogueRoute,item:sharedCatalogueItemHtml,detail:sharedCatalogueDetailHtml,read:sharedCatalogueRead,view:viewSharedCatalogue,page:sharedCatalogueLoadPage};",context);
  return {context,h:context.shared,elements,requests,capture(){return {generation:1,auth:1,token:"login-a",origin:"/api/v1",route:"#/shared"};}};
 }
 function reply(value){return new Response(JSON.stringify(value),{headers:{"content-type":"application/json"}});}
@@ -63,9 +67,9 @@ test("shared pagination encodes opaque cursors, keeps full-reference deduplicati
  const item={source:"shared",reference:ref,title:"One",kind:"movie"},cursor="opaque+/=cursor";
  let calls=0;const fixture=harness(async path=>{calls++;return reply({items:[item,item],next_cursor:calls<3?cursor:null});});
  await fixture.h.page("/shared/imports/"+ref.import_id+"/libraries/"+ref.library_id+"/items",ref,fixture.capture(),"rows","title+space");
- const rows=fixture.elements.get("rows");assert.equal((rows.innerHTML.match(/<strong>One/g)||[]).length,1);
+ const rows=fixture.elements.get("rows");assert.equal((rows.innerHTML.match(/<strong class="t">One/g)||[]).length,1);
  await rows.more.onclick();assert.equal(calls,2);assert.ok(fixture.requests[1].includes("cursor=opaque%2B%2F%3Dcursor"));
- assert.ok(fixture.requests[0].includes("q=title%2Bspace"));assert.equal((rows.innerHTML.match(/<strong>One/g)||[]).length,1);
+ assert.ok(fixture.requests[0].includes("q=title%2Bspace"));assert.equal((rows.innerHTML.match(/<strong class="t">One/g)||[]).length,1);
  fixture.context.AUTH_GENERATION++;await rows.more.onclick();assert.equal(calls,2,"old-account continuation cannot make another request");
 });
 test("Source metadata loads use at most four concurrent groups",async()=>{
@@ -124,7 +128,7 @@ test("an expired or substituted Source cursor reopens the list once instead of r
   await fixture.h.page("/shared/imports/"+ref.import_id+"/libraries/"+ref.library_id+"/items",library,fixture.capture(),"rows");
   const rows=fixture.elements.get("rows");await rows.more.onclick();
   assert.equal(calls,3,code);assert.ok(fixture.requests[1].includes("cursor=opaque-1"));assert.ok(!fixture.requests[2].includes("cursor="),"fresh open");
-  assert.match(rows.innerHTML,/reopened from the start/);assert.equal((rows.innerHTML.match(/<strong>Item 1/g)||[]).length,1);
+  assert.match(rows.innerHTML,/reopened from the start/);assert.equal((rows.innerHTML.match(/<strong class="t">Item 1/g)||[]).length,1);
   assert.equal(rows.more,null,"the reopened list ended without another dead cursor");
  }
  // Other refusals keep the existing retry affordance and never reopen.
@@ -190,6 +194,16 @@ test("Shared movie detail formats milliseconds and does not request unsupported 
  const f=harness(path=>{assert.ok(!path.includes("/children"));return reply({item:{source:"shared",reference:ref,title:"Twelve minutes",kind:"movie"},delivery_status:"available",files:[{file_id:"1",reference:{item:ref,file_id:"1"},duration_ms:720000,video_codec:"h264"}]});});
  const durations=[];f.context.fmtDur=ms=>{durations.push(ms);return "12:00";};
  f.context.location.hash=f.h.href(ref);await f.h.view(1);
- assert.deepEqual(durations,[720000]);assert.match(f.elements.get("shared-catalogue").innerHTML,/12:00/);
+ assert.ok(durations.length>0);assert.ok(durations.every(ms=>ms===720000));assert.match(f.elements.get("shared-catalogue").innerHTML,/12:00/);
  assert.equal(f.requests.filter(path=>path.includes("/children")).length,0);
+});
+
+test("shared details render delivered enrichment and track facts without local item actions",()=>{
+ const f=harness(),file={file_id:"7",reference:{item:ref,file_id:"7"},video_codec:"hevc",width:3840,height:2160,bit_depth:10,hdr:"hdr10",duration_ms:8640000,container:"mkv",size:"9007199254740993",audio_streams:[{codec:"eac3",channels:8,language:"eng",title:"<Atmos>"}],subtitle_streams:[{codec:"subrip",language:"fra",forced:true,hearing_impaired:true,title:'<script>bad</script>'}]};
+ const html=f.h.detail({item:{source:"shared",reference:ref,title:"Film",kind:"movie",year:2016,genres:["Drama","<script>genre</script>"],presentation:{runtime_ms:8640000,air_date:"2016-01-15",ratings:[{source:"imdb",value:7.3,scale:10,votes:12000}]}},files:[file],delivery_status:"available"},ref,null);
+ for(const text of ["2016","Drama","2160p","3840×2160","HEVC","HDR10","7.1","fra","forced","SDH","IMDb","7.3","12,000","Released 2016-01-15"])assert.ok(html.includes(text),text);
+ assert.ok(!html.includes("<script>"));assert.match(html,/&lt;script>bad/);assert.match(html,/data-shared-play="0"/);
+ assert.ok(!html.includes("#/item/"));assert.ok(!html.includes("refreshMediaPreparation"));assert.ok(!html.includes("openEdit"));
+ assert.match(f.h.detail({item:{source:"shared",reference:ref,title:"Old source",kind:"movie"},files:[file],delivery_status:"unavailable"},ref,null),/data-shared-play="0" disabled/);
+ assert.throws(()=>f.h.detail({item:{source:"shared",reference:ref,title:"Bad",kind:"movie"},files:[{...file,reference:{item:{...ref,library_id:"9"},file_id:"7"}}]},ref,null),/Shared file changed/);
 });

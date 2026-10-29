@@ -1,6 +1,7 @@
 "use strict";
 const fs=require("node:fs"),vm=require("node:vm"),assert=require("node:assert/strict"),{test}=require("node:test");
 const source=fs.readFileSync("crates/plurxd/src/web/pages/sharing-management.js","utf8"),catalogue=fs.readFileSync("crates/plurxd/src/web/pages/shared-libraries.js","utf8");
+const qrSource=fs.readFileSync("crates/plurxd/src/web/pages/sharing-qr.js","utf8"),encoder=fs.readFileSync("crates/plurxd/src/web/vendor/qrcodegen.js","utf8"),decoder=fs.readFileSync("crates/plurxd/src/web/vendor/jsQR.js","utf8");
 const id="11111111-1111-4111-8111-111111111111",server="22222222-2222-4222-8222-222222222222",epoch="33333333-3333-4333-8333-333333333333",claim="44444444-4444-4444-8444-444444444444",grant="55555555-5555-4555-8555-555555555555",large=9007199254740993n;
 const endpoint={ipv4:"100.127.255.254",ipv6:"fd7a:115c:a1e0::1",ts_fqdn:"source.private.ts.net",port:8443n,spki_sha256:"a".repeat(64)};
 function imported(){return {import:{id,source_server_id:server,catalogue_epoch:epoch,claim_id:claim,remote_grant_id:grant,source_name:"Source",state:"active",assignment_generation:large,lifecycle_generation:large,endpoint_generation:large,endpoints:[{...endpoint}]},pairing_code:"0123456789abcdef"};}
@@ -12,7 +13,8 @@ function harness(fetcher=async()=>reply({updated:true})){
  const c=vm.createContext({TextDecoder,TextEncoder,Uint8Array,URL,URLSearchParams,Response,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/settings/sharing",origin:"https://b.example"},PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   SETTINGS_DATA:{},SETTINGS_LOADED:new Set(),readAfterRequest:()=>({index:"",generation:1,epoch:0}),observeReadAfter(){},forgetReadAfter(){},clearLocalSession(){c.AUTH_GENERATION++;c.TOKEN=null;},
   esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),setHead:()=>"",setCard:v=>v,cardHead:()=>"",document:{getElementById(){return element;}},fetch:async(path,options)=>{requests.push({path,options});return fetcher(path,options,c);}});
- vm.runInContext(catalogue+"\n"+source+"\nthis.m={parse:sharingJSON,stringify:sharingJSONString,endpoint:sharingEndpoint,endpoints:sharingEndpoints,recovery:sharingRecoveryHTML,mainReload:sharingReload,matrix:sharingMatrix,assignments:sharingAssignments,cancel:sharingCancelInvitation,copyInvitation:sharingCopyInvitation,endpointEdit:sharingEndpointEdit,endpointCount:sharingEndpointCount,request:sharingRequest,read:sharingManagementRead,panel:sharingManagementPanel,capture:sharingCapture,retire:sharingRetire,route:sharingRouteChanged,open:sharingOpen,save:sharingSave,reload:sharingEditorReload,configure:sharingConfigureAddresses,back:sharingCloseEditor,select:sharingSelect,edit:sharingEdit,matrixEdit:sharingMatrixEdit,removeOutside:sharingRemoveOutside,work:sharingWork,state:()=>SHARING_MANAGEMENT};",c);
+ c.window=c;c.self=c;
+ vm.runInContext(encoder+"\n"+decoder+"\n"+qrSource+"\n"+catalogue+"\n"+source+"\nthis.m={parse:sharingJSON,stringify:sharingJSONString,endpoint:sharingEndpoint,endpoints:sharingEndpoints,recovery:sharingRecoveryHTML,mainReload:sharingReload,matrix:sharingMatrix,assignments:sharingAssignments,cancel:sharingCancelInvitation,copyInvitation:sharingCopyInvitation,endpointEdit:sharingEndpointEdit,endpointCount:sharingEndpointCount,request:sharingRequest,read:sharingManagementRead,panel:sharingManagementPanel,capture:sharingCapture,retire:sharingRetire,route:sharingRouteChanged,open:sharingOpen,save:sharingSave,reload:sharingEditorReload,configure:sharingConfigureAddresses,back:sharingCloseEditor,select:sharingSelect,edit:sharingEdit,matrixEdit:sharingMatrixEdit,removeOutside:sharingRemoveOutside,work:sharingWork,paint:sharingPaint,qrMatrix:sharingQRMatrix,qrBegin:sharingQRBegin,qrFinish:sharingQRFinish,qrUpload:sharingQRUpload,qrExport:sharingQRExport,qrScan:sharingQRScan,state:()=>SHARING_MANAGEMENT};",c);
  const data={sharingImports:{imports:[imported()]},sharingExports:{exports:[exported()],next:null},sharingStatus:{listener:"ready"}};
  c.m.panel(data);return {c,m:c.m,requests,element,data};
 }
@@ -335,4 +337,129 @@ test("invitation copy confirms the exact secret or offers manual selection witho
  h.c.navigator={};await h.m.copyInvitation();assert.match(h.element.innerHTML,/Automatic copy is unavailable/);assert.equal(selected,1);
  let release;const gate=new Promise(resolve=>release=resolve);h.c.navigator={clipboard:{writeText:async()=>gate}};
  const pending=h.m.copyInvitation();h.m.retire();release();await pending;assert.equal(h.element.innerHTML,"");assert.equal(h.m.state(),null);
+});
+
+test("sharing QR codes round trip the exact invitation including maximum capacity and retain a quiet zone",()=>{
+ const h=harness();
+ for(const length of [120,1300,2331]){
+  const text="cinema-share-v1:"+"a".repeat(length-16),qr=h.m.qrMatrix(text),scale=4,width=(qr.size+8)*scale,pixels=new Uint8ClampedArray(width*width*4).fill(255);
+  for(let y=0;y<qr.size;y++)for(let x=0;x<qr.size;x++)if(qr.getModule(x,y))for(let dy=0;dy<scale;dy++)for(let dx=0;dx<scale;dx++){
+   const offset=(((y+4)*scale+dy)*width+(x+4)*scale+dx)*4;pixels[offset]=pixels[offset+1]=pixels[offset+2]=0;
+  }
+  assert.equal(h.c.jsQR(pixels,width,width).data,text);
+ }
+ assert.throws(()=>h.m.qrMatrix("cinema-share-v1:"+"x".repeat(2331)),/too large/);
+ assert.throws(()=>h.m.qrMatrix("https://other.example/"),/valid cinema-share-v1/);
+ assert.throws(()=>h.m.qrMatrix("cinema-share-v1:abc\n"),/valid cinema-share-v1/);
+});
+test("sharing QR result defaults to the image with collapsed text and PNG export",async()=>{
+ const h=harness();const invitation={id,invitation:"cinema-share-v1:secret",qrImage:"data:image/png;base64,cG5n"};h.m.state().invitation=invitation;
+ h.m.paint();assert.match(h.element.innerHTML,/sharing-qr-image/);assert.match(h.element.innerHTML,/<details id="sharing-invitation-details">/);assert.match(h.element.innerHTML,/Save QR code/);
+ let clicked=0,removed=0,link;h.c.document.createElement=()=>link={click(){clicked++;},remove(){removed++;}};h.c.document.body={appendChild(){}};
+ await h.m.qrExport(false);assert.equal(link.href,invitation.qrImage);assert.equal(link.download,"cinema-sharing-invitation.png");assert.equal(clicked,1);assert.equal(removed,1);assert.equal(h.requests.length,0);
+ h.c.File=File;h.c.atob=atob;let shared;h.c.navigator={canShare:()=>true,share:async data=>{shared=data;}};
+ await h.m.qrExport(true);assert.equal(shared.files[0].type,"image/png");assert.equal(await shared.files[0].text(),"png");
+ h.c.navigator.canShare=()=>false;await h.m.qrExport(true);assert.match(h.element.innerHTML,/Use Save QR code/);
+});
+test("QR scan only fills a current draft and rejects stale editor account and explicit edits",async()=>{
+ const h=harness();await h.m.open("import");const job=h.m.qrBegin();h.m.qrFinish(job,"cinema-share-v1:scanned");
+ assert.equal(h.m.state().editor.text,"cinema-share-v1:scanned");assert.match(h.element.innerHTML,/Choose Save to import/);assert.equal(h.requests.length,0);
+ const invalid=h.m.qrBegin();h.m.qrFinish(invalid,"https://other.example");assert.match(h.m.state().editor.error,/not a Cinema/);assert.equal(h.m.state().editor.text,"cinema-share-v1:scanned");
+ const edited=h.m.qrBegin();h.m.edit("text","cinema-share-v1:manual");h.m.qrFinish(edited,"cinema-share-v1:old");assert.equal(h.m.state().editor.text,"cinema-share-v1:manual");
+ const closed=h.m.qrBegin();h.m.back();await h.m.open("import");h.m.qrFinish(closed,"cinema-share-v1:old");assert.equal(h.m.state().editor.text,"");
+ const retired=h.m.qrBegin();h.m.retire();h.m.qrFinish(retired,"cinema-share-v1:old");assert.equal(h.m.state(),null);
+});
+test("QR upload bounds images and closes a late bitmap without restoring a retired draft",async()=>{
+ const h=harness();await h.m.open("import");const input={files:[{type:"image/png",size:10485761}],value:"selected"};await h.m.qrUpload(input);assert.equal(input.value,"");assert.match(h.m.state().editor.error,/10 MiB/);assert.equal(h.requests.length,0);
+ let release,closed=0;h.c.createImageBitmap=()=>new Promise(resolve=>release=resolve);input.files=[{type:"image/png",size:100}];
+ const pending=h.m.qrUpload(input);h.m.back();await h.m.open("import");release({width:20,height:20,close(){closed++;}});await pending;
+ assert.equal(closed,1);assert.equal(h.m.state().editor.text,"");assert.equal(h.requests.length,0);
+});
+test("QR camera permission arriving after page retirement stops every camera track",async()=>{
+ const h=harness();await h.m.open("import");let release,stopped=0;h.c.navigator={mediaDevices:{getUserMedia:()=>new Promise(resolve=>release=resolve)}};
+ const pending=h.m.qrScan();h.m.retire();release({getTracks:()=>[{stop(){stopped++;}},{stop(){stopped++;}}]});await pending;
+ assert.equal(stopped,2);assert.equal(h.m.state(),null);assert.equal(h.requests.length,0);
+});
+
+test("automatic host setup reports required action without claiming peer reachability",()=>{
+ const h=harness();
+ const status={listener:"listening",certificate:{spki_sha256:endpoint.spki_sha256},address_manifest:null,host_setup:{state:"sign_in_required",message:"Open Tailscale on this host and sign in."}};
+ const html=h.m.panel({...h.data,sharingStatus:status});
+ assert.match(html,/Open Tailscale on this host and sign in/);assert.match(html,/No router configuration is needed/);assert.match(html,/Advanced addresses/);assert.match(html,/Cinema is preparing this host/);assert.doesNotMatch(html,/Host setup is configured/);
+ const ready=h.m.panel({...h.data,sharingStatus:{...status,address_manifest:{revision:1n,endpoints:[endpoint]},host_setup:{state:"ready",message:"Private host setup is configured."}}});
+ assert.match(ready,/Pair another Cinema to verify its access and certificate/);assert.doesNotMatch(ready,/set up Tailscale and TCP Serve on each serving host first/);
+});
+
+test("setup polling stops on readiness and retires without replaying writes",async()=>{
+ const h=harness(async(path)=>reply(path.endsWith("endpoints")?{manifest:{revision:1n,endpoints:[endpoint]}}:{listener:"listening",host_setup:{state:"ready",message:"Private host setup is configured."}}));
+ const timers=[],cleared=[];h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=id=>cleared.push(id);
+ h.m.panel({...h.data,sharingStatus:{listener:"listening",host_setup:{state:"pending",message:"Setting up…"}}});assert.equal(timers.length,1);
+ await timers[0]();assert.equal(h.m.state().status.host_setup.state,"ready");assert.equal(timers.length,1);assert.ok(h.requests.every(r=>r.options.method==="GET"));
+ h.m.panel({...h.data,sharingStatus:{host_setup:{state:"permission_required",message:"Host permission is required."}}});assert.equal(timers.length,2);
+ h.m.retire();assert.deepEqual(cleared,[2]);const count=h.requests.length;await timers[1]();assert.equal(h.requests.length,count);assert.equal(h.m.state(),null);
+});
+
+test("unavailable peer explains setup and stale invitations without replaying the import",async()=>{
+ const h=harness(async()=>reply({code:"sharing_peer_unavailable",error:"sharing peer unavailable"},502));
+ await assert.rejects(h.m.request("/sharing/imports",{method:"POST",body:{invitation:"test"}}),error=>error.code==="sharing_peer_unavailable"&&/Check both Cinemas/.test(error.message)&&/fresh invitation/.test(error.message));
+ assert.equal(h.requests.length,1);assert.equal(h.requests[0].options.method,"POST");
+});
+
+test("combined invitation waits for private consent then imports once automatically",async()=>{
+ const timers=[];
+ const {c,m,requests}=harness(async(path,options)=>path.endsWith("/sharing/connection")?reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:JSON.parse(options.body).probe===true}):reply(imported()));
+ c.setTimeout=fn=>{timers.push(fn);return timers.length;};c.clearTimeout=()=>{};
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
+ assert.equal(requests.filter(r=>r.path.endsWith("/sharing/imports")).length,0);
+ assert.match(String(c.document.getElementById().innerHTML),/Authorize connection to source/);
+ assert.equal(m.state().editor.waitingConnection,true);
+ await timers.shift()();
+ assert.equal(requests.filter(r=>r.path.endsWith("/sharing/imports")).length,1);
+ assert.equal(m.state().editor.text,"");
+});
+test("combined invitation never resumes after authorization changes",async()=>{
+ const timers=[];
+ const {c,m,requests}=harness(async()=>reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:false}));
+ c.setTimeout=fn=>{timers.push(fn);return timers.length;};c.clearTimeout=()=>{};
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();m.retire();
+ for(const fn of timers)await fn();
+ assert.equal(requests.filter(r=>r.path.endsWith("/sharing/imports")).length,0);
+});
+test("combined invitation rejects arbitrary consent destinations before publishing links",async()=>{
+ const {m,requests,element}=harness(async()=>reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://evil.invalid/admin/invite/token"}],connected:false}));
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
+ assert.match(m.state().editor.error,/Invalid private connection/);assert.doesNotMatch(element.innerHTML,/href="https:\/\/evil/);
+ assert.equal(requests.length,1);
+});
+test("connected combined invitation imports directly without a second consent action",async()=>{
+ const {m,requests}=harness(async(path)=>path.endsWith("/sharing/connection")?reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:true}):reply(imported()));
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
+ assert.deepEqual(requests.map(r=>r.path),["/api/v1/sharing/connection","/api/v1/sharing/imports"]);
+});
+test("network authorization clears the transient API key and never returns it to invitations",async()=>{
+ const {m,requests}=harness(async()=>reply({configured:true}));
+ await m.open("network");m.edit("text","tskey-api-fixture");await m.save();
+ assert.equal(m.state().editor.text,"");assert.equal(requests.length,2);
+ assert.equal(requests[0].options.body,null);
+ assert.equal(requests[1].path,"/api/v1/sharing/network-authorization");
+ assert.deepEqual(JSON.parse(requests[1].options.body),{token:"tskey-api-fixture"});
+});
+
+test("automatic endpoint discovery refreshes an open invitation without losing library choices",async()=>{
+ const timers=[];let reads=0;
+ const {c,m,requests}=harness(async(path)=>{
+  if(path.endsWith("/libraries"))return reply([{id:1n,name:"Movies",kind:"movies"}]);
+  if(path.endsWith("/sharing/status"))return reply({host_setup:{state:"ready",message:"Private connection ready"}});
+  if(path.endsWith("/sharing/endpoints"))return reply({manifest:++reads===1?null:{revision:1n,endpoints:[endpoint]}});
+  throw new Error("No mutation should be sent");
+ });
+ c.setTimeout=fn=>{timers.push(fn);return timers.length;};c.clearTimeout=()=>{};
+ m.state().status.host_setup={state:"pending",message:"Discovering private connection"};
+ await m.open("invite");m.select(0,true);
+ assert.equal(m.state().editor.needsEndpoints,true);
+ assert.deepEqual([...m.state().editor.selected],["1"]);
+ await timers.shift()();
+ assert.equal(m.state().editor.needsEndpoints,false);
+ assert.deepEqual([...m.state().editor.selected],["1"]);
+ assert.equal(requests.filter(r=>r.options.method!=="GET").length,0);
 });
