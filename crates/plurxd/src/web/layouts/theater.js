@@ -401,7 +401,7 @@ function theaterItemBody(p){
     // specs. `p.playable` and `p.resume` and `p.meta` are all the model's —
     // the file pick, the 3-second threshold and the player's info payload are
     // decided once, in loadItem(), for every layout.
-    const pmeta=p.meta, resume=p.resume, playable=p.playable;
+    const resume=p.resume, playable=p.playable, pmeta=playbackMetaFor(p,playable);
     const watchBtn=watchControls(it);
     if(playable){
       acts=`<div class="actions">
@@ -423,7 +423,7 @@ function theaterItemBody(p){
       // already badged on the backdrop screen, so its block is just the spec
       // detail. Third copy of that rule — NOTES §5.2.
       const header=(p.multi||miss)
-        ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&p.multi)?`<button class="ghost sm" onclick='play(${v.id},${esc(JSON.stringify(it.title))},${resume},${v.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ Play</button>`:''}</div>`
+        ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&p.multi)?`<button class="ghost sm" onclick='play(${v.id},${esc(JSON.stringify(it.title))},${resume},${v.duration_ms||0},${esc(JSON.stringify(playbackMetaFor(p,v)))})'>▶ Play</button>`:''}</div>`
         : '';
       return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}${fileAdminActions(v,it.id)}</div>`;
     }).join("");

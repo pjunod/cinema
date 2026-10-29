@@ -1,3 +1,28 @@
+plurx-player (0.4.1+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Make both Cinema Info buttons show live playback diagnostics, including
+    decoded picture/color, renderer/decoder, sound and demuxer observations.
+    Report missing measurements as unavailable; retain title/episode metadata.
+  * Keep the private mpv/libplacebo pins and closed-form equations unchanged:
+    tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Wed, 28 Oct 2026 21:30:00 +0000
+
+plurx-player (0.4.0+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Replace mpv's stock on-screen controller with Cinema-style playback
+    chrome: full-film seeking, transport, stream track menus, playback
+    information, speed/audio sync, fullscreen and four-second auto-hide.
+    Keep the private mpv decoder, display management and session owner.
+  * Show scoped library title, episode identity and synopsis; resolve Next
+    on the server without granting general browsing access. Autoplay can be
+    disabled in Settings and its choice is saved locally.
+  * Auto, Original and advertised quality rungs use the existing server
+    decision/session path, retaining film position and paused state.
+  * Closed-form equations unchanged: tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Wed, 28 Oct 2026 16:00:00 +0000
+
 plurx-player (0.3.2+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
 
   * Profile 7 titles from plurx now play with their full enhancement layer.

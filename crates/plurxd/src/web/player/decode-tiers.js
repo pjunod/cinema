@@ -790,8 +790,8 @@ function qualityLabel(){
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
-  // Settings → Playback → Open titles in → plurx Player: a cold start is
-  // handed to the native player (docs/clients/LINUX-PLAYER-PLAN.md §4.1).
+  // Settings → Playback → Dolby Vision playback on Linux: an eligible
+  // Dolby Vision cold start is handed to the native player (docs/clients/LINUX-PLAYER-PLAN.md §4.1).
   // With the default, This browser, this returns false and nothing changes.
   if(playerHandoffWanted(fileId,meta,reservedOpenAttempt,retryIntent))
     return handOffToPlayer(fileId,title,resumeMs,knownDurMs,meta);

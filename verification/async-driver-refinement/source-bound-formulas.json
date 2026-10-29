@@ -1,7 +1,7 @@
 {
   "algorithm_version": 1,
   "complete": true,
-  "finite_inventory_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+  "finite_inventory_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
   "formulas": [
     {
       "id": "json.0.ref",
@@ -15835,7 +15835,7 @@
       "two_jobs_requests_waiters"
     ],
     "specification_id": "fresh-selected-two-job-sqlite-v1",
-    "specification_sha256": "00afcf3569c9910c2697ba69e0516a5d6bb1de0c12f423b8f2f201bfc93900f5"
+    "specification_sha256": "2fd0e8817ef2d5365b2184c72aeda7af56bb6e7c2ccab49cd45487f070683c05"
   },
   "init_class_rules": [
     {
@@ -15846,7 +15846,7 @@
       ],
       "rule_id": "full_column_schema_inventory_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403"
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f"
     },
     {
       "anchor": "updated_at INTEGER NOT NULL DEFAULT (unixepoch())",
@@ -15856,7 +15856,7 @@
       ],
       "rule_id": "fixed_init_i64_json_representation_not_episode_horizon_v1",
       "source_path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "source_sha256": "1509df2d15e01f43b40228440c8dbe2be03e2eaef4585a2fb436250c78ec5ada"
+      "source_sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e"
     },
     {
       "anchor": "Self::backfill_hdr_format(&conn)?;",
@@ -15866,7 +15866,7 @@
       ],
       "rule_id": "startup_instance_and_hdr_flag_only_v1",
       "source_path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "source_sha256": "1509df2d15e01f43b40228440c8dbe2be03e2eaef4585a2fb436250c78ec5ada"
+      "source_sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e"
     },
     {
       "anchor": "Self::seed(SqliteStore::open_in_memory()",
@@ -15874,7 +15874,7 @@
       "operands": [],
       "rule_id": "selected_fresh_fixture_only_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403"
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f"
     },
     {
       "anchor": "fn initial() -> Self",
@@ -15882,7 +15882,7 @@
       "operands": [],
       "rule_id": "exact_initial_episode_payload_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403"
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f"
     },
     {
       "anchor": "root_path: \"/async-store-root\"",
@@ -15892,7 +15892,7 @@
       ],
       "rule_id": "fresh_library_1_and_shared_root_mapping_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403"
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f"
     },
     {
       "anchor": "id: uuid::Uuid::new_v4().to_string(),",
@@ -15912,7 +15912,7 @@
       ],
       "rule_id": "fixed_selected_job_request_waiter_pairing_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403"
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f"
     }
   ],
   "inventory_mapping": [
@@ -16246,7 +16246,7 @@
       "id": "domain_acquisitions",
       "rule_id": "f614_domain_acquisition_budget",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "3"
     },
     {
@@ -16254,7 +16254,7 @@
       "id": "field_name.0",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "15"
     },
     {
@@ -16262,7 +16262,7 @@
       "id": "field_name.1",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "22"
     },
     {
@@ -16270,7 +16270,7 @@
       "id": "field_name.10",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "7"
     },
     {
@@ -16358,7 +16358,7 @@
       "id": "field_name.11",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "7"
     },
     {
@@ -16446,7 +16446,7 @@
       "id": "field_name.12",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "8"
     },
     {
@@ -16486,7 +16486,7 @@
       "id": "field_name.124",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "3"
     },
     {
@@ -16494,7 +16494,7 @@
       "id": "field_name.125",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "4"
     },
     {
@@ -16502,7 +16502,7 @@
       "id": "field_name.126",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "8"
     },
     {
@@ -16534,7 +16534,7 @@
       "id": "field_name.13",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "5"
     },
     {
@@ -16622,7 +16622,7 @@
       "id": "field_name.14",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "8"
     },
     {
@@ -16710,7 +16710,7 @@
       "id": "field_name.15",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "16"
     },
     {
@@ -16798,7 +16798,7 @@
       "id": "field_name.16",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "8"
     },
     {
@@ -16830,7 +16830,7 @@
       "id": "field_name.163",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "2"
     },
     {
@@ -16838,7 +16838,7 @@
       "id": "field_name.164",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "3"
     },
     {
@@ -16846,7 +16846,7 @@
       "id": "field_name.165",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "4"
     },
     {
@@ -16854,7 +16854,7 @@
       "id": "field_name.166",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "6"
     },
     {
@@ -16862,7 +16862,7 @@
       "id": "field_name.167",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "15"
     },
     {
@@ -16870,7 +16870,7 @@
       "id": "field_name.168",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "15"
     },
     {
@@ -16878,7 +16878,7 @@
       "id": "field_name.169",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "7"
     },
     {
@@ -16886,7 +16886,7 @@
       "id": "field_name.17",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "13"
     },
     {
@@ -16894,7 +16894,7 @@
       "id": "field_name.170",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "7"
     },
     {
@@ -16902,7 +16902,7 @@
       "id": "field_name.171",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "16"
     },
     {
@@ -16974,7 +16974,7 @@
       "id": "field_name.18",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "5"
     },
     {
@@ -17006,7 +17006,7 @@
       "id": "field_name.183",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "7"
     },
     {
@@ -17062,7 +17062,7 @@
       "id": "field_name.19",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "8"
     },
     {
@@ -17070,7 +17070,7 @@
       "id": "field_name.190",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "5"
     },
     {
@@ -17078,7 +17078,7 @@
       "id": "field_name.191",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "6"
     },
     {
@@ -17086,7 +17086,7 @@
       "id": "field_name.192",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "8"
     },
     {
@@ -17094,7 +17094,7 @@
       "id": "field_name.193",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "14"
     },
     {
@@ -17102,7 +17102,7 @@
       "id": "field_name.194",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "9"
     },
     {
@@ -17110,7 +17110,7 @@
       "id": "field_name.195",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "14"
     },
     {
@@ -17118,7 +17118,7 @@
       "id": "field_name.196",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "18"
     },
     {
@@ -17126,7 +17126,7 @@
       "id": "field_name.197",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "6"
     },
     {
@@ -17134,7 +17134,7 @@
       "id": "field_name.198",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "14"
     },
     {
@@ -17142,7 +17142,7 @@
       "id": "field_name.199",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "11"
     },
     {
@@ -17150,7 +17150,7 @@
       "id": "field_name.2",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "23"
     },
     {
@@ -17158,7 +17158,7 @@
       "id": "field_name.20",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "18"
     },
     {
@@ -17166,7 +17166,7 @@
       "id": "field_name.200",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "14"
     },
     {
@@ -17174,7 +17174,7 @@
       "id": "field_name.201",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "8"
     },
     {
@@ -17182,7 +17182,7 @@
       "id": "field_name.202",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "4"
     },
     {
@@ -17190,7 +17190,7 @@
       "id": "field_name.203",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "10"
     },
     {
@@ -17198,7 +17198,7 @@
       "id": "field_name.204",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "7"
     },
     {
@@ -17222,7 +17222,7 @@
       "id": "field_name.207",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "11"
     },
     {
@@ -17246,7 +17246,7 @@
       "id": "field_name.21",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "3"
     },
     {
@@ -17294,7 +17294,7 @@
       "id": "field_name.215",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "11"
     },
     {
@@ -17334,7 +17334,7 @@
       "id": "field_name.22",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "10"
     },
     {
@@ -17422,7 +17422,7 @@
       "id": "field_name.23",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "15"
     },
     {
@@ -17510,7 +17510,7 @@
       "id": "field_name.24",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "8"
     },
     {
@@ -17598,7 +17598,7 @@
       "id": "field_name.25",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "13"
     },
     {
@@ -17686,7 +17686,7 @@
       "id": "field_name.26",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "3"
     },
     {
@@ -17774,7 +17774,7 @@
       "id": "field_name.27",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "6"
     },
     {
@@ -17862,7 +17862,7 @@
       "id": "field_name.28",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "6"
     },
     {
@@ -17950,7 +17950,7 @@
       "id": "field_name.29",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "14"
     },
     {
@@ -18038,7 +18038,7 @@
       "id": "field_name.3",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "27"
     },
     {
@@ -18046,7 +18046,7 @@
       "id": "field_name.30",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "6"
     },
     {
@@ -18134,7 +18134,7 @@
       "id": "field_name.31",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "15"
     },
     {
@@ -18222,7 +18222,7 @@
       "id": "field_name.32",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "7"
     },
     {
@@ -18310,7 +18310,7 @@
       "id": "field_name.33",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "15"
     },
     {
@@ -18398,7 +18398,7 @@
       "id": "field_name.34",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "4"
     },
     {
@@ -18486,7 +18486,7 @@
       "id": "field_name.35",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "7"
     },
     {
@@ -18926,7 +18926,7 @@
       "id": "field_name.4",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "28"
     },
     {
@@ -19374,7 +19374,7 @@
       "id": "field_name.45",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "4"
     },
     {
@@ -19462,7 +19462,7 @@
       "id": "field_name.46",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "13"
     },
     {
@@ -19550,7 +19550,7 @@
       "id": "field_name.47",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "10"
     },
     {
@@ -19558,7 +19558,7 @@
       "id": "field_name.48",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "10"
     },
     {
@@ -19574,7 +19574,7 @@
       "id": "field_name.5",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "27"
     },
     {
@@ -19662,7 +19662,7 @@
       "id": "field_name.6",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "23"
     },
     {
@@ -19750,7 +19750,7 @@
       "id": "field_name.7",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "10"
     },
     {
@@ -19838,7 +19838,7 @@
       "id": "field_name.8",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "8"
     },
     {
@@ -19846,7 +19846,7 @@
       "id": "field_name.80",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "4"
     },
     {
@@ -19854,7 +19854,7 @@
       "id": "field_name.81",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "13"
     },
     {
@@ -19862,7 +19862,7 @@
       "id": "field_name.82",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "3"
     },
     {
@@ -19870,7 +19870,7 @@
       "id": "field_name.83",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "6"
     },
     {
@@ -19878,7 +19878,7 @@
       "id": "field_name.84",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "14"
     },
     {
@@ -19886,7 +19886,7 @@
       "id": "field_name.85",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "5"
     },
     {
@@ -19894,7 +19894,7 @@
       "id": "field_name.86",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "12"
     },
     {
@@ -19926,7 +19926,7 @@
       "id": "field_name.9",
       "rule_id": "exact_source_field_name_utf8_length_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "6"
     },
     {
@@ -20014,7 +20014,7 @@
       "id": "fixed.claim_ids",
       "rule_id": "two_jobs_times_two_fixed_claim_ids_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "value": "4"
     },
     {
@@ -20022,7 +20022,7 @@
       "id": "fixed.claim_loss_keys",
       "rule_id": "eight_persistent_source_loss_keys_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "8"
     },
     {
@@ -20054,7 +20054,7 @@
       "id": "fixed.jobs",
       "rule_id": "exact_two_selected_jobs_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "2"
     },
     {
@@ -20062,7 +20062,7 @@
       "id": "fixed.workers",
       "rule_id": "exact_two_selected_worker_slots_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "value": "2"
     },
     {
@@ -20070,7 +20070,7 @@
       "id": "fixed_init.i64_encoded_width",
       "rule_id": "fixed_init_i64_json_representation_not_transition_finiteness_v1",
       "source_path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "source_sha256": "1509df2d15e01f43b40228440c8dbe2be03e2eaef4585a2fb436250c78ec5ada",
+      "source_sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e",
       "value": "20"
     },
     {
@@ -20078,7 +20078,7 @@
       "id": "fresh.settings_rows",
       "rule_id": "fresh_sqlite_only_instance_uuid_and_hdr_backfill_settings_v1",
       "source_path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "source_sha256": "1509df2d15e01f43b40228440c8dbe2be03e2eaef4585a2fb436250c78ec5ada",
+      "source_sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e",
       "value": "2"
     },
     {
@@ -20086,7 +20086,7 @@
       "id": "future_mono_offset",
       "rule_id": "f614_maximum_raw_future_offset",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "30000"
     },
     {
@@ -20094,7 +20094,7 @@
       "id": "future_wall_offset",
       "rule_id": "f614_maximum_raw_future_offset",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "719999"
     },
     {
@@ -20230,7 +20230,7 @@
       "id": "row_count.background_job_attempts",
       "rule_id": "f614_complete_selected_row_write_inventory_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "4"
     },
     {
@@ -20238,7 +20238,7 @@
       "id": "row_count.background_job_commands",
       "rule_id": "f614_complete_selected_row_write_inventory_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "0"
     },
     {
@@ -20246,7 +20246,7 @@
       "id": "row_count.background_job_domain_leases",
       "rule_id": "f614_complete_selected_row_write_inventory_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "1"
     },
     {
@@ -20254,7 +20254,7 @@
       "id": "row_count.background_job_reservations",
       "rule_id": "f614_complete_selected_row_write_inventory_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "6"
     },
     {
@@ -20262,7 +20262,7 @@
       "id": "row_count.background_job_waiters",
       "rule_id": "f614_complete_selected_row_write_inventory_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "2"
     },
     {
@@ -20270,7 +20270,7 @@
       "id": "row_count.background_jobs",
       "rule_id": "f614_complete_selected_row_write_inventory_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "2"
     },
     {
@@ -20278,7 +20278,7 @@
       "id": "row_count.background_library_requests",
       "rule_id": "f614_complete_selected_row_write_inventory_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "2"
     },
     {
@@ -20286,7 +20286,7 @@
       "id": "row_count.job_leases",
       "rule_id": "f614_complete_selected_row_write_inventory_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "1"
     },
     {
@@ -20294,7 +20294,7 @@
       "id": "semantic_families",
       "rule_id": "eleven_exact_source_outcome_families_v1",
       "source_path": "verification/async-driver-refinement/paged-outcomes.json",
-      "source_sha256": "6dbceff36c79b3c176272b1ecf6b5d91b80ed61a085aa1a9104c0a2cfa25634c",
+      "source_sha256": "535ac7785e0f7467a1c4d19de25096804cf150f60a2f4faccf587d7742b32a75",
       "value": "11"
     },
     {
@@ -20302,16 +20302,16 @@
       "id": "source_bytes.0",
       "rule_id": "exact_registered_utf8_file_bytes_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "source_sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
-      "value": "150003"
+      "source_sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
+      "value": "174857"
     },
     {
       "anchor": "//! Exact selected two-worker product producer. The independent checker/TLA",
       "id": "source_bytes.1",
       "rule_id": "exact_registered_utf8_file_bytes_v1",
       "source_path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "source_sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
-      "value": "206077"
+      "source_sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
+      "value": "206377"
     },
     {
       "anchor": "use async_trait::async_trait;",
@@ -20326,8 +20326,8 @@
       "id": "source_bytes.11",
       "rule_id": "exact_registered_utf8_file_bytes_v1",
       "source_path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "source_sha256": "1509df2d15e01f43b40228440c8dbe2be03e2eaef4585a2fb436250c78ec5ada",
-      "value": "131366"
+      "source_sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e",
+      "value": "134683"
     },
     {
       "anchor": "//! Library CRUD.",
@@ -20342,8 +20342,8 @@
       "id": "source_bytes.13",
       "rule_id": "exact_registered_utf8_file_bytes_v1",
       "source_path": "crates/plurx-core/src/store/mod.rs",
-      "source_sha256": "7c201e74d268a5432ffd5643b0f9929f3226b22af3f695a84379ebd22a56f9c8",
-      "value": "298981"
+      "source_sha256": "fbb15bfa61539c69c169440dc675c7652b60e07440cfa0a7545910f6cd260c66",
+      "value": "299025"
     },
     {
       "anchor": "//! Library scanning: walk the tree, place items in the hierarchy, record",
@@ -20398,8 +20398,8 @@
       "id": "source_bytes.2",
       "rule_id": "exact_registered_utf8_file_bytes_v1",
       "source_path": "crates/plurx-core/src/store/background_jobs.rs",
-      "source_sha256": "a71c9b2a3e1e1fd5f7fd9b248af402ee95263075f836ef0881203a86fd984f88",
-      "value": "185463"
+      "source_sha256": "efd58cb947e5b68c43b79711b932afc5487816ebccd36e9e575d605fa9e93a4e",
+      "value": "188065"
     },
     {
       "anchor": "\"\"\"Closed registries and graph import. Importing a graph is inventory, not proof.\"\"\"",
@@ -20422,7 +20422,7 @@
       "id": "source_bytes.22",
       "rule_id": "exact_registered_utf8_file_bytes_v1",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "24052"
     },
     {
@@ -20438,7 +20438,7 @@
       "id": "source_bytes.24",
       "rule_id": "exact_registered_utf8_file_bytes_v1",
       "source_path": "verification/async-driver-refinement/paged-outcomes.json",
-      "source_sha256": "6dbceff36c79b3c176272b1ecf6b5d91b80ed61a085aa1a9104c0a2cfa25634c",
+      "source_sha256": "535ac7785e0f7467a1c4d19de25096804cf150f60a2f4faccf587d7742b32a75",
       "value": "13394"
     },
     {
@@ -20542,7 +20542,7 @@
       "id": "successful_claims",
       "rule_id": "f614_successful_claim_budget",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "4"
     },
     {
@@ -20550,7 +20550,7 @@
       "id": "successful_renewals",
       "rule_id": "f614_renewal_budget",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "4"
     },
     {
@@ -20558,7 +20558,7 @@
       "id": "visited_mono_max",
       "rule_id": "f614_prospective_anchor_envelope_not_list_length",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "29550985"
     },
     {
@@ -20566,7 +20566,7 @@
       "id": "visited_wall_max",
       "rule_id": "f614_prospective_anchor_envelope_not_list_length",
       "source_path": "verification/async-driver-refinement/finite-inventory.json",
-      "source_sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb",
+      "source_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
       "value": "44641000"
     }
   ],
@@ -32111,15 +32111,15 @@
     },
     {
       "path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2"
+      "sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30"
     },
     {
       "path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403"
+      "sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f"
     },
     {
       "path": "crates/plurx-core/src/store/background_jobs.rs",
-      "sha256": "a71c9b2a3e1e1fd5f7fd9b248af402ee95263075f836ef0881203a86fd984f88"
+      "sha256": "efd58cb947e5b68c43b79711b932afc5487816ebccd36e9e575d605fa9e93a4e"
     },
     {
       "path": "crates/plurx-core/src/store/background_jobs_domain.rs",
@@ -32155,7 +32155,7 @@
     },
     {
       "path": "crates/plurx-core/src/store/mod.rs",
-      "sha256": "7c201e74d268a5432ffd5643b0f9929f3226b22af3f695a84379ebd22a56f9c8"
+      "sha256": "fbb15bfa61539c69c169440dc675c7652b60e07440cfa0a7545910f6cd260c66"
     },
     {
       "path": "crates/plurx-core/src/store/sqlite/library.rs",
@@ -32163,7 +32163,7 @@
     },
     {
       "path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "sha256": "1509df2d15e01f43b40228440c8dbe2be03e2eaef4585a2fb436250c78ec5ada"
+      "sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e"
     },
     {
       "path": "crates/plurx-worker-control/src/library_driver.rs",
@@ -32195,7 +32195,7 @@
     },
     {
       "path": "verification/async-driver-refinement/finite-inventory.json",
-      "sha256": "f6148a2e9d797d73a844084b34594bc9bf2f5543f47cb2296b4d570cfc5e22fb"
+      "sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa"
     },
     {
       "path": "verification/async-driver-refinement/paged-catalog-transport.schema.json",
@@ -32207,7 +32207,7 @@
     },
     {
       "path": "verification/async-driver-refinement/paged-outcomes.json",
-      "sha256": "6dbceff36c79b3c176272b1ecf6b5d91b80ed61a085aa1a9104c0a2cfa25634c"
+      "sha256": "535ac7785e0f7467a1c4d19de25096804cf150f60a2f4faccf587d7742b32a75"
     },
     {
       "path": "verification/async-driver-refinement/paged-proof.schema.json",

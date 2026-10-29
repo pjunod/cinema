@@ -288,3 +288,91 @@ async fn playback_handoff_redeems_once_into_a_file_scoped_audience() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn playback_handoff_advances_only_a_live_expected_scope_without_extending_it() {
+    for_each_backend(|store, backend| async move {
+        let (uid, file) = seed_file(&store, "handoff-advance").await;
+        let minter = digest("advance-minter");
+        store
+            .create_token(&minter, uid, Some("web"))
+            .await
+            .expect("minter");
+        let now = unix_seconds();
+        let expires = now + 60;
+        for id in ["advance", "revoked", "expired", "logout"] {
+            assert!(store
+                .create_playback_handoff(handoff(id, uid, file, &minter, now))
+                .await
+                .expect("mint"));
+            store
+                .redeem_playback_handoff(&redemption(id, &digest(id), now, expires))
+                .await
+                .expect("redeem");
+        }
+        let token = digest("advance");
+        assert!(!store
+            .advance_playback_handoff(&digest("unknown"), file, file + 1, now)
+            .await
+            .expect("unknown"));
+        assert!(!store
+            .advance_playback_handoff(&token, file + 1, file + 2, now)
+            .await
+            .expect("wrong predecessor"));
+        assert!(
+            store
+                .advance_playback_handoff(&token, file, file + 1, now)
+                .await
+                .expect("advance"),
+            "{backend}"
+        );
+        assert!(!store
+            .advance_playback_handoff(&token, file, file + 2, now)
+            .await
+            .expect("replay"));
+        let scope = store
+            .playback_handoff_token_scope(&token, now)
+            .await
+            .expect("scope")
+            .expect("live");
+        assert_eq!(
+            (
+                scope.file_id,
+                scope.expires_at,
+                scope.user_id,
+                scope.handoff_id.as_str()
+            ),
+            (file + 1, expires, uid, "advance")
+        );
+        assert_eq!(
+            audiences(&store, &token).await,
+            [TokenAudience::PlaybackHandoff]
+        );
+        store
+            .revoke_playback_handoff_token(&digest("revoked"))
+            .await
+            .expect("revoke");
+        assert!(!store
+            .advance_playback_handoff(&digest("revoked"), file, file + 1, now)
+            .await
+            .expect("revoked"));
+        assert!(!store
+            .advance_playback_handoff(&digest("expired"), file, file + 1, expires)
+            .await
+            .expect("expired"));
+        store.delete_token(&minter).await.expect("logout");
+        assert!(!store
+            .advance_playback_handoff(&digest("logout"), file, file + 1, now)
+            .await
+            .expect("minter revoked"));
+        assert!(
+            store
+                .playback_handoff_token_scope(&token, now)
+                .await
+                .expect("scope")
+                .is_none(),
+            "advance retained minter binding"
+        );
+    })
+    .await;
+}

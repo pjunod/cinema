@@ -225,6 +225,13 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/source_probe/title_work_tests.rs::source_probe::title_work::tests::"
             "physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict"
         ] = "physical: the deployed processing helper, a radeonsi VA-API device and a P7 FEL title"
+        # The title/index parity check (#1301) needs a real title, the
+        # processing bundle and its standalone aggregate; ordinary unit
+        # runners do not provide those operator-owned inputs.
+        additional_fixture_reasons[
+            "crates/plurxd/src/fragindex/tests.rs::fragindex::tests::dv_title_companion::"
+            "physical_the_index_pass_reads_the_standalone_title_aggregate"
+        ] = "physical: a processing bundle (PLURX_DV_PROCESSING_DIR), a Dolby Vision title and its standalone aggregate"
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -232,16 +239,15 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 14)
-        # The product runner already executes these six source-bound fixtures
-        # explicitly with --ignored. Inventory their exact reasons without
-        # adding debt, an admitted exclusion or a new opt-in configuration.
+        self.assertEqual(len(additional_fixtures), 15)
+        # Exact source-bound product fixtures remain operator-invoked, not debt
+        # or admitted exclusions. The paged entry and bounded comparison have
+        # distinct registered inputs; calibration grants no qualification credit.
         source_bound_product_reasons = {
             "crates/plurx-core/src/store/async_driver_product.rs::"
             "store::async_driver_product::" + name:
                 "requires source-bound driver input; run scripts/check-async-driver-refinement"
             for name in (
-                "actual_sql_two_worker_product_is_closed",
                 "product_prefix_completion_mutation_fails_last_request_atomic_retirement",
                 "product_prefix_reservation_mutation_fails_reservation_conservation",
                 "actual_ordinary_settlement_payload_and_time_conformance",
@@ -249,6 +255,14 @@ class KnownRedContractTest(unittest.TestCase):
                 "actual_queued_eligibility_progress_witness",
             )
         }
+        source_bound_product_reasons[
+            "crates/plurx-core/src/store/async_driver_product.rs::store::async_driver_product::"
+            "actual_sql_two_worker_product_is_closed"
+        ] = "requires registered schema6 paged request"
+        source_bound_product_reasons[
+            "crates/plurx-core/src/store/async_driver_product.rs::store::async_driver_product::"
+            "product_paged_disk_and_reference_complete_predecessors_agree"
+        ] = "requires the registered actual driver graph input"
         product_fixtures = tuple(
             item for item in ignored if item.identity in source_bound_product_reasons
         )
@@ -256,10 +270,17 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in product_fixtures},
             source_bound_product_reasons,
         )
-        self.assertEqual(len(product_fixtures), 6)
-        # Keep all six in the residual inventory: the historical38 plus the
-        # source-bound graph/control/conformance fixtures above makes44.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 44)
+        self.assertEqual(len(product_fixtures), 7)
+        calibration_identity = (
+            "crates/plurx-core/src/store/async_driver_catalog.rs::store::async_driver_catalog::tests::"
+            "catalog_sqlite_empty_schema_reports_actual_engine_geometry"
+        )
+        calibration_fixtures = tuple(item for item in ignored if item.identity == calibration_identity)
+        self.assertEqual(len(calibration_fixtures), 1)
+        self.assertEqual(calibration_fixtures[0].reason,
+                         "manual operational calibration requires an owned output path")
+        # Preserve Main's39 residual fixtures plus all8 actual paged additions.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 47)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

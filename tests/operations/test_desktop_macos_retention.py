@@ -485,7 +485,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             consumer_workflow_sha256=native.digest(native.transformed_workflow(legacy)),
             recipe_compatibility=native.RECIPE_COMPATIBILITY,
             adapter_sha256=native.digest(b'adapter'),policy_sha256=native.policy_fingerprint(),checkout_attestation=attest,
-            decision='fresh_execution',current_native_commands_executed=True,history={'pagination_complete':True},
+            decision='fresh_execution',current_native_commands_executed=True,current_build_products_exist=False,history={'pagination_complete':True},
             observed=native.parse_native(self.native,self.expected,WORK),native_log_sha256=native.digest(self.native),
             execution_origin={'commit':commit,'tree':tree,'run':rid,'job':jid,'attempt':1,
                 'native_execution_key':key,'native_log_sha256':native.digest(self.native)})
@@ -518,6 +518,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             changes = [lambda p:p.pop('fresh-finish.json'),
                 lambda p:p.__setitem__('fresh-finish.json',native.canonical({**json.loads(p['fresh-finish.json']),'exit_code':1})),
                 lambda p:p.__setitem__('receipt.json',native.canonical({**receipt,'policy_sha256':'0'*64})),
+                lambda p:p.__setitem__('receipt.json',native.canonical({**receipt,'current_build_products_exist':True})),
                 lambda p:p.__setitem__('receipt.json',native.canonical({**receipt,'native_execution_key':'0'*64})),
                 lambda p:p.__setitem__('receipt.json',native.canonical({**receipt,'execution_origin':{}}))]
             for change in changes:
@@ -550,6 +551,9 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
              mock.patch.object(native,'v1_result',return_value=original) as resolve:
             result = real_v1(api,SCOPE,ROOT,6200,62001,CURRENT,legacy,key)
             self.assertIs(result,original);self.assertTrue(resolve.call_args.kwargs['require_fresh'])
+            current,resolved,checked,attest=real_v1(api,SCOPE,ROOT,6200,62001,CURRENT,legacy,key,include_current=True)
+            self.assertEqual(current['run']['id'],6200);self.assertIs(resolved,original)
+            self.assertFalse(checked['current_native_commands_executed']);self.assertEqual(attest['run'],6200)
             with self.assertRaises(native.receipts.ReceiptError):
                 real_v1(api,SCOPE,ROOT,6200,62001,CURRENT,legacy,key,require_fresh=True)
             retained['execution_origin']['run'] = 6200
@@ -890,3 +894,55 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             payload['receipt.json'] = native.canonical(receipt);envelope['archive'] = packed(payload)
             with self.assertRaisesRegex(native.receipts.ReceiptError,'Native v1 checkout identity differs'):
                 native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)
+
+
+    def test_combined_native_roles_reject_reordering_family_predicate_and_command_changes(self):
+        legacy=subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
+        current=(ROOT/native.WORKFLOW).read_bytes()
+        with mock.patch.object(native,'git',return_value=current):
+            self.assertEqual(native.workflow_scope(ROOT,CURRENT,legacy),
+                             {'sha256':native.digest(current),'kind':'adapted'})
+        variants=[
+            current.replace(b'--family tv_navigation',b'--family desktop_macos',1),
+            current.replace(b'--family tv_navigation',b'--family tv_navigation --family desktop_macos',1),
+            current.replace(b'run: python3 -m validation.desktop_macos_retention --fresh-on-new-inputs',
+                            b'run: true # python3 -m validation.desktop_macos_retention --fresh-on-new-inputs',1),
+            current.replace(b"&& steps.native_receipts.outputs.tv_navigation != 'true'",b"&& true",1),
+            current.replace(b'      - name: Retain or execute native macOS server tray evidence\n',
+                            b'      - name: Retain or execute native macOS server tray evidence\n        continue-on-error: true\n',1),
+            current.replace(b'          path: target/validation/desktop-macos-retention\n',
+                            b'          path: target/validation/desktop-macos-check.log\n',1),
+        ]
+        metadata=native.NATIVE_TV_METADATA
+        self.assertEqual(current.count(metadata),1)
+        removed=current.replace(metadata,b'',1)
+        variants.append(removed.replace(b'      - name: Verify the pinned Apple toolchain\n',
+                                        metadata+b'      - name: Verify the pinned Apple toolchain\n',1))
+        variants.append(current.replace(metadata,metadata+metadata,1))
+        for raw in variants:
+            self.assertNotEqual(raw,current)
+            with self.subTest(sha=native.digest(raw)),mock.patch.object(native,'git',return_value=raw):
+                with self.assertRaises(native.receipts.ReceiptError):native.workflow_scope(ROOT,CURRENT,legacy)
+
+    def test_public_current_result_derives_full_scope_and_rechecks_live_source(self):
+        api,envelope,payload,receipt,key,legacy,packed=self.v1_fixture()
+        commit=envelope['run']['commit_sha'];rid=envelope['run']['id'];jid=envelope['job']['id']
+        api.runs[RUN]=copy.deepcopy(envelope['run'])
+        def objects(workspace,*args,**kwargs):
+            if args[-1]==native.PRODUCER+':'+native.WORKFLOW:return legacy
+            return b'd'*40 if args[0]=='rev-parse' else b'adapter'
+        with mock.patch.object(native,'v1_envelope',return_value=envelope), \
+             mock.patch.object(native,'manifest',return_value=(self.entries,self.contents)), \
+             mock.patch.object(native,'git',side_effect=objects):
+            result=native.authenticate_current_result(api,ROOT,commit,rid,jid,1,SCOPE['pr'],event_base='a'*40)
+            self.assertEqual(result['scope'],SCOPE)
+            self.assertEqual(result['current']['run'],rid)
+            self.assertEqual(result['current']['checkout_attestation'],receipt['checkout_attestation'])
+            self.assertEqual(result['execution_origin']['run'],rid)
+            self.assertTrue(result['current']['receipt']['current_native_commands_executed'])
+            with self.assertRaises(native.receipts.ReceiptError):
+                native.authenticate_current_result(api,ROOT,commit,rid,jid,1,SCOPE['pr'],event_base='f'*40)
+            moved=json.loads(api.runs[RUN]['event_payload']);moved['pull_request']['head']['ref']='other-branch'
+            api.runs[RUN]['event_payload']=json.dumps(moved)
+            with self.assertRaises(native.receipts.ReceiptError):
+                native.authenticate_current_result(api,ROOT,commit,rid,jid,1,SCOPE['pr'])

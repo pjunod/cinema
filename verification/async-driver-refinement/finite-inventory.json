@@ -6,38 +6,38 @@
   "source_bindings": {
     "oracle": {
       "path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
       "anchors": [
         {
           "text": "pub(super) struct Episode {",
-          "line": 616,
+          "line": 620,
           "occurrences": 1
         },
         {
           "text": "async fn actions(",
-          "line": 796,
+          "line": 800,
           "occurrences": 1
         },
         {
           "text": "async fn apply_primitive(",
-          "line": 976,
+          "line": 980,
           "occurrences": 1
         },
         {
           "text": "async fn omitted_dv_state(",
-          "line": 1427,
+          "line": 1431,
           "occurrences": 1
         },
         {
           "text": "struct BoundaryObservation {",
-          "line": 1558,
+          "line": 1563,
           "occurrences": 1
         }
       ]
     },
     "product": {
       "path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
       "anchors": [
         {
           "text": "struct Valuation {",
@@ -46,53 +46,53 @@
         },
         {
           "text": "fn retain_anchors(",
-          "line": 671,
+          "line": 672,
           "occurrences": 1
         },
         {
           "text": "fn claim_recovery_steps(",
-          "line": 1452,
+          "line": 1453,
           "occurrences": 1
         },
         {
           "text": "fn environment_allowed(",
-          "line": 945,
+          "line": 946,
           "occurrences": 1
         },
         {
           "text": "fn enumerate_candidates(",
-          "line": 1007,
+          "line": 1008,
           "occurrences": 1
         },
         {
           "text": "fn classify_demand(",
-          "line": 1143,
+          "line": 1144,
           "occurrences": 1
         },
         {
           "text": "fn successors(",
-          "line": 1607,
+          "line": 1608,
           "occurrences": 1
         }
       ]
     },
     "queue": {
       "path": "crates/plurx-core/src/store/background_jobs.rs",
-      "sha256": "a71c9b2a3e1e1fd5f7fd9b248af402ee95263075f836ef0881203a86fd984f88",
+      "sha256": "efd58cb947e5b68c43b79711b932afc5487816ebccd36e9e575d605fa9e93a4e",
       "anchors": [
         {
           "text": "const RENEW_SQL: &str",
-          "line": 651,
+          "line": 676,
           "occurrences": 1
         },
         {
           "text": "const SETTLE_SQL: &str",
-          "line": 684,
+          "line": 709,
           "occurrences": 1
         },
         {
           "text": "async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError> {",
-          "line": 3742,
+          "line": 3789,
           "occurrences": 1
         }
       ]
@@ -201,7 +201,7 @@
     },
     "independent": {
       "path": "verification/async-driver-refinement/checker.py",
-      "sha256": "0103695e2e4676dd67851c387d9d9b1e14f4d39bff3c19001fdfc0a2b3439f6e",
+      "sha256": "a6c99456d60461dcddb939434df4843be8c4188100af415c5fa3dec098b5721b",
       "anchors": [
         {
           "text": "def validate_driver(g):",
@@ -215,7 +215,7 @@
         },
         {
           "text": "def expected_product_successors(",
-          "line": 757,
+          "line": 759,
           "occurrences": 1
         }
       ]
@@ -243,7 +243,7 @@
     },
     "migrations": {
       "path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "sha256": "1509df2d15e01f43b40228440c8dbe2be03e2eaef4585a2fb436250c78ec5ada",
+      "sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e",
       "anchors": []
     }
   },

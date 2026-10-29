@@ -575,3 +575,217 @@ async fn handoff_code_expires_after_120s_and_token_after_6h() {
     );
     assert!(lists_device(&devices(&app, &admin).await));
 }
+
+async fn add_episode(state: &AppState, seed: &Seed, season: i64, number: i32) -> (i64, i64) {
+    use plurx_core::domain::{ItemKind, NewItem, ProbeResult};
+    // Catalogue ordering compares season_number before episode_number.
+    // Fixtures must carry the same parent-season facts as scanned episodes.
+    let season_number = state
+        .store
+        .get_item(season)
+        .await
+        .expect("season read")
+        .expect("parent season")
+        .season_number;
+    let item = state
+        .store
+        .insert_item(&NewItem {
+            library_id: seed.lib,
+            kind: ItemKind::Episode,
+            parent_id: Some(season),
+            title: format!("Episode {number}"),
+            year: None,
+            season_number,
+            episode_number: Some(number),
+        })
+        .await
+        .expect("episode");
+    let path = crate::test_temp_path(format!("handoff-episode-{}.mp4", uuid::Uuid::new_v4()));
+    std::fs::write(&path, b"tiny episode").expect("episode fixture");
+    let file = state
+        .store
+        .upsert_file(
+            item,
+            &path.to_string_lossy(),
+            12,
+            1,
+            &ProbeResult::default(),
+        )
+        .await
+        .expect("file");
+    (item, file)
+}
+
+#[tokio::test]
+async fn handoff_context_and_next_follow_episode_order_without_broadening_authority() {
+    use plurx_core::domain::{ItemKind, NewItem};
+    let (app, state, _fixture) = test_app_with_fixture_store();
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let first = state.store.files_for_item(seed.ep).await.expect("files")[0].id;
+    let (second_item, second) = add_episode(&state, &seed, seed.season, 2).await;
+    // A vanished higher-quality copy must not hide the available episode.
+    state
+        .store
+        .upsert_file(
+            second_item,
+            &format!("/missing/handoff-{}.mkv", uuid::Uuid::new_v4()),
+            1,
+            1,
+            &plurx_core::domain::ProbeResult {
+                height: Some(2160),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("missing preferred copy");
+    let season2 = state
+        .store
+        .insert_item(&NewItem {
+            library_id: seed.lib,
+            kind: ItemKind::Season,
+            parent_id: Some(seed.show),
+            title: "Season 2".into(),
+            year: None,
+            season_number: Some(2),
+            episode_number: None,
+        })
+        .await
+        .expect("season");
+    let (_, third) = add_episode(&state, &seed, season2, 1).await;
+    let (_, code) = mint(&app, &admin, first).await;
+    let token = redeemed_token(&app, &code).await;
+    let context_path = "/api/v1/playback-handoffs/self/context";
+    let next_path = "/api/v1/playback-handoffs/self/next";
+    let (status, body) = call(&app, get(context_path, Some(&token))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["file_id"], first);
+    assert_eq!(body["metadata"]["title"], "The Target");
+    assert_eq!(body["metadata"]["series_title"], "The Wire");
+    assert_eq!(body["next"]["file_id"], second);
+    assert_eq!(body["next"]["item_id"], second_item);
+    assert!(body.get("files").is_none() && body.get("children").is_none());
+    assert!(!body.to_string().contains("/media/") && !body.to_string().contains("token"));
+    assert_eq!(
+        call(
+            &app,
+            get(&format!("/api/v1/items/{}", seed.ep), Some(&token))
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        decision_status(&app, &token, second).await,
+        StatusCode::FORBIDDEN
+    );
+    let (status, body) = call(
+        &app,
+        post(next_path, Some(&token), json!({"expected_file_id": first})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["file_id"], second);
+    assert_eq!(body["item_id"], second_item);
+    assert_eq!(body["start_ms"], 0);
+    assert!(body["audio"].is_null() && body["subtitle"].is_null());
+    assert_eq!(body["next"]["file_id"], third);
+    assert_eq!(
+        decision_status(&app, &token, first).await,
+        StatusCode::FORBIDDEN
+    );
+    assert!(!matches!(
+        decision_status(&app, &token, second).await,
+        StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
+    ));
+    let (status, body) = call(
+        &app,
+        post(next_path, Some(&token), json!({"expected_file_id": first})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "handoff_stale");
+    let (status, body) = call(
+        &app,
+        post(next_path, Some(&token), json!({"expected_file_id": second})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["file_id"], third);
+    assert!(body["next"].is_null());
+    assert_eq!(
+        call(
+            &app,
+            post(next_path, Some(&token), json!({"expected_file_id": third}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&app, get(context_path, Some(&token))).await.1["file_id"],
+        third
+    );
+    assert_eq!(
+        call(&app, get(context_path, Some(&admin))).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&app, get(context_path, None)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn handoff_context_and_next_refuse_revoked_expired_and_minter_revoked_tokens() {
+    let (app, state, fixture) = test_app_with_fixture_store();
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    for reason in ["self", "expired", "minter"] {
+        let web = login(&app, reason).await;
+        let (id, code) = mint(&app, &web, seed.file).await;
+        let token = redeemed_token(&app, &code).await;
+        match reason {
+            "self" => {
+                call(&app, delete("/api/v1/playback-handoffs/self", Some(&token))).await;
+            }
+            "expired" => {
+                fixture
+                    .fixture_expire_playback_handoff(&id, now_secs() - 1)
+                    .await
+                    .expect("expire");
+            }
+            _ => {
+                call(&app, post("/api/v1/auth/logout", Some(&web), json!({}))).await;
+            }
+        }
+        assert_eq!(
+            call(
+                &app,
+                get("/api/v1/playback-handoffs/self/context", Some(&token))
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED,
+            "{reason}"
+        );
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    "/api/v1/playback-handoffs/self/next",
+                    Some(&token),
+                    json!({"expected_file_id": seed.file})
+                )
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED,
+            "{reason}"
+        );
+    }
+    assert_eq!(
+        decision_status(&app, &admin, seed.file).await,
+        StatusCode::OK
+    );
+}

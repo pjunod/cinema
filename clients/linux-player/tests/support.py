@@ -64,6 +64,14 @@ class FakePlurx:
         self.redeem_status = 200
         self.redeem_body = {"file_id": FILE_ID, "item_id": ITEM_ID, "start_ms": 65_000, "audio": 1,
                             "subtitle": None, "user": "viewer"}
+        self.context_status = 200
+        self.current_file_id, self.current_item_id = FILE_ID, ITEM_ID
+        self.context_data = {"file_id": FILE_ID, "item_id": ITEM_ID, "start_ms": 0,
+                             "metadata": {"title": "Fixture", "kind": "movie", "year": 2026,
+                                          "overview": "A library synopsis.", "runtime_ms": 7_200_000},
+                             "next": None}
+        self.next_context = None
+        self.next_status = 200
         self.decision = transcode_decision()
         self.sessions = []
         self.origins = [60_000]
@@ -139,14 +147,29 @@ class FakePlurx:
             return 405, {"error": "method"}
         if not authed:
             return 401, {"error": "authentication required"}
+        if path == "/api/v1/playback-handoffs/self/context" and method == "GET":
+            return self.context_status, self.context_data
+        if path == "/api/v1/playback-handoffs/self/next" and method == "POST":
+            if body != {"expected_file_id": self.current_file_id}:
+                return 409, {"message": "stale predecessor"}
+            if self.next_status != 200:
+                return self.next_status, {"message": "next refused"}
+            if not self.next_context:
+                return 404, {"message": "no next episode"}
+            self.context_data = self.next_context
+            self.next_context = None
+            self.current_file_id = self.context_data["file_id"]
+            self.current_item_id = self.context_data["item_id"]
+            return 200, self.context_data
         if path == "/api/v1/playback-handoffs/self" and method == "DELETE":
             self.revoked = True
             return 204, None
-        if path == f"/api/v1/files/{FILE_ID}/decision" and method == "POST":
+        if path == f"/api/v1/files/{self.current_file_id}/decision" and method == "POST":
             if not isinstance(body, dict) or set(body) != {"caps"} or body["caps"].get("v") != 2:
                 return 400, {"error": "caps document v2 expected"}
-            return 200, self.decision
-        if path == f"/api/v1/files/{FILE_ID}/hls/sessions" and method == "POST":
+            payload = json.dumps(self.decision).replace(f"/files/{FILE_ID}/", f"/files/{self.current_file_id}/")
+            return 200, json.loads(payload)
+        if path == f"/api/v1/files/{self.current_file_id}/hls/sessions" and method == "POST":
             if self.create_status:
                 status = self.create_status.pop(0)
                 if status != 200:
@@ -161,7 +184,7 @@ class FakePlurx:
                                    "next_exchange_ms": 5000, "lease_timeout_ms": 60000}}
             self.sessions.append(created)
             return 200, created
-        if path == f"/api/v1/items/{ITEM_ID}/progress" and method == "POST":
+        if path == f"/api/v1/items/{self.current_item_id}/progress" and method == "POST":
             return 200, {"position_ms": body.get("position_ms")}
         if path == "/api/v1/client-log" and method == "POST":
             return 204, None

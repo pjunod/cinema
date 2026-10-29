@@ -1473,3 +1473,76 @@ fn unresolved_transaction_refusal_names_phase_and_explicit_recovery() {
         ensure_resolved(Some(&j)).expect("terminal transaction");
     }
 }
+
+#[test]
+fn interrupted_committed_shutdown_recovers_only_with_exact_clean_exit_evidence() {
+    let mut committed = journal();
+    committed
+        .transition(Phase::ShutdownCommitted)
+        .expect("committed shutdown");
+    let receipt = ShutdownReceiptV1 {
+        schema_version: 1,
+        operation_id: committed.transaction_id.clone(),
+        process: committed.process.clone().expect("bound process"),
+        generation: committed
+            .shutdown_generation
+            .clone()
+            .expect("bound generation"),
+        http_drained: true,
+        store_closed: true,
+        exit_class: ExitClass::Clean,
+    };
+    for case in 0..10 {
+        let mut pending = committed.clone();
+        let mut proof = receipt.clone();
+        match case {
+            0 => proof.operation_id = "other-transaction".into(),
+            1 => proof.process.nonce = "other-process".into(),
+            2 => proof.process.start_generation = "reused-pid".into(),
+            3 => proof.generation = "other-shutdown".into(),
+            4 => proof.http_drained = false,
+            5 => proof.store_closed = false,
+            6 => proof.exit_class = ExitClass::Unclean,
+            9 => pending.phase = Phase::Installing,
+            _ => {}
+        }
+        let before = serde_json::to_value(&pending).expect("journal before recovery");
+        assert!(
+            pending
+                .complete_clean_shutdown(proof, case != 7, case != 8)
+                .is_err(),
+            "case {case}"
+        );
+        assert_eq!(
+            serde_json::to_value(&pending).expect("held journal"),
+            before,
+            "failed recovery preserves evidence, case {case}"
+        );
+    }
+    committed
+        .complete_clean_shutdown(receipt.clone(), true, true)
+        .expect("recover exact clean exit");
+    assert_eq!(committed.phase, Phase::CleanStop);
+    let scratch = Scratch::new();
+    let mut installation = installed();
+    installation.owner_uid = native_uid();
+    installation.service_uid = native_uid();
+    installation.paths.state = scratch.0.clone();
+    let store = TransactionStore::locked(&installation).expect("held journal lock");
+    store
+        .transactions
+        .child(&committed.transaction_id, true)
+        .expect("transaction directory");
+    store
+        .save(&committed)
+        .expect("durable recovered journal and progress");
+    let reloaded = store
+        .load(&committed.transaction_id)
+        .expect("reload recovered journal");
+    assert_eq!(reloaded.phase, Phase::CleanStop);
+    assert!(reloaded.clean_receipt.is_some());
+    assert_eq!(
+        serde_json::to_value(committed.clean_receipt).expect("retained receipt"),
+        serde_json::to_value(receipt).expect("original receipt")
+    );
+}

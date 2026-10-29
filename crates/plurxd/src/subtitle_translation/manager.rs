@@ -931,7 +931,7 @@ pub(crate) async fn worker_pass(
             {
                 continue;
             }
-            match state.transcode.admit_speech().await {
+            match state.transcode.admit_progressive_speech(shutdown).await {
                 Some(a) if state.transcode.speech_capacity_available(&a) => Some(a),
                 _ => continue,
             }

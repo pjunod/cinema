@@ -102,6 +102,9 @@ services:
     # Keep the base service on ordinary Docker networking. Host-specific
     # overrides commonly attach plurxd to an external media network, and
     # Compose forbids combining `networks` with `network_mode: host`.
+    # Optional native HTTPS is published only when enabled, by the temporary
+    # overlay generated for make docker-up / docker-image-up. No always-open
+    # HTTPS mapping belongs here; saved settings select its container port.
     ports:
       # Keep the container port stable for peer containers. Move only the host
       # side when another service (usually Plex) still owns TCP 32400.

@@ -9,6 +9,7 @@ a document to this folder.
 |---|---|---|
 | [ENGINEERING-KNOWLEDGE.md](ENGINEERING-KNOWLEDGE.md) | Code/diff queries, source-backed record maintenance, advisory PR capture and evidence limits for the bounded knowledge pilot. | open |
 | [DOCKER-HARDWARE-STATUS.md](DOCKER-HARDWARE-STATUS.md) | Automatic Docker GPU passthrough, device groups, NVIDIA libraries, review and validation progress. | open |
+| [NATIVE-CI-RECEIPTS.md](NATIVE-CI-RECEIPTS.md) | Authenticated native successes, unchanged source closures, build-specification boundaries and original-run provenance. | built |
 | [PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md) | Once-per-PR Python successes: authenticated journals are adopted, anything else simply runs again — history never blocks a PR. | open |
 | [EFFORT-WEB-STATIC-CONTRACTS.md](EFFORT-WEB-STATIC-CONTRACTS.md) | Current-source effort web lint, preserved shape obligations, and explicitly deferred behavioral qualification. | open |
 | [STATUS-HISTORY.md](STATUS-HISTORY.md) | Includes the 2026-09-24/25 sections moved on 2026-10-05. Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |

@@ -446,6 +446,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/playback-handoffs"
         | "/api/v1/playback-handoffs/redeem"
         | "/api/v1/playback-handoffs/self"
+        | "/api/v1/playback-handoffs/self/context"
+        | "/api/v1/playback-handoffs/self/next"
         | "/api/v1/playback-handoffs/{id}"
         | "/api/v1/files/{id}/stream.mp4"
         | "/api/v1/files/{id}/subs/{subtitle}"
@@ -1724,6 +1726,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/playback-handoffs/self",
             delete(playback_handoffs::revoke_self),
+        )
+        .route(
+            "/playback-handoffs/self/context",
+            get(playback_handoffs::context),
+        )
+        .route(
+            "/playback-handoffs/self/next",
+            post(playback_handoffs::advance_next),
         )
         .route("/playback-handoffs/{id}", get(playback_handoffs::status))
         .route(

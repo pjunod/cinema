@@ -59,6 +59,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- Linux player 0.4.0 uses Cinema-style playback controls with scoped library
+  metadata and next episode, saved autoplay, and Auto/Original/advertised
+  quality choices that retain playback position and paused state.
+
 - The closed-form CM v2.9 display management (`tools/dv_processing/dv_dm.h`)
   evaluates its output lattice once per frame instead of eight vertices per
   pixel, and CM v4.0 and CM v2.9 compile as separate shaders. The output is
@@ -108,6 +112,19 @@ bump may break compatibility and a **patch** bump never does.
   Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v4`.
 
 ### Fixed
+
+- Fresh macOS media builds retain caller macro paths and expose Homebrew
+  aclocal macros to the source-built Automake tools used by libass.
+
+- macOS source upgrades wait through transient process-inspection failures,
+  recover interrupted clean shutdowns, and print a directly runnable recovery
+  command with the complete executable path.
+
+- Fresh macOS source installs build Automake without creating a circular
+  GNUmakefile symlink when the temporary directory uses a symlinked path.
+
+- Restrict the Linux external player preference to Dolby Vision files on Linux;
+  other formats and operating systems retain web playback, including mixed-version titles.
 
 - Shared playback retries closure acknowledgements after concurrent updates to
   the same owner's custody ledger. Actual driver closure and authority fences
@@ -389,6 +406,11 @@ bump may break compatibility and a **patch** bump never does.
     docs/API.md §7.4.
 
 ### Fixed
+
+- **Docker publishes native HTTPS only when enabled.** The supported Docker
+  startup targets derive the HTTPS mapping from the node's desired settings,
+  including its configured port, and remove the generated mapping on disable.
+  `PLURX_HTTPS_HOST_PORT` selects an independent host port when needed.
 
 - **Consistent reads on a cluster no longer wait 40 ms each.** Every
   linearizable read opens a stream to each other voter to confirm leadership,

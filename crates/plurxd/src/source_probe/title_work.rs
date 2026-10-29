@@ -53,10 +53,12 @@ impl TitleTask {
         let Some(probe_pipeline) = plurx_core::scan::probe::pipeline_digest().await else {
             return Ok(None);
         };
-        let scanner = tools.scanner_digest();
+        let scanner = tools.title_scanner_digest();
         let demands = state.store.dv_title_demands(&scanner, *after).await?;
         if demands.is_empty() {
             *after = 0;
+            #[cfg(target_os = "linux")]
+            requalify_stale_fel_titles(state, &tools, &scanner).await;
             return Ok(None);
         }
         for mut demand in demands {
@@ -71,6 +73,11 @@ impl TitleTask {
             {
                 continue;
             }
+            // The local index pass reads this title next, and reads its RPUs
+            // in that same read: do not read the file twice.
+            if state.jobs.title_scan_awaits_index_pass(file.id) {
+                continue;
+            }
             let Some(revision) = state
                 .store
                 .bind_dv_title_demand(demand.probe_revision, &scanner)
@@ -78,6 +85,7 @@ impl TitleTask {
             else {
                 continue;
             };
+            let reused = reusable_aggregate(&demand, revision);
             demand.probe_revision = revision;
             use sha2::{Digest, Sha256};
             let identity = hex::encode(Sha256::digest(
@@ -164,6 +172,7 @@ impl TitleTask {
                 state.clone(),
                 file,
                 demand,
+                reused,
                 tools,
                 admission,
                 job,
@@ -246,6 +255,53 @@ impl TitleTask {
     }
 }
 
+/// A renderer, recipe or encoder change leaves every FEL verdict measured
+/// under the old identity. While no title work waits, ask for a bounded batch
+/// of those titles again: their demand is rebound, and the title job rescans
+/// and re-qualifies them. Title demand no longer follows the renderer, so this
+/// is what keeps "a changed renderer re-qualifies every title" true; the
+/// request is throttled per title like a play's.
+#[cfg(target_os = "linux")]
+async fn requalify_stale_fel_titles(state: &AppState, tools: &ToolSet, scanner: &str) {
+    if !state.transcode.fel_qualification_capable() {
+        return;
+    }
+    let identity = match state.transcode.fel_identity(&tools.backend_digest()).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::debug!(%error, "FEL identity unavailable for re-qualification");
+            return;
+        }
+    };
+    match state.store.dv_fel_stale_titles(&identity, 16).await {
+        Ok(titles) => {
+            for file_id in titles {
+                state
+                    .transcode
+                    .request_fel_qualification(file_id, scanner, &identity)
+                    .await;
+            }
+        }
+        Err(error) => tracing::warn!(%error, "listing FEL titles to re-qualify"),
+    }
+}
+
+/// The aggregate this title's job may settle with instead of reading the
+/// file: one stored under the generation the worker's bind left unchanged.
+/// Only a publisher bound to that generation's scanner stores one (an index
+/// pass's ride-along, or an earlier job), and a bind to another scanner
+/// rotates the generation and drops it in the same transaction — so a
+/// generation that moved, or a document read before it moved, reuses nothing.
+pub(super) fn reusable_aggregate(
+    demand: &TitleDemand,
+    bound_revision: i64,
+) -> Option<plurx_core::scan::dv_title::DvTitleStats> {
+    if bound_revision != demand.probe_revision {
+        return None;
+    }
+    plurx_core::scan::dv_title::DvTitleStats::from_probe_json(&demand.probe_json)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one owned title attempt retains source, tools, physical and durable admission"
@@ -254,6 +310,7 @@ async fn execute(
     state: AppState,
     file: plurx_core::domain::MediaFile,
     demand: TitleDemand,
+    reused: Option<plurx_core::scan::dv_title::DvTitleStats>,
     tools: Arc<ToolSet>,
     admission: crate::transcode::FragmentAdmission,
     job: plurx_core::store::background_jobs::BackgroundJob,
@@ -262,15 +319,20 @@ async fn execute(
 ) -> bool {
     let fence = active.fence();
     let cancel = fence.loss_token().child_token();
-    let result = super::run_admitted_probe(
-        &state.transcode,
-        &admission,
-        &cancel,
-        &shutdown,
-        None,
-        super::dv_title::scan(&file, &demand.probe_json, &tools),
-    )
-    .await;
+    let result = match reused {
+        Some(stats) => Ok(stats),
+        None => {
+            super::run_admitted_probe(
+                &state.transcode,
+                &admission,
+                &cancel,
+                &shutdown,
+                None,
+                super::dv_title::scan(&file, &demand.probe_json, &tools),
+            )
+            .await
+        }
+    };
     let mut published = false;
     let settlement = if shutdown.is_cancelled() || cancel.is_cancelled() {
         // A manual cancel/source supersession has already invalidated our token,
@@ -328,7 +390,7 @@ async fn execute(
                     probe_revision: demand.probe_revision,
                     source_size: demand.source_size,
                     source_mtime: demand.source_mtime,
-                    scanner_digest: tools.scanner_digest(),
+                    scanner_digest: tools.title_scanner_digest(),
                     stats,
                 };
                 match fence.publish_dv_title(output).await {

@@ -316,12 +316,15 @@ class DockerHardwareTests(unittest.TestCase):
     def test_pi_prepare_retains_host_compose_files_and_configuration(self):
         (self.root / 'base.yml').touch()
         (self.root / 'nas.yml').touch()
-        host = {'volumes': [{'source': '/srv/data', 'target': '/var/lib/plurx'},
+        host = {'volumes': [{'type': 'bind', 'source': '/srv/data', 'target': '/var/lib/plurx'},
                             {'source': '/nas', 'target': '/media', 'read_only': True}],
                 'environment': {'PLURX_DATA_DIR': '/var/lib/plurx', 'CUSTOM': 'keep'},
                 'networks': ['operator'], 'group_add': ['123'],
                 'security_opt': ['apparmor=operator-profile']}
         original = json.loads(json.dumps(host))
+        local_files = mock.patch.dict(HELPER['HTTPS']['mapped_file'].__globals__, require_local_filesystem=lambda: None)
+        local_files.start()
+        self.addCleanup(local_files.stop)
         runtime = {'service': {'image': 'plurx-pi-fixture:source',
                    'build': {'context': str(ROOT), 'dockerfile': 'Dockerfile.pi'},
                    'devices': ['/dev/video19:/dev/video19:rw'], 'group_add': ['44'],

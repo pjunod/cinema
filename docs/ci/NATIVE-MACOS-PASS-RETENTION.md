@@ -93,30 +93,36 @@ name, ID and final size must agree with the API archive. A separate TV upload in
 the same Apple job supplies no native hash and does not invalidate one.
 
 Workflow applicability pins the complete original preamble (triggers, global
-environment and concurrency), the complete transitive `paperwork`, `scope` and
-`preflight` jobs, and the complete original or reviewed adapted `apple_compile`
-job. Current execution and v1 producers require the adapted kind. The bounded
-UTF-8/LF plain-job-map splitter rejects tabs, duplicate or complex keys, late
-globals, unsupported indentation and more than 64 jobs within 128 KiB.
-Unrelated job bodies may change without changing the protected native scope.
-One exact original DerivedData cache step is an optional isolated capability:
-its complete 645 bytes and pinned action/path/key/condition are checked, and it
-may occur once only at its original position immediately before the mobile/TV
-compile step. Scope comparison removes only that exact block from both sides;
-modified, moved, duplicated or additional cache recipes still refuse. Its
-`clients/apple/build/DerivedData` path is outside the native tray source and
-scratch closure. This supports cache removal without changing native commands
-or accepting modified mobile/TV cases as old passes.
-Receipts still record the SHA-256 of the actual complete producer/consumer
-workflow bytes; scoped kind is separate and never replaces raw provenance.
-The scope version and protected identities enter the policy fingerprint;
-older v1 adapter/policy receipts receive no compatibility waiver. Existing
-source, API, checkout, toolchain and upload authentication remain exact.
+environment and concurrency) and the complete transitive `paperwork`, `scope`
+and `preflight` jobs. The Apple job is a closed, ordered composition of exact
+reviewed roles. Historical legacy and dedicated-adapter sequences remain
+recognized; the combined sequence adds TV-only native authentication and its
+provenance upload before the independent strict desktop adapter and upload,
+then retains the reviewed mobile/TV operations and adoption predicates.
+
+Every role preserves its exact action pin, command, arguments, environment,
+path, condition and order. Job needs, labels, timeout, checkout policy and exit
+propagation remain checked. Unknown or duplicate steps, moved roles, command
+wrappers and weaker conditions fail closed. The bounded UTF-8/LF plain-job-map
+splitter still rejects tabs, duplicate or complex keys, late globals,
+unsupported indentation and more than 64 jobs within 128 KiB. Unrelated job
+bodies may change without changing the protected native scope.
+
+The exact original DerivedData cache is an optional historical role only at
+its reviewed placement immediately before mobile/TV compilation. Its complete
+645 bytes and pinned action/path/key/condition remain checked; it is not an
+allowance for arbitrary cache steps. Its `clients/apple/build/DerivedData` path
+is outside the native tray source and scratch closure. Receipts retain the
+SHA-256 of the actual complete producer/consumer workflow; a recognized role
+sequence never replaces raw provenance. Scope version and protected identities
+enter the policy fingerprint, with no older adapter/policy compatibility waiver.
+Existing source, API, checkout, toolchain and upload authentication remain exact.
+
 Workflow text does not additionally pin source helpers invoked by prerequisite
-jobs. The native command, full checkout, evidence-upload path and all protected
-mobile/TV steps remain unchanged. The current job
-rechecks Xcode and records its actual output. API auth tokens remain in the
-parent client and are removed from Git, toolchain and native child environments.
+jobs. The desktop native command, full checkout and evidence-upload path remain
+unchanged. The current job rechecks Xcode and records its actual output. API
+auth tokens remain in the parent client and are removed from Git, toolchain and
+native child environments.
 
 The applicability receipt says `retained_prior_execution`, names the original
 commit/tree/run/job/attempt, records all archive/member/job-log/source/policy and
@@ -124,6 +130,29 @@ adapter identities, and attaches original evidence. It emits no new native pass
 events or current build-product claim. Original host OS release, compiler binary
 hash, SDK inventory and build-product digests are unrecorded and remain null.
 Checkout/scratch paths are provenance, not a binary reproducibility guarantee.
+
+## Desktop and TV keep separate evidence authorities
+
+The combined workflow calls `validation.native_receipts --family tv_navigation`
+for TV discovery and adoption. Other callers retain the full-family default;
+empty, duplicate or unknown selections are refused. TV provenance follows
+[NATIVE-CI-RECEIPTS.md](NATIVE-CI-RECEIPTS.md). A generic desktop flag never skips
+the dedicated desktop adapter.
+
+Desktop production and Main consumption share
+`validation.desktop_macos_retention.authenticate_current_result`. It derives
+repository, PR and branch scope from the authenticated current event and live
+PR, checks the strict current artifact and returns its attestation/receipt
+separately from the resolved original execution. A retained bundle's embedded
+old XCTest log cannot become a current original through generic log parsing.
+The generic desktop-original reader rejects dedicated multi-member bundles.
+
+Main always uses this strict desktop boundary. Fresh TV evidence separately
+requires the full authenticated upload transaction, actual archive hash and
+expected source/commands. Missing or invalid desktop evidence fails the Main
+condition; consumers do not start another native run. Compatible 75-case reuse
+still requires the actual current execution key to equal the authenticated
+original key, under the unchanged source and complete-history rules below.
 
 ## Version-1 receipts resolve to one real original execution
 

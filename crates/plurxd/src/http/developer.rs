@@ -1751,7 +1751,7 @@ async fn dolby_vision_fel_reencode(
             .map_err(|error| error.to_string());
         let facts = state.transcode.live_reconstruction_facts().await;
         let counts = match &tools {
-            Ok(Some(tools)) => match state.transcode.fel_identity(&tools.scanner_digest()).await {
+            Ok(Some(tools)) => match state.transcode.fel_identity(&tools.backend_digest()).await {
                 Ok(identity) => state
                     .store
                     .dv_fel_verdict_counts(&identity)

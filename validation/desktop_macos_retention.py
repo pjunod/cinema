@@ -48,7 +48,7 @@ MAKEFILE_FAMILY = (
 )
 CANONICAL_MAKEFILE = MAKEFILE_FAMILY[0]
 APPLICABILITY_PROJECTION = 'bounded-native-make-scope-v1'
-RECIPE_COMPATIBILITY = 'exact protected native workflow scope v1; bounded native Make scope v1'
+RECIPE_COMPATIBILITY = 'closed ordered native workflow roles v2; bounded native Make scope v1'
 MAX_MAKE_LINES = 4096
 MAKE_PROTECTED_LINES = (
     'CARGO ?= cargo',
@@ -156,6 +156,9 @@ ADAPTER_STEP = '''      - name: Retain or execute native macOS server tray evide
 '''
 LEGACY_UPLOAD = '          path: target/validation/desktop-macos-check.log\n'
 ADAPTER_UPLOAD = '          path: target/validation/desktop-macos-retention\n'
+
+
+NATIVE_TV_METADATA = b'      - name: Authenticate compatible original native test receipts\n        id: native_receipts\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n        run: python3 -m validation.native_receipts --family tv_navigation\n      - name: Preserve native adoption provenance\n        if: always()\n        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4\n        with:\n          name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}\n          path: .main-preflight-receipts/native/receipt.json\n          if-no-files-found: error\n          retention-days: 90\n'
 
 
 RECEIPT_COMMON = frozenset(['schema_version', 'case', 'current_commit', 'current_tree', 'current_run', 'current_job', 'current_attempt', 'scope', 'native_execution_key', 'source_manifest_kind', 'current_source_manifest', 'expected_case_ids', 'toolchain_contract', 'adapter_environment', 'producer_workflow_sha256', 'consumer_workflow_sha256', 'recipe_compatibility', 'adapter_sha256', 'policy_sha256', 'build_product_digests', 'current_build_products_exist', 'checkout_attestation'])
@@ -450,6 +453,50 @@ def apple_without_reviewed_cache(apple, cache):
     return apple
 
 
+def apple_role_blocks(block):
+    """Exact ordered step bytes; no command or environment normalization."""
+    starts=list(re.finditer(rb'(?m)^      - ',block))
+    require(starts,'Native Apple role sequence is empty')
+    header=block[:starts[0].start()];roles=[];seen=set()
+    for n,start in enumerate(starts):
+        raw=block[start.start():starts[n+1].start() if n+1<len(starts) else len(block)]
+        first=raw.split(b'\n',1)[0]
+        if first.startswith(b'      - name: '):role=first[len(b'      - name: '):].decode('utf-8')
+        else:
+            require(first==b'      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4',
+                    'Unknown unnamed native role')
+            role='checkout'
+        require(role not in seen,'Duplicate native workflow role');seen.add(role);roles.append((role,raw))
+    return header,roles
+
+
+def reviewed_apple_roles(legacy_apple,adapted_apple):
+    header,old=apple_role_blocks(legacy_apple);adapted_header,adapted=apple_role_blocks(adapted_apple)
+    require(header==adapted_header,'Reviewed native job header changed')
+    expected=['checkout','Verify the pinned Apple toolchain','Build and test native macOS server tray',
+        'Preserve native macOS server tray check output','Verify the pinned mobile Apple toolchain',
+        'Compile iOS and tvOS without running simulator tests','Require native TV navigation journeys',
+        'Preserve TV navigation evidence including failures']
+    require([name for name,_ in old]==expected,'Reviewed legacy native role sequence differs')
+    require([name for name,_ in adapted]==[name.replace('Build and test native macOS server tray',
+        'Retain or execute native macOS server tray evidence') for name in expected],
+        'Reviewed adapted native role sequence differs')
+    metadata_header,metadata=apple_role_blocks(NATIVE_TV_METADATA)
+    require(not metadata_header and [name for name,_ in metadata]==[
+        'Authenticate compatible original native test receipts','Preserve native adoption provenance'],
+        'Reviewed TV metadata roles differ')
+    combined=adapted[:2]+metadata+adapted[2:]
+    changed=[]
+    tv_roles=set(expected[-3:])
+    for name,raw in combined:
+        if name in tv_roles:
+            old_predicate=b"needs.scope.outputs.apple == 'true'"
+            require(raw.count(old_predicate)==1,'Reviewed TV predicate is ambiguous')
+            raw=raw.replace(old_predicate,old_predicate+b" && steps.native_receipts.outputs.tv_navigation != 'true'",1)
+        changed.append((name,raw))
+    return header,old,adapted,changed
+
+
 def workflow_scope(workspace,commit,legacy):
     require(isinstance(commit,str) and re.fullmatch('[0-9a-f]{40}',commit),'Invalid native workflow commit')
     require(digest(legacy) == PRODUCER_WORKFLOW,'Unrecognized native producer workflow')
@@ -472,9 +519,11 @@ def workflow_scope(workspace,commit,legacy):
     apple = blocks.get('apple_compile')
     require(apple is not None, 'Unsupported native Apple job scope')
     scoped_apple = apple_without_reviewed_cache(apple, cache)
-    require(scoped_apple in (legacy_apple,adapted_apple),
-        'Unsupported native Apple job scope')
-    return {'sha256':digest(current),'kind':'legacy' if scoped_apple == legacy_apple else 'adapted'}
+    header,old_roles,adapted_roles,combined_roles=reviewed_apple_roles(legacy_apple,adapted_apple)
+    current_header,current_roles=apple_role_blocks(scoped_apple)
+    require(current_header==header and current_roles in (old_roles,adapted_roles,combined_roles),
+        'Unsupported native Apple job scope (ordered roles)')
+    return {'sha256':digest(current),'kind':'legacy' if current_roles==old_roles else 'adapted'}
 
 
 def workflow_identity(workspace,commit,legacy):
@@ -910,7 +959,9 @@ def policy_fingerprint():
         'origin_job':ORIGIN_JOB,'origin_artifact':ORIGIN_ARTIFACT,'archive_sha256':ORIGIN_ZIP_SHA,
         'job_log_sha256':ORIGIN_JOB_SHA,'roots':ROOTS,'command':COMMAND,
         'workflow_sha256':PRODUCER_WORKFLOW,
-        'workflow_scope':{'version':2,'grammar':'bounded-plain-job-map-LF-UTF8-v1','pins':WORKFLOW_SCOPE_PINS,
+        'workflow_scope':{'version':3,'grammar':'closed-ordered-native-roles-LF-UTF8-v2','pins':WORKFLOW_SCOPE_PINS,
+            'tv_metadata_sha256':digest(NATIVE_TV_METADATA),'tv_family':'tv_navigation',
+            'tv_predicate':"needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'",
             'optional_apple_cache':{'version':1,'sha256':APPLE_CACHE_SHA256,'bytes':645,
                 'placement':'immediately-before-single-compile-step','cardinality':[0,1],
                 'comparison':'remove-exact-legacy-bytes-both-sides-scope-only'},
@@ -1048,7 +1099,7 @@ def checked_attestation(lines,commit,tree,run_id,job,entries,key):
     return value
 
 
-def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,require_fresh=False):
+def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,require_fresh=False,include_current=False):
     result = v1_envelope(api,scope,workspace,run_id,job_id,current,legacy)
     payload = unpack_v1(result['archive']);receipt = receipts.bounded_json(payload['receipt.json'])
     require(isinstance(receipt,dict), 'Native v1 receipt is not an object')
@@ -1072,6 +1123,7 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
         and receipt.get('source_manifest_kind') == 'reconstructed_from_authenticated_checkout'
         and receipt.get('recipe_compatibility') == RECIPE_COMPATIBILITY
         and receipt.get('build_product_digests') is None
+        and receipt.get('current_build_products_exist') is False
         and isinstance(receipt.get('toolchain_contract'),dict)
         and receipt['toolchain_contract'].get('xcode_output') == TOOLCHAIN
         and receipt['toolchain_contract'].get('swift_path') == SWIFT,
@@ -1103,7 +1155,7 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
         root = {'commit':commit,'tree':tree,'run':run_id,'job':job['id'],'attempt':1,
             'native_execution_key':key,'native_log_sha256':digest(native)}
         require(canonical(receipt.get('execution_origin')) == canonical(root), 'Native fresh original execution differs')
-        return result
+        return (result,result,receipt,attestation) if include_current else result
     require(not require_fresh and receipt.get('decision') == 'retained_prior_execution'
         and receipt.get('current_native_commands_executed') is False
         and set(payload) == {'receipt.json','origin-artifact.zip','origin-job.log','origin-metadata.json',MEMBER},
@@ -1117,6 +1169,8 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
     else:
         original = v1_result(api,scope,workspace,receipts.positive(pointer.get('run')),
             receipts.positive(pointer.get('job')),current,legacy,key,require_fresh=True)
+    require(original['key']==key and applicability_inputs(original['manifest'])==applicability_inputs(entries),
+        'Retained native execution does not match the actual current input key')
     require(canonical(pointer) == canonical(origin_identity(original)) and payload['origin-artifact.zip'] == original['archive']
         and payload['origin-job.log'] == original['job_log'] and native == original['native_log'],
         'Native retained original identity/hash/key/copy differs')
@@ -1125,7 +1179,32 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
         and receipt.get('attached_metadata_sha256') == digest(payload['origin-metadata.json']), 'Native retained metadata copy/hash differs')
     copied_result = {**original,**copied}
     require(origin_identity(copied_result) == origin_identity(original), 'Native retained metadata identity differs')
-    return original
+    return (result,original,receipt,attestation) if include_current else original
+
+
+def authenticate_current_result(api,workspace,current,run_id,job_id,repository,pr,*,event_base=None):
+    """Strict current attestation and resolved original, with separate identities."""
+    run_id=receipts.positive(run_id);job_id=receipts.positive(job_id)
+    scope=main_receipts.identity(api,receipts.positive(pr),current)
+    require(scope['repository']==receipts.positive(repository),'Current native repository differs')
+    run=api.get('/actions/runs/'+str(run_id))
+    require(run.get('id')==run_id and run.get('commit_sha')==current,'Current native run/source differs')
+    event=adoption.bind_event(run,scope);main_receipts.authenticate_run(scope,run)
+    require(event['pull_request']['head']['ref']==scope['branch'],'Current native branch differs')
+    if event_base is not None:
+        require(event['pull_request']['base']['sha']==event_base,'Current native event baseline differs')
+    adoption.validate_live_pr(api.get('/pulls/'+str(scope['pr'])),event,current)
+    legacy=git(workspace,'show',PRODUCER+':'+WORKFLOW,limit=MAX_WORKFLOW_BYTES)
+    entries,contents=manifest(workspace,current);key=execution_key(entries,case_inventory(contents))
+    actual,original,receipt,attestation=v1_result(api,scope,workspace,run_id,job_id,current,legacy,key,include_current=True)
+    require(actual['run']['commit_sha']==current and actual['job']['id']==job_id,
+            'Current native result changed source/job identity')
+    adoption.validate_live_pr(api.get('/pulls/'+str(scope['pr'])),event,current)
+    return {'scope':scope,'current':{'commit':current,'tree':actual['tree'],'run':run_id,'job':job_id,
+        'task':actual['job']['task_id'],'attempt':1,'artifact':actual['artifact']['id'],
+        'archive_sha256':digest(actual['archive']),'job_log_sha256':digest(actual['job_log']),
+        'receipt_member_sha256':actual['receipt_member_sha256'],'checkout_attestation':attestation,
+        'receipt':receipt},'execution_origin':origin_identity(original),'observed':original['observed']}
 
 
 def matching_v1(api,scope,workspace,current,current_run,key,legacy):

@@ -436,3 +436,7 @@ parents = ["00c74cd8c5ebd9ff3c6957532c42854ddc3d671a", "e44718420a118bf2b05aaa49
 title = "Merge pull request #1251: connect Rust schedules to two-worker progress"
 pull = "1251"
 reason = "Verified Forgejo PR #1251 landing uses a custom subject outside the canonical parser shapes. Its fifteen original Regression-Test fields resolve against this exact immutable tree; all seven corrective commits reported by PR #1257 preflight are in its introduced ancestry. Recognition pins commit, tree, ordered parents and subject, preserves every own-tree trailer check, and waives no regression evidence."
+
+[[errata]]
+commit = "85f7bbd7bb61099b75733c367b0bc4aabf7f0522"
+reason = "PR #1314 repaired the macOS companion title-scan platform gates, but its immutable landing message qualified Rust regression names with fragindex::tests::dv_title_companion::. The regression-field validator requires the function name within the named source file. The corrected references are crates/plurxd/src/fragindex/tests.rs::the_companion_scan_is_judged_like_the_title_job and crates/plurxd/src/fragindex/tests.rs::the_companion_scan_leaves_the_index_pass_untouched; both resolve in the landing tree. The PR body was corrected after merge. This records the malformed historical anchors without changing the audit boundary, validation rules, or runtime behavior."

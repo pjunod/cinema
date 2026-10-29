@@ -613,9 +613,9 @@ function catalogItemBody(p){
     acts=bookActions(p);
     rest=bookVersions(p);
   } else if(p.shape==="versions"){
-    const pmeta=p.meta, resume=p.resume;
+    const resume=p.resume;
     const watchBtn=watchControls(it);
-    const playable=p.playable;
+    const playable=p.playable, pmeta=playbackMetaFor(p,playable);
     if(playable){
       acts=`<div class="actions">
         <button class="btnplay" onclick='play(${playable.id},${esc(JSON.stringify(it.title))},${resume},${playable.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ ${resume?`Resume · ${fmtDur(resume)}`:'Play'}</button>
@@ -632,7 +632,7 @@ function catalogItemBody(p){
     rest=d.files.map(v=>{
       const miss=!v.available;
       const header=(multi||miss)
-        ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" onclick='play(${v.id},${esc(JSON.stringify(it.title))},${resume},${v.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ Play</button>`:''}</div>`
+        ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" onclick='play(${v.id},${esc(JSON.stringify(it.title))},${resume},${v.duration_ms||0},${esc(JSON.stringify(playbackMetaFor(p,v)))})'>▶ Play</button>`:''}</div>`
         : '';
       return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}${fileAdminActions(v,it.id)}</div>`;
     }).join("");

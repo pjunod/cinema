@@ -406,9 +406,79 @@ async fn projection(
         .checkpoint
         .as_ref()
         .filter(|checkpoint| checkpoint["fence"].as_i64() == Some(job.fence));
-    let waiting =
-        job.state == JobState::Queued && !state.transcode.speech_capacity_observation().await.2;
+    let (phase, reason) = status_phase(
+        job.state,
+        matches!(payload, JobPayload::SubtitleTextTranslate { .. }),
+        checkpoint,
+        job.fence,
+        state.transcode.speech_capacity_observation().await.2,
+    );
     Ok(
-        json!({"version":1,"job_id":job.id,"state":job.state,"phase":if waiting{Some("waiting_for_capacity")}else{checkpoint.and_then(|c|c["phase"].as_str())},"reason":if waiting{Some("waiting_for_playback_capacity")}else{job.last_error_code.as_deref().map(super::manager::safe_reason)},"retryable":matches!(job.state,JobState::Failed|JobState::Cancelled),"progress":{"completed":checkpoint.and_then(|c|c["completed_cues"].as_u64()).unwrap_or(0),"total":checkpoint.and_then(|c|c["total_cues"].as_u64()).unwrap_or(0)},"result":result}),
+        json!({"version":1,"job_id":job.id,"state":job.state,"phase":phase,"reason":reason.or_else(||job.last_error_code.as_deref().map(super::manager::safe_reason)),"retryable":matches!(job.state,JobState::Failed|JobState::Cancelled),"progress":{"completed":checkpoint.and_then(|c|c["completed_cues"].as_u64()).unwrap_or(0),"total":checkpoint.and_then(|c|c["total_cues"].as_u64()).unwrap_or(0)},"result":result}),
     )
+}
+
+fn status_phase(
+    state: JobState,
+    is_text_translate: bool,
+    checkpoint: Option<&Value>,
+    fence: i64,
+    capacity_available: bool,
+) -> (Option<&str>, Option<&'static str>) {
+    let checkpoint = checkpoint.filter(|checkpoint| checkpoint["fence"].as_i64() == Some(fence));
+    let phase = checkpoint.and_then(|checkpoint| checkpoint["phase"].as_str());
+    let waiting = state == JobState::Queued && is_text_translate && !capacity_available;
+    if waiting {
+        (
+            Some("waiting_for_capacity"),
+            Some("waiting_for_playback_capacity"),
+        )
+    } else {
+        (phase, None)
+    }
+}
+
+#[cfg(test)]
+mod status_phase_tests {
+    use super::status_phase;
+    use plurx_core::store::background_jobs::JobState;
+    use serde_json::json;
+
+    #[test]
+    fn fresh_queued_translation_reports_capacity_wait() {
+        assert_eq!(
+            status_phase(JobState::Queued, true, None, 1, false),
+            (
+                Some("waiting_for_capacity"),
+                Some("waiting_for_playback_capacity")
+            )
+        );
+    }
+
+    #[test]
+    fn queued_model_operation_keeps_its_download_phase() {
+        let checkpoint = json!({"fence": 1, "phase": "downloading"});
+        assert_eq!(
+            status_phase(JobState::Queued, false, Some(&checkpoint), 1, false),
+            (Some("downloading"), None)
+        );
+    }
+
+    #[test]
+    fn running_model_operation_preserves_capacity_phase() {
+        let checkpoint = json!({"fence": 1, "phase": "waiting_for_capacity"});
+        assert_eq!(
+            status_phase(JobState::Running, false, Some(&checkpoint), 1, true),
+            (Some("waiting_for_capacity"), None)
+        );
+    }
+
+    #[test]
+    fn stale_checkpoint_is_ignored() {
+        let checkpoint = json!({"fence": 0, "phase": "downloading"});
+        assert_eq!(
+            status_phase(JobState::Queued, false, Some(&checkpoint), 1, false),
+            (None, None)
+        );
+    }
 }

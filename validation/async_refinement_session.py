@@ -820,7 +820,9 @@ def authenticate_main(api, reg, run_id, root, *, verified):
     else:
         p.require(not worker,'unaffected worker job published unexpected proof artifact')
     if required['apple_compile']:
-        authenticate_native(api, reg, run_id, artifacts, logs['apple_compile'], selected)
+        native_result=authenticate_native(api, reg, run_id, artifacts, logs['apple_compile'], selected,root,contexts['apple_compile'])
+        for record in records:
+            if record['condition']=='apple_compile':record['native_receipts']=native_result
     main_conditions(results, True)
     live_pr(api, reg)
     return records
@@ -852,8 +854,9 @@ def validate_worker_receipt(root, directory):
         p.require(all(result.get(k) == v for k,v in parsed.items()), 'worker original verdict differs')
 
 
-def authenticate_native(api, reg, run_id, artifacts, lines, selected):
+def authenticate_native(api, reg, run_id, artifacts, lines, selected, root, job):
     from validation import native_receipts as native
+    from validation import desktop_macos_retention as desktop
     scope = {'repository': reg['repository'], 'pr': reg['pr']}
     adopted_name = 'native-adoption-' + str(run_id) + '-1'
     adoption_artifacts = [a for a in artifacts if a.get('name') == adopted_name]
@@ -862,31 +865,40 @@ def authenticate_native(api, reg, run_id, artifacts, lines, selected):
     rows = authenticated_main_artifact(api, adoption_artifacts[0], lines, directory)
     p.require(len(rows) == 1, 'native adoption member ambiguous')
     report = p.read(directory / rows[0]['path'])
+    p.closed(report,('version','scope','current_commit','current_run','adoptions','compatibility'))
+    p.require(type(report['version']) is int and report['version']==1,'native report version differs')
     p.require(report.get('scope') == scope and report.get('current_commit') == reg['source']['commit']
-              and report.get('current_run') == run_id, 'native current provenance differs')
-    for family, needed, name in (
-            ('tv_navigation', selected['apple'], 'tv-navigation-' + str(run_id) + '-1'),
-            ('desktop_macos', selected['desktop_macos'], 'desktop-macos-check-' + str(run_id) + '-1')):
-        if not needed:
-            continue
-        adopted = report.get('adoptions', {}).get(family)
+              and report.get('current_run') == run_id and type(report.get('adoptions')) is dict
+              and set(report['adoptions'])<= {'tv_navigation'}, 'native current TV-only provenance differs')
+    result={}
+    if selected['apple']:
+        adopted = report['adoptions'].get('tv_navigation')
         if adopted:
             ident = receipts.positive(adopted['artifact'])
             artifact = api.get('/actions/artifacts/' + str(ident))
-            confirmed = native.adopt(api, scope, reg['source']['commit'], run_id, [artifact])
-            p.require(confirmed.get(family) == adopted, 'native adopted origin/applicability differs')
+            confirmed = native.adopt(api, scope, reg['source']['commit'], run_id, [artifact],families=('tv_navigation',))
+            p.require(confirmed.get('tv_navigation') == adopted, 'native adopted TV origin/applicability differs')
+            result['tv_navigation']={'disposition':'adopted','original':adopted}
         else:
-            matches = [a for a in artifacts if a.get('name') == name]
-            p.require(len(matches) == 1 and not matches[0].get('expired'), 'original native artifact absent')
-            with native.download(api, matches[0]) as stream:
-                data = native.archive_member(stream, 'receipt.json' if family == 'tv_navigation'
-                                              else 'desktop-macos-check.log')
-            p.require(lines.count('Artifact ' + name + ' has been successfully uploaded!') == 1,
-                      'native original upload ambiguous')
-            if family == 'tv_navigation':
-                native.verify_tv(p.decode(data), reg['source']['commit'])
-            else:
-                native.verify_desktop(data)
+            name='tv-navigation-'+str(run_id)+'-1'
+            matches=[a for a in artifacts if a.get('name')==name]
+            p.require(len(matches)==1 and matches[0].get('run_id')==run_id
+                      and matches[0].get('expired') is False,'current original TV artifact absent/foreign')
+            artifact=matches[0];aid=receipts.positive(artifact['id'])
+            _,archive_sha,_,_=p.upload_slice(lines,name,aid,artifact['size_in_bytes'])
+            archive=p.artifact_bytes(api,artifact)
+            try:
+                p.require(p.file_sha(archive)==archive_sha,'current TV archive differs from full native upload transaction')
+                with archive.open('rb') as stream:data=native.archive_member(stream,'receipt.json')
+            finally:archive.unlink(missing_ok=True)
+            native.verify_tv(p.decode(data),reg['source']['commit'])
+            result['tv_navigation']={'disposition':'fresh_execution','commit':reg['source']['commit'],
+                'run':run_id,'job':job['id'],'task':job['task_id'],'attempt':1,'artifact':aid,
+                'archive_sha256':archive_sha,'receipt_sha256':p.digest(data)}
+    if selected['desktop_macos']:
+        result['desktop_macos']=desktop.authenticate_current_result(api,Path(root),reg['source']['commit'],
+            run_id,job['id'],reg['repository'],reg['pr'],event_base=reg['event_base'])
+    return result
 
 
 OUTPUT_MARKER = 'ASYNC_SESSION_OUTPUT '

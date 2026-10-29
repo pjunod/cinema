@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from .caps import control_capabilities
 from .api import ApiError, error_text
 from .mpv import CLOSED, MpvError
+from .cinema import context as cinema_context, display_title, quality_choices
 
 PROTOCOL = "plurx-playback-control-v1"
 # How close to the end of what a growing session has produced a seek may land
@@ -64,7 +65,7 @@ def _float(text):
 
 
 class Playback:
-    def __init__(self, http, mpv, handoff, caps, clock, sleep, timing=None, log=None):
+    def __init__(self, http, mpv, handoff, caps, clock, sleep, timing=None, log=None, preferences=None):
         self.http = http
         self.mpv = mpv
         self.caps = caps
@@ -110,6 +111,18 @@ class Playback:
         self.stopped_by_server = None
         self.recreations = 0
         self._auth_header = False
+        self.preferences = preferences
+        self.autoplay_next = preferences.autoplay_next if preferences else True
+        self.context = None
+        self.next_handoff = None
+        self.quality = preferences.quality if preferences else "auto"
+        self.changing = False
+        self.chrome_error = None
+        self.chrome_revision = 0
+        self.eof_handled = False
+        self.retryable = False
+        self.pending_quality = None
+        self._seed_context = handoff.get("cinema_context")
 
     # -- the server ---------------------------------------------------------
 
@@ -120,7 +133,8 @@ class Playback:
         return status, payload
 
     def decide(self):
-        query = ["force=auto"]
+        force = self.quality if self.quality in ("auto", "original") else "transcode"
+        query = [f"force={force}"]
         if self.audio is not None:
             query.append(f"audio={self.audio}")
         if self.subtitle is not None:
@@ -193,8 +207,9 @@ class Playback:
             body.update(copy=True, aac=bool(self.delivery.get("aac")),
                         preserve_dolby_vision=bool(self.delivery.get("preserve_dolby_vision")))
         else:
-            # Transcode: no height. Auto is the server's choice (API.md 7.2).
-            body["quality_auto"] = True
+            body["quality_auto"] = self.quality == "auto"
+            if self.quality.isdigit():
+                body["height"] = int(self.quality)
         if self.burn is not None:
             body["subtitle_burn"] = self.burn
         try:
@@ -234,8 +249,13 @@ class Playback:
 
     def start(self):
         self.decide()
+        if self.quality not in {row["id"] for row in quality_choices(self.decision)}:
+            self.quality = "auto"
+            self.decide()
         self.plan_subtitle()
+        self.load_context()
         self.mpv.command("observe_property", 1, "pause")
+        self.mpv.command("observe_property", 2, "eof-reached")
         self.mpv.command("request_log_messages", "info")
         if self.mode == "direct":
             self.origin_ms = 0
@@ -284,6 +304,8 @@ class Playback:
         self.recreate(target_ms)
 
     def on_file_loaded(self):
+        if self.pending_quality is not None:
+            self.pending_quality["loaded"] = True
         try:
             if self.sidecar:
                 self.mpv.command("sub-add", self.http.url(self.sidecar), "select", "plurx")
@@ -357,6 +379,203 @@ class Playback:
         self.mpv.set("pause", False)
         self.recreations += 1
 
+    # -- Cinema controls ------------------------------------------------------
+
+    def load_context(self):
+        try:
+            if self._seed_context is not None:
+                data = self._seed_context
+                self._seed_context = None
+            else:
+                status, data = self._call("GET", "/api/v1/playback-handoffs/self/context")
+                if status != 200:
+                    raise ValueError("Update Cinema's server for library information and next episode")
+            self.context = cinema_context(data, self.file_id)
+        except (ApiError, ValueError) as error:
+            self.chrome_error = str(error)
+        self.publish_chrome()
+
+    def publish_chrome(self):
+        self.chrome_revision += 1
+        data = self.context or {}
+        info = data.get("metadata") or {}
+        self.mpv.set("force-media-title", display_title(info))
+        self.mpv.set("user-data/cinema", {
+            "metadata": info, "next": data.get("next"),
+            # Presentation facts only: never forward the decision/session maps,
+            # whose URLs and owner credentials do not belong on screen.
+            "playback": {"mode": self.mode if self.mode in ("direct", "remux", "transcode") else None,
+                         "transport": "progressive" if self.mode == "direct" else
+                                      "hls" if self.mode in ("remux", "transcode") else None,
+                         "session": "vod" if self.session and self.session.get("vod") else
+                                    "live" if self.session else "none" if self.mode == "direct" else None},
+            "quality": {"selected": self.quality, "choices": quality_choices(self.decision or {})},
+            "autoplay_next": self.autoplay_next, "busy": self.changing, "error": self.chrome_error,
+            "retryable": self.retryable, "revision": self.chrome_revision})
+
+    def change_quality(self, choice):
+        if self.changing:
+            return
+        if choice == self.quality:
+            self.publish_chrome()  # Acknowledge a no-op; Lua must release its request fence.
+            return
+        if self.loading or not self.started:
+            self.chrome_error = "Wait for playback to start before changing quality"
+            self.publish_chrome()
+            return
+        if choice not in {row["id"] for row in quality_choices(self.decision or {})}:
+            self.chrome_error = "That quality is not available for this title"
+            self.publish_chrome()
+            return
+        position = self.position_ms() or 0
+        paused = bool(self.mpv.get("pause", self.paused))
+        saved = {key: getattr(self, key) for key in (
+            "quality", "decision", "delivery", "mode", "method", "sidecar", "burn", "notice",
+            "audio", "subtitle", "playback_id", "session", "origin_ms")}
+        self.changing, self.chrome_error = True, None
+        self.publish_chrome()
+        self.progress("seek")
+        self.quality = choice
+        # Provisional creation must never supersede the incumbent on admission failure.
+        self.playback_id = f"plurx-player:{uuid.uuid4()}"
+        try:
+            # Policy and session admission happen before the old media is detached.
+            self.decide()
+            self.plan_subtitle()
+            replacement = None if self.mode == "direct" else self.create_session(position)
+        except (ApiError, PlaybackError) as error:
+            for key, value in saved.items():
+                setattr(self, key, value)
+            self.chrome_error = str(error)
+        else:
+            # Own both sessions before the first fallible mpv operation.
+            self.pending_quality = {"saved": saved, "position": position, "paused": paused,
+                                    "deadline": self.clock() + 25, "candidate": replacement, "loaded": False}
+            self.session = replacement
+            self.mpv.set("pause", True)
+            self.origin_ms = max(0, _track((replacement or {}).get("media_origin_ms")) or 0)
+            self.last_position_ms = position
+            # The incumbent stays alive until the new picture restarts.
+            # A prior text sidecar must not remain selected after replacement.
+            self.mpv.set("sid", "no")
+            url = self.delivery.get("url") if replacement is None else replacement["playlist_url"]
+            self.load(self.http.url(url), (position - self.origin_ms) / 1000)
+            self.show_film_timeline()
+            self.mpv.set("pause", paused)
+        finally:
+            if self.pending_quality is None:
+                self.changing = False
+            self.publish_chrome()
+
+    def settle_quality(self, error=None):
+        pending = self.pending_quality
+        if pending is None:
+            return
+        self.pending_quality = None
+        if error:
+            self.delete_session(pending["candidate"])
+            for key, value in pending["saved"].items():
+                setattr(self, key, value)
+            self.last_position_ms = pending["position"]
+            url = self.delivery.get("url") if self.session is None else self.session["playlist_url"]
+            self.load(self.http.url(url), (pending["position"] - self.origin_ms) / 1000)
+            self.show_film_timeline()
+            self.mpv.set("pause", pending["paused"])
+            self.chrome_error = error
+        else:
+            self.delete_session(pending["saved"]["session"])
+            self.retryable = False
+            self.chrome_error = None
+            if self.preferences:
+                try:
+                    self.preferences.set_quality(self.quality)
+                except OSError:
+                    self.chrome_error = "Current quality changed, but its preference could not be saved"
+        self.changing = False
+        self.publish_chrome()
+
+    def retry_playback(self):
+        if not self.retryable or self.changing:
+            return
+        self.changing = True
+        self.publish_chrome()
+        try:
+            target = self.last_position_ms or self.origin_ms
+            if self.session is not None:
+                self.recreate(target)
+            else:
+                self.load(self.http.url(self.delivery.get("url")), target / 1000)
+                self.mpv.set("pause", False)
+            self.retryable, self.chrome_error, self.eof_handled = False, None, False
+        finally:
+            self.changing = False
+            self.publish_chrome()
+
+    def next_episode(self):
+        nxt = (self.context or {}).get("next")
+        if self.changing or self.next_handoff is not None or not nxt:
+            return
+        self.changing, self.chrome_error = True, None
+        self.publish_chrome()
+        # Progress belongs to the predecessor and must precede the scope change.
+        self.progress("exit")
+        self.log_mapper()
+        try:
+            try:
+                status, data = self._call("POST", "/api/v1/playback-handoffs/self/next",
+                                          {"expected_file_id": self.file_id})
+            except ApiError:
+                # Lost response: recover the one expected successor without advancing twice.
+                status, data = self._call("GET", "/api/v1/playback-handoffs/self/context")
+            if status == 409:
+                status, data = self._call("GET", "/api/v1/playback-handoffs/self/context")
+            if status != 200:
+                raise ValueError(error_text(data, "The next episode could not be opened"))
+            resolved = cinema_context(data)
+            if resolved["file_id"] == self.file_id:
+                raise ValueError("Next did not advance. The current episode is still playing; try again")
+            if resolved["item_id"] != nxt["item_id"]:
+                raise ServerStop("The library changed while opening Next. Reopen the title in Cinema")
+            self.next_handoff = dict(resolved, cinema_context=resolved)
+        except (ApiError, ValueError) as error:
+            self.chrome_error = str(error)
+            self.changing = False
+            self.publish_chrome()
+
+    def cinema_action(self, args):
+        if not args:
+            return
+        if args[0] == "cinema-quality" and len(args) == 2:
+            self.change_quality(args[1])
+        elif args[0] == "cinema-next" and len(args) == 1:
+            self.next_episode()
+        elif args[0] == "cinema-retry" and len(args) == 1:
+            self.retry_playback()
+        elif args[0] == "cinema-autoplay" and len(args) == 2 and args[1] in ("yes", "no"):
+            try:
+                if self.preferences:
+                    self.preferences.set_autoplay(args[1] == "yes")
+                self.autoplay_next = args[1] == "yes"
+                self.chrome_error = None
+            except OSError:
+                self.chrome_error = "Could not save the autoplay preference"
+            self.publish_chrome()
+
+    def reached_end(self):
+        if self.loading or self.eof_handled:
+            return
+        self.eof_handled = True
+        position, duration = self.position_ms(), self.duration_ms()
+        if duration is None or position is None or position < max(0, duration - 15_000):
+            self.retryable = True
+            self.chrome_error = "The stream stopped before the end of the title. Retry to continue."
+            self.publish_chrome()
+            return
+        self.ended = True
+        self.progress("exit")
+        if self.autoplay_next:
+            self.next_episode()
+
     # -- reporting ------------------------------------------------------------
 
     def control_body(self):
@@ -367,7 +586,7 @@ class Playback:
         demand = "hold" if self.paused else "active"
         speed = _number(self.mpv.get("speed")) or 1.0
         rate = min(4.0, max(0.25, speed)) if demand == "active" else min(4.0, max(0.0, speed))
-        if not self.started:
+        if not self.started or self.loading:
             render = "starting"
         elif seeking:
             render = "seeking"
@@ -388,7 +607,10 @@ class Playback:
             "playback_rate": rate, "render_state": render,
             "seek_target_ms": position if render == "seeking" else None,
             "observed_download_bps": None,
-            "selection": {"quality": {"mode": "original"} if self.mode == "remux" else {"mode": "auto"},
+            "selection": {"quality": ({"mode": "manual", "height": int(self.quality)}
+                                      if self.quality.isdigit() else {"mode": "original"}
+                                      if self.mode == "remux" or self.quality == "original"
+                                      else {"mode": "auto"}),
                           "audio_track": self.audio, "subtitle": subtitle, "audio_offset_ms": 0,
                           "codec": "auto", "dynamic_range": "auto"},
             "capabilities": control_capabilities(), "observation": None, "acknowledgement": None,
@@ -500,9 +722,14 @@ class Playback:
         name = event.get("event")
         if name == CLOSED:
             return False
+        if name == "playback-restart" and self.pending_quality is not None and not self.pending_quality["loaded"]:
+            return True  # An already queued incumbent seek cannot commit its successor.
         if name == "file-loaded":
             self.on_file_loaded()
         elif name == "playback-restart":
+            self.eof_handled, self.ended = False, False
+            if self.pending_quality is not None and self.pending_quality["loaded"]:
+                self.settle_quality()
             first = not self.started
             self.started, self.loading, self.seeking = True, False, False
             if first:
@@ -511,6 +738,7 @@ class Playback:
             else:
                 self.progress("seek")
         elif name == "seek":
+            self.ended = False
             self.seeking = True
             self.on_seek()
         elif name == "property-change" and event.get("name") == "pause":
@@ -518,18 +746,30 @@ class Playback:
             changed, self.paused = paused != self.paused, paused
             if paused and changed and self.started:
                 self.progress("pause")
+        elif name == "property-change" and event.get("name") == "eof-reached":
+            if event.get("data") is True:
+                self.reached_end()
         elif name == "end-file":
             reason = event.get("reason")
             if reason == "eof":
-                self.ended = True
+                self.reached_end()
+            elif reason == "error" and self.pending_quality is not None:
+                self.settle_quality("The new quality could not play; restored the previous quality")
             elif reason == "error":
-                self.failure = f"mpv could not play the stream ({event.get('file_error') or 'error'})"
+                message = f"mpv could not play the stream ({event.get('file_error') or 'error'})"
+                if not self.started:
+                    raise PlaybackError(message)
+                self.retryable, self.eof_handled = True, True
+                self.chrome_error = message + ". Retry to continue."
+                self.publish_chrome()
         elif name == "log-message":
             self.on_log(event)
         elif name == "client-message":
             args = event.get("args") or []
             if args and args[0] == "osc-film-seek":
                 self.on_film_seek(args)
+            else:
+                self.cinema_action(args)
         return True
 
     def loop(self):
@@ -538,11 +778,13 @@ class Playback:
         next_control, next_progress = now, now + timing.progress_s
         while True:
             for event in self.mpv.events():
-                if not self.on_event(event):
+                if not self.on_event(event) or self.next_handoff is not None:
                     return
             if self.mpv.closed:
                 return
             now = self.clock()
+            if self.pending_quality is not None and now >= self.pending_quality["deadline"]:
+                self.settle_quality("The quality change timed out; restored the previous quality")
             if self.session is not None and now >= next_control:
                 self.heartbeat()
                 next_control = _advance(next_control, timing.control_s, now)
@@ -559,6 +801,8 @@ class Playback:
         try:
             self.start()
             self.loop()
+            if self.next_handoff is not None:
+                return 0
         except ServerStop as stop:
             self.stopped_by_server = str(stop)
             self.log(f"stopped by the server: {stop}")
@@ -592,15 +836,18 @@ class Playback:
                 step()
             except (ApiError, MpvError, ServerStop, OSError) as error:
                 self.log(f"teardown: {error}")
+        pending, self.pending_quality = self.pending_quality, None
+        if pending:
+            self.delete_session(pending["saved"]["session"])
         session, self.session = self.session, None
         self.delete_session(session)
 
     def _final_progress(self):
-        if self.started:
+        if self.started and self.next_handoff is None:
             self.progress("exit")
 
     def _final_mapper(self):
-        if self.started and not self.mapper_logged:
+        if self.started and not self.mapper_logged and self.next_handoff is None:
             self.log_mapper()
 
     def _report_failure(self):

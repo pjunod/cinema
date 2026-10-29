@@ -270,6 +270,34 @@ function translationValidateOptions(options,state){
   if(selected.capability?.supported!==true)throw Error(translationFailure(selected.capability?.reason||"direct_audio_selection_unverified"));
   const sourceOriginMs=selected.source_origin_ms??options.source_origin_ms;if(sourceOriginMs!=null&&(!Number.isSafeInteger(sourceOriginMs)||Math.abs(sourceOriginMs)>604800000))throw Error(translationFailure("source_clock_unsupported"));
 }
+function translationClockStale(state){return !state.clock||Math.max(0,performance.now()-state.clock.at)>240000;}
+async function translationRefreshOptions(state){
+  if(state.optionsRefresh)return state.optionsRefresh;
+  const generation=state.windowGeneration,clock=state.clock;
+  const refresh=(async()=>{
+    try{
+      const {data}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-translation/options`);
+      if(!state.current()||state.windowGeneration!==generation||state.operation||state.assetId)return false;
+      translationValidateOptions(data,state);
+      if(data.source_size!==state.options.source_size||data.source_mtime!==state.options.source_mtime)throw Error(translationFailure("source_changed"));
+      const panel=translationPanel(state);if(!panel)return false;
+      const taskSelect=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-task]")),profiles=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-profile]")),languages=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-language]"));
+      const task=taskSelect.value,selected=profiles.value,language=languages.value,prior=translationProfile(state.options,selected),profile=translationProfile(data,selected);
+      if(prior&&profile&&(prior.model_id!==profile.model_id||prior.model_sha256!==profile.model_sha256||prior.timeline_contract!==profile.timeline_contract||translationTask(prior)!==translationTask(profile)))throw Error("Caption profile identity changed. Reopen caption choices.");
+      const tasks=[...new Set([task,...["translate","transcribe"].filter(value=>translationTaskProfiles(data,value).length)])];
+      const rows=translationTaskProfiles(data,task),choices=[...new Set([...(profile?.input_languages||[]),...(language?[language]:[])])];
+      taskSelect.innerHTML=tasks.map(value=>`<option value="${esc(value)}">${translationTaskLabel(value)}</option>`).join("");taskSelect.value=task;
+      profiles.innerHTML=(selected&&!rows.some(row=>row.profile_id===selected)?`<option value="${esc(selected)}">Selected model unavailable</option>`:"")+rows.map(row=>`<option value="${esc(row.profile_id)}">${esc(row.label||row.model_id)}</option>`).join("");profiles.value=selected;
+      languages.innerHTML='<option value="">Choose spoken language</option>'+choices.map(code=>`<option value="${esc(code)}">${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");languages.value=language;
+      state.options=data;if(state.profile?.profile_id===selected&&profile){state.profile=profile;state.limits=translationProfileLimits(profile);}
+      /** @type {HTMLButtonElement} */(panel.querySelector("[data-translation-start]")).hidden=!data.permissions?.demand||!ME?.is_admin;
+      translationAssetChoices(state,data.assets||[],data.assets_next_cursor);
+      return true;
+    }catch(error){if(state.current()&&state.windowGeneration===generation)state.clock=clock;throw error;}
+  })();
+  state.optionsRefresh=refresh;
+  try{return await refresh;}finally{if(state.optionsRefresh===refresh)state.optionsRefresh=null;}
+}
 async function translationOpen(button){
   const player=PLAYER,video=document.getElementById("video"),reason=translationDirectReason(player,video);
   if(reason){toast(translationFailure(reason));return;}
@@ -287,8 +315,8 @@ async function translationOpen(button){
     state.task=availableTasks.includes("translate")?"translate":"transcribe";
     panel.innerHTML=`<div class="card" style="padding:16px"><h3 data-translation-heading>${translationTaskLabel(state.task)}</h3><p data-translation-description>AI captions are an estimate and may be wrong. The picture keeps playing; original captions and Off stay available.</p>${ME?.is_admin?'<p><a href="#/settings/playback/enable-subtitle-translation">AI caption settings</a></p>':""}<p>Spoken audio: ${esc(audio.title||audio.language||"Untagged audio")} · stream ${esc(String(state.audioIndex+1))}</p><label>Caption task <select data-translation-task>${availableTasks.map(task=>`<option value="${task}">${translationTaskLabel(task)}</option>`).join("")}</select></label><label>Speech model <select data-translation-profile></select></label><label>Spoken language <select data-translation-language></select></label><p class="hint">Confirm the language spoken in the attached audio. Metadata can be wrong; correct it here.</p><label class="chk"><input type="checkbox" data-translation-confirm> I confirm this is the spoken language.</label><button class="sm" data-translation-start>${translationTaskLabel(state.task)}</button> <button class="ghost sm" data-translation-use disabled>Use generated captions</button> <button class="ghost sm" data-translation-stop hidden>Stop caption work for everyone</button> <button class="ghost sm" data-translation-resume hidden>Resume caption work</button> <button class="ghost sm" data-translation-refresh>Refresh status</button><div data-translation-assets></div><div data-translation-failures></div><p data-translation-status role="status" aria-live="polite"></p><p class="hint" data-translation-clock aria-live="off"></p></div>`;
     const taskSelect=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-task]")),profiles=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-profile]"));
-    const updateLanguage=()=>{const profile=translationProfile(options,profiles.value),select=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-language]")),previous=select.value,tag=audio.normalized_language,choices=profile?.input_languages||[],chosen=choices.includes(previous)?previous:choices.includes(tag)?tag:"";select.innerHTML=`<option value="">Choose spoken language</option>`+choices.map(code=>`<option value="${esc(code)}"${code===chosen?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");select.value=chosen;panel.querySelector("[data-translation-heading]").textContent=translationTaskLabel(state.task);panel.querySelector("[data-translation-start]").textContent=translationTaskLabel(state.task);};
-    const updateProfiles=(preferred)=>{const rows=translationTaskProfiles(options,state.task),active=translationPreferredProfile(options,state.task,preferred);profiles.innerHTML=rows.map(profile=>`<option value="${esc(profile.profile_id)}">${esc(profile.label||profile.model_id)}</option>`).join("");profiles.value=active?.profile_id||"";updateLanguage();};
+    const updateLanguage=()=>{const profile=translationProfile(state.options,profiles.value),select=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-language]")),previous=select.value,tag=audio.normalized_language,choices=profile?.input_languages||[],chosen=choices.includes(previous)?previous:choices.includes(tag)?tag:"";select.innerHTML=`<option value="">Choose spoken language</option>`+choices.map(code=>`<option value="${esc(code)}"${code===chosen?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");select.value=chosen;panel.querySelector("[data-translation-heading]").textContent=translationTaskLabel(state.task);panel.querySelector("[data-translation-start]").textContent=translationTaskLabel(state.task);};
+    const updateProfiles=(preferred)=>{const rows=translationTaskProfiles(state.options,state.task),active=translationPreferredProfile(state.options,state.task,preferred);profiles.innerHTML=rows.map(profile=>`<option value="${esc(profile.profile_id)}">${esc(profile.label||profile.model_id)}</option>`).join("");profiles.value=active?.profile_id||"";updateLanguage();};
     updateProfiles(null);
     taskSelect.value=state.task;
     taskSelect.addEventListener("change",()=>{const prior=profiles.value;state.task=taskSelect.value;translationSwitchAsset(state);updateProfiles(prior);translationRenderStatus(state);});
@@ -360,7 +388,12 @@ function translationAdoptReceipt(state,receipt,sent=null){
   return true;
 }
 async function translationStart(state){
-  if(!translationPanel(state)||!ME?.is_admin||!state.options.permissions?.demand)return;
+  if(!translationPanel(state)||!ME?.is_admin)return;
+  if(!state.operation&&!state.assetId&&!state.createIntent&&translationClockStale(state)){
+    try{if(!await translationRefreshOptions(state))return;}
+    catch(error){if(state.current()){state.error=error.message;translationRenderStatus(state);}return;}
+  }
+  if(!state.current()||!state.options.permissions?.demand)return;
   const reason=translationDirectReason(state.player,state.video);if(reason){state.error=translationFailure(reason);translationRenderStatus(state);return;}
   const profile=translationProfile(state.options,state.panel.querySelector("[data-translation-profile]").value),language=state.panel.querySelector("[data-translation-language]").value;
   const task=state.panel.querySelector("[data-translation-task]").value,outputLanguage=translationOutputLanguage(profile,language);
@@ -613,7 +646,14 @@ async function translationRetry(state,body,key){
   catch(error){if(state.current()&&translationProducerGeneration(state)===generation&&state.operation?.operation_id===operationId){translationRejectIntent(state,key,error);state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
 }
 async function translationPoll(state,force=false){
-  if(!state.current()||state.rebinding||state.positionReady===false||!state.limits)return;const generation=state.windowGeneration;if(state.polling){state.pollAgain=state.pollAgain||force;return;}
+  if(!state.current()||state.rebinding||state.positionReady===false)return;
+  if(!state.operation&&!state.assetId){
+    if(!force)return;
+    try{if(await translationRefreshOptions(state)){state.error=null;translationRenderStatus(state);}}
+    catch(error){if(state.current()){state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
+    return;
+  }
+  if(!state.limits)return;const generation=state.windowGeneration;if(state.polling){state.pollAgain=state.pollAgain||force;return;}
   clearTimeout(state.timer);state.polling=true;
   try{
     if(state.operation){const {data}=await translationRequest(state,`/subtitle-translation/operations/${state.operation.operation_id}`);if(!state.current()||state.windowGeneration!==generation)return;translationValidateOperation(state,data);if(translationCompare(data.operation_epoch,state.operation.operation_epoch)>0||translationCompare(data.operation_epoch,state.operation.operation_epoch)===0&&translationCompare(data.view_revision,state.operation.view_revision)>=0){const page=state.failurePage;if(page&&page.operation_id===data.operation_id&&page.operation_epoch===data.operation_epoch&&page.view_revision===data.view_revision){data.failed_ranges=page.entries;data.failed_ranges_next_cursor=page.next_cursor;}else state.failurePage=null;state.operation=data;state.spokenLanguage=data.spoken_language;state.assetId=data.asset_id;state.stopped=data.state==="stopped";if(state.stopped)state.demand=null;}}

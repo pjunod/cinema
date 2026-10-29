@@ -1,6 +1,6 @@
 # Async driver and Store refinement — conditional progress of a selected operation
 
-**Status:** Open — run 6115 hit the exact Store cap; schema 6 paged M0 contracts are constructed, with design conformance, implementation and complete qualification pending. **Updated:** 2026-10-28 · **Owner:** Codex coordinator · **Branch:** `codex/async-store-refinement` · [PR #1263](http://forge.lan:3000/noirr/plurx/pulls/1263).
+**Status:** Open — run 6115 hit the exact Store cap; amended M0 conforms, M1/M2 and M3/M4 batches are committed, and native CI integration is built; current Main reconciliation, review and qualification remain. **Updated:** 2026-10-28 · **Owner:** Codex coordinator · **Branch:** `codex/async-store-refinement` · [PR #1263](http://forge.lan:3000/noirr/plurx/pulls/1263).
 
 The [paged implementation ledger](PAGED-ASYNC-PROOF-IMPLEMENTATION.md) and
 [schema 6 contract](../../verification/async-driver-refinement/PAGED-CONTRACT.md)
@@ -12,9 +12,17 @@ exact storage, 20,000 resident entries plus admitted byte/RSS bounds, bounded
 pages and an immutable measured total-session disk/artifact/unit plan. D,
 raw IDs/times, all seven complete contexts, all eleven semantic outcome
 families and backend/Main obligations remain. M0 supplies normative interfaces
-and a source-reviewed finite ledger only. Actual Astra design conformance,
-full lower-model implementation, a separate fresh Astra final review and
-post-review affected qualification are pending. No paged campaign has run.
+and a source-reviewed finite ledger. The amended M0 packet has actual Astra
+design conformance. Rust storage, actual Init/Oracle replay, checkpoint/backup,
+export, request interfaces and complete predecessor transactions are committed
+and compile-clean. The schema 6 paged driver and resource guards are committed
+through `a3b584e9`; the bounded static ABI audit found no owned Rust mismatch.
+Verifier continuation `3f8d483f` and orchestration baseline/final-prep
+`2a91c77`/`cb298490` are committed and integrated. Native CI session integration
+is implemented under the reviewed desktop/TV evidence boundaries. Current Main
+reconciliation and final source freeze remain.
+Separate fresh Astra final review and complete post-review qualification remain
+pending. No new tests or paged campaign have run.
 The older implementation/review/run descriptions below retain their historical
 source applicability; they do not establish acceptance of this target.
 

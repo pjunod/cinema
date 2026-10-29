@@ -83,11 +83,11 @@ async fn managed_bootstrap_layout(
         return Ok((None, String::new()));
     }
     let version = super::subtitle_managed_schema::bootstrap_version(&shape)?;
-    if version == Some(1) {
+    if let Some(version) = version {
         // authority: canonical DDL cannot substitute for the committed singleton version row when deciding that another installation already won.
         let mut marker = timeout_store(client.query_consistent(
-            "SELECT count(*) AS count FROM subtitle_managed_schema WHERE singleton=1 AND version=1",
-            params!(),
+            "SELECT count(*) AS count FROM subtitle_managed_schema WHERE singleton=1 AND version=$1",
+            params!(version),
         ))
         .await?;
         if marker.len() != 1 || marker[0].get::<i64>("count") != 1 {
@@ -107,7 +107,7 @@ async fn managed_bootstrap_layout(
 
 async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     let (version, observed_view) = managed_bootstrap_layout(client).await?;
-    if version == Some(1) {
+    if matches!(version, Some(1 | 2)) {
         // Reinstall only idempotent probe objects; never replace a managed view.
         let prefix = super::background_jobs_probe::SCHEMA
             .split_once("-- next statement\nDROP VIEW")
@@ -145,7 +145,7 @@ async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<()
                 .map_err(database_error)
         });
     let (settled, _) = managed_bootstrap_layout(client).await?;
-    if settled == Some(1) {
+    if matches!(settled, Some(1 | 2)) {
         return Ok(());
     }
     attempt?;

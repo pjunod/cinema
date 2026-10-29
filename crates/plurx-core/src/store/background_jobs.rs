@@ -130,7 +130,8 @@ macro_rules! text_admission {
 }
 
 macro_rules! translation_admission {
-    ($payload:literal,$now:literal,$job:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
+    ($payload:literal,$now:literal,$job:literal) => { translation_admission!($payload,$now,$job,"0") };
+    ($payload:literal,$now:literal,$job:literal,$fence:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
       JOIN settings config ON config.key='subtitles.translation.config.v1'
       WHERE op.id=COALESCE(json_extract("#,$payload,r#",'$.operation_id'),json_extract("#,$payload,r#",'$.recipe.operation_id'))
       AND op.operation_epoch=COALESCE(json_extract("#,$payload,r#",'$.operation_epoch'),json_extract("#,$payload,r#",'$.recipe.operation_epoch'))
@@ -148,7 +149,10 @@ macro_rules! translation_admission {
         AND d.expires_at_ms>"#,$now,r#" AND u.is_admin=1
         AND (json_extract("#,$payload,r#",'$.kind')='subtitle_translation_prepare' OR
         json_extract("#,$payload,r#",'$.recipe.core_index') BETWEEN CAST(d.position_ms/json_extract(op.profile_json,'$.core_ms') AS INTEGER)
-        AND CAST(d.position_ms/json_extract(op.profile_json,'$.core_ms') AS INTEGER)+min(2,CAST(d.playback_rate AS INTEGER)+1)))
+        AND CAST(d.position_ms/json_extract(op.profile_json,'$.core_ms') AS INTEGER)+min(2,CAST(d.playback_rate AS INTEGER)+1)
+        OR EXISTS(SELECT 1 FROM subtitle_translation_range_continuities continuity
+          WHERE continuity.job_id="#,$job,r#" AND continuity.fence="#,$fence,r#"
+          AND continuity.demand_id=d.id AND continuity.continuity_id=d.continuity_id)))
       AND (json_extract("#,$payload,r#",'$.kind')='subtitle_translation_prepare' OR
         (op.asset_id=json_extract("#,$payload,r#",'$.recipe.asset_id') AND EXISTS (
           SELECT 1 FROM subtitle_translation_assets a WHERE a.id=op.asset_id AND a.retired_at_ms IS NULL
@@ -609,6 +613,16 @@ WHERE id = json_extract($1, '$.job_id')
                     AND viewer.consumer_kind = 'playback_fragment'
                     AND viewer.state IN ('pending','awaiting_hydration')
                     AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
+              OR (interest.consumer_kind IN ('subtitle_translation','subtitle_translation_range') AND EXISTS (
+                  SELECT 1 FROM background_jobs live_range WHERE live_range.id=interest.job_id
+                    AND ((interest.consumer_kind='subtitle_translation_range' AND live_range.kind='subtitle_translation_range')
+                      OR (interest.consumer_kind='subtitle_translation' AND live_range.kind='subtitle_translation_prepare')) AND ("#,
+    translation_admission!(
+        "live_range.payload_json",
+        "json_extract($1,'$.now_ms')",
+        "live_range.id"
+    ),
+    r#")))
               OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
                   SELECT 1 FROM analysis_requests request
                   WHERE request.request_id = interest.consumer_ref
@@ -631,6 +645,17 @@ WHERE id = json_extract($1, '$.job_id')
                           AND viewer.consumer_kind = 'playback_fragment'
                           AND viewer.state IN ('pending','awaiting_hydration')
                           AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
+                    OR (interest.consumer_kind IN ('subtitle_translation','subtitle_translation_range') AND EXISTS (
+                        SELECT 1 FROM background_jobs live_range WHERE live_range.id=interest.job_id
+                          AND ((interest.consumer_kind='subtitle_translation_range' AND live_range.kind='subtitle_translation_range')
+                      OR (interest.consumer_kind='subtitle_translation' AND live_range.kind='subtitle_translation_prepare')) AND ("#,
+    translation_admission!(
+        "live_range.payload_json",
+        "json_extract($1,'$.now_ms')",
+        "live_range.id",
+        "live_range.fence"
+    ),
+    r#")))
                     OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
                         SELECT 1 FROM analysis_requests request
                         WHERE request.request_id = interest.consumer_ref
@@ -2058,6 +2083,9 @@ pub trait BackgroundJobStore: Send + Sync {
         binding: &str,
     ) -> Result<bool, StoreError>;
     async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError>;
+    /// Settled FEL titles whose verdict another FEL identity measured.
+    async fn dv_fel_stale_titles(&self, identity: &str, limit: u32)
+        -> Result<Vec<i64>, StoreError>;
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -2072,6 +2100,12 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: super::dv_title_jobs::PublishTitleJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    /// Offer a content-analysis pass's complete-title aggregate to the
+    /// title's current demand.
+    async fn publish_dv_title_from_analysis(
+        &self,
+        output: super::dv_title_jobs::AnalysisTitleOutput,
+    ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError>;
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -2617,6 +2651,13 @@ LIMIT 1
     async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError> {
         super::dv_title_jobs::fel_verdict_counts(self, identity).await
     }
+    async fn dv_fel_stale_titles(
+        &self,
+        identity: &str,
+        limit: u32,
+    ) -> Result<Vec<i64>, StoreError> {
+        super::dv_title_jobs::stale_fel_titles(self, identity, limit).await
+    }
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -2636,6 +2677,12 @@ LIMIT 1
         request: super::dv_title_jobs::PublishTitleJob,
     ) -> Result<JobPublishOutcome, StoreError> {
         super::dv_title_jobs::publish(self, request).await
+    }
+    async fn publish_dv_title_from_analysis(
+        &self,
+        output: super::dv_title_jobs::AnalysisTitleOutput,
+    ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError> {
+        super::dv_title_jobs::publish_from_analysis(self, output).await
     }
     async fn probe_can_preempt_title(
         &self,

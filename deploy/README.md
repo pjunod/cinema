@@ -512,23 +512,28 @@ listeners. Discovery still advertises HTTP, so select HTTPS explicitly by URL.
 Trust installation and physical browser/native playback qualification remain
 open in [the build ledger](../docs/server/HTTPS-BUILD.md).
 
-For Docker/Compose, add an explicit port publication to your untracked override
-before enabling the listener. This example keeps the default container port:
+For Docker/Compose, save the desired enabled state and port in the HTTPS card,
+then apply it from the checkout with `make docker-up` (source build) or
+`make docker-image-up` (prebuilt image). These commands generate a temporary
+port mapping **only while HTTPS is enabled**, using the same TOML → node-local
+`https-settings.json` → container environment precedence as the daemon. They
+recreate the container when its publications change; a tray restart or
+`docker restart` cannot change Docker port mappings. Disable HTTPS and run the
+same command to remove the generated publication.
 
-```yaml
-services:
-  plurxd:
-    ports:
-      - "32443:32443"
-```
-
-If the desired HTTPS port changes, the right-hand container port must match it;
-the left-hand host port is an independent operator choice. The base Compose
-file keeps its current publications. Dockerfile `EXPOSE` metadata does not
-prevent an explicitly published additional port. With host networking, the
-configured listener binds directly to the host; open firewall access only for
-the networks you intend to serve. None of these examples changes a running
-service until the operator applies its own deployment configuration.
+The host port defaults to the configured HTTPS port (32443 initially). Set
+`PLURX_HTTPS_HOST_PORT` in `deploy/.env` to choose a different host port.
+Existing explicit TCP publications for the configured container port retain
+their operator-chosen host address and port. Remove an old manual HTTPS
+publication from your override if you want disabling HTTPS to remove it too.
+The automatic path requires readable bind-mounted settings/configuration or
+Compose file configs and a local Docker engine; it refuses opaque mounts or
+remote-engine paths rather than guessing the state. For a remote engine, run
+the rollout command on its host.
+Direct `docker compose up` does not generate this overlay; use the Make targets
+for conditional publication. Dockerfile `EXPOSE` metadata is not needed for
+explicit port publication. With host networking, no mapping is added: the
+listener binds directly to the host.
 
 Leaving both certificate paths empty generates and retains a self-signed
 identity under the existing data bind mount. Keep that data through container
@@ -992,7 +997,7 @@ conversion Off until a real pod proves the filesystem contract above.
 | Port | Proto | Purpose |
 |---|---|---|
 | 32400 | TCP | HTTP API + web app (and the Plex-compat façade) |
-| 32443 | TCP + TLS | Optional native HTTPS; off by default, separately published in the operator override; HTTP remains available |
+| 32443 | TCP + TLS | Optional native HTTPS; off by default, published conditionally by the Docker rollout targets; HTTP remains available |
 | 8096 | TCP | Jellyfin compatibility at the server root, Jellyfin's standard port, so a Jellyfin client given only a host connects; answers only while Settings → Developer enables it (host port movable via `PLURX_JELLYFIN_HOST_PORT`) |
 | 32414 | UDP | GDM discovery so Plex/Kodi clients find the server on the LAN (host port movable via `PLURX_GDM_PORT`, but discovery only works on 32414) |
 | 5353 | UDP multicast | Bonjour `_plurx._tcp` discovery for native clients; the Compose companion owns this on the host network |

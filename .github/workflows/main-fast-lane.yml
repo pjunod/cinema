@@ -497,6 +497,19 @@ jobs:
           grep -Fxq "Xcode 27.1" <<< "$xcode_version"
           grep -Fxq "Build version 27A9275" <<< "$xcode_version"
           xcrun --find swift
+      - name: Authenticate compatible original native test receipts
+        id: native_receipts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.native_receipts --family tv_navigation
+      - name: Preserve native adoption provenance
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .main-preflight-receipts/native/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Retain or execute native macOS server tray evidence
         if: needs.scope.outputs.desktop_macos == 'true'
         env:
@@ -515,15 +528,15 @@ jobs:
         run: |
           test "$(xcodegen --version)" = "Version: 2.46.0"
       - name: Compile iOS and tvOS without running simulator tests
-        if: needs.scope.outputs.apple == 'true'
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         run: make apple-build
       - name: Require native TV navigation journeys
-        if: needs.scope.outputs.apple == 'true'
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
-        if: always() && needs.scope.outputs.apple == 'true'
+        if: always() && needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
