@@ -4,10 +4,17 @@ import android.app.Application
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import androidx.core.content.FileProvider
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.qrcode.QRCodeReader
+import java.io.ByteArrayInputStream
+import javax.imageio.ImageIO
 import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.junit.Assert.*
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -18,6 +25,47 @@ import tv.plurx.app.R
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 class SharingInvitationFileProviderTest {
+    @Before fun attachThisApplicationsProviders() {
+        val context = RuntimeEnvironment.getApplication()
+        // Android attaches providers at startup. Do the same for each fresh
+        // Robolectric application before FileProvider consults its path cache.
+        for (suffix in listOf(".sharing-files", ".diagnostics-files")) {
+            val client = context.contentResolver.acquireContentProviderClient(context.packageName + suffix)
+            assertNotNull("Provider missing from the merged manifest: " + suffix, client)
+            client!!.close()
+        }
+    }
+
+    @Test fun laterSharesCannotReplaceTheInvitationVisibleThroughAnEarlierGrantedUri() {
+        val context = RuntimeEnvironment.getApplication()
+        val authority = context.packageName + ".sharing-files"
+        val directory = File(context.cacheDir, "sharing-invitations/immutable-exports")
+        val firstSecret = "cinema-share-v1:first-invitation"
+        val secondSecret = "cinema-share-v1:second-invitation"
+        fun share(secret: String): android.net.Uri {
+            val bitmap = sharingInvitationBitmap(secret)
+            val file = try { writeSharingInvitationImage(directory, bitmap) } finally { bitmap.recycle() }
+            return FileProvider.getUriForFile(context, authority, file)
+        }
+        fun read(uri: android.net.Uri): ByteArray = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+        fun decode(bytes: ByteArray): String {
+            val image = ImageIO.read(ByteArrayInputStream(bytes))
+            val pixels = image.getRGB(0, 0, image.width, image.height, null, 0, image.width)
+            return QRCodeReader().decode(BinaryBitmap(HybridBinarizer(RGBLuminanceSource(image.width, image.height, pixels)))).text
+        }
+        try {
+            val firstGrantedUri = share(firstSecret)
+            val originallyGrantedBytes = read(firstGrantedUri)
+            assertEquals(firstSecret, decode(originallyGrantedBytes))
+            val secondGrantedUri = share(secondSecret)
+            assertNotEquals(firstGrantedUri, secondGrantedUri)
+            assertEquals(secondSecret, decode(read(secondGrantedUri)))
+            val earlierUriAfterSecondExport = read(firstGrantedUri)
+            assertArrayEquals(originallyGrantedBytes, earlierUriAfterSecondExport)
+            assertEquals(firstSecret, decode(earlierUriAfterSecondExport))
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test fun sharingPngAndDiagnosticsZipResolveThroughIndependentProvidersAndPaths() {
         val context = RuntimeEnvironment.getApplication()
         val sharingAuthority = context.packageName + ".sharing-files"

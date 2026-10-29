@@ -122,12 +122,7 @@ internal fun SharedSharingInvitationTools(
                 if (!accepts(revision)) return@launch
                 working = true
                 try {
-                    val file = withContext(Dispatchers.IO) {
-                        shareDirectory.mkdirs()
-                        File(shareDirectory, "cinema-sharing-invitation.png").also { destination ->
-                            destination.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
-                        }
-                    }
+                    val file = withContext(Dispatchers.IO) { writeSharingInvitationImage(shareDirectory, bitmap) }
                     if (!accepts(revision)) { file.delete(); return@launch }
                     val uri = FileProvider.getUriForFile(context, context.packageName + ".sharing-files", file)
                     val send = Intent(Intent.ACTION_SEND).setType("image/png").putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -175,6 +170,19 @@ internal fun SharedSharingInvitationTools(
     }
     if (working) Text("Reading or saving QR image…")
     if (notice.isNotEmpty()) Text(notice)
+}
+
+/** Never reuse a granted URI for a later invitation: each export owns a new file. */
+internal fun writeSharingInvitationImage(directory: File, bitmap: Bitmap): File {
+    check(directory.isDirectory || directory.mkdirs()) { "Share directory unavailable" }
+    val file = File.createTempFile("cinema-sharing-invitation-", ".png", directory)
+    return try {
+        file.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+        file
+    } catch (failure: Exception) {
+        file.delete()
+        throw failure
+    }
 }
 
 internal fun sharingInvitationBitmap(text: String): Bitmap {

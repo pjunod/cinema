@@ -59,6 +59,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- Cinema sharing invitations open as QR codes with expandable text. Save or
+  share the PNG, then upload or scan it on the receiving Cinema; import and
+  pairing approval remain explicit. Web, Apple, and Android clients retain
+  text fallback for oversized invitations.
+
 - Linux player 0.4.0 uses Cinema-style playback controls with scoped library
   metadata and next episode, saved autoplay, and Auto/Original/advertised
   quality choices that retain playback position and paused state.
