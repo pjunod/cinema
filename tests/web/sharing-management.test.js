@@ -349,8 +349,8 @@ test("sharing QR codes round trip the exact invitation including maximum capacit
   assert.equal(h.c.jsQR(pixels,width,width).data,text);
  }
  assert.throws(()=>h.m.qrMatrix("cinema-share-v1:"+"x".repeat(2331)),/too large/);
- assert.throws(()=>h.m.qrMatrix("https://other.example/"),/valid cinema-share-v1/);
- assert.throws(()=>h.m.qrMatrix("cinema-share-v1:abc\n"),/valid cinema-share-v1/);
+ assert.throws(()=>h.m.qrMatrix("https://other.example/"),/valid Cinema invitation/);
+ assert.throws(()=>h.m.qrMatrix("cinema-share-v1:abc\n"),/valid Cinema invitation/);
 });
 test("sharing QR result defaults to the image with collapsed text and PNG export",async()=>{
  const h=harness();const invitation={id,invitation:"cinema-share-v1:secret",qrImage:"data:image/png;base64,cG5n"};h.m.state().invitation=invitation;
