@@ -16,6 +16,12 @@ that set complete or that the abstractions are correct.
 
 Scoped review on 2026-10-29 of conformance parent registration: the exact Store inventory records four existing text-caption methods with new typed dispatch/absence/refusal coverage on all backends. Formal-publication module registration and selected library positive examples are unchanged. Positive caption publication on Hiqlite is not claimed. Refresh only live M2 parent correspondence; historical anchors, model/configuration and qualification identities remain unchanged; source review is not execution evidence.
 
+The final replicated fixture review also checks the exact current tail and marker
+inventories before one child-first mutation transaction. Its refusal matrix and
+ordinary-bootstrap round trip are runtime checks, separate from this correspondence
+record. The selected formal-publication examples and historical identities stay
+unchanged.
+
 ## Historical schema fixtures — scoped refresh on 2026-10-29
 
 Compared with `d5cd473536`, the caption schema source changes only the

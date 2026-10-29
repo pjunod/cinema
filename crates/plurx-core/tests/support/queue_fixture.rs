@@ -570,6 +570,11 @@ pub(crate) fn translation_fixture_shape() -> Vec<(String, String)> {
     translation_fixture_shape_at(0)
 }
 
+#[allow(dead_code)]
+pub(crate) fn current_translation_fixture_shape() -> Vec<(String, String)> {
+    translation_fixture_shape_at(2)
+}
+
 fn translation_fixture_shape_at(version: u8) -> Vec<(String, String)> {
     assert!(
         version <= 2,
@@ -1047,6 +1052,11 @@ fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
     }
     expected
 }
+#[allow(dead_code)]
+pub(crate) fn managed_fixture_shape(version: i64) -> Vec<(String, String)> {
+    managed_fixture_rows(&managed_fixture_connection(version))
+}
+
 fn managed_fixture_rows(connection: &rusqlite::Connection) -> Vec<(String, String)> {
     connection
         .prepare(MANAGED_FIXTURE_SHAPE_SQL)
@@ -1163,24 +1173,116 @@ fn managed_fixture_rewind_refuses_v2_drift_marker_and_populated_work_without_mut
     }
 }
 
+/// Closed published v116/v117 objects, including arbitrarily named indexes
+/// and triggers attached to one of the owned tables.
+pub(crate) const CURRENT_TAIL_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_text_translation_*' OR name GLOB 'shared_caption_*' OR tbl_name GLOB 'subtitle_text_translation_*' OR tbl_name GLOB 'shared_caption_*') AND sql IS NOT NULL ORDER BY name";
+pub(crate) const CURRENT_TAIL_FIXTURE_TABLES: [&str; 4] = [
+    "shared_caption_read_leases",
+    "shared_caption_schema",
+    "subtitle_text_translation_cues",
+    "subtitle_text_translation_schema",
+];
+pub(crate) const CURRENT_TAIL_FIXTURE_MARKERS: [&str; 2] =
+    ["shared_caption_schema", "subtitle_text_translation_schema"];
+
+fn current_tail_fixture_rows(connection: &rusqlite::Connection) -> Vec<(String, String)> {
+    connection
+        .prepare(CURRENT_TAIL_FIXTURE_SHAPE_SQL)
+        .expect("tail shape query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("tail shape rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete tail shape")
+}
+
+pub(crate) fn current_tail_fixture_shape() -> Vec<(String, String)> {
+    let expected = rusqlite::Connection::open_in_memory().expect("current tail witness");
+    expected.execute_batch("CREATE TABLE background_jobs(id TEXT PRIMARY KEY); CREATE TABLE subtitle_translation_assets(id TEXT PRIMARY KEY);")
+        .expect("current tail dependencies");
+    expected
+        .execute_batch(include_str!(
+            "../../src/store/subtitle_text_translation.sql"
+        ))
+        .expect("published text translation objects");
+    expected
+        .execute_batch(include_str!("../../src/store/shared_caption_read.sql"))
+        .expect("published caption objects");
+    current_tail_fixture_rows(&expected)
+}
+
+/// Pure removal plan shared by SQLite and replicated historical fixtures.
+/// All four table totals and both exact-marker counts are required; no caller
+/// may infer emptiness from a partial inventory or discard retained leases/cues.
+pub(crate) fn validated_empty_current_tail_rewind(
+    actual: &[(String, String)],
+    counts: &[(String, i64)],
+    correct_markers: &[(String, i64)],
+) -> Vec<String> {
+    assert_eq!(
+        actual,
+        current_tail_fixture_shape(),
+        "exact current tail shape required"
+    );
+    let counts_by_name = counts
+        .iter()
+        .map(|(name, count)| (name.as_str(), *count))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        counts.len(),
+        counts_by_name.len(),
+        "tail table inventoried once"
+    );
+    assert_eq!(
+        counts_by_name
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        CURRENT_TAIL_FIXTURE_TABLES.into_iter().collect(),
+        "every current tail table must be inventoried",
+    );
+    for (name, count) in counts_by_name {
+        assert_eq!(
+            count,
+            i64::from(CURRENT_TAIL_FIXTURE_MARKERS.contains(&name)),
+            "tail markers must be singular and retained data must be empty: {name}"
+        );
+    }
+    let markers_by_name = correct_markers
+        .iter()
+        .map(|(name, count)| (name.as_str(), *count))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        correct_markers.len(),
+        markers_by_name.len(),
+        "tail marker inventoried once"
+    );
+    assert_eq!(
+        markers_by_name
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        CURRENT_TAIL_FIXTURE_MARKERS.into_iter().collect(),
+        "both exact current tail markers must be inventoried",
+    );
+    for (name, count) in markers_by_name {
+        assert_eq!(
+            count, 1,
+            "exact singleton=1/version=1 marker required: {name}"
+        );
+    }
+    CURRENT_TAIL_FIXTURE_TABLES
+        .into_iter()
+        .map(|name| format!("DROP TABLE {name}"))
+        .collect()
+}
+
 /// Read-only plan for the exact empty v116-v120 tail of a current fixture.
 /// This recognizes published layouts, not arbitrary later schema versions.
 fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, i64) {
-    const SHAPE: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_text_translation_*' OR name GLOB 'shared_caption_*' OR tbl_name GLOB 'subtitle_text_translation_*' OR tbl_name GLOB 'shared_caption_*') AND sql IS NOT NULL ORDER BY name";
-    let shape = |conn: &rusqlite::Connection| {
-        conn.prepare(SHAPE)
-            .expect("tail shape query")
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .expect("tail shape rows")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("complete tail shape")
-    };
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture version");
-    let actual = shape(connection);
+    let actual = current_tail_fixture_rows(connection);
     if version <= 115 {
         assert!(
             actual.is_empty(),
@@ -1208,32 +1310,37 @@ fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, 
         version, 120,
         "only the exact current fixture tail may be rewound"
     );
-    let expected = rusqlite::Connection::open_in_memory().expect("current tail witness");
-    expected.execute_batch("CREATE TABLE background_jobs(id TEXT PRIMARY KEY); CREATE TABLE subtitle_translation_assets(id TEXT PRIMARY KEY);")
-        .expect("current tail dependencies");
-    expected
-        .execute_batch(include_str!(
-            "../../src/store/subtitle_text_translation.sql"
-        ))
-        .expect("published text translation objects");
-    expected
-        .execute_batch(include_str!("../../src/store/shared_caption_read.sql"))
-        .expect("published caption objects");
+    // Validate DDL before using any table identity in the read-only inventory.
     assert_eq!(
         actual,
-        shape(&expected),
+        current_tail_fixture_shape(),
         "exact current tail shape required"
     );
-    for table in ["subtitle_text_translation_schema", "shared_caption_schema"] {
-        require_fixture_marker(connection, table, 1);
-    }
-    let retained: i64 = connection.query_row(
-        "SELECT (SELECT count(*) FROM subtitle_text_translation_cues) + (SELECT count(*) FROM shared_caption_read_leases)",
-        [], |row| row.get(0)).expect("tail retained data");
-    assert_eq!(
-        retained, 0,
-        "text output and caption leases cannot be rewound"
-    );
+    let counts = CURRENT_TAIL_FIXTURE_TABLES
+        .into_iter()
+        .map(|table| {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("complete current tail data inventory");
+            (table.to_owned(), count)
+        })
+        .collect::<Vec<_>>();
+    let markers = CURRENT_TAIL_FIXTURE_MARKERS
+        .into_iter()
+        .map(|table| {
+            let count: i64 = connection
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE singleton=1 AND version=1"),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("current tail marker inventory");
+            (table.to_owned(), count)
+        })
+        .collect::<Vec<_>>();
+    let drops = validated_empty_current_tail_rewind(&actual, &counts, &markers);
     let translation = connection
         .prepare(TRANSLATION_FIXTURE_SHAPE_SQL)
         .expect("current translation query")
@@ -1261,10 +1368,7 @@ fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, 
         .query_row(MANAGED_FIXTURE_DATA_SQL, [], |row| row.get(0))
         .expect("current managed data");
     validated_empty_managed_rewind(&managed_fixture_rows(connection), marker, managed);
-    (
-        "DROP TABLE shared_caption_read_leases; DROP TABLE shared_caption_schema; DROP TABLE subtitle_text_translation_cues; DROP TABLE subtitle_text_translation_schema;".into(),
-        115,
-    )
+    (format!("{};", drops.join(";")), 115)
 }
 
 pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connection) {
