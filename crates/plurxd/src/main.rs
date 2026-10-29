@@ -1939,6 +1939,8 @@ struct Boot {
 /// cannot retain the pending router after activation.
 struct StartupObservationHttp {
     bind: SocketAddr,
+    #[cfg(test)]
+    prebound: tokio::sync::Mutex<Option<tokio::net::TcpListener>>,
     router: Arc<std::sync::RwLock<axum::Router>>,
     tasks: tokio::sync::Mutex<Option<StartupObservationTasks>>,
     stop: tokio_util::sync::CancellationToken,
@@ -1955,10 +1957,19 @@ impl StartupObservationHttp {
     fn new(bind: SocketAddr) -> Self {
         Self {
             bind,
+            #[cfg(test)]
+            prebound: tokio::sync::Mutex::new(None),
             router: Arc::new(std::sync::RwLock::new(axum::Router::new())),
             tasks: tokio::sync::Mutex::new(None),
             stop: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    #[cfg(test)]
+    fn from_listener(listener: tokio::net::TcpListener) -> std::io::Result<Self> {
+        let mut owner = Self::new(listener.local_addr()?);
+        owner.prebound = tokio::sync::Mutex::new(Some(listener));
+        Ok(owner)
     }
 
     async fn stop_probe(&self) {
@@ -2144,9 +2155,16 @@ impl StartupClockObserver for StartupObservationHttp {
                     "clock observation socket already owned".into(),
                 ));
             }
-            let listener = bind_listener(self.bind)
-                .await
-                .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?;
+            #[cfg(test)]
+            let prebound = self.prebound.lock().await.take();
+            #[cfg(not(test))]
+            let prebound: Option<tokio::net::TcpListener> = None;
+            let listener = match prebound {
+                Some(listener) => listener,
+                None => bind_listener(self.bind)
+                    .await
+                    .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?,
+            };
             let observer = crate::clock_offset::ClockObserver::new(membership.clone());
             let pending = axum::Router::new()
                 .route(

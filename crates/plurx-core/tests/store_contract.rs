@@ -615,6 +615,14 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "mutate_subtitle_translation",
     "bind_translation_source",
     "publish_translation_segment",
+    // text_caption_dispatch_refuses_unowned_work_and_reads_absent_state checks
+    // typed dispatch, absent state and invalid-input refusal on every backend.
+    // Positive publication and grant-lease lifecycles retain their SQLite tests;
+    // this is not full positive Hiqlite publication qualification.
+    "publish_text_translation_slice",
+    "read_text_translation_cues",
+    "text_translation_request_receipt",
+    "read_shared_captions",
     // Managed configuration CAS and node-bounded model publication/observation
     // run on both backends in the managed_subtitle_configuration_* and
     // managed_subtitle_model_operations_* contracts in background_jobs.rs.
@@ -20829,7 +20837,7 @@ fn contract_inventory_matches_every_store_method() {
     // +5: source-revision title demand/readiness, binding, fenced publication
     // and same-node probe priority, explicitly listed in BACKGROUND_JOB_METHODS.
     // +3: source-fenced FEL verdict write, requalification and verdict counts.
-    assert_eq!(declared.len(), 511, "review the Store method count");
+    assert_eq!(declared.len(), 517, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

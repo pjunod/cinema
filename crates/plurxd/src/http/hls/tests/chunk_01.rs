@@ -325,12 +325,14 @@
             "the ordinary candidate's link binding is kept for a dispatch that degrades"
         );
         let degraded = source
-            .split_once("    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) =")
-            .expect("the dispatch result carries the worker's degrade reason")
+            .split_once("crate::media_pool::mark_create_phase(\"dispatch\");")
+            .expect("the completed dispatch phase")
             .1
             .split_once("    if owner_node_id == state.node_id {")
             .expect("the activation that follows dispatch")
             .0;
+        assert!(degraded.contains("(degraded_processing, processing_note)"), "the worker result carries its degrade reason and processing note");
+        assert!(degraded.contains("if let Some(reason) = degraded_processing {"));
         for restored in [
             "plan_notes.push(processing_declined_note(&reason));",
             "request = ordinary;",
