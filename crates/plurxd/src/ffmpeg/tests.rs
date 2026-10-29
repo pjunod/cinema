@@ -245,13 +245,26 @@ async fn engine_object_digest_is_reused_per_version_and_rehashed_on_change() {
     std::fs::write(&path, b"first engine bytes").expect("object");
     let (first, version) = super::hash_engine_object(&path).await.expect("first hash");
     assert_eq!(first, sha2::Sha256::digest(b"first engine bytes").to_vec());
+    #[cfg(unix)]
+    if !super::engine_metadata_has_settled(&std::fs::metadata(&path).expect("object metadata")) {
+        assert_eq!(
+            super::cached_engine_digest(&path, &version),
+            None,
+            "a newly written object has not earned metadata-only reuse"
+        );
+        // ctime cannot be backdated. Let the actual object age beyond the
+        // production two-second grace, then capture its now-settled version.
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    }
+    let (again, same_version) = super::hash_engine_object(&path)
+        .await
+        .expect("settled hash");
+    assert_eq!((again, same_version), (first.clone(), version.clone()));
     assert_eq!(
         super::cached_engine_digest(&path, &version),
         Some(first.clone()),
-        "a captured version is served without reading the object again"
+        "a settled captured version is served without reading the object again"
     );
-    let (again, same_version) = super::hash_engine_object(&path).await.expect("cached");
-    assert_eq!((again, same_version), (first.clone(), version.clone()));
     // A replacement changes the cheap object version (size, ctime, inode).
     std::fs::write(&path, b"replaced engine object bytes").expect("replacement");
     let (replaced, replaced_version) = super::hash_engine_object(&path).await.expect("rehash");

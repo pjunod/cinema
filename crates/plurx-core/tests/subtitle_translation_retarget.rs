@@ -185,15 +185,64 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
                 .starts_with("CREATE TRIGGER subtitle_translation_mutate ")
         })
         .expect("known legacy trigger");
-    conn.execute_batch("DROP TRIGGER subtitle_translation_mutate; DROP TRIGGER subtitle_translation_capture_continuity; DROP TRIGGER subtitle_translation_retire_continuity; DROP TRIGGER subtitle_translation_revoke_continuity; DROP TABLE subtitle_translation_range_continuities; ALTER TABLE subtitle_translation_demands DROP COLUMN continuity_id;")
-        .expect("downgrade fixture only");
-    conn.execute_batch(legacy).expect("published trigger");
-    conn.pragma_update(None, "user_version", 117)
-        .expect("published ordinal");
+    conn.execute(
+        "INSERT INTO subtitle_model_receipts(node_id,model_id,receipt_json) VALUES('worker-a','small','{\"fixture\":true}')",
+        [],
+    ).expect("owned managed model receipt");
+    // v120 changed the managed marker and resource view. A v117 fixture must
+    // restore their exact published v1 definitions before replaying v120;
+    // retained operation, request, model-receipt and queue rows stay owned.
+    let managed_v1 = include_str!("../src/store/subtitle_managed_schema.sql");
+    let managed_marker = managed_v1
+        .split("-- next statement")
+        .find(|sql| sql.contains("CREATE TABLE subtitle_managed_schema("))
+        .expect("published managed v1 marker DDL");
+    let managed_view = managed_v1
+        .split("-- next statement")
+        .find(|sql| {
+            sql.trim_start()
+                .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
+        })
+        .expect("published managed v1 resource view");
+    conn.execute_batch(&format!(
+        "SAVEPOINT historical_retarget_fixture;
+         DROP TRIGGER subtitle_translation_mutate;
+         DROP TRIGGER subtitle_translation_capture_continuity;
+         DROP TRIGGER subtitle_translation_retire_continuity;
+         DROP TRIGGER subtitle_translation_revoke_continuity;
+         DROP TABLE subtitle_translation_range_continuities;
+         ALTER TABLE subtitle_translation_demands DROP COLUMN continuity_id;
+         {legacy}
+         DROP VIEW background_job_required_resources;
+         DROP TABLE subtitle_managed_schema;
+         {managed_marker}
+         INSERT INTO subtitle_managed_schema VALUES(1,1);
+         {managed_view}
+         PRAGMA user_version=117;
+         RELEASE historical_retarget_fixture;"
+    ))
+    .expect("atomic exact historical fixture without discarding owned rows");
     drop(conn);
     drop(store);
     let reopened = SqliteStore::open(&dir.path().join("store.db")).expect("explicit upgrade");
     assert_eq!(store_epoch(&reopened, &id).await, "1");
+    let upgraded = rusqlite::Connection::open(dir.path().join("store.db"))
+        .expect("upgraded fixture inspection");
+    assert_eq!(
+        upgraded
+            .query_row(
+                "SELECT version FROM subtitle_managed_schema WHERE singleton=1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .expect("upgraded managed marker"),
+        2
+    );
+    assert_eq!(
+        upgraded.query_row("SELECT receipt_json FROM subtitle_model_receipts WHERE node_id='worker-a' AND model_id='small'", [], |row| row.get::<_, String>(0))
+            .expect("retained managed model receipt"),
+        r#"{"fixture":true}"#
+    );
     assert_eq!(
         reopened
             .mutate_subtitle_translation(request)

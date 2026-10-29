@@ -1,3 +1,7 @@
+# Cache regression fixture review (2026-10-29): one added awaited 2100 ms
+# settling delay in ffmpeg/tests.rs preserves the production metadata grace.
+# It starts no task or child and supplies no reap or publication authority.
+# Exact namespaced timer count is 1910; roots, patterns and zeroes unchanged.
 # Integration with main 10f45ae5f: retain its two awaited Live TV fixture timers
 # and three HTTP response observations alongside the reviewed repair fixtures.
 # Final exact counts are verified by the unchanged structural inventory.
@@ -5038,7 +5042,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 1909
+expected_occurrences = 1910
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
