@@ -93,6 +93,11 @@ pub(crate) fn admin_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/sharing/settings", get(settings).put(save_settings))
         .route("/sharing/status", get(status))
+        .route(
+            "/sharing/network-authorization",
+            get(network_authorization_status).put(network_authorization),
+        )
+        .route("/sharing/connection", post(connection))
         .route("/sharing/endpoints", get(manifest).put(save_manifest))
         .route("/sharing/invitations", post(invite))
         .route("/sharing/invitations/{id}", delete(cancel_invite))
@@ -497,6 +502,11 @@ async fn save_manifest(
 struct InvitationRequest {
     library_ids: Vec<SourceId>,
     ttl_seconds: Option<i64>,
+    #[serde(default = "external_by_default")]
+    include_network: bool,
+}
+fn external_by_default() -> bool {
+    true
 }
 fn library_ids(ids: Vec<SourceId>) -> Result<Vec<i64>, ApiError> {
     if ids.len() > MAX_LIBRARIES {
@@ -558,7 +568,7 @@ async fn invite(
         secret,
         expires_at_ms: now.checked_add(ttl * 1000).ok_or_else(invalid)?,
     };
-    let blob = invite.encode().map_err(|_| invalid())?;
+    let mut blob = invite.encode().map_err(|_| invalid())?;
     let _created = mutation(
         state
             .store
@@ -572,8 +582,23 @@ async fn invite(
             .await
             .map_err(authority)?,
     )?;
+    let invitation_id = invite.id;
+    let expires_at_ms = invite.expires_at_ms;
+    if request.include_network {
+        match crate::sharing_network::issue(&state, invite).await {
+            Ok(combined) => blob = combined,
+            Err(code) => {
+                state
+                    .store
+                    .cancel_share_invitation(invitation_id)
+                    .await
+                    .map_err(authority)?;
+                return Err(failure(StatusCode::CONFLICT, code));
+            }
+        }
+    }
     Ok(Json(
-        json!({"id":invite.id,"invitation":blob.expose(),"expires_at_ms":invite.expires_at_ms}),
+        json!({"id":invitation_id,"invitation":blob.expose(),"expires_at_ms":expires_at_ms}),
     ))
 }
 async fn cancel_invite(
@@ -872,7 +897,8 @@ async fn verified_import(
     {
         return Err(failure(StatusCode::SERVICE_UNAVAILABLE, "sharing_disabled"));
     }
-    let mut invitation = Invitation::parse(&request.invitation).map_err(|_| invalid())?;
+    let combined = ConnectionInvitation::parse(&request.invitation).map_err(|_| invalid())?;
+    let mut invitation = Invitation::parse(&combined.invitation).map_err(|_| invalid())?;
     let now = clock_ms();
     if invitation.expires_at_ms <= now {
         return Err(failure(StatusCode::GONE, "sharing_expired"));
@@ -1097,4 +1123,63 @@ async fn rotate_import(
         .await
         .map_err(peer_error)?;
     Ok(Json(import_status(&state, import_id).await?))
+}
+
+async fn network_authorization_status(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Json<Value> {
+    Json(crate::sharing_network::status(&state).await)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetworkAuthorizationRequest {
+    #[serde(deserialize_with = "invitation_secret")]
+    token: Secret,
+}
+async fn network_authorization(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    raw: Body,
+) -> Result<Json<Value>, ApiError> {
+    let request: NetworkAuthorizationRequest = body(raw).await?;
+    crate::sharing_network::authorization(&state, request.token)
+        .await
+        .map_err(|code| failure(StatusCode::CONFLICT, code))?;
+    Ok(Json(json!({"configured":true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectionRequest {
+    #[serde(deserialize_with = "invitation_secret")]
+    invitation: Secret,
+    #[serde(default)]
+    probe: bool,
+}
+async fn connection(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    raw: Body,
+) -> Result<Json<Value>, ApiError> {
+    let request: ConnectionRequest = body(raw).await?;
+    let combined = ConnectionInvitation::parse(&request.invitation).map_err(|_| invalid())?;
+    let invite = Invitation::parse(&combined.invitation).map_err(|_| invalid())?;
+    let now = clock_ms();
+    if invite.expires_at_ms <= now {
+        return Err(failure(StatusCode::GONE, "sharing_expired"));
+    }
+    if invite.expires_at_ms > now.saturating_add(MAX_INVITATION_TTL_MS + 300_000) {
+        return Err(invalid());
+    }
+    let connected = request.probe
+        && crate::sharing_client::PeerConnection::verified(
+            &state.sharing,
+            &invite.endpoints,
+            &invite.identity,
+        )
+        .await
+        .is_ok();
+    Ok(Json(
+        json!({"name":invite.name,"network":combined.network,"connected":connected}),
+    ))
 }

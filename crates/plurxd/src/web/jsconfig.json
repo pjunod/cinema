@@ -98,6 +98,7 @@
     "pages/library-channels-page.js",
     "pages/shared-artwork.js",
     "pages/shared-libraries.js",
+    "pages/sharing-qr.js",
     "pages/sharing-management.js",
     "core/remote-navigation.js",
     "core/remote-router.js",

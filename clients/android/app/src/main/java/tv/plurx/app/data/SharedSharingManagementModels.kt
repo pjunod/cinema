@@ -114,6 +114,7 @@ internal class SharedSharingAssignmentMatrix(row: SharedSharingImportSummary,
 
 internal object SharedSharingValidation {
     fun ids(values: List<String>) { require(values.size <= 64 && values.toSet().size == values.size && values.all(PlaybackFileContext::canonicalId)) }
+    fun invitation(value: String): Boolean = value.matches(Regex("^(cinema-share-v1:[A-Za-z0-9_-]{1,10923}|cinema-connect-v1:[A-Za-z0-9_-]{1,15000})$"))
     fun code(value: String): Boolean = value.matches(Regex("^[0-9a-f]{16}$"))
     fun assignments(values: List<SharedSharingAssignmentGroup>) {
         ids(values.map { it.library_id })
@@ -155,6 +156,13 @@ internal class SharedSharingSecretDraft private constructor(beforeObserver: (() 
     }
     fun accepts(requestedRevision: Long): Boolean = synchronized(lock) {
         if (!active || !current()) { clearLocked(); false } else revision == requestedRevision
+    }
+    /** Image/camera results may arrive after an edit, logout, or page leave. */
+    fun acceptInvitation(value: String, requestedRevision: Long): Boolean = synchronized(lock) {
+        if (!active || !current()) { clearLocked(); return@synchronized false }
+        if (revision != requestedRevision) return@synchronized false
+        require(SharedSharingValidation.invitation(value)) { "That QR code does not contain a Cinema sharing invitation." }
+        invitationValue = value; revision++; invalidation.value = revision; true
     }
     fun clear(requestedRevision: Long) = synchronized(lock) {
         if (active && current() && revision == requestedRevision) { invitationValue = ""; codeValue = ""; revision++; invalidation.value = revision }

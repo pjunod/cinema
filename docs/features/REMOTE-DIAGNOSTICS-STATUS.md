@@ -5,6 +5,9 @@
 
 The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md#current-direction--attach-a-zip-to-a-bug-report) defines the current archive-attachment release.
 Hosted submission is deferred; web/phone export and native TV transfer have current software qualification. This file is the canonical execution ledger.
+Credential sign-in forms omit the report action under issue #1321; connection,
+setup, saved-session recovery, and signed-in reporting keep their entry points.
+The historical packet receipts below describe their original source.
 The [project backlog](PROJECT-BACKLOG.md) indexes the effort rather than
 duplicating its evidence.
 

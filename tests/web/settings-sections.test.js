@@ -2191,9 +2191,9 @@ test("Cinema sharing lists endpoint setup and unverified host network without ga
   assert.equal(enabled,true);
   assert.match(requirements.find(row=>row.id==="endpoints").detail,/Settings → Sharing/);
   assert.match(html,/Saved endpoints do not prove connectivity/);
-  assert.match(requirements.find(row=>row.id==="network").detail,/Tailscale installed and signed in/);
-  assert.match(html,/A container cannot infer host installation or remote reachability/);
-  assert.match(html,/Readiness observations never prevent saving/);
+  assert.match(requirements.find(row=>row.id==="network").detail,/host component/);
+  assert.match(html,/Pairing still verifies the other Cinema/);
+  assert.match(html,/Your choice is saved even when setup needs attention/);
 });
 
 

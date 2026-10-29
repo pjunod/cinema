@@ -200,6 +200,13 @@ impl SealedSecret {
         Ok(&self.0)
     }
 
+    /// Read a protected persisted envelope; plaintext is refused.
+    pub fn from_persisted(value: String) -> Result<Self, SecretError> {
+        let sealed = Self(value);
+        sealed.parse()?;
+        Ok(sealed)
+    }
+
     /// True once this value is an envelope this build can parse.
     pub fn is_wrapped(&self) -> bool {
         self.parse().is_ok()
@@ -583,6 +590,8 @@ pub enum SharingSecretPurpose {
     CatalogueRevision,
     /// Stable receiver-purpose material for non-capability file locators.
     FileLocator,
+    /// Node-local authority to create external network invitations.
+    NetworkAuthorization,
 }
 
 fn sharing_aad(purpose: SharingSecretPurpose, server: uuid::Uuid, import: uuid::Uuid) -> Vec<u8> {
@@ -593,6 +602,7 @@ fn sharing_aad(purpose: SharingSecretPurpose, server: uuid::Uuid, import: uuid::
         SharingSecretPurpose::Upstream => b"upstream".as_slice(),
         SharingSecretPurpose::CatalogueRevision => b"catalogue-revision".as_slice(),
         SharingSecretPurpose::FileLocator => b"file-locator".as_slice(),
+        SharingSecretPurpose::NetworkAuthorization => b"network-authorization".as_slice(),
     };
     let mut aad = b"plurx.sharing.v1\0".to_vec();
     aad.extend_from_slice(&(tag.len() as u32).to_be_bytes());
