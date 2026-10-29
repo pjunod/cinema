@@ -16,7 +16,7 @@ settings:
     SWIFT_VERSION: "5.9"
     SWIFT_STRICT_CONCURRENCY: targeted
     MARKETING_VERSION: "0.7.0"
-    CURRENT_PROJECT_VERSION: "277"
+    CURRENT_PROJECT_VERSION: "279"
     CODE_SIGN_STYLE: Automatic
 
 targets:
@@ -75,7 +75,7 @@ targets:
         # Without this iOS silently refuses connections to 192.168.x.x —
         # a functional bug, not paperwork.
         NSLocalNetworkUsageDescription: "Cinema connects to your media server on your local network."
-        NSCameraUsageDescription: "Cinema scans a QR code containing your media server address."
+        NSCameraUsageDescription: "Cinema scans QR codes to connect to your media server, pair a remote, or import a sharing invitation."
         # Browsing is also the permission preflight: it makes iOS ask before a
         # login request can race the system sheet. The value must match the
         # service plurxd publishes through DNS-SD.

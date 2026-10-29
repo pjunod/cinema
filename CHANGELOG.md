@@ -67,6 +67,14 @@ bump may break compatibility and a **patch** bump never does.
   cards, availability filters and one bounded Continue Watching row labelled
   by share. The layout adapts to desktop and phone screens.
 
+- Credential sign-in screens omit Report a problem. Connection setup, saved-
+  session recovery, and signed-in reporting keep their entry points.
+
+- Cinema sharing invitations open as QR codes with expandable text. Save or
+  share the PNG, then upload or scan it on the receiving Cinema; import and
+  pairing approval remain explicit. Web, Apple, and Android clients retain
+  text fallback for oversized invitations.
+
 - Linux player 0.4.0 uses Cinema-style playback controls with scoped library
   metadata and next episode, saved autoplay, and Auto/Original/advertised
   quality choices that retain playback position and paused state.
@@ -120,6 +128,9 @@ bump may break compatibility and a **patch** bump never does.
   Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v4`.
 
 ### Fixed
+
+- Fresh macOS Vulkan media builds include libplacebo's pinned fast_float
+  headers, allowing floating-point parsing with the macOS 12 deployment target.
 
 - Fresh macOS media builds retain caller macro paths and expose Homebrew
   aclocal macros to the source-built Automake tools used by libass.

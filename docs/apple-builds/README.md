@@ -134,3 +134,5 @@ Apple growing playlist attachment: [preparation and failover correction](914-gro
 
 - [Apple TV focus responsiveness](1130-apple-tv-focus-responsiveness.md) —
   input-update isolation, regression evidence and remaining device acceptance.
+
+Credential sign-in: [Keep the report action off credential sign-in screens](1321-sign-in-report-button.md).

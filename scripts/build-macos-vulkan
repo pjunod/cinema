@@ -137,6 +137,9 @@ def build(prepared, jobs, cache=None):
         raise ValueError("shaderc version declaration missing")
     pkgconfig(prefix, "shaderc", match.group(1) + ".1", "-lshaderc_combined -lc++", "Pinned static shaderc")
     placebo = source / "libplacebo"
+    # Archive downloads omit libplacebo's fast_float submodule, which libc++ needs
+    # for floating-point from_chars below macOS 26 (the deployment target is 12.0).
+    shutil.copytree(source / "fast-float", placebo / "3rdparty/fast_float", dirs_exist_ok=True)
     marker = placebo / ".jellyfin-patch-sha256"
     patch = prepared / "source/builder/patches/libplacebo/0001-libav-utils-fix-non-multiplane-fmt-bit_shift-in-pl_m.patch"
     if not marker.exists():
