@@ -1724,6 +1724,7 @@ impl HiqliteAuthStore {
     async fn retire_requests_of_removed_nodes(&self, now_ms: i64) -> Result<u64, StoreError> {
         let membership = self
             .client()
+            // authority: retirement needs committed membership schema before treating removed-target authority as absent.
             .query_consistent_map::<SchemaCountRow, _>(
                 "SELECT COUNT(*) AS count FROM sqlite_master
                   WHERE type = 'table' AND name = 'cluster_nodes'",

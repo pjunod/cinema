@@ -563,16 +563,38 @@ pub(crate) fn remove_jellyfin_compatibility_schema(connection: &rusqlite::Connec
 
 /// The published v112 object witness shared by SQLite and replicated fixtures.
 #[allow(dead_code)]
-pub(crate) const TRANSLATION_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'subtitle_translation_*' AND sql IS NOT NULL ORDER BY name";
+pub(crate) const TRANSLATION_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_translation_*' OR tbl_name GLOB 'subtitle_translation_*') AND sql IS NOT NULL ORDER BY name";
 
 #[allow(dead_code)]
 pub(crate) fn translation_fixture_shape() -> Vec<(String, String)> {
+    translation_fixture_shape_at(0)
+}
+
+fn translation_fixture_shape_at(version: u8) -> Vec<(String, String)> {
+    assert!(
+        version <= 2,
+        "only published translation shapes are recognized"
+    );
     let expected = rusqlite::Connection::open_in_memory().expect("translation shape witness");
     expected.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT);")
         .expect("translation metadata dependencies");
     expected
         .execute_batch(include_str!("../../src/store/subtitle_translation.sql"))
-        .expect("published current translation objects");
+        .expect("published legacy translation objects");
+    if version >= 1 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_translation_retarget.sql"
+            ))
+            .expect("published retarget translation objects");
+    }
+    if version == 2 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_translation_continuity.sql"
+            ))
+            .expect("published continuity translation objects");
+    }
     let shape = expected
         .prepare(TRANSLATION_FIXTURE_SHAPE_SQL)
         .expect("translation shape query")
@@ -585,8 +607,14 @@ pub(crate) fn translation_fixture_shape() -> Vec<(String, String)> {
     shape
 }
 
-/// A read-only, closed drop plan. All 12 table inventories must be present:
-/// the exact marker is retained until execution and every other table is empty.
+fn translation_fixture_version(actual: &[(String, String)]) -> u8 {
+    (0..=2)
+        .find(|version| actual == translation_fixture_shape_at(*version))
+        .expect("only an exact published translation shape may be rewound")
+}
+
+/// A read-only, closed drop plan. Every table in the selected published layout
+/// is inventoried: its exact marker remains and every other table is empty.
 #[allow(dead_code)]
 pub(crate) fn validated_empty_translation_rewind(
     actual: &[(String, String)],
@@ -597,11 +625,7 @@ pub(crate) fn validated_empty_translation_rewind(
         accepted_jobs, 0,
         "historical fixture must not discard accepted translation work"
     );
-    assert_eq!(
-        actual,
-        translation_fixture_shape(),
-        "only the exact current translation shape may be rewound"
-    );
+    let version = translation_fixture_version(actual);
     let tables: std::collections::BTreeSet<_> = actual
         .iter()
         .filter(|(_, sql)| sql.starts_with("CREATE TABLE"))
@@ -631,7 +655,7 @@ pub(crate) fn validated_empty_translation_rewind(
         .collect();
     // Triggers first, then explicit FK children before assets/operations. This
     // is not a generic down-migration or a production migration tolerance.
-    let ordered = [
+    let mut ordered = vec![
         "subtitle_translation_read_leases",
         "subtitle_translation_snapshots",
         "subtitle_translation_segments",
@@ -645,20 +669,38 @@ pub(crate) fn validated_empty_translation_rewind(
         "subtitle_translation_operations",
         "subtitle_translation_schema",
     ];
+    if version == 2 {
+        ordered.insert(0, "subtitle_translation_range_continuities");
+    }
     assert_eq!(
         tables,
-        ordered.into_iter().collect(),
+        ordered.iter().copied().collect(),
         "every translation table is explicitly removed"
     );
-    drops.extend(ordered.map(|name| format!("DROP TABLE {name}")));
+    drops.extend(ordered.into_iter().map(|name| format!("DROP TABLE {name}")));
     drops
+}
+
+fn require_fixture_marker(connection: &rusqlite::Connection, table: &str, version: i64) {
+    let counts: (i64, i64) = connection
+        .query_row(
+            &format!("SELECT count(*),COALESCE(sum(singleton=1 AND version=?1),0) FROM {table}"),
+            [version],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("fixture marker inventory");
+    assert_eq!(
+        counts,
+        (1, 1),
+        "one exact published marker required for {table}"
+    );
 }
 
 /// Closed, read-only removal plan for the empty v115 playback handoff
 /// extension: the SQL that drops it and the version the next rewind sees.
 #[allow(dead_code)]
-fn validated_handoff_rewind(connection: &rusqlite::Connection) -> (String, i64) {
-    const SHAPE: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'playback_handoffs*' AND sql IS NOT NULL ORDER BY name";
+fn validated_handoff_rewind(connection: &rusqlite::Connection, version: i64) -> (String, i64) {
+    const SHAPE: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'playback_handoffs*' OR tbl_name GLOB 'playback_handoffs*') AND sql IS NOT NULL ORDER BY name";
     let shape = |conn: &rusqlite::Connection| {
         conn.prepare(SHAPE)
             .expect("handoff shape query")
@@ -669,9 +711,6 @@ fn validated_handoff_rewind(connection: &rusqlite::Connection) -> (String, i64) 
             .collect::<Result<Vec<_>, _>>()
             .expect("complete handoff shape")
     };
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("fixture version");
     let actual = shape(connection);
     if actual.is_empty() {
         assert!(
@@ -696,6 +735,7 @@ fn validated_handoff_rewind(connection: &rusqlite::Connection) -> (String, i64) 
         shape(&expected),
         "exact current handoff shape required"
     );
+    require_fixture_marker(connection, "playback_handoffs_schema", 1);
     let rows: i64 = connection
         .query_row(
             "SELECT (SELECT count(*) FROM playback_handoffs) + (SELECT count(*) FROM playback_handoffs_tokens)",
@@ -962,11 +1002,8 @@ fn validated_translation_rewind(connection: &rusqlite::Connection, version: i64)
         "only the current translation fixture may be rewound"
     );
     // Validate identifiers/DDL before using any names in data inventory SQL.
-    assert_eq!(
-        actual,
-        translation_fixture_shape(),
-        "exact current translation shape required"
-    );
+    translation_fixture_version(&actual);
+    require_fixture_marker(connection, "subtitle_translation_schema", 1);
     let counts = actual
         .iter()
         .filter(|(_, sql)| sql.starts_with("CREATE TABLE"))
@@ -988,7 +1025,7 @@ fn validated_translation_rewind(connection: &rusqlite::Connection, version: i64)
 
 /// Rewind only an exact empty managed extension in an owned historical fixture.
 #[allow(dead_code)]
-pub(crate) const MANAGED_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY name";
+pub(crate) const MANAGED_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_managed_*' OR name GLOB 'subtitle_model_receipts*' OR tbl_name GLOB 'subtitle_managed_*' OR tbl_name GLOB 'subtitle_model_receipts*' OR name='background_job_required_resources') AND sql IS NOT NULL ORDER BY name";
 pub(crate) const MANAGED_FIXTURE_DATA_SQL: &str = "SELECT (SELECT count(*) FROM subtitle_model_receipts) + (SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_model_operation','subtitle_transcribe_managed','subtitle_text_model_operation','subtitle_text_translate'))";
 
 fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
@@ -1126,8 +1163,113 @@ fn managed_fixture_rewind_refuses_v2_drift_marker_and_populated_work_without_mut
     }
 }
 
+/// Read-only plan for the exact empty v116-v120 tail of a current fixture.
+/// This recognizes published layouts, not arbitrary later schema versions.
+fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, i64) {
+    const SHAPE: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_text_translation_*' OR name GLOB 'shared_caption_*' OR tbl_name GLOB 'subtitle_text_translation_*' OR tbl_name GLOB 'shared_caption_*') AND sql IS NOT NULL ORDER BY name";
+    let shape = |conn: &rusqlite::Connection| {
+        conn.prepare(SHAPE)
+            .expect("tail shape query")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("tail shape rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("complete tail shape")
+    };
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture version");
+    let actual = shape(connection);
+    if version <= 115 {
+        assert!(
+            actual.is_empty(),
+            "historical fixture cannot carry later translation or caption objects"
+        );
+        let translation = connection
+            .prepare(TRANSLATION_FIXTURE_SHAPE_SQL)
+            .expect("historical translation query")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("historical translation rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("complete historical translation shape");
+        if !translation.is_empty() {
+            assert_eq!(
+                translation_fixture_version(&translation),
+                0,
+                "historical SQLite fixture requires legacy translation"
+            );
+        }
+        return (String::new(), version);
+    }
+    assert_eq!(
+        version, 120,
+        "only the exact current fixture tail may be rewound"
+    );
+    let expected = rusqlite::Connection::open_in_memory().expect("current tail witness");
+    expected.execute_batch("CREATE TABLE background_jobs(id TEXT PRIMARY KEY); CREATE TABLE subtitle_translation_assets(id TEXT PRIMARY KEY);")
+        .expect("current tail dependencies");
+    expected
+        .execute_batch(include_str!(
+            "../../src/store/subtitle_text_translation.sql"
+        ))
+        .expect("published text translation objects");
+    expected
+        .execute_batch(include_str!("../../src/store/shared_caption_read.sql"))
+        .expect("published caption objects");
+    assert_eq!(
+        actual,
+        shape(&expected),
+        "exact current tail shape required"
+    );
+    for table in ["subtitle_text_translation_schema", "shared_caption_schema"] {
+        require_fixture_marker(connection, table, 1);
+    }
+    let retained: i64 = connection.query_row(
+        "SELECT (SELECT count(*) FROM subtitle_text_translation_cues) + (SELECT count(*) FROM shared_caption_read_leases)",
+        [], |row| row.get(0)).expect("tail retained data");
+    assert_eq!(
+        retained, 0,
+        "text output and caption leases cannot be rewound"
+    );
+    let translation = connection
+        .prepare(TRANSLATION_FIXTURE_SHAPE_SQL)
+        .expect("current translation query")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("current translation rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete current translation shape");
+    assert_eq!(
+        translation_fixture_version(&translation),
+        2,
+        "current tail requires continuity translation"
+    );
+    let marker: i64 = connection
+        .query_row(
+            "SELECT COALESCE(max(version),0) FROM subtitle_managed_schema WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("current managed marker");
+    assert_eq!(marker, 2, "current tail requires managed v2");
+    require_fixture_marker(connection, "subtitle_managed_schema", 2);
+    let managed: i64 = connection
+        .query_row(MANAGED_FIXTURE_DATA_SQL, [], |row| row.get(0))
+        .expect("current managed data");
+    validated_empty_managed_rewind(&managed_fixture_rows(connection), marker, managed);
+    (
+        "DROP TABLE shared_caption_read_leases; DROP TABLE shared_caption_schema; DROP TABLE subtitle_text_translation_cues; DROP TABLE subtitle_text_translation_schema;".into(),
+        115,
+    )
+}
+
 pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connection) {
-    let (handoff_rewind, version) = validated_handoff_rewind(connection);
+    let (tail_rewind, version) = validated_current_tail_rewind(connection);
+    let (handoff_rewind, version) = validated_handoff_rewind(connection, version);
     let (title_rewind, version) = validated_title_rewind(connection, version);
     let annotations_rewind = validated_annotations_rewind(connection, version);
     let translation_rewind = validated_translation_rewind(connection, version);
@@ -1160,7 +1302,174 @@ pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connec
         validated_empty_managed_rewind(&managed_fixture_rows(connection), marker, data).join(";");
     // Preserve a complete predecessor while the common-queue removal follows.
     // A savepoint keeps this atomic even inside an outer fixture transaction.
-    connection.execute_batch(&format!("SAVEPOINT rewind_managed_fixture; {handoff_rewind} {title_rewind} {annotations_rewind} {translation_rewind} {managed_rewind}; RELEASE rewind_managed_fixture;")).expect("atomic empty managed fixture rewind");
+    connection.execute_batch(&format!("SAVEPOINT rewind_managed_fixture; {tail_rewind} {handoff_rewind} {title_rewind} {annotations_rewind} {translation_rewind} {managed_rewind}; RELEASE rewind_managed_fixture;")).expect("atomic empty managed fixture rewind");
+}
+
+fn complete_fixture_snapshot(connection: &rusqlite::Connection) -> String {
+    let mut snapshot = String::new();
+    for name in ["user_version", "schema_version", "foreign_keys"] {
+        let value: i64 = connection
+            .pragma_query_value(None, name, |row| row.get(0))
+            .expect("fixture pragma snapshot");
+        snapshot.push_str(&format!("{name}={value};"));
+    }
+    let objects = connection
+        .prepare("SELECT type,name,COALESCE(sql,'') FROM sqlite_master ORDER BY type,name")
+        .expect("fixture DDL snapshot")
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .expect("fixture DDL rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete fixture DDL");
+    for (kind, name, sql) in objects {
+        snapshot.push_str(&format!("{kind:?}:{name:?}:{sql:?};"));
+        if kind == "table" {
+            let escaped = name.replace('"', "\"\"");
+            let mut statement = connection
+                .prepare(&format!("SELECT * FROM \"{escaped}\""))
+                .expect("fixture retained data snapshot");
+            let columns = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .expect("fixture retained rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("complete retained data");
+            snapshot.push_str(&format!("{rows:?};"));
+        }
+    }
+    snapshot
+}
+
+#[test]
+fn current_fixture_rewind_accepts_exact_empty_v120_with_foreign_keys() {
+    let dir = tempfile::tempdir().expect("current fixture");
+    let path = dir.path().join("store.sqlite");
+    drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture schema"));
+    let connection = rusqlite::Connection::open(path).expect("fixture connection");
+    connection
+        .execute_batch("PRAGMA foreign_keys=ON;")
+        .expect("enforce fixture foreign keys");
+    rewind_empty_managed_subtitle_schema(&connection);
+    let remaining: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE name GLOB 'subtitle_translation_*' OR name GLOB 'subtitle_text_translation_*' OR name GLOB 'shared_caption_*' OR name GLOB 'subtitle_managed_*' OR name='subtitle_model_receipts'",
+        [], |row| row.get(0)).expect("removed fixture inventory");
+    assert_eq!(remaining, 0);
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .expect("unchanged checkpoint"),
+        120
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("fixture foreign key consistency"),
+        0
+    );
+}
+
+#[test]
+fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
+    for damage in [
+        "future-version",
+        "unsupported-tail-version",
+        "text-marker",
+        "caption-marker",
+        "wrong-text-marker",
+        "wrong-caption-marker",
+        "managed-marker",
+        "wrong-managed-marker",
+        "missing-index",
+        "translation-trigger",
+        "managed-view",
+        "extra-object",
+        "text-cue",
+        "caption-lease",
+        "continuity-capture",
+        "translation-command",
+        "managed-receipt",
+        "text-model-job",
+        "text-translation-job",
+        "partial-handoff",
+        "handoff-marker",
+        "wrong-translation-marker",
+        "extra-text-marker",
+        "extra-managed-object",
+        "unowned-text-index",
+        "unowned-managed-index",
+        "legacy-with-current-translation",
+    ] {
+        let dir = tempfile::tempdir().expect("refusal fixture");
+        let path = dir.path().join("store.sqlite");
+        drop(plurx_core::store::SqliteStore::open(&path).expect("current refusal schema"));
+        let connection = rusqlite::Connection::open(path).expect("refusal connection");
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .expect("prepare hostile retained fixture rows");
+        let sql = match damage {
+            "future-version" => "PRAGMA user_version=121;",
+            "unsupported-tail-version" => "PRAGMA user_version=119;",
+            "text-marker" => "DELETE FROM subtitle_text_translation_schema;",
+            "caption-marker" => "DELETE FROM shared_caption_schema;",
+            "managed-marker" => "DELETE FROM subtitle_managed_schema;",
+            "wrong-text-marker" => "PRAGMA ignore_check_constraints=ON; UPDATE subtitle_text_translation_schema SET version=2; PRAGMA ignore_check_constraints=OFF;",
+            "wrong-caption-marker" => "PRAGMA ignore_check_constraints=ON; UPDATE shared_caption_schema SET version=2; PRAGMA ignore_check_constraints=OFF;",
+            "wrong-managed-marker" => "PRAGMA ignore_check_constraints=ON; UPDATE subtitle_managed_schema SET version=1; PRAGMA ignore_check_constraints=OFF;",
+            "missing-index" => "DROP INDEX shared_caption_read_expiry;",
+            "translation-trigger" => "DROP TRIGGER subtitle_translation_mutate; CREATE TRIGGER subtitle_translation_mutate AFTER INSERT ON subtitle_translation_commands BEGIN SELECT 1; END;",
+            "managed-view" => "DROP VIEW background_job_required_resources; CREATE VIEW background_job_required_resources AS SELECT 1;",
+            "extra-object" => "CREATE TABLE subtitle_text_translation_unknown(value TEXT);",
+            // Hostile retained rows need no live parent to require refusal.
+            // Re-enable foreign keys before the planner runs and snapshot them.
+            "text-cue" => "INSERT INTO subtitle_text_translation_cues VALUES('retained',printf('%064d',0),0,printf('%064d',0),0,1,'{}',0);",
+            "caption-lease" => "INSERT INTO shared_caption_read_leases VALUES('retained','00000000-0000-0000-0000-000000000000',printf('%064d',0),1,'retained',0,1,0);",
+            "continuity-capture" => "INSERT INTO subtitle_translation_range_continuities VALUES('retained',1,'retained','00000000-0000-0000-0000-000000000000');",
+            "translation-command" => "INSERT INTO subtitle_translation_commands VALUES('retained','unknown','{}','{}');",
+            "managed-receipt" => "INSERT INTO subtitle_model_receipts VALUES('node','model','{}');",
+            "text-model-job" | "text-translation-job" => {
+                let kind = if damage == "text-model-job" { "subtitle_text_model_operation" } else { "subtitle_text_translate" };
+                connection.execute("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms) VALUES('retained',?1,1,'{}','retained',0,'queued',0,0,0)", [kind]).expect("retained accepted text work");
+                ""
+            }
+            "partial-handoff" => "DROP TABLE playback_handoffs_tokens;",
+            "handoff-marker" => "DELETE FROM playback_handoffs_schema;",
+            "wrong-translation-marker" => "PRAGMA ignore_check_constraints=ON; UPDATE subtitle_translation_schema SET version=2; PRAGMA ignore_check_constraints=OFF;",
+            "extra-text-marker" => "PRAGMA ignore_check_constraints=ON; INSERT INTO subtitle_text_translation_schema VALUES(2,1); PRAGMA ignore_check_constraints=OFF;",
+            "extra-managed-object" => "CREATE TABLE subtitle_managed_unknown(value TEXT);",
+            "unowned-text-index" => "CREATE INDEX unexpected_text_index ON subtitle_text_translation_cues(cue_index);",
+            "unowned-managed-index" => "CREATE INDEX unexpected_receipt_index ON subtitle_model_receipts(model_id);",
+            "legacy-with-current-translation" => "DROP TABLE shared_caption_read_leases; DROP TABLE shared_caption_schema; DROP TABLE subtitle_text_translation_cues; DROP TABLE subtitle_text_translation_schema; PRAGMA user_version=115;",
+            _ => unreachable!(),
+        };
+        connection.execute_batch(sql).expect("damage owned fixture");
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON;")
+            .expect("enforce refusal foreign keys");
+        let before = complete_fixture_snapshot(&connection);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rewind_empty_managed_subtitle_schema(&connection);
+            }))
+            .is_err(),
+            "{damage} must refuse"
+        );
+        assert_eq!(
+            complete_fixture_snapshot(&connection),
+            before,
+            "{damage}: refusal preserves all DDL, versions, markers and retained data"
+        );
+    }
 }
 
 /// Wind a current test database back across the durable-queue introduction.
