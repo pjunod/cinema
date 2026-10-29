@@ -116,6 +116,17 @@ The existing producer regression passes actual attachment and acquisition
 playlists through that validator. The two real sharing regressions must pass
 before the next long default suite starts.
 
+On `528be167e`, all 118 focused regressions and all 11 isolated daemon
+sharing tests pass, including both successor-playlist cases. The separate-daemon
+restart proof then exposed a phase-dependent fixture timeout: a healthy active
+import refreshes every 60 seconds, but the test required an authenticated new
+manifest revision within 30 seconds. A Source-side endpoint write cannot wake
+the Recipient's local claim loop. The fixture now allows one refresh period
+plus 30 seconds of bounded transport/scheduling margin; it still requires exact
+revision 2 after restart and retains the SPKI, import, grant and catalogue-epoch
+assertions. One isolated old-source diagnostic reproduced the timeout; fresh
+fixed-source execution remains required before the full workspace suite.
+
 ## Reproducing the measurement
 
 The manual workflow uses `scripts/unit-coverage` on the existing capacity-one
