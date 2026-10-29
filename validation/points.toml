@@ -41,7 +41,8 @@ command = "python3 -m unittest discover -s tests/validation -p 'test_*.py'"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["python3"]
 missing = "fail"
-timeout_seconds = 60
+# The complete suite measured 95s on the 0.8.0 release workstation.
+timeout_seconds = 180
 
 [[checks]]
 id = "knowledge-contract"
@@ -59,7 +60,8 @@ command = "scripts/history-audit --report target/validation/history.json"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["git", "python3"]
 missing = "fail"
-timeout_seconds = 120
+# The complete corrective-history audit measured 172s in release CI.
+timeout_seconds = 300
 
 [[checks]]
 id = "operations-contract"
@@ -68,7 +70,8 @@ command = "python3 -m unittest discover -s tests/operations -p 'test_*.py'"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["bash", "make", "python3", "sh"]
 missing = "fail"
-timeout_seconds = 120
+# The complete shipping-contract suite measured 193s for the 0.8.0 release.
+timeout_seconds = 300
 
 [[checks]]
 id = "benchmark-contract"
