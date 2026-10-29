@@ -302,7 +302,8 @@ async fn sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_r
         Method::POST,
         "/api/v1/sharing/invitations",
         Some(&source_token),
-        Some(json!({"library_ids":[library["id"].as_i64().expect("library ID").to_string()]})),
+        // The disposable namespace and TLS proxy provide this fixture's connectivity.
+        Some(json!({"library_ids":[library["id"].as_i64().expect("library ID").to_string()],"include_network":false})),
     )
     .await;
     call(

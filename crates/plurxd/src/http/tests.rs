@@ -11514,7 +11514,8 @@ async fn sharing_pinned_transport_recovers_committed_claim_and_rotation_after_re
         post(
             "/api/v1/sharing/invitations",
             Some(&source_admin),
-            json!({"library_ids":[seeded.lib.to_string()]}),
+            // CGNAT/TLS connectivity is owned by this fixture, not a provider invitation.
+            json!({"library_ids":[seeded.lib.to_string()],"include_network":false}),
         ),
     )
     .await;
@@ -12101,7 +12102,9 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1["code"], "sharing_invalid_request");
     }
-    let (status, created) = call(
+    // Combined external invitations are the production default. This owned
+    // fixture has no provider authorization and must retain that refusal.
+    let (status, denied) = call(
         &app,
         post(
             "/api/v1/sharing/invitations",
@@ -12110,7 +12113,28 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        denied,
+        json!({"code":"sharing_network_authorization_required","message":"sharing network authorization required"})
+    );
+    // The claim/approval/rotation contract below owns its endpoint manifest;
+    // request the supported Cinema-only invitation without an external share.
+    let (status, created) = call(
+        &app,
+        post(
+            "/api/v1/sharing/invitations",
+            Some(&admin),
+            json!({"library_ids":[seeded.lib.to_string()],"include_network":false}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected invitation code: {:?}",
+        created.get("code")
+    );
     let invitation = Invitation::parse(&Secret::from_cleartext(
         created["invitation"]
             .as_str()

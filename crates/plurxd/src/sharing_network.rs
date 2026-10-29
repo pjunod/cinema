@@ -510,7 +510,11 @@ pub(crate) async fn issue(state: &AppState, invite: Invitation) -> Result<Secret
                     }
                 }
             }
-            let _ = state.store.cancel_share_invitation(invite.id).await;
+            crate::store_result::observe(
+                crate::store_result::Operation::CancelUnpublishedShareInvitation,
+                crate::store_result::Discard::LostWork,
+                state.store.cancel_share_invitation(invite.id).await,
+            );
             let result = cleanup(&state).await;
             *state
                 .sharing
