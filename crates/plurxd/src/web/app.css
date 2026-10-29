@@ -3729,6 +3729,14 @@
 #cinema-pair-dialog button{min-height:44px;margin:4px}
 #cinema-pair-dialog canvas{max-width:100%;height:auto}
   .sharing-invitation{margin-top:20px;padding:20px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel2)}
+.sharing-qr-image{display:block;width:min(100%,360px);height:auto;background:white;image-rendering:pixelated;margin:16px 0}
+.sharing-invitation summary,.sharing-qr-upload{cursor:pointer;padding:12px 0;min-height:44px}
+.sharing-qr-upload{display:block}
+.sharing-qr-upload input{display:block;margin:8px 0;max-width:100%}
+.sharing-qr-scanner{width:min(92vw,560px);max-height:90vh;overflow:auto;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:var(--radius);padding:20px}
+.sharing-qr-scanner::backdrop{background:#000b}
+.sharing-qr-scanner video{display:block;width:100%;max-height:60vh;object-fit:contain;background:#000}
+.sharing-qr-scanner button{min-height:44px}
   .sharing-invitation textarea{display:block;width:100%;min-height:110px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);font:13px/1.5 monospace;resize:vertical;overflow-wrap:anywhere}
 
 /* The report is a local modal shared by every shell layout. */

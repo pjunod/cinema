@@ -119,9 +119,12 @@ async function main() {
         "function render(){}",
         "async function loadFeatures(){}",
         "async function api(){return {token:'new',user:{id:1}};}",
-        "function authShell(title,sub,fields,btn,onsubmit){painted.push(sub);setSubmit(onsubmit);}",
+        "const app={innerHTML:''};const document={getElementById(id){return id==='app'?app:{addEventListener(){}};}};",
+        "function buildLabel(){return 'test';}",
+        shippedSource("authShell").replace("function authShell(", "function shippedAuthShell("),
+        "function authShell(...args){painted.push(args[1]);setSubmit(args[4]);shippedAuthShell(...args);}",
         shippedSource("renderLogin"),
-        "return {renderLogin, notice:()=>AUTH_NOTICE};",
+        "return {renderLogin, notice:()=>AUTH_NOTICE, html:()=>app.innerHTML, paintSetup:()=>shippedAuthShell('Set up','Create the first account.','','Create',async()=>{})};",
       ].join("\n"),
     );
     const shell = run(painted, (fn) => { submit = fn; });
@@ -131,8 +134,13 @@ async function main() {
       "Signed out after 90 days of inactivity. Sign in again to continue.",
       "Signed out after 90 days of inactivity. Sign in again to continue.",
     ]);
+    assert.match(shell.html(), /Username/);
+    assert.match(shell.html(), /Password/);
+    assert.doesNotMatch(shell.html(), /showDiagnostics|Report a problem/, "credential sign-in omits the reporting action");
     await submit();
     assert.equal(shell.notice(), "", "a successful sign-in clears the reason");
+    shell.paintSetup();
+    assert.match(shell.html(), /Report a problem/, "first-account setup retains connection reporting");
   }
 
   // 4. Each device's expiry, as the Users section's devices drawer says it.

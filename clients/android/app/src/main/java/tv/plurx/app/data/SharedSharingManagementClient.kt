@@ -59,7 +59,7 @@ internal class SharedSharingManagementClient private constructor(private val aut
         require(next == null || next != after); return ExportPage(rows, next)
     }
     private fun invitation(value: String): String {
-        require(value.matches(Regex("^(cinema-share-v1:[A-Za-z0-9_-]{1,10923}|cinema-connect-v1:[A-Za-z0-9_-]{1,15000})$"))) { "Paste a valid Cinema invitation." }; return value
+        require(SharedSharingValidation.invitation(value)) { "Paste a valid Cinema invitation." }; return value
     }
     suspend fun invite(libraries: List<String>, ttlSeconds: Long = 86400): SharedSharingInvitation {
         SharedSharingValidation.ids(libraries); require(libraries.isNotEmpty() && ttlSeconds in 1..604800)
