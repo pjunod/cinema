@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`10f45ae5f` plus the repair worktree (scoped source audits below) · **Scope:** bound `library_scan` and
+`5ac9d8f25` combined with repair `59c648db` (scoped audits below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,23 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+
+## Local main integration — source correspondence on 2026-10-29
+
+The repair source `59c648db` is combined locally with main `5ac9d8f25`.
+Both parent audits below retain their historical source identities. Incoming
+Cargo.lock and `main.rs` pins follow the reviewed macOS runtime update and
+bounded test-only fork stress. The merged Store and caption fixtures retain
+both parents' closed shape, marker, retained-data and atomic refusal checks,
+including schema 121 with managed v3. Their live whole-file hashes follow the
+resolved source; selected formal-publication and library-worker anchors remain.
+
+This reconciliation changes no model, configuration, property, fairness
+premise, validator or historical qualification receipt and supplies no new
+runtime or TLC evidence. The frozen `59c648db` measurement and this integration
+candidate are separate source identities; neither substitutes for the other's
+required validation.
 
 ## Test-only schema expectation — scoped source review on 2026-10-29
 
@@ -68,6 +85,49 @@ validators and historical source-anchor snapshots are unchanged. This audit
 supplies no new runtime or TLC execution, refinement theorem, liveness,
 physical acceptance or qualification. Historical receipts retain their
 recorded source identities; fresh affected execution is separate evidence.
+
+## macOS parser runtime — scoped lock refresh on 2026-10-29
+
+Wasmtime 50.0.0 includes the [upstream Mach receiver fix](https://github.com/bytecodealliance/wasmtime/pull/14414).
+The macOS-only runtime and required Cranelift dependencies change; native traps,
+epoch deadlines, memory/stack limits and import restrictions remain. Tokio
+1.53.1 and Hiqlite 0.14.0 remain pinned. Refresh only the live Cargo.lock
+whole-file hash. Selected library-worker behavior, historical anchors, models,
+configurations, toolchain and qualification identities are unchanged. This
+source correspondence adds no formal execution or progress claim.
+
+## Current validation fixtures — scoped refresh on 2026-10-29
+
+Scoped review on 2026-10-29 of conformance parent registration: the exact Store inventory records four existing text-caption methods with new typed dispatch/absence/refusal coverage on all backends. Formal-publication module registration and selected library positive examples are unchanged. Positive caption publication on Hiqlite is not claimed. Refresh only live M2 parent correspondence; historical anchors, model/configuration and qualification identities remain unchanged; source review is not execution evidence.
+
+The final replicated fixture review also checks the exact current tail and marker
+inventories before one child-first mutation transaction. Its refusal matrix and
+ordinary-bootstrap round trip are runtime checks, separate from this correspondence
+record. The selected formal-publication examples and historical identities stay
+unchanged.
+
+## Historical schema fixtures — scoped refresh on 2026-10-29
+
+Compared with `d5cd473536`, the caption schema source changes only the
+[v115 migration test](../../crates/plurx-core/src/store/subtitle_translation_schema.rs):
+it expects the current composed schema and verifies the managed v2 resources.
+The production recognizer and migration SQL remain unchanged. Refresh its one
+whole-file pin while retaining the exact anchor and historical source anchors.
+
+The [SQLite fixture rewind](../../crates/plurx-core/tests/support/queue_fixture.rs)
+now validates the exact empty v120 text/caption tail, continuity layout and
+managed v2 marker before planning any mutation. Unknown objects, marker drift
+and retained work refuse without changing DDL, versions or data. Historical
+SQLite layouts retain their legacy translation witness; the published
+replicated fixture witnesses remain separate. This closes the SQLite v115-only
+limitation recorded in the earlier scoped review, without claiming a general
+downgrade or complete replicated-schema qualification.
+
+The consistent-read census records existing committed-authority reads and keeps
+its unannotated ceiling at 237. No selected library claim, publication,
+reservation, lease or progress behavior changes. Models, configurations,
+properties and qualification identities retain their bytes; fresh mapping and
+smoke results are separate execution evidence.
 
 ## Managed-v2 fixture follow-through — scoped refresh on 2026-10-28
 

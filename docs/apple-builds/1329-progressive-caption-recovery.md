@@ -1,6 +1,6 @@
 # Recover stopped caption generation explicitly
 
-Build: 281
+Build: 282
 Issue: #1329
 
 A fresh Generate action can now discover an existing stopped operation even

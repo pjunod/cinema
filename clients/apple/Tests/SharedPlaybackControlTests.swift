@@ -50,6 +50,12 @@ final class SharedPlaybackControlTests: XCTestCase {
         change(&wire)
         return try SharedDecision.decode(JSONSerialization.data(withJSONObject: wire))
     }
+    private func directDecision(change: (inout [String: Any]) -> Void = { _ in }) throws -> SharedDecision {
+        try decision(method: "direct_play") { wire in
+            wire["audio"] = [["index": 1, "codec": "aac", "default": true]]
+            change(&wire)
+        }
+    }
     private func reply(_ id: String? = nil) throws -> Data {
         let id = id ?? session
         return try JSONSerialization.data(withJSONObject: ["session_id": id, "playlist_url": "/api/v1/hls/\(id)/master.m3u8", "vod": true,
@@ -289,7 +295,7 @@ final class SharedPlaybackControlTests: XCTestCase {
     func testReopenPlanKeepsPlaybackIdHasNoLineageAndChoosesDirectOnlyWhenAVPlayerCanTakeTheBytes() async throws {
         let context = try await context(), caps = Caps.snapshot().document
         let subject = SharedPlaybackSubject(context: context, title: "Shared", resumeMs: 61_500, watchSequence: 7)
-        let direct = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play"), caps: caps, quality: .auto, playbackId: "player-1")
+        let direct = try SharedPlaybackPlan.make(subject: subject, decision: try directDecision(), caps: caps, quality: .auto, playbackId: "player-1")
         XCTAssertEqual(direct.request.presentation, "direct"); XCTAssertEqual(direct.request.playbackId, "player-1")
         XCTAssertEqual(direct.request.start, 61.5)
         var injected = direct.request
@@ -299,10 +305,12 @@ final class SharedPlaybackControlTests: XCTestCase {
         XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: direct.decision, caps: caps, request: injected))
         XCTAssertNil(direct.request.copy); XCTAssertNil(direct.request.height); XCTAssertNil(direct.request.aac); XCTAssertNil(direct.request.audio)
         XCTAssertNil(direct.request.previousSessionId); XCTAssertNil(direct.request.reopenReason); XCTAssertNil(direct.request.controlSequence); XCTAssertNil(direct.request.intent)
-        let again = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play"), caps: caps, quality: .auto, playbackId: "player-1")
+        let again = try SharedPlaybackPlan.make(subject: subject, decision: try directDecision(), caps: caps, quality: .auto, playbackId: "player-1")
         XCTAssertNotEqual(again.request.requestId, direct.request.requestId)
-        let dv = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play") { $0["source"] = ["container": "mp4", "hdr": "dolby_vision"] }, caps: caps, quality: .auto)
+        let dv = try SharedPlaybackPlan.make(subject: subject, decision: try directDecision { $0["source"] = ["container": "mp4", "hdr": "dolby_vision"] }, caps: caps, quality: .auto)
         XCTAssertEqual(dv.request.presentation, "vod"); XCTAssertEqual(dv.request.copy, true)
+        let multiAudio = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play"), caps: caps, quality: .auto)
+        XCTAssertEqual(multiAudio.request.presentation, "vod"); XCTAssertEqual(multiAudio.request.copy, true); XCTAssertEqual(multiAudio.request.audio, 1)
         let nonDefault = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play") { $0["delivery"] = ["mode": "direct", "audio": 2] }, caps: caps, quality: .auto)
         XCTAssertEqual(nonDefault.request.presentation, "vod")
         let chosenAudio = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play"), caps: caps, quality: .auto, audioIndex: 2)
@@ -313,14 +321,14 @@ final class SharedPlaybackControlTests: XCTestCase {
         let rung = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "transcode"), caps: caps, quality: .p480)
         XCTAssertEqual(rung.request.height, 480); XCTAssertNotEqual(rung.request.copy, true); XCTAssertEqual(rung.rawQuality, .p480)
         var smuggled = direct.request; smuggled.copy = true
-        XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: try decision(method: "direct_play"), caps: caps, request: smuggled))
+        XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: direct.decision, caps: caps, request: smuggled))
         XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: try decision(), caps: caps, request: direct.request))
     }
 
     func testDirectStartPlaysTheBoundAliasWithoutAccountHeadersAndEndsThroughB() async throws {
         let context = try await context(), caps = Caps.snapshot().document
         let subject = SharedPlaybackSubject(context: context, title: "Shared", resumeMs: 0, watchSequence: 7)
-        let plan = try SharedPlaybackPlan.make(subject: subject, decision: try decision(method: "direct_play"), caps: caps, quality: .auto)
+        let plan = try SharedPlaybackPlan.make(subject: subject, decision: try directDecision(), caps: caps, quality: .auto)
         let url = "\(base)/direct?session=\(session)"
         var good: [String: Any] = ["presentation": "direct", "session_id": session, "url": url, "length": 9_007_199_254_740_991, "mime": "video/mp4"]
         var sent: Data?

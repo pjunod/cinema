@@ -169,6 +169,23 @@ async fn retarget_refuses_expired_or_revoked_demand_disable_and_newer_view() {
         assert_eq!(operation(&store,id,1_003).await["preparation_job_id"],before["preparation_job_id"]);
     }
 }
+fn fixture_schema_rows(connection: &rusqlite::Connection, query: &str) -> Vec<(String, String)> {
+    connection
+        .prepare(query)
+        .expect("fixture shape query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("fixture shape rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete fixture shape")
+}
+const MANAGED_SHAPE: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_managed_*' OR name GLOB 'subtitle_model_receipts*' OR tbl_name GLOB 'subtitle_managed_*' OR tbl_name GLOB 'subtitle_model_receipts*' OR name='background_job_required_resources') AND sql IS NOT NULL ORDER BY name";
+const TRANSLATION_SHAPE: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_translation_*' OR tbl_name GLOB 'subtitle_translation_*') AND sql IS NOT NULL ORDER BY name";
+fn canonical_fixture_rows(rows: Vec<(String, String)>) -> Vec<(String, String)> {
+    rows.into_iter()
+        .map(|(name, sql)| (name, sql.split_whitespace().collect::<Vec<_>>().join(" ")))
+        .collect()
+}
+
 #[tokio::test]
 async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receipt_rows() {
     let (dir, store, conn) = fixture();
@@ -185,64 +202,114 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
                 .starts_with("CREATE TRIGGER subtitle_translation_mutate ")
         })
         .expect("known legacy trigger");
-    conn.execute(
-        "INSERT INTO subtitle_model_receipts(node_id,model_id,receipt_json) VALUES('worker-a','small','{\"fixture\":true}')",
-        [],
-    ).expect("owned managed model receipt");
-    // v120/v121 changed the managed marker and resource view. A v117 fixture
-    // must restore their exact published v1 definitions before replaying both;
-    // retained operation, request, model-receipt and queue rows stay owned.
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .expect("current fixture checkpoint"),
+        121
+    );
+    let witness = rusqlite::Connection::open_in_memory().expect("published managed witness");
+    witness.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE VIEW background_job_required_resources AS SELECT 1;").expect("closed witness dependencies");
     let managed_v1 = include_str!("../src/store/subtitle_managed_schema.sql");
-    let managed_marker = managed_v1
-        .split("-- next statement")
-        .find(|sql| sql.contains("CREATE TABLE subtitle_managed_schema("))
-        .expect("published managed v1 marker DDL");
-    let managed_view = managed_v1
-        .split("-- next statement")
-        .find(|sql| {
-            sql.trim_start()
-                .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
+    witness
+        .execute_batch(managed_v1)
+        .expect("published managed v1");
+    let expected_v1 = fixture_schema_rows(&witness, MANAGED_SHAPE);
+    witness
+        .execute_batch(include_str!("../src/store/subtitle_translation.sql"))
+        .expect("published legacy translation");
+    let expected_legacy = canonical_fixture_rows(fixture_schema_rows(&witness, TRANSLATION_SHAPE));
+    witness
+        .execute_batch(include_str!(
+            "../src/store/subtitle_managed_resources_v2.sql"
+        ))
+        .expect("published managed v2");
+    witness
+        .execute_batch(include_str!(
+            "../src/store/subtitle_managed_resources_v3.sql"
+        ))
+        .expect("published managed v3");
+    let expected_v3 = fixture_schema_rows(&witness, MANAGED_SHAPE);
+    assert_eq!(fixture_schema_rows(&conn, MANAGED_SHAPE), expected_v3);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=3",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .expect("managed v3 marker"),
+        1
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM subtitle_managed_schema", [], |row| {
+            row.get::<_, i64>(0)
         })
-        .expect("published managed v1 resource view");
-    conn.execute_batch(&format!(
-        "SAVEPOINT historical_retarget_fixture;
-         DROP TRIGGER subtitle_translation_mutate;
-         DROP TRIGGER subtitle_translation_capture_continuity;
-         DROP TRIGGER subtitle_translation_retire_continuity;
-         DROP TRIGGER subtitle_translation_revoke_continuity;
-         DROP TABLE subtitle_translation_range_continuities;
-         ALTER TABLE subtitle_translation_demands DROP COLUMN continuity_id;
-         {legacy}
-         DROP VIEW background_job_required_resources;
-         DROP TABLE subtitle_managed_schema;
-         {managed_marker}
-         INSERT INTO subtitle_managed_schema VALUES(1,1);
-         {managed_view}
-         PRAGMA user_version=117;
-         RELEASE historical_retarget_fixture;"
-    ))
-    .expect("atomic exact historical fixture without discarding owned rows");
+        .expect("exact marker row"),
+        1
+    );
+    conn.execute(
+        "INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')",
+        [],
+    )
+    .expect("retained managed receipt");
+    let mut restore = Vec::new();
+    for sentinel in [
+        "CREATE TABLE subtitle_managed_schema(",
+        "CREATE VIEW IF NOT EXISTS background_job_required_resources",
+        "INSERT INTO subtitle_managed_schema ",
+    ] {
+        let blocks = managed_v1
+            .split("-- next statement")
+            .filter(|sql| sql.contains(sentinel))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            blocks.len(),
+            1,
+            "one published predecessor block for {sentinel}"
+        );
+        restore.push(blocks[0]);
+    }
+    conn.execute_batch("SAVEPOINT recognized_retarget_fixture; DROP VIEW background_job_required_resources; DROP TABLE subtitle_managed_schema;").expect("start exact owned fixture rewind");
+    conn.execute_batch(&restore.join(";\n"))
+        .expect("restore only published v1 view and marker");
+    conn.execute_batch("DROP TRIGGER subtitle_translation_mutate; DROP TRIGGER subtitle_translation_capture_continuity; DROP TRIGGER subtitle_translation_retire_continuity; DROP TRIGGER subtitle_translation_revoke_continuity; DROP TABLE subtitle_translation_range_continuities; ALTER TABLE subtitle_translation_demands DROP COLUMN continuity_id;")
+        .expect("downgrade fixture only");
+    conn.execute_batch(legacy).expect("published trigger");
+    assert_eq!(fixture_schema_rows(&conn, MANAGED_SHAPE), expected_v1);
+    assert_eq!(
+        conn.query_row(
+            "SELECT version FROM subtitle_managed_schema WHERE singleton=1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .expect("published v1 marker"),
+        1
+    );
+    assert_eq!(
+        canonical_fixture_rows(fixture_schema_rows(&conn, TRANSLATION_SHAPE)),
+        expected_legacy
+    );
+    conn.pragma_update(None, "user_version", 117)
+        .expect("published ordinal");
+    conn.execute_batch("RELEASE recognized_retarget_fixture;")
+        .expect("atomic published predecessor fixture");
     drop(conn);
     drop(store);
     let reopened = SqliteStore::open(&dir.path().join("store.db")).expect("explicit upgrade");
     assert_eq!(store_epoch(&reopened, &id).await, "1");
-    let upgraded = rusqlite::Connection::open(dir.path().join("store.db"))
-        .expect("upgraded fixture inspection");
+    let current =
+        rusqlite::Connection::open(dir.path().join("store.db")).expect("upgraded fixture");
+    assert_eq!(fixture_schema_rows(&current, MANAGED_SHAPE), expected_v3);
     assert_eq!(
-        upgraded
+        current
             .query_row(
                 "SELECT version FROM subtitle_managed_schema WHERE singleton=1",
                 [],
                 |row| row.get::<_, i64>(0)
             )
-            .expect("upgraded managed marker"),
+            .expect("upgraded v3 marker"),
         3
     );
-    assert_eq!(
-        upgraded.query_row("SELECT receipt_json FROM subtitle_model_receipts WHERE node_id='worker-a' AND model_id='small'", [], |row| row.get::<_, String>(0))
-            .expect("retained managed model receipt"),
-        r#"{"fixture":true}"#
-    );
+    assert_eq!(current.query_row("SELECT receipt_json FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'", [], |row| row.get::<_, String>(0)).expect("retained managed model receipt"), "{}");
     assert_eq!(
         reopened
             .mutate_subtitle_translation(request)

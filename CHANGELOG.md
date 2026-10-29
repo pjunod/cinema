@@ -126,6 +126,12 @@ bump may break compatibility and a **patch** bump never does.
 
 - Shared playback handoff and quality reopen accept the producer's bounded
   playlist start hint instead of returning 503 when playback resumes after zero.
+- Update the macOS source parser runtime to fix an abort in native exception
+  handling, preserving its deadline, memory, stack and capability limits.
+
+- Sharing-host setup reaps its helper before timeout or cancellation returns,
+  while retaining the helper's native user/IPC environment. The lifecycle
+  inventory now records the sharing-host and invitation owners and their tests.
 - Existing-text subtitle inference consumes verified caption artifacts without
   waiting for unrelated media readers; legacy extraction jobs remain fenced.
 - Progressive captions decode valid surround audio without treating FFmpeg

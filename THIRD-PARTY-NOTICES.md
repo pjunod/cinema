@@ -14,8 +14,8 @@ license notices are identified below. ffmpeg is invoked rather than linked
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 626 source-bearing crates in the root workspace · license fields
-verified 2026-10-19; the graph itself re-checked against `Cargo.lock`
+the work. 624 source-bearing crates in the root workspace · license fields
+verified 2026-10-29; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
 resolution, and on 2026-09-24, when `ring` became the only rustls provider
@@ -29,7 +29,9 @@ the counts and the full list to one another. The graph and declared SPDX
 expressions were rechecked with pinned, locked `cargo metadata` on 2026-10-12
 for the independent support service dependencies. The desktop controller and
 Linux GTK tray dependencies were rechecked against the combined locked
-workspace metadata on 2026-10-19.
+workspace metadata on 2026-10-19. The Wasmtime 50.0.0 / Cranelift
+0.137.0 graph and declared license fields were rechecked against locked
+workspace metadata on 2026-10-29.
 
 ---
 
@@ -162,7 +164,7 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-626 source-bearing crates resolve into a plurx build, excluding the ten
+624 source-bearing crates resolve into a plurx build, excluding the ten
 first-party crates and the vendored ones above (`s3-simple` resolves only in
 the fork's optional backup graph, never in this one). The independently built support service adds five MPL-2.0 libraries for
 passkey validation; the other selected license terms are permissive:
@@ -184,7 +186,7 @@ binding crates and are not bundled in `plurx-desktop`. See the
 | `MIT/Apache-2.0` | 22 |
 | `Unicode-3.0` | 18 |
 | `Apache-2.0` | 12 |
-| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 12 |
+| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 10 |
 | `MPL-2.0` | 5 |
 | `Unlicense OR MIT` | 5 |
 | `Unlicense/MIT` | 4 |
@@ -250,7 +252,7 @@ workspaces ships in any artifact, so they are out of scope for distribution,
 but they are not covered by the table above.
 
 <details>
-<summary>Full crate list (626)</summary>
+<summary>Full crate list (624)</summary>
 
 | Crate | Version | License |
 |---|---|---|
@@ -351,19 +353,19 @@ but they are not covered by the table above.
 | `cpp_demangle` | 0.5.1 | MIT OR Apache-2.0 |
 | `cpufeatures` | 0.2.17 | MIT OR Apache-2.0 |
 | `cpufeatures` | 0.3.0 | MIT OR Apache-2.0 |
-| `cranelift-assembler-x64` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-assembler-x64-meta` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-bforest` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-bitset` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-codegen` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-codegen-meta` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-codegen-shared` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-control` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-entity` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-frontend` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-isle` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-native` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-srcgen` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-assembler-x64` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-assembler-x64-meta` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-bforest` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-bitset` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-codegen` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-codegen-meta` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-codegen-shared` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-control` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-entity` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-frontend` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-isle` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-native` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-srcgen` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
 | `crc` | 3.4.0 | MIT OR Apache-2.0 |
 | `crc-catalog` | 2.5.0 | MIT OR Apache-2.0 |
 | `crc32fast` | 1.5.0 | MIT OR Apache-2.0 |
@@ -612,8 +614,8 @@ but they are not covered by the table above.
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 |
 | `proc-macro-crate` | 3.5.0 | MIT OR Apache-2.0 |
 | `proc-macro2` | 1.0.107 | MIT OR Apache-2.0 |
-| `pulley-interpreter` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `pulley-macros` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `pulley-interpreter` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `pulley-macros` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
 | `pulp` | 0.22.3 | MIT |
 | `pulp-wasm-simd-flag` | 0.1.1 | MIT |
 | `qrcode` | 0.14.1 | MIT OR Apache-2.0 |
@@ -714,7 +716,7 @@ but they are not covered by the table above.
 | `strum_macros` | 0.28.0 | MIT |
 | `subtle` | 2.6.1 | BSD-3-Clause |
 | `syn` | 2.0.119 | MIT OR Apache-2.0 |
-| `syn` | 3.0.3 | MIT OR Apache-2.0 |
+| `syn` | 3.0.9 | MIT OR Apache-2.0 |
 | `sync_wrapper` | 1.0.2 | Apache-2.0 |
 | `synstructure` | 0.13.2 | MIT |
 | `sysctl` | 0.6.0 | MIT |
@@ -801,22 +803,20 @@ but they are not covered by the table above.
 | `wasm-bindgen-macro` | 0.2.126 | MIT OR Apache-2.0 |
 | `wasm-bindgen-macro-support` | 0.2.126 | MIT OR Apache-2.0 |
 | `wasm-bindgen-shared` | 0.2.126 | MIT OR Apache-2.0 |
-| `wasm-encoder` | 0.258.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `wasm-encoder` | 0.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `wasm-streams` | 0.4.2 | MIT OR Apache-2.0 |
-| `wasmparser` | 0.258.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `wasmparser` | 0.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
-| `wasmprinter` | 0.258.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
-| `wasmtime` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-environ` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-component-util` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-core` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-cranelift` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-fiber` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-jit-debug` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-jit-icache-coherence` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-unwinder` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-versioned-export-macros` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmprinter` | 0.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| `wasmtime` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-environ` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-component-util` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-core` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-cranelift` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-fiber` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-jit-debug` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-jit-icache-coherence` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-unwinder` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-versioned-export-macros` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
 | `wast` | 261.0.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `wat` | 1.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `web-sys` | 0.3.103 | MIT OR Apache-2.0 |

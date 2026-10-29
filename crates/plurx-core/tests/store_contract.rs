@@ -610,12 +610,6 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "probe_can_preempt_title",
     // Progressive translation's actual source-bind/publication/Stop/read-lease
     // contract below exercises these on every backend, including three voters.
-    // Text publication/receipt fences and read-only grant projection are
-    // exercised by subtitle_text_contract_preserves_receipts_and_immutable_cues.
-    "publish_text_translation_slice",
-    "read_text_translation_cues",
-    "text_translation_request_receipt",
-    "read_shared_captions",
     "maintain_translation_cache",
     "write_translation_settings",
     "read_subtitle_translation",
@@ -623,6 +617,15 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "mutate_subtitle_translation",
     "bind_translation_source",
     "publish_translation_segment",
+    // text_caption_dispatch_refuses_unowned_work_and_reads_absent_state checks
+    // typed dispatch, absent state and invalid-input refusal on every backend.
+    // subtitle_text_contract_preserves_receipts_and_immutable_cues additionally
+    // exercises positive publication/receipt fences and read-only grant
+    // projection through for_each_backend, including replicated storage.
+    "publish_text_translation_slice",
+    "read_text_translation_cues",
+    "text_translation_request_receipt",
+    "read_shared_captions",
     // Managed configuration CAS and node-bounded model publication/observation
     // run on both backends in the managed_subtitle_configuration_* and
     // managed_subtitle_model_operations_* contracts in background_jobs.rs.
@@ -12783,6 +12786,9 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
         Vec<String>,
         Vec<String>,
         Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
     ) {
         async fn rows(client: &Client, sql: &str) -> Vec<String> {
             client
@@ -12798,7 +12804,10 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
          rows(client, "SELECT json_array(node_id,model_id,profile_id,receipt_json) AS payload FROM subtitle_translation_capabilities ORDER BY node_id,model_id,profile_id").await,
          rows(client, "SELECT json_array(node_id,model_id,receipt_json) AS payload FROM subtitle_model_receipts ORDER BY node_id,model_id").await,
          rows(client, "SELECT json_array(id,kind,payload_version,payload_json,dedupe_key,priority,state,target_node_id,owner_node_id,owner_boot_id,claim_id,fence,revision,lease_expires_ms,failure_policy,failed_attempts,attempt_limit,retry_deadline_ms,attempt_errors,index_diagnostic_json,yield_count,abandoned_count,not_before_ms,checkpoint_json,result_ref,last_error_code,created_at_ms,updated_at_ms) AS payload FROM background_jobs ORDER BY id").await,
-         rows(client, "SELECT json_array('translation',singleton,version) AS payload FROM subtitle_translation_schema UNION ALL SELECT json_array('managed',singleton,version) AS payload FROM subtitle_managed_schema ORDER BY payload").await)
+         rows(client, "SELECT json_array('translation',singleton,version) AS payload FROM subtitle_translation_schema UNION ALL SELECT json_array('managed',singleton,version) AS payload FROM subtitle_managed_schema UNION ALL SELECT json_array('text',singleton,version) AS payload FROM subtitle_text_translation_schema UNION ALL SELECT json_array('caption',singleton,version) AS payload FROM shared_caption_schema ORDER BY payload").await,
+         rows(client, "SELECT json_array(job_id,recipe_digest,cue_index,input_sha256,start_ms,end_ms,body,created_at_ms) AS payload FROM subtitle_text_translation_cues ORDER BY job_id,recipe_digest,cue_index").await,
+         rows(client, "SELECT json_array(id,grant_id,principal,file_id,asset_id,manifest_revision,expires_at_ms,created_at_ms) AS payload FROM shared_caption_read_leases ORDER BY id").await,
+         rows(client, "SELECT json_array(job_id,fence,demand_id,continuity_id) AS payload FROM subtitle_translation_range_continuities ORDER BY job_id,fence,demand_id").await)
     }
     for scenario in [
         "translation-job",
@@ -12807,12 +12816,34 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
         "managed-data",
         "managed-marker",
         "managed-shape",
+        "translation-marker",
+        "text-marker",
+        "caption-marker",
+        "extra-managed-object",
+        "unowned-text-index",
+        "unowned-managed-index",
+        "text-shape",
+        "caption-shape",
+        "text-cue",
     ] {
         let (inject, restore) = match scenario {
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,3)".to_owned()),
+            "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
+            "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
+            "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
+            "extra-managed-object" => ("CREATE TABLE subtitle_managed_unknown(value TEXT)".to_owned(), "DROP TABLE subtitle_managed_unknown".to_owned()),
+            "unowned-text-index" => ("CREATE INDEX unexpected_text_fixture_index ON subtitle_text_translation_cues(cue_index)".to_owned(), "DROP INDEX unexpected_text_fixture_index".to_owned()),
+            "unowned-managed-index" => ("CREATE INDEX unexpected_managed_fixture_index ON subtitle_model_receipts(model_id)".to_owned(), "DROP INDEX unexpected_managed_fixture_index".to_owned()),
+            "text-cue" => ("INSERT INTO subtitle_text_translation_cues VALUES('fixture-tail-data',printf('%064d',0),0,printf('%064d',0),0,1,'{}',0)".to_owned(), "DELETE FROM subtitle_text_translation_cues WHERE job_id='fixture-tail-data'".to_owned()),
+            "text-shape" | "caption-shape" => {
+                let index = if scenario == "text-shape" {"subtitle_text_translation_recipe"} else {"shared_caption_read_expiry"};
+                let mut rows = client.query_consistent("SELECT sql FROM sqlite_master WHERE name=$1", hiqlite::params!(index)).await.expect("published tail index");
+                assert_eq!(rows.len(), 1);
+                (format!("DROP INDEX {index}"), rows[0].get::<String>("sql"))
+            }
             "translation-shape" | "managed-shape" => {
                 let trigger = if scenario == "translation-shape" {"subtitle_translation_source_changed"} else {"subtitle_managed_source_changed"};
                 let mut rows = client.query_consistent("SELECT sql FROM sqlite_master WHERE name=$1", hiqlite::params!(trigger)).await.expect("original trigger definition");
@@ -12821,8 +12852,20 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             }
             _ => unreachable!(),
         };
+        let mut injections = vec![(inject, hiqlite::params!())];
+        let mut restorations = vec![(restore, hiqlite::params!())];
+        if scenario == "text-cue" {
+            // A real parent satisfies FK checks. Its unrelated cancelled kind
+            // cannot satisfy any managed accepted-work guard, isolating the
+            // retained cue check rather than relying on a different refusal.
+            injections.insert(0, ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-tail-data','library_scan',1,'{}','fixture-tail-data',0,'cancelled',0,0,0,'fixture-node')".to_owned(), hiqlite::params!()));
+            restorations.push((
+                "DELETE FROM background_jobs WHERE id='fixture-tail-data'".to_owned(),
+                hiqlite::params!(),
+            ));
+        }
         client
-            .txn([(inject, hiqlite::params!())])
+            .txn(injections)
             .await
             .expect("inject only owned refusal fixture")
             .into_iter()
@@ -12842,13 +12885,131 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "{scenario} refusal preserves complete DDL, schema marker and owned payloads"
         );
         client
-            .txn([(restore, hiqlite::params!())])
+            .txn(restorations)
             .await
             .expect("restore only injected refusal fixture")
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .expect("fixture restored");
     }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exactly() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("current rewind client");
+    let telemetry = cluster._root.path().join("current-rewind.db");
+    let store = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current replicated extensions");
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("empty owned fixture");
+    store
+        .put_setting("fixture.subtitle-tail-unrelated", "survives")
+        .await
+        .expect("unrelated retained row");
+    let queries = [
+        queue_fixture::CURRENT_TAIL_FIXTURE_SHAPE_SQL,
+        queue_fixture::TRANSLATION_FIXTURE_SHAPE_SQL,
+        queue_fixture::MANAGED_FIXTURE_SHAPE_SQL,
+    ];
+    let mut before = Vec::new();
+    for query in queries {
+        before.push(replicated_fixture_shape(&client, query).await);
+    }
+    drop(store);
+    rewind_empty_managed_subtitle_extension(&client).await;
+    for query in queries {
+        let rows = replicated_fixture_shape(&client, query).await;
+        if query == queue_fixture::MANAGED_FIXTURE_SHAPE_SQL {
+            assert_eq!(
+                rows.len(),
+                1,
+                "only the restored predecessor resource view remains"
+            );
+            assert_eq!(rows[0].0, "background_job_required_resources");
+        } else {
+            assert!(rows.is_empty(), "complete empty extension removed");
+        }
+    }
+    let reopened = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("ordinary bootstrap restores published current extensions");
+    assert_eq!(
+        reopened
+            .get_setting("fixture.subtitle-tail-unrelated")
+            .await
+            .expect("unrelated row"),
+        Some("survives".into())
+    );
+    for (query, expected) in queries.into_iter().zip(before) {
+        assert_eq!(
+            replicated_fixture_shape(&client, query).await,
+            expected,
+            "bootstrap exact published shape"
+        );
+    }
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 3).await;
+    require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
+    for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
+        require_replicated_fixture_marker(&client, marker, 1).await;
+    }
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM pragma_foreign_key_check",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("restored FK inventory");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value, 0,
+        "no dangling child schema/data after bootstrap"
+    );
+    assert_unactivated_contract_baseline(&client).await;
+}
+
+/// Exact marker identity and total cardinality; a matching row may not hide
+/// an extra row installed with disabled CHECK constraints in an owned fixture.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn require_replicated_fixture_marker(client: &Client, table: &str, version: i64) -> i64 {
+    let mut rows = client.query_consistent(
+        format!("SELECT count(*) AS total,COALESCE(sum(singleton=1 AND version={version}),0) AS correct FROM {table}"),
+        hiqlite::params!(),
+    ).await.expect("exact replicated fixture marker inventory");
+    assert_eq!(rows.len(), 1, "marker inventory: {table}");
+    let total = rows[0].get::<i64>("total");
+    let correct = rows[0].get::<i64>("correct");
+    assert_eq!(
+        (total, correct),
+        (1, 1),
+        "one exact published marker: {table}"
+    );
+    correct
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
+    client
+        .query_consistent(sql.to_owned(), hiqlite::params!())
+        .await
+        .expect("complete replicated extension shape")
+        .iter_mut()
+        .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+        .collect()
 }
 
 /// A historical queue fixture cannot retain half of the independent managed
@@ -12868,52 +13029,61 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
             .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
             .collect()
     }
-    async fn extension_counts(client: &Client, shape: &[(String, String)]) -> Vec<(String, i64)> {
-        let mut counts = Vec::new();
-        for (name, sql) in shape {
-            if sql.starts_with("CREATE TABLE") {
-                let rows: Vec<I64Value> = client
-                    .query_consistent_map(
-                        format!("SELECT count(*) AS value FROM {name}"),
-                        hiqlite::params!(),
-                    )
-                    .await
-                    .expect("extension data inventory");
-                assert_eq!(rows.len(), 1);
-                counts.push((name.clone(), rows[0].value));
-            }
-        }
-        counts
-    }
-    let caption_shape = extension_shape(client, queue_fixture::CAPTION_FIXTURE_SHAPE_SQL).await;
-    assert_eq!(
-        caption_shape,
-        queue_fixture::caption_fixture_shape(),
-        "exact caption shape required before inventory"
-    );
-    let caption_counts = extension_counts(client, &caption_shape).await;
-    let text_jobs: Vec<I64Value> = client
-        .query_consistent_map(
-            "SELECT count(*) AS value FROM background_jobs WHERE kind IN ('subtitle_text_translate','subtitle_text_translate_artifact')",
-            hiqlite::params!(),
-        )
-        .await
-        .expect("accepted text translation work");
-    assert_eq!(text_jobs.len(), 1);
-    let caption_drops = queue_fixture::validated_empty_caption_rewind(
-        &caption_shape,
-        &caption_counts,
-        text_jobs[0].value,
-    );
     let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
     assert_eq!(
         handoff_shape,
         queue_fixture::handoff_fixture_shape(),
         "exact handoff shape required before inventory"
     );
-    let handoff_counts = extension_counts(client, &handoff_shape).await;
+    require_replicated_fixture_marker(client, "playback_handoffs_schema", 1).await;
+    let mut handoff_counts = Vec::new();
+    for (name, sql) in &handoff_shape {
+        if sql.starts_with("CREATE TABLE") {
+            let rows: Vec<I64Value> = client
+                .query_consistent_map(
+                    format!("SELECT count(*) AS value FROM {name}"),
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("complete handoff data inventory");
+            assert_eq!(rows.len(), 1);
+            handoff_counts.push((name.clone(), rows[0].value));
+        }
+    }
     let handoff_drops =
         queue_fixture::validated_empty_handoff_rewind(&handoff_shape, &handoff_counts);
+    let tail_shape = extension_shape(client, queue_fixture::CURRENT_TAIL_FIXTURE_SHAPE_SQL).await;
+    assert_eq!(
+        tail_shape,
+        queue_fixture::current_tail_fixture_shape(),
+        "exact current replicated tail"
+    );
+    let mut tail_counts = Vec::new();
+    for table in queue_fixture::CURRENT_TAIL_FIXTURE_TABLES {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                format!("SELECT count(*) AS value FROM {table}"),
+                hiqlite::params!(),
+            )
+            .await
+            .expect("complete tail data inventory");
+        assert_eq!(rows.len(), 1);
+        tail_counts.push((table.to_owned(), rows[0].value));
+    }
+    let mut tail_markers = Vec::new();
+    for table in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
+        let correct = require_replicated_fixture_marker(client, table, 1).await;
+        tail_markers.push((table.to_owned(), correct));
+    }
+    let tail_drops = queue_fixture::validated_empty_current_tail_rewind(
+        &tail_shape,
+        &tail_counts,
+        &tail_markers,
+    );
+    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 1).await;
+    require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
+    require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 3).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
@@ -12981,7 +13151,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     );
     let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
     let managed_drops =
-        queue_fixture::validated_empty_managed_rewind(&managed_shape, 2, managed_data_count);
+        queue_fixture::validated_empty_managed_rewind(&managed_shape, 3, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -13000,8 +13170,8 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     };
     assert_eq!(
         shape,
-        queue_fixture::translation_fixture_shape(),
-        "only exact current translation fixtures may be rewound"
+        queue_fixture::current_translation_fixture_shape(),
+        "only exact current generation-2 translation fixtures may be rewound"
     );
     let mut counts = Vec::new();
     for (name, sql) in &shape {
@@ -13021,7 +13191,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let mut statements: Vec<_> = caption_drops
+    let mut statements: Vec<_> = tail_drops
         .into_iter()
         .chain(handoff_drops)
         .chain(title_drops)
@@ -13586,7 +13756,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 1",
+             WHERE singleton = 1 AND version = 3",
             1,
         ),
         (
@@ -13612,6 +13782,12 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 3).await;
+        assert_eq!(
+            replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
+            queue_fixture::managed_fixture_shape(3),
+            "{round}: exact current managed v3 view, marker and guards",
+        );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
                 "SELECT sql AS value FROM sqlite_master \

@@ -1204,7 +1204,11 @@
                 ..Default::default()
             },
         ).await;
-        store.put_setting(keys::HLS_READRATE, "0").await.expect("readrate");
+        // Retention is optional: a busy capture refuses rather than slowing
+        // ordinary publication. Pace this positive fixture without the default
+        // 90-second initial burst, just like d3_copy_session below.
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced retention");
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("retained allowance");
         // Rolling retention is a Developer switch, off by default (D3).
         store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
@@ -1231,9 +1235,40 @@
                 if let Some(artifact) = manager.vod.acquire_rolling_output(production) {
                     break artifact;
                 }
+                assert!(
+                    !first.failed.load(Acquire),
+                    "copy failed before retained completion: {:?}",
+                    first.failure_reason()
+                );
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-        }).await.expect("normal child and reader completion publish retained inventory");
+        }).await;
+        let artifact = match artifact {
+            Ok(artifact) => artifact,
+            Err(elapsed) => {
+                // Diagnose only after the unchanged completion deadline. Do
+                // not poll/reap the child or wait indefinitely on its owners.
+                let actor = tokio::time::timeout(
+                    Duration::from_secs(1), first.control.snapshot(),
+                ).await;
+                let child = first.child.try_lock()
+                    .map_err(|_| "child slot locked")
+                    .map(|child| child.as_ref().map(|child| (
+                        child.producer_attempt, child.id(), child.terminal_exit_snapshot(),
+                    )));
+                let collection = first.rolling_collection.as_ref()
+                    .map(|collection| (collection.abandoned(), collection.directory_for_test()));
+                let failed = first.failed.load(Acquire);
+                let failure = failed.then(|| first.failure_reason());
+                panic!(
+                    "normal child and reader completion publish retained inventory: {elapsed:?}; \
+                     failed={failed}; failure={failure:?}; actor={actor:?}; \
+                     child(attempt,pid,exit)={child:?}; \
+                     collection(abandoned,directory)={collection:?}; retained={:?}",
+                    manager.vod.retained_snapshot(),
+                );
+            }
+        };
         let rates = artifact.bandwidth().expect("complete mux rates");
         assert!(rates.average_bps > 0 && rates.peak_bps >= rates.average_bps);
         let next = manager.start_copy(file_id, 0.0, None, options, "owner", "second")
@@ -1375,7 +1410,10 @@
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
         // Rolling retention is a Developer switch, off by default (D3).
         store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
-        store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
+        // Obtain the complete retained fixture before testing its revocation;
+        // optional capture contention belongs to the dedicated busy-owner test.
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced retention");
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
             work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu));

@@ -1,4 +1,4 @@
-//! Bounded ownership for short-lived media inspection processes.
+//! Bounded ownership for short-lived helper processes.
 //!
 //! Startup probes are evidence, not services. They receive a small explicit
 //! environment, bounded output and wall time, and one owner that kills and
@@ -138,7 +138,15 @@ pub async fn output_command(
     max_output_bytes: usize,
     work: super::ChildWork,
 ) -> io::Result<Output> {
-    output_command_environment(command, wall_time, max_output_bytes, work, true, None).await
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Service,
+        None,
+    )
+    .await
 }
 
 /// Bounded CPU child with held descriptors and an LC_ALL-only environment.
@@ -155,7 +163,35 @@ pub async fn output_command_clean_env(
             "managed child executable must be absolute",
         ));
     }
-    output_command_environment(command, wall_time, max_output_bytes, work, false, None).await
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Clean,
+        None,
+    )
+    .await
+}
+
+/// Native host tools may require their existing user/IPC environment. Keep
+/// that environment intact while using the same bounded process-group owner.
+/// Inspection probes must continue using the service or clean environment APIs.
+pub async fn output_command_inherited_env(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+) -> io::Result<Output> {
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Inherited,
+        None,
+    )
+    .await
 }
 
 /// A clean-environment child whose stderr retains only selected complete lines.
@@ -180,10 +216,17 @@ pub async fn output_command_clean_env_selected_stderr(
         wall_time,
         max_output_bytes,
         work,
-        false,
+        Environment::Clean,
         Some(select),
     )
     .await
+}
+
+#[derive(Clone, Copy)]
+enum Environment {
+    Service,
+    Clean,
+    Inherited,
 }
 
 async fn output_command_environment(
@@ -191,19 +234,20 @@ async fn output_command_environment(
     wall_time: Duration,
     max_output_bytes: usize,
     work: super::ChildWork,
-    inherit_service_environment: bool,
+    environment: Environment,
     stderr_selector: Option<fn(&[u8]) -> bool>,
 ) -> io::Result<Output> {
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
+    if !matches!(environment, Environment::Inherited) {
+        command.env_clear().env("LC_ALL", "C");
+    }
     command
-        .env_clear()
-        .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    if inherit_service_environment {
+    if matches!(environment, Environment::Service) {
         for name in [
             "PATH",
             "LD_LIBRARY_PATH",
@@ -486,6 +530,33 @@ mod tests {
         .expect("bounded output");
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_helper_environment_preservation_is_explicit() {
+        for inherited in [false, true] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "printf %s \"$PLURX_NATIVE_HELPER_FIXTURE\""])
+                .env("PLURX_NATIVE_HELPER_FIXTURE", "native-host-value");
+            let output = if inherited {
+                output_command_inherited_env(&mut command, Duration::from_secs(5), 1024, TEST_WORK)
+                    .await
+            } else {
+                output_command(&mut command, Duration::from_secs(5), 1024, TEST_WORK).await
+            }
+            .expect("bounded native helper");
+            assert!(output.status.success());
+            assert_eq!(
+                output.stdout,
+                if inherited {
+                    b"native-host-value".as_slice()
+                } else {
+                    b"".as_slice()
+                }
+            );
+        }
     }
 
     #[cfg(unix)]

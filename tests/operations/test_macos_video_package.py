@@ -31,7 +31,7 @@ class MacosVideoPackageCase(unittest.TestCase):
         self.artifact = self.package / "bin/plurx-source-parser.wasm"
         self.artifact.write_bytes(b"\0asm\1\0\0\0")
         self.manifest = {"source_sha256": TOOL.SOURCE_SHA256, "source_commit": TOOL.COMMIT,
-                         "parser_abi": "plurx-source-wasi-p1-v1-wasmtime-49.0.2",
+                         "parser_abi": "plurx-source-wasi-p1-v1-wasmtime-50.0.0",
                          "module_sha256": hashlib.sha256(self.artifact.read_bytes()).hexdigest(), "module_bytes": 8}
         self.write_manifest()
 

@@ -126,10 +126,15 @@ async fn k06_clock_only_socket_denies_application_and_transfers_existing_keepali
         stream.read_exact(&mut body).await.expect("body");
         status
     }
-    let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve");
+    let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve");
     let address = reservation.local_addr().expect("address");
-    drop(reservation);
-    let owner = Arc::new(StartupObservationHttp::new(address));
+    let owner = Arc::new(StartupObservationHttp::from_listener(reservation).expect("owned socket"));
+    assert!(
+        tokio::net::TcpListener::bind(address).await.is_err(),
+        "the same listener stays reserved before startup consumes it"
+    );
     owner
         .start(
             plurx_core::cluster::membership::MembershipManager::unavailable(),
@@ -206,10 +211,15 @@ async fn k06_clock_only_socket_denies_application_and_transfers_existing_keepali
 #[tokio::test]
 async fn pending_socket_answers_starting_not_not_found() {
     use axum::http::{header, Request, StatusCode};
-    let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve");
+    let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve");
     let address = reservation.local_addr().expect("address");
-    drop(reservation);
-    let owner = Arc::new(StartupObservationHttp::new(address));
+    let owner = Arc::new(StartupObservationHttp::from_listener(reservation).expect("owned socket"));
+    assert!(
+        tokio::net::TcpListener::bind(address).await.is_err(),
+        "the same listener stays reserved before startup consumes it"
+    );
     owner
         .start(
             plurx_core::cluster::membership::MembershipManager::unavailable(),
@@ -3040,11 +3050,12 @@ fn split_children_log_under_their_parent_target() {
                 let call = format!("tracing::{level}!(");
                 for (at, _) in source.match_indices(&call) {
                     let arguments = source[at + call.len()..].trim_start();
-                    // These diagnostic channels are deliberately separate from
+                    // Three diagnostic channels are deliberately separate from
                     // their parent target so an operator can enable them
                     // alone: the hashed retained-output reuse facts
                     // (CONTINUOUS-QUALITY-BUILD) and the typed Auto
-                    // preparation outcomes (2ed23494f). Each is admitted
+                    // preparation outcomes (2ed23494f), and source-fenced FEL
+                    // qualification (681d628f6d). Each is admitted
                     // only in the files that own it, and still requires an
                     // explicit target, never a child default.
                     let relative = path.strip_prefix(&src).expect("split child under src");

@@ -1733,18 +1733,17 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS dv_title_jobs_schema",
             // v115: the same strict empty-extension rewind removes handoffs.
             "CREATE TABLE IF NOT EXISTS playback_handoffs_schema",
-            // v116/v117: strict empty-caption rewind removes both extensions.
+            // v116-v119: the guarded current tail removes empty text cues and
+            // caption leases first; the exact translation drop plan removes
+            // the replacement trigger and continuity children before demands.
             "CREATE TABLE subtitle_text_translation_schema",
             "CREATE TABLE shared_caption_schema",
-            // v118/v119: the complete translation rewind removes replacement
-            // triggers and continuity tables before replaying their migrations.
             "DROP TRIGGER subtitle_translation_mutate",
-            "CREATE TABLE subtitle_translation_range_continuities",
-            // v120: managed rewind recognizes the exact v2 view/marker before
-            // removing the empty extension; v111 reconstructs its predecessor.
+            "ADD COLUMN continuity_id",
+            // v120/v121: managed rewind recognizes the exact coupled v120/v2
+            // or v121/v3 view/marker before removing the empty extension;
+            // accepted artifact work still refuses and v111 reconstructs v1.
             "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2))",
-            // v121: exact v3 shape/marker and empty accepted-work inventory
-            // share the same managed rewind before v111 reconstructs v1.
             "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=3))",
         ];
 

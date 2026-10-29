@@ -1,3 +1,24 @@
+# Latest main5ac integration source audit (2026-10-29; 460 Rust files):
+# exact counts are 1029 namespaced tasks, 81 method spawns, 1917 timers,
+# 312 Commands, 837 launch-shaped methods, 360 lifecycle methods, 74 UFCS
+# lifecycle sites and 117 kill-on-drop constructors. Roots, patterns, row IDs,
+# exact equality and all forbidden zeroes remain unchanged.
+# Native fixture stress replaces the unbounded fork loop with four joined
+# workers and 300 barrier rounds: Builder.spawn adds one method site, five
+# Barrier.wait calls add lifecycle-shaped observations, and one additional
+# Command.status shape is an owned, checked fork/exec. Its removed namespaced
+# thread spawn is balanced by sharing_host's joined cancellation-test task.
+# sharing_host now uses the existing bounded inherited-environment child owner;
+# its direct wait/kill and kill-on-drop sites disappear. Three awaited fixture
+# timers replace its old production timeout site (net +2). The announced PID's
+# libc::kill(pid,0) is a post-settlement existence check, never a signal.
+# One additional transcode timer bounds failure diagnostics after the original
+# retention deadline; it neither extends success nor reaps a child. The new
+# bounded-process Command constructor is a test of inherited environment.
+# Existing lifecycle fixture sites also require raw-symbol correspondence:
+# DVR adds one always-ready ServingAuthority; diagnostic route setup adds two
+# publication_ready_at_ms fields and one blocked sentinel. These are test-only
+# authority observations, not new publication or serving permission.
 # Main10ef metadata integration (2026-10-29): retain both parent ownership
 # audits. Relative to main859, the incoming bounded-pipe tests add two tasks,
 # two awaited timers and three Command constructors; all parent repair sites
@@ -90,6 +111,12 @@
 # 307 Commands, 821 launch shapes, 355 lifecycle methods, 73 UFCS lifecycle
 # sites. Module roots, patterns, exact equality and forbidden zeroes unchanged.
 
+# Integration review (2026-10-29): preserve both reviewed owner sets below.
+# Relative to the native-fixture source: +2 joined selected-stderr test tasks,
+# +2 awaited test bounds, +3 bounded test Command constructors and +1 HTTP
+# status projection. Exact combined counts are 1029/1910/308/822; all other
+# reviewed counts, scan patterns, roots and forbidden zeroes are unchanged.
+
 # Subtitle repair ownership review (issue #1329, 2026-10-29;
 # reviewed corrective source 9996d26f4, current tree c4e32f291):
 # +2 namespaced tasks are cfg(test) bounded.rs duplex-pipe writers in
@@ -115,26 +142,42 @@
 # launch-shaped 820->821. Patterns, scan roots, equality checks and all other
 # counts/forbidden-shape zeroes are unchanged. Source review is not execution.
 
-# Private sharing setup/network ownership review (2026-10-28; main 10f45ae5f):
-# Exact sharing-only deltas from 66a33d723: +3 namespaced tasks, +4 timers,
-# +1 Command, +9 launch-shaped status observations, +2 child lifecycle calls
-# and +1 kill-on-drop construction. No patterns, roots, equality checks or
-# forbidden-shape zeroes change.
-# Two startup tasks run the node-local host/network maintenance loops with
-# the existing shutdown token, observed between maintenance iterations.
-# One invitation issuance task survives a dropped HTTP receiver; it
-# bounds issue_inner at 22s, records durable abandonment on failed delivery,
-# cancels Cinema authority and invokes the persisted provider cleanup owner.
-# These are not rolling-media producers; no join/reap claim is added here.
-# Host setup owns one registered ChildWork::background command, null stdin/
-# stderr and capped stdout, with an 8s timeout and kill_on_drop. Normal
-# completion awaits wait; the explicit error path awaits kill. Timeout/drop
-# kill is not a confirmed-reap receipt. The other host timer is its poll;
-# network timers bound issuance and the 30s cleanup observation interval.
-# All nine new launch-shaped matches are HTTP or domain .status() reads,
-# not nine process launches. The two lifecycle matches are this child's
-# wait/kill. Existing provider HTTPS requests have finite connect/request
-# bounds; cleanup intent remains journal-owned after requester cancellation.
+# Native fixture ownership review (2026-10-29): four test-only forkers keep
+# all 300 immediate fixture executions, with at most 1200 checked child
+# attempts. Each round drains child outcomes; stop/barrier release joins the
+# workers after fixture failure, and partial creation drops unarmed channels.
+# A bounded async-signal-safe pre_exec poll forces the inheritance window.
+# Replacing namespaced thread::spawn with Builder.spawn gives -1 namespaced
+# task spelling and +1 method/broad launch spelling; no new producer owner.
+# Five new .wait() matches are Barrier synchronization, not child lifecycle.
+# One timer diagnoses an already-failed retained-copy completion after its
+# unchanged 30s bound; it never reaps/signals a child or permits late success.
+# Patterns, roots, equality checks and forbidden zeroes remain unchanged.
+
+# Sharing-host and invitation ownership review (2026-10-28):
+# main.rs starts sharing_host::run and sharing_network::run with the existing
+# BackgroundLoopGuard token. Their polling loops observe cancellation; the
+# daemon does not retain/join these background handles, so this is cooperative
+# cancellation rather than a joined daemon-shutdown receipt.
+# sharing_network::issue retains its state and persisted invitation job while
+# its spawned owner delivers an oneshot outcome. Its 22s issue timeout does not
+# bound subsequent abandonment/revocation cleanup; the periodic cleanup owner
+# polls every 30s. These are node-local invitation owners, not rolling producers.
+# sharing_host::command now delegates its eight-second, LIMIT+1 capture to the
+# existing bounded process-group owner. Native user/IPC environment is preserved
+# explicitly; normal exit, timeout and cooperative cancellation settle the child
+# and pipe readers before this directly awaited helper returns. Dropping an
+# unrelated caller still uses the bounded owner's best-effort Drop backstop.
+# This removes the unawaited timeout/drop collection path and the duplicate
+# direct wait/kill/kill_on_drop sites; existing shared-owner counts remain.
+# New regression owners: one joined cancellation driver, three bounded fixture
+# waits/polls, and one shell constructor testing explicit environment retention.
+# One libc::kill(pid, 0) observes only the exact fixture PID to prove it is reaped;
+# it sends no signal and introduces no process owner. Nine .status() projections
+# (seven sharing-host, two network HTTP response reads) launch no child/task.
+# Net measured additions: +4 namespaced tasks, +6 timers, +2 constructors,
+# +9 launch-shaped status reads and +1 free lifecycle observation. Patterns,
+# scanned roots, exact equality, and forbidden-shape zeroes stay unchanged.
 
 # Live TV upload regression ownership review (PR #1312, 2026-10-28;
 # Rust source 9c5aa95df): +2 namespaced timers are the awaited five-second
@@ -1578,7 +1621,7 @@ pattern = "ServingAuthority"
 # real `ServingFence`, and `test_manager_with_system`'s always-ready argument
 # in its new position.
 # Measured on the merge with main at 36: 36 + (-9) = 27.
-expected_occurrences = 27
+expected_occurrences = 28
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1864,7 +1907,7 @@ pattern = "publication_ready_at_ms"
 # sentinel. None moves a shipped fence.
 # #978: +2, test-only. The create.rs epoch-fence regression builds a blocked
 # activation and then the confirmed row a takeover produces.
-expected_occurrences = 160
+expected_occurrences = 162
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -1932,7 +1975,7 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # #978: +1, test-only, the same blocked activation as the handoff fence above.
 # PR1225: +1 in manager/processed_reuse_tests.rs:1425, the test incumbent's
 # blocked activation before its existing Confirm settlement; no shipped write.
-expected_occurrences = 57
+expected_occurrences = 58
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -3638,7 +3681,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # kill_on_drop guard; no production launcher or separate reap owner is added.
 # Main contributes one HTTPS transport JoinSet.spawn; its driver is joined by
 # the listener owner. Both parent additions are present in the source union.
-expected_occurrences = 80
+expected_occurrences = 81
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5102,7 +5145,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 1914
+expected_occurrences = 1917
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5584,7 +5627,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
 # is gone; the store-less physical qualification test and its ffprobe child
 # are replaced by the real title-job physical test.
-expected_occurrences = 311
+expected_occurrences = 312
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6236,7 +6279,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # inspect the in-process Axum oneshot response for invalid opt-in and success.
 # These reads launch no task or child and introduce no producer ownership.
 # Combined with main's Live TV HTTP assertion: 809 + 2 = 811 reviewed matches.
-expected_occurrences = 836
+expected_occurrences = 837
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6532,7 +6575,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 357
+expected_occurrences = 360
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6611,7 +6654,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 73
+expected_occurrences = 74
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6756,7 +6799,7 @@ pattern = "kill_on_drop\\s*\\("
 # `source_probe/fel_qualification.rs` (helper, consumer, decoder; one site
 # counts once). Each is also explicitly waited, or killed and waited, by its
 # owner; kill-on-drop is the backstop, not the settlement.
-expected_occurrences = 118
+expected_occurrences = 117
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

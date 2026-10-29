@@ -3620,7 +3620,8 @@ final class PlayerController: ObservableObject {
         if let sessionId {
             self.sessionId = nil
             let model = model
-            Task { await model?.endHlsSession(sessionId) }
+            let releaseHlsSession = self.releaseHlsSession
+            Task { if let model { await releaseHlsSession(model, sessionId) } }
         }
         let wasRemoteOwner = RemoteCommandOwner.shared.isCurrent(remoteOwnerToken)
         removeRemoteCommands()

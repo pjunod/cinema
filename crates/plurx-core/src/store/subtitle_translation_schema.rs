@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("upgraded version"),
-            121
+            crate::store::SQLITE_SCHEMA_VERSION
         );
         assert_eq!(
             conn.query_row(
@@ -196,6 +196,8 @@ mod tests {
         crate::store::subtitle_text_translation_schema::verify_sqlite(&conn)
             .expect("text schema appended");
         crate::store::shared_caption_schema::verify_sqlite(&conn).expect("shared schema appended");
+        crate::store::subtitle_managed_schema::verify_sqlite(&conn)
+            .expect("current managed resources appended");
         crate::store::playback_handoffs::verify_sqlite(&conn).expect("main schema preserved");
         drop(store);
     }
