@@ -11,9 +11,11 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import tarfile
 import time
@@ -75,6 +77,227 @@ GENERATED_FIXTURE_PATHS = frozenset(
     + [Path('target/fixtures') / name
        for name in ('eac3.mkv', 'chaptered.mkv', 'chapters.ffmeta', '.publication.lock')]
 )
+
+
+# Clean-environment subprocesses intentionally discard LLVM_PROFILE_FILE.
+# scan::probe's re-exec fixtures and desktop-control's trust-info fixture then
+# use LLVM's default filename in these exact package working directories.
+ESCAPED_PROFILE_DIRS = (Path('crates/plurx-core'), Path('crates/plurx-desktop-control'))
+ESCAPED_PROFILE_NAME = re.compile(r'default_[0-9]{1,20}_[0-9]{1,20}_[0-9]{1,20}\.profraw')
+MAX_ESCAPED_PROFILE_BYTES = 128 * 1024**2
+MAX_ESCAPED_PROFILE_COUNT = 64
+MAX_ESCAPED_PROFILE_TOTAL = 512 * 1024**2
+PIPE_FIXTURE_PATH = Path('crates/plurx-core/pipe:1')
+
+
+def regular_snapshot(path, limit=None):
+    """Hash one held regular file and reject pathname/metadata replacement."""
+    path = Path(path)
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or (limit is not None and not 0 < before.st_size <= limit):
+        raise ValueError('runtime input must be a bounded regular file: ' + str(path))
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, 'rb') as stream:
+        held = os.fstat(stream.fileno())
+        sha256 = hashlib.file_digest(stream, 'sha256').hexdigest()
+        after = os.fstat(stream.fileno())
+    current = path.lstat()
+    fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode')
+    if any(getattr(before, key) != getattr(other, key)
+           for other in (held, after, current) for key in fields):
+        raise ValueError('runtime input changed while reading: ' + str(path))
+    return {**{key: getattr(current, key) for key in fields}, 'sha256': sha256}
+
+
+def llvm_output(program, arguments, env):
+    """Read bounded identity output without trusting a profile's reported size."""
+    command = [str(program), *map(str, arguments)]
+    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    captured = {'stdout': bytearray(), 'stderr': bytearray()}
+    deadline = time.monotonic() + 30
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+        selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, 30)
+            for key, _ in selector.select(remaining):
+                block = os.read(key.fileobj.fileno(), 16384)
+                if not block:
+                    selector.unregister(key.fileobj)
+                    continue
+                data = captured[key.data]
+                if len(data) + len(block) > 128 * 1024:
+                    raise ValueError('LLVM identity output exceeds its bound')
+                data.extend(block)
+        status = process.wait(timeout=max(0, deadline - time.monotonic()))
+        stdout, stderr = (bytes(captured[name]).decode('utf-8') for name in ('stdout', 'stderr'))
+        if status:
+            raise subprocess.CalledProcessError(status, command, output=stdout, stderr=stderr)
+        return stdout
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        process.stdout.close()
+        process.stderr.close()
+
+
+def profile_binary_ids(output):
+    lines = output.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.strip() == 'Binary IDs:']
+    if len(starts) != 1:
+        raise ValueError('raw profile must identify its binaries')
+    identities = [line.strip().lower() for line in lines[starts[0] + 1:] if line.strip()]
+    if (not identities or len(identities) > 64 or len(set(identities)) != len(identities)
+            or any(not re.fullmatch(r'[0-9a-f]{2,128}', value) or len(value) % 2
+                   for value in identities)):
+        raise ValueError('raw profile has malformed or absent binary IDs')
+    return set(identities)
+
+
+def authorized_profile_objects(manifests, source_sha256, required, llvm, env):
+    """Authorize only IDs from exact hashed objects of this frozen archive."""
+    records = {}
+    for manifest in manifests:
+        receipt = json.loads(Path(manifest).read_text())
+        if receipt.get('source_sha256') != source_sha256:
+            raise ValueError('runtime escrow cannot adopt another source archive')
+        for record in receipt['objects']:
+            path = record['path']
+            if path in records and records[path] != record:
+                raise ValueError('runtime object receipts disagree: ' + path)
+            if not re.fullmatch(r'[0-9a-f]{64}', record.get('sha256', '')):
+                raise ValueError('runtime object needs a full hash receipt')
+            records[path] = record
+    authorized = {}
+    for path, record in sorted(records.items()):
+        if not required - authorized.keys():
+            break
+        before = Path(path).lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError('runtime object is not regular: ' + path)
+        notes = llvm_output(llvm / 'llvm-readobj', ['--notes', path], env)
+        identities = {value.lower() for value in
+                      re.findall(r'^\s*Build ID: ([0-9a-fA-F]+)\s*$', notes, re.MULTILINE)}
+        matched = identities & required
+        if matched:
+            snapshot = regular_snapshot(path)
+            if (snapshot['sha256'] != record['sha256']
+                    or any(snapshot[key] != record[field] for key, field in
+                           (('st_dev', 'device'), ('st_ino', 'inode'), ('st_size', 'bytes'),
+                            ('st_mtime_ns', 'mtime_ns')))
+                    or any(getattr(before, key) != snapshot[key] for key in
+                           ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))):
+                raise ValueError('runtime object changed after its receipt: ' + path)
+            for identity in matched:
+                authorized[identity] = {'path': path, 'sha256': snapshot['sha256']}
+    if required - authorized.keys():
+        raise ValueError('escaped profile binary IDs do not belong to this cohort: '
+                         + repr(sorted(required - authorized.keys())))
+    return authorized
+
+
+def escrow_generated_outputs(root, archive, source_sha256, manifests, output, profiles, llvm, env):
+    """Preserve known runtime outputs; never add source-verifier exceptions."""
+    root, output, profiles, llvm = map(Path, (root, output, profiles, llvm))
+    if (output.resolve().is_relative_to(root.resolve()) or profiles != output / 'profiles'
+            or profiles.is_symlink() or not profiles.is_dir() or len(manifests) != 2):
+        raise ValueError('runtime escrow needs the fresh outside-source cohort profile pool and two receipts')
+    if digest(archive) != source_sha256:
+        raise ValueError('runtime escrow archive digest mismatch')
+    with tarfile.open(archive, 'r:*') as source:
+        archived = {Path(member.name) for member in source if member.isfile()}
+    candidates = []
+    for directory in ESCAPED_PROFILE_DIRS:
+        parent = root / directory
+        if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+            raise ValueError('runtime package directory is not a real directory')
+        if not parent.exists():
+            continue
+        for path in sorted(parent.iterdir()):
+            if ESCAPED_PROFILE_NAME.fullmatch(path.name):
+                candidates.append((path, 'profile', MAX_ESCAPED_PROFILE_BYTES))
+    pipe = root / PIPE_FIXTURE_PATH
+    if pipe.exists() or pipe.is_symlink():
+        candidates.append((pipe, 'pipe-fixture', len(b'partial')))
+    if sum(kind == 'profile' for _, kind, _ in candidates) > MAX_ESCAPED_PROFILE_COUNT:
+        raise ValueError('too many escaped profiles')
+    if sum(path.lstat().st_size for path, kind, _ in candidates if kind == 'profile') > MAX_ESCAPED_PROFILE_TOTAL:
+        raise ValueError('escaped profiles exceed their aggregate byte bound')
+    validated = []
+    required = set()
+    for path, kind, limit in candidates:
+        relative = path.relative_to(root)
+        if relative in archived:
+            raise ValueError('archived bytes can never be runtime escrow: ' + str(relative))
+        # Reject links in any intermediate directory before opening the file.
+        if any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
+            raise ValueError('runtime path crosses a directory link')
+        snapshot = regular_snapshot(path, limit)
+        identities = set()
+        if kind == 'pipe-fixture':
+            if snapshot['sha256'] != hashlib.sha256(b'partial').hexdigest():
+                raise ValueError('unexpected pipe fixture bytes')
+        else:
+            identities = profile_binary_ids(llvm_output(
+                llvm / 'llvm-profdata', ['show', '--binary-ids', path], env))
+            required.update(identities)
+        if regular_snapshot(path, limit) != snapshot:
+            raise ValueError('runtime input changed during LLVM validation')
+        validated.append({'source': str(path), 'original_relative_path': str(relative),
+                          'kind': kind, 'snapshot': snapshot, 'binary_ids': sorted(identities)})
+    if sum(item['snapshot']['st_size'] for item in validated if item['kind'] == 'profile') > MAX_ESCAPED_PROFILE_TOTAL:
+        raise ValueError('escaped profiles exceed their aggregate byte bound')
+    authorized = authorized_profile_objects(manifests, source_sha256, required, llvm, env)
+    escrow = output / 'runtime-escrow'
+    escrow.mkdir()
+    journal = escrow / 'moves.jsonl'
+    with journal.open('x') as stream:
+        for index, item in enumerate(validated):
+            source = Path(item['source'])
+            snapshot = item['snapshot']
+            if regular_snapshot(source) != snapshot:
+                raise ValueError('runtime input changed before preservation')
+            stage = escrow / ('input-' + str(index))
+            descriptor = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, 'rb') as original, stage.open('xb') as destination:
+                shutil.copyfileobj(original, destination)
+                destination.flush()
+                os.fsync(destination.fileno())
+            stage.chmod(stat.S_IMODE(snapshot['st_mode']))
+            if regular_snapshot(stage)['sha256'] != snapshot['sha256']:
+                raise ValueError('runtime preservation copy differs')
+            if regular_snapshot(source) != snapshot:
+                raise ValueError('runtime input changed while preserving')
+            if item['kind'] == 'profile':
+                path_digest = hashlib.sha256(item['original_relative_path'].encode()).hexdigest()[:16]
+                destination = profiles / ('escaped-' + path_digest + '-' + snapshot['sha256'] + '.profraw')
+            else:
+                destination = escrow / 'core-pipe-output.txt'
+            item.update(destination=str(destination), moved=False)
+            stream.write(json.dumps(item) + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.link(stage, destination)  # Never replace an existing profile or receipt.
+            if regular_snapshot(destination)['sha256'] != snapshot['sha256']:
+                raise ValueError('runtime destination changed before its move')
+            if regular_snapshot(source) != snapshot:
+                raise ValueError('runtime input changed before its move')
+            source.unlink()
+            stage.unlink()
+            item['moved'] = True
+            stream.write(json.dumps(item) + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+    receipt = {'schema': 1, 'source_sha256': source_sha256,
+               'scope': 'current-cohort escaped runtime outputs after strict source preflight',
+               'authorized_objects': authorized, 'files': validated}
+    write_json(output / 'runtime-escrow.json', receipt)
+    return receipt
 
 
 def verify_source(root, archive, expected_digest, commit, *, allow_generated_fixtures=False):
@@ -258,7 +481,7 @@ class Campaign:
         host = next(line[6:] for line in self.capture('rustc-detail', ['rustc', '-vV']).splitlines()
                     if line.startswith('host: '))
         self.llvm = sysroot / 'lib/rustlib' / host / 'bin'
-        for name in ('llvm-profdata', 'llvm-cov'):
+        for name in ('llvm-profdata', 'llvm-cov', 'llvm-readobj'):
             if not (self.llvm / name).is_file():
                 raise ValueError('pinned LLVM tool missing: ' + name)
         ffmpeg = self.capture('ffmpeg-version', ['ffmpeg', '-version']).splitlines()[0]
@@ -266,7 +489,8 @@ class Campaign:
             raise ValueError('this corpus requires Ubuntu 24.04 FFmpeg major 6')
         self.tools = {'rustc': rustc, 'cargo': cargo, 'cargo_llvm_cov': version,
                       'ffmpeg': ffmpeg, 'llvm_cov_sha256': digest(self.llvm / 'llvm-cov'),
-                      'llvm_profdata_sha256': digest(self.llvm / 'llvm-profdata')}
+                      'llvm_profdata_sha256': digest(self.llvm / 'llvm-profdata'),
+                      'llvm_readobj_sha256': digest(self.llvm / 'llvm-readobj')}
         self.run('fetch-dependencies', ['cargo', 'fetch', '--locked'], bound=3600)
         instrumentation = self.capture('instrumentation', ['cargo', 'llvm-cov', 'show-env', '--sh'])
         self.env.update(parse_show_env(instrumentation))
@@ -415,6 +639,13 @@ class Campaign:
         if failed:
             raise RuntimeError('one or more native software tests failed')
 
+    def escrow_runtime_outputs(self):
+        return escrow_generated_outputs(self.root, self.args.source_archive,
+            self.args.source_sha256,
+            [self.output / 'objects-default/objects.json',
+             self.output / 'expanded/objects/objects.json'],
+            self.output, self.output / 'profiles', self.llvm, self.env)
+
     def collect(self):
         source = verify_source(self.root, self.args.source_archive,
                                self.args.source_sha256, self.args.source_commit)
@@ -437,6 +668,7 @@ class Campaign:
         expanded, core_scope = self.augmented()
         if self.args.native:
             self.native(default_metadata, default_receipt)
+        self.escrow_runtime_outputs()
         source = verify_source(self.root, self.args.source_archive, self.args.source_sha256,
                                self.args.source_commit, allow_generated_fixtures=True)
         write_json(self.output / 'source-post-verification.json', source)
@@ -461,6 +693,7 @@ class Campaign:
             'line_coverage': lines, 'report_sha256': digest(self.output / 'cov.json'),
             'object_manifests': ['objects-default/objects.json', 'expanded/objects/objects.json'],
             'core_selection': 'expanded/core-replay-selection.json', 'phases': 'phases.json',
+            'runtime_escrow': 'runtime-escrow.json',
             'scope': 'Linux software coverage; no hardware, namespace-sandbox or formal qualification',
         })
         print(json.dumps({'status': 'passed', 'cov_json': str(self.output / 'cov.json'), **lines}), flush=True)

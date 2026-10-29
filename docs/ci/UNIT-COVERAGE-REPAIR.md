@@ -136,6 +136,15 @@ suite. The eight affected integration targets run completely. Optional `--native
 adds twelve named software-media/storage tests, never hardware qualification.
 No corpus phase stops early based on the measured percentage.
 
+Clean-environment probe and desktop-control children deliberately discard the
+profile output environment variable. Postflight preserves their raw profiles
+only from the two source-backed package directories, requires LLVM binary IDs
+from exact hashed objects of the same source archive, and moves them into the
+fresh profile pool with a non-overwriting provenance journal. The thumbnail
+cancellation fixture's exact `partial` pipe-output file is preserved outside the
+checkout. Initial source verification remains strict; unknown outputs and
+unarchived Rust source still fail postflight.
+
 Only a passing required corpus creates `cov.json` and the success receipt used
 for publication. Source/object mismatches, unexpected feature changes and failed
 commands preserve diagnostic logs but cannot update the badge. Collector guard
