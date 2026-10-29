@@ -1,3 +1,7 @@
+# Main metadata integration (2026-10-29; main 85910425c): preserve both
+# parent ownership audits and the repair fixture counts. Main changes since
+# 6c8c98c79 affect no Rust/Cargo or served-asset bytes; exact source census,
+# roots, patterns and forbidden zeroes retain their reviewed identities.
 # Cache regression fixture review (2026-10-29): one added awaited 2100 ms
 # settling delay in ffmpeg/tests.rs preserves the production metadata grace.
 # It starts no task or child and supplies no reap or publication authority.
@@ -76,6 +80,28 @@
 # Updated repair-only structural totals before main integration: 80 method spawns, 1899 namespaced timers,
 # 307 Commands, 821 launch shapes, 355 lifecycle methods, 73 UFCS lifecycle
 # sites. Module roots, patterns, exact equality and forbidden zeroes unchanged.
+
+# Private sharing setup/network ownership review (2026-10-28; main 10f45ae5f):
+# Exact sharing-only deltas from 66a33d723: +3 namespaced tasks, +4 timers,
+# +1 Command, +9 launch-shaped status observations, +2 child lifecycle calls
+# and +1 kill-on-drop construction. No patterns, roots, equality checks or
+# forbidden-shape zeroes change.
+# Two startup tasks run the node-local host/network maintenance loops with
+# the existing shutdown token, observed between maintenance iterations.
+# One invitation issuance task survives a dropped HTTP receiver; it
+# bounds issue_inner at 22s, records durable abandonment on failed delivery,
+# cancels Cinema authority and invokes the persisted provider cleanup owner.
+# These are not rolling-media producers; no join/reap claim is added here.
+# Host setup owns one registered ChildWork::background command, null stdin/
+# stderr and capped stdout, with an 8s timeout and kill_on_drop. Normal
+# completion awaits wait; the explicit error path awaits kill. Timeout/drop
+# kill is not a confirmed-reap receipt. The other host timer is its poll;
+# network timers bound issuance and the 30s cleanup observation interval.
+# All nine new launch-shaped matches are HTTP or domain .status() reads,
+# not nine process launches. The two lifecycle matches are this child's
+# wait/kill. Existing provider HTTPS requests have finite connect/request
+# bounds; cleanup intent remains journal-owned after requester cancellation.
+
 # Live TV upload regression ownership review (PR #1312, 2026-10-28;
 # Rust source 9c5aa95df): +2 namespaced timers are the awaited five-second
 # fixture observation deadline and its five-millisecond poll. Neither starts

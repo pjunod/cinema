@@ -4786,12 +4786,18 @@ assert.equal(context.ACT_TIMER, null);
                     # environment or requests owner signing credentials.
                     expected_gate = gate
                     if path == ".github/workflows/github-release.yml":
-                        if name in ("desktop_signing", "publish"):
+                        if name == "desktop_signing":
+                            expected_gate += " && needs.resolve.outputs.mode == 'release' && needs.resolve.outputs.publish_updates == 'true'"
+                        elif name == "publish":
+                            expected_gate += " && !cancelled() && !failure() && needs.resolve.outputs.mode == 'release'"
+                        elif name == "macos_signing":
                             expected_gate += " && needs.resolve.outputs.mode == 'release'"
+                        elif name == "desktop_metadata":
+                            expected_gate += " && !cancelled() && !failure() && needs.resolve.outputs.mode != 'qualification'"
                         elif name == "desktop_qualification":
                             expected_gate += " && needs.resolve.outputs.mode == 'qualification'"
                         elif name != "resolve":
-                            self.assertIn(name, {"linux", "macos_build", "macos", "windows", "windows_smoke", "desktop_metadata"})
+                            self.assertIn(name, {"linux", "macos_source_parser", "macos_build", "macos", "windows", "windows_smoke", "desktop_metadata"})
                             expected_gate += " && needs.resolve.outputs.mode != 'qualification'"
                     self.assertEqual([expected_gate], conditions, f"{path}:{name}")
                     if path == ".github/workflows/github-release.yml" and name == "desktop_qualification":
