@@ -2,17 +2,20 @@
 
 **Status:** open · implementation active · updated 2026-10-28. PR #1248 on
 `effort/adaptive-playback-resources` is the sole effort. Local integration
-contains main `f2120bd9ad1770f27b16e5cefef82cf5efaa72c4` in effort
-`96ab7f0e82dee43efdd2dd703d68325ce76c737f`; task PR #1293 remains unmerged. These local changes
+contains main `66a33d723096ee931ce2e05e860f51f8f3671513` in effort
+`cc3da4a9003c5fbebefe05cbcbfa92abe3b50bdc`; task PR #1293 remains unmerged. These local changes
 are not the previously published CI candidate. The supplied Opus implementation
 review examined 5267/c108; its source findings remain in
 [the review document](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md).
-Required behavioral tests are authorized and underway. The incomplete native
-survey at `00811689a1a5dc218d3a5330a29d87b165b4a1df` recorded 16 passes
-and 41 failures before its subprocess-summary check stopped the campaign.
-A separate web regression passed at 2f0a. No full behavioral, model, mutation
-or workload qualification is claimed. No new external review is dispatched.
-V1–V5 and R1/M0–M7 remain OPEN.
+Required behavioral tests are authorized. The finished native campaign at
+`dec1576cf60a1d44a7eb643d4f82ceb9523e50c5` selected 180 cases: 149 passed,
+29 failed and two aborted without completion. All 135 selected Core cases
+passed; daemon cases recorded 14 passes, 29 failures and two stack aborts.
+Receipt SHA-256: `6b197b91504ed1d5116c8ac123ffbebe1ffc16c22656cb9840382173a4a0ed02`.
+Cgroup visibility/root handling and fixture stack aborts remain under repair;
+these failures prevent qualification. The separate web regression passed at
+8b2ae86f. No full behavioral, model, mutation or workload qualification is
+claimed. No new external review is dispatched. V1–V5 and R1/M0–M7 remain OPEN.
 
 The copy driver retains the same NeverRoot/RootOnly/Joined witnesses and
 one-shot settlement. Positive post-Arm refusal may close the never-entered
@@ -33,8 +36,8 @@ and proven pre-reservation refusals do not invent native uncertainty.
 Genuine uncertainty retains its existing operation reservation and blocks
 planned-restart drain/commit; unrelated starts use normal capacity, phase,
 readiness and identity checks. No sticky uncertainty is cleared or refunded.
-C5's later source follow-up separates live-ticket custody from repair selection;
-its regression bodies now run, with cleanup failures still under repair.
+C5's source follow-up separates live-ticket custody from repair selection;
+SQL and HTTP retirement coverage remains blocked by daemon failures.
 
 Preparation retains its controller through positive join and same-operation
 Store proof. Selected Linux software SDR Source planning retains original P/M

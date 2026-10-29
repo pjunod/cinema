@@ -7,9 +7,14 @@ Companion to the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) and
 [delivery checklist](ADAPTIVE-PLAYBACK-DELIVERY.md). PR #1293 targets effort
 PR #1248. Source is committed and reviewed through ordinary Git. Required
 behavioral tests are now authorized and running after the supplied source review
-and fixes. The incomplete 00811689a core survey recorded 16 passes and 41
-failures; those failures remain qualification blockers. Mutation tests have not
-run. The bounded design review grants no final implementation acceptance.
+and fixes. The finished native campaign at `dec1576cf60a` recorded 135/135
+Core passes and daemon 14 passes, 29 failures and two stack aborts, with no
+ignored cases. Cgroup-reader/environment and fixture-stack repairs remain
+open. Effort `cc3da4a9003c` includes main `66a33d723` and passed native strict
+Clippy; joined task `02bf1fd46e58` passed all three host compiler phases.
+These separate source receipts do not establish a passing joined behavioral
+candidate. Mutation tests have not run. The bounded design review grants no
+final implementation acceptance.
 
 The user supplied a review attributed to Claude Opus 5.5, dated 2026-10-26,
 against implementation `46dc2805b9b6688b5052494605250898a6b105c7` and document
