@@ -201,6 +201,59 @@ def decoded_reservation(path, budget):
         return decoded_stream_reservation(stream,size,budget)
 
 
+def canonical_json_footprint(value):
+    """Exact encoded bytes and decoder structural charge, without encoding.
+
+    Cursor JSON uses only closed dict/list/string/integer/boolean/null values.
+    Order does not affect this footprint; punctuation and UTF-8 escaping match
+    canonical(). The traversal allocates no encoded strings or container copies.
+    """
+    def visit(item, depth):
+        if depth > 128 or type(item) in (dict, list) and depth >= 128:
+            raise Incomplete('JSON nesting exceeds reviewed bounded decoder stack')
+        if item is None:
+            return 4, 0
+        if type(item) is bool:
+            return (4 if item else 5), 0
+        if type(item) is int:
+            number = abs(item)
+            width = 1 + (item < 0)
+            while number >= 10:
+                number //= 10
+                width += 1
+            return width, 0
+        if type(item) is str:
+            width = 2
+            for char in item:
+                point = ord(char)
+                require(not 0xD800 <= point <= 0xDFFF, 'invalid cursor UTF-8 surrogate')
+                width += (2 if point in (8, 9, 10, 12, 13, 34, 92) else 6 if point < 32 else
+                          1 if point < 128 else 2 if point < 2048 else 3 if point < 65536 else 4)
+            return width, 1
+        require(type(item) in (dict, list), 'unsupported closed cursor JSON value')
+        commas = max(0, len(item) - 1)
+        width, structural = 2 + commas, 1 + commas
+        if type(item) is dict:
+            for key, child in item.items():
+                require(type(key) is str, 'non-string cursor JSON key')
+                a, b = visit(key, depth + 1)
+                c, d = visit(child, depth + 1)
+                width += a + 1 + c
+                structural += b + 1 + d
+        else:
+            for child in item:
+                a, b = visit(child, depth + 1)
+                width += a
+                structural += b
+        return width, structural
+    return visit(value, 0)
+
+
+def decoded_json_allocation(size, structural):
+    """One shared producer/restore policy for full JSON decoded working space."""
+    return 32 * size + 512 * structural + 65536
+
+
 def decoded_stream_reservation(stream,size,budget):
     tokens=containers=depth=0
     quoted=escaped=False
@@ -228,12 +281,12 @@ def decoded_stream_reservation(stream,size,budget):
                 tokens+=1
         # <=32x input bytes plus 512 bytes for each token/container safely
         # overcharges the actual fixed Python decoder representation.
-        estimate=32*size+512*(tokens+containers)+65536
+        estimate=decoded_json_allocation(size,tokens+containers)
         if estimate>budget.plan['resident_bytes']:
             raise Incomplete('decoded working-set reservation exceeds admitted resident bytes')
         budget.check()
     require(not quoted and depth==0,'unterminated JSON lexical frame')
-    return 32*size+512*(tokens+containers)+65536
+    return decoded_json_allocation(size,tokens+containers)
 
 
 def bounded_json(data,budget):

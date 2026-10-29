@@ -6,6 +6,8 @@ transition implementation, trusts a catalog projection, or page-constrains D.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import io
 import hashlib
 import json
 from pathlib import Path
@@ -16,7 +18,7 @@ import time
 import checker as legacy
 from paged_codec import (BLOBS, COUNT_KINDS, BoundedList, Budget, ContinuationResolver, ExecutionState, Incomplete, Invalid, RecordIndex, bounded_json, canonical,
                          digest, encoded, envelope, inner, ref, require, sha_bytes,
-                         strict_json)
+                         strict_json, canonical_json_footprint, decoded_json_allocation, decoded_stream_reservation)
 
 
 class Rows:
@@ -1043,51 +1045,202 @@ def component_tables(index, temporal, component):
 
 
 class TemporalQualification:
-    """Journalled next-work cursor and bounded Outcome aggregation.
-
-    These rows resume only after the exact authenticated private backup/result
-    chain has been reconciled. They never replace retained TLC byte parsing.
-    """
+    """Authenticated cursor with retained decoded and prospective encoding space."""
     operation = 'temporal_qualification'
 
     def __init__(self, index, mapping):
-        self.index = index
+        self.index, self.mapping, self.charged = index, mapping, 0
+        self._receipts = None
+        self._mutation_depth = 0
         closure = index.db.execute("SELECT state FROM operation_state WHERE operation='source_closure_binding'").fetchone()
         require(closure is not None, 'temporal cursor before exact source closure')
         self.binding = encoded({'closure': strict_json(closure[0]), 'families': mapping,
                                 'configs': list(legacy.CONFIGS.items()), 'contexts': legacy.CONFIG_CONTEXT})
-        old = index.db.execute('SELECT scope,state FROM operation_state WHERE operation=?', (self.operation,)).fetchone()
-        if old is None:
-            self.state = {'phase': 'one_step', 'family': 0, 'after_product': -1,
-                          'property': 0, 'after_component': 0, 'pending': None,
-                          'receipt_after': '', 'receipts': [], 'witness': None, 'violated': False}
-            with index.execution.quantum('one_step_tlc', stage='temporal_components'):
-                index.db.execute('INSERT INTO operation_state VALUES(?,?,?)',
-                                 (self.operation, self.binding, encoded(self.state)))
-        else:
-            require(old[0] == self.binding, 'temporal cursor exact source/config/family binding changed')
-            self.state = bounded_json(old[1], index.budget)
+        old = index.db.execute('SELECT scope,length(state) FROM operation_state WHERE operation=?', (self.operation,)).fetchone()
+        try:
+            if old is None:
+                self.state = {'phase': 'one_step', 'family': 0, 'after_product': -1,
+                              'property': 0, 'after_component': 0, 'pending': None,
+                              'receipt_after': '', 'receipts': [], 'witness': None, 'violated': False}
+                with index.execution.quantum('one_step_tlc', stage='temporal_components'):
+                    with self.serialization() as raw:
+                        index.db.execute('INSERT INTO operation_state VALUES(?,?,?)',
+                                         (self.operation, self.binding, raw))
+                        del raw
+            else:
+                require(old[0] == self.binding, 'temporal cursor exact source/config/family binding changed')
+                size = old[1]
+                if size > index.budget.member_limit():
+                    raise Incomplete('indivisible temporal state exceeds restore allocation')
+                # Reserve the SQL result buffer before fetching it. Decode under
+                # exactly bounded_json's lexical policy, retaining its charge
+                # while the decoded aggregate remains live on this invocation.
+                buffer_charge = 2 * size + 65536
+                index.budget.reserve_working(buffer_charge)
+                try:
+                    raw = index.db.execute('SELECT state FROM operation_state WHERE operation=?', (self.operation,)).fetchone()[0]
+                    estimate = decoded_stream_reservation(io.BytesIO(raw), len(raw), index.budget)
+                    index.budget.reserve_working(estimate)
+                    self.charged = estimate
+                    self.state = strict_json(raw)
+                    shape = self.footprint()
+                    require(shape[0] == size and decoded_json_allocation(*shape) == estimate,
+                            'noncanonical temporal aggregate footprint')
+                    self.check_caps(shape)
+                finally:
+                    raw = None
+                    index.budget.release_working(buffer_charge)
+        except BaseException:
+            self.close()
+            raise
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, error, traceback):
+        self.close()
+
+    def close(self):
+        self.state = None
+        self._receipts = None
+        self.index.budget.release_working(self.charged)
+        self.charged = 0
+
+    def receipt_shape(self):
+        values = self.state['receipts']
+        if values is not self._receipts:
+            self._receipts = values
+            self._receipt_shape = canonical_json_footprint(values)
+            self._receipt_count = len(values)
+        require(len(values) == self._receipt_count, 'aggregate grew outside prospective guard')
+        return self._receipt_shape
+
+    def footprint(self, receipt_shape=None):
+        receipts = self.receipt_shape() if receipt_shape is None else receipt_shape
+        # Only the fixed scalar/ref cursor fields are walked on every step.
+        stub = {key: ([] if key == 'receipts' else value) for key, value in self.state.items()}
+        width, structural = canonical_json_footprint(stub)
+        return width + receipts[0] - 2, structural + receipts[1] - 1
+
+    def outcome_value(self, count=None):
+        family = self.mapping['families'][self.state['family']]
+        expected = ('pass' if family['expected_first_failure'] is None else
+                    'finite_witness' if family['family'] == 'nonvacuity' else 'named_semantic_counterexample')
+        return envelope('Outcome', {'family': family['family'], 'expected': expected, 'actual': expected,
+            'component_receipts': self.state['receipts'],
+            'invocation_count': len(self.state['receipts']) if count is None else count, 'witness': self.state['witness']})
+
+    def outcome_footprint(self, receipts, count=None):
+        value = self.outcome_value(count)
+        value['record']['component_receipts'] = []
+        width, structural = canonical_json_footprint(value)
+        return width + receipts[0] - 2, structural + receipts[1] - 1
+
+    def check_caps(self, shape, receipts=None, count=None):
+        if shape[0] > self.index.budget.member_limit():
+            raise Incomplete('indivisible temporal aggregation state exceeds resident admission')
+        if self.state['phase'] != 'one_step' and self.state['family'] < len(self.mapping['families']):
+            outcome = self.outcome_footprint(self.receipt_shape() if receipts is None else receipts, count)
+            if outcome[0] > min(self.index.budget.member_limit(), self.index.budget.allowances['Outcome']['max_encoded_bytes']):
+                raise Incomplete('whole Outcome exceeds encoded allocation')
+
+    @staticmethod
+    def encoding_charge(shape):
+        # Unicode serializer chunks, joined text, UTF-8 output, simultaneous
+        # proposal/index byte copies, and per-token serializer container slack.
+        return 16 * shape[0] + 512 * shape[1] + 65536
+
+    @contextmanager
+    def reservation(self, shape, receipts=None, count=None, encoding_shape=None):
+        self.check_caps(shape, receipts, count)
+        target = decoded_json_allocation(*shape)
+        growth = max(0, target - self.charged)
+        temporary = self.encoding_charge(shape if encoding_shape is None else encoding_shape)
+        # One prospective reservation rejects both growth and encoding BEFORE
+        # either list mutation or construction of a whole encoded byte string.
+        self.index.budget.reserve_working(growth + temporary)
+        self.charged += growth
+        try:
+            yield
+        finally:
+            self.index.budget.release_working(temporary)
+        if not self._mutation_depth and target < self.charged:
+            self.index.budget.release_working(self.charged - target)
+            self.charged = target
+
+    @contextmanager
+    def quantum(self, operation, **options):
+        require(not self._mutation_depth, 'nested temporal aggregate mutation')
+        # A fixed-size field snapshot aliases the old receipt list; it does not
+        # duplicate its prefix. Keep that list's charge until commit/rollback.
+        snapshot_charge = 65536
+        self.index.budget.reserve_working(snapshot_charge)
+        before = dict(self.state)
+        old_receipts = self.state['receipts']
+        old_shape = self.receipt_shape()
+        old_count = self._receipt_count
+        before_commit = self.index.execution.sequence()[0]
+        self._mutation_depth = 1
+        try:
+            with self.index.execution.quantum(operation, **options) as quantum:
+                yield quantum
+        except BaseException:
+            # ExecutionQuantum checks resources once more after committing. A
+            # post-commit stop must retain the just-committed in-memory prefix.
+            if self.index.execution.sequence()[0] == before_commit:
+                del old_receipts[old_count:]
+                self.state.clear()
+                self.state.update(before)
+                self._receipts, self._receipt_shape, self._receipt_count = old_receipts, old_shape, old_count
+            raise
+        finally:
+            self._mutation_depth = 0
+            before = old_receipts = None
+            target = decoded_json_allocation(*self.footprint())
+            require(self.charged >= target, 'unreserved temporal aggregate mutation')
+            self.index.budget.release_working(self.charged - target)
+            self.charged = target
+            self.index.budget.release_working(snapshot_charge)
+
+    @contextmanager
+    def serialization(self):
+        shape = self.footprint()
+        with self.reservation(shape):
+            raw = encoded(self.state)
+            require(len(raw) == shape[0], 'temporal serialization footprint differs')
+            try:
+                yield raw
+            finally:
+                raw = None
+
+    @contextmanager
+    def outcome(self):
+        shape = self.footprint()
+        with self.reservation(shape, encoding_shape=self.outcome_footprint(self.receipt_shape())):
+            yield self.outcome_value()
 
     def save(self):
         require(self.index.execution.active, 'temporal cursor outside atomic quantum')
-        raw = encoded(self.state)
-        if len(raw) > self.index.budget.member_limit():
-            raise Incomplete('indivisible temporal aggregation state exceeds resident admission')
-        self.index.budget.check(records=1, bytes_=len(raw))
-        self.index.db.execute('UPDATE operation_state SET state=? WHERE operation=?', (raw, self.operation))
+        with self.serialization() as raw:
+            self.index.budget.check(records=1, bytes_=len(raw))
+            self.index.db.execute('UPDATE operation_state SET state=? WHERE operation=?', (raw, self.operation))
+            del raw
 
     def advance(self, **changes):
-        with self.index.execution.quantum('family_finish'):
+        with self.quantum('family_finish'):
             self.state.update(changes)
             self.save()
 
     def append(self, reference):
-        # Outcome remains an admitted indivisible record. The traversal building
-        # it is a persisted prefix, rather than a fresh full-prefix scan.
-        self.state['receipts'].append(reference)
-        if len(encoded(self.state['receipts'])) > min(self.index.budget.member_limit(),
-                self.index.budget.allowances['Outcome']['max_encoded_bytes']):
-            raise Incomplete('whole Outcome component receipt array exceeds allocation')
+        before = self.receipt_shape()
+        item = canonical_json_footprint(reference)
+        comma = int(bool(self._receipt_count))
+        after = before[0] + item[0] + comma, before[1] + item[1] + comma
+        shape = self.footprint(after)
+        with self.reservation(shape, after, self._receipt_count + 1):
+            self.state['receipts'].append(reference)
+            self._receipt_count += 1
+            self._receipt_shape = after
 
 
 def temporal_receipt_ref(index, tag):
@@ -1098,7 +1251,8 @@ def temporal_receipt_ref(index, tag):
     return {'kind': 'tlc_receipt', 'id': row[2], 'sha256': sha_bytes(row[1])}
 
 
-def run_temporal_tlc(index, output, tlc, tag, module, directory, config, *, completed):
+def run_temporal_tlc(index, output, tlc, tag, module, directory, config, *, completed, cursor=None):
+    step = index.execution.quantum if cursor is None else cursor.quantum
     identity, key = tlc_identity(index, directory, module, config, tlc, tag)
     old = index.db.execute('SELECT invocation_key,input_tuple,receipt,relative_path FROM tlc_done WHERE tag=?', (tag,)).fetchone()
     if old:
@@ -1112,13 +1266,13 @@ def run_temporal_tlc(index, output, tlc, tag, module, directory, config, *, comp
             reparse_retained_tlc(result,None,resolver,index.execution)
         finally:
             resolver.close()
-        with index.execution.quantum('family_finish'):
+        with step('family_finish'):
             completed(retained)
         return retained
     operation = {'PagedOneStep': 'one_step_tlc', 'PagedComponent': 'component_tlc', 'BoundaryControls': 'boundary_tlc'}[module]
     position={**index.execution.cursor()['position'],'family':identity['family'],
         'after_key':identity['scope'].get('owned_predecessor'),'component_id':identity['scope'].get('component')}
-    with index.execution.quantum(operation, stage='temporal_components', claim='tlc_completed',position=position,
+    with step(operation, stage='temporal_components', claim='tlc_completed',position=position,
             coverage={'record_kind':'Product' if module=='PagedOneStep' else 'Scc' if module=='PagedComponent' else None,
                 'lower_exclusive':None,'upper_inclusive':position['after_key'] if module=='PagedOneStep' else position['component_id'],
                 'count':1,'scope':{**index.execution.cursor()['scope'],'family':identity['family'],'input_root':key}},
@@ -1134,12 +1288,16 @@ def run_temporal_tlc(index, output, tlc, tag, module, directory, config, *, comp
 
 
 def qualify_temporal(index, semantic, temporal, output, tlc):
+    mapping = strict_json((Path(__file__).resolve().parent / 'paged-outcomes.json').read_bytes())
+    with TemporalQualification(index, mapping) as cursor:
+        return qualify_temporal_pending(index, semantic, temporal, output, tlc, mapping, cursor)
+
+
+def qualify_temporal_pending(index, semantic, temporal, output, tlc, mapping, cursor):
     """Every original predecessor and required component, across bounded units."""
     import shutil
     package = Path(__file__).resolve().parent
     output = Path(output)
-    mapping = strict_json((package / 'paged-outcomes.json').read_bytes())
-    cursor = TemporalQualification(index, mapping)
     state = cursor.state
     originals = [(name, desc) for name, desc in legacy.CONFIGS.items()
                  if desc.get('model') != 'BoundaryControls']
@@ -1186,11 +1344,11 @@ def qualify_temporal(index, semantic, temporal, output, tlc):
                                      (family, identity, encoded(receipt)))
                 state['after_product'] = identity
                 cursor.save()
-            run_temporal_tlc(index, output, tlc, tag, 'PagedOneStep', directory, config, completed=completed)
+            run_temporal_tlc(index, output, tlc, tag, 'PagedOneStep', directory, config, completed=completed, cursor=cursor)
             continue
         if state['family'] == len(families):
             # Only the fixed seven contexts and one final Counts record remain.
-            with index.execution.quantum('family_finish'):
+            with cursor.quantum('family_finish'):
                 require(index.count('Outcome') == 11, 'eleven semantic outcome families incomplete')
                 for context in semantic.checkpoint['contexts']:
                     require(context['frontier'] == 0 and context['reachable_products'] == context['expanded_products'],
@@ -1231,7 +1389,7 @@ def qualify_temporal(index, semantic, temporal, output, tlc):
             def completed(receipt):
                 state.update(phase='component_walk', pending=component['id'])
                 cursor.save()
-            run_temporal_tlc(index, output, tlc, tag, 'PagedComponent', directory, config, completed=completed)
+            run_temporal_tlc(index, output, tlc, tag, 'PagedComponent', directory, config, completed=completed, cursor=cursor)
         elif state['phase'] == 'component_walk':
             component = index.get('Scc', state['pending'])
             prop = properties[state['property']]
@@ -1245,7 +1403,7 @@ def qualify_temporal(index, semantic, temporal, output, tlc):
             walk = temporal.fair_walk(component)
             require((receipt['first_failure'] == 'EventuallyDischarged') == (walk is not None),
                     'TLC/composed fair-language disagreement')
-            with index.execution.quantum('family_finish'):
+            with cursor.quantum('family_finish'):
                 cursor.append(temporal_receipt_ref(index, tag))
                 if walk is not None:
                     state['violated'] = True
@@ -1282,7 +1440,7 @@ def qualify_temporal(index, semantic, temporal, output, tlc):
                     cursor.append(temporal_receipt_ref(index, tag))
                     state.update(witness=temporal_receipt_ref(index, tag), violated=True, phase='collect')
                     cursor.save()
-                return run_temporal_tlc(index, output, tlc, tag, module, directory, config, completed=completed)
+                return run_temporal_tlc(index, output, tlc, tag, module, directory, config, completed=completed, cursor=cursor)
             qualify_boundary(index, semantic, output, tlc, family, run_once)
         elif state['phase'] == 'collect':
             # One retained reference per committed step. No receipt/log copies or
@@ -1294,7 +1452,7 @@ def qualify_temporal(index, semantic, temporal, output, tlc):
                 cursor.advance(phase='finish')
                 continue
             index.budget.check(records=1)
-            with index.execution.quantum('family_finish'):
+            with cursor.quantum('family_finish'):
                 cursor.append(temporal_receipt_ref(index, row[0]))
                 state['receipt_after'] = row[0]
                 cursor.save()
@@ -1303,7 +1461,7 @@ def qualify_temporal(index, semantic, temporal, output, tlc):
             if not properties and family['scope'] != 'sparse_boundary_control' and family['expected_first_failure'] is not None and state['witness'] is None:
                 require(finite is not None, 'expected original invariant witness absent')
                 witness = finite_witness(index, semantic, name, finite[0])
-                with index.execution.quantum('family_finish'):
+                with cursor.quantum('family_finish'):
                     path = output / (name + '-finite-witness.json')
                     write_json(path, witness)
                     reference = {'kind': 'causal_receipt', 'id': path.name, 'sha256': file_sha(path)}
@@ -1319,11 +1477,12 @@ def qualify_temporal(index, semantic, temporal, output, tlc):
             else:
                 require(state['violated'], 'required mutation counterexample missing')
                 expected = 'named_semantic_counterexample'
-            with index.execution.quantum('family_finish'):
-                outcome = envelope('Outcome', {'family': name, 'expected': expected, 'actual': expected,
-                    'component_receipts': state['receipts'], 'invocation_count': len(state['receipts']), 'witness': state['witness']})
-                index.propose(outcome, 'family_finish')
-                write_json(output / (name + '-outcome.json'), outcome)
+            with cursor.quantum('family_finish'):
+                with cursor.outcome() as outcome:
+                    require(outcome['record']['expected'] == expected, 'aggregate named outcome differs')
+                    index.propose(outcome, 'family_finish')
+                    write_json(output / (name + '-outcome.json'), outcome)
+                del outcome
                 state.update(phase='components', family=state['family'] + 1, property=0, after_component=0,
                              pending=None, receipt_after='', receipts=[], witness=None, violated=False)
                 cursor.save()

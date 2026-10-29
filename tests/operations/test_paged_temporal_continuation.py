@@ -32,6 +32,9 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         self.source = {**fixture.SOURCE, 'toolchain_sha256': codec.digest(self.runtime)}
         self.plan = copy.deepcopy(fixture.admitted(self.root).plan)
         self.plan.update(source=self.source, unit_predecessor_allowance=2, unit_record_allowance=25)
+        if self._testMethodName.startswith('test_aggregate_'):
+            self.plan.update(resident_bytes=16 * 1024 * 1024, unit_predecessor_allowance=100000,
+                             unit_record_allowance=100000)
         self.plan['plan_sha256'] = codec.digest(codec.envelope('ResourcePlan', self.plan))
         self.index = codec.RecordIndex(self.root / 'work.sqlite', source=self.source,
             session_id=fixture.SESSION, budget=codec.Budget(self.plan, self.root))
@@ -420,6 +423,123 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
             self.qualify()
         self.assertEqual(self.index.db.execute('SELECT count(*) FROM tlc_done').fetchone()[0], count)
         self.assertEqual((self.state.sequence(), self.state.cursor(), self.state.logical_digest()), before)
+
+    def test_aggregate_boundary_reserves_before_growth_and_restores_same_plan(self):
+        expected = []
+        interrupted = False
+        boundary = False
+        encoded_checks = []
+        failed_reservations = []
+        cleanup = next(i for i, family in enumerate(self.mapping['families']) if family['family'] == 'cleanup')
+        original_encoded = checker.encoded
+        for batch in range(80):
+            with checker.TemporalQualification(self.index, self.mapping) as cursor:
+                if batch == 0:
+                    cursor.advance(phase='collect', family=cleanup)
+                self.assertEqual(cursor.state['receipts'], expected)
+                self.assertGreaterEqual(self.index.budget.working_bytes, codec.decoded_json_allocation(*cursor.footprint()),
+                    'loaded aggregate lost its live decoded reservation')
+                original_reserve = self.index.budget.reserve_working
+                def reserve(amount):
+                    before_count = len(cursor.state['receipts'])
+                    try:
+                        return original_reserve(amount)
+                    except codec.Incomplete:
+                        failed_reservations.append((amount, before_count))
+                        raise
+                def encode(value):
+                    if value is cursor.state:
+                        shape = cursor.footprint()
+                        required = codec.decoded_json_allocation(*shape) + cursor.encoding_charge(shape)
+                        self.assertGreaterEqual(self.index.budget.working_bytes, required,
+                            'whole-state serialization allocated before its temporary-copy reservation')
+                        encoded_checks.append(shape)
+                    return original_encoded(value)
+                for _ in range(16):
+                    number = len(expected) + 1
+                    tag = 'cleanup-one-step-' + str(number)
+                    directory = self.output / 'temporal' / tag
+                    directory.mkdir(parents=True, exist_ok=True)
+                    for module in ('AsyncDriverRefinement', 'PagedOneStep'):
+                        shutil.copyfile(fixture.PACKAGE / (module + '.tla'), directory / (module + '.tla'))
+                    for module in ('SourceTables', 'PagedTables'):
+                        (directory / (module + '.tla')).write_text('---- MODULE ' + module + ' ----\n====\n')
+                    checker.write_json(directory / 'id-map.json', {'owned': number})
+                    config = directory / 'paged-one-step.cfg'
+                    config.write_text('SPECIFICATION PageSpec\n')
+                    before = (self.state.sequence(), self.state.cursor(), self.state.logical_digest(),
+                        self.index.db.execute("SELECT state FROM operation_state WHERE operation='temporal_qualification'").fetchone()[0],
+                        self.index.db.execute("SELECT count(*) FROM credit_links WHERE table_name='tlc_invocation'").fetchone()[0])
+                    before_shape, before_charge = cursor.receipt_shape(), cursor.charged
+                    def completed(receipt):
+                        cursor.state['receipt_after'] = tag
+                        cursor.append(checker.temporal_receipt_ref(self.index, tag))
+                        cursor.save()
+                        if number == 3 and not interrupted:
+                            raise codec.Incomplete('fixture: interrupt after guarded append/save before invocation commit')
+                    try:
+                        with patch.object(self.index.budget, 'reserve_working', side_effect=reserve), \
+                             patch.object(checker, 'encoded', side_effect=encode), \
+                             patch.object(checker, 'invoke_tlc', side_effect=self.invoke):
+                            checker.run_temporal_tlc(self.index, self.output, self.tlc, tag, 'PagedOneStep',
+                                directory, config, completed=completed, cursor=cursor)
+                    except codec.Incomplete as error:
+                        after = (self.state.sequence(), self.state.cursor(), self.state.logical_digest(),
+                            self.index.db.execute("SELECT state FROM operation_state WHERE operation='temporal_qualification'").fetchone()[0],
+                            self.index.db.execute("SELECT count(*) FROM credit_links WHERE table_name='tlc_invocation'").fetchone()[0])
+                        self.assertEqual(after, before, 'failed aggregate quantum changed saved cursor/credit')
+                        self.assertEqual(cursor.state['receipts'], expected, 'rollback retained an uncommitted live append')
+                        self.assertEqual(cursor.receipt_shape(), before_shape)
+                        self.assertEqual(cursor.charged, before_charge)
+                        if 'fixture: interrupt' in str(error):
+                            interrupted = True
+                            continue
+                        self.assertIn('prospective', str(error))
+                        self.assertTrue(failed_reservations)
+                        self.assertEqual(failed_reservations[-1][1], len(expected), 'unsafe append occurred before admission failed')
+                        self.assertGreaterEqual(failed_reservations[-1][0], cursor.encoding_charge(cursor.footprint()),
+                            'prospective request omitted temporary serialized copies')
+                        # The old encoded-only cap would still admit this state;
+                        # prospective live/temporary accounting must stop it first.
+                        self.assertLess(len(before[3]), self.index.budget.member_limit())
+                        boundary = True
+                        break
+                    expected.append(checker.temporal_receipt_ref(self.index, tag))
+                saved = self.index.db.execute("SELECT state FROM operation_state WHERE operation='temporal_qualification'").fetchone()[0]
+            self.assertEqual(self.index.budget.working_bytes, 0, 'aggregate ownership leaked after close')
+            same_plan = codec.Budget(copy.deepcopy(self.plan), self.output)
+            self.assertEqual(codec.bounded_json(saved, same_plan)['receipts'], expected,
+                'committed aggregate cannot pass the unchanged bounded_json restore policy')
+            self.authenticated_restore()
+            self.next_unit()
+            if boundary:
+                with checker.TemporalQualification(self.index, self.mapping) as restored:
+                    self.assertEqual(restored.state['receipts'], expected)
+                    self.assertGreaterEqual(self.index.budget.working_bytes,
+                        codec.decoded_json_allocation(*restored.footprint()))
+                break
+        else:
+            self.fail('producer-shaped references never reached the admitted resident boundary')
+        self.assertTrue(interrupted)
+        self.assertTrue(boundary)
+        self.assertGreaterEqual(self.restores, 2)
+        self.assertGreater(len(expected), 16)
+        self.assertTrue(encoded_checks, 'test never observed guarded whole-state serialization')
+        self.assertEqual(len({reference['id'] for reference in expected}), len(expected))
+        self.assertEqual(self.index.db.execute('SELECT count(*) FROM tlc_done').fetchone()[0], len(expected))
+
+    def test_aggregate_footprint_matches_exact_decoder_token_policy(self):
+        # Escaping, Unicode, punctuation inside strings and scalar/container
+        # charges must agree with the real decoder rather than a 32x estimate.
+        import io
+        values = [None, True, False, -9223372036854775808, 9223372036854775807,
+            {'quoted': '"\\\n\t\u0000é🧪,:[]{}', 'nested': [[], {}, {'empty': ''}, 0]}]
+        for value in values:
+            raw = codec.encoded(value)
+            shape = codec.canonical_json_footprint(value)
+            self.assertEqual(shape[0], len(raw))
+            self.assertEqual(codec.decoded_json_allocation(*shape),
+                codec.decoded_stream_reservation(io.BytesIO(raw), len(raw), self.index.budget))
 
 
 if __name__ == '__main__':
