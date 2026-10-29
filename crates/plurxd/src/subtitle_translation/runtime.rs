@@ -160,7 +160,7 @@ fn clock_frame_record(line: &[u8]) -> bool {
         b"[Parsed_ashowinfo_4 ".as_slice(),
     ]
     .iter()
-    .any(|marker| line.windows(marker.len()).any(|part| part == *marker));
+    .any(|marker| line.starts_with(marker));
     instance
         && line
             .windows(2)
@@ -1492,6 +1492,25 @@ mod tests {
         format!(
             "[Parsed_ashowinfo_{filter} @0] n:0 pts:{pts} pts_time:0 fmt:s16 channels:1 rate:16000 nb_samples:{samples}\n"
         )
+    }
+
+    #[test]
+    fn clock_record_selector_ignores_foreign_log_messages() {
+        for filter in [1, 4] {
+            let record = frame(filter, 0, 16_000);
+            assert!(clock_frame_record(record.as_bytes()));
+            // Demuxer metadata and another logger can quote a frame marker;
+            // neither is evidence emitted by the observed filter instance.
+            for prefix in ["    title : ", "[demuxer @0] "] {
+                let quoted = format!("{prefix}{record}");
+                assert!(!clock_frame_record(quoted.as_bytes()));
+            }
+            let malformed = record.replace("pts:0 ", "missing_pts ");
+            assert!(
+                clock_frame_record(malformed.as_bytes()),
+                "actual malformed frame records must still reach strict parsing"
+            );
+        }
     }
 
     #[test]
