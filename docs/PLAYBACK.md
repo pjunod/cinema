@@ -1113,10 +1113,19 @@ first leaves a monotonic lifetime verdict that refuses any later replacement.
 
 ## The fragment index — a file's segmentation, computed once
 
-Copy VOD uses a complete index for the exact source and output recipe.
-A missing index keeps the current watch on the rolling presentation; it does
-not make the viewer wait for a full source pass. See
+Local copy VOD uses a complete index for the exact source and output recipe.
+A missing index keeps the current local watch on the rolling presentation; it
+does not make the viewer wait for a full source pass. See
 [VOD-PRESENTATION-PLAN.md](streaming/VOD-PRESENTATION-PLAN.md) §2.2.
+
+Cinema sharing uses indexed HLS copy. For a cold non-Dolby H.264 or HEVC source,
+Start builds the complete index under the Source actor's admission, authority,
+held-file fence and start deadline. HEVC copy requires a completed original-
+header proof bound to that physical source node and object. HDR10 video and
+its static metadata stay copied when the client supports them; unsupported
+audio can become AAC without requiring an HDR10 video encoder. A failed or
+incomplete scan refuses preparation. This path does not start an anonymous
+background index job or force SDR merely because the index was missing.
 
 **What it is.** One row per fragment of a file, produced by the production copy
 pipe with the audio dropped and the input unpaced: first-sample decode time,

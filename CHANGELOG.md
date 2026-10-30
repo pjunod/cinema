@@ -121,6 +121,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared HDR10 playback builds a missing HEVC copy index instead of forcing
+  video encoding and SDR on hosts without an HDR10 encoder. Unsupported EAC3
+  audio converts to AAC while the HDR10 video and static metadata stay intact.
+
 - Sharing hides revoked recipients by default, explains pairing and viewer
   assignment steps, and refreshes incoming requests automatically. Invitation
   imports verify an existing private connection immediately, show actionable

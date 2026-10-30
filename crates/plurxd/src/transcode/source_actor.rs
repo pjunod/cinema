@@ -1086,11 +1086,14 @@ impl TranscodeManager {
         &self,
         owner: &Arc<SourceViewerInner>,
         prepared: &crate::http::hls::PreparedSourcePlayback,
+        source_node_id: &str,
         deadline: Instant,
         work: &mut Option<crate::fragindex::SourceIndexOperation>,
     ) -> Result<(), SourceWorkerError> {
         let file = prepared.file();
-        if file.video_codec.as_deref() != Some("h264") {
+        if !matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265"))
+            || plurx_core::playback::is_dolby_vision(file)
+        {
             // Existing warm indexes retain their established support policy.
             return Ok(());
         }
@@ -1105,7 +1108,26 @@ impl TranscodeManager {
         if preserve_dolby_vision || convert_dolby_vision {
             return Err(SourceWorkerError::Unsupported);
         }
-        let video = plurx_core::transcode::CopyVideoOptions::new(false, false);
+        let authority = owner.gate.current_preparation(&owner.assignment).await?;
+        let stored_probe = self
+            .store
+            .source_index_probe_evidence(&authority)
+            .await
+            .map_err(|_| SourceWorkerError::Unresolved)?;
+        if stored_probe
+            .as_ref()
+            .is_some_and(|probe| probe.len() > 1024 * 1024)
+        {
+            return Err(SourceWorkerError::Unsupported);
+        }
+        // Match Source VOD's exact recipe, including parameter-set promotion
+        // and retention. A plain-copy identity cannot stand in for either.
+        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+            file,
+            stored_probe.as_deref(),
+            false,
+            false,
+        );
         let identity = crate::fragindex::identity_for(file, video);
         if self
             .store
@@ -1125,12 +1147,7 @@ impl TranscodeManager {
             .map_err(|_| SourceWorkerError::Unavailable)?;
         let object_version = source.object_version().to_owned();
         let authority = owner.gate.current_preparation(&owner.assignment).await?;
-        let stored_probe = self
-            .store
-            .source_index_probe_evidence(&authority)
-            .await
-            .map_err(|_| SourceWorkerError::Unresolved)?
-            .ok_or(SourceWorkerError::Unsupported)?;
+        let stored_probe = stored_probe.ok_or(SourceWorkerError::Unsupported)?;
         authority
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -1158,7 +1175,7 @@ impl TranscodeManager {
         if !built.source_unchanged {
             return Err(SourceWorkerError::Unavailable);
         }
-        let crate::fragindex::IndexOutcome::Built(index) = built.outcome else {
+        let crate::fragindex::IndexOutcome::Built(mut index) = built.outcome else {
             return Err(SourceWorkerError::Unavailable);
         };
         let fence =
@@ -1166,6 +1183,30 @@ impl TranscodeManager {
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
         owner.gate.current_preparation(&owner.assignment).await?;
+        if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+            // This scan read the held local source, not a peer's index. Bind
+            // its original-header proof to the actual assigned physical node
+            // before VOD copy admission can rely on it.
+            if source_node_id.is_empty() || source_node_id != owner.assignment.owner_node_id() {
+                return Err(SourceWorkerError::Unavailable);
+            }
+            let proof = index
+                .promotion
+                .hevc_configuration
+                .as_mut()
+                .ok_or(SourceWorkerError::Unsupported)?;
+            proof.source_node_id = source_node_id.to_owned();
+            let verified = if video.retains_hevc_parameter_sets() {
+                // Retaining copies deliver changing parameter sets rather
+                // than deleting them; VOD does not require a constant proof.
+                proof.current_on_node(&object_version, source_node_id)
+            } else {
+                proof.permits_on_node(&object_version, source_node_id)
+            };
+            if !verified {
+                return Err(SourceWorkerError::Unsupported);
+            }
+        }
         self.store
             .put_fragment_index(file.id, &index)
             .await
@@ -1373,6 +1414,7 @@ impl TranscodeManager {
                     Box::pin(self.prepare_source_cold_index(
                         &owner,
                         &prepared,
+                        &state.node_id,
                         deadline,
                         &mut index_work,
                     ))
