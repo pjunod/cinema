@@ -440,3 +440,7 @@ reason = "Verified Forgejo PR #1251 landing uses a custom subject outside the ca
 [[errata]]
 commit = "85f7bbd7bb61099b75733c367b0bc4aabf7f0522"
 reason = "PR #1314 repaired the macOS companion title-scan platform gates, but its immutable landing message qualified Rust regression names with fragindex::tests::dv_title_companion::. The regression-field validator requires the function name within the named source file. The corrected references are crates/plurxd/src/fragindex/tests.rs::the_companion_scan_is_judged_like_the_title_job and crates/plurxd/src/fragindex/tests.rs::the_companion_scan_leaves_the_index_pass_untouched; both resolve in the landing tree. The PR body was corrected after merge. This records the malformed historical anchors without changing the audit boundary, validation rules, or runtime behavior."
+
+[[errata]]
+commit = "d03c8abdf17dea7147e112a32fec274834151fca"
+reason = "Corrective commit d03c8abd (fix(server): repair unit regressions and lifecycle edge cases) is already in main ancestry outside a recognized landing commit. Its immutable message carries ten Regression-Test fields; all ten resolve in that commit's own tree. PR #1336 fast lane #6236 first reported this inherited history error before its runtime checks. This permanent erratum records the missing landing carrier without rewriting history, moving the audit boundary, changing runtime behavior or claiming new execution evidence."
