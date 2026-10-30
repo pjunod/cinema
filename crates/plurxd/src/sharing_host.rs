@@ -157,10 +157,13 @@ pub(crate) struct SetupStatus {
     pub state: SetupState,
     pub message: String,
     pub checked_at_ms: Option<i64>,
+    /// Fresh control-plane observation, separate from forwarding readiness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tailscale_online: Option<bool>,
 }
 impl SetupState {
     fn status(self) -> SetupStatus {
-        SetupStatus { state: self, checked_at_ms: Some(clock_ms()), message: match self {
+        SetupStatus { state: self, checked_at_ms: Some(clock_ms()), tailscale_online: None, message: match self {
             Self::Pending => "Setting up the private connection…",
             Self::Disabled => "Sharing is disabled.",
             Self::Ready => "Private host setup is configured. Pair another Cinema to verify the connection.",
@@ -182,6 +185,8 @@ pub(crate) struct HostAddress {
     ipv4: Ipv4Addr,
     ipv6: Option<Ipv6Addr>,
     ts_fqdn: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tailscale_online: Option<bool>,
 }
 impl HostAddress {
     fn endpoint(&self, pin: String) -> Result<Endpoint, SetupState> {
@@ -410,6 +415,7 @@ fn host_address(status: &serde_json::Value) -> Result<HostAddress, SetupState> {
         ipv4,
         ipv6,
         ts_fqdn,
+        tailscale_online: self_node.get("Online").and_then(serde_json::Value::as_bool),
     };
     address.endpoint("0".repeat(64))?;
     Ok(address)
@@ -729,6 +735,11 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
                 )
                 .await
             };
+            let tailscale_online = result
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .and_then(|address| address.tailscale_online);
             let (setup, address) = match result {
                 Ok(Some(address)) if enabled => match publish_endpoint(&state, &address).await {
                     Ok(()) => (SetupState::Ready, Some(IpAddr::V4(address.ipv4))),
@@ -745,9 +756,11 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
                 }
                 last_setup = Some(setup);
             }
+            let mut observation = setup.status();
+            observation.tailscale_online = tailscale_online;
             state
                 .sharing
-                .observe_host_setup(setup.status(), address, guard);
+                .observe_host_setup(observation, address, guard);
         } else {
             state
                 .sharing
@@ -1086,6 +1099,7 @@ esac
             ipv4: Ipv4Addr::new(100, 80, 1, index),
             ipv6: None,
             ts_fqdn: format!("cinema{index}.tail123.ts.net"),
+            tailscale_online: None,
         }
         .endpoint(format!("{index:064x}"))
         .expect("synthetic sharing host fixture")
@@ -1197,6 +1211,42 @@ esac
         assert!(host_address(&fixture("192.168.1.2")).is_err());
         assert!(host_address(&json!({"BackendState":"NeedsLogin"})).is_err());
     }
+    #[test]
+    fn host_online_observation_distinguishes_disconnected_and_legacy_reports() {
+        let mut status = json!({"BackendState":"Running","Self":{"DNSName":"cinema.tail123.ts.net.","TailscaleIPs":["100.80.1.2"]}});
+        for (value, expected) in [
+            (json!(true), Some(true)),
+            (json!(false), Some(false)),
+            (json!("true"), None),
+            (json!(null), None),
+        ] {
+            status["Self"]["Online"] = value;
+            let address = host_address(&status).expect("valid private identity");
+            assert_eq!(address.tailscale_online, expected);
+            let mut observation = SetupState::Ready.status();
+            observation.tailscale_online = address.tailscale_online;
+            let wire = serde_json::to_value(observation).expect("observed status");
+            assert_eq!(
+                wire["state"], "ready",
+                "online is independent from configured forwarding"
+            );
+            assert_eq!(
+                wire.get("tailscale_online")
+                    .and_then(serde_json::Value::as_bool),
+                expected
+            );
+        }
+        let legacy: HostAddress = serde_json::from_value(
+            json!({"ipv4":"100.80.1.2","ipv6":null,"ts_fqdn":"cinema.tail123.ts.net"}),
+        )
+        .expect("older host helper report");
+        assert_eq!(legacy.tailscale_online, None);
+        assert!(serde_json::to_value(legacy)
+            .expect("legacy address")
+            .get("tailscale_online")
+            .is_none());
+    }
+
     #[test]
     fn sharing_setup_never_replaces_other_services_or_public_rules() {
         assert_eq!(

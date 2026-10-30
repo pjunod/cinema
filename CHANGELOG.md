@@ -158,6 +158,11 @@ bump may break compatibility and a **patch** bump never does.
   Current nonretryable range failures are visible without hiding available
   coverage or offering unsupported retries.
 - Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
+- Sharing setup shows the Tailscale connection and saved account authorization
+  up front, confirms key saves by reading them back, and refreshes connection
+  status after setup. Cluster gateway addresses and node-local setup are labeled
+  separately.
+
 
 
 - Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.

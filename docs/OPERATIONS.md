@@ -5104,6 +5104,20 @@ private forwarding after sharing is enabled. Settings → Sharing shows setup
 progress and required sign-in, permission or port-conflict actions. No router
 configuration is needed. Pairing still requires explicit approval and scope.
 
+**Connect Tailscale account** appears at the top of Sharing. Its saved API-key
+status is separate from this host's Tailscale connection, private forwarding
+and Cinema listener status. Connected uses the host's current Tailscale online
+observation, not just configured forwarding; a host helper report without that fact
+reports an unconfirmed connection. A saved key is not a live provider-authorization
+check. The page continues checking host setup after it becomes ready so a later
+disconnect appears; stale or failed checks become unconfirmed.
+
+Cluster members share one Cinema identity, library grants and gateway address
+list. Host Tailscale state, listener certificates, the saved account API key and
+provider-invitation cleanup records currently belong to each node. Create external
+invitations through the node where the account key was saved; configuring it on
+one member does not install that key on the other members.
+
 Linux Compose uses the separately installed component in
 [the host setup guide](features/SHARING-HOST-SETUP.md). Its one-time local
 administrator installation prepares the private bridge and worker; the worker
