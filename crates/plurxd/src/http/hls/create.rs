@@ -2586,6 +2586,21 @@ pub(super) async fn validate_hevc_copy_transport(
     caps: &plurx_core::playback::DeviceCaps,
     request: &crate::transcode::SessionRequest,
 ) -> Result<(), ApiError> {
+    if !matches!(request.kind, crate::transcode::SessionKind::Copy { .. })
+        || caps.progressive_hevc_sample_entries.is_none()
+    {
+        return Ok(());
+    }
+    let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), source).await?;
+    validate_hevc_copy_transport_from_probe(source, caps, request, probe_json.as_deref())
+}
+
+fn validate_hevc_copy_transport_from_probe(
+    source: &MediaFile,
+    caps: &plurx_core::playback::DeviceCaps,
+    request: &crate::transcode::SessionRequest,
+    probe_json: Option<&str>,
+) -> Result<(), ApiError> {
     let crate::transcode::SessionKind::Copy {
         preserve_dolby_vision,
         ..
@@ -2596,9 +2611,7 @@ pub(super) async fn validate_hevc_copy_transport(
     if caps.progressive_hevc_sample_entries.is_none() {
         return Ok(());
     }
-    let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), source).await?;
-    let promotes =
-        plurx_core::transcode::hevc_parameter_set_promotion_required(source, probe_json.as_deref());
+    let promotes = plurx_core::transcode::hevc_parameter_set_promotion_required(source, probe_json);
     let Some(actual) =
         super::super::stream::progressive_hevc_output_tag(source, preserve_dolby_vision, promotes)
     else {
@@ -6395,7 +6408,13 @@ pub(crate) async fn prepare_source_playback<
         body,
     )
     .await?;
-    validate_hevc_copy_transport(state, &file, &caps, &resolved.request).await?;
+    // Source preparation must not run the local census, which can change
+    // the revision being authorized and starts children outside its owner.
+    let probe_json = snapshot.probe_json.as_deref();
+    if probe_json.is_some_and(|probe| probe.len() > 1024 * 1024) {
+        return Err(refused("stored_probe_bound"));
+    }
+    validate_hevc_copy_transport_from_probe(&file, &caps, &resolved.request, probe_json)?;
     if burn_would_discard_this_session_hdr(
         state,
         Some(&file),
