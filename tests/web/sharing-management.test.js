@@ -23,7 +23,7 @@ function ownedTimers(context){
  context.setTimeout=(fn,delay)=>{const id=++next;pending.set(id,{fn,delay});return id;};context.clearTimeout=id=>pending.delete(id);
  return {pending,async run(id){const timer=pending.get(id);assert.ok(timer,"owned timer exists");pending.delete(id);return timer.fn();}};
 }
-function readyStatus(now=Date.now()){return {node_id:"node-a",listener:"listening",host_setup:{state:"ready",checked_at_ms:now},network_authorization:{configured:false,node_id:"node-a"}};}
+function readyStatus(now=Date.now()){return {node_id:"node-a",listener:"listening",host_setup:{state:"ready",tailscale_online:true,checked_at_ms:now},network_authorization:{configured:false,node_id:"node-a"}};}
 
 test("sharing management parses and serializes exact wire integers without rounding Local or Source identities",()=>{
  const {m}=harness();const value=m.parse('{"generation":9007199254740993,"user":9223372036854775807,"library":"9007199254740993","zero":0,"ignored":1.5}');
@@ -401,11 +401,11 @@ test("automatic host setup reports required action without claiming peer reachab
 
 test("setup polling continues after readiness and observes a later disconnect without replaying writes",async()=>{
  let disconnected=false;
- const h=harness(async(path)=>reply(path.endsWith("endpoints")?{manifest:{revision:1n,endpoints:[endpoint]}}:path.endsWith("network-authorization")?{configured:true,node_id:"node-a"}:{listener:"listening",node_id:"node-a",host_setup:{state:disconnected?"sign_in_required":"ready",message:disconnected?"Open Tailscale and sign in.":"Private host setup is configured.",checked_at_ms:Date.now()}}));
+ const h=harness(async(path)=>reply(path.endsWith("endpoints")?{manifest:{revision:1n,endpoints:[endpoint]}}:path.endsWith("network-authorization")?{configured:true,node_id:"node-a"}:{listener:"listening",node_id:"node-a",host_setup:{state:"ready",tailscale_online:!disconnected,message:"Private host setup is configured.",checked_at_ms:Date.now()}}));
  const timers=ownedTimers(h.c);
  h.m.panel({...h.data,sharingStatus:{node_id:"node-a",listener:"listening",host_setup:{state:"pending",message:"Setting up…",checked_at_ms:Date.now()}}});
  await timers.run(h.m.state().setupTimer);assert.equal(h.m.state().status.host_setup.state,"ready");assert.match(h.element.innerHTML,/Tailscale on this node: Connected/);
- disconnected=true;await timers.run(h.m.state().setupTimer);assert.equal(h.m.state().status.host_setup.state,"sign_in_required");assert.match(h.element.innerHTML,/Tailscale on this node: Not connected/);assert.match(h.element.innerHTML,/API key saved on this node/);assert.ok(h.requests.every(r=>r.options.method==="GET"));
+ disconnected=true;await timers.run(h.m.state().setupTimer);assert.equal(h.m.state().status.host_setup.state,"ready");assert.match(h.element.innerHTML,/Tailscale on this node: Disconnected/);assert.match(h.element.innerHTML,/API key saved on this node/);assert.ok(h.requests.every(r=>r.options.method==="GET"));
  h.m.retire();assert.equal(timers.pending.size,0);assert.equal(h.m.state(),null);
 });
 
@@ -531,7 +531,7 @@ test("automatic endpoint discovery refreshes an open invitation without losing l
 
 test("Tailscale setup and account action are visible before advanced details and distinguish cluster scope",()=>{
  const h=harness();h.c.SERVER={cluster_enabled:true};
- const html=h.m.panel({...h.data,sharingStatus:{listener:"listening",host_setup:{state:"ready",checked_at_ms:Date.now()},network_authorization:{configured:false}}});
+ const html=h.m.panel({...h.data,sharingStatus:{listener:"listening",host_setup:{state:"ready",tailscale_online:true,checked_at_ms:Date.now()},network_authorization:{configured:false}}});
  const front=html.split('<details class="sharing-advanced">')[0];
  assert.match(front,/Connect Tailscale account/);assert.match(front,/Tailscale on this node: Connected/);assert.doesNotMatch(front,/Private forwarding:|Cinema listener:/);assert.match(front,/no API key saved on this node/);
  assert.match(front,/Cluster-wide libraries and gateways · connection checks for this node/);
@@ -541,9 +541,9 @@ test("Tailscale setup and account action are visible before advanced details and
 test("a saved API key never substitutes for host connectivity or a live provider check",()=>{
  const h=harness();const html=h.m.panel({...h.data,sharingStatus:{listener:"not_started",host_setup:{state:"sign_in_required",checked_at_ms:Date.now()},network_authorization:{configured:true}}});
  assert.match(html,/Tailscale on this node: Not connected/);assert.match(html,/API key saved on this node/);assert.doesNotMatch(html.split('<details class="sharing-advanced">')[0],/current account authorization/);assert.doesNotMatch(html,/Tailscale on this node: Connected/);
- const stale=h.m.panel({...h.data,sharingStatus:{listener:"listening",host_setup:{state:"ready",checked_at_ms:Date.now()-60000},network_authorization:{configured:true}}});
+ const stale=h.m.panel({...h.data,sharingStatus:{listener:"listening",host_setup:{state:"ready",tailscale_online:true,checked_at_ms:Date.now()-60000},network_authorization:{configured:true}}});
  assert.match(stale,/Tailscale on this node: Status unavailable/);assert.doesNotMatch(stale,/Tailscale on this node: Connected/);
- const future=h.m.panel({...h.data,sharingStatus:{host_setup:{state:"ready",checked_at_ms:Date.now()+60000},network_authorization:{configured:true}}});assert.match(future,/Tailscale on this node: Status unavailable/);
+ const future=h.m.panel({...h.data,sharingStatus:{host_setup:{state:"ready",tailscale_online:true,checked_at_ms:Date.now()+60000},network_authorization:{configured:true}}});assert.match(future,/Tailscale on this node: Status unavailable/);
 });
 
 test("failed saved-status read after a confirmed key save preserves confirmation without repeating the write",async()=>{
@@ -557,7 +557,7 @@ test("failed saved-status read after a confirmed key save preserves confirmation
 
 test("failed connection status refresh clears the connected claim and never publishes after retirement",async()=>{
  const h=harness(async()=>reply({message:"status unavailable"},503)),timers=ownedTimers(h.c);
- h.m.panel({...h.data,sharingStatus:{node_id:"node-a",listener:"listening",host_setup:{state:"ready",checked_at_ms:Date.now()},network_authorization:{configured:true}}});h.m.paint();
+ h.m.panel({...h.data,sharingStatus:{node_id:"node-a",listener:"listening",host_setup:{state:"ready",tailscale_online:true,checked_at_ms:Date.now()},network_authorization:{configured:true}}});h.m.paint();
  assert.match(h.element.innerHTML,/Tailscale on this node: Connected/);await timers.run(h.m.state().setupTimer);assert.match(h.element.innerHTML,/Tailscale on this node: Status unavailable/);assert.doesNotMatch(h.element.innerHTML,/Tailscale on this node: Connected/);
  const count=h.requests.length;h.m.retire();assert.equal(timers.pending.size,0);assert.equal(h.requests.length,count);
 });
@@ -667,4 +667,20 @@ test("a hung initial account read is bounded and cannot restore authorization af
  await timers.run(h.m.state().networkReadDeadlineTimer);await opening;
  assert.equal(h.m.state().busy,false);assert.equal(h.m.state().editor.ready,false);assert.match(h.m.state().editor.error,/timed out/);assert.equal(request.options.signal.aborted,true);assert.equal(h.m.state().networkReadController,null);assert.equal(h.m.state().networkReadDeadlineTimer,null);
  h.m.retire();release(reply({configured:true,node_id:"node-a"}));await new Promise(setImmediate);assert.equal(h.m.state(),null);assert.equal(h.element.innerHTML,"");assert.equal(timers.pending.size,0);
+});
+
+
+test("configured forwarding alone never claims a live Tailscale connection",()=>{
+ const h=harness();
+ for(const online of [false,undefined,"true"]){
+  const status=readyStatus();status.host_setup.tailscale_online=online;
+  const html=h.m.panel({...h.data,sharingStatus:status}).split('<details class="sharing-advanced">')[0];
+  assert.doesNotMatch(html,/Tailscale on this node: Connected/);
+  assert.match(html,online===false?/Tailscale on this node: Disconnected/:/Running — connection not confirmed/);
+ }
+ const untimed=readyStatus();untimed.host_setup.checked_at_ms=null;
+ assert.doesNotMatch(h.m.panel({...h.data,sharingStatus:untimed}),/Tailscale on this node: Connected/);
+ const attention=readyStatus();attention.host_setup.state="port_conflict";attention.host_setup.message="Resolve this host's private forwarding conflict.";
+ const html=h.m.panel({...h.data,sharingStatus:attention}).split('<details class="sharing-advanced">')[0];
+ assert.match(html,/Tailscale on this node: Connected/);assert.match(html,/private forwarding conflict/);
 });

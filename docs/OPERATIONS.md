@@ -5106,7 +5106,9 @@ configuration is needed. Pairing still requires explicit approval and scope.
 
 **Connect Tailscale account** appears at the top of Sharing. Its saved API-key
 status is separate from this host's Tailscale connection, private forwarding
-and Cinema listener status. A saved key is not a live provider-authorization
+and Cinema listener status. Connected uses the host's current Tailscale online
+observation, not just configured forwarding; a host helper report without that fact
+reports an unconfirmed connection. A saved key is not a live provider-authorization
 check. The page continues checking host setup after it becomes ready so a later
 disconnect appears; stale or failed checks become unconfirmed.
 

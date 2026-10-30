@@ -4157,7 +4157,10 @@ libraries for return. Address updates remain explicit `expected_revision`
 CAS writes with pin confirmation; no invitation POST is replayed.
 
 `GET /api/v1/sharing/status` also returns node-local `host_setup` with
-`state`, `message` and `checked_at_ms`. States distinguish `pending`,
+`state`, `message` and `checked_at_ms`. Optional `tailscale_online` reports the
+host's observed Tailscale control-plane connection (`true` or `false`); absent
+means unknown, including host helper reports that omit this fact. It is independent of forwarding
+readiness and does not prove reachability from another Cinema. States distinguish `pending`,
 `disabled`, `ready`, `tailscale_missing`, `sign_in_required`,
 `permission_required`, `port_conflict`, `host_helper_required`,
 `deployment_required`, `native_setup_required` and `unavailable`.

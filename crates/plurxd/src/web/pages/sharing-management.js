@@ -223,11 +223,12 @@ function sharingInput(label,key,value,kind="text"){
 function sharingConnectionHTML(status){
   const setup=status?.host_setup,phase=setup?.state,checked=setup?.checked_at_ms,age=checked==null?null:Date.now()-Number(checked);
   const stale=!!status?.observation_error||(age!=null&&(!Number.isFinite(age)||age>30000||age< -30000));
-  const connected=phase==="ready"&&!stale&&checked!=null;
-  const connection=stale?"Status unavailable — refresh or wait for the next check":connected?"Connected":phase==="sign_in_required"?"Not connected — sign in on this host":phase==="tailscale_missing"?"Not installed on this host":phase==="disabled"?"Not checked — sharing is disabled":"Not confirmed";
+  const online=setup?.tailscale_online,observed=!stale&&checked!=null&&typeof online==="boolean",connected=observed&&online;
+  const connection=stale?"Status unavailable — refresh or wait for the next check":connected?"Connected":observed?"Disconnected":phase==="sign_in_required"?"Not connected — sign in on this host":phase==="tailscale_missing"?"Not installed on this host":phase==="disabled"?"Not checked — sharing is disabled":phase==="ready"?"Running — connection not confirmed":"Not confirmed";
+  const guidance=!stale&&observed&&!online?"Check this host’s network and Tailscale connection. Cinema checks again automatically.":!stale&&phase!=="ready"?setup?.message:null;
   const authorization=status?.network_authorization,known=typeof authorization?.configured==="boolean",saved=known&&authorization.configured;
   const scope=typeof SERVER!=="undefined"&&SERVER?.cluster_enabled?"<p class=\"muted\">Cluster-wide libraries and gateways · connection checks for this node.</p>":"";
-  return `<section class="sharing-connection"><h3>Private connection</h3>${scope}<p role="status"><strong>Tailscale on this node: ${esc(connection)}</strong>${checked!=null?` · checked ${esc(new Date(Number(checked)).toLocaleTimeString())}`:""}</p>${!connected&&!stale&&setup?.message?`<p>${esc(setup.message)}</p>`:""}<p>Tailscale account: ${known?(saved?"API key saved on this node":"no API key saved on this node"):"saved authorization could not be checked"}.</p><p>${sharingButton(saved?"Update Tailscale account":"Connect Tailscale account","sharingOpen('network')",SHARING_MANAGEMENT?.busy||SHARING_MANAGEMENT?.editor?.mode==="network")}</p>${!known&&status?.network_authorization_error?`<p role="alert">${esc(status.network_authorization_error)}</p>`:""}</section>`;
+  return `<section class="sharing-connection"><h3>Private connection</h3>${scope}<p role="status"><strong>Tailscale on this node: ${esc(connection)}</strong>${checked!=null?` · checked ${esc(new Date(Number(checked)).toLocaleTimeString())}`:""}</p>${guidance?`<p>${esc(guidance)}</p>`:""}<p>Tailscale account: ${known?(saved?"API key saved on this node":"no API key saved on this node"):"saved authorization could not be checked"}.</p><p>${sharingButton(saved?"Update Tailscale account":"Connect Tailscale account","sharingOpen('network')",SHARING_MANAGEMENT?.busy||SHARING_MANAGEMENT?.editor?.mode==="network")}</p>${!known&&status?.network_authorization_error?`<p role="alert">${esc(status.network_authorization_error)}</p>`:""}</section>`;
 }
 function sharingManagementHTML(){
   const s=SHARING_MANAGEMENT;if(!s)return "";
@@ -263,7 +264,7 @@ function sharingPaintObservation(){
 function sharingScheduleFreshness(){
   const s=SHARING_MANAGEMENT;if(!s||!sharingCurrent(s.capture)||typeof setTimeout!=="function")return;
   if(s.freshnessTimer!=null){clearTimeout(s.freshnessTimer);s.freshnessTimer=null;}
-  const checked=s.status?.host_setup?.checked_at_ms;if(checked==null||s.status?.host_setup?.state!=="ready")return;
+  const checked=s.status?.host_setup?.checked_at_ms;if(checked==null||(s.status?.host_setup?.state!=="ready"&&typeof s.status?.host_setup?.tailscale_online!=="boolean"))return;
   const remaining=30001-(Date.now()-Number(checked));if(!Number.isFinite(remaining)||remaining<=0||remaining>60001)return;
   s.freshnessTimer=setTimeout(()=>{s.freshnessTimer=null;if(SHARING_MANAGEMENT===s&&sharingCurrent(s.capture))sharingPaintObservation();},remaining);
 }
