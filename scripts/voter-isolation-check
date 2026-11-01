@@ -20,6 +20,11 @@ explicit ``--cgroup-parent`` escapes the default), or a slice without its
 limits. It changes nothing: it runs ``docker inspect``/``docker ps``,
 ``systemctl show`` and reads files under /sys and /etc.
 
+It needs the unified cgroup v2 hierarchy, and says so instead of reporting
+every container as misplaced on a cgroup-v1 or hybrid host. A container that
+exits between ``docker ps`` and its inspection is reported as such (the scan
+is then incomplete, so the run still fails); run it again.
+
 Usage: scripts/voter-isolation-check [--plurxd-container plurxd] [--json]
 """
 
@@ -64,6 +69,8 @@ class Container:
     memory_max: str | None
     swap_max: str | None
     cgroup_parent: str
+    # It exited between `docker ps` and being read: nothing about it is known.
+    vanished: bool = False
 
 
 @dataclass
@@ -76,14 +83,33 @@ class Report:
     problems: list[str] = field(default_factory=list)
 
 
+def _vanished(ident: str, name: str | None = None, parent: str = "") -> Container:
+    return Container(
+        name=name or ident,
+        cgroup="",
+        memory_low=None,
+        memory_max=None,
+        swap_max=None,
+        cgroup_parent=parent,
+        vanished=True,
+    )
+
+
 def _container(host: Host, ident: str) -> Container:
-    shown = json.loads(host.run(["docker", "inspect", ident]))[0]
+    try:
+        shown = json.loads(host.run(["docker", "inspect", ident]))[0]
+    except (OSError, subprocess.CalledProcessError, ValueError, IndexError, KeyError):
+        # Gone between `docker ps` and here: inspect fails or answers [].
+        return _vanished(ident)
     name = shown.get("Name", ident).lstrip("/")
     pid = shown.get("State", {}).get("Pid", 0)
     parent = shown.get("HostConfig", {}).get("CgroupParent", "") or ""
     cgroup = ""
     proc = host.read(pathlib.Path(f"/proc/{pid}/cgroup")) if pid else None
-    for line in (proc or "").splitlines():
+    if proc is None:
+        # Pid 0 (stopped) or a /proc entry that is already gone.
+        return _vanished(ident, name, parent)
+    for line in proc.splitlines():
         # cgroup v2: a single "0::/path" line.
         if line.startswith("0::"):
             cgroup = line[3:].strip()
@@ -127,16 +153,27 @@ def check(host: Host, plurxd_name: str = "plurxd") -> Report:
     except (OSError, subprocess.CalledProcessError) as error:
         report.problems.append(f"cannot list containers: {error}")
         return report
+    unified = host.read(CGROUP_ROOT / "cgroup.controllers") is not None
+    if not unified:
+        report.problems.append(
+            "cgroup v2 required: /sys/fs/cgroup is not the unified hierarchy (cgroup v1 or "
+            "hybrid), so plurx.slice's MemoryLow and docker-other.slice's limits cannot work "
+            "as designed; container placement was not checked"
+        )
     containers = [_container(host, ident) for ident in running]
     for container in containers:
-        if container.name == plurxd_name:
+        if container.vanished:
+            report.problems.append(
+                f"container {container.name} exited during the scan; run the check again"
+            )
+        elif container.name == plurxd_name:
             report.plurxd = container
         else:
             report.others.append(container)
 
-    if report.plurxd is None:
+    if unified and report.plurxd is None:
         report.problems.append(f"no running container named {plurxd_name}")
-    else:
+    elif unified and report.plurxd is not None:
         if not _in_slice(report.plurxd.cgroup, PLURX_SLICE):
             report.problems.append(
                 f"{plurxd_name} cgroup {report.plurxd.cgroup or '?'} is outside {PLURX_SLICE}"
@@ -146,7 +183,7 @@ def check(host: Host, plurxd_name: str = "plurxd") -> Report:
                 f"{plurxd_name} memory.low is {report.plurxd.memory_low or 'unreadable'}; "
                 "set mem_reservation so the slice's protection reaches it"
             )
-    for container in report.others:
+    for container in report.others if unified else []:
         if not _in_slice(container.cgroup, OTHER_SLICE):
             why = (
                 f"explicit --cgroup-parent {container.cgroup_parent}"

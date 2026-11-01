@@ -62,9 +62,11 @@ class FakeHost(check.Host):
             self.files[base + "/memory.max"] = high + "\n"
             self.files[base + "/memory.swap.max"] = "max\n"
         self.files["/etc/docker/daemon.json"] = json.dumps(self.daemon)
+        self.files["/sys/fs/cgroup/cgroup.controllers"] = "cpuset cpu io memory pids\n"
         self.files["/sys/block/nvme0n1/queue/scheduler"] = "[none] mq-deadline\n"
         self.files["/sys/block/loop0/queue/scheduler"] = "[none] mq-deadline\n"
         self.commands = []
+        self.exited_before_inspect = set()
 
     def run(self, argv):
         self.commands.append(argv)
@@ -72,6 +74,8 @@ class FakeHost(check.Host):
             return "\n".join(self.containers) + "\n"
         if argv[:2] == ["docker", "inspect"]:
             name = argv[2]
+            if name in self.exited_before_inspect:
+                raise check.subprocess.CalledProcessError(1, argv, stderr="No such object")
             pid = 10 + list(self.containers).index(name)
             parent = self.containers[name][3]
             return json.dumps([{"Name": "/" + name, "State": {"Pid": pid},
@@ -132,6 +136,30 @@ class VoterIsolationCheckTests(unittest.TestCase):
         problems = check.check(host).problems
         self.assertTrue(any("outside plurx.slice" in problem for problem in problems))
         self.assertTrue(any("memory.low is 0" in problem for problem in problems))
+
+    def test_a_container_that_exits_mid_scan_is_reported_not_a_traceback(self):
+        host = FakeHost(isolated(gone=(OTHER_SCOPE, "0", "max", ""),
+                                 stopping=(OTHER_SCOPE, "0", "max", "")))
+        host.exited_before_inspect.add("gone")
+        # `stopping` is inspected after its process exited: no /proc entry.
+        del host.files[f"/proc/{10 + list(host.containers).index('stopping')}/cgroup"]
+        problems = check.check(host).problems
+        self.assertIn("container gone exited during the scan; run the check again", problems)
+        self.assertIn("container stopping exited during the scan; run the check again", problems)
+        self.assertEqual(len(problems), 2, problems)
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(check.main([], host=host), 1)
+        self.assertIn("MISMATCH  container gone exited during the scan", printed.getvalue())
+
+    def test_a_cgroup_v1_host_is_labelled_as_such(self):
+        host = FakeHost(isolated())
+        del host.files["/sys/fs/cgroup/cgroup.controllers"]
+        for index in range(10, 12):
+            host.files[f"/proc/{index}/cgroup"] = "12:memory:/docker/abc\n1:name=systemd:/docker/abc\n"
+        problems = check.check(host).problems
+        self.assertEqual(len(problems), 1, problems)
+        self.assertTrue(problems[0].startswith("cgroup v2 required"), problems)
+        self.assertFalse(any("outside" in problem for problem in problems))
 
     def test_missing_or_unbounded_slices_fail(self):
         slices = {"plurx.slice": {"LoadState": "loaded", "MemoryLow": "0"},
