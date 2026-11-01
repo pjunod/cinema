@@ -530,6 +530,33 @@ def successor_apple_roles(combined):
     return result
 
 
+# Main moved the Apple fleet from Xcode 27.1/27A9275 to 27.2/27B52 after the producer workflow (the
+# standby updated itself on 2026-10-30). Those label and compiler-identity lines are the only reviewed
+# difference this successor admits; every other header and role byte must still equal the reviewed tables.
+TOOLCHAIN_SUCCESSOR_HEADER = (b'    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]\n',
+    b'    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]\n')
+TOOLCHAIN_SUCCESSOR_ROLE = 'Verify the pinned Apple toolchain'
+TOOLCHAIN_SUCCESSOR_LINES = ((b'          grep -Fxq "Xcode 27.1" <<< "$xcode_version"\n',
+    b'          grep -Fxq "Xcode 27.2" <<< "$xcode_version"\n'),
+    (b'          grep -Fxq "Build version 27A9275" <<< "$xcode_version"\n',
+    b'          grep -Fxq "Build version 27B52" <<< "$xcode_version"\n'))
+
+
+def successor_toolchain(header, roles):
+    """The reviewed Xcode 27.2 successor of the already reviewed header and ordered roles."""
+    old, new = TOOLCHAIN_SUCCESSOR_HEADER
+    require(header.count(old) == 1, 'Reviewed Apple runner label is ambiguous')
+    result = []
+    for name, raw in roles:
+        if name == TOOLCHAIN_SUCCESSOR_ROLE:
+            for old, new in TOOLCHAIN_SUCCESSOR_LINES:
+                require(raw.count(old) == 1, 'Reviewed Apple toolchain check is ambiguous')
+                raw = raw.replace(old, new, 1)
+        result.append((name, raw))
+    require([name for name, _ in roles].count(TOOLCHAIN_SUCCESSOR_ROLE) == 1, 'Reviewed Apple toolchain role cardinality differs')
+    return header.replace(*TOOLCHAIN_SUCCESSOR_HEADER, 1), result
+
+
 def workflow_scope(workspace,commit,legacy):
     require(isinstance(commit,str) and re.fullmatch('[0-9a-f]{40}',commit),'Invalid native workflow commit')
     require(digest(legacy) == PRODUCER_WORKFLOW,'Unrecognized native producer workflow')
@@ -560,7 +587,10 @@ def workflow_scope(workspace,commit,legacy):
     except receipts.ReceiptError:
         # An unreviewed step in the current job is an out-of-scope job, not an internal role-table failure.
         raise receipts.ReceiptError('Unsupported native Apple job scope (unreviewed role)') from None
-    require(current_header==header and current_roles in (old_roles,adapted_roles,combined_roles,successor_apple_roles(combined_roles)),
+    successor_roles = successor_apple_roles(combined_roles)
+    toolchain_header, toolchain_roles = successor_toolchain(header, successor_roles)
+    require((current_header == header and current_roles in (old_roles,adapted_roles,combined_roles,successor_roles))
+        or (current_header == toolchain_header and current_roles == toolchain_roles),
         'Unsupported native Apple job scope (ordered roles)')
     return {'sha256':digest(current),'kind':'legacy' if current_roles==old_roles else 'adapted'}
 
