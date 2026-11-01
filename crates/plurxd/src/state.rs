@@ -816,6 +816,9 @@ pub struct AppState {
     pub logs: Arc<LogBuffer>,
     /// Replication/membership detail kept out of the general diagnostics ring.
     pub cluster_logs: Arc<LogBuffer>,
+    /// Shared-library connection, setup and Tailscale-share events, kept
+    /// apart so playback chatter cannot evict a connection failure.
+    pub sharing_logs: Arc<LogBuffer>,
     /// The coming-soon rail's cached answer from Curator (plan §11.2).
     pub coming_soon: Arc<crate::http::ComingSoonCache>,
     /// Pushes watch state to Curator when enabled (plan §11.1).
@@ -1092,6 +1095,7 @@ impl AppState {
             LogBuffers {
                 general: logs,
                 cluster: Arc::new(LogBuffer::default()),
+                sharing: Arc::new(LogBuffer::new(64)),
             },
         )
     }
@@ -1349,6 +1353,7 @@ impl AppState {
             system,
             logs: logs.general,
             cluster_logs: logs.cluster,
+            sharing_logs: logs.sharing,
             coming_soon,
             watched,
             progress,
