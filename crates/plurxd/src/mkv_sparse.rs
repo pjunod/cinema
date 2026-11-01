@@ -39,6 +39,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const HEAD_BYTES: usize = 64 * 1024;
 const MAX_METADATA: u64 = 32 * 1024 * 1024;
 const MAX_BLOCK: u64 = 8 * 1024 * 1024;
+/// Text tracks are kilobytes and a film's PGS track tens of megabytes; past
+/// this the subset is not the cheap answer it exists to be.
+const MAX_SUBSET_BYTES: usize = 128 * 1024 * 1024;
 const MAX_REFERENCES: usize = 500_000;
 const MAX_TOP_LEVEL_WALK: usize = 64;
 const ELEMENT_HEADER_READ: usize = 16;
@@ -328,6 +331,9 @@ pub(crate) struct CueIndex {
     scale: u64,
     /// Subtitle tracks in track-entry order: position is the subtitle ordinal.
     pub(crate) tracks: Vec<SubtitleTrack>,
+    /// What reading the metadata cost.
+    pub(crate) reads: usize,
+    pub(crate) bytes_read: usize,
 }
 
 /// Read the header, seek heads, info, tracks, tags and cues. `Ok(None)` is a
@@ -355,7 +361,7 @@ pub(crate) fn read_index<R: ReadAt + ?Sized>(reader: &R) -> Result<Option<CueInd
         .ok_or(SparseError::Malformed("segment header"))?;
     let segment_data = (ebml_end + segment.len) as u64;
 
-    let positions = locate(&source, segment_data)?;
+    let (positions, tag_positions) = locate(&source, segment_data)?;
     let position = |id: u32| {
         positions.get(&id).copied().ok_or(SparseError::NotIndexed(
             "a required top-level element is absent",
@@ -364,10 +370,12 @@ pub(crate) fn read_index<R: ReadAt + ?Sized>(reader: &R) -> Result<Option<CueInd
     let info = source.element(segment_data + position(INFO)?, INFO, MAX_METADATA)?;
     let tracks = source.element(segment_data + position(TRACKS)?, TRACKS, MAX_METADATA)?;
     let cues = source.element(segment_data + position(CUES)?, CUES, MAX_METADATA)?;
-    let tags = match positions.get(&TAGS) {
-        Some(at) => Some(source.element(segment_data + at, TAGS, MAX_METADATA)?),
-        None => None,
-    };
+    // mkvmerge can write global tags before the clusters and the statistics
+    // tags after the cues; every one is read.
+    let mut tags = Vec::new();
+    for at in &tag_positions {
+        tags.push(source.element(segment_data + at, TAGS, MAX_METADATA)?);
+    }
 
     let info_header = header(&info, 0).ok_or(SparseError::Malformed("info header"))?;
     let mut scale = 1_000_000;
@@ -410,11 +418,12 @@ pub(crate) fn read_index<R: ReadAt + ?Sized>(reader: &R) -> Result<Option<CueInd
         uids.push(uid);
     }
 
-    if let Some(tags) = tags {
-        let frames = frame_statistics(&tags)?;
-        for (track, uid) in subtitles.iter_mut().zip(&uids) {
-            track.frames = uid.and_then(|uid| frames.get(&uid).copied());
-        }
+    let mut frames = HashMap::new();
+    for tags in &tags {
+        frames.extend(frame_statistics(tags)?);
+    }
+    for (track, uid) in subtitles.iter_mut().zip(&uids) {
+        track.frames = uid.and_then(|uid| frames.get(&uid).copied());
     }
 
     let cues_header = header(&cues, 0).ok_or(SparseError::Malformed("cues header"))?;
@@ -483,16 +492,19 @@ pub(crate) fn read_index<R: ReadAt + ?Sized>(reader: &R) -> Result<Option<CueInd
         segment_data,
         scale,
         tracks: subtitles,
+        reads: source.reads.load(Ordering::Relaxed),
+        bytes_read: source.bytes.load(Ordering::Relaxed),
     }))
 }
 
 /// Segment-relative positions of the top-level elements, from every seek
-/// head and from the elements before the first cluster.
+/// head and from the elements before the first cluster, and every `Tags`.
 fn locate<R: ReadAt + ?Sized>(
     source: &Source<'_, R>,
     segment_data: u64,
-) -> Result<HashMap<u32, u64>> {
+) -> Result<(HashMap<u32, u64>, Vec<u64>)> {
     let mut positions = HashMap::new();
+    let mut tags = Vec::new();
     let mut seek_heads = Vec::new();
     let mut at = 0u64;
     for _ in 0..MAX_TOP_LEVEL_WALK {
@@ -504,6 +516,9 @@ fn locate<R: ReadAt + ?Sized>(
             break;
         }
         positions.entry(parsed.id).or_insert(at);
+        if parsed.id == TAGS {
+            tags.push(at);
+        }
         if parsed.id == SEEK_HEAD {
             seek_heads.push(at);
         }
@@ -532,13 +547,18 @@ fn locate<R: ReadAt + ?Sized>(
             }
             if let (Some(target), Some(position)) = (target, position) {
                 positions.entry(target).or_insert(position);
+                if target == TAGS {
+                    tags.push(position);
+                }
                 if target == SEEK_HEAD {
                     seek_heads.push(position);
                 }
             }
         }
     }
-    Ok(positions)
+    tags.sort_unstable();
+    tags.dedup();
+    Ok((positions, tags))
 }
 
 /// `NUMBER_OF_FRAMES` per track UID, from tags that target exactly one track.
@@ -594,12 +614,14 @@ pub(crate) struct Subset {
 
 /// Copy the blocks of `ordinals` into a subtitle-only Matroska file. `span`
 /// keeps only blocks whose cue time lies inside it, in nanoseconds of the
-/// file's own timeline.
+/// file's own timeline. Past `deadline` the reads stop and the caller keeps
+/// its demux: a fast path that has stopped being fast is not one.
 pub(crate) fn subset<R: ReadAt + ?Sized>(
     reader: &R,
     index: &CueIndex,
     ordinals: &[usize],
     span: Option<(i128, i128)>,
+    deadline: std::time::Instant,
 ) -> Result<Subset> {
     let mut wanted = Vec::new();
     for &ordinal in ordinals {
@@ -646,7 +668,7 @@ pub(crate) fn subset<R: ReadAt + ?Sized>(
                     .get(child + found.len..child + found.len + size)
                     .and_then(uint)
                     .ok_or(SparseError::Malformed("cluster timestamp"))?;
-                return Ok((value, at + parsed.len as u64));
+                return Ok((value, at + parsed.len as u64, parsed.size));
             }
             child += found.len + size;
         }
@@ -654,10 +676,15 @@ pub(crate) fn subset<R: ReadAt + ?Sized>(
             "cluster timestamp is not in its header",
         ))
     })?;
-    let headers: HashMap<u64, (u64, u64)> = clusters.into_iter().zip(headers).collect();
+    let headers: HashMap<u64, (u64, u64, Option<u64>)> =
+        clusters.into_iter().zip(headers).collect();
 
+    let copied = AtomicUsize::new(0);
     let blocks = parallel(&wanted, |(reference, number)| {
-        let (_, data) = headers[&reference.cluster];
+        if std::time::Instant::now() > deadline {
+            return Err(SparseError::NotIndexed("cue walk outran its deadline"));
+        }
+        let (timestamp, data, cluster_size) = headers[&reference.cluster];
         let at = data + reference.relative;
         let mut bytes = source.read_up_to(at, BLOCK_READ)?;
         let parsed = header(&bytes, 0).ok_or(SparseError::Malformed("block header"))?;
@@ -672,7 +699,14 @@ pub(crate) fn subset<R: ReadAt + ?Sized>(
         if total > bytes.len() {
             bytes = source.read_exact(at, total)?;
         }
+        if cluster_size.is_some_and(|size| reference.relative + total as u64 > size) {
+            return Err(SparseError::Malformed("cue points past its cluster"));
+        }
+        if copied.fetch_add(total, Ordering::Relaxed) + total > MAX_SUBSET_BYTES {
+            return Err(SparseError::NotIndexed("subtitle subset is too large"));
+        }
         bytes.truncate(total);
+        bytes.shrink_to_fit();
         let block = if parsed.id == SIMPLE_BLOCK {
             &bytes[parsed.len..]
         } else {
@@ -687,6 +721,16 @@ pub(crate) fn subset<R: ReadAt + ?Sized>(
             return Err(SparseError::Malformed(
                 "cue points at another track's block",
             ));
+        }
+        let relative = block
+            .get(len..len + 2)
+            .map(|raw| i16::from_be_bytes([raw[0], raw[1]]))
+            .ok_or(SparseError::Malformed("block timestamp"))?;
+        // The span was chosen on cue times; the subset carries block times.
+        // They are the same instant in a well-formed file, and a file where
+        // they are not cannot be trusted to have been windowed correctly.
+        if i128::from(timestamp) + i128::from(relative) != i128::from(reference.time) {
+            return Err(SparseError::Malformed("cue time is not its block's time"));
         }
         let flags = *block
             .get(len + 2)
@@ -804,6 +848,11 @@ pub(crate) mod fixture {
         pub no_relative: bool,
         /// Point the first subtitle cue at this (cluster, block) instead.
         pub misdirect: Option<(usize, usize)>,
+        /// Added to every subtitle cue's time.
+        pub cue_time_skew: u64,
+        /// Write the first statistic in a `Tags` before the clusters and
+        /// the rest in a second one after the cues.
+        pub split_tags: bool,
     }
 
     impl Default for Fixture {
@@ -813,10 +862,7 @@ pub(crate) mod fixture {
                     (
                         0,
                         vec![
-                            // Starts the file 5 ms early, like an audio
-                            // priming delay: FFmpeg's default timeline then
-                            // shifts every cue by +5 ms.
-                            Block::media(-5),
+                            Block::media(0),
                             Block::text(2, 100, "first line", 900),
                             Block::media(40),
                         ],
@@ -843,6 +889,8 @@ pub(crate) mod fixture {
                 uncued: Vec::new(),
                 no_relative: false,
                 misdirect: None,
+                cue_time_skew: 0,
+                split_tags: false,
             }
         }
     }
@@ -900,6 +948,10 @@ pub(crate) mod fixture {
                 entry.extend(uint_element(TRACK_TYPE, *kind));
                 entry.extend(element(CODEC_ID, codec.as_bytes()));
                 if *kind == 2 {
+                    // A 5 ms codec delay, as Opus and AAC tracks carry,
+                    // gives the file a start time other than zero, so
+                    // FFmpeg's default timeline moves every cue.
+                    entry.extend(uint_element(0x56AA, 5_000_000));
                     let mut audio = element(0xB5, &48_000f64.to_be_bytes());
                     audio.extend(uint_element(0x9F, 2));
                     audio.extend(uint_element(0x6264, 16));
@@ -908,16 +960,21 @@ pub(crate) mod fixture {
                 entries.extend(element(TRACK_ENTRY, &entry));
             }
             let tracks = element(TRACKS, &entries);
-            let mut tag_list = Vec::new();
-            for (number, frames) in &self.frames {
+            let mut tag_lists = (Vec::new(), Vec::new());
+            for (n, (number, frames)) in self.frames.iter().enumerate() {
                 let targets = element(TARGETS, &uint_element(TAG_TRACK_UID, 1000 + number));
                 let mut simple = element(TAG_NAME, b"NUMBER_OF_FRAMES");
                 simple.extend(element(TAG_STRING, frames.to_string().as_bytes()));
                 let mut tag = targets;
                 tag.extend(element(SIMPLE_TAG, &simple));
-                tag_list.extend(element(TAG, &tag));
+                if self.split_tags && n > 0 {
+                    tag_lists.1.extend(element(TAG, &tag));
+                } else {
+                    tag_lists.0.extend(element(TAG, &tag));
+                }
             }
-            let tags = element(TAGS, &tag_list);
+            let tags = element(TAGS, &tag_lists.0);
+            let late_tags = (!tag_lists.1.is_empty()).then(|| element(TAGS, &tag_lists.1));
 
             // Fixed-size seek head first so positions are known up front.
             let seek_len = element(
@@ -965,7 +1022,8 @@ pub(crate) mod fixture {
                             (pc, pb) = target;
                         }
                     }
-                    let time = (*timestamp as i64 + i64::from(block.relative)) as u64;
+                    let time =
+                        (*timestamp as i64 + i64::from(block.relative)) as u64 + self.cue_time_skew;
                     let mut positions_body = uint_element(CUE_TRACK, block.track);
                     positions_body.extend(uint_element(CUE_CLUSTER_POSITION, positions[pc].0));
                     if !(subtitle && self.no_relative) {
@@ -978,12 +1036,19 @@ pub(crate) mod fixture {
                 }
             }
             let cues = element(CUES, &points);
+            // Split tags: the early one is found by walking the top level,
+            // the seek head names only the late one.
+            let named_tags = if late_tags.is_some() {
+                cues_at + cues.len() as u64
+            } else {
+                tags_at
+            };
             let seek = element(
                 SEEK_HEAD,
                 &seek_entries(&[
                     (INFO, info_at),
                     (TRACKS, tracks_at),
-                    (TAGS, tags_at),
+                    (TAGS, named_tags),
                     (CUES, cues_at),
                 ]),
             );
@@ -994,6 +1059,7 @@ pub(crate) mod fixture {
             segment.extend(tags);
             segment.extend(clusters);
             segment.extend(cues);
+            segment.extend(late_tags.unwrap_or_default());
             let mut file = ebml;
             file.extend(element(SEGMENT, &segment));
             file
@@ -1015,6 +1081,10 @@ pub(crate) mod fixture {
 mod tests {
     use super::fixture::Fixture;
     use super::*;
+
+    fn later() -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(60)
+    }
 
     fn index(file: &[u8]) -> CueIndex {
         read_index(file).expect("index").expect("matroska")
@@ -1066,7 +1136,7 @@ mod tests {
     fn the_subset_holds_every_cued_subtitle_block_and_no_picture() {
         let file = Fixture::default().build();
         let index = index(&file);
-        let subset = subset(file.as_slice(), &index, &[0], None).expect("fixture");
+        let subset = subset(file.as_slice(), &index, &[0], None, later()).expect("fixture");
         assert_eq!(
             blocks_of(&subset.bytes, 2),
             vec![
@@ -1084,19 +1154,16 @@ mod tests {
             .bytes
             .windows(64)
             .any(|w| w.iter().all(|b| *b == 0x5A)));
-        assert!(
-            subset.bytes_read < file.len() / 4,
-            "{} of {}",
-            subset.bytes_read,
-            file.len()
-        );
+        // Cluster headers and subtitle blocks only: less than one picture
+        // block's payload.
+        assert!(subset.bytes_read < 20_000, "{}", subset.bytes_read);
     }
 
     #[test]
     fn the_subset_keeps_every_subtitle_entry_so_ordinals_do_not_move() {
         let file = Fixture::default().build();
         let index = index(&file);
-        let subset = subset(file.as_slice(), &index, &[1], None).expect("fixture");
+        let subset = subset(file.as_slice(), &index, &[1], None, later()).expect("fixture");
         assert_eq!(
             blocks_of(&subset.bytes, 3),
             vec![(5300, b"bitmap".to_vec())]
@@ -1118,6 +1185,7 @@ mod tests {
             &index,
             &[0],
             Some((5_000_000_000, 9_000_000_000)),
+            later(),
         )
         .expect("fixture");
         assert_eq!(
@@ -1137,7 +1205,7 @@ mod tests {
         let index = index(&file);
         assert!(!index.tracks[0].indexed(), "two cues for three frames");
         assert!(matches!(
-            subset(file.as_slice(), &index, &[0], None),
+            subset(file.as_slice(), &index, &[0], None, later()),
             Err(SparseError::NotIndexed(_))
         ));
     }
@@ -1171,9 +1239,52 @@ mod tests {
         let file = fixture.build();
         let index = index(&file);
         assert!(matches!(
-            subset(file.as_slice(), &index, &[0], None),
+            subset(file.as_slice(), &index, &[0], None, later()),
             Err(SparseError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn a_cue_time_that_is_not_its_blocks_time_is_refused() {
+        // The window is chosen on cue times; a block that sits elsewhere in
+        // time would be windowed wrongly.
+        let fixture = Fixture {
+            cue_time_skew: 7,
+            ..Fixture::default()
+        };
+        let file = fixture.build();
+        let index = index(&file);
+        assert!(matches!(
+            subset(file.as_slice(), &index, &[0], None, later()),
+            Err(SparseError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn a_walk_past_its_deadline_keeps_the_full_demux() {
+        let file = Fixture::default().build();
+        let index = index(&file);
+        assert!(matches!(
+            subset(
+                file.as_slice(),
+                &index,
+                &[0],
+                None,
+                std::time::Instant::now()
+            ),
+            Err(SparseError::NotIndexed(_))
+        ));
+    }
+
+    #[test]
+    fn statistics_in_a_second_tags_element_still_prove_the_track() {
+        let fixture = Fixture {
+            split_tags: true,
+            ..Fixture::default()
+        };
+        let index = index(&fixture.build());
+        assert!(index.tracks[0].indexed());
+        assert!(index.tracks[1].indexed());
     }
 
     #[test]
@@ -1183,7 +1294,7 @@ mod tests {
         let file = fixture.build();
         let index = index(&file);
         assert!(matches!(
-            subset(file.as_slice(), &index, &[0], None),
+            subset(file.as_slice(), &index, &[0], None, later()),
             Err(SparseError::NotIndexed(_))
         ));
     }

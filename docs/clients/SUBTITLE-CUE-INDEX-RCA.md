@@ -37,8 +37,9 @@ surfacing in a different bound.
 Matroska indexes subtitle blocks. mkvmerge writes a cue point for every
 subtitle frame and a `NUMBER_OF_FRAMES` statistic per track. In a 60-file
 library sample every MKV (mkvmerge, DVDFab, WKSmerge) had both; "Being 17"
-has 1005 cues for 1005 frames, read with 3024 small reads (235 KB) instead
-of 51.6 GB.
+has 1005 cues for 1005 frames; the whole track is 2010 small block reads
+(4.2 MB) and 31.6 s on a loaded NAS instead of a 51.6 GB scan that never
+finished.
 
 ```
  source.mkv ──▶ EBML header · seek heads · Info · Tracks · Tags · Cues
@@ -93,7 +94,8 @@ playback window, and the cluster `subtitle_source` pass.
   laced block, span filter, ordinals kept).
 - Call sites: `subtitles::tests::a_cue_indexed_track_is_extracted_without_demuxing_the_source`
   and `a_cue_indexed_window_reads_only_its_span` pin the route and compare
-  against the demux on a file that starts 64 ms before zero.
+  against the demux on a file whose start time is not zero (a 5 ms codec
+  delay).
 - Library parity, Debian FFmpeg 5.1.9 (the production build): see the PR
   description for the per-file table.
 

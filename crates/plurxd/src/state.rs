@@ -9688,13 +9688,19 @@ impl JobManager {
         // Every planned track cue-indexed: the pass reads those blocks and
         // runs its unchanged command against them. The command is already
         // `-copyts`, so the subset's own timeline is the answer.
+        // Read from the attested object, so what is published is what was
+        // hashed. An empty subset keeps the demux: FFmpeg 6.1+ fails a tee
+        // whose outputs never receive a packet.
         let sparse = crate::subtitles::sparse_subtitle_input(
             file,
             plan.tracks(),
             None,
             crate::subtitles::SparseTimeline::Raw,
+            Some(attested.observation.object_version.as_str()),
+            crate::process_control::ChildWork::background("subtitle source extraction"),
         )
-        .await;
+        .await
+        .filter(|sparse| sparse.blocks > 0);
         tracing::info!(
             file_id = file.id,
             node_id,

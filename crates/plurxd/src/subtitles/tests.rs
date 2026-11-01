@@ -1288,8 +1288,8 @@ async fn a_cue_indexed_track_is_extracted_without_demuxing_the_source() {
     for cue in ["first line", "second line", "third line"] {
         assert!(sparse.contains(cue), "missing {cue:?} in {sparse}");
     }
-    // The file starts before zero, so FFmpeg's default timeline moves every
-    // cue later; the raw block time must not survive into the answer.
+    // The file's start time is not zero (a 5 ms codec delay), so FFmpeg's
+    // default timeline moves every cue; the raw block time must not survive.
     assert!(!sparse.contains("00:00.100 -->"), "{sparse}");
 
     // The same bytes without the proof take the demux, and agree.
@@ -1346,7 +1346,7 @@ async fn a_cue_indexed_window_reads_only_its_span() {
     assert_eq!(vtt_routes_for_test(file.id), ["cue-index-window"]);
     let window = std::fs::read_to_string(&window).expect("window vtt");
     assert!(
-        window.contains("04:10.010 --> 04:11.510\ninside"),
+        window.contains("04:10.015 --> 04:11.515\ninside"),
         "{window}"
     );
     assert!(

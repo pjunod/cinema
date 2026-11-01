@@ -995,9 +995,11 @@ pub(crate) async fn ensure_vtt_with_store(
     }
     let stored = stored.clone();
     ensure_vtt_with(dir, file, index, move |tmp, file, index| async move {
-        // A cue-indexed track costs a few reads per subtitle; nothing the
-        // cluster could hand over is cheaper, and waiting on it is what left
-        // large remuxes without subtitles for the length of a source pass.
+        // A cue-indexed track is read here in a few reads per subtitle,
+        // without waiting on a queued cluster job — the wait that left large
+        // remuxes without subtitles for the length of a source pass. It also
+        // answers on the same rebased timeline as the local demux, where a
+        // cluster-published track is on the source's raw one.
         if extract_vtt_without_demux(&tmp, &file, index, work).await? {
             return Ok(());
         }
@@ -2332,25 +2334,42 @@ pub(crate) struct SparseInput {
     pub(crate) handle: std::fs::File,
     /// Options that go before `-i`.
     pub(crate) input_args: Vec<String>,
+    /// Blocks in the subset. Zero means the answer is an empty track, which
+    /// callers write themselves: FFmpeg 6.1+ fails an output that received
+    /// no packets instead of writing its header.
     pub(crate) blocks: usize,
     #[cfg(windows)]
     _named: tempfile::NamedTempFile,
 }
 
+/// How long one cue walk may take before the caller's demux is the better
+/// answer. A loaded NAS answers a random read in ~20 ms; a film's text track
+/// is a few seconds of that.
+const SPARSE_DEADLINE: Duration = Duration::from_secs(120);
+
 /// Build the subtitle-only subset of `file` for `ordinals`, or `None` when
 /// the cue index cannot be shown to name every block of them — the caller
-/// then demuxes the source as it always did. `span` is in source seconds.
+/// then demuxes the source as it always did.
+///
+/// `span` is in seconds of the timeline the caller's command produces: the
+/// rebased one for [`SparseTimeline::Rebased`], the file's own for `Raw`.
+/// `source_version`, when given, is the object identity the subset must be
+/// read from (an attested source).
 pub(crate) async fn sparse_subtitle_input(
     file: &MediaFile,
     ordinals: &[i64],
     span: Option<(i64, i64)>,
     timeline: SparseTimeline,
+    source_version: Option<&str>,
+    work: crate::process_control::ChildWork,
 ) -> Option<SparseInput> {
     use crate::mkv_sparse::SparseError;
 
     if !matches!(file.container.as_deref(), Some("mkv" | "matroska" | "webm")) {
         return None;
     }
+    // Acquired tracks are appended to `subtitle_streams` after the embedded
+    // ones (`MediaFile::with_downloaded_subtitles`).
     let embedded = file
         .subtitle_streams
         .len()
@@ -2363,17 +2382,12 @@ pub(crate) async fn sparse_subtitle_input(
         .iter()
         .map(|track| track.codec.clone())
         .collect();
-    let source = crate::fragment_index_cluster::open_source_fence(file, None)
+    let source = crate::fragment_index_cluster::open_source_fence(file, source_version)
         .await
         .ok()?;
     let started = std::time::Instant::now();
-    let span = span.map(|(from, to)| {
-        (
-            i128::from(from) * 1_000_000_000,
-            i128::from(to) * 1_000_000_000,
-        )
-    });
-    let built = tokio::task::spawn_blocking(move || {
+    let deadline = started + SPARSE_DEADLINE;
+    let indexed = tokio::task::spawn_blocking(move || {
         advise_random_access(&source.handle);
         let index = crate::mkv_sparse::read_index(&source.handle)?
             .ok_or(SparseError::NotIndexed("not a matroska file"))?;
@@ -2388,23 +2402,50 @@ pub(crate) async fn sparse_subtitle_input(
                 "the subtitle track list disagrees with the library scan",
             ));
         }
-        let subset = crate::mkv_sparse::subset(&source.handle, &index, &wanted, span)?;
-        Ok((subset, source))
+        if let Some(track) = wanted
+            .iter()
+            .find_map(|o| index.tracks.get(*o).filter(|track| !track.indexed()))
+        {
+            let _ = track;
+            return Err(SparseError::NotIndexed(
+                "cue references do not account for every frame",
+            ));
+        }
+        Ok((index, wanted, source))
     })
     .await
     .ok()?;
-    let (subset, source) = match built {
-        Ok(built) => built,
-        Err(SparseError::NotIndexed(why)) => {
-            tracing::debug!(
-                file_id = file.id,
-                why,
-                "subtitle track keeps its full demux"
-            );
+    let (index, wanted, source) = match indexed {
+        Ok(indexed) => indexed,
+        Err(error) => {
+            note_sparse_refusal(file.id, &error);
             return None;
         }
+    };
+    // Measured only once the track is known to be indexed — it is a process
+    // — and before the subset, because the span is in the rebased timeline
+    // and the cues are in the file's own: raw = rebased + start.
+    let start = match timeline {
+        SparseTimeline::Raw => 0.0,
+        SparseTimeline::Rebased => source_start_seconds(&source, file, work).await?,
+    };
+    let start_ns = (start * 1e9).round() as i128;
+    let span = span.map(|(from, to)| {
+        (
+            i128::from(from) * 1_000_000_000 + start_ns,
+            i128::from(to) * 1_000_000_000 + start_ns,
+        )
+    });
+    let built = tokio::task::spawn_blocking(move || {
+        let subset = crate::mkv_sparse::subset(&source.handle, &index, &wanted, span, deadline)?;
+        Ok::<_, SparseError>((subset, index.reads, index.bytes_read, source))
+    })
+    .await
+    .ok()?;
+    let (subset, index_reads, index_bytes, source) = match built {
+        Ok(built) => built,
         Err(error) => {
-            tracing::warn!(file_id = file.id, %error, "subtitle cue index unusable; demuxing the source");
+            note_sparse_refusal(file.id, &error);
             return None;
         }
     };
@@ -2412,30 +2453,57 @@ pub(crate) async fn sparse_subtitle_input(
         return None;
     }
     let mut input_args = vec!["-copyts".to_owned()];
-    if timeline == SparseTimeline::Rebased {
-        let start = source_start_seconds(&source, file).await?;
-        if start != 0.0 {
-            input_args.push("-itsoffset".to_owned());
-            input_args.push(format!("{:.6}", -start));
-        }
+    if start != 0.0 {
+        input_args.push("-itsoffset".to_owned());
+        input_args.push(format!("{:.6}", -start));
     }
-    let input = write_sparse_subset(&subset.bytes).await?;
+    let blocks = subset.blocks;
+    let input = write_sparse_subset(subset.bytes).await?;
     tracing::info!(
         file_id = file.id,
         ordinals = ?ordinals,
-        blocks = subset.blocks,
-        reads = subset.reads,
-        bytes_read = subset.bytes_read,
+        blocks,
+        reads = index_reads + subset.reads,
+        bytes_read = index_bytes + subset.bytes_read,
         elapsed_ms = started.elapsed().as_millis(),
         "reading embedded subtitles through the Matroska cue index"
     );
     Some(SparseInput {
         handle: input.0,
         input_args,
-        blocks: subset.blocks,
+        blocks,
         #[cfg(windows)]
         _named: input.1,
     })
+}
+
+/// Unproven is ordinary (debug). A file that disagrees with its own index
+/// is worth one warning per file: windows ask again every 200 seconds per
+/// viewer.
+fn note_sparse_refusal(file_id: i64, error: &crate::mkv_sparse::SparseError) {
+    match error {
+        crate::mkv_sparse::SparseError::NotIndexed(why) => {
+            tracing::debug!(file_id, why, "subtitle track keeps its full demux");
+        }
+        error if first_sparse_failure(file_id) => {
+            tracing::warn!(file_id, %error, "subtitle cue index unusable; demuxing the source");
+        }
+        error => {
+            tracing::debug!(file_id, %error, "subtitle cue index unusable; demuxing the source")
+        }
+    }
+}
+
+fn first_sparse_failure(file_id: i64) -> bool {
+    static SEEN: OnceLock<std::sync::Mutex<HashSet<i64>>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.len() >= 1024 {
+        seen.clear();
+    }
+    seen.insert(file_id)
 }
 
 /// The cue walk is a few small reads scattered over the whole file. Default
@@ -2466,9 +2534,8 @@ type SparseFile = (std::fs::File,);
 #[cfg(windows)]
 type SparseFile = (std::fs::File, tempfile::NamedTempFile);
 
-async fn write_sparse_subset(bytes: &[u8]) -> Option<SparseFile> {
+async fn write_sparse_subset(bytes: Vec<u8>) -> Option<SparseFile> {
     use std::io::{Seek, Write};
-    let bytes = bytes.to_vec();
     tokio::task::spawn_blocking(move || {
         #[cfg(unix)]
         {
@@ -2491,12 +2558,33 @@ async fn write_sparse_subset(bytes: &[u8]) -> Option<SparseFile> {
     .ok()?
 }
 
+/// The empty-track answer a subset with no blocks stands for.
+async fn write_empty_vtt(tmp: &Path) -> Result<(), String> {
+    tokio::fs::write(tmp, b"WEBVTT\n\n")
+        .await
+        .map_err(|e| format!("writing an empty subtitle track: {e}"))
+}
+
 /// FFmpeg's start time for the original source — what its default timeline
-/// subtracts — measured by the same build that converts the subset.
+/// subtracts — measured by the same build that converts the subset. One
+/// probe per source identity: windows ask for it every 200 seconds.
 async fn source_start_seconds(
     source: &crate::fragment_index_cluster::SourceFence,
     file: &MediaFile,
+    work: crate::process_control::ChildWork,
 ) -> Option<f64> {
+    type Starts = std::sync::Mutex<HashMap<(i64, i64, i64), f64>>;
+    static STARTS: OnceLock<Starts> = OnceLock::new();
+    let key = (file.id, file.size, file.mtime);
+    let starts = STARTS.get_or_init(Default::default);
+    if let Some(start) = starts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .copied()
+    {
+        return Some(start);
+    }
     let probe = source.reopen(file).await.ok()?;
     #[cfg(unix)]
     let input = PathBuf::from("/dev/fd/3");
@@ -2514,13 +2602,15 @@ async fn source_start_seconds(
             "default=noprint_wrappers=1:nokey=1",
         ])
         .arg(&input)
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        // The timeout below drops this future; without the kill a probe
+        // stuck on a stalled mount outlives it.
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(&probe.handle, &input).ok()?;
     let out = tokio::time::timeout(
         Duration::from_secs(30),
-        crate::process_control::output_job_owned(
-            &mut command,
-            crate::process_control::ChildWork::realtime("subtitle source start time"),
-        ),
+        crate::process_control::output_job_owned(&mut command, work),
     )
     .await
     .ok()?
@@ -2529,10 +2619,21 @@ async fn source_start_seconds(
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    match text.trim() {
-        "" | "N/A" => Some(0.0),
-        value => value.parse::<f64>().ok().filter(|value| value.is_finite()),
+    let start = match text.trim() {
+        "" | "N/A" => 0.0,
+        value => value
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())?,
+    };
+    let mut starts = starts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if starts.len() >= 512 {
+        starts.clear();
     }
+    starts.insert(key, start);
+    Some(start)
 }
 
 /// Which route produced each whole-track or window sidecar, by file id.
@@ -2973,6 +3074,8 @@ pub(crate) async fn extract_vtt_window(
         &[index],
         Some((preroll, end)),
         SparseTimeline::Rebased,
+        None,
+        crate::process_control::ChildWork::realtime("subtitle window for the playhead"),
     )
     .await
     {
@@ -2981,12 +3084,15 @@ pub(crate) async fn extract_vtt_window(
                 note_vtt_route(file.id, "cue-index-window");
                 return Ok(());
             }
-            Err(why) => tracing::warn!(
-                file_id = file.id,
-                index,
-                why,
-                "the cue-indexed subtitle window did not convert; demuxing the span"
-            ),
+            Err(why) => {
+                tracing::warn!(
+                    file_id = file.id,
+                    index,
+                    why,
+                    "the cue-indexed subtitle window did not convert; demuxing the span"
+                );
+                let _ = tokio::fs::remove_file(tmp).await;
+            }
         }
     }
     let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
@@ -3075,6 +3181,10 @@ async fn extract_sparse_window(
     anchor_seconds: i64,
     end: i64,
 ) -> Result<(), String> {
+    if sparse.blocks == 0 {
+        // A quiet stretch: nothing cued inside the span.
+        return write_empty_vtt(tmp).await;
+    }
     #[cfg(unix)]
     let input = PathBuf::from("/dev/fd/3");
     #[cfg(windows)]
@@ -3090,6 +3200,8 @@ async fn extract_sparse_window(
         .arg("pipe:1")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(&sparse.handle, &input)?;
     let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(
         &mut command,
         crate::process_control::ChildWork::realtime("subtitle window for the playhead"),
@@ -3419,11 +3531,17 @@ async fn extract_vtt_without_demux(
             .map_err(|e| e.to_string())?;
         return Ok(true);
     }
-    let Some(sparse) = sparse_subtitle_input(file, &[index], None, SparseTimeline::Rebased).await
+    let Some(sparse) =
+        sparse_subtitle_input(file, &[index], None, SparseTimeline::Rebased, None, work).await
     else {
         return Ok(false);
     };
-    match run_vtt_extraction(tmp, &sparse.handle, &sparse.input_args, index, work).await {
+    let converted = if sparse.blocks == 0 {
+        write_empty_vtt(tmp).await
+    } else {
+        run_vtt_extraction(tmp, &sparse.handle, &sparse.input_args, index, work).await
+    };
+    match converted {
         Ok(()) => {
             note_vtt_route(file.id, "cue-index");
             Ok(true)
@@ -3435,6 +3553,8 @@ async fn extract_vtt_without_demux(
                 why,
                 "the cue-indexed subtitle subset did not convert; demuxing the whole source"
             );
+            // The demux writes the same output path and does not overwrite.
+            let _ = tokio::fs::remove_file(tmp).await;
             Ok(false)
         }
     }
