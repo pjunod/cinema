@@ -338,6 +338,7 @@ class Collector:
                 tasks=TaskLookup(self.store), agents=agents, first_seen=dict(self.first_seen),
                 idle_since=dict(self.idle_since), durations=self.durations, pool_stats=self.pool_stats,
                 forge={"ok": self.forge_ok, "error": self.forge_error, "version": self.forge_version,
+                       "repo_url": f"{self.config.get('forge_public_url', self.config['forge_url']).rstrip('/')}/{self.config['repo']}",
                        "source_head": self.source_head, "api_calls": self.forge.calls,
                        "poll_seconds": round(self.poll_seconds, 3)})
         snapshot = fleet.build(inputs)

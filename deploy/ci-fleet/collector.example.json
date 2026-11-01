@@ -1,5 +1,6 @@
 {
   "forge_url": "http://127.0.0.1:3000",
+  "forge_public_url": "http://forge.lan:3000",
   "repo": "noirr/plurx",
   "token_file": "$CREDENTIALS_DIRECTORY/forge.token",
   "agent_token_file": "$CREDENTIALS_DIRECTORY/agent.token",

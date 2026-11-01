@@ -552,6 +552,20 @@ class CollectorCase(unittest.TestCase):
         with urllib.request.urlopen(base + "/metrics") as response:
             self.assertIn("ci_fleet_forgejo_up 1", response.read().decode())
 
+    def test_the_console_is_served_and_needs_nothing_from_the_internet(self):
+        server = self.serve()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        with urllib.request.urlopen(base + "/") as response:
+            page = response.read().decode()
+        self.assertIn("app.js", page)
+        for asset in ("app.js", "app.css"):
+            with urllib.request.urlopen(f"{base}/{asset}") as response:
+                text = response.read().decode()
+            self.assertNotRegex(text, r"https?://(?!127\.0\.0\.1)[a-z]", asset)
+        self.assertNotRegex(page, r"<(script|link)[^>]+(src|href)=\"https?://")
+        with self.assertRaises(urllib.error.HTTPError):
+            urllib.request.urlopen(base + "/../collector.py")
+
     def serve(self):
         import http.server
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.collector))
