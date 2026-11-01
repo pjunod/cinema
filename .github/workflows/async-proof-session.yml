@@ -9,9 +9,9 @@ on:
         options: [unit, complete]
         required: true
       operation:
-        description: Capability probe or authenticated execution
+        description: Capability probe, authenticated execution, or bounded publication transfer/activation
         type: choice
-        options: [probe, execute]
+        options: [probe, execute, publish]
         required: true
       registration_sha256:
         description: Exact source and producer registration digest
