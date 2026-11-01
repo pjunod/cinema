@@ -933,18 +933,20 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         api.runs[RUN]=copy.deepcopy(envelope['run'])
         def objects(workspace,*args,**kwargs):
             if args[-1]==native.PRODUCER+':'+native.WORKFLOW:return legacy
+            if args[0]=='merge-base':return b'c'*40+b'\n'  # Main has moved: the event base sha is 'a'*40
             return b'd'*40 if args[0]=='rev-parse' else b'adapter'
         with mock.patch.object(native,'v1_envelope',return_value=envelope), \
              mock.patch.object(native,'manifest',return_value=(self.entries,self.contents)), \
              mock.patch.object(native,'git',side_effect=objects):
-            result=native.authenticate_current_result(api,ROOT,commit,rid,jid,1,SCOPE['pr'],event_base='a'*40)
+            result=native.authenticate_current_result(api,ROOT,commit,rid,jid,1,SCOPE['pr'],event_base='c'*40)
             self.assertEqual(result['scope'],SCOPE)
             self.assertEqual(result['current']['run'],rid)
             self.assertEqual(result['current']['checkout_attestation'],receipt['checkout_attestation'])
             self.assertEqual(result['execution_origin']['run'],rid)
             self.assertTrue(result['current']['receipt']['current_native_commands_executed'])
-            with self.assertRaises(native.receipts.ReceiptError):
-                native.authenticate_current_result(api,ROOT,commit,rid,jid,1,SCOPE['pr'],event_base='f'*40)
+            for wrong in ('f'*40,'a'*40):  # a never-registered base, and the raw moved-Main base sha
+                with self.assertRaises(native.receipts.ReceiptError):
+                    native.authenticate_current_result(api,ROOT,commit,rid,jid,1,SCOPE['pr'],event_base=wrong)
             moved=json.loads(api.runs[RUN]['event_payload']);moved['pull_request']['head']['ref']='other-branch'
             api.runs[RUN]['event_payload']=json.dumps(moved)
             with self.assertRaises(native.receipts.ReceiptError):

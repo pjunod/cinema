@@ -518,7 +518,7 @@ commit or manual Main bypass is allowed. The schema's current constant names the
 proposed target, not an authenticated installed-service capability.
 
 The trusted controller validates repository, PR/open/ready state as applicable,
-raw event base, exact head/tree/source closure, workflow digest, runner/toolchain,
+raw event base (the merge base of the registered head and Main, see Deviation 4), exact head/tree/source closure, workflow digest, runner/toolchain,
 session/plan, ordered predecessor checkpoint, stage/cases and fresh actual
 run/job/task attempt1. Source and Oracle never receive API credentials. Existing
 ordinary positive/current gates keep strict attempt1 authority; no compatibility
@@ -549,7 +549,7 @@ uploaded constituent, not a new semantic record or proof credit.
 
 The registered successor alone may resume a checkpoint, after checking catalog
 logical digest, full dependency closure, actual Init image and exact sources.
-Completion mode reauthenticates the current ready PR/head/base, all ordered
+Completion mode reauthenticates the current ready PR/head and its merge base with Main, all ordered
 unit artifacts/receipts, all eleven families, all seven contexts, global closure,
 existing Rust/backend/source registries and current Main requirements. It emits
 one complete root consumed by exact-head Main aggregation. An incomplete old
@@ -1179,6 +1179,33 @@ it, and each can be reverted to the ABI wording without touching the others.
    recovery from a dispatch that never became visible is hand-deleting scratch.
    *Awaiting the user's acceptance;* a control file written before this change
    lacks the key and must be rewritten with `[]`.
+4. **`event_base` is the merge base of the head and Main, not the live Main
+   tip.** *Decided by the user on 2026-11-01.* The earlier rule required the
+   PR's live base sha to equal `event_base` at every check, which freezes Main
+   for the whole session. A multi-hour qualification cannot freeze an active
+   Main, so `event_base` now means the merge base of the registered head and
+   Main: the Main commit last merged into the PR. Every check that compared a
+   live, current or event base sha with `event_base` instead requires that the
+   PR's merge base equal `event_base`. The live PR object is checked on its
+   `merge_base` field; the Main fast-lane event, which carries no merge base,
+   is checked on `git merge-base` of its head and base sha in the job's
+   full-history checkout. Merging Main into the head moves the merge base and
+   refuses. Every other condition (head equals the registered commit,
+   `base.ref` is `main`, repositories, open, not draft) is unchanged, and
+   `source_scope` already diffs `base...HEAD`, which has merge-base semantics.
+   The live base sha is recorded as `postcheck.current_base` for audit only and
+   is never compared; the fresh-head receipt, which is compared with later live
+   reads, carries `merge_base` and no moving base. *Landing rule:* evidence
+   qualified against `event_base` may be landed on a Main that has moved only
+   after `async_refinement_session landing-check` (`--control`, `--main-tip`)
+   finds that no file changed on Main between `event_base` and the tip is in the
+   registered proof closure (the proof-contract inputs, the source-bound formula
+   source inputs, the finite-inventory source bindings, the async workflow, the
+   table map and the accounting-method files) and prints its receipt; a touched
+   closure file refuses, and the session must be re-qualified on a Main that
+   includes it. *Reason:* an active Main cannot be frozen for a multi-hour
+   session. A control carrier written before this change lacks
+   `postcheck.merge_base` and is refused by the closed carrier schema.
 
 ### Post-upload session control
 
@@ -1200,7 +1227,7 @@ markers. Canonical base64 chunks are 2048 characters except the last; decoded
 canonical JSON is at most 8 MiB and also satisfies its admitted smaller cap.
 Consumers require exact source/event/task/attempt identity and terminal SUCCESS
 before and after retrieval, reconstruct every native artifact receipt, then
-recheck checkpoint/proof/Main and current ready PR head/base identities.
+recheck checkpoint/proof/Main and current ready PR head/merge-base identities.
 
 For this protocol only, upload_log_sha256 hashes ASCII
 `plurx-async-upload-transaction-v1\0` followed by the validated timestamp-normalized

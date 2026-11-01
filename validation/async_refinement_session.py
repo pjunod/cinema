@@ -153,6 +153,13 @@ def utc(value):
         raise receipts.IntegrityError('Async session: malformed timestamp') from None
 
 
+PROOF_DIRECTORY = 'verification/async-driver-refinement/'
+PROOF_CONTRACT_NAMES = ('PAGED-CONTRACT.md', 'paged-proof.schema.json', 'paged-catalog.sql',
+    'finite-inventory.json', 'paged-outcomes.json', 'paged-catalog-transport.schema.json',
+    'paged-verifier-continuation.schema.json', 'paged-verifier-state.sql',
+    'source-bound-formulas.json', 'source-bound-receipt.schema.json', 'paged-control-carrier.schema.json')
+
+
 def registration(value, root, now=None):
     p.closed(value, REGISTRATION_KEYS)
     now = time.time() if now is None else now
@@ -186,11 +193,8 @@ def registration(value, root, now=None):
               and files.get('.github/workflows/' + p.WORKFLOW) == value['source']['workflow_sha256']
               and files.get('.github/workflows/main-fast-lane.yml') == value['main_workflow_sha256'],
               'workflow/source closure mismatch')
-    proof = 'verification/async-driver-refinement/'
-    names = ('PAGED-CONTRACT.md', 'paged-proof.schema.json', 'paged-catalog.sql',
-             'finite-inventory.json', 'paged-outcomes.json', 'paged-catalog-transport.schema.json',
-             'paged-verifier-continuation.schema.json','paged-verifier-state.sql',
-             'source-bound-formulas.json','source-bound-receipt.schema.json','paged-control-carrier.schema.json')
+    proof = PROOF_DIRECTORY
+    names = PROOF_CONTRACT_NAMES
     p.require(all(proof + n in files for n in names)
               and p.digest(p.canonical(sorted([[proof + n, files[proof + n]] for n in names])))
               == value['source']['proof_contract_sha256']
@@ -216,16 +220,46 @@ def registration(value, root, now=None):
     return value
 
 
+def event_merge_base(root, event):
+    """The merge base of the event's head and its base sha: the Main commit last merged into the PR.
+
+    The workflow event payload carries `pull_request.base.sha` (the live Main tip when the event fired)
+    and no merge base, so the job derives it from the checkout: every workflow that calls this checks
+    out with `fetch-depth: 0`. Exactly one merge base is required; none (unrelated or shallow history)
+    and several (criss-cross merges) refuse, because the registered `event_base` names one commit.
+    """
+    try:
+        head, base = event['pull_request']['head']['sha'], event['pull_request']['base']['sha']
+    except (KeyError, TypeError):
+        raise receipts.ReceiptError('event lacks head/base identities') from None
+    p.require(isinstance(head, str) and isinstance(base, str)
+              and p.COMMIT.fullmatch(head) and p.COMMIT.fullmatch(base), 'event head/base identities malformed')
+    try:
+        found = subprocess.check_output(['git', 'merge-base', '--all', head, base], cwd=root, text=True,
+                                        timeout=60, stderr=subprocess.DEVNULL).split()
+    except (subprocess.SubprocessError, OSError):
+        raise receipts.ReceiptError('event merge base unavailable; history is not complete') from None
+    p.require(len(found) == 1 and p.COMMIT.fullmatch(found[0]), 'event merge base absent or ambiguous')
+    return found[0]
+
+
 def live_pr(api, reg):
+    """The open ready PR at the registered head whose merge base with Main is `event_base`.
+
+    `event_base` is the merge base of the registered head and Main, the Main commit last merged into
+    the PR. Main may advance while the session runs (the live base sha is recorded for audit, never
+    compared); merging Main into the head moves the merge base and refuses.
+    """
     live = api.get('/pulls/' + str(reg['pr']))
     p.require(live.get('number') == reg['pr'] and live.get('state') == 'open'
               and live.get('draft') is False and live.get('head', {}).get('sha') == reg['source']['commit']
               and live.get('head', {}).get('repo', {}).get('id') == reg['repository']
               and live.get('base', {}).get('repo', {}).get('id') == reg['repository']
               and live.get('base', {}).get('ref') == 'main'
-              and live.get('base', {}).get('sha')==reg['event_base']
-              and p.COMMIT.fullmatch(live.get('base', {}).get('sha', '')),
-              'current PR is not ready/open at registered exact head')
+              and isinstance(live.get('base', {}).get('sha'), str)
+              and p.COMMIT.fullmatch(live['base']['sha'])
+              and isinstance(live.get('merge_base'), str) and live['merge_base']==reg['event_base'],
+              'current PR is not ready/open at registered exact head and merge base')
     return live
 
 
@@ -1605,7 +1639,7 @@ def authenticate_main(api, reg, run_id, root, *, verified):
     scope = {'pr': reg['pr'], 'repository': reg['repository']}
     event = adoption.bind_event(run, scope)
     p.require(run['commit_sha'] == reg['source']['commit']
-              and event['pull_request']['base']['sha'] == reg['event_base'], 'Main raw event/source differs')
+              and event_merge_base(root, event) == reg['event_base'], 'Main raw event/source differs')
     adoption.validate_live_pr(api.get('/pulls/' + str(reg['pr'])), event, reg['source']['commit'])
     p.require(p.file_sha(Path(root) / '.github/workflows/main-fast-lane.yml') == reg['main_workflow_sha256'],
               'Main workflow bytes differ')
@@ -3560,9 +3594,11 @@ def finish_runner(api, reg, state, control, root, source, request, output, job):
     verified=run_quantum(path,reg,source,Path(request['output_dir']),argv)
     main_records = authenticate_main(api, reg, control['main_run'], root, verified=verified)
     live = live_pr(api, reg)
+    # The fresh-head receipt is compared with later live reads, so it holds only identities that cannot
+    # legitimately move: the live Main tip is recorded once, in the carrier postcheck, for audit.
     fresh = {'source': reg['source'], 'repository': reg['repository'], 'pr': reg['pr'],
              'head': live['head']['sha'], 'event_base': reg['event_base'],
-             'current_base': live['base']['sha'], 'state': live['state'], 'draft': live['draft'],
+             'merge_base': live['merge_base'], 'state': live['state'], 'draft': live['draft'],
              'run': int(os.environ['GITHUB_RUN_ID']), 'job': job['id'], 'task': job['task_id'], 'attempt': 1}
     out = output / 'completion'; out.mkdir()
     refs = []
@@ -3622,8 +3658,8 @@ def authenticate_completion(api, reg, run_id, root, destination):
     fresh=p.read(find_member(parts,'fresh-head.json'))
     live=live_pr(api,reg)
     expected={'source':reg['source'],'repository':reg['repository'],'pr':reg['pr'],
-        'head':live['head']['sha'],'event_base':reg['event_base'],'current_base':live['base']['sha'],
-        'state':live['state'],'draft':live['draft'],'run':run_id,'job':result['work_unit']['job'],
+        'head':live['head']['sha'],'event_base':reg['event_base'],
+        'merge_base':live['merge_base'],'state':live['state'],'draft':live['draft'],'run':run_id,'job':result['work_unit']['job'],
         'task':result['work_unit']['task'],'attempt':1}
     p.require(fresh==expected,'completion archived/current live identities differ')
     freshref={'kind':'fresh_head_receipt','id':'fresh-head.json','sha256':p.digest(p.canonical(fresh))}
@@ -3664,7 +3700,7 @@ def require_completion(root, output):
         control = p.decode(payload['inputs']['control'].encode())
         reg = registration(control['registration'], root)
         p.require(reg['pr'] == scope['pr'] and reg['repository'] == scope['repository']
-                  and reg['event_base'] == event['pull_request']['base']['sha'], 'completion current event scope differs')
+                  and reg['event_base'] == event_merge_base(root, event), 'completion current event scope differs')
         result = authenticate_completion(api, reg, run['id'], root, Path(output) / ('complete-' + str(run['id'])))
         p.write(Path(output) / 'completion.json', result)
         return
@@ -3791,6 +3827,10 @@ def main(argv=None):
     controller.add_argument('--control', type=Path, required=True)
     controller.add_argument('--output', type=Path, required=True)
     controller.add_argument('--maximum-dispatches', type=int, default=1)
+    landing = sub.add_parser('landing-check')
+    landing.add_argument('--control', type=Path, required=True)
+    landing.add_argument('--main-tip', required=True)
+    landing.add_argument('--output', type=Path)
     args = parser.parse_args(argv)
     # Every owned spool, database, grant descriptor and restored image is private.
     os.umask(0o077)
@@ -3801,6 +3841,11 @@ def main(argv=None):
         finalize_uploads(args.output or event_output(root),root)
     elif args.command == 'require-completion':
         require_completion(root, args.output)
+    elif args.command == 'landing-check':
+        receipt = landing_check(p.read(args.control)['registration'], args.main_tip, root)
+        if args.output:
+            p.write(args.output, receipt)
+        print(p.canonical(receipt).decode())
     elif args.command == 'probe':
         dispatch_probe(p.read(args.control),root,args.output)
     elif args.command == 'coordinate':
@@ -4406,6 +4451,72 @@ ACCOUNTING_METHOD_FILES=('validation/async_refinement_provenance.py','validation
     'validation/async_physical_table_map.json')
 
 
+def proof_closure(root, commit):
+    """Every repository path the registered proof is bound to, from the code's own lists.
+
+    The proof-contract inputs (`PROOF_CONTRACT_NAMES`, the set `registration` digests into
+    `proof_contract_sha256`), the source-bound formula source inputs (and the record schemas and
+    source paths its rules bind), the finite-inventory source bindings, the async workflow, the table
+    map and `ACCOUNTING_METHOD_FILES`. The two JSON lists are read at the registered `commit`.
+    """
+    def blob(path):
+        try:
+            raw = subprocess.check_output(['git', 'show', commit + ':' + path], cwd=root, timeout=30,
+                                          stderr=subprocess.DEVNULL)
+            return json.loads(raw)
+        except (subprocess.SubprocessError, OSError, ValueError):
+            raise receipts.ReceiptError('Async session: proof closure list unreadable at ' + path) from None
+    closure = {PROOF_DIRECTORY + name for name in PROOF_CONTRACT_NAMES}
+    closure.add('.github/workflows/' + p.WORKFLOW)
+    closure.add(ACCOUNTING_METHOD['table_map'])
+    closure.update(ACCOUNTING_METHOD_FILES)
+    formulas = blob(PROOF_DIRECTORY + 'source-bound-formulas.json')
+    inventory = blob(PROOF_DIRECTORY + 'finite-inventory.json')
+    p.require(type(formulas) is dict and type(inventory) is dict and type(inventory.get('source_bindings')) is dict
+              and formulas.get('source_inputs') and inventory['source_bindings'], 'proof closure lists absent')
+    for rows, key in ((formulas['source_inputs'], 'path'), (formulas.get('record_schemas', []), 'path'),
+                      (formulas.get('primitive_bindings', []), 'source_path'),
+                      (formulas.get('init_class_rules', []), 'source_path')):
+        closure.update(row[key] for row in rows)
+    for binding in inventory['source_bindings'].values():
+        closure.add(binding['path'] if type(binding) is dict else binding)
+    return sorted(p.safe_source_path(path) for path in closure)
+
+
+def landing_check(reg, main_tip, root):
+    """License landing qualified evidence onto a Main that has moved since the session registered.
+
+    Main cannot be frozen for a multi-hour session, so the session qualifies against `event_base`, the
+    merge base of the registered head and Main. The evidence is valid on a later Main tip exactly when
+    Main changed nothing the proof is bound to: this refuses if any file changed on Main between
+    `event_base` and `main_tip` is in the registered proof closure (`proof_closure`), otherwise returns
+    a receipt. This check, not the live Main tip, is what authorises the landing.
+    """
+    p.closed(reg, REGISTRATION_KEYS)
+    commit = reg['source']['commit']
+    p.require(all(isinstance(v, str) and p.COMMIT.fullmatch(v) for v in (reg['event_base'], commit, main_tip)),
+              'landing check needs full commit identities')
+    try:
+        ancestor = subprocess.run(['git', 'merge-base', '--is-ancestor', reg['event_base'], main_tip], cwd=root,
+                                  timeout=60, stderr=subprocess.DEVNULL).returncode
+        changed = subprocess.check_output(['git', 'diff', '--name-only', '-z', '--no-renames',
+                                           reg['event_base'], main_tip], cwd=root, timeout=60,
+                                          stderr=subprocess.DEVNULL).split(b'\0')
+    except (subprocess.SubprocessError, OSError):
+        raise receipts.ReceiptError('Async session: Main history from event_base to the tip is unavailable') from None
+    p.require(ancestor == 0, 'Main tip does not descend from the registered event_base')
+    changed = sorted({name.decode('utf-8', 'surrogateescape') for name in changed if name})
+    closure = proof_closure(root, commit)
+    touched = sorted(set(changed) & set(closure))
+    p.require(not touched, 'Main changed the registered proof closure since event_base: ' + ', '.join(touched[:8])
+              + (' ...' if len(touched) > 8 else ''))
+    return {'schema_version': 1, 'kind': 'landing_compatibility', 'repository': reg['repository'],
+            'pr': reg['pr'], 'source': reg['source'], 'event_base': reg['event_base'], 'main_tip': main_tip,
+            'main_changed_files': len(changed), 'main_changed_sha256': p.digest(p.canonical(changed)),
+            'closure_files': len(closure), 'closure_sha256': p.digest(p.canonical(closure)),
+            'compatible': True}
+
+
 def accounting_method_digest(files):
     return p.digest(p.canonical([[name,files[name]] for name in ACCOUNTING_METHOD_FILES]))
 
@@ -4532,7 +4643,7 @@ def validate_control_identity(value,reg,metadata,run_id,job,root):
             p.require(batch['purpose']=='transfer' and value['activation'] is None, 'transfer carrier shape differs')
     utc(value['postcheck']['checked_at'])
     p.require(value['postcheck']['source_commit']==reg['source']['commit']
-              and value['postcheck']['current_base']==reg['event_base'], 'carrier live source/base differs')
+              and value['postcheck']['merge_base']==reg['event_base'], 'carrier live source/merge base differs')
 
 
 def finalize_uploads(output,root):
@@ -4589,7 +4700,8 @@ def finalize_uploads(output,root):
     record['artifact_roots']=[p.ref(v,v['record']['artifact_id']) for v in carrier['artifact_receipts']]
     live=live_pr(api,reg)
     post={'checked_at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'source_commit':reg['source']['commit'],
-        'current_base':live['base']['sha'],'pr_state':live['state'],'draft':live['draft'],
+        'current_base':live['base']['sha'],'merge_base':live['merge_base'],
+        'pr_state':live['state'],'draft':live['draft'],
         'archived_fresh_head':None,'main_receipts':[],'main_conditions_sha256':None,'semantic_verification':None}
     if role=='completion':
         records=authenticate_main(api,reg,draft['control']['main_run'],root,verified=draft['verified'])
@@ -4597,7 +4709,8 @@ def finalize_uploads(output,root):
         parts={n:Path(output)/'finalizer-parts'/str(n) for n in range(len(metadata['parts']))}
         fresh=p.read(find_member(parts,'fresh-head.json'))
         current={'source':reg['source'],'repository':reg['repository'],'pr':reg['pr'],'head':live['head']['sha'],
-            'event_base':reg['event_base'],'current_base':live['base']['sha'],'state':live['state'],'draft':live['draft'],
+            'event_base':reg['event_base'],'merge_base':live['merge_base'],
+            'state':live['state'],'draft':live['draft'],
             'run':run_id,'job':job['id'],'task':job['task_id'],'attempt':1}
         p.require(fresh==current,'archived fresh-head identities changed after uploads')
         refs=[{'kind':'main_receipt','id':'main/'+r['condition']+'.json','sha256':p.digest(p.canonical(r))} for r in records]
@@ -4698,8 +4811,8 @@ def finalize_publication(output,root,draft,inputs):
         carrier['transport_conformance']=draft['conformance']
     live=live_pr(api,reg)
     carrier['postcheck']={'checked_at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
-        'source_commit':reg['source']['commit'],'current_base':live['base']['sha'],'pr_state':live['state'],
-        'draft':live['draft'],'archived_fresh_head':None,'main_receipts':[],'main_conditions_sha256':None,
+        'source_commit':reg['source']['commit'],'current_base':live['base']['sha'],'merge_base':live['merge_base'],
+        'pr_state':live['state'],'draft':live['draft'],'archived_fresh_head':None,'main_receipts':[],'main_conditions_sha256':None,
         'semantic_verification':None}
     local_parts={n:Path(output)/'finalizer-parts'/str(n) for n in range(len(metadata['parts']))}
     enforce_control_caps(state,{'parts':{},'control':carrier},root)
@@ -4863,7 +4976,7 @@ def preflight_publication(output,metadata,draft):
     checkpoint=(draft['candidate_checkpoint'] if role=='unit_checkpoint' else
                 None if accepted is None else p.ref(accepted,p.digest(p.canonical(accepted))))
     post={'checked_at':'9999-12-31T23:59:59Z','source_commit':reg['source']['commit'],
-        'current_base':reg['event_base'],'pr_state':'open','draft':False,
+        'current_base':reg['event_base'],'merge_base':reg['event_base'],'pr_state':'open','draft':False,
         'archived_fresh_head':None,'main_receipts':[],'main_conditions_sha256':None,'semantic_verification':None}
     carrier={'schema_version':2,'kind':'async_session_control','role':role,
         'registration_sha256':p.digest(p.canonical(reg)),'source_archive_sha256':reg['source_archive_sha256'],
@@ -4905,7 +5018,7 @@ def preflight_carrier(output,metadata):
     origin['operation']='execute';origin['dispatch_ordinal']=state['next_dispatch_ordinal']
     completion_value=p.read(output/'completion-draft.json') if role=='completion' else None
     post={'checked_at':'9999-12-31T23:59:59Z','source_commit':reg['source']['commit'],
-        'current_base':reg['event_base'],'pr_state':'open','draft':False,
+        'current_base':reg['event_base'],'merge_base':reg['event_base'],'pr_state':'open','draft':False,
         'archived_fresh_head':None,'main_receipts':[],'main_conditions_sha256':None,'semantic_verification':None}
     if completion_value:
         post.update(archived_fresh_head=completion_value['record']['current_head_recheck'],

@@ -151,6 +151,9 @@
         "current_base": {
           "$ref": "paged-proof.schema.json#/$defs/Commit"
         },
+        "merge_base": {
+          "$ref": "paged-proof.schema.json#/$defs/Commit"
+        },
         "pr_state": {
           "const": "open"
         },
@@ -221,6 +224,7 @@
         "checked_at",
         "source_commit",
         "current_base",
+        "merge_base",
         "pr_state",
         "draft",
         "archived_fresh_head",

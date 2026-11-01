@@ -1264,7 +1264,10 @@ def authenticate_current_result(api,workspace,current,run_id,job_id,repository,p
     event=adoption.bind_event(run,scope);main_receipts.authenticate_run(scope,run)
     require(event['pull_request']['head']['ref']==scope['branch'],'Current native branch differs')
     if event_base is not None:
-        require(event['pull_request']['base']['sha']==event_base,'Current native event baseline differs')
+        # `event_base` is the registered merge base of the head and Main; Main itself may have moved on.
+        pull=event['pull_request']
+        merge=git(workspace,'merge-base','--all',pull['head']['sha'],pull['base']['sha'],limit=1024).decode().split()
+        require(len(merge)==1 and merge[0]==event_base,'Current native event merge base differs')
     adoption.validate_live_pr(api.get('/pulls/'+str(scope['pr'])),event,current)
     legacy=git(workspace,'show',PRODUCER+':'+WORKFLOW,limit=MAX_WORKFLOW_BYTES)
     entries,contents=manifest(workspace,current);key=execution_key(entries,case_inventory(contents))

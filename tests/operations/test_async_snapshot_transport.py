@@ -1007,7 +1007,8 @@ def carrier_for(role='publication_batch', ordinal=0, operation='execute', purpos
             'expected_prior_checkpoint': None, 'work_unit': {'record': unit}, 'artifact_receipts': [{}],
             'completion': None, 'transfer_batch': batch,
             'activation': {'execution_origin': EXECUTION} if role == 'unit_checkpoint' else None,
-            'postcheck': {'checked_at': '2026-01-01T00:00:00Z', 'source_commit': 'a' * 40, 'current_base': 'a' * 40}}
+            'postcheck': {'checked_at': '2026-01-01T00:00:00Z', 'source_commit': 'a' * 40, 'current_base': 'a' * 40,
+                          'merge_base': 'a' * 40}}
 
 
 def check_identity(value, run_id=None, operation=None):
@@ -1047,9 +1048,16 @@ class ControlIdentityTests(unittest.TestCase):
         with self.assertRaises(receipts.ReceiptError):
             check_identity(wrong)
         stale = carrier_for()
-        stale['postcheck']['current_base'] = 'b' * 40
+        stale['postcheck']['merge_base'] = 'b' * 40  # Main was merged into the head: the merge base moved
         with self.assertRaises(receipts.ReceiptError):
             check_identity(stale)
+
+    def test_a_moved_main_tip_with_an_unchanged_merge_base_is_accepted(self):
+        moved = carrier_for()
+        moved['postcheck']['current_base'] = 'b' * 40  # audit only: the live Main tip advanced
+        check_identity(moved)
+        check_identity(dict(carrier_for(ordinal=1, operation='publish'),
+                            postcheck=dict(moved['postcheck'])))
 
     def test_role_specific_shapes_cannot_be_mixed(self):
         activation = carrier_for('unit_checkpoint', ordinal=2, operation='publish', purpose='transfer')
