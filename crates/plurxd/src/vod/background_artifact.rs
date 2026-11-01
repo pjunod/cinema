@@ -317,6 +317,10 @@ pub(crate) struct StaticArtifactRun {
 }
 
 impl StaticArtifactRun {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Each argument is a distinct admitted owner the one original static run must hold until its own retirement; a grouping struct would carry no invariant."
+    )]
     pub(super) fn new(
         mut owner: SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
@@ -462,13 +466,13 @@ impl StaticArtifactRun {
         // prepared complete output. The manifest it was built from carries
         // neither: a discovered manifest must never mint this authority.
         artifact.candidate = self.provenance.candidate.clone();
-        let _ = artifact
-            .private_preparation_origin
-            .set(super::retained::PreparedOrigin::settled_static(
+        let _ = artifact.private_preparation_origin.set(
+            super::retained::PreparedOrigin::settled_static(
                 uuid::Uuid::new_v4(),
                 artifact.id,
                 &self.provenance,
-            ));
+            ),
+        );
         Ok(artifact)
     }
 }
