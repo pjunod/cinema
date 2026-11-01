@@ -2729,35 +2729,21 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("cargo test", fast_jobs["rust_compile"])
         self.assertIn('major: "6"', fast_rust_steps["Install the pinned FFmpeg"])
         self.assertIn("timeout-minutes: 90", fast_jobs["rust_compile"])
+        # Ordinary PRs consume the authenticated complete qualification session; the proof itself runs in the
+        # registered async-proof-session workflow, so this dependent gate is a thin consumer with no Rust build.
         async_job = fast_jobs["async_refinement"]
         self.assertIn("needs: [scope, preflight, rust_compile]",async_job)
-        self.assertIn("timeout-minutes: 90",async_job)
-        self.assertIn('CARGO_BUILD_JOBS: "1"',async_job)
-        self.assertIn("lane: main-fast-rust",async_job)
+        self.assertIn("timeout-minutes: 10",async_job)
+        self.assertNotIn("CARGO_BUILD_JOBS",async_job)
+        self.assertNotIn("cargo ",async_job)
         async_steps = workflow_step_blocks(async_job)
         self.assertEqual(list(async_steps),[
-            "Install Rust gate prerequisites","Check out the candidate","Install the pinned Rust toolchain",
-            "Install the pinned FFmpeg","Restore the main fast Rust cache",
-            "Provision locked dependencies for offline async qualification",
-            "Prepare authenticated same-PR async driver proof resumption",
-            "Provision the pinned TLC toolchain for async driver refinement",
-            "Build deterministic async driver prefix checkpoint","Snapshot immutable async driver prefix checkpoint",
-            "Preserve immutable async driver prefix checkpoint","Build async driver refinement graph and control inputs",
-            "Qualify async driver refinement with pinned TLC","Snapshot compact async driver refinement evidence",
-            "Preserve async driver refinement evidence","Enforce persistent Cargo bounds",
-            "Restore persistent runner workspace ownership"])
-        self.assertEqual(
-            workflow_step_literal(
-                async_steps["Provision locked dependencies for offline async qualification"],
-                "run",
-            ),
-            [
-                "set -euo pipefail",
-                "cargo +1.97.1 fetch --locked --manifest-path Cargo.toml",
-                "cargo +1.97.1 fetch --locked --offline --manifest-path Cargo.toml",
-                "git diff --exit-code -- Cargo.lock",
-            ],
-        )
+            "Check out the exact candidate",
+            "Require an authenticated complete qualification session",
+            "Preserve the consumed complete session root"])
+        require_step = async_steps["Require an authenticated complete qualification session"]
+        self.assertIn("run: >-\n          python3 -m validation.async_refinement_session require-completion\n"
+                      "          --output .async-proof-sessions/main-${{ github.run_id }}-${{ github.run_attempt }}\n", require_step)
         fast_preflight = workflow_step_blocks(fast_jobs["preflight"])
         playback_contracts = workflow_step_scalar(
             fast_preflight["Check the shared player input contract"], "run"
