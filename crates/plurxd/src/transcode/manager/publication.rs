@@ -1934,6 +1934,16 @@ impl TranscodeManager {
                     }
                     return Ok(SegmentPublication::Pending(current_owner()));
                 }
+                if let Some(failed) = prepublication_failure_before(
+                    &session,
+                    retired_owner,
+                    resolved_attempt,
+                    deadline,
+                )
+                .await
+                {
+                    return Ok(failed);
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             };
@@ -1994,6 +2004,16 @@ impl TranscodeManager {
                     }
                     if Instant::now() >= deadline {
                         return Ok(SegmentPublication::Pending(current_owner()));
+                    }
+                    if let Some(failed) = prepublication_failure_before(
+                        &session,
+                        retired_owner,
+                        resolved_attempt,
+                        deadline,
+                    )
+                    .await
+                    {
+                        return Ok(failed);
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -2250,5 +2270,75 @@ impl TranscodeManager {
                 | SegmentPublication::Pending(_)
                 | SegmentPublication::Failed(_) => None,
             })
+    }
+}
+
+/// C5: while waiting for an object of exact attempt `attempt` that has no
+/// served playlist yet, recognise that this attempt has ended. The producer
+/// is not coming back, so the wait answers its typed `ProducerEnded`
+/// stamped with *that* attempt instead of polling until the request
+/// deadline. A retry or a replacement in progress keeps waiting, and a
+/// superseded attempt is left to the existing owner-transition rejection.
+async fn prepublication_failure_before(
+    session: &Arc<Session>,
+    retired_owner: bool,
+    attempt: u64,
+    deadline: Instant,
+) -> Option<SegmentPublication> {
+    if retired_owner || session.cached {
+        return None;
+    }
+    match session
+        .prepublication_attempt_outcome_before(attempt, deadline)
+        .await
+    {
+        crate::playback_control::PrepublicationAttemptOutcome::Failed(reason) => Some(
+            SegmentPublication::Failed(PlaylistPublicationError::for_attempt(
+                PlaylistError::ProducerEnded(reason),
+                session,
+                attempt,
+            )),
+        ),
+        crate::playback_control::PrepublicationAttemptOutcome::Superseded
+        | crate::playback_control::PrepublicationAttemptOutcome::Waiting => None,
+    }
+}
+
+#[cfg(test)]
+mod prepublication_wait_tests {
+    /// C5 (M5): both 100 ms sleep branches of the init/segment wait classify
+    /// the exact attempt before sleeping again, so a producer that died
+    /// before its first served playlist ends the wait on the next poll
+    /// instead of at the request deadline (the 55 s master.m3u8).
+    #[test]
+    fn both_wait_branches_classify_the_exact_attempt_before_sleeping() {
+        let source = include_str!("publication.rs");
+        let wait = source
+            .split_once("pub(crate) async fn segment_for_publication_before(")
+            .expect("wait function")
+            .1
+            .split_once("let opened = if let Some(opened) = authenticated_cached_file.take()")
+            .expect("the wait before any object is opened")
+            .0;
+        // The two branches that wait before this attempt has a served
+        // snapshot: no coherent attempt yet, and no snapshot for it. The
+        // later sleep waits on an attempt that has published, whose ended
+        // producer `published_producer_ended_before` already recognises.
+        let sleeps = wait
+            .match_indices("tokio::time::sleep(Duration::from_millis(100)).await;")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(sleeps.len(), 2, "the two sleep branches");
+        for sleep in sleeps {
+            let before = &wait[..sleep];
+            let check = before
+                .rfind("prepublication_failure_before(")
+                .expect("a terminal check precedes every sleep");
+            assert!(
+                !before[check..].contains("continue;"),
+                "the check is in the same branch as the sleep it guards"
+            );
+            assert!(before[check..].contains("resolved_attempt"));
+        }
     }
 }

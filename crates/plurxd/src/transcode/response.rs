@@ -149,6 +149,24 @@ impl PlaylistPublicationError {
         }
     }
 
+    /// A refusal bound to one exact attempt rather than to whichever attempt
+    /// is current when it is built: a waiter classifies the attempt its
+    /// capability was resolved against, and only that attempt's verdict may
+    /// be published to it.
+    pub(super) fn for_attempt(
+        error: PlaylistError,
+        session: &Arc<Session>,
+        producer_attempt: u64,
+    ) -> Self {
+        Self {
+            error,
+            owner: Some(MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                session: Arc::clone(session),
+                producer_attempt,
+            })),
+        }
+    }
+
     pub(super) fn without_owner(error: PlaylistError) -> Self {
         Self { error, owner: None }
     }
