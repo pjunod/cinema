@@ -3055,7 +3055,7 @@ impl super::TranscodeManager {
         } else {
             None
         };
-        if expire_after_refusal {
+        let fence_operation = if expire_after_refusal {
             let adoption = refused_adopt
                 .as_ref()
                 .expect("expiry follows the refused original Adopt");
@@ -3087,6 +3087,7 @@ impl super::TranscodeManager {
                 .find(|row| row.key == claim.key)
                 .expect("same original expired row");
             assert_eq!(row.phase, AttemptPhase::Cleanup);
+            let operation = row.last_operation_id;
             assert!(matches!(
                 self.store
                     .adopt_adaptive_winner(adoption)
@@ -3094,6 +3095,7 @@ impl super::TranscodeManager {
                     .expect("delayed same original Adopt after expiry Fence"),
                 AttemptAdoption::Refused(_)
             ));
+            operation
         } else {
             let receiver = self
                 .begin_adaptive_cancel(stale.clone())
@@ -3190,7 +3192,8 @@ impl super::TranscodeManager {
                 .await
                 .expect("same original Rich enters typed cleanup under committed Fence");
             assert!(matches!(*entry.state().await, AttemptState::Handoff(_)));
-        }
+            foreign.context.operation_id
+        };
         tokio::time::timeout_at(deadline.into(), async {
             loop {
                 self.reconcile_adaptive_attempt_tasks().await;
@@ -3223,7 +3226,7 @@ impl super::TranscodeManager {
             .find(|row| row.key == claim.key)
             .expect("same worker");
         assert_eq!(row.phase, AttemptPhase::Cleanup);
-        assert_eq!(row.last_operation_id, foreign.context.operation_id);
+        assert_eq!(row.last_operation_id, fence_operation);
         assert_eq!(
             runtime
                 .accounting()
@@ -3279,7 +3282,7 @@ impl super::TranscodeManager {
                     .expect("same worker");
                 if row.phase == AttemptPhase::Closed {
                     assert_ne!(
-                        row.last_operation_id, foreign.context.operation_id,
+                        row.last_operation_id, fence_operation,
                         "only worker's actual retained Close follows native/app completion"
                     );
                     break;

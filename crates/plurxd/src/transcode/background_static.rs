@@ -742,7 +742,11 @@ impl TranscodeManager {
                 .prepare_inputs(deadline)
                 .await
                 .map_err(|error| PreparationError::Retry(error.to_string()))?;
-            let report = if let Some(report) = entry.report.lock().await.as_ref().cloned() {
+            // Edition 2021 keeps an `if let` scrutinee's temporaries alive
+            // through `else`, so the cached-report guard must be released
+            // before the miss path takes the same lock to store the report.
+            let cached = entry.report.lock().await.as_ref().cloned();
+            let report = if let Some(report) = cached {
                 report
             } else {
                 let report = owner

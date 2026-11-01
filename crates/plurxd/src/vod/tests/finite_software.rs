@@ -1288,6 +1288,9 @@ async fn foreign_finite_fence_cleanup(refused_adopt: bool, expire_after_refusal:
     request.request_id = Some(root.to_string());
     request.playback_id = uuid::Uuid::new_v4().to_string();
     request.kind = SessionKind::Transcode { height: 360 };
+    // A worker envelope carries an immutable VOD request; the fixture default
+    // is the live presentation, which worker ingress refuses.
+    request.presentation = crate::transcode::Presentation::Vod;
     request.audio_index = fixture.recipe.audio_index;
     request.audio_delivery = fixture.recipe.audio_delivery.clone();
     let mut envelope = crate::media_sessions::RemoteStartRequest {

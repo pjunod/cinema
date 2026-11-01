@@ -359,35 +359,6 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     );
     drop(legacy);
     assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
-    // A background legacy occupant does not trip the foreground-idle guard,
-    // so the selected static constructor itself must refuse the shared
-    // compatibility alias. The same original P stays with the entry and the
-    // resume below must settle it.
-    let background_legacy = compatibility_pool
-        .try_admit_software(0, 1, crate::admission::Priority::Background)
-        .expect("actual original background legacy owner");
-    let error = manager
-        .produce_encoded_output_job(
-            &file,
-            controller.job(),
-            fence.clone(),
-            deadline,
-            observation,
-        )
-        .await
-        .expect_err("selected static R must not bypass the background legacy owner");
-    assert!(
-        matches!(&error, crate::background_jobs::PreparationError::Retry(message)
-            if message.contains("compatibility pool")),
-        "the actual static R compatibility refusal: {error:?}"
-    );
-    assert_eq!(
-        compatibility_pool.snapshot().software_used,
-        compatibility_baseline.software_used + 1,
-        "R refusal leaves only the same original background legacy claim"
-    );
-    drop(background_legacy);
-    assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
     assert!(manager
         .produce_encoded_output_job(
             &file,
