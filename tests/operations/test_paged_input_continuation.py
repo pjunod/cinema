@@ -24,7 +24,7 @@ class PagedInputContinuationFixtures(unittest.TestCase):
         plan['plan_sha256']=codec.digest(codec.envelope('ResourcePlan',plan))
         self.plan=plan
         self.index=codec.RecordIndex(self.root/'work.sqlite',source=fixture.SOURCE,
-            session_id=fixture.SESSION,budget=codec.Budget(plan,self.root))
+            session_id=fixture.SESSION,budget=fixture.granted_budget(plan,self.root))
         self.state=codec.ExecutionState(self.index,'6'*64)
         self.index.execution=self.state
         self.auth=self.root/'authenticated.sqlite'
@@ -72,7 +72,7 @@ class PagedInputContinuationFixtures(unittest.TestCase):
         return {'checkpoint':cp,'dependency_index':str(self.auth),'initial_image':{'record':{'image_sha256':'6'*64}}}
 
     def next_quantum_budget(self):
-        budget=codec.Budget(copy.deepcopy(self.plan),self.root)
+        budget=fixture.granted_budget(copy.deepcopy(self.plan),self.root)
         self.index.budget=self.state.budget=budget
 
     def finish_dependencies(self,request):
@@ -150,7 +150,7 @@ class PagedInputContinuationFixtures(unittest.TestCase):
         self.next_quantum_budget()
         descriptor=self.state.backup(self.root/'backup.sqlite')
         view=codec.RecordIndex.readonly_view(self.root/'backup.sqlite',source=fixture.SOURCE,
-            session_id=fixture.SESSION,budget=codec.Budget(copy.deepcopy(self.plan),self.root),resolver_path=self.auth)
+            session_id=fixture.SESSION,budget=fixture.granted_budget(copy.deepcopy(self.plan),self.root),resolver_path=self.auth)
         try:
             view.bind_scope(self.index.scope)
             self.assertEqual(view.raw_count('PhysicalRows'),1)

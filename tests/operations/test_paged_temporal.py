@@ -5,13 +5,19 @@ These micrographs exercise monitors/SCC/fairness, not selected production D.
 """
 from __future__ import annotations
 
+import atexit
 import copy
+import functools
 import itertools
 import json
+import os
 from pathlib import Path
+import shutil
+import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 PACKAGE = Path(__file__).resolve().parents[2] / 'verification' / 'async-driver-refinement'
 sys.path.insert(0, str(PACKAGE))
@@ -24,24 +30,156 @@ SOURCE = {k: ('1' * 40 if k in ('commit', 'tree') else '2' * 64)
 SESSION = '00000000-0000-4000-8000-000000000001'
 
 
+MIB = 1024 * 1024
+FIXTURE_DATABASE_BYTES = 64 * MIB
+
+
+def physical():
+    return codec.physical_policy_module()
+
+
+def fixture_policy(source_map):
+    """A closed PhysicalPolicy3 whose journal/temp reservations cover the ceiling exactly."""
+    ceiling = FIXTURE_DATABASE_BYTES
+    families = {name: {'owner': owner, 'database_bytes': ceiling, 'main_bytes': 2 * ceiling,
+                       'journal_bytes': 2 * ceiling + MIB, 'temp_bytes': 2 * ceiling}
+                for name, owner in physical().FAMILY_OWNERS.items()}
+    pools = {name: 64 * MIB for name in physical().POOL_OWNERS}
+    return {'schema_version': 3, 'kind': 'physical_policy', 'table_map_sha256': physical().digest(source_map),
+            'families': families, 'pools': pools}
+
+
+@functools.lru_cache(maxsize=None)
+def source_bounds():
+    """Canonical OperationalBounds3: typed physical policy + honest calibration, independent of record quotas."""
+    module = physical()
+    source_map = module.load_source_map()
+    policy = fixture_policy(source_map)
+    geometry = {}
+    for family, databases in source_map['families'].items():
+        geometry[family] = []
+        for entry in databases:
+            connection = sqlite3.connect(':memory:')
+            try:
+                geometry[family].append(module.install_empty_role(connection, entry['database_role'], source_map))
+            finally:
+                connection.close()
+    calibration = module.calibrate_physical_policy(
+        policy, geometry, {'source_workspace_bytes': 0, 'existing_unpooled_bytes': 0},
+        {'total_retained_artifact_bytes': TOTAL_RETAINED, 'maximum_units': MAXIMUM_UNITS,
+         'total_session_disk_bytes': TOTAL_DISK}, source_map=source_map)
+    schema = codec.strict_json((PACKAGE / 'paged-proof.schema.json').read_bytes())
+    kinds = [item['properties']['kind']['const'] for item in schema['oneOf']]
+    return codec.canonical({'schema_version': 3, 'accounting_rule': 'typed_physical_caps_v1',
+        'source_receipt': fixture_source_receipt(),
+        'record_allowances': {kind: {'records': 1000000, 'max_encoded_bytes': 8 * MIB} for kind in kinds},
+        'physical_policy': policy, 'calibration': calibration,
+        'accounting_method_sha256': '4' * 64, 'measurement_sha256': '5' * 64})
+
+
+def fixture_source_receipt():
+    """Structurally complete SourceBoundReceipt for plan schema checks only.
+
+    paged_bounds.derive produces the real receipt and verifies every pin; the
+    plan fixtures here need the same shape without depending on those pins.
+    """
+    specification = codec.strict_json((PACKAGE / 'source-bound-formulas.json').read_bytes())
+    return {'schema_version': 1, 'kind': 'source_bound_receipt', 'source': dict(SOURCE),
+            'specification_sha256': codec.sha_bytes((PACKAGE / 'source-bound-formulas.json').read_bytes()),
+            'finite_inventory_sha256': specification['finite_inventory_sha256'],
+            'record_schemas': specification['record_schemas'], 'algorithm_version': 1,
+            'report_role': 'source_global_symbolic', 'premise_class': 'reviewed_source_lemmas',
+            'machine_sqlite_rust_proof': False, 'init_class': specification['init_class'],
+            'primitive_bindings': specification['primitive_bindings'], 'formulas': specification['formulas'],
+            'records': specification['records'],
+            'complete_kind_inventory_sha256': codec.sha_bytes(codec.encoded([r['record_kind'] for r in specification['records']])),
+            'acceptance': False}
+
+
+TOTAL_DISK = 2**34
+TOTAL_RETAINED = 2**30
+MAXIMUM_UNITS = 100
+_LIVE_PARENTS = []
+
+
+@atexit.register
+def _release_parents():
+    for parent in _LIVE_PARENTS:
+        parent.close()
+
+
+class GrantParent:
+    """The parent half of LocalPhysicalGrant1: deducts, seals and passes the child its grant.
+
+    The fixture child never receives the full policy ledger. It inherits only
+    the sealed read-only descriptor and the held lease through the three
+    environment variables, exactly as a spawned verifier does.
+    """
+    def __init__(self, plan):
+        module = physical()
+        base = PACKAGE.parents[1] / '.async-proof-sessions' / 'paged-fixtures'
+        base.mkdir(parents=True, exist_ok=True)
+        self.directory = Path(tempfile.mkdtemp(prefix='physical-parent-', dir=base))
+        policy = codec.strict_json(plan['source_bounds_utf8'])['physical_policy']
+        self.ledger = module.ReservationLedger(policy, self.directory)
+        lease = self.directory / 'lease'
+        descriptor = os.open(lease, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+        self.lease_fd = os.open(lease, os.O_RDONLY)
+        ceiling = FIXTURE_DATABASE_BYTES
+
+        def database(family, name):
+            owner = module.FAMILY_OWNERS[family]
+            return [{'owner': owner, 'resource': family, 'component': 'main', 'bytes': ceiling,
+                     'relative_path': name, 'recursive': False},
+                    {'owner': owner, 'resource': family, 'component': 'journal', 'bytes': 2 * ceiling + MIB,
+                     'relative_path': name, 'recursive': False},
+                    {'owner': owner, 'resource': family, 'component': 'temp', 'bytes': 2 * ceiling,
+                     'relative_path': name + '.temp', 'recursive': True}]
+        allocations = (database('verifier_main', 'work.sqlite') + database('verifier_continuation_scratch', 'continuation.sqlite')
+                       + [{'owner': module.POOL_OWNERS['snapshot_spool_bytes'], 'resource': 'snapshot_spool_bytes',
+                           'component': 'bytes', 'bytes': 64 * MIB, 'relative_path': 'spool', 'recursive': True}])
+        binding = {'source': plan['source'], 'session_id': plan['session_id'], 'resource_plan_sha256': plan['plan_sha256'],
+                   'physical_policy_sha256': module.digest(policy)}
+        self.handle = self.ledger.issue_child_grant(allocations, [], binding, module.HeldLease(self.lease_fd, 'lease'))
+        _LIVE_PARENTS.append(self)
+
+    def environment(self):
+        return self.handle.environment()
+
+    def close(self):
+        self.handle.close()
+        try:
+            os.close(self.lease_fd)
+        except OSError:
+            pass
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+
+def granted_budget(plan, directory, *, seconds=None):
+    """Budget for an allocation-capable child: built only from an explicit inherited grant.
+
+    The plan's identity is bound into a fresh parent-issued descriptor, so any
+    test that edits the plan and recomputes plan_sha256 gets a matching grant.
+    """
+    parent = GrantParent(plan)
+    with mock.patch.dict(os.environ, parent.environment()):
+        return codec.Budget(plan, directory, seconds=seconds)
+
+
 def admitted(directory):
     value = codec.strict_json((PACKAGE / 'paged-resource-plan.example.json').read_bytes())
     plan = value['record'] if 'record' in value else value
     plan = copy.deepcopy(plan)
     plan.update(admission='admitted', session_id=SESSION, source=SOURCE,
                 resident_bytes=512 * 1024 * 1024, resident_rss_bytes=2**40,
-                total_session_disk_bytes=2**30, total_retained_artifact_bytes=2**30,
-                maximum_units=100, unit_predecessor_allowance=100000,
+                total_session_disk_bytes=TOTAL_DISK, total_retained_artifact_bytes=TOTAL_RETAINED,
+                maximum_units=MAXIMUM_UNITS, unit_predecessor_allowance=100000,
                 unit_record_allowance=1000000, unit_byte_allowance=2**30,
                 available_disk_receipt={'kind': 'runtime_receipt', 'id': 'disk.json', 'sha256': '3' * 64})
-    schema=codec.strict_json((PACKAGE/'paged-proof.schema.json').read_bytes())
-    kinds=[item['properties']['kind']['const'] for item in schema['oneOf']]
-    plan['source_bounds_utf8']=codec.canonical({'schema_version':2,'accounting_rule':'operational_encoded_caps_v1',
-        'source_receipt':{'fixture_only':True},'record_allowances':{kind:{'records':1000000,'max_encoded_bytes':8*1024*1024} for kind in kinds},
-        'overhead':{k:0 for k in ('index_bytes','wal_bytes','scratch_bytes','retained_bytes','duplicate_backup_bytes')},
-        'accounting_method_sha256':'4'*64,'measurement_sha256':'5'*64})
+    plan['source_bounds_utf8'] = source_bounds()
     plan['plan_sha256'] = codec.digest(codec.envelope('ResourcePlan', plan))
-    return codec.Budget(plan, directory)
+    return granted_budget(plan, directory)
 
 
 def idle():

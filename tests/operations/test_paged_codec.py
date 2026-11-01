@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -11,6 +13,7 @@ from unittest.mock import patch
 PACKAGE = Path(__file__).resolve().parents[2] / 'verification' / 'async-driver-refinement'
 sys.path.insert(0, str(PACKAGE))
 import paged_codec as codec
+import test_paged_temporal as fixture
 from test_paged_temporal import SOURCE, SESSION, admitted
 
 
@@ -129,6 +132,88 @@ class PagedCodecFixtures(unittest.TestCase):
         self.assertEqual(self.index.get('FairPair', key)['to_product'], 14)
         with self.assertRaisesRegex(codec.Invalid, 'missing record'):
             self.index.get('FairPair', 1)
+
+
+class PagedBudgetPhysicalAdmission(unittest.TestCase):
+    """Typed physical admission of the verifier Budget (typed_physical_caps_v1); unrun definitions."""
+    def setUp(self):
+        base = PACKAGE.parents[1] / '.async-proof-sessions' / 'paged-fixtures'
+        base.mkdir(parents=True, exist_ok=True)
+        self.directory = tempfile.TemporaryDirectory(dir=base)
+        self.root = Path(self.directory.name)
+        self.addCleanup(self.directory.cleanup)
+        self.plan = copy.deepcopy(admitted(self.root).plan)
+
+    def edited(self, mutate):
+        plan = copy.deepcopy(self.plan)
+        accounting = json.loads(plan['source_bounds_utf8'])
+        mutate(accounting)
+        plan['source_bounds_utf8'] = codec.canonical(accounting)
+        plan['plan_sha256'] = codec.digest(codec.envelope('ResourcePlan', plan))
+        return plan
+
+    def test_retired_overhead_wrapper_is_refused_before_any_physical_authority_exists(self):
+        # grant_from_environment=False: this case is about wrapper admission, which precedes any grant.
+        def retire(accounting):
+            for key in ('physical_policy', 'calibration'):
+                del accounting[key]
+            accounting.update(schema_version=2, accounting_rule='operational_encoded_caps_v1',
+                              overhead={k: 0 for k in ('index_bytes', 'wal_bytes', 'scratch_bytes', 'retained_bytes', 'duplicate_backup_bytes')})
+        with self.assertRaises(codec.Invalid):
+            codec.Budget(self.edited(retire), self.root, grant_from_environment=False)
+
+    def test_uncalibrated_plan_is_refused(self):
+        with self.assertRaises(codec.Invalid):
+            codec.Budget(self.edited(lambda a: a.update(calibration=None)), self.root, grant_from_environment=False)
+        with self.assertRaises(codec.Invalid):
+            codec.Budget(self.edited(lambda a: a.update(measurement_sha256=None)), self.root, grant_from_environment=False)
+
+    def test_calibration_must_describe_the_immutable_policy(self):
+        # grant_from_environment=False: the calibration/policy digest comparison runs before the grant load.
+        def widen(accounting):
+            accounting['physical_policy']['families']['verifier_main']['database_bytes'] += 4096
+            accounting['physical_policy']['families']['verifier_main']['main_bytes'] += 4096
+        with self.assertRaisesRegex(codec.Invalid, 'physical calibration differs'):
+            codec.Budget(self.edited(widen), self.root, grant_from_environment=False)
+
+    def test_allocation_capable_child_without_an_inherited_grant_is_incomplete(self):
+        names = ('PLURX_ASYNC_PHYSICAL_GRANT_FD', 'PLURX_ASYNC_PHYSICAL_GRANT_SHA256', 'PLURX_ASYNC_PHYSICAL_LEASE_FD')
+        with patch.dict(os.environ, {}, clear=False):
+            for name in names:
+                os.environ.pop(name, None)
+            with self.assertRaises(codec.Incomplete):
+                codec.Budget(self.plan, self.root)
+
+    def test_grant_for_another_plan_digest_is_refused(self):
+        parent = fixture.GrantParent(self.plan)
+        other = self.edited(lambda a: None)
+        other['unit_record_allowance'] += 1
+        other['plan_sha256'] = codec.digest(codec.envelope('ResourcePlan', other))
+        with patch.dict(os.environ, parent.environment()):
+            with self.assertRaises((codec.Invalid, fixture.physical().PhysicalPolicyError)):
+                codec.Budget(other, self.root)
+
+    def test_logical_allowances_never_change_the_physical_identity(self):
+        def reshape(accounting):
+            for allocation in accounting['record_allowances'].values():
+                allocation['records'] *= 3
+        edited = self.edited(reshape)
+        before, after = (json.loads(p['source_bounds_utf8']) for p in (self.plan, edited))
+        self.assertEqual(before['physical_policy'], after['physical_policy'])
+        self.assertEqual(before['calibration'], after['calibration'])
+        self.assertNotEqual(before['record_allowances'], after['record_allowances'])
+        self.assertIsNotNone(fixture.granted_budget(edited, self.root).grant)
+
+    def test_child_limits_are_the_granted_allocations_not_the_policy(self):
+        budget = fixture.granted_budget(self.plan, self.root)
+        self.assertIsNotNone(budget.grant)
+        limits = budget.family_limits('verifier_main')
+        self.assertEqual(limits['database_bytes'], fixture.FIXTURE_DATABASE_BYTES)
+        self.assertEqual(budget.pool_limit('snapshot_spool_bytes'), 64 * fixture.MIB)
+        with self.assertRaises(codec.Incomplete):
+            budget.pool_limit('cas_bytes')
+        with self.assertRaises(codec.Incomplete):
+            budget.family_limits('catalog_main')
 
 
 if __name__ == '__main__':

@@ -37,7 +37,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
                              unit_record_allowance=100000)
         self.plan['plan_sha256'] = codec.digest(codec.envelope('ResourcePlan', self.plan))
         self.index = codec.RecordIndex(self.root / 'work.sqlite', source=self.source,
-            session_id=fixture.SESSION, budget=codec.Budget(self.plan, self.root))
+            session_id=fixture.SESSION, budget=fixture.granted_budget(self.plan, self.root))
         self.state = codec.ExecutionState(self.index, '6' * 64)
         self.index.execution = self.state
         self.mapping = codec.strict_json((fixture.PACKAGE / 'paged-outcomes.json').read_bytes())
@@ -119,7 +119,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         self.unit += 1
         self.output = self.root / ('unit-' + str(self.unit))
         self.output.mkdir()
-        self.index.budget = self.state.budget = codec.Budget(self.plan, self.output)
+        self.index.budget = self.state.budget = fixture.granted_budget(self.plan, self.output)
         self.index.request = {'dependency_index': str(self.auth), 'output_dir': str(self.output)}
         self.index.resolver_path = self.auth
         self.index.input_snapshot = self.checkpoint
@@ -223,7 +223,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
     def authenticated_restore(self):
         # Seal a producer-shaped micrograph unit and authenticate its exact
         # member/result chain. No parser, identity or reconciliation is mocked.
-        self.index.budget = self.state.budget = codec.Budget(self.plan, self.output)
+        self.index.budget = self.state.budget = fixture.granted_budget(self.plan, self.output)
         common = {'source': self.source, 'session_id': fixture.SESSION, 'unit_ordinal': self.unit,
                   'checkpoint_sha256': codec.digest(self.checkpoint)}
         results, unit_inputs = [], []
@@ -319,7 +319,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         shutil.copyfile(backup_path, restored)
         self.assertEqual(checker.file_sha(restored), descriptor['work_db_sha256'])
         self.index = codec.RecordIndex(restored, source=self.source, session_id=fixture.SESSION,
-            budget=codec.Budget(self.plan, self.output))
+            budget=fixture.granted_budget(self.plan, self.output))
         self.state = codec.ExecutionState(self.index, '6' * 64)
         self.index.execution = self.state
         resolver = codec.ContinuationResolver(self.auth, self.output, source=self.source,
@@ -411,7 +411,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         with self.assertRaises(codec.Incomplete):
             self.qualify()
         # Reset only the unit budget; retain its exact committed private prefix.
-        self.index.budget = self.state.budget = codec.Budget(self.plan, self.output)
+        self.index.budget = self.state.budget = fixture.granted_budget(self.plan, self.output)
         before = self.state.sequence(), self.state.cursor(), self.state.logical_digest()
         count = self.index.db.execute('SELECT count(*) FROM tlc_done').fetchone()[0]
         original_save = checker.TemporalQualification.save
@@ -507,7 +507,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
                     expected.append(checker.temporal_receipt_ref(self.index, tag))
                 saved = self.index.db.execute("SELECT state FROM operation_state WHERE operation='temporal_qualification'").fetchone()[0]
             self.assertEqual(self.index.budget.working_bytes, 0, 'aggregate ownership leaked after close')
-            same_plan = codec.Budget(copy.deepcopy(self.plan), self.output)
+            same_plan = fixture.granted_budget(copy.deepcopy(self.plan), self.output)
             self.assertEqual(codec.bounded_json(saved, same_plan)['receipts'], expected,
                 'committed aggregate cannot pass the unchanged bounded_json restore policy')
             self.authenticated_restore()

@@ -1,8 +1,11 @@
 """Unrun Init-class fixtures; fixed startup i64s are not Episode horizons."""
 from __future__ import annotations
 
+import json
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 
 import test_paged_temporal as fixture
 import paged_bounds as bounds
@@ -61,6 +64,44 @@ class PagedInitClassFixtures(unittest.TestCase):
             with self.assertRaisesRegex(codec.Invalid,'domain constructor'):
                 bounds.validate_initial_class(db,raw)
         finally:db.close()
+
+
+class PagedPhysicalChargeInventory(unittest.TestCase):
+    """The nonsemantic inventory names physical policy pools/families, never aggregate multiples."""
+    SPEC = bounds.PACKAGE / 'source-bound-formulas.json'
+
+    def refused(self, mutate, pattern):
+        spec = json.loads(self.SPEC.read_bytes())
+        mutate(spec['inventory_mapping'])
+        base = bounds.ROOT / '.async-proof-sessions' / 'paged-fixtures'
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base) as scratch:
+            path = Path(scratch) / 'spec.json'
+            path.write_bytes(codec.canonical(spec).encode())
+            with self.assertRaisesRegex(codec.Invalid, pattern):
+                bounds.validate_specification(path, expected_sha256=codec.sha_bytes(path.read_bytes()))
+
+    def row(self, mapping, kind):
+        return next(r for r in mapping if r['kind'] == kind)
+
+    def test_retired_overhead_fields_are_refused(self):
+        for kind, retired in (('backup_and_chunks', 'duplicate_backup_bytes'), ('downloads_and_restores', 'duplicate_backup_bytes'),
+                              ('logs', 'retained_bytes'), ('source_archive', 'scratch_bytes'),
+                              ('sql_indexes', 'index_bytes'), ('sql_wal', 'wal_bytes')):
+            self.refused(lambda m, kind=kind, retired=retired: self.row(m, kind).update(overhead_field=retired), 'physical policy pool/family')
+
+    def test_each_peak_workspace_class_has_exactly_its_own_physical_charge(self):
+        self.refused(lambda m: self.row(m, 'sql_wal').update(overhead_field='family_main_bytes'), 'physical policy pool/family')
+        self.refused(lambda m: self.row(m, 'backup_and_chunks').update(overhead_field='restore_staging_bytes'), 'physical policy pool/family')
+
+    def test_dropping_a_physical_charge_class_is_refused(self):
+        self.refused(lambda m: m.remove(self.row(m, 'sql_wal')), 'charge inventory|missing/extra|order')
+
+    def test_the_registered_mapping_names_only_policy_pools_and_families(self):
+        spec = json.loads(self.SPEC.read_bytes())
+        charges = {r['overhead_field'] for r in spec['inventory_mapping'] if r['overhead_field'] is not None}
+        self.assertEqual(charges, set(bounds.PHYSICAL_CHARGES.values()))
+        self.assertFalse(charges & {'index_bytes', 'wal_bytes', 'scratch_bytes', 'retained_bytes', 'duplicate_backup_bytes'})
 
 
 if __name__=='__main__':
