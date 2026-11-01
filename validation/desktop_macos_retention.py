@@ -1254,6 +1254,17 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
     return (result,original,receipt,attestation) if include_current else original
 
 
+def event_merge_base(workspace,pull):
+    """The single merge base of the event's head and base shas, which are validated before git sees them."""
+    try:head,base=pull['head']['sha'],pull['base']['sha']
+    except (KeyError,TypeError):raise receipts.ReceiptError('Current native event lacks head/base identities') from None
+    require(all(isinstance(sha,str) and re.fullmatch('[0-9a-f]{40}',sha) for sha in (head,base)),
+            'Current native event head/base identities malformed')
+    merge=git(workspace,'merge-base','--all',head,base,limit=1024).decode().split()
+    require(len(merge)==1 and re.fullmatch('[0-9a-f]{40}',merge[0]),'Current native event merge base absent or ambiguous')
+    return merge[0]
+
+
 def authenticate_current_result(api,workspace,current,run_id,job_id,repository,pr,*,event_base=None):
     """Strict current attestation and resolved original, with separate identities."""
     run_id=receipts.positive(run_id);job_id=receipts.positive(job_id)
@@ -1265,9 +1276,7 @@ def authenticate_current_result(api,workspace,current,run_id,job_id,repository,p
     require(event['pull_request']['head']['ref']==scope['branch'],'Current native branch differs')
     if event_base is not None:
         # `event_base` is the registered merge base of the head and Main; Main itself may have moved on.
-        pull=event['pull_request']
-        merge=git(workspace,'merge-base','--all',pull['head']['sha'],pull['base']['sha'],limit=1024).decode().split()
-        require(len(merge)==1 and merge[0]==event_base,'Current native event merge base differs')
+        require(event_merge_base(workspace,event['pull_request'])==event_base,'Current native event merge base differs')
     adoption.validate_live_pr(api.get('/pulls/'+str(scope['pr'])),event,current)
     legacy=git(workspace,'show',PRODUCER+':'+WORKFLOW,limit=MAX_WORKFLOW_BYTES)
     entries,contents=manifest(workspace,current);key=execution_key(entries,case_inventory(contents))

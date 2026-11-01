@@ -1002,6 +1002,53 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
                         fresh_envelope['archive']=packed(payload);wrapper['archive']=packed(values)
 
 
+class NativeEventMergeBase(unittest.TestCase):
+    """The event merge base runs against a real git repository, with shas validated before git sees them."""
+    def setUp(self):
+        self.root=Path(tempfile.mkdtemp(prefix='native-merge-base-'))
+        self.addCleanup(__import__('shutil').rmtree,self.root,True)
+        self.git('init','-q','-b','main')
+
+    def git(self,*args):
+        return subprocess.check_output(['git','-c','user.name=t','-c','user.email=t@example.invalid',
+            '-c','commit.gpgsign=false',*args],cwd=self.root,text=True,stderr=subprocess.STDOUT).strip()
+
+    def commit(self,name):
+        (self.root/name).write_text(name)
+        self.git('add','-A');self.git('commit','-q','-m',name)
+        return self.git('rev-parse','HEAD')
+
+    def pull(self,head,base):
+        return {'head':{'sha':head},'base':{'sha':base}}
+
+    def test_moved_main_has_the_one_merge_base_and_history_gaps_refuse(self):
+        base=self.commit('base')
+        self.git('checkout','-q','-b','pr');head=self.commit('pr')
+        self.git('checkout','-q','main');tip=self.commit('main-moved')
+        self.assertEqual(native.event_merge_base(self.root,self.pull(head,tip)),base)
+        with self.assertRaises(native.receipts.ReceiptError):  # well-formed but absent from history
+            native.event_merge_base(self.root,self.pull(head,'e'*40))
+
+    def test_several_merge_bases_refuse(self):
+        base=self.commit('base')
+        self.git('checkout','-q','-b','x');x=self.commit('x')
+        self.git('checkout','-q','-b','y',base);y=self.commit('y')
+        self.git('checkout','-q','-b','xy',x);self.git('merge','-q','--no-ff','-m','xy',y);xy=self.git('rev-parse','HEAD')
+        self.git('checkout','-q','-b','yx',y);self.git('merge','-q','--no-ff','-m','yx',x);yx=self.git('rev-parse','HEAD')
+        self.assertEqual(len(self.git('merge-base','--all',xy,yx).split()),2)
+        with self.assertRaises(native.receipts.ReceiptError):
+            native.event_merge_base(self.root,self.pull(xy,yx))
+
+    def test_malformed_shas_never_reach_git(self):
+        with mock.patch.object(native,'git',side_effect=AssertionError('git reached')) as called:
+            for head,base in (('--all','a'*40),('a'*40,'-h'),('main','a'*40),('A'*40,'a'*40),(None,'a'*40),('a'*39,'a'*40)):
+                with self.subTest(head=head,base=base),self.assertRaises(native.receipts.ReceiptError):
+                    native.event_merge_base(self.root,self.pull(head,base))
+            with self.assertRaises(native.receipts.ReceiptError):
+                native.event_merge_base(self.root,{})
+        called.assert_not_called()
+
+
 class PreflightSuccessorScope(unittest.TestCase):
     """Main's reviewed 15 -> 30 minute preflight budget is the only accepted difference from the producer job."""
     def current(self):
