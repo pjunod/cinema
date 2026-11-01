@@ -872,7 +872,9 @@ only inside `ResourcePlan.source_bounds_utf8`:
 `families` has exactly eight members, each a closed `FamilyPolicy`
 `{owner,database_bytes,main_bytes,journal_bytes,temp_bytes}` of positive
 integers with `main_bytes >= database_bytes`; `database_bytes` caps each
-database file, `main_bytes` reserves the family's simultaneous main files,
+database file, `main_bytes` reserves the family's simultaneous main files
+(calibration requires it to cover every database the map declares live together,
+below),
 `journal_bytes` covers WAL, shared-memory and rollback companions and
 `temp_bytes` covers SQLite FILE temporaries:
 
@@ -882,7 +884,7 @@ database file, `main_bytes` reserves the family's simultaneous main files,
 | `verifier_main` | `verifier` | live M3 verifier databases |
 | `catalog_export_scratch` | `catalog_export` | the manifest-closure export database |
 | `verifier_continuation_scratch` | `verifier_continuation` | continuation and work scratch |
-| `catalog_or_verifier_restore_scratch` | `snapshot_restore` | restore queues |
+| `catalog_or_verifier_restore_scratch` | `snapshot_restore` | ancillary journal and temp work of the read-only restore validators; it declares no database role, because a restored file is attached from `restore_staging_bytes` and never given its own scratch database |
 | `publication_pack_scratch` | `snapshot_transport` | PartPlan and manifest queues |
 | `authentication_index` | `provenance` | dependency, member and locator indexes |
 | `publication_pending_scratch` | `session_controller` | pending, coverage and dispatch indexes |
@@ -904,9 +906,22 @@ assumption is made.
 installed table, index and scratch DDL of each family's database roles with
 pinned constructor sources whose hashes are verified when the map loads; implicit
 objects (`sqlite_sequence` and `sqlite_autoindex_*`) are derived from the actual
-engine and the declared PRIMARY KEY/UNIQUE constraints. Calibration rejects an
+engine and the declared PRIMARY KEY/UNIQUE constraints. Every database role also
+declares its `role_lifetime` `{simultaneous,holders}`: the largest number of
+databases of that role live at once in one job or ledger (active input plus
+pending output generation for the catalog and the verifier; the pack job's part
+plan and its content and evidence inventories; the working, conformance and
+controller dependency indexes; the store, replay and conformance pending
+ledgers) and who holds them. Loading the map also requires each object's
+constructor to resolve to a real definition in its pinned source (a Python
+class method or function, a Rust impl function, or a CREATE statement of the
+source SQL), so a removed constructor cannot stay calibrated. Calibration rejects an
 unknown or missing table or index, a drifted constructor source and an installed
-DDL that differs from the map. The map supports relational planning and source
+DDL that differs from the map, and requires each family's reservations to cover
+its declared live databases: with `n` the sum of the family's role
+`simultaneous` counts (at least one), `main_bytes >= n*database_bytes`,
+`journal_bytes >= n*(2*database_bytes + 1 MiB)` and
+`temp_bytes >= n*2*database_bytes`. The map supports relational planning and source
 review; it is not a packing theorem. The nonsemantic accounting classes of the
 registered inventory each name exactly one physical charge:
 `backup_and_chunks` charges `snapshot_spool_bytes`, `downloads_and_restores`
@@ -976,7 +991,16 @@ to run as allocation-capable. An already-restored read-only database attaches
 its held reservation instead of consuming another main allocation, and its
 journal and temp work need a separate allocation. Ownership transfer reserves
 the destination while the source stays charged and commits one owner only after
-the rename and directory fsync; an alias never creates fresh quota.
+the rename and directory fsync; an alias never creates fresh quota. The attached
+restored database is checked against its effective page ceiling (its destination
+family's `database_bytes` rounded down to the file's own page size) from its
+header, before it is first opened, by both private restore validators; a
+database beyond it is an incomplete disposition. The descriptor's `parent` is
+`{pid,start_ticks}` where `start_ticks` is the platform's exact process start
+identity (field 22 of `/proc/<pid>/stat` on Linux; the kernel start time of
+`sysctl kern.proc.pid` in microseconds on macOS), compared for equality with the
+same pid's current reading; the owned-root and lease device/inode checks are
+exact file-system comparisons on both platforms.
 
 Producers/readers enforce b_k on the full canonical outer record, including
 headers and every escaping layer, plus separate decoded-working-set/RSS limits.
