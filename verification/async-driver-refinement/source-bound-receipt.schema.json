@@ -293,98 +293,11 @@
         "report_role"
       ],
       "additionalProperties": false
-    },
-    "OperationalResourceBounds": {
-      "type": "object",
-      "properties": {
-        "schema_version": {
-          "const": 2
-        },
-        "accounting_rule": {
-          "const": "operational_encoded_caps_v1"
-        },
-        "source_receipt": {
-          "$ref": "#/$defs/SourceBoundReceipt"
-        },
-        "record_allowances": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "object",
-            "properties": {
-              "records": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "max_encoded_bytes": {
-                "type": "integer",
-                "minimum": 1
-              }
-            },
-            "required": [
-              "records",
-              "max_encoded_bytes"
-            ],
-            "additionalProperties": false
-          }
-        },
-        "overhead": {
-          "type": "object",
-          "properties": {
-            "index_bytes": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "wal_bytes": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "scratch_bytes": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "retained_bytes": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "duplicate_backup_bytes": {
-              "type": "integer",
-              "minimum": 0
-            }
-          },
-          "required": [
-            "index_bytes",
-            "wal_bytes",
-            "scratch_bytes",
-            "retained_bytes",
-            "duplicate_backup_bytes"
-          ],
-          "additionalProperties": false
-        },
-        "accounting_method_sha256": {
-          "$ref": "paged-proof.schema.json#/$defs/Sha256"
-        },
-        "measurement_sha256": {
-          "$ref": "paged-proof.schema.json#/$defs/Sha256"
-        }
-      },
-      "required": [
-        "schema_version",
-        "accounting_rule",
-        "source_receipt",
-        "record_allowances",
-        "overhead",
-        "accounting_method_sha256",
-        "measurement_sha256"
-      ],
-      "additionalProperties": false
     }
   },
   "oneOf": [
     {
       "$ref": "#/$defs/SourceBoundReceipt"
-    },
-    {
-      "$ref": "#/$defs/OperationalResourceBounds"
     }
   ]
 }
