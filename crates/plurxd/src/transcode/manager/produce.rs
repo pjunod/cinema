@@ -228,13 +228,9 @@ impl TranscodeManager {
             coordinator_frame_bytes
                 .checked_add(std::mem::size_of::<SessionRequest>())?
                 .checked_add(request.selected_finite_requested_heap_bytes()?)?
-                .checked_add(std::mem::size_of::<
-                    plurx_core::store::PlaybackPlanningSnapshot,
-                >())?
-                .checked_add(2 * std::mem::size_of::<usize>())?
-                .checked_add(
-                    super::adaptive_attempts::planning_snapshot_requested_heap_bytes(&planning)?,
-                )?
+                .checked_add(super::adaptive_attempts::retained_planning_snapshot_bytes(
+                    request, &planning,
+                )?)?
                 .checked_add(source_object_version.capacity())?
                 .checked_add(super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)
         })()

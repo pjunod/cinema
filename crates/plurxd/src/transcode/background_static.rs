@@ -309,22 +309,10 @@ fn planning_application_bytes(
         .checked_add(frame_bytes)?
         .checked_add(std::mem::size_of::<SessionRequest>())?
         .checked_add(request.selected_finite_requested_heap_bytes()?)?
-        .checked_add(super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)?;
-    if request.candidate_context.as_ref().is_none_or(|context| {
-        context
-            .planning_snapshot
-            .as_ref()
-            .is_none_or(|held| !Arc::ptr_eq(held, snapshot))
-    }) {
-        bytes = bytes
-            .checked_add(
-                std::mem::size_of::<plurx_core::store::PlaybackPlanningSnapshot>()
-                    + 2 * std::mem::size_of::<usize>(),
-            )?
-            .checked_add(
-                super::adaptive_attempts::planning_snapshot_requested_heap_bytes(snapshot)?,
-            )?;
-    }
+        .checked_add(super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)?
+        .checked_add(super::adaptive_attempts::retained_planning_snapshot_bytes(
+            request, snapshot,
+        )?)?;
     // The claimed job and its separately decoded catalog stay live in the
     // caller while this original coordinator awaits native work.
     bytes = bytes
