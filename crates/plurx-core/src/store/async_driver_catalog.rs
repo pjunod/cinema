@@ -2457,7 +2457,7 @@ impl ReadSnapshot {
         // the file must lie in the granted allocation and the journal/temp
         // reservations must cover the database ceiling.
         let family = resource.family("catalog_export_scratch")?;
-        let scratch = output.join(".manifest-closure.sqlite");
+        let scratch = output.join("manifest-closure.sqlite");
         let granted = self
             .catalog
             .inner
