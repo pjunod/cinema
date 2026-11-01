@@ -1,6 +1,7 @@
 """Synthetic transport fixtures; no solver, Rust producer or network execution."""
 from __future__ import annotations
 import copy
+import hashlib
 import io
 from pathlib import Path
 import sqlite3
@@ -9,6 +10,7 @@ import unittest
 import zipfile
 
 from validation import async_refinement_provenance as p
+from validation import async_snapshot_transport as transport
 from validation import python_unit_receipts as receipts
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,18 +31,43 @@ def checkpoint():
         'page_root':'d'*64,'catalog_logical_digest':'e'*64}}
 
 
+ORIGIN = {'repository': 1, 'pr': 2, 'event_base': 'a' * 40, 'workflow_id': p.WORKFLOW,
+          'event_name': 'workflow_dispatch', 'mode': 'unit', 'operation': 'execute',
+          'run': 11, 'job': 12, 'task': 13, 'attempt': 1, 'dispatch_ordinal': 0}
+
+
+def pseudo_random(size):
+    out = bytearray()
+    counter = 0
+    while len(out) < size:
+        out.extend(hashlib.sha256(counter.to_bytes(8, 'big')).digest())
+        counter += 1
+    return bytes(out[:size])
+
+
 class CatalogTransportTests(unittest.TestCase):
+    """Snapshot roots are rebuilt from authenticated content-addressed chunks only.
+
+    The former whole-backup packer (a 32-slot inequality over one backup) is retired
+    by the sealed capacity design; each fixture below keeps the behavior it pinned.
+    """
     def setUp(self):
         scratch = ROOT/'.agent-proof-fixtures/transport'; scratch.mkdir(parents=True,exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(dir=scratch); self.addCleanup(self.temporary.cleanup)
-        self.directory = Path(self.temporary.name)
+        self.directory = Path(self.temporary.name).resolve()
         self.cp = checkpoint()
-        self.backup = self.directory/'backup.sqlite'
+        for name in ('work', 'cas', 'restore'):
+            (self.directory/name).mkdir(mode=0o700)
+        self.backup = self.directory/'work/backup.sqlite'
         db = sqlite3.connect(self.backup)
         db.execute('CREATE TABLE identities(id INTEGER PRIMARY KEY AUTOINCREMENT,value TEXT)')
         db.execute('CREATE TABLE fifo(ticket INTEGER PRIMARY KEY,product INTEGER)')
+        db.execute('CREATE TABLE payload(value BLOB)')
         db.execute('INSERT INTO identities(value) VALUES(?)',('exact raw UUID',))
-        db.execute('INSERT INTO fifo VALUES(7,1)'); db.commit(); db.close()
+        db.execute('INSERT INTO fifo VALUES(7,1)')
+        db.execute('INSERT INTO payload VALUES(?)',(pseudo_random(1300 * 1024),))  # genuinely spans two chunks
+        db.commit(); db.close()
+        self.backup.chmod(0o600)
         cp = self.cp['record']
         self.descriptor = {'source':SOURCE,'session_id':SESSION,'unit_ordinal':0,
              'checkpoint_sha256':p.digest(p.canonical(self.cp)),'previous_checkpoint_sha256':None,
@@ -49,26 +76,45 @@ class CatalogTransportTests(unittest.TestCase):
              'semantic_manifest_root':cp['page_root'],'snapshot_boundary':'post_checkpoint_pre_upload',
              'format':'sqlite3','backup_method':'sqlite_backup_api_v1',
              'catalog_bytes':self.backup.stat().st_size,'catalog_sha256':p.file_sha(self.backup)}
+        self.binding = {'source':SOURCE,'session_id':SESSION,'unit_ordinal':0,
+                        'resource_plan_sha256':cp['resource_plan_sha256'],'initial_image_sha256':cp['initial_image_id']}
+        self.charged = 0
+        self.cas = transport.OwnedDirectory(self.directory/'cas', self.directory, lambda: None)
+        self.addCleanup(self.cas.close)
+        self.work = transport.OwnedDirectory(self.directory/'work', self.directory, lambda: None)
+        self.addCleanup(self.work.close)
+        self.restore = transport.OwnedDirectory(self.directory/'restore', self.directory, lambda: None)
+        self.addCleanup(self.restore.close)
+        self.inventory = transport.ContentInventory(sqlite3.connect(':memory:'), self.cas,
+                                                    self.charge, self.discharge)
 
-    def package(self):
-        root, plan = p.pack_catalog(self.backup,self.descriptor,self.cp,self.directory/'package',ROOT)
-        self.addCleanup(plan.close)
-        receipts_by_part = {}
-        parts = {}
-        for n in range(plan.preflight()):
-            members = plan.manifest(n); parts[n] = plan.directory(n)
-            receipts_by_part[n] = {'schema_version':6,'kind':'ArtifactReceipt','record':{
-                'artifact_id':n+1,'session_id':SESSION,'unit_ordinal':0,'run':1,'job':2,'task':3,
-                'attempt':1,'source':SOURCE,'name':f'part-{n}','expired':False,'zip_sha256':'f'*64,
-                'zip_bytes':1,'extracted_bytes':sum(m['bytes'] for m in members),'member_count':len(members),
-                'members':members,'upload_log_sha256':'f'*64,'event_payload_sha256':'f'*64,
-                'expected_prior_checkpoint':None,'produced_checkpoint':p.digest(p.canonical(self.cp))}}
-        return root,parts,receipts_by_part
+    def charge(self, size):
+        self.charged += size
+
+    def discharge(self, size):
+        self.charged -= size
+
+    def snapshot(self, cp=None, descriptor=None):
+        return transport.snapshot_root(self.inventory, self.binding, ORIGIN, cp or self.cp,
+                                       descriptor or self.descriptor, self.work, 'backup.sqlite')
+
+    def content(self):
+        rows = self.inventory.db.execute('SELECT kind,sha256,bytes FROM content').fetchall()
+        return {sha: self.inventory.bytes({'kind': kind, 'sha256': sha, 'bytes': size}) for kind, sha, size in rows}
+
+    @staticmethod
+    def resolver(store):
+        def resolve(reference):
+            if reference['sha256'] not in store:
+                raise transport.SnapshotTransportError('content absent from authenticated parts')
+            return store[reference['sha256']]
+        return resolve
 
     def test_multipart_roundtrip_preserves_private_ids_fifo_allocator(self):
-        root,parts,rs = self.package()
-        self.assertGreaterEqual(len(parts),2)
-        target = p.restore_catalog(root,parts,rs,self.cp,self.directory/'staged.sqlite',ROOT)
+        root,_ = self.snapshot()
+        self.assertGreaterEqual(root['chunk_count'],2)
+        target = transport.restore_image(root,self.resolver(self.content()),self.restore,'staged.sqlite',
+                                         self.charge,self.discharge)
         self.assertEqual(p.file_sha(target),p.file_sha(self.backup))
         db = sqlite3.connect('file:'+str(target)+'?mode=ro',uri=True)
         try:
@@ -77,25 +123,38 @@ class CatalogTransportTests(unittest.TestCase):
         finally: db.close()
 
     def test_missing_part_truncated_chunk_and_mixed_checkpoint_never_resume(self):
-        root,parts,rs = self.package()
+        root,_ = self.snapshot()
+        store = self.content()
+        chunks = [sha for kind, sha in ((k, s_) for k, s_, _ in self.inventory.db.execute(
+            'SELECT kind,sha256,bytes FROM content')) if kind == 'snapshot_chunk']
         for mutate in ('missing','truncated','checkpoint'):
             with self.subTest(mutate=mutate):
-                selected = dict(parts); receipts_copy = copy.deepcopy(rs); cp = copy.deepcopy(self.cp)
-                if mutate == 'missing': selected.pop(max(selected))
-                elif mutate == 'truncated':
-                    name = next(pth for pth in selected[max(selected)].rglob('*.bin'))
-                    original=name.read_bytes();name.write_bytes(original[:-1])
-                else: cp['record']['source']['commit'] = '0'*40
-                with self.assertRaises((receipts.ReceiptError,sqlite3.IntegrityError)):
-                    p.restore_catalog(root,selected,receipts_copy,cp,self.directory/(mutate+'.sqlite'),ROOT)
-                self.assertFalse((self.directory/(mutate+'.sqlite')).exists())
-                if mutate=='truncated':name.write_bytes(original)
+                selected = dict(store); name = mutate+'.sqlite'
+                before = self.charged
+                if mutate == 'missing': selected.pop(chunks[-1])
+                elif mutate == 'truncated': selected[chunks[-1]] = selected[chunks[-1]][:-1]
+                if mutate == 'checkpoint':
+                    cp = copy.deepcopy(self.cp); cp['record']['source']['commit'] = '0'*40
+                    with self.assertRaises(transport.SnapshotTransportError):
+                        self.snapshot(cp)
+                else:
+                    with self.assertRaises(transport.SnapshotTransportError):
+                        transport.restore_image(root,self.resolver(selected),self.restore,name,
+                                                self.charge,self.discharge)
+                self.assertFalse((self.directory/'restore'/name).exists())
+                self.assertEqual(list((self.directory/'restore').iterdir()),[])  # no partial writer-visible file
+                self.assertEqual(self.charged,before)  # the failed restore returned its reservation
 
     def test_closed_root_rejects_extra_fields_and_old_snapshot_boundary(self):
-        root,_,_ = self.package()
+        root,_ = self.snapshot()
+        p.auxiliary(copy.deepcopy(root),ROOT)
         for field,value in (('future_artifact_id',1),('snapshot_boundary','live_copy')):
             bad = dict(root); bad[field] = value
             with self.assertRaises(receipts.ReceiptError):p.auxiliary(bad,ROOT)
+
+    def test_whole_backup_packer_and_part_restorer_stay_retired(self):
+        for name in ('pack_catalog','pack_verifier','restore_catalog'):
+            self.assertFalse(hasattr(p,name),name)
 
     def test_digest_collision_never_replaces_full_payload(self):
         index = p.DependencyIndex(self.directory/'objects.sqlite'); self.addCleanup(index.close)
@@ -126,7 +185,7 @@ class CatalogTransportTests(unittest.TestCase):
 
 class ControlCarrierTests(unittest.TestCase):
     def framed(self):
-        value={'registration_sha256':'a'*64,'source_archive_sha256':'b'*64,
+        value={'schema_version':2,'registration_sha256':'a'*64,'source_archive_sha256':'b'*64,
                'session_id':SESSION,'unit_ordinal':0,'role':'unit_checkpoint',
                'origin':{'run':7,'job':8,'task':9,'attempt':1},'payload':'x'*4000}
         binding=p.control_binding(value);sha=p.digest(p.canonical(value))
