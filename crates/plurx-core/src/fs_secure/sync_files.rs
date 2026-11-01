@@ -17,7 +17,7 @@ fn invalid(message: &'static str) -> io::Error {
 }
 
 fn canonical_name(name: &str) -> bool {
-    if name == "init.mp4" || name == "identity.json" || name == "encoded-process" {
+    if name == "init.mp4" || super::FIXED_METADATA_NAMES.contains(&name) {
         return true;
     }
     let Some(number) = name
