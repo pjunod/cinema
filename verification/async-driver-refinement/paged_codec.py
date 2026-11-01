@@ -422,7 +422,7 @@ def is_physical_exhaustion(error):
 
 class Budget:
     """Separate logical admission from measured resident/disk/work ceilings."""
-    def __init__(self, plan, directory, *, seconds=None):
+    def __init__(self, plan, directory, *, seconds=None, grant_from_environment=True):
         Schema().check(plan, 'ResourcePlan')
         require(plan['admission'] == 'admitted', 'resource plan unadmitted')
         require(plan['plan_sha256'] == digest(envelope('ResourcePlan', plan)), 'resource plan digest')
@@ -444,6 +444,10 @@ class Budget:
         require(calibration['policy_sha256'] == physical.digest(policy) and calibration['table_map_sha256'] == policy['table_map_sha256'],
                 'physical calibration differs from the immutable physical policy')
         self.physical_policy = policy
+        # An allocation-capable child owns ONLY what its parent deducted and
+        # handed down (LocalPhysicalGrant1); it never re-instantiates the full
+        # policy. Tests of non-child components must opt out explicitly.
+        self.grant = self._environment_grant(plan, physical, policy) if grant_from_environment else None
         require(seconds is None or type(seconds) in (int,float) and math.isfinite(seconds),'invalid remaining unit time')
         if seconds is not None and seconds<=0:raise Incomplete('shared unit deadline exhausted before decoder admission')
         self.deadline = time.monotonic() + min(plan['unit_seconds'],plan['unit_seconds'] if seconds is None else seconds)
@@ -488,6 +492,39 @@ class Budget:
     def release_working(self,amount):
         self.working_bytes=max(0,self.working_bytes-amount)
 
+    @staticmethod
+    def _environment_grant(plan, physical, policy):
+        names = ('PLURX_ASYNC_PHYSICAL_GRANT_FD', 'PLURX_ASYNC_PHYSICAL_GRANT_SHA256', 'PLURX_ASYNC_PHYSICAL_LEASE_FD')
+        if not all(name in os.environ for name in names):
+            raise Incomplete('allocation-capable child requires an explicit physical grant')
+        try:
+            grant_fd, lease_fd = int(os.environ[names[0]]), int(os.environ[names[2]])
+        except ValueError as error:
+            raise Invalid('physical grant descriptor numbers are not decimal') from error
+        return physical.load_child_grant(grant_fd, os.environ[names[1]], lease_fd, {
+            'source': plan['source'], 'session_id': plan['session_id'], 'resource_plan_sha256': plan['plan_sha256'],
+            'physical_policy_sha256': physical.digest(policy), 'physical_policy': policy})
+
+    def family_limits(self, family):
+        """Effective database/journal/temp limits: the policy, narrowed to the child's grant."""
+        limits = self.physical_policy['families'][family]
+        if self.grant is None:
+            return limits
+        self.grant._authority()
+        main = self.grant.limits.get((family, 'main'))
+        if main is None:
+            raise Incomplete('child physical grant lacks the ' + family + ' family')
+        return {'database_bytes': min(limits['database_bytes'], main), 'main_bytes': main,
+                'journal_bytes': self.grant.limits.get((family, 'journal'), 0), 'temp_bytes': self.grant.limits.get((family, 'temp'), 0)}
+
+    def pool_limit(self, pool):
+        if self.grant is None:
+            return self.physical_policy['pools'][pool]
+        self.grant._authority()
+        if (pool, 'bytes') not in self.grant.limits:
+            raise Incomplete('child physical grant lacks the ' + pool + ' pool')
+        return self.grant.limits[(pool, 'bytes')]
+
     def enforce_database_cap(self, db, family='verifier_main'):
         """Apply the verifier main file's effective page ceiling BEFORE any DDL or write.
 
@@ -498,7 +535,7 @@ class Budget:
         """
         size = db.execute('PRAGMA page_size').fetchone()[0]
         pages = db.execute('PRAGMA page_count').fetchone()[0]
-        family = self.physical_policy['families'][family]
+        family = self.family_limits(family)
         effective = family['database_bytes'] // size
         if effective == 0 or pages > effective:
             raise Incomplete('verifier database exceeds its effective physical page ceiling')
@@ -512,7 +549,7 @@ class Budget:
         """Re-verify the cap, the pragma and the companion files around SQL work and every commit."""
         size = db.execute('PRAGMA page_size').fetchone()[0]
         pages = db.execute('PRAGMA page_count').fetchone()[0]
-        family = self.physical_policy['families'][family]
+        family = self.family_limits(family)
         effective = family['database_bytes'] // size
         if pages > effective or pages * size > family['database_bytes']:
             raise Incomplete('verifier main database exceeded its physical page ceiling')
@@ -1381,7 +1418,7 @@ class ExecutionState:
         # immutable snapshot spool and, with all live files, the session disk.
         self.budget.check_database(self.db)
         copy_bytes = self.db.execute('PRAGMA page_size').fetchone()[0] * self.db.execute('PRAGMA page_count').fetchone()[0]
-        if copy_bytes > self.budget.physical_policy['pools']['snapshot_spool_bytes']:
+        if copy_bytes > self.budget.pool_limit('snapshot_spool_bytes'):
             raise Incomplete('verifier standalone backup exceeds the snapshot spool reservation')
         live = sum((Path(d) / n).stat().st_size for d, _, names in os.walk(self.budget.directory) for n in names)
         if live + copy_bytes > self.budget.plan['total_session_disk_bytes']:
@@ -1393,7 +1430,7 @@ class ExecutionState:
             require(out.execute('PRAGMA integrity_check').fetchone() == ('ok',), 'verifier backup integrity')
         finally:
             out.close()
-        if target.stat().st_size > self.budget.physical_policy['pools']['snapshot_spool_bytes']:
+        if target.stat().st_size > self.budget.pool_limit('snapshot_spool_bytes'):
             raise Incomplete('verifier standalone backup grew beyond the snapshot spool reservation')
         require(before == (self.sequence(), self.logical_digest()), 'verifier mutated during backup')
         h = hashlib.sha256()

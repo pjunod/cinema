@@ -276,6 +276,7 @@ def expected_owner(family_or_pool):
 
 class HeldLease:
     """The already-held owned-slot lease: an open descriptor and its owned-root-relative name.
+    Any object exposing integer `fd` and `relative_path` is accepted by the ledger (duck typing).
 
     The ledger never opens a lease by filename. It only proves that the held
     descriptor and that name denote the same non-symlink regular file.
@@ -415,6 +416,12 @@ class ReservationLedger:
         self.by_id[grant.reservation_id] = grant
         self.reservations.append(grant)
         return grant
+
+    def remaining(self, family_or_pool, component):
+        """Capacity not yet deducted for one resource component (delegation sizing)."""
+        key = family_or_pool, component
+        require(key in self.limits, 'unknown physical reservation component')
+        return self.limits[key] - self.used[key]
 
     def _authority(self):
         """Root ledgers hold the process-local policy; nothing to re-verify."""
@@ -592,7 +599,9 @@ def _component_rules(resource, component):
     """(is_family, recursive_required) for one valid resource/component pair."""
     if resource in FAMILY_OWNERS:
         require(component in FAMILY_COMPONENTS, 'unknown physical family component')
-        return True, (True if component == 'temp' else False)
+        # main/journal name one database file; temp is accounting-only for the
+        # anonymous FILE work of that database (non-recursive) or an owned scratch subtree.
+        return True, (None if component == 'temp' else False)
     require(resource in POOL_OWNERS and component == 'bytes', 'unknown physical pool/component')
     return False, None
 
@@ -608,6 +617,8 @@ def _scope_claims(entry):
     is_family, _ = _component_rules(entry['resource'], entry['component'])
     if is_family and entry['component'] == 'journal':
         return [(base.with_name(base.name + suffix), False) for suffix in DB_COMPANIONS]
+    if is_family and entry['component'] == 'temp' and not entry['recursive']:
+        return []  # anonymous SQLite FILE work owns no addressable file, only prospective bytes
     return [(base, entry['recursive'])]
 
 
@@ -619,7 +630,8 @@ def validate_allocation(entry, *, attachment=False, policy=None):
     is_family, recursive_required = _component_rules(entry['resource'], entry['component'])
     integer(entry['bytes'], positive=True)
     require(type(entry['recursive']) is bool, 'invalid physical recursion flag')
-    require(not is_family or entry['recursive'] is recursive_required, 'physical family component scope differs from ownership map')
+    require(not is_family or recursive_required is None or entry['recursive'] is recursive_required,
+            'physical family component scope differs from ownership map')
     safe_relative(entry['relative_path'])
     if attachment:
         require(entry['access'] == 'read_only', 'attachments are read-only')
@@ -696,7 +708,10 @@ def _write_private(path, raw):
 
 
 def _binding(value, *, policy=None):
-    closed(value, BINDING_FIELDS, 'physical grant binding')
+    """Closed source/session/plan/policy binding; optional owned_root/parent are cross-checked by callers."""
+    require(type(value) is dict, 'physical grant binding must be an object')
+    closed({k: v for k, v in value.items() if k in BINDING_FIELDS}, BINDING_FIELDS, 'physical grant binding')
+    require(set(value) <= set(BINDING_FIELDS) | {'owned_root', 'parent', 'physical_policy'}, 'unknown physical grant binding field')
     require(type(value['source']) is dict and value['source'], 'invalid physical grant source')
     require(type(value['session_id']) is str and UUID_TEXT.fullmatch(value['session_id']), 'invalid physical grant session')
     sha(value['resource_plan_sha256'])
@@ -725,8 +740,18 @@ class GrantHandle:
 
     @property
     def descriptor_fd(self):
-        require(not self.closed, 'physical grant already reconciled')
+        require(not self.closed and self._fd >= 0, 'physical grant already reconciled/closed')
         return self._fd
+
+    @property
+    def fd(self):
+        return self.descriptor_fd
+
+    def close(self):
+        """Release only the read-only descriptor handle; charges stay until reconcile_after_reap."""
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
 
     @property
     def sha256(self):
@@ -739,17 +764,17 @@ class GrantHandle:
     def environment(self):
         """Exactly the three source-owned environment names (decimal FDs, canonical hash)."""
         require(not self.closed, 'physical grant already reconciled')
-        return {ENV_GRANT_FD: str(self._fd), ENV_GRANT_SHA256: self.sha256, ENV_LEASE_FD: str(self._lease.fd)}
+        return {ENV_GRANT_FD: str(self.descriptor_fd), ENV_GRANT_SHA256: self.sha256, ENV_LEASE_FD: str(self._lease.fd)}
 
     def pass_fds(self):
-        return self._fd, self._lease.fd
+        return self.descriptor_fd, self._lease.fd
 
     def check(self):
         if not self.closed:
             for reservation in self.reservations:
                 reservation.check()
 
-    def reconcile_after_reap(self, returncode):
+    def reconcile_after_reap(self, child=None):
         """After the child is reaped: keep every surviving file charged, release the rest.
 
         Charges for surviving files are retained regardless of the child's exit
@@ -757,7 +782,9 @@ class GrantHandle:
         allocations are released. Exhaustion is raised after reconciliation.
         """
         require(not self.closed, 'physical grant already reconciled')
-        require(type(returncode) is int, 'child must be reaped before physical grant reconciliation')
+        # `child` may be a reaped exit status, or a Popen-like object that must already have exited.
+        require(child is None or type(child) is int or (hasattr(child, 'poll') and child.poll() is not None),
+                'child must be reaped before physical grant reconciliation')
         retained, released, overage = [], [], []
         for reservation in self.reservations:
             reservation.delegated = False
@@ -768,7 +795,7 @@ class GrantHandle:
             else:
                 reservation.release_after_removal()
                 released.append(reservation.reservation_id)
-        os.close(self._fd)
+        self.close()
         self._path.unlink()
         _fsync_directory(self._path.parent)
         self._control.release_after_removal()
@@ -785,7 +812,15 @@ def _issue_child_grant(self, allocations, attachments, binding, held_lease):
     policy = self.policy
     require(policy is not None, 'this ledger holds no policy to delegate from')
     _binding(binding, policy=policy)
-    require(isinstance(held_lease, HeldLease), 'the already-held lease is required')
+    identity = os.lstat(self.directory)
+    if 'owned_root' in binding:
+        claimed = binding['owned_root']
+        require(claimed == str(self.directory) or claimed == {'path': str(self.directory), **_identity(identity)},
+                'physical grant binding owned root differs from the ledger root')
+    if 'parent' in binding:
+        require(binding['parent'] == {'pid': os.getpid(), 'start_ticks': process_start_ticks(os.getpid())},
+                'physical grant binding parent differs from this process')
+    held_lease = HeldLease(getattr(held_lease, 'fd', None), str(getattr(held_lease, 'relative_path', '')))
     lease = _lease_identity(self.directory, held_lease.relative_path, held_lease.fd)
     root = os.lstat(self.directory)
     require(stat.S_ISDIR(root.st_mode), 'owned root is not a directory')
@@ -941,7 +976,7 @@ def load_child_grant(grant_fd, expected_sha256, lease_fd, expected_binding):
     digest so allocations beyond policy are refused).
     """
     require(type(expected_binding) is dict, 'physical grant binding is required')
-    extras = {k: expected_binding[k] for k in ('owned_root', 'physical_policy') if k in expected_binding}
+    extras = {k: expected_binding[k] for k in ('owned_root', 'parent', 'physical_policy') if k in expected_binding}
     base = {k: v for k, v in expected_binding.items() if k not in extras}
     policy = extras.get('physical_policy')
     _binding(base, policy=policy)
@@ -969,8 +1004,9 @@ def load_child_grant(grant_fd, expected_sha256, lease_fd, expected_binding):
         integer(value)
     integer(parent['pid'], positive=True)
     safe_relative(lease['relative_path'])
-    require(type(root['path']) is str and Path(root['path']).is_absolute() and ('owned_root' not in extras or extras['owned_root'] == root['path']),
-            'physical grant owned root differs')
+    require(type(root['path']) is str and Path(root['path']).is_absolute(), 'physical grant owned root differs')
+    require('owned_root' not in extras or extras['owned_root'] in (root['path'], root), 'physical grant owned root differs from expectation')
+    require('parent' not in extras or extras['parent'] == parent, 'physical grant parent differs from expectation')
     require(process_start_ticks(parent['pid']) == parent['start_ticks'], 'physical grant parent is not the live identity')
     named = os.lstat(root['path'])
     require(stat.S_ISDIR(named.st_mode) and (named.st_dev, named.st_ino) == (root['device'], root['inode']), 'owned root device/inode differs')
