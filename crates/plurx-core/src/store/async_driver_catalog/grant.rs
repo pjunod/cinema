@@ -8,8 +8,9 @@
 //! field or proof credit.
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Read;
-use std::os::unix::fs::MetadataExt;
+use std::mem::ManuallyDrop;
+use std::os::fd::FromRawFd;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -132,10 +133,13 @@ fn overlap(left: &[(PathBuf, bool)], right: &[(PathBuf, bool)]) -> bool {
 fn hex64(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
-/// Linux process start identity (field 22 of /proc/<pid>/stat).
+fn parent_not_live() -> CatalogError {
+    CatalogError::SourceMismatch("physical grant: parent is not live".into())
+}
+/// Linux process start identity (field 22 of /proc/<pid>/stat, clock ticks since boot).
+#[cfg(target_os = "linux")]
 pub fn process_start_ticks(pid: u64) -> CatalogResult<u64> {
-    let raw = fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map_err(|_| CatalogError::SourceMismatch("physical grant: parent is not live".into()))?;
+    let raw = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| parent_not_live())?;
     let tail = raw
         .rfind(')')
         .map(|at| &raw[at + 1..])
@@ -145,8 +149,102 @@ pub fn process_start_ticks(pid: u64) -> CatalogResult<u64> {
         .and_then(|ticks| ticks.parse().ok())
         .ok_or_else(|| CatalogError::SourceMismatch("physical grant: parent start ticks".into()))
 }
-fn effective_uid() -> CatalogResult<u32> {
-    Ok(fs::metadata("/proc/self")?.uid())
+/// macOS process start identity: the start time the kernel records in the proc entry
+/// (`sysctl kern.proc.pid.<pid>`), in microseconds since the epoch.
+#[cfg(target_os = "macos")]
+pub fn process_start_ticks(pid: u64) -> CatalogResult<u64> {
+    let numeric = i32::try_from(pid).map_err(|_| parent_not_live())?;
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        numeric,
+    ];
+    let mut size: libc::size_t = 0;
+    // SAFETY: `mib` is a live 4-element array, the old-value pointer is null and `size` is a
+    // valid out-parameter, which asks the kernel only for the size of the result.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size == 0 {
+        return Err(parent_not_live()); // an absent pid is rc 0 with an empty result
+    }
+    let mut image = vec![0u8; size];
+    // SAFETY: `image` is writable for exactly `size` bytes and `size` is passed by reference
+    // so the kernel reports how much it actually wrote.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            image.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size == 0 || size > image.len() {
+        return Err(parent_not_live());
+    }
+    image.truncate(size);
+    parse_kinfo_start(&image, pid)
+}
+/// No exact process identity is available on this platform: the grant cannot be verified.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn process_start_ticks(_pid: u64) -> CatalogResult<u64> {
+    Err(CatalogError::SourceMismatch(
+        "physical grant: no process start identity on this platform".into(),
+    ))
+}
+/// Start time (microseconds since the epoch) from a 64-bit macOS `kinfo_proc` image of exactly
+/// `pid`: `extern_proc.p_starttime` is the timeval at offset 0 (i64 seconds, i32 microseconds)
+/// and `p_pid` the i32 at offset 40. Echoing the pid makes a mismatched layout fail closed.
+#[cfg(any(target_os = "macos", test))]
+fn parse_kinfo_start(image: &[u8], pid: u64) -> CatalogResult<u64> {
+    let field = |from: usize, to: usize| {
+        image
+            .get(from..to)
+            .and_then(|b| <[u8; 8]>::try_from(b).ok())
+    };
+    let narrow = |from: usize| {
+        image
+            .get(from..from + 4)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(i32::from_ne_bytes)
+    };
+    let (Some(seconds), Some(micros), Some(observed)) =
+        (field(0, 8).map(i64::from_ne_bytes), narrow(8), narrow(40))
+    else {
+        return Err(parent_not_live());
+    };
+    if i64::from(observed) != i64::try_from(pid).unwrap_or(-1)
+        || seconds <= 0
+        || !(0..1_000_000).contains(&micros)
+    {
+        return Err(parent_not_live());
+    }
+    u64::try_from(seconds)
+        .ok()
+        .and_then(|s| s.checked_mul(1_000_000))
+        .and_then(|s| s.checked_add(u64::try_from(micros).ok()?))
+        .ok_or_else(parent_not_live)
+}
+fn effective_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+/// Borrow an inherited descriptor as a `File` that is never closed here. Every use is a
+/// read-only fstat or pread; an invalid descriptor surfaces as EBADF from that call.
+fn borrowed(fd: i32) -> ManuallyDrop<fs::File> {
+    // SAFETY: `ManuallyDrop` never closes a descriptor this loader does not own, and the
+    // wrapped `File` is only used for fstat and offset-explicit reads.
+    ManuallyDrop::new(unsafe { fs::File::from_raw_fd(fd) })
 }
 
 fn entry(value: &Value, attachment: bool, expected_policy: &Value) -> CatalogResult<GrantEntry> {
@@ -238,33 +336,38 @@ impl ChildGrant {
         if grant_fd < 0 || lease_fd < 0 || grant_fd == lease_fd || !hex64(expected_sha256) {
             return refuse("invalid inherited descriptors or hash");
         }
-        // Re-open the inherited descriptor by its /proc name: an independent
-        // read-only description at offset zero over the same inode.
-        let flags = fs::read_to_string(format!("/proc/self/fdinfo/{grant_fd}"))
-            .ok()
-            .and_then(|info| {
-                info.lines()
-                    .find_map(|line| line.strip_prefix("flags:").map(|v| v.trim().to_owned()))
-            })
-            .and_then(|octal| i64::from_str_radix(&octal, 8).ok())
-            .ok_or_else(|| CatalogError::SourceMismatch("physical grant fd flags".into()))?;
-        if flags & 3 != 0 {
+        // The inherited description is checked read-only by fcntl and read with offset-explicit
+        // reads from zero, so neither a /proc name nor the shared file position is trusted.
+        // SAFETY: F_GETFL only reads the status flags of a descriptor number.
+        let flags = unsafe { libc::fcntl(grant_fd, libc::F_GETFL) };
+        if flags < 0 {
+            return refuse("physical grant fd flags");
+        }
+        if flags & libc::O_ACCMODE != libc::O_RDONLY {
             return refuse("descriptor is writable");
         }
-        let mut file = fs::File::open(format!("/proc/self/fd/{grant_fd}"))?;
+        let file = borrowed(grant_fd);
         let info = file.metadata()?;
         if !info.is_file()
             || info.nlink() != 1
             || info.mode() & 0o077 != 0
-            || info.uid() != effective_uid()?
+            || info.uid() != effective_uid()
             || info.len() > MAXIMUM_GRANT_BYTES
         {
             return refuse("descriptor is not a private regular file");
         }
         let mut raw = Vec::new();
-        file.by_ref()
-            .take(MAXIMUM_GRANT_BYTES + 1)
-            .read_to_end(&mut raw)?;
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let count = file.read_at(&mut chunk, raw.len() as u64)?;
+            if count == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..count]);
+            if raw.len() as u64 > MAXIMUM_GRANT_BYTES {
+                return refuse("descriptor exceeds its bound");
+            }
+        }
         if digest(&raw) != expected_sha256 {
             return refuse("descriptor hash differs");
         }
@@ -319,7 +422,7 @@ impl ChildGrant {
             return refuse("owned root device/inode differs");
         }
         let lease_relative = safe_relative(lease["relative_path"].as_str().unwrap_or_default())?;
-        let held = fs::metadata(format!("/proc/self/fd/{lease_fd}"))?;
+        let held = borrowed(lease_fd).metadata()?;
         let by_name = fs::symlink_metadata(root.join(&lease_relative))?;
         let recorded = (number(lease, "device")?, number(lease, "inode")?);
         if !held.is_file()
@@ -558,6 +661,43 @@ mod tests {
             let (file, sha) = self.write(&value, 0o600);
             self.load(&file, &sha, &lease)
         }
+    }
+
+    fn kinfo_image(seconds: i64, micros: i32, pid: i32) -> Vec<u8> {
+        let mut image = vec![0u8; 648];
+        image[0..8].copy_from_slice(&seconds.to_ne_bytes());
+        image[8..12].copy_from_slice(&micros.to_ne_bytes());
+        image[40..44].copy_from_slice(&pid.to_ne_bytes());
+        image
+    }
+
+    #[test]
+    fn macos_kinfo_start_is_the_exact_microsecond_identity_of_that_pid() {
+        let image = kinfo_image(1_790_000_000, 123_456, 4242);
+        assert_eq!(
+            parse_kinfo_start(&image, 4242).expect("start"),
+            1_790_000_000_123_456
+        );
+        // A later start of the same pid (a recycled pid) is a different identity.
+        let recycled = kinfo_image(1_790_000_001, 123_456, 4242);
+        assert_ne!(
+            parse_kinfo_start(&recycled, 4242).expect("start"),
+            parse_kinfo_start(&image, 4242).expect("start")
+        );
+        // The pid echo, an empty start, an out-of-range microsecond and a short image fail closed.
+        assert!(parse_kinfo_start(&image, 4243).is_err());
+        assert!(parse_kinfo_start(&kinfo_image(0, 0, 4242), 4242).is_err());
+        assert!(parse_kinfo_start(&kinfo_image(1, 1_000_000, 4242), 4242).is_err());
+        assert!(parse_kinfo_start(&kinfo_image(1, -1, 4242), 4242).is_err());
+        assert!(parse_kinfo_start(&image[..43], 4242).is_err());
+    }
+
+    #[test]
+    fn the_live_parent_identity_is_stable_and_exact_on_this_platform() {
+        let me = u64::from(std::process::id());
+        let first = process_start_ticks(me).expect("ticks");
+        assert_eq!(first, process_start_ticks(me).expect("ticks"));
+        assert!(process_start_ticks(4_000_000_000).is_err());
     }
 
     #[test]
