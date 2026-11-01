@@ -324,6 +324,25 @@ mod tests {
     }
 }
 
+/// Route this thread's events into `buffer` until the returned guard drops.
+///
+/// tracing-core 0.1.36 computes a callsite's interest from the registering
+/// thread's default alone while only one dispatcher is registered
+/// (`Dispatchers::has_just_one`). If this test's subscriber is that one and
+/// another test thread reaches a callsite first, the callsite caches "never"
+/// from that thread's no-op default, and this thread's event at it is
+/// dropped. A second, silent dispatcher kept registered alongside keeps the
+/// shortcut off, so interest is computed from every live dispatcher.
+#[cfg(test)]
+pub(crate) fn capture_for_test(buffer: &Arc<LogBuffer>) -> impl Sized {
+    use tracing_subscriber::prelude::*;
+    let peer = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let current = tracing::subscriber::set_default(
+        tracing_subscriber::registry().with(BufferLayer(Arc::clone(buffer))),
+    );
+    (current, peer)
+}
+
 /// A `MakeWriter` that keeps what a subscriber formatted, so a test can read
 /// the bytes a real `tracing_subscriber::fmt` layer produced instead of
 /// asserting on a reimplementation of it.

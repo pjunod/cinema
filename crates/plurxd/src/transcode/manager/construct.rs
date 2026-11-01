@@ -122,6 +122,10 @@ impl TranscodeManager {
             serving_authority: crate::serving_fence::ServingAuthority::always_ready(),
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
+            outage_resolution: tokio::sync::watch::Sender::new(
+                crate::serving_fence::OutageResolution::initial(),
+            ),
+            outage_owner_active: AtomicBool::new(false),
             active_session_count: Arc::new(AtomicUsize::new(0)),
             codec_qualification: Arc::new(CodecQualificationMetrics::default()),
             requests: std::sync::Mutex::new(HashMap::new()),

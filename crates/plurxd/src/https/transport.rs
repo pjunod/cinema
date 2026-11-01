@@ -147,7 +147,8 @@ impl Serving {
         let listener = TlsListener::new(prepared.socket, &prepared.identity);
         let stop = listener_stop.child_token();
         let shutdown = stop.clone();
-        let future = crate::serve_http(
+        let future = crate::serve_http_listener(
+            "https",
             listener,
             app,
             async move { shutdown.cancelled().await },

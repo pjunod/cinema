@@ -491,7 +491,8 @@ impl SharingManager {
                                     Ok(listener) => {
                                         self.listener_status("listening");
                                         let stop = CancellationToken::new();
-                                        let serve = crate::serve_http(
+                                        let serve = crate::serve_http_listener(
+                                            "sharing",
                                             SharingTlsListener::new(listener, identity.clone()),
                                             crate::http::sharing::peer_router(state.clone()),
                                             stop.clone().cancelled_owned(),

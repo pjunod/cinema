@@ -1,0 +1,4 @@
+{
+  "cgroup-parent": "docker-other.slice",
+  "live-restore": true
+}

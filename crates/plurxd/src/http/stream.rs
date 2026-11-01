@@ -3839,6 +3839,7 @@ fn spawn_remux_process_owner(
                     crate::serving_fence::LossOutcome::Recovered {
                         outage,
                         budget_spent,
+                        ..
                     } => {
                         generation = serving.borrow_and_update().loss_generation;
                         tracing::info!(
