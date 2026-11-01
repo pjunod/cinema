@@ -109,7 +109,7 @@ impl PublicationRequest {
         payload: Vec<u8>,
         io_id: uuid::Uuid,
     ) -> io::Result<Self> {
-        if !matches!(name, "identity.json" | "encoded-process") || io_id.is_nil() {
+        if !super::FIXED_METADATA_NAMES.contains(&name) || io_id.is_nil() {
             return Err(invalid(
                 "metadata publication requires a fixed name and nonnil operation",
             ));
