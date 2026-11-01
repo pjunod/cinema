@@ -394,23 +394,31 @@ class NativeCaseReceiptTests(unittest.TestCase):
                     self.assertRaises(ReceiptError):
                 native.case_input_compatibility('old', 'new')
 
+    def plan_report(self, cases):
+        """The complete report the producer writes (main(): version, scope, commit, run, adoptions, compatibility, tv_cases)."""
+        return {'version': 1, 'scope': {'repository': 1, 'pr': 1}, 'current_commit': 'current', 'current_run': 2,
+                'adoptions': {}, 'compatibility': 'Pinned workflow toolchain contract; schema 1 has no host OS fingerprint',
+                'tv_cases': cases}
+
     def test_local_resume_plan_requires_reauthenticated_original_records(self):
-        plan = {'scope': {'pr': 1}, 'current_commit': 'current', 'current_run': 2,
-                'tv_cases': {'passes': {'Suite/testOne': {'forged': True}}, 'pending': []}}
-        with patch.object(native, 'api_context', return_value=(None, {'pr': 1}, 'current', 2)), \
+        class API:
+            def get(self, path):
+                return {'id': int(path.rsplit('/', 1)[1])}
+        plan = self.plan_report({'required_tests': ['Suite/testOne'], 'passes': {'Suite/testOne': {'artifact': 7, 'forged': True}},
+                                 'pending': []})
+        with patch.object(native, 'api_context', return_value=(API(), {'repository': 1, 'pr': 1}, 'current', 2)), \
                 patch.object(native, 'safe_storage'), patch.object(native, 'REPORT') as report, \
                 patch.object(native, 'native_artifacts', return_value=[]), \
                 patch.object(native, 'adopt_tv_cases', return_value={'passes': {}, 'pending': ['Suite/testOne']}):
             report.read_bytes.return_value = json.dumps(plan).encode()
-            with self.assertRaises(ReceiptError):
+            with self.assertRaisesRegex(ReceiptError, 'lacks reauthenticated original case evidence'):
                 native.main(['--verify-tv-plan'])
-
 
     def test_resume_verifies_each_exact_origin_once_without_new_discovery(self):
         sources = {'Suite/testOne': {'artifact': 7}, 'Suite/testTwo': {'artifact': 7},
                    'Suite/testThree': {'artifact': 9}}
         cases = {'required_tests': list(sources), 'passes': sources, 'pending': []}
-        plan = {'scope': {'pr': 1}, 'current_commit': 'current', 'current_run': 2, 'tv_cases': cases}
+        plan = self.plan_report(cases)
         class API:
             def __init__(self):
                 self.paths = []
@@ -418,7 +426,7 @@ class NativeCaseReceiptTests(unittest.TestCase):
                 self.paths.append(path)
                 return {'id': int(path.rsplit('/', 1)[1])}
         api = API()
-        with patch.object(native, 'api_context', return_value=(api, {'pr': 1}, 'current', 2)), \
+        with patch.object(native, 'api_context', return_value=(api, {'repository': 1, 'pr': 1}, 'current', 2)), \
                 patch.object(native, 'safe_storage'), patch.object(native, 'REPORT') as report, \
                 patch.object(native, 'native_artifacts', side_effect=AssertionError('No new discovery')), \
                 patch.object(native, 'adopt_tv_cases', return_value=cases) as adopt:
