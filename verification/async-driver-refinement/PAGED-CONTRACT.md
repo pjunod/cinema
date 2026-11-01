@@ -609,9 +609,11 @@ overlaps, duplicate intervals, inconsistent summaries, cycles, extra tails and
 scope/kind mixing are rejected. The scope hash binds source, session, plan and
 initial image, so a chunk hash alone never authorizes content for another
 snapshot. An unchanged chunk may be referenced through the authenticated
-`predecessor_root` lineage or an already authenticated batch of the same
-pending snapshot; local cache presence grants no provenance, and no
-repository-wide same-hash search is authority.
+`predecessor_root` lineage, meaning only batches of publications whose
+activation was accepted (the replay-derived set of accepted batch receipts), or
+an already authenticated batch of the same pending snapshot. Locators of a
+pending, discarded or rehearsal publication seed nothing; local cache presence
+grants no provenance, and no repository-wide same-hash search is authority.
 
 Producing a snapshot does not publish it. After the ordinary quantum and its
 complete result/backup descriptors succeed, the controller freezes a
@@ -641,12 +643,21 @@ members and 512 MiB extracted/retained ZIP limits including ZIP overhead,
 256 MiB members and 8 MiB metadata members; the batch first reserves the
 source-bounded space of its transfer-manifest nodes, then packs only content
 not already authenticated, and ends at the first content that no longer fits.
-A batch that can pack no required content is `resource_blocked`. A snapshot
+A batch that can pack no required content is `resource_blocked`. Progress is
+closure-relative on the receiver as well: a `transfer` batch is credited only
+for identities in the pending publication's required closure (the intent, then
+the children of covered, authenticated parents, recomputed from the batch's own
+bytes) and must newly cover at least one; authenticated bytes of unrelated
+content are refused, credit nothing and gain no locator, and an `activate`
+batch may carry only validation receipts. The sender therefore offers content
+only once an owner is covered or packed earlier in the same batch. A snapshot
 therefore need not fit one job. Remaining content is carried by further
 closed `publish` dispatches (`Origin.operation` `execute` or `publish`) on the
 same registered route, runtime and storage lease. These execute no proof
-operation. Each dispatch takes a durable `dispatch_ordinal` before the API
-call, and failed or uncertain dispatches, publish dispatches and the final
+operation. Each dispatch's `dispatch_ordinal` is the length of the authenticated
+attempt inventory read from the source repository's own event history and
+re-derived by every replay (a local counter could diverge from that inventory,
+so none is kept), and failed or uncertain dispatches, publish dispatches and the final
 activation dispatch all consume the immutable `maximum_units`; there is no
 hidden transfer loop, dynamic matrix, runtime slot increase or operator-created
 batch receipt. No direct action-bundle execution or separate uploader task is
@@ -683,8 +694,13 @@ exact pending publication resumes after its batch chain is authenticated and
 the immutable spool checked; the local chunk cache is rebuilt from authenticated
 native artifacts. If required unuploaded spool bytes are lost, the pending
 authority is discarded and the session reruns from the last accepted
-checkpoint; orphan bytes are reused only when the rebuilt snapshot has
-identical bound roots and provenance is reauthenticated. Production Init
+checkpoint; spool directories no authenticated pending chain can still use are
+removed at the next job start and their bytes are never reused: a rebuilt
+snapshot is transferred and authenticated again. A new controller process also
+settles `physical-transfers/` and `physical-grants/` records a crashed parent
+left (the single moving file is located exactly and charged to the side that
+holds it, a lost or ambiguous one refuses the job, a grant of a dead parent is
+removed, a live foreign parent refuses). Production Init
 restoration and actual API replay remain mandatory; a snapshot is neither a live
 Store endpoint certificate nor semantic acceptance, and transport never grants
 proof acceptance.
@@ -896,6 +912,13 @@ below),
 (both `session_controller`). Every directory or file family has exactly one
 owner and one reservation; a copy belongs to its pool, not to a second
 independent grant; there is no unnamed shared pool or unaccounted fallback.
+Downloaded artifact ZIPs and their extractions are charged to
+`restore_staging_bytes` with their extraction subtree tracked, and the
+dependency indexes and receiver ledgers are opened through their declared
+families. The unit quantum's own output directory (pages, manifests, verifier
+evidence, TLC logs, the initial image) is the one tree not yet delegated as a
+named subtree sized from `unit_byte_allowance`; it is bounded only by the
+runtime aggregate session-disk check until the grant ABI can claim it.
 `database_bytes` values are operator capacity ceilings rounded down to the
 measured SQLite page size, neither observed consumption nor a promise of
 sufficiency, and no B-tree fill factor, average row width or one-page-per-row
