@@ -1767,16 +1767,6 @@
           },
           {
             "type": "table",
-            "name": "dispatches",
-            "table": "dispatches",
-            "ddl": "CREATE TABLE IF NOT EXISTS dispatches(\n                ordinal INTEGER PRIMARY KEY,operation TEXT,intent_sha256 TEXT,run_id INTEGER,status TEXT)",
-            "source_path": "validation/async_snapshot_transport.py",
-            "constructor": "PublicationLedger.__init__",
-            "relation": "Operational keyed relation only; no proof credit or per-record multiplier",
-            "lifetime": "Current authenticated publication/input scope; retained files remain physically charged"
-          },
-          {
-            "type": "table",
             "name": "queue",
             "table": "queue",
             "ddl": "CREATE TABLE IF NOT EXISTS queue(kind TEXT,sha256 TEXT,bytes INTEGER,PRIMARY KEY(kind,sha256))",

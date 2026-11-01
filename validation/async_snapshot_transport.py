@@ -416,7 +416,9 @@ class ContentInventory:
 
 
 class PublicationLedger:
-    """Finite dispatch and authenticated coverage state on a granted owned DB.
+    """Finite authenticated coverage state on a granted owned DB.
+
+    A dispatch ordinal is never kept here: it is the length of the authenticated attempt inventory.
 
     ContentInventory is not an authority input. Call authenticate only after exact
     native task/upload/ZIP/member validation and source-bound lineage validation.
@@ -429,8 +431,6 @@ class PublicationLedger:
             CREATE TABLE IF NOT EXISTS queue(kind TEXT,sha256 TEXT,bytes INTEGER,PRIMARY KEY(kind,sha256));
             CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value BLOB);
             CREATE TABLE IF NOT EXISTS expanded(kind TEXT,sha256 TEXT,PRIMARY KEY(kind,sha256));
-            CREATE TABLE IF NOT EXISTS dispatches(
-                ordinal INTEGER PRIMARY KEY,operation TEXT,intent_sha256 TEXT,run_id INTEGER,status TEXT);
         ''')
         self.db.commit()
 
@@ -454,21 +454,6 @@ class PublicationLedger:
                 self.db.execute('INSERT OR IGNORE INTO coverage VALUES(?,?,?)',
                                 (reference['kind'], reference['sha256'], reference['bytes']))
         return self.coverage()
-
-
-    def reserve_dispatch(self, operation, intent_sha256, maximum_units):
-        _require(operation in ('execute', 'publish', 'complete'), 'unknown dispatch operation')
-        self.db.execute('BEGIN IMMEDIATE')
-        try:
-            ordinal = self.db.execute('SELECT coalesce(max(ordinal)+1,0) FROM dispatches').fetchone()[0]
-            _require(ordinal < maximum_units, 'immutable dispatch allowance exhausted')
-            self.db.execute('INSERT INTO dispatches VALUES(?,?,?,NULL,?)',
-                            (ordinal, operation, intent_sha256, 'reserved'))
-            self.db.commit()
-            return ordinal
-        except BaseException:
-            self.db.rollback()
-            raise
 
 
 STRUCTURED_KINDS = ('publication_intent', 'catalog_backup', 'verifier_backup',

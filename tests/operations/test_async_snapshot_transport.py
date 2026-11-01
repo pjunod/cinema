@@ -305,13 +305,6 @@ class ReceiverClosureTests(unittest.TestCase):
             ledger.db.execute('INSERT INTO queue VALUES(?,?,?)', (kind, char * 64, 5))
         self.assertEqual(next(transport.missing_content(ledger))['kind'], 'publication_intent')
 
-    def test_dispatch_ordinals_are_reserved_once_and_exhaust_without_reuse(self):
-        _db, ledger = structured_database()
-        self.assertEqual([ledger.reserve_dispatch('publish', 'a' * 64, 3) for _ in range(3)], [0, 1, 2])
-        with self.assertRaises(transport.SnapshotTransportError):
-            ledger.reserve_dispatch('publish', 'a' * 64, 3)
-        self.assertEqual(ledger.db.execute('SELECT count(*) FROM dispatches').fetchone()[0], 3)
-
 
 class AuthenticatedResolverTests(unittest.TestCase):
     def setUp(self):

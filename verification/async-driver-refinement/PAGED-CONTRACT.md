@@ -903,7 +903,7 @@ below),
 | `catalog_or_verifier_restore_scratch` | `snapshot_restore` | ancillary journal and temp work of the read-only restore validators; it declares no database role, because a restored file is attached from `restore_staging_bytes` and never given its own scratch database |
 | `publication_pack_scratch` | `snapshot_transport` | PartPlan and manifest queues |
 | `authentication_index` | `provenance` | dependency, member and locator indexes |
-| `publication_pending_scratch` | `session_controller` | pending, coverage and dispatch indexes |
+| `publication_pending_scratch` | `session_controller` | pending and coverage indexes |
 
 `pools` has exactly six positive byte members with these owners:
 `snapshot_spool_bytes` (`snapshot_transport`), `restore_staging_bytes`
