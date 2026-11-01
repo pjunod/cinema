@@ -66,6 +66,14 @@ services:
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-}
     image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurxd
+    # On a Raft voter plurxd must not be starved by another container
+    # (docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md §4.6). It runs in its own
+    # slice, and carries its own memory.low: a slice's MemoryLow only reaches
+    # the container through it. Both are mitigation on a host without the
+    # slices from deploy/voter-isolation/; `scripts/voter-isolation-check`
+    # reports what a voter actually enforces.
+    cgroup_parent: ${PLURX_CGROUP_PARENT:-plurx.slice}
+    mem_reservation: ${PLURX_MEM_RESERVATION:-3g}
     restart: "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"
     # This must cover the effective snapshot deadline plus the three startup
     # allowances (135s total). Keeping that pair in step used to be an

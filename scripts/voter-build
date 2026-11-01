@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Run an agent build container on a Raft voter, capped.
+
+C0 of docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md: six uncapped clippy drivers of
+2.3-4.6 GB each filled a voter's swap, its runtime stalled for seconds and the
+cluster lost its leader again and again. Every agent build on a voter goes
+through this wrapper (AGENTS.md), which is ``docker run`` with:
+
+- ``--memory 8g --memory-swap 8g``: 8 GiB, and no swap on top of it;
+- ``--cpus 4``;
+- ``CARGO_BUILD_JOBS=4``, so cargo runs ``-j4`` inside it.
+
+It places the container nowhere special: dockerd's default parent,
+``docker-other.slice`` (deploy/voter-isolation/), bounds it further. It refuses
+the flags that would undo either: any memory, swap, CPU or cgroup-parent
+option, ``--privileged`` and ``--pid host``.
+
+Usage: scripts/voter-build [docker run options --] IMAGE [COMMAND [ARG...]]
+       scripts/voter-build --print ...   (show the docker command, run nothing)
+
+Options for ``docker run`` go before a ``--``; everything after it (the image
+and its command) is passed through untouched. Without ``--`` the first
+argument is the image.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+CAPS = ["--memory", "8g", "--memory-swap", "8g", "--cpus", "4", "--env", "CARGO_BUILD_JOBS=4"]
+REFUSED = (
+    "--memory",
+    "-m",
+    "--memory-swap",
+    "--memory-reservation",
+    "--kernel-memory",
+    "--oom-kill-disable",
+    "--cpus",
+    "--cpu-shares",
+    "-c",
+    "--cpu-period",
+    "--cpu-quota",
+    "--cpuset-cpus",
+    "--cgroup-parent",
+    "--cgroupns",
+    "--privileged",
+    "--pid",
+)
+
+
+def refused(argument: str) -> str | None:
+    if argument.startswith("CARGO_BUILD_JOBS="):
+        return argument
+    flag = argument.split("=", 1)[0]
+    if flag in REFUSED:
+        return flag
+    # Docker accepts glued short options such as -m8g.
+    if flag.startswith("-m") and not flag.startswith("--"):
+        return "-m"
+    return None
+
+
+def command(argv: list[str]) -> list[str]:
+    if "--" in argv:
+        split = argv.index("--")
+        options, rest = argv[:split], argv[split + 1 :]
+    else:
+        options, rest = [], argv
+    for argument in options:
+        flag = refused(argument)
+        if flag is not None:
+            raise SystemExit(
+                f"voter-build: {flag} is refused; the caps on a voter are fixed "
+                "(docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md §4.6)"
+            )
+    if not rest:
+        raise SystemExit(__doc__)
+    return ["docker", "run", *CAPS, *options, *rest]
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    show = bool(argv) and argv[0] == "--print"
+    if show:
+        argv = argv[1:]
+    built = command(argv)
+    if show:
+        print(" ".join(built))
+        return 0
+    os.execvp(built[0], built)
+    return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main())

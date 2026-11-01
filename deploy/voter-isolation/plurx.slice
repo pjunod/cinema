@@ -1,0 +1,13 @@
+# plurxd's slice on a Raft voter. Install with deploy/voter-isolation/README.md.
+#
+# Compose places the plurxd container here (`cgroup_parent: plurx.slice`).
+# MemoryLow reaches the container only through the container's own
+# memory.low, which compose's `mem_reservation` sets; memory_recursiveprot is
+# not assumed. CPUWeight is relative to docker-other.slice's 50.
+[Unit]
+Description=plurxd on a Raft voter: protected memory and CPU priority
+Before=slices.target
+
+[Slice]
+MemoryLow=3G
+CPUWeight=1000

@@ -155,6 +155,12 @@ shape for an agent here — use the source-only loop in
   evidence for a branch whose base moved.
 - Verify `rustc --version` (pinned 1.97.1) rather than trusting the default
   `cargo`. Remove stale source extractions when disk gets tight.
+- **Never build uncapped on a Raft voter.** Use a learner or lab host; on a
+  voter, a build container goes through `scripts/voter-build` (8 GiB, no
+  swap, four CPUs, `-j4`). An uncapped build on a voter cost the cluster its
+  leader on 2026-11-01
+  ([docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md](docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md));
+  `scripts/voter-isolation-check` shows whether a voter is isolated.
 
 ## Large efforts
 

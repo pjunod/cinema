@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Report, read-only, whether this voter isolates plurxd from every other container.
+
+C0 of docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md: an uncapped build container on
+a Raft voter starved plurxd of memory, the voter missed heartbeats and the
+cluster lost its leader for seconds at a time. The isolation is two systemd
+slices (deploy/voter-isolation/):
+
+- plurxd's container sits in ``plurx.slice`` and carries its own non-zero
+  ``memory.low`` (compose ``mem_reservation``; a slice's MemoryLow only reaches
+  a container through that, ``memory_recursiveprot`` is not assumed);
+- every other container sits in ``docker-other.slice``, which dockerd makes
+  the default parent (``daemon.json "cgroup-parent"``) and which is bounded by
+  MemoryHigh, MemoryMax and MemorySwapMax.
+
+This prints the effective values the kernel and systemd hold, not what a file
+declares, and exits 1 on any mismatch: plurxd outside plurx.slice or with
+``memory.low`` 0, any other running container outside docker-other.slice (an
+explicit ``--cgroup-parent`` escapes the default), or a slice without its
+limits. It changes nothing: it runs ``docker inspect``/``docker ps``,
+``systemctl show`` and reads files under /sys and /etc.
+
+Usage: scripts/voter-isolation-check [--plurxd-container plurxd] [--json]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+from dataclasses import dataclass, field
+
+PLURX_SLICE = "plurx.slice"
+OTHER_SLICE = "docker-other.slice"
+CGROUP_ROOT = pathlib.Path("/sys/fs/cgroup")
+# Loop, network-block, RAM and optical devices carry no container IO worth a
+# scheduler report.
+VIRTUAL_BLOCK_DEVICES = ("loop", "nbd", "ram", "zram", "sr")
+
+
+class Host:
+    """Everything this script reads from the machine, so tests can stand in."""
+
+    def run(self, argv: list[str]) -> str:
+        return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
+
+    def read(self, path: pathlib.Path) -> str | None:
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def glob(self, pattern: str) -> list[pathlib.Path]:
+        return sorted(pathlib.Path("/").glob(pattern))
+
+
+@dataclass
+class Container:
+    name: str
+    cgroup: str
+    memory_low: str | None
+    memory_max: str | None
+    swap_max: str | None
+    cgroup_parent: str
+
+
+@dataclass
+class Report:
+    plurxd: Container | None = None
+    others: list[Container] = field(default_factory=list)
+    slices: dict[str, dict[str, str]] = field(default_factory=dict)
+    daemon: dict[str, object] = field(default_factory=dict)
+    io_schedulers: dict[str, str] = field(default_factory=dict)
+    problems: list[str] = field(default_factory=list)
+
+
+def _container(host: Host, ident: str) -> Container:
+    shown = json.loads(host.run(["docker", "inspect", ident]))[0]
+    name = shown.get("Name", ident).lstrip("/")
+    pid = shown.get("State", {}).get("Pid", 0)
+    parent = shown.get("HostConfig", {}).get("CgroupParent", "") or ""
+    cgroup = ""
+    proc = host.read(pathlib.Path(f"/proc/{pid}/cgroup")) if pid else None
+    for line in (proc or "").splitlines():
+        # cgroup v2: a single "0::/path" line.
+        if line.startswith("0::"):
+            cgroup = line[3:].strip()
+    base = CGROUP_ROOT / cgroup.lstrip("/")
+
+    def value(name: str) -> str | None:
+        text = host.read(base / name) if cgroup else None
+        return text.strip() if text is not None else None
+
+    return Container(
+        name=name,
+        cgroup=cgroup,
+        memory_low=value("memory.low"),
+        memory_max=value("memory.max"),
+        swap_max=value("memory.swap.max"),
+        cgroup_parent=parent,
+    )
+
+
+def _in_slice(cgroup: str, slice_name: str) -> bool:
+    return f"/{slice_name}/" in f"{cgroup}/" or cgroup.startswith(f"{slice_name}/")
+
+
+def _slice(host: Host, name: str) -> dict[str, str]:
+    properties = ["LoadState", "MemoryLow", "MemoryHigh", "MemoryMax", "MemorySwapMax", "CPUWeight"]
+    try:
+        shown = host.run(["systemctl", "show", name, *[f"--property={p}" for p in properties]])
+    except (OSError, subprocess.CalledProcessError):
+        return {}
+    return dict(line.split("=", 1) for line in shown.splitlines() if "=" in line)
+
+
+def _unbounded(value: str | None) -> bool:
+    return value in (None, "", "infinity", "max")
+
+
+def check(host: Host, plurxd_name: str = "plurxd") -> Report:
+    report = Report()
+    try:
+        running = host.run(["docker", "ps", "-q"]).split()
+    except (OSError, subprocess.CalledProcessError) as error:
+        report.problems.append(f"cannot list containers: {error}")
+        return report
+    containers = [_container(host, ident) for ident in running]
+    for container in containers:
+        if container.name == plurxd_name:
+            report.plurxd = container
+        else:
+            report.others.append(container)
+
+    if report.plurxd is None:
+        report.problems.append(f"no running container named {plurxd_name}")
+    else:
+        if not _in_slice(report.plurxd.cgroup, PLURX_SLICE):
+            report.problems.append(
+                f"{plurxd_name} cgroup {report.plurxd.cgroup or '?'} is outside {PLURX_SLICE}"
+            )
+        if report.plurxd.memory_low in (None, "", "0"):
+            report.problems.append(
+                f"{plurxd_name} memory.low is {report.plurxd.memory_low or 'unreadable'}; "
+                "set mem_reservation so the slice's protection reaches it"
+            )
+    for container in report.others:
+        if not _in_slice(container.cgroup, OTHER_SLICE):
+            why = (
+                f"explicit --cgroup-parent {container.cgroup_parent}"
+                if container.cgroup_parent
+                else "dockerd's default cgroup-parent is not docker-other.slice"
+            )
+            report.problems.append(
+                f"container {container.name} cgroup {container.cgroup or '?'} is outside "
+                f"{OTHER_SLICE} ({why})"
+            )
+
+    for name in (PLURX_SLICE, OTHER_SLICE):
+        report.slices[name] = _slice(host, name)
+    plurx = report.slices[PLURX_SLICE]
+    if plurx.get("LoadState") != "loaded":
+        report.problems.append(f"{PLURX_SLICE} is not installed")
+    elif _unbounded(plurx.get("MemoryLow")) or plurx.get("MemoryLow") == "0":
+        report.problems.append(f"{PLURX_SLICE} MemoryLow is {plurx.get('MemoryLow')}")
+    other = report.slices[OTHER_SLICE]
+    if other.get("LoadState") != "loaded":
+        report.problems.append(f"{OTHER_SLICE} is not installed")
+    else:
+        for key in ("MemoryHigh", "MemoryMax", "MemorySwapMax"):
+            if _unbounded(other.get(key)):
+                report.problems.append(f"{OTHER_SLICE} {key} is unbounded")
+
+    daemon_text = host.read(pathlib.Path("/etc/docker/daemon.json"))
+    try:
+        daemon = json.loads(daemon_text) if daemon_text else {}
+    except json.JSONDecodeError:
+        daemon = {}
+        report.problems.append("/etc/docker/daemon.json is not valid JSON")
+    report.daemon = {
+        "cgroup-parent": daemon.get("cgroup-parent"),
+        "live-restore": daemon.get("live-restore"),
+    }
+    if daemon.get("cgroup-parent") != OTHER_SLICE:
+        report.problems.append(
+            f"daemon.json cgroup-parent is {daemon.get('cgroup-parent')!r}, not {OTHER_SLICE!r}"
+        )
+
+    # Reported, not judged: IOWeight only works with BFQ or io.cost.
+    for path in host.glob("sys/block/*/queue/scheduler"):
+        if path.parts[-3].startswith(VIRTUAL_BLOCK_DEVICES):
+            continue
+        text = host.read(path)
+        if text:
+            report.io_schedulers[path.parts[-3]] = text.strip()
+    return report
+
+
+def render(report: Report) -> str:
+    lines = []
+    if report.plurxd:
+        p = report.plurxd
+        lines.append(f"plurxd    {p.cgroup}  memory.low={p.memory_low}  memory.max={p.memory_max}")
+    for c in report.others:
+        lines.append(
+            f"container {c.name}  {c.cgroup}  memory.max={c.memory_max}  "
+            f"memory.swap.max={c.swap_max}  cgroup-parent={c.cgroup_parent or '(default)'}"
+        )
+    for name, values in report.slices.items():
+        shown = " ".join(f"{k}={v}" for k, v in sorted(values.items())) or "(not found)"
+        lines.append(f"slice     {name}  {shown}")
+    lines.append(
+        "dockerd   " + " ".join(f"{k}={v}" for k, v in report.daemon.items())
+    )
+    for device, scheduler in report.io_schedulers.items():
+        lines.append(f"io        {device}  {scheduler}")
+    for problem in report.problems:
+        lines.append(f"MISMATCH  {problem}")
+    lines.append("isolation OK" if not report.problems else f"{len(report.problems)} mismatch(es)")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None, host: Host | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--plurxd-container", default="plurxd")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    report = check(host or Host(), args.plurxd_container)
+    if args.json:
+        print(json.dumps(report, default=lambda value: value.__dict__, indent=2))
+    else:
+        print(render(report))
+    return 1 if report.problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
