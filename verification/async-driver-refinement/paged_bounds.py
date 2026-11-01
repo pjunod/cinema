@@ -19,6 +19,17 @@ SPEC_KEYS = {'schema_version', 'kind', 'algorithm_version', 'complete', 'finite_
              'record_schemas', 'init_class', 'init_class_rules', 'primitive_bindings', 'formulas', 'records',
              'limits', 'source_inputs', 'report_role', 'inventory_mapping'}
 LIMIT_KEYS = {'maximum_nodes', 'maximum_depth', 'maximum_arguments', 'maximum_integer_digits', 'maximum_metadata_bytes'}
+# Nonsemantic storage is charged to explicit PhysicalPolicy3 families/pools (typed_physical_caps_v1),
+# never to an aggregate multiplied against logical record allowances. Each peak-workspace class
+# names exactly one physical charge; nothing is a derived whole-backup or index multiple.
+PHYSICAL_CHARGES = {
+    'backup_and_chunks': 'snapshot_spool_bytes',
+    'downloads_and_restores': 'restore_staging_bytes',
+    'logs': 'retained_artifact_bytes',
+    'source_archive': 'source_runtime_scratch_bytes',
+    'sql_indexes': 'family_main_bytes',
+    'sql_wal': 'family_journal_bytes',
+}
 
 
 def exact(value, keys, label):
@@ -199,7 +210,7 @@ def validate_specification(specification, *, root=ROOT, expected_sha256=None):
             len({r['kind'] for r in mapping})==len(mapping),'registered semantic/operational mapping order')
     source_kinds=set()
     operational=set()
-    overhead={'index_bytes','wal_bytes','scratch_bytes','retained_bytes','duplicate_backup_bytes'}
+    charged=set()
     for item in mapping:
         exact(item,{'kind','role','lifetime','source_record_kind','overhead_field'},'source/operational inventory mapping')
         if item['role']=='source_global':
@@ -209,9 +220,14 @@ def validate_specification(specification, *, root=ROOT, expected_sha256=None):
             require(item['lifetime']=='session_retained_unit_member' and item['source_record_kind'] is None and item['overhead_field'] is None,'operational-only record meaning')
             operational.add(item['kind'])
         elif item['role']=='operational_overhead':
-            require(item['source_record_kind'] is None and ((item['lifetime']=='peak_workspace' and item['overhead_field'] in overhead) or
-                (item['lifetime']=='resident_working_set' and item['overhead_field'] is None)),'operational overhead meaning')
+            require(item['source_record_kind'] is None,'operational overhead meaning')
+            if item['lifetime']=='peak_workspace':
+                require(PHYSICAL_CHARGES.get(item['kind'])==item['overhead_field'],'peak workspace class is not charged to its physical policy pool/family')
+                charged.add(item['kind'])
+            else:
+                require(item['lifetime']=='resident_working_set' and item['overhead_field'] is None,'operational overhead meaning')
         else:raise Invalid('unknown accounting inventory role')
+    require(charged==set(PHYSICAL_CHARGES),'physical policy charge inventory is incomplete')
     require(source_kinds|operational==expected and not source_kinds&operational,'missing/extra registered source/control/auxiliary kind')
     require({r['record_kind'] for r in records}==source_kinds,'source theorem missing a semantic kind or inventing Nk for operational artifacts')
     return spec, graph

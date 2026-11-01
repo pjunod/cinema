@@ -16129,19 +16129,12 @@
     {
       "kind": "backup_and_chunks",
       "lifetime": "peak_workspace",
-      "overhead_field": "duplicate_backup_bytes",
+      "overhead_field": "snapshot_spool_bytes",
       "role": "operational_overhead",
       "source_record_kind": null
     },
     {
       "kind": "catalog_backup",
-      "lifetime": "session_retained_unit_member",
-      "overhead_field": null,
-      "role": "operational_only",
-      "source_record_kind": null
-    },
-    {
-      "kind": "catalog_chunk_index",
       "lifetime": "session_retained_unit_member",
       "overhead_field": null,
       "role": "operational_only",
@@ -16157,21 +16150,63 @@
     {
       "kind": "downloads_and_restores",
       "lifetime": "peak_workspace",
-      "overhead_field": "duplicate_backup_bytes",
+      "overhead_field": "restore_staging_bytes",
       "role": "operational_overhead",
+      "source_record_kind": null
+    },
+    {
+      "kind": "evidence_manifest_node",
+      "lifetime": "session_retained_unit_member",
+      "overhead_field": null,
+      "role": "operational_only",
       "source_record_kind": null
     },
     {
       "kind": "logs",
       "lifetime": "peak_workspace",
-      "overhead_field": "retained_bytes",
+      "overhead_field": "retained_artifact_bytes",
       "role": "operational_overhead",
+      "source_record_kind": null
+    },
+    {
+      "kind": "native_transport_conformance",
+      "lifetime": "session_retained_unit_member",
+      "overhead_field": null,
+      "role": "operational_only",
+      "source_record_kind": null
+    },
+    {
+      "kind": "pending_publication",
+      "lifetime": "session_retained_unit_member",
+      "overhead_field": null,
+      "role": "operational_only",
+      "source_record_kind": null
+    },
+    {
+      "kind": "publication_activation",
+      "lifetime": "session_retained_unit_member",
+      "overhead_field": null,
+      "role": "operational_only",
+      "source_record_kind": null
+    },
+    {
+      "kind": "publication_intent",
+      "lifetime": "session_retained_unit_member",
+      "overhead_field": null,
+      "role": "operational_only",
+      "source_record_kind": null
+    },
+    {
+      "kind": "snapshot_manifest_node",
+      "lifetime": "session_retained_unit_member",
+      "overhead_field": null,
+      "role": "operational_only",
       "source_record_kind": null
     },
     {
       "kind": "source_archive",
       "lifetime": "peak_workspace",
-      "overhead_field": "scratch_bytes",
+      "overhead_field": "source_runtime_scratch_bytes",
       "role": "operational_overhead",
       "source_record_kind": null
     },
@@ -16185,15 +16220,36 @@
     {
       "kind": "sql_indexes",
       "lifetime": "peak_workspace",
-      "overhead_field": "index_bytes",
+      "overhead_field": "family_main_bytes",
       "role": "operational_overhead",
       "source_record_kind": null
     },
     {
       "kind": "sql_wal",
       "lifetime": "peak_workspace",
-      "overhead_field": "wal_bytes",
+      "overhead_field": "family_journal_bytes",
       "role": "operational_overhead",
+      "source_record_kind": null
+    },
+    {
+      "kind": "transfer_batch_receipt",
+      "lifetime": "session_retained_unit_member",
+      "overhead_field": null,
+      "role": "operational_only",
+      "source_record_kind": null
+    },
+    {
+      "kind": "transfer_manifest_node",
+      "lifetime": "session_retained_unit_member",
+      "overhead_field": null,
+      "role": "operational_only",
+      "source_record_kind": null
+    },
+    {
+      "kind": "validation_receipt",
+      "lifetime": "session_retained_unit_member",
+      "overhead_field": null,
+      "role": "operational_only",
       "source_record_kind": null
     },
     {
@@ -16205,13 +16261,6 @@
     },
     {
       "kind": "verifier_check_result",
-      "lifetime": "session_retained_unit_member",
-      "overhead_field": null,
-      "role": "operational_only",
-      "source_record_kind": null
-    },
-    {
-      "kind": "verifier_chunk_index",
       "lifetime": "session_retained_unit_member",
       "overhead_field": null,
       "role": "operational_only",

@@ -3946,7 +3946,7 @@
           "const": "typed_physical_caps_v1"
         },
         "source_receipt": {
-          "$ref": "source-bound-receipt.schema.json"
+          "$ref": "source-bound-receipt.schema.json#/$defs/SourceBoundReceipt"
         },
         "record_allowances": {
           "type": "object",
