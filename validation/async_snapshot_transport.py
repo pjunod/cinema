@@ -428,6 +428,7 @@ class PublicationLedger:
             CREATE TABLE IF NOT EXISTS coverage(kind TEXT,sha256 TEXT,bytes INTEGER,PRIMARY KEY(kind,sha256));
             CREATE TABLE IF NOT EXISTS queue(kind TEXT,sha256 TEXT,bytes INTEGER,PRIMARY KEY(kind,sha256));
             CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value BLOB);
+            CREATE TABLE IF NOT EXISTS expanded(kind TEXT,sha256 TEXT,PRIMARY KEY(kind,sha256));
             CREATE TABLE IF NOT EXISTS dispatches(
                 ordinal INTEGER PRIMARY KEY,operation TEXT,intent_sha256 TEXT,run_id INTEGER,status TEXT);
         ''')
@@ -467,6 +468,101 @@ class PublicationLedger:
         except BaseException:
             self.db.rollback()
             raise
+
+
+STRUCTURED_KINDS = ('publication_intent', 'catalog_backup', 'verifier_backup',
+                    'snapshot_manifest_node', 'evidence_manifest_node')
+
+
+def child_refs(kind: str, raw: bytes) -> list[dict]:
+    """Closure children named by one authenticated structured object.
+
+    Leaf payload kinds (snapshot_chunk, planned_execution_result) have none. A
+    transfer manifest node is deliberately outside the publication closure.
+    """
+    import json
+    value = json.loads(raw)
+    _require(canonical(value) == raw, 'noncanonical structured content')
+    if kind == 'publication_intent':
+        rows = [value['catalog_root'], value['verifier_root'], value['execution_result'], value['evidence_root']]
+        return [row for row in rows if row is not None]
+    if kind in ('catalog_backup', 'verifier_backup'):
+        return [value['manifest_root']]
+    if kind == 'snapshot_manifest_node':
+        return [row['child'] if value['level'] else row['content'] for row in value['entries']]
+    if kind == 'evidence_manifest_node':
+        if value['level']:
+            return [row['child'] for row in value['entries']]
+        return [row['chunks'] for row in value['entries'] if row['chunks'] is not None]
+    raise SnapshotTransportError('unstructured content kind has no children: ' + kind)
+
+
+def expand_with_resolver(ledger: 'PublicationLedger', resolve) -> int:
+    """Grow the required closure from authenticated bytes only; return new entries.
+
+    Children of covered structured content are queued so the receiver recomputes
+    the complete closure itself. Uncovered content is never parsed, so a sender's
+    claim about a graph confers nothing until its parent bytes are authenticated.
+    """
+    added = 0
+    while True:
+        rows = ledger.db.execute(
+            "SELECT c.kind,c.sha256,c.bytes FROM coverage c LEFT JOIN expanded e "
+            "ON e.kind=c.kind AND e.sha256=c.sha256 WHERE e.sha256 IS NULL AND c.kind IN (%s) "
+            "ORDER BY c.kind,c.sha256 LIMIT 256" % ','.join('?' * len(STRUCTURED_KINDS)),
+            STRUCTURED_KINDS).fetchall()
+        if not rows:
+            return added
+        for kind, sha, size in rows:
+            raw = resolve({'kind': kind, 'sha256': sha, 'bytes': size})
+            for child in child_refs(kind, raw):
+                before = ledger.db.total_changes
+                ledger.db.execute('INSERT OR IGNORE INTO queue VALUES(?,?,?)',
+                                  (child['kind'], child['sha256'], child['bytes']))
+                added += ledger.db.total_changes - before
+            ledger.db.execute('INSERT OR IGNORE INTO expanded VALUES(?,?)', (kind, sha))
+        ledger.db.commit()
+
+
+def closure_complete(ledger: 'PublicationLedger') -> bool:
+    """Every queued identity is covered and every covered structured object expanded."""
+    if next(missing_content(ledger), None) is not None:
+        return False
+    return ledger.db.execute(
+        "SELECT 1 FROM coverage c LEFT JOIN expanded e ON e.kind=c.kind AND e.sha256=c.sha256 "
+        "WHERE e.sha256 IS NULL AND c.kind IN (%s) LIMIT 1" % ','.join('?' * len(STRUCTURED_KINDS)),
+        STRUCTURED_KINDS).fetchone() is None
+
+
+def coverage_after(ledger: 'PublicationLedger', references) -> tuple[str, int]:
+    """Coverage digest/count after adding `references`, without committing them."""
+    ledger.db.execute('CREATE TEMP TABLE IF NOT EXISTS candidate(kind TEXT,sha256 TEXT,bytes INTEGER,PRIMARY KEY(kind,sha256))')
+    ledger.db.execute('DELETE FROM candidate')
+    ledger.db.execute('INSERT INTO candidate SELECT kind,sha256,bytes FROM coverage')
+    for reference in references:
+        row = ledger.db.execute('SELECT bytes FROM candidate WHERE kind=? AND sha256=?',
+                                (reference['kind'], reference['sha256'])).fetchone()
+        _require(row is None or row == (reference['bytes'],), 'authenticated coverage collision')
+        ledger.db.execute('INSERT OR IGNORE INTO candidate VALUES(?,?,?)',
+                          (reference['kind'], reference['sha256'], reference['bytes']))
+    hashed = hashlib.sha256(b'[')
+    count = 0
+    for kind, sha, size in ledger.db.execute('SELECT kind,sha256,bytes FROM candidate ORDER BY kind,sha256'):
+        if count:
+            hashed.update(b',')
+        hashed.update(canonical({'kind': kind, 'sha256': sha, 'bytes': size}))
+        count += 1
+    hashed.update(b']')
+    ledger.db.execute('DROP TABLE candidate')
+    return hashed.hexdigest(), count
+
+
+def seed_coverage(ledger: 'PublicationLedger', references) -> None:
+    """Credit exact predecessor-lineage identities (already authenticated batches)."""
+    with ledger.db:
+        for reference in references:
+            ledger.db.execute('INSERT OR IGNORE INTO coverage VALUES(?,?,?)',
+                              (reference['kind'], reference['sha256'], reference['bytes']))
 
 
 class AuthenticatedResolver:

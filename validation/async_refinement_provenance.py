@@ -588,13 +588,16 @@ def verifier_auxiliary(value, root):
 
 class PartPlan:
     """Disk inventory: no global backup/member descriptor list."""
-    def __init__(self, staging, slots=UPLOAD_SLOTS, limits=None):
+    def __init__(self, staging, slots=UPLOAD_SLOTS, limits=None, *, database=None, budget=None):
         self.root = Path(staging)
         require(not self.root.exists(), 'multipart staging must be fresh')
         self.root.mkdir(parents=True)
         self.slots = slots
         self.limits = limits
-        self.db = sqlite3.connect(self.root / 'inventory.sqlite')
+        # A controller passes a physically granted connection and the transfer
+        # staging pool; every staged copy is reserved before it is created.
+        self.budget = budget
+        self.db = sqlite3.connect(self.root / 'inventory.sqlite') if database is None else database
         self.db.execute('CREATE TABLE members(path TEXT PRIMARY KEY,part INTEGER,bytes INTEGER,digest TEXT)')
         self.db.execute('CREATE TABLE indexes(level INTEGER,first_chunk INTEGER,path TEXT,part INTEGER,digest TEXT,chunk_count INTEGER,offset INTEGER,bytes INTEGER,PRIMARY KEY(level,first_chunk))')
         self.db.commit()
@@ -617,6 +620,8 @@ class PartPlan:
     def allocate(self, size, prefer=0):
         require(0 <= size <= MAX_MEMBER, 'part member size exceeded')
         self.guard(size)
+        if self.budget is not None:
+            self.budget.reserve(size)
         for ordinal in range(prefer, self.slots):
             count, total = self.db.execute('SELECT count(*),coalesce(sum(bytes),0) FROM members WHERE part=?', (ordinal,)).fetchone()
             # Reserve metadata and conservative deflate expansion/ZIP headers.
