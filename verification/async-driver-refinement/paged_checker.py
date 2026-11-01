@@ -2488,6 +2488,7 @@ def finalize_unit(request):
         kind={'result':'verifier_check_result','evidence_index':'verifier_evidence_index','progress':'verifier_unit_progress'}[m['role']]
         require(kind in index.budget.allowances and m['maximum_bytes']<=index.budget.allowances[kind]['max_encoded_bytes'],'reserved metadata exceeds admitted operational byte allocation')
     state_db=sqlite3.connect(Path(request['verifier_work_db']))
+    index.budget.enforce_database_cap(state_db)
     state=ExecutionState.__new__(ExecutionState)
     state.index,state.db,state.budget,state.active=index,state_db,index.budget,False
     state.sql_path=Path(__file__).resolve().parent/'paged-verifier-state.sql';state.schema_sha256=file_sha(state.sql_path)

@@ -406,6 +406,20 @@ def process_resident_bytes():
             resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*(1 if sys.platform=='darwin' else 1024))
 
 
+def physical_policy_module():
+    """The reviewed physical-accounting module (operational caps only, never proof semantics)."""
+    root = str(PACKAGE.parent.parent)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from validation import async_physical_policy
+    return async_physical_policy
+
+
+def is_physical_exhaustion(error):
+    """SQLite SQLITE_FULL from an enforced max_page_count is incomplete capacity, never evidence."""
+    return isinstance(error, sqlite3.OperationalError) and 'database or disk is full' in str(error)
+
+
 class Budget:
     """Separate logical admission from measured resident/disk/work ceilings."""
     def __init__(self, plan, directory, *, seconds=None):
@@ -414,10 +428,22 @@ class Budget:
         require(plan['plan_sha256'] == digest(envelope('ResourcePlan', plan)), 'resource plan digest')
         self.plan, self.directory = plan, Path(directory).resolve()
         self.accounting = strict_json(plan['source_bounds_utf8'])
-        require(type(self.accounting) is dict and set(self.accounting)=={'schema_version','accounting_rule','source_receipt','record_allowances','overhead','accounting_method_sha256','measurement_sha256'} and self.accounting['schema_version']==2 and self.accounting['accounting_rule']=='operational_encoded_caps_v1','unregistered operational accounting meaning')
+        Schema().check(self.accounting, 'OperationalBounds3')
+        require(canonical(self.accounting) == plan['source_bounds_utf8'] and self.accounting['schema_version'] == 3 and
+                self.accounting['accounting_rule'] == 'typed_physical_caps_v1' and self.accounting['calibration'] is not None and
+                self.accounting['measurement_sha256'] is not None, 'unregistered/uncalibrated operational accounting meaning')
         self.allowances=self.accounting['record_allowances']
         for kind,allocation in self.allowances.items():
             require(type(allocation) is dict and set(allocation)=={'records','max_encoded_bytes'} and type(allocation['records']) is int and allocation['records']>=0 and type(allocation['max_encoded_bytes']) is int and allocation['max_encoded_bytes']>0,'invalid operational record allocation')
+        # Physical caps are independent of the logical allowances above: they
+        # name the verifier main file's byte ceiling and its journal/temp pools.
+        physical = physical_policy_module()
+        policy = self.accounting['physical_policy']
+        physical.validate_physical_policy(policy, physical.load_source_map())
+        calibration = self.accounting['calibration']
+        require(calibration['policy_sha256'] == physical.digest(policy) and calibration['table_map_sha256'] == policy['table_map_sha256'],
+                'physical calibration differs from the immutable physical policy')
+        self.physical_policy = policy
         require(seconds is None or type(seconds) in (int,float) and math.isfinite(seconds),'invalid remaining unit time')
         if seconds is not None and seconds<=0:raise Incomplete('shared unit deadline exhausted before decoder admission')
         self.deadline = time.monotonic() + min(plan['unit_seconds'],plan['unit_seconds'] if seconds is None else seconds)
@@ -461,6 +487,45 @@ class Budget:
 
     def release_working(self,amount):
         self.working_bytes=max(0,self.working_bytes-amount)
+
+    def enforce_database_cap(self, db, family='verifier_main'):
+        """Apply the verifier main file's effective page ceiling BEFORE any DDL or write.
+
+        The ceiling is the immutable operator capacity rounded down to the
+        measured page size. A database already beyond it (for example a
+        restored snapshot) is refused; the requested pragma result must be
+        exactly the effective count, otherwise nothing may run.
+        """
+        size = db.execute('PRAGMA page_size').fetchone()[0]
+        pages = db.execute('PRAGMA page_count').fetchone()[0]
+        family = self.physical_policy['families'][family]
+        effective = family['database_bytes'] // size
+        if effective == 0 or pages > effective:
+            raise Incomplete('verifier database exceeds its effective physical page ceiling')
+        require(2 * family['database_bytes'] + 1024 * 1024 <= family['journal_bytes'] and 2 * family['database_bytes'] <= family['temp_bytes'],
+                'verifier journal/temp reservation cannot cover its database ceiling')
+        actual = db.execute('PRAGMA max_page_count=' + str(effective)).fetchone()[0]
+        require(actual == effective, 'ineffective verifier SQLite max_page_count')
+        return effective
+
+    def check_database(self, db, family='verifier_main'):
+        """Re-verify the cap, the pragma and the companion files around SQL work and every commit."""
+        size = db.execute('PRAGMA page_size').fetchone()[0]
+        pages = db.execute('PRAGMA page_count').fetchone()[0]
+        family = self.physical_policy['families'][family]
+        effective = family['database_bytes'] // size
+        if pages > effective or pages * size > family['database_bytes']:
+            raise Incomplete('verifier main database exceeded its physical page ceiling')
+        require(db.execute('PRAGMA max_page_count').fetchone()[0] == effective, 'verifier SQLite physical page cap changed')
+        path = next(row[2] for row in db.execute('PRAGMA database_list') if row[1] == 'main')
+        companions = 0
+        for suffix in ('-wal', '-shm', '-journal'):
+            companion = Path(str(path) + suffix)
+            require(not companion.is_symlink(), 'symlink in verifier journal companions')
+            if companion.exists():
+                companions += companion.stat().st_size
+        if companions > family['journal_bytes']:
+            raise Incomplete('verifier journal/shared-memory exceeds its physical reservation')
 
     def member_limit(self):
         # Decoding one indivisible member has a conservative charged resident
@@ -572,6 +637,11 @@ class RecordIndex:
         self.schema.check(source, 'SourceIdentity')
         self.schema.check(session_id, 'Uuid')
         self.db = sqlite3.connect(self.path, factory=PrivateConnection)
+        try:
+            budget.enforce_database_cap(self.db)
+        except BaseException:
+            self.db.close()
+            raise
         self.db.executescript((PACKAGE / 'paged-verifier-state.sql').read_text())
         self.db.execute('PRAGMA foreign_keys=ON')
         self.db.execute('PRAGMA temp_store=FILE')
@@ -1184,9 +1254,13 @@ class ExecutionState:
         self.budget.check()
         size=self.db.execute('PRAGMA page_size').fetchone()[0]
         pages=self.db.execute('PRAGMA page_count').fetchone()[0]
-        # Private SQLite uses bounded cache + FILE temporaries and DELETE
-        # journaling. Reserve a full main image and two rollback copies before
-        # commit; this is operational capacity, never a source-width theorem.
+        # The named verifier_main family carries the exact physical caps: the
+        # effective page ceiling, and journal/temp reservations that cover a
+        # full-ceiling rollback copy pair. The whole-session guard below stays
+        # as the conservative aggregate: a full main image and two rollback
+        # copies must still fit before commit (operational capacity, never a
+        # source-width theorem).
+        self.budget.check_database(self.db)
         live=0
         for directory,_,names in os.walk(self.budget.directory):
             for name in names:
@@ -1303,6 +1377,15 @@ class ExecutionState:
         before = self.sequence(), self.logical_digest()
         target = Path(destination)
         require(target.is_absolute() and not target.is_symlink() and not target.exists(), 'unsafe verifier backup destination')
+        # Reserve the standalone copy BEFORE creating it: it must fit the named
+        # immutable snapshot spool and, with all live files, the session disk.
+        self.budget.check_database(self.db)
+        copy_bytes = self.db.execute('PRAGMA page_size').fetchone()[0] * self.db.execute('PRAGMA page_count').fetchone()[0]
+        if copy_bytes > self.budget.physical_policy['pools']['snapshot_spool_bytes']:
+            raise Incomplete('verifier standalone backup exceeds the snapshot spool reservation')
+        live = sum((Path(d) / n).stat().st_size for d, _, names in os.walk(self.budget.directory) for n in names)
+        if live + copy_bytes > self.budget.plan['total_session_disk_bytes']:
+            raise Incomplete('verifier standalone backup preallocation exceeds the session disk reservation')
         out = sqlite3.connect(target)
         try:
             self.db.backup(out, pages=128, progress=lambda status, remaining, total: self.budget.check())
@@ -1310,6 +1393,8 @@ class ExecutionState:
             require(out.execute('PRAGMA integrity_check').fetchone() == ('ok',), 'verifier backup integrity')
         finally:
             out.close()
+        if target.stat().st_size > self.budget.physical_policy['pools']['snapshot_spool_bytes']:
+            raise Incomplete('verifier standalone backup grew beyond the snapshot spool reservation')
         require(before == (self.sequence(), self.logical_digest()), 'verifier mutated during backup')
         h = hashlib.sha256()
         with target.open('rb') as stream:
@@ -1392,6 +1477,8 @@ class ExecutionQuantum:
                     resource_error=s.resource_failure
                     s.resource_failure=None
                     raise resource_error
+                if is_physical_exhaustion(error):
+                    raise Incomplete('verifier physical page ceiling exhausted; quantum rolled back') from error
                 return False
             require(not self.framing or not s.db.meaningful_change,
                     'framing cannot mutate semantic or algorithm work')
@@ -1408,8 +1495,10 @@ class ExecutionQuantum:
                          (commit, self.sequence, encoded(self.after)))
             s.prospective_commit()
             sqlite3.Connection.commit(s.db)
-        except BaseException:
+        except BaseException as failure:
             s.db.rollback()
+            if is_physical_exhaustion(failure):
+                raise Incomplete('verifier physical page ceiling exhausted at commit; quantum rolled back') from failure
             raise
         finally:
             s.active = False
@@ -1425,6 +1514,11 @@ class ContinuationResolver:
         require(path.is_absolute() and path.is_file() and not path.is_symlink(), 'continuation resolver path')
         self.auth = sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True)
         self.db = sqlite3.connect(Path(directory) / 'continuation-validation.sqlite')
+        try:
+            budget.enforce_database_cap(self.db, 'verifier_continuation_scratch')
+        except BaseException:
+            self.db.close()
+            raise
         self.db.execute('PRAGMA temp_store=FILE')
         self.db.execute('PRAGMA cache_size=-2048')
         self.db.executescript('''CREATE TABLE IF NOT EXISTS evidence_work(root TEXT,unit INTEGER,path TEXT,digest TEXT,level INTEGER,first_ordinal INTEGER,item_count INTEGER,PRIMARY KEY(root,unit,path));
