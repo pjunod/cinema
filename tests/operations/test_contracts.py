@@ -13,6 +13,8 @@ import tomllib
 import unittest
 from unittest import mock
 
+from validation import runner_fleet as runner_fleet_module
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -116,19 +118,13 @@ def runner_fleet() -> dict:
 
 
 def rostered_runners() -> tuple[tuple[str, frozenset[str]], ...]:
-    """Each rostered runner and every label GitHub would match it against.
+    """Each rostered runner and every label the forge would match it against.
 
     `self-hosted` and the operating-system and architecture labels are added by
-    GitHub, never by the ansible inventory, so the roster derives them here
-    rather than repeating five read-only strings on every runner.
+    the forge, never by the ansible inventory; `validation.runner_fleet`
+    derives them so ci-fleet and this test share one definition.
     """
-    return tuple(
-        (
-            runner["name"],
-            frozenset(runner["labels"]) | {"self-hosted", runner["os"], runner["arch"]},
-        )
-        for runner in runner_fleet()["runners"]
-    )
+    return runner_fleet_module.rostered_runners(runner_fleet())
 
 
 def store_shard_count() -> int:
@@ -142,21 +138,8 @@ def store_shard_count() -> int:
 
 
 def self_hosted_label_sets(block: str) -> list[tuple[str, ...]]:
-    """Every self-hosted label set a job's `runs-on` can resolve to.
-
-    A job either names the local labels as a YAML flow sequence or reads the
-    same sequence from a matrix key. Parse the arrays that are actually there
-    instead of matching label strings this test already knows.
-    """
-    direct = [
-        tuple(part.strip().strip('"\'') for part in literal.split(","))
-        for literal in re.findall(r"(?m)^ +runs-on: \[([^]]+)\]$", block)
-    ]
-    matrix = [
-        tuple(json.loads(literal))
-        for literal in re.findall(r"(?m)^ +runs_on: '(\[[^']*\])'$", block)
-    ]
-    return [labels for labels in (*direct, *matrix) if "self-hosted" in labels]
+    """Every self-hosted label set a job's `runs-on` can resolve to."""
+    return runner_fleet_module.self_hosted_label_sets(block)
 
 
 def workflow_step_literal(step: str, key: str) -> list[str]:

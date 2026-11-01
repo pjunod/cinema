@@ -1,0 +1,20 @@
+[Unit]
+Description=ci-fleet agent: report this runner host's resources, carry out its controls
+Documentation=https://forge.lan:3000/noirr/plurx/src/branch/main/docs/ci/CI-FLEET.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Root: it reads every runner's cgroup and the Docker socket, and its controls
+# drive systemctl, incus and the runner watchdog.
+ExecStart=/usr/bin/python3 /opt/ci-fleet/ci-fleet-agent --config /etc/ci-fleet/agent.json
+StateDirectory=ci-fleet
+Restart=on-failure
+RestartSec=10
+CPUQuota=10%
+MemoryMax=100M
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

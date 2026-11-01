@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Install the ci-fleet collector or agent from this checkout (docs/ci/CI-FLEET.md).
+#   sudo deploy/ci-fleet/install collector <collector.json>   # the forge host
+#   sudo deploy/ci-fleet/install agent <agent.json>           # every runner host and Incus runner guest
+# Re-running upgrades in place; the configuration file is replaced only when given.
+set -euo pipefail
+[ "$(id -u)" -eq 0 ] || { echo 'install: run as root' >&2; exit 1; }
+[ "$#" -eq 2 ] && { [ "$1" = collector ] || [ "$1" = agent ]; } || { echo 'usage: install collector|agent <config.json>' >&2; exit 2; }
+role=$1 config=$2
+here=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+root=$(cd -P -- "$here/../.." && pwd -P)
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || { echo 'install: python3 3.9+ required' >&2; exit 1; }
+if [ "$role" = collector ]; then
+  python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || { echo 'install: the collector needs python3 3.11+ (tomllib)' >&2; exit 1; }
+fi
+if [ "$(uname -s)" = Darwin ]; then
+  [ "$role" = agent ] || { echo 'install: only the agent runs on macOS' >&2; exit 2; }
+  dest=/usr/local/lib/ci-fleet etc=/usr/local/etc/ci-fleet
+else
+  dest=/opt/ci-fleet etc=/etc/ci-fleet
+fi
+staging=$(mktemp -d "${dest}.new.XXXXXX")
+trap 'rm -rf "$staging"' EXIT
+cp -R "$root/tools/ci-fleet/cifleet" "$root/tools/ci-fleet/ui" "$staging/"
+install -m 0755 "$root/tools/ci-fleet/ci-fleetd" "$root/tools/ci-fleet/ci-fleet-agent" "$staging/"
+mkdir -p "$staging/validation"
+: > "$staging/validation/__init__.py"
+install -m 0644 "$root/validation/runner_fleet.py" "$staging/validation/"
+find "$staging" -name __pycache__ -prune -exec rm -rf {} +
+rm -rf "$dest.old"
+[ -d "$dest" ] && mv "$dest" "$dest.old"
+mv "$staging" "$dest"
+trap - EXIT
+rm -rf "$dest.old"
+install -d -m 0750 "$etc"
+install -m 0640 "$config" "$etc/$role.json"
+if [ "$(uname -s)" = Darwin ]; then
+  install -m 0644 "$here/tv.plurx.ci-fleet-agent.plist" /Library/LaunchDaemons/
+  launchctl bootout system/tv.plurx.ci-fleet-agent 2>/dev/null || true
+  launchctl bootstrap system /Library/LaunchDaemons/tv.plurx.ci-fleet-agent.plist
+  exit 0
+fi
+unit=$([ "$role" = collector ] && echo ci-fleetd.service || echo ci-fleet-agent.service)
+install -m 0644 "$here/$unit" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable "$unit"
+systemctl restart "$unit"
+systemctl --no-pager --lines=0 status "$unit"

@@ -89,6 +89,11 @@ before a new backup daemon starts.
  backup daemon exits                   ──▶ standby, or restart during outage
 ```
 
+An operator can take the backup out of the pool from
+[ci-fleet](CI-FLEET.md) (Drain): that writes the configuration's `pause_marker`,
+and while it exists the controller drains the backup the same way and offers no
+slot, even during an outage. Resume removes it.
+
 **Limits:** availability is observed from the M3, not from Forgejo's runner
 database. A network partition between the two Macs can enable both runners
 even if the M4 can still reach Forgejo. A running daemon with invalid

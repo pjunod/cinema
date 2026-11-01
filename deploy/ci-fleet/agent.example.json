@@ -1,0 +1,30 @@
+{
+  "agent": "lab6",
+  "host": "lab6",
+  "role": "host",
+  "collector": "http://forge.lan:8790",
+  "token_file": "/etc/ci-fleet/agent.token",
+  "disks": ["/"],
+  "incus_project": "github-runners",
+  "watchdog": "/usr/local/sbin/plurx-runner-watchdog",
+  "runners": [
+    {"name": "gha-lab6-general-01", "kind": "incus", "vm": "gha-lab6-general-01",
+     "unit": "forgejo-runner-gha-lab6-general-01.service"},
+    {"name": "gha-lab6-general-02", "kind": "incus", "vm": "gha-lab6-general-02",
+     "unit": "forgejo-runner-gha-lab6-general-02.service"}
+  ],
+  "_examples": {
+    "incus guest (role guest)": {"name": "gha-lab6-general-01", "kind": "systemd",
+      "unit": "forgejo-runner-gha-lab6-general-01.service", "work": "/opt/forgejo-runner/_work",
+      "cache": "/opt/forgejo-runner/cache"},
+    "host-mode runner": {"name": "gha-lab5-general-03", "kind": "systemd",
+      "unit": "forgejo-runner-gha-lab5-general-03.service", "work": "/opt/actions-runner-03/_work"},
+    "launchd primary (macOS)": {"name": "gha-maca-apple-01", "kind": "launchd", "domain": "system",
+      "label": "org.forgejo.actions.runner.plurx.gha-maca-apple-01",
+      "plist": "/Library/LaunchDaemons/org.forgejo.actions.runner.plurx.gha-maca-apple-01.plist",
+      "match": "forgejo-runner daemon"},
+    "standby backup (macOS)": {"name": "gha-macb-apple-01", "kind": "standby",
+      "pause_marker": "/opt/homebrew/var/lib/forgejo-runner/ci-fleet-paused", "match": "forgejo-runner daemon"},
+    "Lima ARM runner (macOS)": {"name": "gha-macb-linux-arm-01", "kind": "lima", "vm": "plurx-ci-arm"}
+  }
+}
