@@ -31,13 +31,14 @@ import paged_codec as codec  # noqa: E402
 
 MIB = 1024 * 1024
 PAGE = 4096
+EMPTY_FIT = 256  # pages: the largest pinned empty schema (independent_verifier) is 169 pages, so the default ceiling must admit it
 
 
 def owner_of(resource):
     return physical.FAMILY_OWNERS.get(resource, physical.POOL_OWNERS.get(resource))
 
 
-def build_policy(source_map, *, database=10 * PAGE, **pools):
+def build_policy(source_map, *, database=EMPTY_FIT * PAGE, **pools):
     families = {name: {'owner': owner, **physical.minimum_family_policy(source_map, name, database)}
                 for name, owner in physical.FAMILY_OWNERS.items()}
     pool_bytes = {name: 8 * MIB for name in physical.POOL_OWNERS}
@@ -831,7 +832,8 @@ class ChildLoaderTests(PhysicalBase):
         connection = grant.connect()
         self.addCleanup(connection.close)
         self.assertEqual(connection.execute('PRAGMA max_page_count').fetchone()[0], 3)
-        with self.assertRaises(physical.PhysicalPolicyError):
+        # The first database consumed the whole granted main allocation; the policy ceiling (far larger) grants nothing more.
+        with self.assertRaisesRegex(physical.PhysicalIncomplete, 'physical reservation exhausted: catalog_main/main'):
             physical.reserve_database(child, 'catalog_main', self.root / 'out' / 'elsewhere.sqlite', PAGE)
 
     def test_child_cannot_claim_a_path_outside_its_allocation(self):
@@ -868,7 +870,7 @@ class ChildLoaderTests(PhysicalBase):
             self.load(handle, owned_root=str(self.root / 'out'))
         with self.assertRaisesRegex(physical.PhysicalPolicyError, 'live identity'):
             self.load_forged(handle, lambda v: v['parent'].update(start_ticks=1))
-        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'live identity|parent identity'):
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'parent process identity is unavailable/not live'):
             self.load_forged(handle, lambda v: v['parent'].update(pid=4194304))
         with self.assertRaisesRegex(physical.PhysicalPolicyError, 'owned root device/inode'):
             self.load_forged(handle, lambda v: v['owned_root'].update(inode=v['owned_root']['inode'] + 1))
