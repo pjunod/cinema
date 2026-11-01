@@ -104,5 +104,94 @@ class PagedPhysicalChargeInventory(unittest.TestCase):
         self.assertFalse(charges & {'index_bytes', 'wal_bytes', 'scratch_bytes', 'retained_bytes', 'duplicate_backup_bytes'})
 
 
+class PagedRealSpecificationAdmission(unittest.TestCase):
+    """validate_specification on the REAL source-bound-formulas.json and the REAL pinned schemas.
+
+    N2: stale record_schemas / primitive_bindings pins and a mapped kind that no pinned schema declares were both
+    present in the tree while every other fixture used synthetic specifications. These drive the real files, so a
+    pin that drifts or a kind that is mapped but undeclared (the `validation_receipt` gap) refuses here.
+    """
+    SPEC = bounds.PACKAGE / 'source-bound-formulas.json'
+
+    def check(self, mutate=None):
+        spec = json.loads(self.SPEC.read_bytes())
+        if mutate is not None:
+            mutate(spec)
+        base = bounds.ROOT / '.async-proof-sessions' / 'paged-fixtures'
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base) as scratch:
+            path = Path(scratch) / 'spec.json'
+            path.write_bytes(self.SPEC.read_bytes() if mutate is None else codec.canonical(spec).encode())
+            return bounds.validate_specification(path, expected_sha256=codec.sha_bytes(path.read_bytes()))
+
+    def declared_kinds(self):
+        """Every `properties.kind.const` of every pinned record schema, found by an independent walk."""
+        spec = json.loads(self.SPEC.read_bytes())
+        found = set()
+
+        def walk(node):
+            if isinstance(node, dict):
+                kind = node.get('properties', {}).get('kind', {}).get('const') if isinstance(node.get('properties'), dict) else None
+                if isinstance(kind, str):
+                    found.add(kind)
+                for child in node.values():
+                    walk(child)
+            elif isinstance(node, list):
+                for child in node:
+                    walk(child)
+        for binding in spec['record_schemas']:
+            walk(json.loads((bounds.ROOT / binding['path']).read_bytes()))
+        return found
+
+    def test_the_real_specification_is_admitted_by_the_real_pins_and_schemas(self):
+        spec, graph = self.check()
+        self.assertTrue(spec['complete'])
+        self.assertTrue(graph.nodes)
+
+    def test_every_mapped_record_kind_is_declared_by_a_pinned_schema(self):
+        spec = json.loads(self.SPEC.read_bytes())
+        mapped = {row['kind'] for row in spec['inventory_mapping'] if row['role'] in ('source_global', 'operational_only')}
+        self.assertEqual(mapped - self.declared_kinds(), set(), 'a kind is charged by the inventory but no pinned schema declares it')
+        self.assertIn('validation_receipt', self.declared_kinds())
+
+    def test_a_mapped_kind_that_no_pinned_schema_declares_is_refused(self):
+        def add_ghost(spec):
+            spec['inventory_mapping'].append({'kind': 'zz_undeclared_record', 'role': 'operational_only',
+                                              'lifetime': 'session_retained_unit_member', 'source_record_kind': None, 'overhead_field': None})
+            spec['inventory_mapping'].sort(key=lambda row: row['kind'])
+        with self.assertRaisesRegex(codec.Invalid, 'missing/extra registered source/control/auxiliary kind'):
+            self.check(add_ghost)
+
+    def test_dropping_a_mapped_kind_a_schema_declares_is_refused(self):
+        def drop_receipt(spec):
+            spec['inventory_mapping'] = [row for row in spec['inventory_mapping'] if row['kind'] != 'validation_receipt']
+        with self.assertRaisesRegex(codec.Invalid, 'missing/extra registered source/control/auxiliary kind'):
+            self.check(drop_receipt)
+
+    def test_a_stale_record_schema_pin_is_refused(self):
+        for index in range(len(json.loads(self.SPEC.read_bytes())['record_schemas'])):
+            with self.assertRaisesRegex(codec.Invalid, 'record schema premise drift', msg=str(index)):
+                self.check(lambda spec, index=index: spec['record_schemas'][index].update(sha256='0' * 64))
+
+    def test_a_stale_source_input_or_primitive_pin_is_refused(self):
+        with self.assertRaisesRegex(codec.Invalid, 'source-bound premise source drift'):
+            self.check(lambda spec: spec['source_inputs'][0].update(sha256='0' * 64))
+        spec = json.loads(self.SPEC.read_bytes())
+        paths = sorted({row['source_path'] for row in spec['primitive_bindings']})
+        self.assertTrue(paths)
+        for path in paths:  # every distinct pinned source, not just the first binding
+            def stale(value, path=path):
+                row = next(r for r in value['primitive_bindings'] if r['source_path'] == path)
+                row['source_sha256'] = '0' * 64
+            with self.assertRaisesRegex(codec.Invalid, 'primitive source hash', msg=path):
+                self.check(stale)
+
+    def test_a_missing_primitive_anchor_is_refused(self):
+        def lose_anchor(spec):
+            spec['primitive_bindings'][0]['anchor'] = 'ANCHOR-THAT-IS-NOT-IN-THE-SOURCE-0f3a'
+        with self.assertRaisesRegex(codec.Invalid, 'primitive source anchor missing'):
+            self.check(lose_anchor)
+
+
 if __name__=='__main__':
     unittest.main()
