@@ -141,6 +141,10 @@ pub struct SoftwareVodRequest {
     /// a separate lifetime slot from Rendition metadata and response bodies.
     pub application_owner_bytes: u64,
     pub output: FiniteOutputLimits,
+    /// The original continuous create cutoff carried from a remote grant
+    /// through P into this R owner. It is checked before any constructor IO
+    /// and then at every fresh arm and native entry; `None` for local work.
+    pub continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
 }
 
 impl SoftwareVodRequest {
@@ -1175,6 +1179,15 @@ impl NodeResourceRuntime {
             &Arc<super::finite_lifetime::FiniteAppState>,
         ) -> Result<T, FiniteVodError>,
     ) -> Result<(SoftwareVodOwner, T), FiniteVodError> {
+        // Before any metadata IO or reservation: a remote grant whose original
+        // continuous cutoff already passed admits no R owner at all.
+        if super::operations::continuous_window_closed(request.continuous_entry_deadline.as_ref()) {
+            return Err(OperationError::BeforeReservation(
+                super::operations::PreReservationRefusal::ContinuousCutoff,
+            )
+            .into());
+        }
+        let continuous_entry_deadline = request.continuous_entry_deadline.clone();
         if request.generation_epoch == 0 {
             return Err(OperationError::BeforeReservation(
                 super::operations::PreReservationRefusal::Admission(
@@ -1593,6 +1606,7 @@ impl NodeResourceRuntime {
                 members: plans,
             }],
             Some(&[producer_memory_claim]),
+            continuous_entry_deadline,
             deadline,
             |preparation| {
                 let output = FiniteOutput {

@@ -799,10 +799,14 @@ impl NodeResourceRuntime {
             // source, process, image nor parser can enter before this point.
             #[cfg(test)]
             tests::stages::before_registered_entry(task.engine_plan.member_id.uuid()).await;
-            let probe_released = self.release_native_entry(binding, probe_start).is_ok();
+            let probe_released = self
+                .release_native_entry(binding, None, probe_start)
+                .is_ok();
             #[cfg(test)]
             tests::stages::between_registered_entries(task.engine_plan.member_id.uuid()).await;
-            let engine_released = self.release_native_entry(binding, engine_start).is_ok();
+            let engine_released = self
+                .release_native_entry(binding, None, engine_start)
+                .is_ok();
             if !probe_released || !engine_released {
                 // Each failed release drops only its own unopened sender.
                 // An earlier sibling may already own native work: retain and

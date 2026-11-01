@@ -1071,6 +1071,7 @@ impl Shared {
         duration_ms: i64,
         settings: &VodSettings,
         application_owner_bytes: usize,
+        continuous_entry_deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     ) -> Result<PreparedAttemptRendition, AdaptiveBuildFailure> {
         let build_guard = self.rendition_build_gate(&key).lock_owned().await;
         if self.finite_closing.lock().await.contains_key(&key)
@@ -1102,6 +1103,7 @@ impl Shared {
             plan,
             settings,
             application_owner_bytes,
+            continuous_entry_deadline,
         )
         .await?;
         Ok(PreparedAttemptRendition {

@@ -788,6 +788,7 @@ impl VodServe {
         prepared: PreparedAdaptiveRecipe,
         settings: &VodSettings,
         application_owner_bytes: usize,
+        continuous_entry_deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     ) -> Result<shared::PreparedAttemptRendition, shared::AdaptiveBuildFailure> {
         let PreparedAdaptiveRecipe {
             key,
@@ -805,6 +806,7 @@ impl VodServe {
                 duration_ms,
                 settings,
                 application_owner_bytes,
+                continuous_entry_deadline,
             )
             .await
     }

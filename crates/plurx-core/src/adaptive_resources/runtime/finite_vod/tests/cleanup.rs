@@ -116,6 +116,18 @@ fn original_owner_at_generation(
     Arc<NodeResourceRuntime>,
     Result<SoftwareVodOwner, FiniteVodError>,
 ) {
+    original_owner_with_cutoff(root, reject_prepare, generation_epoch, None)
+}
+
+fn original_owner_with_cutoff(
+    root: &Path,
+    reject_prepare: bool,
+    generation_epoch: u64,
+    continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
+) -> (
+    Arc<NodeResourceRuntime>,
+    Result<SoftwareVodOwner, FiniteVodError>,
+) {
     crate::testfixtures::require_ffmpeg();
     let source = root.join("source.mkv");
     crate::testfixtures::run(
@@ -332,10 +344,37 @@ fn original_owner_at_generation(
                 parent_entry_reserve_bytes: 4096,
                 bootstrap_memory_bytes: 1024 * 1024,
             },
+            continuous_entry_deadline,
         },
         deadline(),
     );
     (runtime, owner)
+}
+
+#[tokio::test]
+async fn expired_original_continuous_cutoff_refuses_r_before_any_reservation() {
+    let root = tempfile::tempdir().expect("actual software cutoff fixture");
+    let clock = Arc::new(crate::cluster::clock::ClusterClockGuard::new(false));
+    let original = clock
+        .capture_continuous()
+        .expect("actual Linux clock")
+        .deadline_after(Duration::from_millis(50))
+        .expect("original live cutoff");
+    std::thread::sleep(Duration::from_millis(100));
+    let (runtime, result) = original_owner_with_cutoff(root.path(), false, 1, Some(original));
+    let Err(error) = result else {
+        panic!("an expired original cutoff must not admit an R owner");
+    };
+    assert!(error.definitely_before_reservation());
+    assert_eq!(
+        runtime.accounting().expect("same empty ledger").used,
+        ResourceVector::default()
+    );
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("original journal drain");
 }
 
 #[tokio::test]

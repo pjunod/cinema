@@ -447,6 +447,7 @@ pub(super) async fn build(
         plan,
         settings,
         None,
+        None,
         &mut ignored,
     )
     .await
@@ -463,6 +464,7 @@ pub(super) async fn build_attempt(
     plan: SegmentPlan,
     settings: &VodSettings,
     application_owner_bytes: usize,
+    continuous_entry_deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
 ) -> Result<(Arc<Rendition>, FiniteApplicationLease), super::shared::AdaptiveBuildFailure> {
     let mut cleanup = None;
     let result = build_inner(
@@ -473,6 +475,7 @@ pub(super) async fn build_attempt(
         plan,
         settings,
         Some(application_owner_bytes),
+        continuous_entry_deadline,
         &mut cleanup,
     )
     .await;
@@ -496,6 +499,7 @@ async fn build_inner(
     plan: SegmentPlan,
     settings: &VodSettings,
     application_owner_bytes: Option<usize>,
+    continuous_entry_deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     failed_attempt_cleanup: &mut Option<super::shared::PreparedAttemptCleanup>,
 ) -> Result<(Arc<Rendition>, Option<FiniteApplicationLease>), String> {
     let runtime = shared
@@ -726,6 +730,7 @@ async fn build_inner(
     .map_err(|_| "finite build cleanup slot deadline elapsed".to_owned())??;
     let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
     let compatibility = compatibility.enter();
+    request.continuous_entry_deadline = continuous_entry_deadline;
     let owner = match runtime.prepare_software_vod(request, admission_deadline) {
         Ok(owner) => owner,
         Err(error) => {

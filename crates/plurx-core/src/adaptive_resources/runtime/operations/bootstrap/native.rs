@@ -657,7 +657,10 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         if bootstrap.native_root.is_none() {
-            if Instant::now() >= deadline {
+            if crate::adaptive_resources::runtime::operations::entry_window_closed(
+                role.continuous_entry_deadline.as_ref(),
+                deadline,
+            ) {
                 return Err(OperationError::Deadline);
             }
             if bootstrap.change.is_some()
@@ -676,7 +679,11 @@ impl NodeResourceRuntime {
                 RootCell::launch(bootstrap.plan.filesystem_domain.clone(), io, copy)?;
             bootstrap.native_root = Some(cell);
             if allow_entry {
-                self.release_native_entry(role.binding, enter)?;
+                self.release_native_entry(
+                    role.binding,
+                    role.continuous_entry_deadline.as_ref(),
+                    enter,
+                )?;
             } else {
                 drop(enter);
             }

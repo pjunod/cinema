@@ -305,6 +305,8 @@ impl NodeResourceRuntime {
             usize::try_from(resources.peak_memory_bytes).map_err(|_| OperationError::State)?,
         )?;
         let role = OwnedRole {
+            // No original create cutoff survives a restart; local deadlines still apply.
+            continuous_entry_deadline: None,
             binding,
             durable_tag: id,
             members: Vec::new(),

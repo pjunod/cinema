@@ -1044,7 +1044,10 @@ impl NodeResourceRuntime {
         let source = role.sources.get(&member).ok_or(OperationError::State)?;
         if !role.armed.contains(&member) {
             if !matches!(role.phase, Phase::Prepared | Phase::AcquisitionPossible)
-                || Instant::now() >= deadline
+                || crate::adaptive_resources::runtime::operations::entry_window_closed(
+                    role.continuous_entry_deadline.as_ref(),
+                    deadline,
+                )
             {
                 return Err(OperationError::Deadline);
             }
@@ -1062,11 +1065,20 @@ impl NodeResourceRuntime {
         }
         let source = role.sources.get_mut(&member).ok_or(OperationError::State)?;
         if source.spec.is_some() {
-            if !matches!(role.phase, Phase::AcquisitionPossible) || Instant::now() >= deadline {
+            if !matches!(role.phase, Phase::AcquisitionPossible)
+                || crate::adaptive_resources::runtime::operations::entry_window_closed(
+                    role.continuous_entry_deadline.as_ref(),
+                    deadline,
+                )
+            {
                 return Err(OperationError::Deadline);
             }
             let enter = source.launch()?;
-            self.release_native_entry(role.binding, enter)?;
+            self.release_native_entry(
+                role.binding,
+                role.continuous_entry_deadline.as_ref(),
+                enter,
+            )?;
         }
         source.join().await?;
         if !source.observed_committed {

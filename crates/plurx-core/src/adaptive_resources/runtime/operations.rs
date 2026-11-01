@@ -112,6 +112,10 @@ struct Bundle {
 
 struct OwnedRole {
     binding: ReservationBinding,
+    // The original continuous create cutoff a remote grant carried into this
+    // R owner. It closes fresh arm and native entry only; cleanup and joins
+    // never consult it.
+    continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     // The original prepare bundle tag is distinct from its journal obligation.
     // A conserving R→S commit replaces it with the selected target durable tag.
     durable_tag: Uuid,
@@ -155,6 +159,23 @@ struct OwnedRole {
     pending_finite_close: Option<PendingFiniteClose>,
     receipt: Option<PhysicalCloseReceipt>,
     refunded: bool,
+}
+
+/// Whether the original continuous create cutoff has closed fresh arm and
+/// native entry. An unknown or discontinuous clock closes it too.
+pub(in crate::adaptive_resources::runtime) fn continuous_window_closed(
+    continuous: Option<&crate::cluster::clock::ContinuousDeadline>,
+) -> bool {
+    continuous.is_some_and(|limit| limit.remaining().is_err())
+}
+
+/// The local entry deadline or the original continuous cutoff, whichever
+/// closes first. Only fresh arm/native-entry seams use this.
+pub(in crate::adaptive_resources::runtime) fn entry_window_closed(
+    continuous: Option<&crate::cluster::clock::ContinuousDeadline>,
+    deadline: Instant,
+) -> bool {
+    Instant::now() >= deadline || continuous_window_closed(continuous)
 }
 
 struct Transition {
@@ -210,6 +231,8 @@ pub(crate) enum PreReservationRefusal {
     Admission(AdmissionRefusal),
     #[error("resource runtime draining")]
     Draining,
+    #[error("original continuous create cutoff elapsed before R admission")]
+    ContinuousCutoff,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -401,6 +424,7 @@ impl NodeResourceRuntime {
     pub(crate) fn release_native_entry(
         &self,
         binding: ReservationBinding,
+        continuous: Option<&crate::cluster::clock::ContinuousDeadline>,
         enter: tokio::sync::oneshot::Sender<()>,
     ) -> Result<(), OperationError> {
         let state = self
@@ -425,6 +449,12 @@ impl NodeResourceRuntime {
             )
         {
             return Err(OperationError::State);
+        }
+        // The original continuous create cutoff linearizes here with every
+        // other entry fence. Expiry drops only the unopened latch, so the job
+        // is NeverEntered; its retained owner still joins and closes.
+        if continuous_window_closed(continuous) {
+            return Err(OperationError::Deadline);
         }
         // Sending is synchronous and performs no filesystem IO under this lock.
         // An overage fence installed afterward cannot retroactively undo entry.
@@ -452,6 +482,7 @@ impl NodeResourceRuntime {
                 })
                 .collect(),
             false,
+            None,
             None,
             deadline,
             |_| (),
@@ -488,8 +519,15 @@ impl NodeResourceRuntime {
         claims: Option<&[MemoryClaim]>,
         deadline: Instant,
     ) -> Result<OwnedPreparation, OperationError> {
-        self.prepare_typed_families_claiming_initialized(families, plans, claims, deadline, |_| ())
-            .map(|(owner, ())| owner)
+        self.prepare_typed_families_claiming_initialized(
+            families,
+            plans,
+            claims,
+            None,
+            deadline,
+            |_| (),
+        )
+        .map(|(owner, ())| owner)
     }
 
     /// Attach a fixed core-owned payload while the new preparation is still
@@ -500,6 +538,7 @@ impl NodeResourceRuntime {
         families: &[FamilyDemand<'_>],
         plans: Vec<TypedGraphPlan>,
         claims: Option<&[MemoryClaim]>,
+        continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
         deadline: Instant,
         initialize: impl FnOnce(&OwnedPreparation) -> T,
     ) -> Result<(OwnedPreparation, T), OperationError> {
@@ -519,6 +558,7 @@ impl NodeResourceRuntime {
                 .collect(),
             true,
             claims,
+            continuous_entry_deadline,
             deadline,
             initialize,
         )
@@ -531,6 +571,7 @@ impl NodeResourceRuntime {
         plans: Vec<PreparationPlan>,
         typed: bool,
         claims: Option<&[MemoryClaim]>,
+        continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
         deadline: Instant,
         initialize: impl FnOnce(&OwnedPreparation) -> T,
     ) -> Result<(OwnedPreparation, T), OperationError> {
@@ -696,6 +737,7 @@ impl NodeResourceRuntime {
             }
             roles.push(OwnedRole {
                 binding,
+                continuous_entry_deadline: continuous_entry_deadline.clone(),
                 durable_tag: id,
                 members: plan.legacy,
                 typed_members,

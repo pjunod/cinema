@@ -388,7 +388,10 @@ impl NodeResourceRuntime {
             .state();
         let sync = bootstrap.sync.as_ref().ok_or(OperationError::State)?;
         if sync.request.is_some() && state.asset.totals.pending_jobs == 0 {
-            if Instant::now() >= deadline {
+            if crate::adaptive_resources::runtime::operations::entry_window_closed(
+                role.continuous_entry_deadline.as_ref(),
+                deadline,
+            ) {
                 return Err(OperationError::Deadline);
             }
             let event = AssetEventV1::ArmIo {
@@ -411,8 +414,10 @@ impl NodeResourceRuntime {
             .state();
         let sync = bootstrap.sync.as_mut().ok_or(OperationError::State)?;
         if sync.request.is_some() {
-            if Instant::now() >= deadline
-                || bootstrap.change.is_some()
+            if crate::adaptive_resources::runtime::operations::entry_window_closed(
+                role.continuous_entry_deadline.as_ref(),
+                deadline,
+            ) || bootstrap.change.is_some()
                 || state
                     .asset
                     .head
@@ -433,7 +438,11 @@ impl NodeResourceRuntime {
                     .as_ref()
                     .ok_or(OperationError::State)?,
             )?;
-            self.release_native_entry(role.binding, enter)?;
+            self.release_native_entry(
+                role.binding,
+                role.continuous_entry_deadline.as_ref(),
+                enter,
+            )?;
         }
         sync.join().await?;
         let result = sync.result.as_ref().ok_or(OperationError::State)?;

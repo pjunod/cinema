@@ -569,6 +569,12 @@ impl NodeResourceRuntime {
             if role.invoked.contains(&member) || role.graph.is_none() {
                 return Err(OperationError::State);
             }
+            // No fresh arm once the original continuous cutoff has passed.
+            if crate::adaptive_resources::runtime::operations::continuous_window_closed(
+                role.continuous_entry_deadline.as_ref(),
+            ) {
+                return Err(OperationError::Deadline);
+            }
             if !role.armed.contains(&member) {
                 start_transition(
                     &self.journal,
@@ -581,7 +587,10 @@ impl NodeResourceRuntime {
                 )?;
                 self.finish_transition(bundle_id, role).await?;
             }
-            if Instant::now() >= deadline {
+            if crate::adaptive_resources::runtime::operations::entry_window_closed(
+                role.continuous_entry_deadline.as_ref(),
+                deadline,
+            ) {
                 return Err(OperationError::Deadline);
             }
             let graph = role.graph.as_mut().ok_or(OperationError::State)?;
@@ -646,7 +655,7 @@ impl NodeResourceRuntime {
             .ok_or(OperationError::State)?
             .take_finite_vod_start(task)
             .await?;
-        self.release_native_entry(role.binding, enter)?;
+        self.release_native_entry(role.binding, role.continuous_entry_deadline.as_ref(), enter)?;
         finite.task_entered = true;
         Ok(())
     }

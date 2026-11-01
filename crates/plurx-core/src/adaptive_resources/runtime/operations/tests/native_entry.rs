@@ -32,7 +32,7 @@ async fn overage_fence_closes_second_role_latch_and_keeps_both_charges() {
 
     let (enter, entered) = oneshot::channel();
     assert!(matches!(
-        runtime.release_native_entry(second, enter),
+        runtime.release_native_entry(second, None, enter),
         Err(OperationError::State)
     ));
     assert!(entered.await.is_err(), "refusal drops the unopened latch");
@@ -71,7 +71,7 @@ async fn native_entry_refuses_old_binding_after_capacity_epoch_refresh() {
 
     let (enter, entered) = oneshot::channel();
     assert!(matches!(
-        runtime.release_native_entry(binding, enter),
+        runtime.release_native_entry(binding, None, enter),
         Err(OperationError::State)
     ));
     assert!(
@@ -113,7 +113,7 @@ async fn native_entry_refuses_after_drain_without_canceling_or_refunding_role() 
 
     let (enter, entered) = oneshot::channel();
     assert!(matches!(
-        runtime.release_native_entry(binding, enter),
+        runtime.release_native_entry(binding, None, enter),
         Err(OperationError::State)
     ));
     assert!(entered.await.is_err(), "drain closes the unopened latch");
@@ -134,5 +134,52 @@ async fn native_entry_refuses_after_drain_without_canceling_or_refunding_role() 
             .state,
         ReservationState::Reserved
     );
+    runtime.drain().expect("drain journal owner");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn expired_original_continuous_cutoff_closes_native_entry_and_keeps_the_charge() {
+    let root = tempfile::tempdir().expect("durable TMPDIR");
+    let runtime = runtime(root.path());
+    let owner = prepare(&runtime, vec![plan()], deadline()).expect("one role prepare");
+    runtime
+        .resolve_preparation(&owner, deadline())
+        .await
+        .expect("durable role preparation");
+    let binding = owner.state.lock().await.roles[0].binding;
+    let charged = runtime.accounting().expect("original charge").used;
+    let clock = Arc::new(crate::cluster::clock::ClusterClockGuard::new(false));
+    let original = clock
+        .capture_continuous()
+        .expect("actual Linux clock")
+        .deadline_after(std::time::Duration::from_millis(50))
+        .expect("original live cutoff");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let (enter, entered) = oneshot::channel();
+    assert!(matches!(
+        runtime.release_native_entry(binding, Some(&original), enter),
+        Err(OperationError::Deadline)
+    ));
+    assert!(entered.await.is_err(), "expiry drops the unopened latch");
+    {
+        let state = runtime.ledger.inner.lock().expect("ledger state");
+        assert_eq!(
+            state.entries.get(&binding.reservation).unwrap().state,
+            ReservationState::Reserved,
+            "the refused role remains reserved"
+        );
+    }
+    assert_eq!(
+        runtime.accounting().expect("charge remains held").used,
+        charged
+    );
+    // The same binding still enters without a cutoff: only the cutoff refused.
+    let (enter, entered) = oneshot::channel();
+    runtime
+        .release_native_entry(binding, None, enter)
+        .expect("same role enters without a cutoff");
+    entered.await.expect("released latch");
     runtime.drain().expect("drain journal owner");
 }

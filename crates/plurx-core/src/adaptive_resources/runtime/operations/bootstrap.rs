@@ -663,6 +663,13 @@ impl NodeResourceRuntime {
         }
         if !role.armed.contains(&member) {
             if role.transition.is_none() {
+                // A pending Arm still finishes; only a fresh one is refused
+                // once the original continuous cutoff has passed.
+                if crate::adaptive_resources::runtime::operations::continuous_window_closed(
+                    role.continuous_entry_deadline.as_ref(),
+                ) {
+                    return Err(OperationError::Deadline);
+                }
                 start_transition(
                     &self.journal,
                     role,
@@ -681,7 +688,10 @@ impl NodeResourceRuntime {
             }
             self.finish_transition(id, role).await?;
         }
-        if Instant::now() >= deadline {
+        if crate::adaptive_resources::runtime::operations::entry_window_closed(
+            role.continuous_entry_deadline.as_ref(),
+            deadline,
+        ) {
             return Err(OperationError::Deadline);
         }
         if role

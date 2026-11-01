@@ -179,7 +179,7 @@ impl FixedEngineFileClosed {
 /// Attested by the collector that owned the dependency-slot iterator: the
 /// number of prearmed File slots it never opened. Slots are handed out in
 /// order (producer first), so the opened set is exactly the prefix
-/// `[0, file_slots.len() - count)`. Only `collect_fixed_engine` constructs it.
+/// `[0, file_slots.len() - count)`. Only `collect_fixed_engine_with_continuous` constructs it.
 pub(crate) struct FixedEngineUnusedSlots {
     count: u16,
 }
@@ -1086,15 +1086,6 @@ async fn run_original_command(
 /// Invoke from the original, retained P task only after its durable arm. The
 /// task owns the command roots and the sequential object File loop. A failure
 /// does not produce a close capability; P remains held until explicit recovery.
-#[cfg(any(test, feature = "fixtures"))]
-pub(crate) async fn collect_fixed_engine(
-    task: FixedPlanningEngineTaskV1,
-    boot_id: Option<Uuid>,
-    deadline: Instant,
-) -> Result<FixedEngineNativeCompletion, FixedEngineNativeFailure> {
-    collect_fixed_engine_with_continuous(task, boot_id, deadline, None).await
-}
-
 pub(crate) async fn collect_fixed_engine_with_continuous(
     task: FixedPlanningEngineTaskV1,
     boot_id: Option<Uuid>,
