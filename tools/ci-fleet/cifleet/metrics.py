@@ -32,6 +32,8 @@ def render(snapshot: dict, *, poll_seconds: float, api_calls: int, forge_up: boo
     family("ci_fleet_waiting_jobs", "gauge", "Waiting and blocked jobs by why-waiting class.",
            [({"class": name}, value) for name, value in snapshot["classes"].items()])
     family("ci_fleet_unsatisfiable_jobs", "gauge", "Jobs no registered runner can take.", [({}, counts["unsatisfiable"])])
+    family("ci_fleet_unsatisfiable_pools", "gauge", "Label sets workflows request that no registered runner carries.",
+           [({}, sum(1 for pool in snapshot["pools"] if pool["requested"] and not pool["registered"]))])
     family("ci_fleet_oldest_wait_seconds", "gauge", "Oldest waiting job's wait.", [({}, snapshot["oldest_wait"])])
     requested = [pool for pool in snapshot["pools"] if pool["requested"] or pool["waiting"]]
     family("ci_fleet_pool_runners", "gauge", "Runners per requested pool by state.",
@@ -59,9 +61,11 @@ def render(snapshot: dict, *, poll_seconds: float, api_calls: int, forge_up: boo
             host_cpu.append(({"host": host["alias"], "owner": owner}, round(cores, 3)))
         for owner, used in (metrics.get("mem_used") or {}).items():
             host_mem.append(({"host": host["alias"], "owner": owner}, int(used)))
-        if "agent_age" in host:
-            ages.append(({"host": host["alias"]}, host["agent_age"]))
+
     family("ci_fleet_host_cpu_cores", "gauge", "Cores in use per host by owner (ci, plurx, other).", host_cpu)
     family("ci_fleet_host_memory_bytes", "gauge", "Memory in use per host by owner.", host_mem)
-    family("ci_fleet_agent_age_seconds", "gauge", "Seconds since the host's agent last reported.", ages)
+    for agent, info in sorted((snapshot.get("agents") or {}).items()):
+        ages.append(({"agent": agent, "host": info.get("host") or ""}, info.get("age")))
+    family("ci_fleet_agent_age_seconds", "gauge",
+           "Seconds since each agent last reported; kept for every agent ever seen, so silence grows it.", ages)
     return "\n".join(lines) + "\n"

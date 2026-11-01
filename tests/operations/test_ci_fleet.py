@@ -267,6 +267,9 @@ class FakeForge:
             return FakeResponse(b'{"workflow_runs":[]}')
         if path.endswith("/actions/tasks"):
             return FakeResponse(b'{"workflow_runs":[]}')
+        if request.get_method() == "DELETE" and "/actions/runners/" in path:
+            self.deleted = getattr(self, "deleted", []) + [path]
+            return FakeResponse(b"")
         if "/actions/runs/" in path and path.endswith("/cancel"):
             self.cancelled.append(path)
             return FakeResponse(b"")
@@ -412,7 +415,7 @@ class AgentCase(unittest.TestCase):
     def agent(self, runners, folder):
         commands = []
 
-        def execute(*args, timeout=20):
+        def execute(*args, timeout=20, check=True):
             commands.append(args)
             return "receipt\n"
         config = {"agent": "lab6", "incus_project": "github-runners", "runners": runners,
@@ -425,7 +428,7 @@ class AgentCase(unittest.TestCase):
                       "unit": "forgejo-runner-gha-lab6-general-01.service"}
             agent, commands = self.agent([runner], folder)
             busy = {"value": "4f2a9c\n"}  # a task container is running
-            agent.execute = lambda *args, timeout=20: commands.append(args) or (busy["value"] if "sh" in args else "")
+            agent.execute = lambda *args, timeout=20, check=True: commands.append(args) or (busy["value"] if "sh" in args else "")
             result = agent.perform({"action": "drain", "target": runner["name"], "actor": "op", "reason": "r"})
             marker = Path(folder) / "watchdog" / runner["vm"]
             self.assertTrue(marker.exists(), result)
@@ -449,7 +452,7 @@ class AgentCase(unittest.TestCase):
             agent, _ = self.agent([runner], folder)
             usage = {"ns": 10_000_000_000}
 
-            def execute(*args, timeout=20):
+            def execute(*args, timeout=20, check=True):
                 return json.dumps([{"name": runner["vm"], "status": "Running", "expanded_config": {},
                                     "state": {"cpu": {"usage": usage["ns"]}, "memory": {"usage": 1 << 30}}}])
             agent.execute = execute
@@ -589,3 +592,172 @@ class CollectorCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFindingsCase(unittest.TestCase):
+    """Each case pins a finding from the PR #1344 adversarial review."""
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.opener = FakeForge()
+        store = Store(str(Path(self.folder.name) / "db.sqlite"))
+        self.addCleanup(store.close)
+        self.now = [NOW]
+        self.collector = Collector({"forge_url": "http://forge", "repo": "noirr/plurx", "token": "t",
+                                    "agent_token": "agent-secret"},
+                                   forge=Forgejo("http://forge", "noirr/plurx", "t", opener=self.opener),
+                                   store=store, clock=lambda: self.now[0])
+        self.collector.poll()
+
+    host = {"agent": "lab6", "host": "lab6", "role": "host",
+            "runners": [{"name": "gha-lab6-general-02", "kind": "incus", "controls": ["resume"], "paused": True,
+                         "paused_by": "operator"}]}
+    guest = {"agent": "lab6-g2", "host": "lab6", "role": "guest",
+             "runners": [{"name": "gha-lab6-general-02", "kind": "systemd", "controls": ["drain"], "paused": False,
+                          "usage": {"cpu": 1.5}}]}
+
+    def test_pause_and_controls_come_from_the_host_agent_in_either_report_order(self):
+        for order in ((self.host, self.guest), (self.guest, self.host)):
+            merged = fleet._agent_runners({r["agent"]: r for r in order})["gha-lab6-general-02"]
+            self.assertEqual((merged["paused"], merged["controls"], merged["agent"]), (True, ["resume"], "lab6"))
+            self.assertEqual(merged["usage"], {"cpu": 1.5})
+
+    def test_controls_route_only_to_the_host_agent(self):
+        self.collector.accept_report(json.loads(json.dumps(self.guest)))
+        refused = self.collector.control("op", "t", {"action": "drain", "target": "gha-lab6-general-02"})
+        self.assertFalse(refused["ok"])  # the guest's claim is not a control
+        self.collector.accept_report(json.loads(json.dumps(self.host)))
+        self.assertEqual(self.collector.control("op", "t", {"action": "resume", "target": "gha-lab6-general-02"}),
+                         {"ok": True, "result": "queued for lab6"})
+
+    def test_two_claimants_or_a_silent_owner_are_refused(self):
+        self.collector.accept_report(json.loads(json.dumps(self.host)))
+        twin = json.loads(json.dumps(self.host))
+        twin["agent"] = "lab6-twin"
+        self.collector.accept_report(twin)
+        self.assertIn("2 agents claim", self.collector.control("op", "t", {"action": "resume",
+                                                                           "target": "gha-lab6-general-02"})["error"])
+        del self.collector.agents["lab6-twin"]
+        self.now[0] += 120
+        self.assertIn("has not reported", self.collector.control("op", "t", {"action": "resume",
+                                                                             "target": "gha-lab6-general-02"})["error"])
+
+    def test_a_command_for_one_agent_never_goes_to_another_and_expires(self):
+        self.collector.accept_report(json.loads(json.dumps(self.host)))
+        self.collector.control("op", "t", {"action": "resume", "target": "gha-lab6-general-02"})
+        other = self.collector.accept_report({"agent": "lab5", "host": "lab5", "runners": []})
+        self.assertEqual(other["commands"], [])
+        self.now[0] += 61
+        late = self.collector.accept_report({"agent": "lab6", "host": "lab6", "runners": []})
+        self.assertEqual(late["commands"], [])
+        self.assertTrue(any(row["result"].startswith("expired") for row in self.collector.store.audit_log(10)))
+
+    def test_a_guest_agent_carries_out_no_controls(self):
+        guest = agent_module.Agent({"agent": "g", "role": "guest", "runners": [
+            {"name": "r", "kind": "systemd", "unit": "u"}]}, execute=lambda *a, **k: "")
+        self.assertIn("guest agent", guest.perform({"action": "drain", "target": "r"})["result"])
+        self.assertNotIn("controls", guest.runner_report({"name": "r", "kind": "systemd", "unit": "u"}))
+
+    def test_an_empty_agent_token_rejects_every_report(self):
+        self.collector.agent_token = ""
+        server = CollectorCase.serve(self)
+        status, _ = CollectorCase.post(self, f"http://127.0.0.1:{server.server_address[1]}/api/agent",
+                                       {"agent": "x"}, bearer="")
+        self.assertEqual(status, 401)
+
+    def test_delete_is_refused_for_a_runner_an_agent_reports(self):
+        self.collector.accept_report({"agent": "lab6", "host": "lab6", "runners": [
+            {"name": "gha-lab6-general-03", "kind": "incus", "controls": []}]})
+        self.collector.rebuild(self.now[0])
+        result = self.collector.control("op", "t", {"action": "delete_runner", "target": "gha-lab6-general-03"})
+        self.assertFalse(result["ok"])
+
+    def test_a_poll_failure_is_reported_not_frozen(self):
+        self.opener.__class__ = type("Broken", (FakeForge,), {
+            "__call__": lambda self, request, timeout=None: FakeResponse(b'[{"name": "no uuid"}]')
+            if request.full_url.split("?")[0].endswith("/actions/runners") else FakeForge.__call__(self, request, timeout)})
+        self.now[0] += 30
+        self.collector.poll()
+        self.assertFalse(self.collector.forge_ok)
+        self.assertFalse(self.collector.fresh())
+        self.assertIn("ci_fleet_forgejo_up 0", metrics.render(self.collector.snapshot, poll_seconds=0, api_calls=0,
+                                                               forge_up=self.collector.fresh()))
+
+    def test_a_silent_agent_keeps_a_growing_age_metric(self):
+        self.collector.accept_report({"agent": "lab5", "host": "lab5", "runners": []})
+        self.now[0] += 6 * 3600
+        snapshot = self.collector.rebuild(self.now[0])
+        self.assertIn('ci_fleet_agent_age_seconds{agent="lab5",host="lab5"} 21600',
+                      metrics.render(snapshot, poll_seconds=0, api_calls=0, forge_up=True))
+
+    def test_doc_alert_for_offline_pools_matches_on_pool(self):
+        doc = (ROOT / "docs/ci/CI-FLEET.md").read_text()
+        self.assertIn("on(pool)", doc)
+
+
+class ReviewClassifierCase(unittest.TestCase):
+    def test_a_requested_pool_nobody_carries_is_blocking_before_any_job_queues(self):
+        live = json.loads(json.dumps(FIXTURE["runners"]))
+        for runner in live:
+            runner["labels"] = [label.replace("xcode-27.2", "xcode-27.3") for label in runner["labels"]]
+        snapshot = fleet.build(inputs(runners=live, queue=[]))
+        finding = next(f for f in snapshot["drift"] if f["kind"] == "unsatisfiable_pool")
+        self.assertEqual(finding["severity"], "blocking")
+        self.assertIn("unsatisfiable_pool", {alert["kind"] for alert in snapshot["alerts"]})
+
+    def test_an_always_gate_is_not_dead_on_pickup(self):
+        snapshot = fleet.build(inputs())
+        gates = [job for job in snapshot["jobs"]["blocked"] if job["name"] == "Main promotion gate"]
+        self.assertTrue(gates)
+        self.assertFalse(any("dead_on_pickup" in job["flags"] for job in gates))
+
+    def test_matrix_and_reusable_needs_resolve(self):
+        workflow = runner_fleet.parse_workflow("w.yml", (
+            "jobs:\n  pkg:\n    name: package (${{ matrix.arch }})\n  shards:\n    uses: ./.github/workflows/s.yml\n"
+            "  gate:\n    name: gate\n    needs: [pkg, shards.shard]\n"))
+        called = runner_fleet.parse_workflow("s.yml", "jobs:\n  shard:\n    name: shard ${{ matrix.i }}\n")
+        run = {"id": 1, "index_in_repo": 1, "workflow_id": "w.yml", "started": "2026-11-01T17:00:00Z"}
+        jobs = [{"id": 1, "run_id": 1, "name": "package (amd64)", "status": "success", "task_id": 1, "runs_on": []},
+                {"id": 2, "run_id": 1, "name": "package (arm64)", "status": "success", "task_id": 2, "runs_on": []},
+                {"id": 3, "run_id": 1, "name": "shard 0", "status": "success", "task_id": 3, "runs_on": []},
+                {"id": 4, "run_id": 1, "name": "gate", "needs": ["pkg", "shards.shard"], "status": "blocked",
+                 "task_id": 0, "runs_on": []}]
+        snapshot = fleet.build(fleet.Inputs(now=NOW, runners=[], queue=[], runs={1: run}, run_jobs={1: jobs},
+                                            workflows=[workflow, called], roster=None))
+        self.assertEqual(snapshot["jobs"]["blocked"][0]["class"], "held")
+        jobs[1]["status"] = "running"
+        snapshot = fleet.build(fleet.Inputs(now=NOW, runners=[], queue=[], runs={1: run}, run_jobs={1: jobs},
+                                            workflows=[workflow, called], roster=None))
+        self.assertEqual(snapshot["jobs"]["blocked"][0]["reason"], "waiting for pkg")
+
+    def test_paused_runners_are_not_free(self):
+        agents = {"lab5": {"agent": "lab5", "host": "lab5", "runners": [
+            {"name": "gha-lab5-general-0%d" % i, "paused": True, "controls": ["resume"]} for i in (5, 6)]}}
+        pools = {pool["name"]: pool for pool in fleet.build(inputs(agents=agents))["pools"]}
+        unpaused = {pool["name"]: pool for pool in fleet.build(inputs())["pools"]}
+        self.assertEqual(unpaused["general"]["free"] - pools["general"]["free"], 2)
+
+    def test_not_picked_up_counts_from_ready_not_from_the_run_start(self):
+        run, job = single_job(["self-hosted", "Linux", "X64", "lab", "general"], needs=["build"])
+        snapshot = fleet.build(fleet.Inputs(
+            now=NOW, runners=[runner("gha-lab5-general-05", ["general"])], queue=[job], runs={1: run},
+            run_jobs={1: [job]}, workflows=[], roster=None, idle_since={"gha-lab5-general-05": NOW - 600},
+            waiting_since={10: NOW - 3}))
+        self.assertEqual(snapshot["jobs"]["waiting"][0]["class"], "queued")
+
+
+class ReviewStoreCase(unittest.TestCase):
+    def test_minute_rows_are_stamped_at_their_minute_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = Store(str(Path(folder) / "db"))
+            try:
+                start = (NOW - 2 * 86400) // 60 * 60
+                for ts in range(start + 4, start + 600, 5):  # sampling phase 4 mod 5
+                    store.record_usage("task", "1", ts, 1.0, 100)
+                store.maintain(NOW)
+                rows = store.series("task", "1")
+                stamps = [row["ts"] for row in rows]
+                self.assertEqual(stamps, [start + 60 * i for i in range(10)])
+            finally:
+                store.close()

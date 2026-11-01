@@ -72,6 +72,8 @@ def status(snapshot: dict) -> str:
     for alert in snapshot["alerts"]:
         if alert["kind"] == "unsatisfiable":
             lines.append(f"CRITICAL {alert['count']} job(s) can never start: no runner carries {', '.join(alert['labels'])}")
+        elif alert["kind"] == "unsatisfiable_pool":
+            lines.append(f"CRITICAL workflows request pool {alert['pool']}, which no registered runner carries")
         elif alert["kind"] == "pool_offline":
             lines.append(f"WARNING pool {alert['pool']} has 0 of {alert['registered']} runners online")
         elif alert["kind"] == "pool_degraded":
@@ -88,6 +90,11 @@ def drift(snapshot: dict) -> str:
     for finding in snapshot["drift"]:
         lines.append(f"{finding['severity'].upper():<8} {finding['title']}")
         for runner in finding.get("runners", []):
-            lines.append(f"  {runner if isinstance(runner, str) else runner}")
+            if isinstance(runner, str):
+                lines.append(f"  {runner}")
+            else:
+                parts = [f"roster only: {', '.join(runner['roster_only'])}" if runner.get("roster_only") else "",
+                         f"registered only: {', '.join(runner['live_only'])}" if runner.get("live_only") else ""]
+                lines.append(f"  {runner.get('runner')}: " + "; ".join(part for part in parts if part))
         lines.append(f"  fix: {finding['fix']}")
     return "\n".join(lines)

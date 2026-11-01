@@ -793,7 +793,9 @@ function renderChrome() {
   document.querySelectorAll('nav a').forEach(a => {
     if (a.dataset.route === state.route.name) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
-  const stale = !!state.error || (state.fetchedAt && Date.now() - state.fetchedAt > 20000);
+  // Stale when the fetch failed, or the collector says its own snapshot is old
+  // (its poll stopped, or the forge stopped answering) — not by this browser's clock.
+  const stale = !!state.error || (s && (s.fresh === false || num(s.age) > 20)) || (state.fetchedAt && Date.now() - state.fetchedAt > 20000);
   $('#st-live').className = `live ${stale ? 'bad' : ''}`;
   $('#st-dot').className = `dot ${stale ? 'bad' : 'ok'}`;
   setText($('#st-live-word'), !state.fetchedAt && !state.error ? 'connecting' : stale ? 'stale' : 'live');

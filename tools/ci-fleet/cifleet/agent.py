@@ -35,16 +35,20 @@ import urllib.request
 
 VERSION = "1"
 INTERVAL = 5
-DU_SECONDS = 600
+DU_SECONDS = 3600
+DU_TIMEOUT = 300
+DU_BACKOFF = 24 * 3600  # a tree too big to measure in DU_TIMEOUT is retried a day later
 INCUS_SECONDS = 30
 TASK_CONTAINER = re.compile(r"ACTIONS-TASK-(\d+)")
 CGROUP = Path("/sys/fs/cgroup")
 
 
-def run(*args, timeout=20) -> str:
+def run(*args, timeout=20, check=True) -> str:
     result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    if result.returncode:
+    if result.returncode and check:
         raise RuntimeError(f"{args[0]} failed ({result.returncode}): {result.stderr.strip()[:200]}")
+    if result.returncode:  # the watchdog prints its receipt and exits 1 when it refused: keep the receipt
+        return f"exit {result.returncode}: {(result.stdout or result.stderr).strip()}"
     return result.stdout
 
 
@@ -160,6 +164,23 @@ class CgroupReader:
         }
 
 
+def qemu_rss(vm: str, proc: Path = Path("/proc")) -> int | None:
+    """Resident memory of the qemu process running Incus VM `vm`, in bytes."""
+    needle = b"-name\x00" + vm.encode()
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+            if b"qemu" not in cmdline.split(b"\x00", 1)[0] or needle not in cmdline:
+                continue
+            fields = (entry / "statm").read_text().split()
+            return int(fields[1]) * os.sysconf("SC_PAGE_SIZE")
+        except (OSError, ValueError, IndexError):
+            continue
+    return None
+
+
 def docker_containers() -> list[dict]:
     """Running containers via the Docker socket (no docker CLI needed)."""
     sock = "/var/run/docker.sock"
@@ -199,6 +220,7 @@ class Agent:
         self.cpu_before = None
         self.results = []
         self.sizes = {}
+        self.du_skip = {}
         self.incus = {"at": float("-inf"), "vms": []}
         self.is_mac = platform.system() == "Darwin"
         self.paused_dir = Path(config.get("paused_dir", "/var/lib/ci-fleet/paused"))
@@ -206,10 +228,10 @@ class Agent:
 
     # -- collection ----------------------------------------------------------
     def report(self) -> dict:
+        results, self.results = self.results, []
         body = {"agent": self.config["agent"], "host": self.config.get("host", self.config["agent"]),
                 "role": self.config.get("role", "host"), "version": VERSION, "ts": int(time.time()),
-                "results": self.results}
-        self.results = []
+                "results": results}
         try:
             if self.is_mac:
                 body["host_metrics"] = self.mac_metrics()
@@ -261,7 +283,8 @@ class Agent:
         for vm in self.incus["vms"]:
             # Every Incus VM's qemu sits in incus.service's cgroup, so a VM's
             # CPU comes from Incus's own counter (incus_vms), not a cgroup.
-            ci_mem += vm.get("memory_bytes") or 0
+            # A VM costs the host its qemu process's RSS, not what the guest uses.
+            ci_mem += vm.get("host_rss") or vm.get("memory_bytes") or 0
             ci_cpu += vm.get("cpu") or 0
         used_mem = mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)
         metrics = {
@@ -370,8 +393,10 @@ class Agent:
         vms = []
         try:
             listing = json.loads(self.execute("incus", "list", "--project", project, "--format", "json"))
-        except (RuntimeError, ValueError, subprocess.TimeoutExpired):
-            listing = []
+        except (RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            # Keep the last listing; a failed `incus list` is not every VM vanishing.
+            self.incus["error"] = str(error)[:200]
+            return self.incus["vms"]
         for instance in listing:
             if instance["name"] not in managed:
                 continue
@@ -383,13 +408,14 @@ class Agent:
             cores = None
             if cpu_ns is not None and before.get("cpu_ns") is not None and now > before.get("at", now):
                 cores = round(max(0, cpu_ns - before["cpu_ns"]) / 1e9 / (now - before["at"]), 3)
+            rss = qemu_rss(instance["name"]) if instance["status"] == "Running" else 0
             vms.append({"name": instance["name"], "status": instance["status"], "cpu_ns": cpu_ns, "at": now,
-                        "cpu": cores,
+                        "cpu": cores, "host_rss": rss,
                         "memory_limit": instance.get("expanded_config", {}).get("limits.memory"),
                         "memory_bytes": (state.get("memory") or {}).get("usage"),
                         "autostart": instance.get("expanded_config", {}).get("boot.autostart") != "false",
                         "paused": paused, "controls": controls})
-        self.incus = {"at": time.monotonic(), "vms": vms}
+        self.incus = {"at": time.monotonic(), "vms": vms, "error": ""}
         return vms
 
     def runner_report(self, runner: dict) -> dict:
@@ -439,7 +465,20 @@ class Agent:
             report["usage"] = {"cpu": round(sum(p[1] for p in procs), 3), "rss": sum(p[2] for p in procs),
                                "pids": len(procs)}
         report["hygiene"] = self.hygiene(runner)
+        if report.get("paused"):
+            report["paused_by"] = self._paused_by(runner)
+        if self.config.get("role", "host") != "host":
+            # A guest reports usage only; the host agent owns pause and controls.
+            for key in ("controls", "paused", "draining", "paused_by"):
+                report.pop(key, None)
         return report
+
+    def _paused_by(self, runner: dict) -> str | None:
+        marker = self._marker_path(runner)
+        try:
+            return json.loads(marker.read_text()).get("actor") if marker else None
+        except (OSError, ValueError):
+            return None
 
     def _draining(self, runner: dict) -> bool:
         marker = self._marker_path(runner)
@@ -482,15 +521,23 @@ class Agent:
                     path = runner.get(key)
                     if not path:
                         continue
+                    if time.time() < self.du_skip.get(path, 0):
+                        continue
                     try:
-                        self.sizes[path] = int(self.execute("du", "-sk", path, timeout=300).split()[0]) * 1024
-                    except (RuntimeError, ValueError, IndexError, subprocess.TimeoutExpired):
+                        self.sizes[path] = int(self.execute("du", "-sk", path, timeout=DU_TIMEOUT).split()[0]) * 1024
+                    except subprocess.TimeoutExpired:
+                        self.sizes[path] = None
+                        self.du_skip[path] = time.time() + DU_BACKOFF
+                    except (RuntimeError, ValueError, IndexError):
                         self.sizes[path] = None
             time.sleep(DU_SECONDS)
 
     # -- controls --------------------------------------------------------------
     def perform(self, command: dict) -> dict:
         action, target = command.get("action"), command.get("target")
+        if self.config.get("role", "host") != "host":
+            return {"id": command.get("id"), "action": action, "target": target, "actor": command.get("actor"),
+                    "result": "failed: a guest agent carries out no controls"}
         runner = next((r for r in self.config.get("runners", []) if r["name"] == target or r.get("vm") == target), None)
         result = {"id": command.get("id"), "action": action, "target": target,
                   "actor": command.get("actor"), "reason": command.get("reason")}
@@ -537,7 +584,7 @@ class Agent:
         if action == "resume" and kind in ("systemd", "incus", "launchd"):
             marker.unlink(missing_ok=True)
             if kind == "incus":
-                return "resumed: " + self.execute(watchdog, "--vm", runner["vm"], timeout=180).strip()[-200:]
+                return "resumed: " + self.execute(watchdog, "--vm", runner["vm"], timeout=180, check=False).strip()[-300:]
             if kind == "systemd":
                 self.execute("systemctl", "start", "--no-block", runner["unit"])
                 return "resumed"
@@ -550,7 +597,7 @@ class Agent:
             self.execute("launchctl", "kickstart", service)
             return "resumed"
         if kind == "incus" and action == "start_vm":
-            return self.execute(watchdog, "--vm", runner["vm"], timeout=180).strip()[-300:]
+            return self.execute(watchdog, "--vm", runner["vm"], timeout=180, check=False).strip()[-300:]
         if kind == "standby" and action == "drain":
             self._marker(marker, command, state="stopped")
             return "draining: the standby controller drains the backup and stops offering it"
@@ -597,8 +644,12 @@ class Agent:
                 else:
                     self.execute("launchctl", "kill", "SIGTERM", f"{runner.get('domain', 'system')}/{runner['label']}")
             except (RuntimeError, subprocess.TimeoutExpired) as error:
-                self.results.append({"action": "drain", "target": runner["name"], "actor": detail.get("actor"),
-                                     "result": f"stop failed: {error}"[:300]})
+                message = f"stop failed: {error}"[:300]
+                if detail.get("error") != message:  # audit a failure once, retry quietly
+                    detail["error"] = message
+                    marker.write_text(json.dumps(detail) + "\n")
+                    self.results.append({"action": "drain", "target": runner["name"], "actor": detail.get("actor"),
+                                         "result": message})
                 continue
             detail["state"] = "stopped"
             marker.write_text(json.dumps(detail) + "\n")
@@ -625,7 +676,9 @@ class Agent:
                 self.progress_drains()
                 reply = self.push(self.report())
                 for command in reply.get("commands", []):
-                    self.results.append(self.perform(command))
+                    # Resume and Start VM can take minutes; the report loop keeps going.
+                    threading.Thread(target=lambda c=command: self.results.append(self.perform(c)),
+                                     daemon=True).start()
             except (OSError, ValueError, RuntimeError) as error:
                 print(f"ci-fleet-agent: {error}", flush=True)
             time.sleep(max(1.0, INTERVAL - (time.time() - started)))

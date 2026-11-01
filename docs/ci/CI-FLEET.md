@@ -51,13 +51,25 @@ with the signer's login.
 | Control | What actually happens |
 |---|---|
 | Cancel run | `POST /actions/runs/{id}/cancel`. Forgejo cancels whole runs, never one job. |
-| Drain (Incus VM runner) | Writes `/var/lib/plurx-runner-watchdog/paused/<vm>` at once, so the watchdog leaves it alone; once the guest has no `ACTIONS-TASK-` container and no runner child process, `systemctl stop --no-block` inside the VM. A busy runner is never stopped: stopping a container runner can cancel its job. |
+| Drain (Incus VM runner) | Writes `/var/lib/plurx-runner-watchdog/paused/<vm>` at once, so the watchdog leaves it alone; once the guest has no `ACTIONS-TASK-` container and no runner child process, `systemctl stop --no-block` inside the VM. A runner busy at the last probe is not stopped. The marker does not stop the runner polling, so a job accepted between that probe and the stop gets the unit's graceful stop (`TimeoutStopSec=30min`). |
 | Drain (host-mode systemd runner) | Writes `/var/lib/ci-fleet/paused/<runner>`; stops the unit once it has no child process. |
 | Drain (launchd Apple primary) | `launchctl disable` (the Apple janitor honours it) and a marker; SIGTERM once the runner has no child process. |
 | Drain (Apple standby backup) | Writes the standby controller's `pause_marker`; it drains the backup and offers no slot until Resume. |
 | Resume | Removes the marker; Incus runners are started by `plurx-runner-watchdog --vm <vm>`. |
 | Start VM | `plurx-runner-watchdog --vm <vm>`: the watchdog's own start path with its headroom check and backoff. The console shows its receipt, including refusals. |
 | Delete registration | Only for runners that are offline, not in the roster, and with no agent unit. |
+
+Only a **host** agent carries controls; an agent inside an Incus guest reports
+usage and hygiene only, because the pause marker and the watchdog live on the
+host. A control is refused when two agents claim it or when its agent has not
+reported for 60 s, and a queued control its agent does not collect within
+60 s is dropped and audited. The watchdog takes a lock around each pass, so
+the timer and a Start VM / Resume pass never interleave.
+
+Controls travel over plain HTTP on the LAN with the operator's Forgejo token,
+which the console keeps in the tab's `sessionStorage`; a revoked token keeps
+working for up to 5 minutes (the collector's identity cache). That is an
+accepted LAN trade-off; put the collector behind TLS if the console leaves the LAN.
 
 ## Installing
 
@@ -119,12 +131,13 @@ a VM or a daemon itself.
 roster said `xcode-27.1`, and the contract test only checks workflows against
 the roster. Drift (roster vs live registrations) is now computed every poll,
 exported as `ci_fleet_drift_findings`, and `scripts/ci-fleet drift --check`
-fails on a blocking finding. A PR job cannot run that check: the token
+fails on a blocking finding. A label set a workflow requests that no registered
+runner carries is blocking at once, before any job is stuck on it. A PR job cannot run that check: the token
 Actions jobs receive has no runner-admin scope.
 
 **Bounds.** Polls every 5 s (runners, queue, active runs and their jobs,
-running tasks), finished tasks every 30 s, workflows and roster only when
-`main` moves; backfill of 90 days runs every third poll at five runs per step.
+running tasks), finished tasks every 30 s, workflows and roster re-read every
+10 minutes when `main` has moved; backfill of 90 days runs every third poll at five runs per step.
 SQLite on lab3: tasks 90 days, pool minutes 30 days, usage at 5 s for 24 h then
 1 min for 30 days, a hard row cap per series, 10,000 audit rows — all constants
 in `tools/ci-fleet/cifleet/store.py`. Metrics are labelled by pool, host,
@@ -136,11 +149,14 @@ runner, class and severity only.
 - alert: CIJobsUnsatisfiable
   expr: ci_fleet_unsatisfiable_jobs > 0
   for: 2m
+- alert: CIPoolUnsatisfiable   # a workflow asks for labels no registered runner carries
+  expr: ci_fleet_unsatisfiable_pools > 0
+  for: 5m
 - alert: CIPoolOffline
-  expr: ci_fleet_pool_runners{state="registered"} > 0 and ci_fleet_pool_runners{state="online"} == 0
+  expr: ci_fleet_pool_runners{state="registered"} > 0 and on(pool) ci_fleet_pool_runners{state="online"} == 0
   for: 10m
 - alert: CIFleetCollectorDown
-  expr: up{job="ci-fleet"} == 0 or ci_fleet_forgejo_up == 0
+  expr: up{job="ci-fleet"} == 0 or ci_fleet_forgejo_up == 0   # 0 also when the snapshot is older than 15 s
   for: 5m
 - alert: CIFleetAgentSilent
   expr: ci_fleet_agent_age_seconds > 120
@@ -188,3 +204,4 @@ runner, class and severity only.
 |---|---|---|---|
 | 2026-11-01 | claude-opus-5-5 · 01BCWL9y | Proposal, renderings, Fable review, revision | Approved by Paul to build |
 | 2026-11-01 | claude-opus-5-5 · 01BCWL9y | M0–M3 built on `effort/ci-fleet` | PR #1344 (draft) |
+| 2026-11-01 | claude-fable-5-1 (review) · claude-opus-5-5 (fixes) | Adversarial review of the PR: verdict rework, 2 P1, 7 P2, 16 P3, 4 surviving mutations | P1/P2 and the P3s fixed in the follow-up commits; each finding pinned by a test in `ReviewFindingsCase`, `ReviewClassifierCase`, `ReviewStoreCase` |

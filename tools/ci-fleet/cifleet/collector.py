@@ -43,6 +43,7 @@ AGENT_STALE = 60
 OPERATOR_CACHE = 300
 FINISHED = {"success", "failure", "cancelled", "skipped"}
 CONCLUDED_JOBS_SECONDS = 60
+COMMAND_TTL = 60  # a control not picked up by its agent in this long is dropped and audited
 UI = Path(__file__).resolve().parent.parent / "ui"
 
 
@@ -76,9 +77,11 @@ class Collector:
         self.runs: dict[int, dict] = {}
         self.run_jobs: dict[int, list[dict]] = {}
         self.workflows = []
+        self.needs = fleet.Needs([])
         self.roster: dict | None = None
         self.source_head = ""
         self.first_seen: dict[int, int] = {}
+        self.waiting_since: dict[int, int] = {}
         self.idle_since: dict[str, int] = {}
         self.agents: dict[str, dict] = {}
         self.commands: dict[str, list[dict]] = {}
@@ -128,13 +131,17 @@ class Collector:
                 self.last["tasks"] = now
             self._backfill(now)
             self.forge_ok, self.forge_error = True, ""
-        except (ForgejoError, OSError, ValueError) as error:
-            self.forge_ok, self.forge_error = False, str(error)[:300]
+        except Exception as error:  # noqa: BLE001 - any forge shape change must show, not freeze the console
+            self.forge_ok, self.forge_error = False, repr(error)[:300]
         if now - self.last["stats"] >= STATS_SECONDS:
             self._refresh_stats(now)
             self.last["stats"] = now
         self.poll_seconds = self.clock() - started
-        self.rebuild(now)
+        try:
+            self.rebuild(now)
+        except Exception as error:  # noqa: BLE001 - keep the last snapshot, say why it is old
+            self.forge_ok, self.forge_error = False, f"snapshot build failed: {error!r}"[:300]
+            return
         if now // 60 != self.last["minute"] and self.snapshot:
             self.store.record_pools(now // 60, self.snapshot["pools"])
             self.last["minute"] = now // 60
@@ -167,6 +174,7 @@ class Collector:
         roster = load_roster(self.forge.file("validation/runner-fleet.toml", head or "main"))
         with self.lock:
             self.workflows = parse_workflows(files)
+            self.needs = fleet.Needs(self.workflows)
             self.roster = roster
             self.source_head = head
 
@@ -179,15 +187,21 @@ class Collector:
                 self.jobs_cache.pop(run_id, None)
 
     def _note_waits(self, now: int, run_jobs: dict) -> None:
-        live = set()
+        live, ready = set(), set()
         for jobs in run_jobs.values():
             for job in jobs:
                 if job["status"] in ("waiting", "blocked", "running"):
                     live.add(job["id"])
                     self.first_seen.setdefault(job["id"], now)
+                if job["status"] == "waiting":
+                    ready.add(job["id"])
+                    self.waiting_since.setdefault(job["id"], now)
         for job_id in list(self.first_seen):
             if job_id not in live:
                 del self.first_seen[job_id]
+        for job_id in list(self.waiting_since):
+            if job_id not in ready:
+                del self.waiting_since[job_id]
 
     def _note_idle(self, now: int, runners: list[dict]) -> None:
         for runner in runners:
@@ -241,19 +255,8 @@ class Collector:
         return record
 
     def _ready(self, job, run, siblings) -> int | None:
-        needs = job.get("needs") or []
-        if not needs:
-            return fleet.iso_seconds(run.get("started"))
-        definitions = {(d.workflow, d.name): d.key for wf in self.workflows for d in wf.jobs}
-        keyed = {definitions.get((run.get("workflow_id"), sibling["name"])): sibling for sibling in siblings}
-        stops = []
-        for key in needs:
-            sibling = keyed.get(key)
-            stored = self.store.task(sibling["task_id"]) if sibling and sibling.get("task_id") else None
-            if not stored or not stored.get("stopped"):
-                return None
-            stops.append(stored["stopped"])
-        return max(stops) if stops else None
+        ready, exact = fleet.ready_time(job, run, siblings, self.needs, TaskLookup(self.store))
+        return ready if exact else None
 
     def _ingest_finished(self, now: int) -> None:
         for task in self.forge.tasks(1):
@@ -275,8 +278,10 @@ class Collector:
         # Newest unplaced tasks first, so recent placement never waits on history.
         for task in self.store.unplaced(BACKFILL_PLACEMENTS):
             placed = self.forge.job_runner(task["job_id"])
+            # The uuid is the placement; the name is resolved from the live
+            # runner list now, or when the record is read later.
             self.store.upsert_task({"task_id": task["task_id"], "runner_uuid": placed[0] if placed else "",
-                                    "runner": uuids.get(placed[0], placed[0]) if placed else ""})
+                                    "runner": uuids.get(placed[0]) if placed else None})
         if not state["tasks_done"]:
             rows = self.forge.tasks(state["tasks_page"])
             for task in rows:
@@ -336,13 +341,16 @@ class Collector:
                 now=now, runners=self.runners, queue=self.queue, runs=dict(self.runs), run_jobs=dict(self.run_jobs),
                 workflows=self.workflows, roster=self.roster, hosts=self.hosts, placements=placements,
                 tasks=TaskLookup(self.store), agents=agents, first_seen=dict(self.first_seen),
+                waiting_since=dict(self.waiting_since),
                 idle_since=dict(self.idle_since), durations=self.durations, pool_stats=self.pool_stats,
                 forge={"ok": self.forge_ok, "error": self.forge_error, "version": self.forge_version,
                        "repo_url": f"{self.config.get('forge_public_url', self.config['forge_url']).rstrip('/')}/{self.config['repo']}",
                        "source_head": self.source_head, "api_calls": self.forge.calls,
                        "poll_seconds": round(self.poll_seconds, 3)})
         snapshot = fleet.build(inputs)
-        snapshot["finished"] = self.store.tasks_since(now - 1800, 50)
+        names = {runner["uuid"]: runner["name"] for runner in self.runners}
+        snapshot["finished"] = [dict(task, runner=task.get("runner") or names.get(task.get("runner_uuid")))
+                                for task in self.store.tasks_since(now - 1800, 50)]
         snapshot["audit"] = self.store.audit_log(20)
         snapshot["agents"] = {name: {"host": r.get("host"), "role": r.get("role"), "age": now - int(r.get("received", now))}
                               for name, r in self.agents.items()}
@@ -360,7 +368,7 @@ class Collector:
             self.store.audit(result.get("actor", "agent"), result.get("action", ""), result.get("target", ""),
                              result.get("reason", ""), f"{agent}: {result.get('result', '')}"[:500])
         metrics_ = report.get("host_metrics") or {}
-        if metrics_:
+        if metrics_ and report.get("role", "host") == "host":
             used = metrics_.get("cpu_used") or {}
             mem = metrics_.get("mem_used") or {}
             self.store.record_usage("host", report.get("host", agent), now, sum(used.values()), sum(mem.values()),
@@ -382,7 +390,12 @@ class Collector:
         with self.lock:
             self.agents[agent] = report
             pending = self.commands.pop(agent, [])
-        return {"commands": pending, "poll_seconds": POLL_SECONDS}
+        live = [command for command in pending if now - command.get("queued", now) <= COMMAND_TTL]
+        for command in pending:
+            if command not in live:
+                self.store.audit(command["actor"], command["action"], command["target"], command["reason"],
+                                 f"expired: {agent} did not collect it within {COMMAND_TTL} s")
+        return {"commands": live, "poll_seconds": POLL_SECONDS}
 
     # -- controls --------------------------------------------------------------
     def operator(self, token: str) -> tuple[str, bool]:
@@ -424,7 +437,7 @@ class Collector:
                 if not agent:
                     raise PermissionError(f"no reporting agent can {action} {target}")
                 command = {"id": secrets.token_hex(8), "action": action, "target": target,
-                           "actor": actor, "reason": reason}
+                           "actor": actor, "reason": reason, "queued": int(self.clock())}
                 with self.lock:
                     self.commands.setdefault(agent, []).append(command)
                 result = f"queued for {agent}"
@@ -437,18 +450,46 @@ class Collector:
         return {"ok": True, "result": result}
 
     def _owner(self, snapshot: dict, action: str, target: str) -> str | None:
+        """The one live host agent that owns this control, or a refusal.
+
+        Only host agents carry controls: an Incus runner's guest agent reports
+        usage, while its pause marker and the watchdog live on the host. Two
+        claimants, or a silent owner, is refused rather than guessed at.
+        """
+        now = int(self.clock())
         with self.lock:
             reports = dict(self.agents)
+        owners = []
         for name, report in reports.items():
+            if report.get("role", "host") != "host":
+                continue
             if action == "start_vm":
-                if any(vm.get("name") == target and "start_vm" in vm.get("controls", []) for vm in report.get("vms", [])):
-                    return name
-            elif any(r.get("name") == target and action in r.get("controls", []) for r in report.get("runners", [])):
-                return name
-        return None
+                claims = any(vm.get("name") == target and "start_vm" in vm.get("controls", [])
+                             for vm in report.get("vms", []))
+            else:
+                claims = any(r.get("name") == target and action in r.get("controls", [])
+                             for r in report.get("runners", []))
+            if claims:
+                owners.append((name, report))
+        if len(owners) > 1:
+            raise PermissionError(f"{len(owners)} agents claim {target}; fix their configs")
+        if not owners:
+            return None
+        name, report = owners[0]
+        if now - int(report.get("received", 0)) > AGENT_STALE:
+            raise PermissionError(f"agent {name} has not reported for {now - int(report.get('received', 0))} s")
+        return name
+
+    def fresh(self) -> bool:
+        """The forge answered the last poll and the snapshot is recent."""
+        snapshot = self.snapshot
+        return bool(self.forge_ok and snapshot and int(self.clock()) - snapshot["generated"] <= 3 * POLL_SECONDS)
 
     def job_detail(self, task_id: int) -> dict:
+        names = {runner["uuid"]: runner["name"] for runner in self.runners}
         task = self.store.task(task_id) or {}
+        if task and not task.get("runner"):
+            task["runner"] = names.get(task.get("runner_uuid"))
         recent = self.store.recent_runs_of(task.get("name", ""), 10) if task else []
         return {"task": task, "recent": recent, "usage": self.store.series("task", str(task_id)),
                 "host_usage": self.store.series("host", fleet.host_of(task.get("runner") or ""),
@@ -481,13 +522,18 @@ def make_handler(collector: Collector):
             query = dict(urllib.parse.parse_qsl(url.query))
             snapshot = collector.snapshot or collector.rebuild(int(collector.clock()))
             if url.path == "/api/snapshot":
-                return self._send(200, snapshot)
-            if url.path.startswith("/api/job/"):
-                return self._send(200, collector.job_detail(int(url.path.rsplit("/", 1)[-1])))
-            if url.path == "/api/why":
-                text = explain.why(snapshot, pr=query.get("pr"), run=int(query["run"]) if query.get("run") else None,
-                                   task=int(query["task"]) if query.get("task") else None)
-                return self._send(200, text + "\n", "text/plain; charset=utf-8")
+                age = int(collector.clock()) - snapshot["generated"]
+                return self._send(200, dict(snapshot, age=age, fresh=collector.fresh()))
+            try:
+                if url.path.startswith("/api/job/"):
+                    return self._send(200, collector.job_detail(int(url.path.rsplit("/", 1)[-1])))
+                if url.path == "/api/why":
+                    text = explain.why(snapshot, pr=query.get("pr"),
+                                       run=int(query["run"]) if query.get("run") else None,
+                                       task=int(query["task"]) if query.get("task") else None)
+                    return self._send(200, text + "\n", "text/plain; charset=utf-8")
+            except ValueError:
+                return self._send(400, {"error": "run, task and job ids are numbers"})
             if url.path == "/api/status":
                 return self._send(200, explain.status(snapshot) + "\n", "text/plain; charset=utf-8")
             if url.path == "/api/drift":
@@ -496,10 +542,12 @@ def make_handler(collector: Collector):
                 return self._send(200, collector.store.audit_log(200))
             if url.path == "/metrics":
                 return self._send(200, metrics.render(snapshot, poll_seconds=collector.poll_seconds,
-                                                      api_calls=collector.forge.calls, forge_up=collector.forge_ok),
+                                                      api_calls=collector.forge.calls, forge_up=collector.fresh()),
                                   "text/plain; version=0.0.4")
             if url.path == "/healthz":
-                return self._send(200 if collector.forge_ok else 503, {"forge": collector.forge_ok})
+                fresh = collector.fresh()
+                return self._send(200 if fresh else 503, {"forge": collector.forge_ok, "fresh": fresh,
+                                                          "error": collector.forge_error})
             name = "index.html" if url.path in ("/", "") else url.path.lstrip("/")
             path = (UI / name).resolve()
             if UI.resolve() in path.parents and path.is_file():
@@ -515,7 +563,8 @@ def make_handler(collector: Collector):
                 return self._send(400, {"error": "invalid JSON"})
             if url.path == "/api/agent":
                 supplied = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-                if not collector.agent_token or not secrets.compare_digest(supplied, collector.agent_token):
+                if not collector.agent_token or not secrets.compare_digest(
+                        supplied.encode("utf-8", "replace"), collector.agent_token.encode()):
                     return self._send(401, {"error": "agent token required"})
                 try:
                     return self._send(200, collector.accept_report(body))

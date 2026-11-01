@@ -2,6 +2,7 @@
 """Recover explicitly managed local runner VMs without undoing maintenance."""
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -156,11 +157,14 @@ def main():
     args = parser.parse_args()
     path = Path(args.state)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # systemd serializes passes; atomic writes preserve restart history on failure.
-    state = json.loads(path.read_text()) if path.exists() else {}
-    receipt = recover(json.loads(Path(args.config).read_text()), state, persist=lambda value: save_state(path, value),
-                      paused_dir=args.paused_dir, only=args.vm)
-    save_state(path, state)
+    # The timer and ci-fleet's Start VM / Resume (`--vm`) can both run a pass:
+    # one lock serialises them so neither loses the other's restart history.
+    with path.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = json.loads(path.read_text()) if path.exists() else {}
+        receipt = recover(json.loads(Path(args.config).read_text()), state,
+                          persist=lambda value: save_state(path, value), paused_dir=args.paused_dir, only=args.vm)
+        save_state(path, state)
     print(json.dumps(receipt), flush=True)
     return int(bool(receipt["errors"]))
 

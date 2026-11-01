@@ -67,6 +67,21 @@ class WorkflowJob:
     label_sets: tuple[tuple[str, ...], ...]
     needs: tuple[str, ...]
     conditional: bool
+    condition: str = ""
+    uses: str = ""  # a reusable workflow this job calls, by file name
+
+    @property
+    def runs_after_failure(self) -> bool:
+        """An `if:` that still runs when a need failed (always(), failure(), !cancelled())."""
+        return bool(re.search(r"\b(always|failure)\(\)|!\s*cancelled\(\)", self.condition))
+
+    def name_pattern(self) -> re.Pattern:
+        """The display names this job's runs can carry (matrix expressions expand)."""
+        parts = re.split(r"\$\{\{.*?\}\}", self.name)
+        pattern = ".+".join(re.escape(part) for part in parts)
+        if self.name == self.key:  # an unnamed matrix job is shown as "key (values)"
+            pattern += r"(?: \(.+\))?"
+        return re.compile(pattern + r"\Z")
 
 
 @dataclass
@@ -95,6 +110,8 @@ def parse_workflow(file: str, text: str) -> Workflow:
         block = body[1][start.start():end]
         key = start.group(1)
         name = re.search(r"(?m)^    name: (.+)$", block)
+        condition = re.search(r"(?m)^    if: ?(.*)\n((?:      .*\n)*)", block + "\n")
+        uses = re.search(r"(?m)^    uses: \./\.github/workflows/([^\s@]+)", block)
         workflow.jobs.append(
             WorkflowJob(
                 workflow=file,
@@ -102,7 +119,9 @@ def parse_workflow(file: str, text: str) -> Workflow:
                 name=name.group(1).strip().strip("\"'") if name else key,
                 label_sets=tuple(self_hosted_label_sets(block)),
                 needs=_needs(block),
-                conditional=re.search(r"(?m)^    if:", block) is not None,
+                conditional=condition is not None,
+                condition=" ".join((condition.group(1) + " " + condition.group(2)).split()) if condition else "",
+                uses=uses.group(1) if uses else "",
             )
         )
     return workflow

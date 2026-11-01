@@ -62,7 +62,8 @@ class Inputs:
     placements: dict[int, dict] = field(default_factory=dict)  # task id -> {"runner", "started", "stopped"}
     tasks: dict[int, dict] = field(default_factory=dict)  # task id -> {"stopped", "status", ...}
     agents: dict[str, dict] = field(default_factory=dict)  # agent id -> latest report
-    first_seen: dict[int, int] = field(default_factory=dict)  # job id -> first poll it was waiting
+    first_seen: dict[int, int] = field(default_factory=dict)  # job id -> first poll it was waiting or blocked
+    waiting_since: dict[int, int] = field(default_factory=dict)  # job id -> first poll it was ready (waiting)
     idle_since: dict[str, int] = field(default_factory=dict)  # runner -> first poll it was idle
     durations: dict[str, dict] = field(default_factory=dict)  # job name -> {"p50", "p95", "n"}
     pool_stats: dict[str, dict] = field(default_factory=dict)  # pool -> 24 h stats
@@ -82,26 +83,31 @@ def neutral_name(name: str, hosts: dict[str, dict]) -> str:
     return f"gha-{alias}-{match.group('role')}"
 
 
+OWNER_KEYS = ("controls", "paused", "draining", "paused_by", "offline_reason", "kind")
+
+
 def _agent_runners(agents: dict[str, dict]) -> dict[str, dict]:
     """One entry per runner, merged across agents.
 
-    An Incus runner is reported twice: by its host's agent (VM state, the
-    controls) and by the agent inside the guest (usage, hygiene). Neither
-    report's facts may erase the other's.
+    An Incus runner is reported twice: by its host's agent (VM state, pause,
+    controls) and by the agent inside the guest (usage, hygiene). Control and
+    pause facts come only from the host report, so the answer never depends on
+    which agent reported last; usage and hygiene come from whichever has them.
     """
     found: dict[str, dict] = {}
-    for report in agents.values():
+    for report in sorted(agents.values(), key=lambda r: r.get("role", "host") == "host"):
+        host_role = report.get("role", "host") == "host"
         for runner in report.get("runners", []):
             entry = found.setdefault(runner["name"], {"controls": [], "agents": []})
             for key, value in runner.items():
-                if key == "controls":
-                    entry["controls"] = sorted(set(entry["controls"]) | set(value))
+                if key in OWNER_KEYS:
+                    if host_role:
+                        entry[key] = value
                 elif value not in (None, "", {}, []) or key not in entry:
                     entry[key] = value
             entry["agents"].append(report.get("agent"))
-            if "controls" in runner and runner["controls"]:
+            if host_role:
                 entry["agent"] = report.get("agent")
-            entry.setdefault("agent", report.get("agent"))
     return found
 
 
@@ -161,7 +167,8 @@ def build(inputs: Inputs) -> dict:
             "busy": len(busy) if busy else (1 if status == "active" else 0),
             "tasks": [job["task_id"] for job in busy],
             "idle_since": inputs.idle_since.get(live["name"]),
-            "offline_reason": agent.get("offline_reason") or ("" if status != "offline" else "not reporting to the forge"),
+            "offline_reason": (f"paused by {agent.get('paused_by') or 'an operator'}" if paused else
+                               agent.get("offline_reason") or ("" if status != "offline" else "not reporting to the forge")),
             "agent": agent.get("agent"),
             "controls": agent.get("controls", []),
             "hygiene": agent.get("hygiene", {}),
@@ -169,11 +176,7 @@ def build(inputs: Inputs) -> dict:
         })
     runner_by_name = {runner["name"]: runner for runner in runners}
 
-    # -- workflows: map (workflow, display name) -> job definition --------------
-    definitions = {(job.workflow.rsplit("/", 1)[-1], job.name): job for wf in inputs.workflows for job in wf.jobs}
-
-    def definition(run: dict, name: str):
-        return definitions.get(((run or {}).get("workflow_id") or "", name))
+    definition = Needs(inputs.workflows)
 
     newest_run: dict[tuple, int] = {}
     for run in inputs.runs.values():
@@ -265,35 +268,99 @@ def build(inputs: Inputs) -> dict:
     }
 
 
-def _ready_at(job: dict, run: dict, inputs: Inputs, definition) -> tuple[int | None, bool]:
+FINISHED = ("success", "failure", "cancelled", "skipped")
+
+
+class Needs:
+    """Resolves a job's `needs` keys to the run's actual jobs.
+
+    `needs` names workflow job keys; the forge's job records carry only display
+    names, which for a matrix job are expanded (`package and smoke (amd64)`) and
+    for a reusable workflow's jobs are the called workflow's names, with needs
+    spelled `caller.inner`. Resolution goes through the parsed workflows.
+    """
+
+    def __init__(self, workflows: list[Workflow]):
+        self.by_file = {wf.file.rsplit("/", 1)[-1]: {job.key: job for job in wf.jobs} for wf in workflows}
+
+    def _patterns(self, workflow: str, key: str) -> list:
+        jobs = self.by_file.get(workflow, {})
+        caller, _, inner = key.partition(".")
+        definition = jobs.get(caller)
+        if definition is None:
+            return []
+        if definition.uses:
+            called = self.by_file.get(definition.uses, {})
+            targets = [called[inner]] if inner else list(called.values())
+            return [job.name_pattern() for job in targets if job]
+        return [definition.name_pattern()] if not inner else []
+
+    def resolve(self, run: dict, siblings: list[dict], needs) -> tuple[dict[str, list[dict]], list[str]]:
+        """({need key: its jobs in this run}, [keys that could not be resolved])."""
+        workflow = (run or {}).get("workflow_id") or ""
+        found, unresolved = {}, []
+        for key in needs or []:
+            patterns = self._patterns(workflow, key)
+            jobs = [job for job in siblings if any(pattern.match(job["name"]) for pattern in patterns)]
+            if jobs:
+                found[key] = jobs
+            else:
+                unresolved.append(key)
+        return found, unresolved
+
+    def definition(self, run: dict, name: str):
+        """The workflow job a run's job record came from, if it can be told."""
+        workflow = (run or {}).get("workflow_id") or ""
+        for job in self.by_file.get(workflow, {}).values():
+            if not job.uses and job.name_pattern().match(name):
+                return job
+        for jobs in self.by_file.values():  # a reusable workflow's job
+            for job in jobs.values():
+                if not job.uses and job.name_pattern().match(name):
+                    return job
+        return None
+
+
+def need_state(jobs: list[dict]) -> str:
+    statuses = {job["status"] for job in jobs}
+    if not statuses <= set(FINISHED):
+        return "unfinished"
+    if statuses & {"failure", "cancelled"}:
+        return "failed"
+    return "done"
+
+
+def ready_time(job: dict, run: dict, siblings: list[dict], needs: Needs, tasks, fallback=None) -> tuple[int | None, bool]:
     """(when the job's needs had all finished, whether that is exact).
 
     Until the needs' tasks are recorded, the run's start is the earliest the
-    job could have been ready, so the wait shown is an upper bound ("≤").
+    job could have been ready, so a wait measured from it is an upper bound.
     """
-    started = iso_seconds(run.get("started"))
-    needs = job.get("needs") or []
-    if not needs:
-        return started or inputs.first_seen.get(job["id"]), bool(started)
-    by_key = _run_jobs_by_key(job["run_id"], run, inputs, definition)
+    started = iso_seconds((run or {}).get("started"))
+    keys = job.get("needs") or []
+    if not keys:
+        return started or fallback, bool(started)
+    found, unresolved = needs.resolve(run, siblings, keys)
     stops = []
-    for key in needs:
-        need = by_key.get(key)
-        task = inputs.tasks.get((need or {}).get("task_id") or 0)
-        if task and task.get("stopped"):
-            stops.append(task["stopped"])
-    if stops and len(stops) == len(needs):
-        return max(stops), True
-    return started or inputs.first_seen.get(job["id"]), False
+    if not unresolved:
+        for jobs in found.values():
+            for need in jobs:
+                task = tasks.get(need.get("task_id") or 0) if need.get("task_id") else None
+                if task and task.get("stopped"):
+                    stops.append(task["stopped"])
+                elif need["status"] != "skipped" or need.get("task_id"):
+                    stops = None
+                    break
+            if stops is None:
+                break
+        if stops:
+            return max(stops), True
+    return started or fallback, False
 
 
-def _run_jobs_by_key(run_id: int, run: dict, inputs: Inputs, definition) -> dict[str, dict]:
-    keyed = {}
-    for job in inputs.run_jobs.get(run_id, []):
-        found = definition(run, job["name"])
-        if found:
-            keyed[found.key] = job
-    return keyed
+def _ready_at(job: dict, run: dict, inputs: Inputs, needs: Needs) -> tuple[int | None, bool]:
+    return ready_time(job, run, inputs.run_jobs.get(job["run_id"], []), needs, inputs.tasks,
+                      inputs.first_seen.get(job["id"]))
 
 
 def classify(job: dict, run: dict, inputs: Inputs, runners: list[dict], definition, newest_run, ready, p50) -> dict:
@@ -301,10 +368,11 @@ def classify(job: dict, run: dict, inputs: Inputs, runners: list[dict], definiti
     flags: list[str] = []
     notes: list[str] = []
     needs = job.get("needs") or []
-    by_key = _run_jobs_by_key(job["run_id"], run, inputs, definition)
-    need_status = {key: (by_key.get(key) or {}).get("status") for key in needs}
-    failed = sorted(key for key, status in need_status.items() if status in ("failure", "cancelled"))
-    if failed:
+    found, unresolved = definition.resolve(run, inputs.run_jobs.get(job["run_id"], []), needs)
+    need_status = {key: need_state(jobs) for key, jobs in found.items()}
+    failed = sorted(key for key, status in need_status.items() if status == "failed")
+    own = definition.definition(run, job["name"])
+    if failed and not (own and own.runs_after_failure):
         flags.append("dead_on_pickup")
         notes.append(f"needed job(s) {', '.join(failed)} did not succeed, so a runner would only skip this")
     newest = newest_run.get((run.get("workflow_id"), run.get("prettyref")))
@@ -314,11 +382,12 @@ def classify(job: dict, run: dict, inputs: Inputs, runners: list[dict], definiti
         notes.append(f"superseded by run #{newer.get('index_in_repo', newest)}")
 
     if job["status"] == "blocked":
-        unfinished = [key for key, status in need_status.items()
-                      if status not in ("success", "failure", "cancelled", "skipped")]
-        if unfinished or len(by_key) < len(needs):
-            waiting_on = unfinished or needs
-            return _verdict("blocked", f"waiting for {', '.join(waiting_on)}", flags, notes)
+        unfinished = [key for key, status in need_status.items() if status == "unfinished"]
+        if unfinished:
+            return _verdict("blocked", f"waiting for {', '.join(unfinished)}", flags, notes)
+        if unresolved:
+            return _verdict("blocked", f"needs {', '.join(unresolved)} could not be matched to this run's jobs; "
+                                       "treating it as waiting for them", flags, notes, unresolved=unresolved)
         return _verdict("held", "its needs have finished; a concurrency group is holding it", flags, notes)
 
     requested = set(job.get("runs_on") or [])
@@ -363,7 +432,11 @@ def classify(job: dict, run: dict, inputs: Inputs, runners: list[dict], definiti
         return _verdict("busy", f"all {len(usable)} usable eligible runners are busy", flags, notes,
                         eligible=names, busy=etas, eta=soonest)
 
-    waited = inputs.now - ready if ready else 0
+    # Exact ready time when known; otherwise only the time the forge has shown
+    # it as waiting (a run's start would make a just-ready job look stuck).
+    exact = ready_time(job, run, inputs.run_jobs.get(job["run_id"], []), definition, inputs.tasks)[1]
+    since = ready if exact and ready else inputs.waiting_since.get(job["id"], inputs.now)
+    waited = inputs.now - since
     idle_long = [runner["name"] for runner in free
                  if runner.get("idle_since") and inputs.now - runner["idle_since"] >= NOT_PICKED_UP_POLLS * POLL_SECONDS]
     if idle_long and waited >= NOT_PICKED_UP_POLLS * POLL_SECONDS:
@@ -447,7 +520,12 @@ def _drift(inputs: Inputs, runners: list[dict], roster: dict, pools: list[dict],
                          "roster": sorted(name for name, labels in rostered.items() if set(absent) & labels),
                          "fix": "Register a runner with the label, or change the workflow to a label that exists."})
     for pool in pools:
-        if pool["requested"] and pool["registered"] and not pool["online"]:
+        if pool["requested"] and not pool["registered"]:
+            findings.append({"severity": "blocking", "kind": "unsatisfiable_pool",
+                             "title": f"Workflows request {pool['name']}; no registered runner can take it",
+                             "used_by": pool["used_by"], "next_schedule": pool["next_schedule"],
+                             "fix": "Register a runner with these labels, or change the workflows."})
+        elif pool["requested"] and pool["registered"] and not pool["online"]:
             findings.append({"severity": "warn", "kind": "pool_offline",
                              "title": f"Pool {pool['name']} has 0 of {pool['registered']} runners online",
                              "runners": pool["runners"], "next_schedule": pool["next_schedule"],
@@ -516,7 +594,7 @@ def _hosts(inputs: Inputs, runners: list[dict], voters: set[str]) -> list[dict]:
     for name, report in reports.items():
         entry = hosts.setdefault(name, {"name": name, "alias": inputs.hosts.get(name, {}).get("alias", name),
                                         "voter": False, "runners": []})
-        entry["agent_age"] = inputs.now - int(report.get("ts", inputs.now))
+        entry["agent_age"] = inputs.now - int(report.get("received", report.get("ts", inputs.now)))
         entry["metrics"] = report.get("host_metrics")
         entry["vms"] = report.get("vms", [])
         entry["watchdog"] = report.get("watchdog")
@@ -531,7 +609,10 @@ def _alerts(waiting: list[dict], pools: list[dict], now: int) -> list[dict]:
         alerts.append({"severity": "critical", "kind": "unsatisfiable", "count": len(unsatisfiable),
                        "labels": labels, "oldest": max(job["waited"] or 0 for job in unsatisfiable)})
     for pool in pools:
-        if pool["requested"] and pool["registered"] and not pool["online"]:
+        if pool["requested"] and not pool["registered"]:
+            alerts.append({"severity": "critical", "kind": "unsatisfiable_pool", "pool": pool["name"],
+                           "used_by": pool["used_by"], "next_schedule": pool["next_schedule"]})
+        elif pool["requested"] and pool["registered"] and not pool["online"]:
             alerts.append({"severity": "warning", "kind": "pool_offline", "pool": pool["name"],
                            "registered": pool["registered"], "next_schedule": pool["next_schedule"]})
         elif pool["requested"] and pool["registered"] and pool["online"] * 2 < pool["registered"]:

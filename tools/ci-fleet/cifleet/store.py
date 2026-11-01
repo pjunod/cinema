@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS pool_minutes (
   pool TEXT, minute INTEGER, online INTEGER, busy INTEGER, waiting INTEGER, max_wait INTEGER,
   PRIMARY KEY (pool, minute));
 CREATE TABLE IF NOT EXISTS usage (
-  scope TEXT, key TEXT, ts INTEGER, cpu REAL, mem REAL, extra TEXT);
+  scope TEXT, key TEXT, ts INTEGER, cpu REAL, mem REAL, extra TEXT, minute INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS usage_series ON usage(scope, key, ts);
 CREATE TABLE IF NOT EXISTS audit (
   ts INTEGER, actor TEXT, action TEXT, target TEXT, reason TEXT, result TEXT);
@@ -94,7 +94,8 @@ class Store:
         return [self._task_row(row) for row in rows]
 
     def unplaced(self, limit: int) -> list[dict]:
-        rows = self._x("SELECT * FROM tasks WHERE runner IS NULL AND job_id IS NOT NULL AND status != 'skipped' "
+        rows = self._x("SELECT * FROM tasks WHERE runner IS NULL AND runner_uuid IS NULL AND job_id IS NOT NULL "
+                       "AND status != 'skipped' "
                        "ORDER BY task_id DESC LIMIT ?", (limit,))
         return [self._task_row(row) for row in rows]
 
@@ -137,7 +138,7 @@ class Store:
 
     # -- usage samples ---------------------------------------------------------
     def record_usage(self, scope: str, key: str, ts: int, cpu: float | None, mem: float | None, extra=None) -> None:
-        self._x("INSERT INTO usage VALUES (?,?,?,?,?,?)",
+        self._x("INSERT INTO usage (scope, key, ts, cpu, mem, extra) VALUES (?,?,?,?,?,?)",
                 (scope, key, ts, cpu, mem, json.dumps(extra) if extra is not None else None))
 
     def series(self, scope: str, key: str, since: int = 0) -> list[dict]:
@@ -160,10 +161,13 @@ class Store:
         with self.lock:
             db = self.db
             db.execute("BEGIN")
+            # Raw samples older than a day become one row per minute, stamped at
+            # the minute they cover and marked as a minute row.
             db.execute(
-                "INSERT INTO usage SELECT scope, key, (ts / 60) * 60 - 1, AVG(cpu), MAX(mem), NULL FROM usage "
-                "WHERE ts < ? AND ts % 60 != 59 GROUP BY scope, key, ts / 60", (cutoff,))
-            db.execute("DELETE FROM usage WHERE ts < ? AND ts % 60 != 59", (cutoff,))
+                "INSERT INTO usage (scope, key, ts, cpu, mem, extra, minute) SELECT scope, key, (ts / 60) * 60, "
+                "AVG(cpu), MAX(mem), NULL, 1 FROM usage WHERE ts < ? AND minute = 0 GROUP BY scope, key, ts / 60",
+                (cutoff,))
+            db.execute("DELETE FROM usage WHERE ts < ? AND minute = 0", (cutoff,))
             db.execute("DELETE FROM usage WHERE ts < ?", (now - COARSE_DAYS * 86400,))
             db.execute("DELETE FROM pool_minutes WHERE minute < ?", ((now - POOL_DAYS * 86400) // 60,))
             db.execute("DELETE FROM tasks WHERE COALESCE(stopped, created, 0) < ? AND stopped IS NOT NULL",
