@@ -77,8 +77,8 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                         self.assertNotIn("DerivedData", step, "whole build state must stay in its job root")
                 self.assertNotIn("path: clients/apple/build/DerivedData", apple_job)
                 self.assertIn("run: make " + command, apple_job)
-                self.assertIn('grep -Fxq "Xcode 27.1"', apple_job)
-                self.assertIn('grep -Fxq "Build version 27A9275"', apple_job)
+                self.assertIn('grep -Fxq "Xcode 27.2"', apple_job)
+                self.assertIn('grep -Fxq "Build version 27B52"', apple_job)
                 self.assertRegex(apple_job, rf"(?m)^    timeout-minutes: {budget}$")
                 self.assertEqual("concurrency:" in apple_job, serialized)
                 if serialized:

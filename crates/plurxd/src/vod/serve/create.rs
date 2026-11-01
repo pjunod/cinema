@@ -1273,6 +1273,7 @@ impl VodServe {
             return Ok(None);
         };
         let rendition = match finite_software::retained_carrier(
+            &self.shared,
             key,
             index.clone(),
             recipe.clone(),
