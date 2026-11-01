@@ -589,6 +589,10 @@ impl VodServe {
     /// Resolve immutable media without attaching a public playback handle.
     /// The returned build guard protects the lookup/reader-attachment gap;
     /// callers must commit their parent-owned reader graph before dropping it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Only the parent create may capture a retained S before build; its companion, soundtrack and preparation resolves share this frame and must say they do not."
+    )]
     pub(super) async fn resolve_rendition(
         &self,
         prepared: &mut VodRecipeRequest<'_>,
