@@ -5,14 +5,13 @@ impl TranscodeManager {
     /// the fence's alone, so it carries the generation this node last held
     /// authority under for a buffered response to wait after.
     fn admit_publication(&self) -> Result<u64, MediaResponsePublicationRejection> {
-        self.serving_authority.admit().ok_or_else(|| {
-            MediaResponsePublicationRejection::AuthorityLost {
-                admitted_generation: self
-                    .serving_authority
-                    .outage_baseline()
-                    .unwrap_or_else(|| self.serving_authority.state().loss_generation),
-            }
-        })
+        self.serving_authority
+            .admit_or_outage_baseline()
+            .map_err(
+                |baseline| MediaResponsePublicationRejection::AuthorityLost {
+                    admitted_generation: baseline,
+                },
+            )
     }
 
     /// Admit a fully prepared response against the exact owner that resolved

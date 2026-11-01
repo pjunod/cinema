@@ -107,18 +107,89 @@ pub(crate) struct ServingState {
 /// watch consumer to mirror a loss into subsystem-local state.
 #[derive(Clone)]
 pub(crate) struct ServingAuthority {
-    ready: Arc<AtomicBool>,
-    loss_generation: Arc<AtomicU64>,
+    word: AuthorityWord,
     loss_transitions_pending: Arc<AtomicU64>,
     transition: Arc<tokio::sync::RwLock<()>>,
     restart_drain: Arc<RestartDrain>,
 }
 
+/// `ready` and the loss generation in one atomic word: the top bit is
+/// `ready`, the low 63 bits the generation. A loss clears `ready` and bumps
+/// the generation in one store, so a reader can never pair the new `ready`
+/// with the old generation.
+#[derive(Clone)]
+struct AuthorityWord(Arc<AtomicU64>);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AuthorityWordValue {
+    ready: bool,
+    loss_generation: u64,
+}
+
+const AUTHORITY_READY_BIT: u64 = 1 << 63;
+
+impl AuthorityWord {
+    fn new(ready: bool) -> Self {
+        Self(Arc::new(AtomicU64::new(if ready {
+            AUTHORITY_READY_BIT
+        } else {
+            0
+        })))
+    }
+
+    fn load(&self) -> AuthorityWordValue {
+        Self::decode(self.0.load(Ordering::Acquire))
+    }
+
+    fn decode(raw: u64) -> AuthorityWordValue {
+        AuthorityWordValue {
+            ready: raw & AUTHORITY_READY_BIT != 0,
+            loss_generation: raw & !AUTHORITY_READY_BIT,
+        }
+    }
+
+    /// Set `ready` to `desired`, bumping the generation when that is a loss.
+    /// Returns the value now published, or `None` when `ready` already was
+    /// `desired`.
+    fn publish(&self, desired: bool) -> Option<AuthorityWordValue> {
+        let mut published = None;
+        let _ = self
+            .0
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |raw| {
+                let current = Self::decode(raw);
+                if current.ready == desired {
+                    published = None;
+                    return None;
+                }
+                let next = AuthorityWordValue {
+                    ready: desired,
+                    loss_generation: if current.ready && !desired {
+                        (current.loss_generation + 1) & !AUTHORITY_READY_BIT
+                    } else {
+                        current.loss_generation
+                    },
+                };
+                published = Some(next);
+                Some(next.loss_generation | if desired { AUTHORITY_READY_BIT } else { 0 })
+            });
+        published
+    }
+}
+
+/// The generation last held, for a word and pending-loss count read together
+/// (see [`ServingAuthority::outage_baseline`]).
+fn outage_baseline_of(word: AuthorityWordValue, pending: u64) -> Option<u64> {
+    match (word.ready, pending) {
+        (true, 0) => None,
+        (true, _) => Some(word.loss_generation),
+        (false, _) => Some(word.loss_generation.saturating_sub(1)),
+    }
+}
+
 impl ServingAuthority {
     pub(crate) fn always_ready() -> Self {
         Self {
-            ready: Arc::new(AtomicBool::new(true)),
-            loss_generation: Arc::new(AtomicU64::new(0)),
+            word: AuthorityWord::new(true),
             loss_transitions_pending: Arc::new(AtomicU64::new(0)),
             transition: Arc::new(tokio::sync::RwLock::new(())),
             restart_drain: Arc::new(RestartDrain::default()),
@@ -146,24 +217,41 @@ impl ServingAuthority {
     }
 
     pub(crate) fn state(&self) -> ServingState {
+        let (word, pending) = self.observe();
+        ServingState {
+            ready: word.ready && pending == 0,
+            loss_generation: word.loss_generation,
+        }
+    }
+
+    /// One coherent read of the authority word and the pending-loss count.
+    /// The word carries `ready` and the loss generation together, so the two
+    /// can never be seen half-published.
+    fn observe(&self) -> (AuthorityWordValue, u64) {
         loop {
-            let before = self.loss_generation.load(Ordering::Acquire);
             let pending_before = self.loss_transitions_pending.load(Ordering::Acquire);
-            let ready = self.ready.load(Ordering::Acquire);
-            let after = self.loss_generation.load(Ordering::Acquire);
+            let word = self.word.load();
             let pending_after = self.loss_transitions_pending.load(Ordering::Acquire);
-            if before == after && pending_before == pending_after {
-                return ServingState {
-                    ready: ready && pending_after == 0,
-                    loss_generation: after,
-                };
+            if pending_before == pending_after {
+                return (word, pending_after);
             }
         }
     }
 
     pub(crate) fn admit(&self) -> Option<u64> {
-        let state = self.state();
-        state.ready.then_some(state.loss_generation)
+        self.admit_or_outage_baseline().ok()
+    }
+
+    /// [`Self::admit`], and when it refuses, [`Self::outage_baseline`] from
+    /// the same observation, so a refusal always names the generation a
+    /// waiter should wait after (a recovery between two separate reads
+    /// would otherwise leave it with none).
+    pub(crate) fn admit_or_outage_baseline(&self) -> Result<u64, u64> {
+        let (word, pending) = self.observe();
+        match outage_baseline_of(word, pending) {
+            None => Ok(word.loss_generation),
+            Some(baseline) => Err(baseline),
+        }
     }
 
     /// When `admit` would refuse, the loss generation this node last held
@@ -174,23 +262,12 @@ impl ServingAuthority {
     /// During the pending-loss window `ready` still reads true and the
     /// generation has not moved, so the last held generation is the current
     /// one. Once the loss is published the generation has already moved past
-    /// it by one. Reading it this way means a waiter never mistakes the
-    /// previous outage's `Recovered` for this one's.
+    /// it by one: the two change in one atomic store, so no reader sees the
+    /// loss without its generation. Reading it this way means a waiter never
+    /// mistakes the previous outage's `Recovered` for this one's.
     pub(crate) fn outage_baseline(&self) -> Option<u64> {
-        loop {
-            let before = self.loss_generation.load(Ordering::Acquire);
-            let pending = self.loss_transitions_pending.load(Ordering::Acquire);
-            let ready = self.ready.load(Ordering::Acquire);
-            let after = self.loss_generation.load(Ordering::Acquire);
-            if before != after {
-                continue;
-            }
-            return match (ready, pending) {
-                (true, 0) => None,
-                (true, _) => Some(after),
-                (false, _) => Some(after.saturating_sub(1)),
-            };
-        }
+        let (word, pending) = self.observe();
+        outage_baseline_of(word, pending)
     }
 
     pub(crate) fn is_current(&self, admitted_generation: u64) -> bool {
@@ -486,8 +563,7 @@ pub(crate) struct ServingHttpPolicy {
 pub(crate) struct ServingFence {
     metrics: PassiveRaftMetrics,
     quorum_managed: Arc<AtomicBool>,
-    ready: Arc<AtomicBool>,
-    loss_generation: Arc<AtomicU64>,
+    word: AuthorityWord,
     loss_transitions_pending: Arc<AtomicU64>,
     transition: Arc<tokio::sync::RwLock<()>>,
     state: tokio::sync::watch::Sender<ServingState>,
@@ -515,8 +591,7 @@ impl ServingFence {
         Self {
             metrics,
             quorum_managed: Arc::new(AtomicBool::new(quorum_managed)),
-            ready: Arc::new(AtomicBool::new(ready)),
-            loss_generation: Arc::new(AtomicU64::new(0)),
+            word: AuthorityWord::new(ready),
             loss_transitions_pending: Arc::new(AtomicU64::new(0)),
             transition,
             state,
@@ -530,8 +605,7 @@ impl ServingFence {
     }
 
     pub(crate) fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
-            && self.loss_transitions_pending.load(Ordering::Acquire) == 0
+        self.word.load().ready && self.loss_transitions_pending.load(Ordering::Acquire) == 0
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<ServingState> {
@@ -540,8 +614,7 @@ impl ServingFence {
 
     pub(crate) fn authority(&self) -> ServingAuthority {
         ServingAuthority {
-            ready: Arc::clone(&self.ready),
-            loss_generation: Arc::clone(&self.loss_generation),
+            word: self.word.clone(),
             loss_transitions_pending: Arc::clone(&self.loss_transitions_pending),
             transition: Arc::clone(&self.transition),
             restart_drain: Arc::clone(&self.restart_drain),
@@ -1021,7 +1094,7 @@ impl ServingFence {
     }
 
     async fn publish(&self, desired: bool) {
-        if self.ready.load(Ordering::Acquire) == desired {
+        if self.word.load().ready == desired {
             return;
         }
         // Announce authority loss before waiting for an EOF commit that
@@ -1030,21 +1103,17 @@ impl ServingFence {
         // change after every commit admitted before the loss was observed.
         // Count rather than boolean so overlapping publishers cannot clear
         // another publisher's pending fence.
-        let _pending_loss = (self.ready.load(Ordering::Acquire) && !desired)
+        let _pending_loss = (self.word.load().ready && !desired)
             .then(|| PendingLossTransition::new(Arc::clone(&self.loss_transitions_pending)));
         let _transition = self.transition.write().await;
-        let previous = self.ready.swap(desired, Ordering::AcqRel);
-        if previous == desired {
+        // One store: `ready` and the bumped generation become visible
+        // together (`ServingAuthority::outage_baseline` relies on it).
+        let Some(published) = self.word.publish(desired) else {
             return;
-        }
-        let loss_generation = if previous && !desired {
-            self.loss_generation.fetch_add(1, Ordering::AcqRel) + 1
-        } else {
-            self.loss_generation.load(Ordering::Acquire)
         };
         self.state.send_replace(ServingState {
-            ready: desired,
-            loss_generation,
+            ready: published.ready,
+            loss_generation: published.loss_generation,
         });
     }
 }
