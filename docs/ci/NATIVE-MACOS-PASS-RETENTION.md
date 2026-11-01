@@ -37,7 +37,7 @@ symlinks and submodules are significant. Bounds are 128 files, 256 KiB per blob
 and 2 MiB total. The known closure has 45 files. This is explicitly
 `reconstructed_from_authenticated_checkout`; the old producer did not record
 an input manifest. The original build/test commands, desktop scope, Apple labels
-and Xcode 27.1/build 27A9275 contract remain unchanged.
+and Xcode 27.2/build 27B52 contract remain unchanged.
 
 The closure policy pins Cargo.toml, package `build` and Package.swift bytes and
 Git modes, and validates the bounded native Make scope rather than allowing

@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "deploy/apple-runner/plurx-apple-standby"
-EXPECTED_HEALTH = "Xcode 27.1\nBuild version 27A9275\n"
+EXPECTED_HEALTH = "Xcode 27.2\nBuild version 27B52\n"
 loader = importlib.machinery.SourceFileLoader("apple_standby", str(SOURCE))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 standby = importlib.util.module_from_spec(spec)
@@ -131,8 +131,8 @@ class AppleRunnerStandbyTests(unittest.TestCase):
     def test_silent_or_mismatched_health_output_is_unavailable(self):
         for output in (
             "",
-            "Xcode 27.0\nBuild version 27A9275\n",
-            "Xcode 27.1\nBuild version 27A266a\n",
+            "Xcode 27.0\nBuild version 27B52\n",
+            "Xcode 27.2\nBuild version 27A266a\n",
             EXPECTED_HEALTH.rstrip("\n"),
             EXPECTED_HEALTH + "\n",
             EXPECTED_HEALTH.replace("\n", "\r\n"),
