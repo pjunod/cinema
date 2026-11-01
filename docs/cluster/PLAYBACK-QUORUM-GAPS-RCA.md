@@ -433,6 +433,15 @@ revision) to the refusal log. M4 reproduces the refusal and picks the fix:
   `operations`, so a single retry can be raced.
 - **(a) confirmed:** reported back for a decision. It is not patched here.
 
+**M4 outcome (measure first).** Both refusals reproduce deterministically in
+unit form, and M0's log now names which one happened (`cause` =
+`inventory_dirty` for (b), `no_room` for (a), with the sweep report). What a
+local reproduction cannot say is which one the fleet hit: the 48 h logs carry
+`remaining_budget=0`, which points to (a), but only a fleet log with `cause`
+settles it. So no C4 fix ships here. M7's correlation reads the `cause`
+field; if it shows (b), the one-retry fix above is the follow-up, and if (a),
+the eviction policy goes back to Paul.
+
 ### 4.5 C5 — the init wait recognises a terminal producer by exact attempt
 
 **Which snapshot fields cannot do this (Fable V1).** v2 named fields that
