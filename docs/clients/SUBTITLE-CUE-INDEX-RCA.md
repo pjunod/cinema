@@ -16,10 +16,10 @@ still work, then don't for a while, then work again."
 
 | Path | What happened |
 |---|---|
-| Playback window (200 s) | 25–186 s per window on nynuc (21:40–22:50 UTC). At the slow end the window took almost as long as it covered, so cues existed for part of each window and every segment requested before it landed was answered empty. Players do not refetch an answered segment. |
+| Playback window (200 s) | 25–186 s per window on media1 (21:40–22:50 UTC). At the slow end the window took almost as long as it covered, so cues existed for part of each window and every segment requested before it landed was answered empty. Players do not refetch an answered segment. |
 | Whole track, playback node | "cluster job is still queued after the foreground claim wait" at 20 s, then a 120 s failure memo. |
-| Whole track, cluster job | Claimed by nynuc 22:53, m6 23:25, nuc4 23:57, m6 00:39 and never published: each pass read 51.6 GB and hit the 30-minute source-pass deadline, then restarted from zero on another node. |
-| Peer window (`/internal/media/subtitle-range`) | 504 after the 25 s work budget on m6 and nuc4. |
+| Whole track, cluster job | Claimed by media1 22:53, lab6 23:25, lab4 23:57, lab6 00:39 and never published: each pass read 51.6 GB and hit the 30-minute source-pass deadline, then restarted from zero on another node. |
+| Peer window (`/internal/media/subtitle-range`) | 504 after the 25 s work budget on lab6 and lab4. |
 
 ## Root cause — subtitles were found by demuxing the picture
 
