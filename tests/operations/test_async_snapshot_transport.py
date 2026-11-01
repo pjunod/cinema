@@ -1499,7 +1499,7 @@ class ActivationTransferTests(ChildPlanBase):
         restored, request = self.restored(), {'operation': 'unit'}
         sizes = {e['family']: e['path'].stat().st_size for e in restored['staged']}
         session.activate_generation(restored, self.out, request)
-        handle = self.issue(request, self.out)  # the held reservations would alias the grant without lending
+        handle = self.issue(request, self.out)  # the held main reservations are delegated by id, never released
         families = self.context.policy['families']
         for family in ('catalog_main', 'verifier_main'):
             self.assertEqual(self.used()[(family, 'main')], families[family]['main_bytes'])  # granted once, in full
@@ -1520,6 +1520,43 @@ class ActivationTransferTests(ChildPlanBase):
         self.assertEqual(self.used(), before)
         for name in ('catalog.sqlite', 'verifier.sqlite'):
             self.assertEqual(len(self.owners(self.out / 'state' / name)), 1)
+
+
+    def test_the_writer_grant_delegates_the_held_reservation_without_any_release_or_unowned_interval(self):
+        restored, request = self.restored(), {'operation': 'unit'}
+        session.activate_generation(restored, self.out, request)
+        active = self.out / 'state'
+        held = {name: self.owners(active / name)[0] for name in ('catalog.sqlite', 'verifier.sqlite')}
+        charged = {name: reservation.bytes for name, reservation in held.items()}
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError('a held main reservation was released/unclaimed while being handed on')
+        with mock.patch.object(physical.Reservation, 'release_after_removal', forbidden), \
+                mock.patch.object(physical.ReservationLedger, '_unclaim', forbidden):
+            handle = self.issue(request, self.out)
+        ids = {a['reservation_id'] for a in handle.descriptor['allocations']}
+        for name, reservation in held.items():
+            self.assertEqual(self.owners(active / name), [reservation])  # the very same reservation, still the one owner
+            self.assertIn(reservation.reservation_id, ids)
+            self.assertTrue(reservation.delegated)
+            self.assertGreaterEqual(reservation.bytes, charged[name])
+        self.assertEqual(self.context.ledger.claims[str((active / 'catalog.sqlite').relative_to(self.root))][0],
+                         held['catalog.sqlite'])
+
+    def test_a_reaped_writer_returns_the_delegated_file_to_the_parent_still_charged(self):
+        restored, request = self.restored(), {'operation': 'unit'}
+        session.activate_generation(restored, self.out, request)
+        active = self.out / 'state'
+        held = self.owners(active / 'catalog.sqlite')[0]
+        handle = self.issue(request, self.out)
+        report = handle.reconcile_after_reap(0)
+        self.assertIn(held.reservation_id, report['retained'])
+        self.assertFalse(held.delegated or held.released)
+        self.assertEqual(self.owners(active / 'catalog.sqlite'), [held])
+        self.assertGreaterEqual(self.used()[('catalog_main', 'main')], held.bytes)
+        # The next writer inherits the same reservation again; nothing was re-reserved in between.
+        again = self.issue(request, self.out)
+        self.assertIn(held.reservation_id, {a['reservation_id'] for a in again.descriptor['allocations']})
 
 
 class RestoreMainLimitReachabilityTests(unittest.TestCase):

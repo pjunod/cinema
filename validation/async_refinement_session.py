@@ -531,24 +531,39 @@ class GrantPlan:
     def __init__(self, context):
         self.context, self.entries, self.delegated = context, [], {}
 
-    def add(self, resource, component, path, amount, recursive=False):
+    def add(self, resource, component, path, amount, recursive=False, whole=False):
+        """Delegate `amount` (or, with `whole`, everything the family component can still give).
+
+        When the ledger already holds exactly this claim (an activated main file, or a surviving
+        journal), the entry carries that reservation_id: the issuer moves ownership to the grant
+        in the one ledger without releasing it, so only the growth beyond the held charge is
+        deducted from what the parent still holds.
+        """
         owner = physical.FAMILY_OWNERS.get(resource, physical.POOL_OWNERS.get(resource))
         p.require(owner is not None, 'unknown physical family/pool')
         p.require(type(amount) is int, 'physical delegation share must be an integer')
         key = resource, component
         if resource in physical.FAMILY_OWNERS:
             p.require(key not in self.delegated, 'physical family component delegated twice: ' + '/'.join(key))
+        entry = {'reservation_id': secrets.token_hex(32), 'owner': owner, 'resource': resource,
+                 'component': component, 'bytes': amount, 'relative_path': self.context.relative(path),
+                 'recursive': recursive}
+        held = self.context.ledger.held_reservation(entry)
+        held_bytes = 0 if held is None else held.bytes
+        remaining = self.context.ledger.remaining(resource, component)
+        if whole:
+            amount = entry['bytes'] = remaining + held_bytes
         total = self.delegated.get(key, 0) + amount
-        if amount <= 0 or total > self.context.ledger.remaining(resource, component):
+        if amount <= 0 or total - held_bytes > remaining:
             raise physical.PhysicalIncomplete('physical capacity exhausted before child startup: ' + '/'.join(key))
+        if held is not None:
+            entry['reservation_id'] = held.reservation_id
         self.delegated[key] = total
-        self.entries.append({'reservation_id': secrets.token_hex(32), 'owner': owner, 'resource': resource,
-                             'component': component, 'bytes': amount, 'relative_path': self.context.relative(path),
-                             'recursive': recursive})
+        self.entries.append(entry)
 
     def family(self, resource, component, path):
         """The whole family component (only this child holds that family while it runs)."""
-        self.add(resource, component, path, self.context.ledger.remaining(resource, component))
+        self.add(resource, component, path, 1, whole=True)
 
     def database(self, resource, path):
         for component in ('main', 'journal', 'temp'):
@@ -647,38 +662,16 @@ class PhysicalContext:
         return [('catalog_main', Path(request.get('catalog_path', out / 'catalog.sqlite'))),
                 ('verifier_main', Path(request.get('verifier_work_db', out / 'verifier.sqlite')))]
 
-    def lend_held(self, request, out):
-        """Hand a main database file that a parent reservation already owns to the writer's grant.
-
-        An activated restore (or an earlier writer's surviving file) is owned by a main-family
-        reservation; a child allocation over the same path would alias it, and delegating on top
-        of it would charge the file twice. As in the transfer commit, the single object's
-        ownership moves with `paths.clear()` + release; the grant claims the path immediately
-        afterwards and a failed issue puts the parent reservation back (see issue).
-        """
-        lent = []
-        for family, path in self.writer_databases(request, out):
-            relative = self.relative(path)
-            for held in [r for r in self.ledger.reservations
-                         if not r.released and not r.delegated and r.transfer is None
-                         and r.key == (family, 'main') and (relative, False) in r.scope()]:
-                lent.append((family, path, held.bytes))
-                held.paths.clear()
-                held.release_after_removal()
-        return lent
-
     def issue(self, request, output):
+        """Seal the child's grant. A main/journal claim the ledger already holds (an activated
+        restore, an earlier writer's surviving file) is delegated by its reservation_id inside
+        issue_child_grant: ownership moves atomically, with no release and no unowned interval,
+        and a failed issue leaves the parent reservation exactly as it was."""
         out = Path(output)
-        lent = [] if request.get('operation') == 'validate_restore' else self.lend_held(request, out)
-        try:
-            allocations, attachments = self.child_plan(request, out)
-            # B's issuer deducts, canonicalizes, fsyncs and reopens the descriptor
-            # read-only; the pre-issue descriptor reservation is charged to control_bytes.
-            return self.ledger.issue_child_grant(allocations, attachments, self.binding(), self.lease)
-        except BaseException:
-            for family, path, size in lent:
-                self.ledger.reserve(physical.FAMILY_OWNERS[family], family, 'main', size).track(path)
-            raise
+        allocations, attachments = self.child_plan(request, out)
+        # B's issuer deducts, canonicalizes, fsyncs and reopens the descriptor
+        # read-only; the pre-issue descriptor reservation is charged to control_bytes.
+        return self.ledger.issue_child_grant(allocations, attachments, self.binding(), self.lease)
 
     def finish(self, handle):
         """After the child is reaped: drop its scratch, then reconcile every surviving owned file.

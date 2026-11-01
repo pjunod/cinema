@@ -17,6 +17,7 @@ import stat
 import sys
 import tempfile
 from types import SimpleNamespace
+from unittest import mock
 import unittest
 import uuid
 
@@ -687,6 +688,152 @@ class TransferTests(PhysicalBase):
         os.link(destination, source)
         with self.assertRaises(physical.PhysicalPolicyError):
             physical.locate_transfer(self.root, handle.record[0])
+
+
+class DelegationTests(PhysicalBase):
+    """An allocation carrying a held reservation_id moves that reservation into the grant in place.
+
+    The release-and-reissue version has an unowned interval (the claim and the charge disappear
+    before the grant re-claims them); every case below fails on it.
+    """
+    def held_main(self, name='out/catalog.sqlite', size=PAGE, nbytes=3 * PAGE, owner='catalog', family='catalog_main'):
+        path = self.root / name
+        path.write_bytes(b'm' * size)
+        held = self.ledger.reserve(owner, family, 'main', nbytes)
+        held.track(path)
+        return path, held
+
+    def entry(self, held, name='out/catalog.sqlite', nbytes=None, **extra):
+        return dict(alloc(held.key[0], held.key[1], held.bytes if nbytes is None else nbytes, name),
+                    reservation_id=held.reservation_id, **extra)
+
+    @staticmethod
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('released/unclaimed while being handed on: an unowned interval')
+
+    def test_delegation_moves_ownership_with_no_release_unclaim_or_extra_charge(self):
+        path, held = self.held_main()
+        used, claims = dict(self.ledger.used), dict(self.ledger.claims)
+        with mock.patch.object(physical.Reservation, 'release_after_removal', self.forbidden), \
+                mock.patch.object(physical.ReservationLedger, '_unclaim', self.forbidden):
+            handle = self.issue([self.entry(held)])
+        self.assertIn(held.reservation_id, [r.reservation_id for r in handle.reservations])
+        self.assertIs(self.ledger.by_id[held.reservation_id], held)
+        self.assertTrue(held.delegated)
+        self.assertEqual(held.bytes, 3 * PAGE)
+        self.assertEqual(self.ledger.claims[str(path.relative_to(self.root))][0], held)
+        self.assertEqual({k: v for k, v in self.ledger.used.items() if k != ('control_bytes', 'bytes')},
+                         {k: v for k, v in used.items() if k != ('control_bytes', 'bytes')}, 'no second charge for the held file')
+        self.assertEqual(set(claims) <= set(self.ledger.claims), True)
+        child = self.load(handle)
+        self.assertEqual(child.limits[('catalog_main', 'main')], 3 * PAGE)
+
+    def test_the_held_charge_cannot_be_released_by_the_parent_while_delegated(self):
+        path, held = self.held_main()
+        self.issue([self.entry(held)])
+        path.unlink()
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'delegated'):
+            held.release_after_removal()
+        with self.assertRaises(physical.PhysicalPolicyError):
+            self.ledger.issue_child_grant([self.entry(held)], [], self.binding, self.lease)  # nor delegated twice
+
+    def test_growth_beyond_the_held_charge_deducts_only_the_difference(self):
+        path, held = self.held_main(nbytes=2 * PAGE)
+        before = self.ledger.remaining('catalog_main', 'main')
+        self.issue([self.entry(held, nbytes=3 * PAGE)])
+        self.assertEqual(held.bytes, 3 * PAGE)
+        self.assertEqual(self.ledger.remaining('catalog_main', 'main'), before - PAGE)
+
+    def test_a_failed_issue_returns_the_held_reservation_untouched(self):
+        path, held = self.held_main(nbytes=2 * PAGE)
+        used = dict(self.ledger.used)
+        too_big = self.policy['pools']['snapshot_spool_bytes']
+        taker = alloc('snapshot_spool_bytes', 'bytes', too_big, 'out/spool')
+        self.ledger.limits[('snapshot_spool_bytes', 'bytes')] = too_big - 1  # the second allocation fails after the first moved
+        with mock.patch.object(physical.Reservation, 'release_after_removal', self.forbidden):
+            with self.assertRaises(physical.PhysicalIncomplete):
+                self.ledger.issue_child_grant([self.entry(held, nbytes=3 * PAGE), taker], [], self.binding, self.lease)
+        self.assertEqual((held.bytes, held.delegated, held.released), (2 * PAGE, False, False))
+        self.assertEqual(self.ledger.used, used, 'the growth is rolled back with the rest')
+        self.assertEqual(self.ledger.claims[str(path.relative_to(self.root))][0], held)
+        self.assertEqual(self.ledger.grants, {})
+
+    def test_only_the_exact_live_undelegated_claim_can_be_delegated(self):
+        path, held = self.held_main(nbytes=3 * PAGE)
+        cases = [
+            self.entry(held, nbytes=2 * PAGE),                                   # shrinking would uncharge bytes
+            dict(self.entry(held), resource='verifier_main', owner='verifier'),  # another family
+            dict(self.entry(held), component='journal'),                         # another component
+            self.entry(held, name='out/other.sqlite'),                           # another scope
+            dict(self.entry(held), recursive=True),                              # a subtree over a file
+        ]
+        for case in cases:
+            used = dict(self.ledger.used)
+            with self.assertRaises(physical.PhysicalPolicyError):
+                self.ledger.issue_child_grant([case], [], self.binding, self.lease)
+            self.assertEqual(self.ledger.used, used)
+            self.assertFalse(held.delegated)
+        # a reservation with no claim at all names nothing a child could write
+        bare = self.ledger.reserve('catalog', 'catalog_main', 'main', PAGE)
+        with self.assertRaises(physical.PhysicalPolicyError):
+            self.ledger.issue_child_grant([self.entry(bare)], [], self.binding, self.lease)
+        released_path = self.root / 'out' / 'gone.sqlite'
+        gone = self.ledger.reserve('catalog', 'catalog_main', 'main', PAGE)
+        gone.track(released_path)
+        gone.release_after_removal()
+        with self.assertRaises(physical.PhysicalPolicyError):
+            self.ledger.issue_child_grant([dict(self.entry(gone, name='out/gone.sqlite'))], [], self.binding, self.lease)
+
+    def test_a_grant_descriptor_reservation_and_a_reservation_in_transfer_are_not_delegable(self):
+        handle = self.issue(database_allocations())
+        control = handle._control
+        with self.assertRaises(physical.PhysicalPolicyError):
+            self.ledger.issue_child_grant([dict(alloc('control_bytes', 'bytes', control.bytes, 'physical-grants/x.json'),
+                                                reservation_id=control.reservation_id)], [], self.binding, self.lease)
+        path = self.root / 'stage' / 'restored.sqlite'
+        path.write_bytes(b'd' * 100)
+        staged = self.ledger.reserve('snapshot_restore', 'restore_staging_bytes', 'bytes', PAGE)
+        staged.track(path)
+        self.ledger.prepare_transfer(staged.reservation_id, 'catalog', 'catalog_main', 'main', self.root / 'out' / 'moved.sqlite')
+        with self.assertRaises(physical.PhysicalPolicyError):
+            self.ledger.issue_child_grant([dict(alloc('restore_staging_bytes', 'bytes', PAGE, 'stage/restored.sqlite'),
+                                                reservation_id=staged.reservation_id)], [], self.binding, self.lease)
+
+    def test_without_the_id_the_same_path_is_an_alias_and_is_refused(self):
+        path, held = self.held_main()
+        used = dict(self.ledger.used)
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'aliases an owned file'):
+            self.ledger.issue_child_grant([alloc('catalog_main', 'main', 3 * PAGE, 'out/catalog.sqlite')], [], self.binding, self.lease)
+        self.assertEqual(self.ledger.used, used)
+
+    def test_held_reservation_finder_matches_only_the_exact_claims(self):
+        path, held = self.held_main()
+        self.assertIs(self.ledger.held_reservation(alloc('catalog_main', 'main', PAGE, 'out/catalog.sqlite')), held)
+        self.assertIsNone(self.ledger.held_reservation(alloc('catalog_main', 'main', PAGE, 'out/else.sqlite')))
+        self.assertIsNone(self.ledger.held_reservation(alloc('verifier_main', 'main', PAGE, 'out/catalog.sqlite')))
+        self.issue([self.entry(held)])
+        self.assertIsNone(self.ledger.held_reservation(alloc('catalog_main', 'main', PAGE, 'out/catalog.sqlite')))
+
+    def test_reconcile_returns_a_surviving_file_to_the_parent_still_charged_and_releases_a_removed_one(self):
+        path, held = self.held_main()
+        handle = self.issue([self.entry(held)])
+        report = handle.reconcile_after_reap(0)
+        self.assertEqual(report['retained'], [held.reservation_id])
+        self.assertEqual((held.delegated, held.released), (False, False))
+        self.assertEqual(self.ledger.used[('catalog_main', 'main')], 3 * PAGE)
+        self.assertIs(self.ledger.held_reservation(alloc('catalog_main', 'main', PAGE, 'out/catalog.sqlite')), held)
+        again = self.issue([self.entry(held)])  # inherited again without any intervening release
+        path.unlink()
+        report = again.reconcile_after_reap(0)
+        self.assertEqual(report['released'], [held.reservation_id])
+        self.assertEqual(self.ledger.used[('catalog_main', 'main')], 0)
+
+    def test_a_child_over_a_delegated_file_still_cannot_exceed_its_allocation(self):
+        path, held = self.held_main()
+        child = self.load(self.issue([self.entry(held)]))
+        with self.assertRaises(physical.PhysicalIncomplete):
+            child.reserve('catalog', 'catalog_main', 'main', 3 * PAGE + 1)
+        child.reserve('catalog', 'catalog_main', 'main', 3 * PAGE)
 
 
 class VerifierBudgetCapTests(unittest.TestCase):
