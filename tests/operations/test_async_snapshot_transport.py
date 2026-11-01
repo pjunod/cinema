@@ -113,6 +113,7 @@ class SnapshotPrimitiveTests(unittest.TestCase):
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from unittest import mock
 
@@ -1195,7 +1196,7 @@ def child_policy(source_map, **pools):
             'families': families, 'pools': pool_bytes}
 
 
-class ChildPlanTests(unittest.TestCase):
+class ChildPlanBase(unittest.TestCase):
     def setUp(self):
         scratch = ROOT / '.agent-proof-fixtures' / 'child-plan'
         scratch.mkdir(parents=True, exist_ok=True)
@@ -1242,6 +1243,34 @@ class ChildPlanTests(unittest.TestCase):
     def load(self, handle):
         return physical.load_child_grant(handle.descriptor_fd, handle.sha256, self.lease_fd, self.expected())
 
+    def stage_file(self, generation, name, blobs=1, context=None):
+        """One restored file in its own single-file restore_staging reservation."""
+        context = self.context if context is None else context
+        generation.mkdir(mode=0o700, exist_ok=True)
+        staged = generation / name
+        budget = session.PoolBudget(context, 'restore_staging_bytes')
+        budget.track(staged)
+        database = sqlite3.connect(staged)
+        database.execute('PRAGMA page_size=%d' % PAGE)
+        database.execute('CREATE TABLE t(v BLOB)')
+        for _ in range(blobs):
+            database.execute('INSERT INTO t VALUES(zeroblob(4000))')
+        database.commit()
+        database.close()
+        staged.chmod(0o600)
+        budget.reserve(staged.stat().st_size)
+        return staged, budget
+
+    def held_restore(self):
+        staged, budget = self.stage_file(self.out / 'state.restore', 'catalog.staged.sqlite', blobs=2)
+        validation = self.root / 'restore-validation'
+        validation.mkdir(mode=0o700)
+        self.context.attach_restore(str(validation), [(budget, staged)])
+        return staged, budget, validation
+
+
+
+class ChildPlanTests(ChildPlanBase):
     def test_no_pool_capacity_is_delegated_twice_and_the_real_issuer_accepts_the_plan(self):
         context, request = self.context, {'operation': 'unit'}
         allocations, attachments = context.child_plan(request, self.out)
@@ -1297,33 +1326,15 @@ class ChildPlanTests(unittest.TestCase):
         for component in ('main', 'journal', 'temp'):
             self.assertIn(('verifier_continuation_scratch', component), child.limits)
 
-    def held_restore(self):
-        generation = self.out / 'state.restore'
-        generation.mkdir(mode=0o700)
-        budget = session.PoolBudget(self.context, 'restore_staging_bytes')
-        budget.track_subtree(generation)
-        staged = generation / 'catalog.staged.sqlite'
-        database = sqlite3.connect(staged)
-        database.execute('PRAGMA page_size=%d' % PAGE)
-        database.execute('CREATE TABLE t(v BLOB)')
-        database.execute('INSERT INTO t VALUES(zeroblob(8192))')
-        database.commit()
-        database.close()
-        staged.chmod(0o600)
-        budget.reserve(staged.stat().st_size)
-        validation = self.root / 'restore-validation'
-        validation.mkdir(mode=0o700)
-        self.context.attach_restore(str(validation), budget, generation)
-        return staged, budget, validation
-
     def test_restore_attaches_the_held_reservation_read_only_and_never_gets_a_second_main(self):
         staged, budget, validation = self.held_restore()
         request = {'operation': 'validate_restore'}
         allocations, attachments = self.context.child_plan(request, validation)
         self.assertEqual(attachments, [{
             'reservation_id': budget.reservation_id, 'owner': 'snapshot_restore', 'resource': 'restore_staging_bytes',
-            'component': 'bytes', 'bytes': staged.stat().st_size, 'relative_path': 'out/state.restore',
-            'recursive': True, 'access': 'read_only'}])
+            'component': 'bytes', 'bytes': staged.stat().st_size,
+            'relative_path': 'out/state.restore/catalog.staged.sqlite', 'recursive': False,
+            'access': 'read_only'}])
         self.assertEqual({e['resource'] for e in allocations},
                          {'catalog_or_verifier_restore_scratch', 'verifier_continuation_scratch',
                           'source_runtime_scratch_bytes'})
@@ -1348,12 +1359,10 @@ class ChildPlanTests(unittest.TestCase):
             self.context.child_plan({'operation': 'unit'}, validation)
 
     def test_an_attachment_needs_the_tracked_held_reservation(self):
-        generation = self.out / 'state.restore'
-        generation.mkdir(mode=0o700)
         budget = session.PoolBudget(self.context, 'restore_staging_bytes')
         budget.reserve(PAGE)
         with self.assertRaises(receipts.ReceiptError):
-            self.context.attach_restore(str(self.root / 'x'), budget, generation)  # subtree never tracked
+            self.context.attach_restore(str(self.root / 'x'), [(budget, self.out / 'state.restore' / 'never-tracked')])
 
     def test_scratch_is_discarded_after_reap_and_sealed_outputs_stay_attachable(self):
         context, request = self.context, {'operation': 'unit'}
@@ -1395,6 +1404,153 @@ class ChildPlanTests(unittest.TestCase):
         with self.assertRaises(physical.PhysicalIncomplete):
             context.finish(handle)
         self.assertTrue((scratch / 'huge').exists())  # evidence is not deleted before the overage is raised
+
+
+
+class ActivationTransferTests(ChildPlanBase):
+    """The activation rename moves each staged file's reservation to main exactly once."""
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(session, 'current_physical', return_value=self.context)
+        self.current = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def restored(self):
+        generation = self.out / 'state.restore'
+        catalog, catalog_budget = self.stage_file(generation, 'catalog.staged.sqlite', blobs=2)
+        verifier, verifier_budget = self.stage_file(generation, 'verifier.staged.sqlite', blobs=3)
+        staged = [{'budget': catalog_budget, 'path': catalog, 'family': 'catalog_main', 'owner': 'catalog',
+                   'name': 'catalog.sqlite'},
+                  {'budget': verifier_budget, 'path': verifier, 'family': 'verifier_main', 'owner': 'verifier',
+                   'name': 'verifier.sqlite'}]
+        return {'generation': generation, 'staged': staged}
+
+    def used(self):
+        return dict(self.context.ledger.used)
+
+    def owners(self, path):
+        return [r for r in self.context.ledger.reservations if not r.released and path in r.paths]
+
+    def test_each_file_is_charged_once_after_activation_and_staging_is_released(self):
+        restored, request = self.restored(), {}
+        sizes = {e['family']: e['path'].stat().st_size for e in restored['staged']}
+        before = self.used()
+        self.assertEqual(before[('restore_staging_bytes', 'bytes')], sum(sizes.values()))
+        session.activate_generation(restored, self.out, request)
+        used = self.used()
+        self.assertEqual(used[('restore_staging_bytes', 'bytes')], 0)  # the double charge is gone
+        self.assertEqual(used[('catalog_main', 'main')], sizes['catalog_main'])
+        self.assertEqual(used[('verifier_main', 'main')], sizes['verifier_main'])
+        self.assertEqual(used[('control_bytes', 'bytes')], 0)
+        self.assertEqual(self.context.ledger.transfers, {})
+        active = self.out / 'state'
+        self.assertEqual(request, {'catalog_path': str(active / 'catalog.sqlite'),
+                                   'verifier_work_db': str(active / 'verifier.sqlite')})
+        for name in ('catalog.sqlite', 'verifier.sqlite'):
+            self.assertEqual(len(self.owners(active / name)), 1)  # one reservation owns the one file
+        self.assertFalse(restored['generation'].exists())
+
+    def test_destination_capacity_failure_leaves_the_staged_generation_unactivated(self):
+        # Policy where the verifier destination cannot hold the staged verifier file.
+        policy = child_policy(self.source_map)
+        policy['families']['verifier_main'].update(database_bytes=PAGE, main_bytes=PAGE,
+                                                   journal_bytes=2 * PAGE + MIB, temp_bytes=2 * PAGE)
+        self.context = self.make_context(policy)
+        self.current.return_value = self.context
+        restored = self.restored()
+        before = self.used()
+        with self.assertRaises(physical.PhysicalIncomplete):
+            session.activate_generation(restored, self.out, {})
+        self.assertEqual(self.used(), before)  # destination claims aborted, sources still charged
+        self.assertEqual(self.context.ledger.transfers, {})
+        self.assertFalse((self.out / 'state').exists())  # the prior root stays authoritative
+        for entry in restored['staged']:
+            self.assertTrue(entry['path'].exists())
+            self.assertEqual(len(self.owners(entry['path'])), 1)
+
+    def test_a_failed_rename_is_undone_before_any_ownership_commits(self):
+        restored = self.restored()
+        before = self.used()
+        real, calls = os.replace, []
+
+        def flaky(source, destination):
+            calls.append(source)
+            if len(calls) == 2:
+                raise OSError('rename failed')
+            return real(source, destination)
+        with mock.patch.object(session.os, 'replace', flaky):
+            with self.assertRaises(OSError):
+                session.activate_generation(restored, self.out, {})
+        self.assertEqual(self.used(), before)
+        self.assertEqual(self.context.ledger.transfers, {})
+        self.assertFalse((self.out / 'state').exists())
+        for entry in restored['staged']:
+            self.assertTrue(entry['path'].exists())
+
+    def test_an_existing_active_generation_is_never_replaced(self):
+        restored = self.restored()
+        (self.out / 'state').mkdir()
+        before = self.used()
+        with self.assertRaises(receipts.ReceiptError):
+            session.activate_generation(restored, self.out, {})
+        self.assertEqual(self.used(), before)
+
+    def test_the_writer_after_activation_gets_the_file_without_a_second_charge(self):
+        restored, request = self.restored(), {'operation': 'unit'}
+        sizes = {e['family']: e['path'].stat().st_size for e in restored['staged']}
+        session.activate_generation(restored, self.out, request)
+        handle = self.issue(request, self.out)  # the held reservations would alias the grant without lending
+        families = self.context.policy['families']
+        for family in ('catalog_main', 'verifier_main'):
+            self.assertEqual(self.used()[(family, 'main')], families[family]['main_bytes'])  # granted once, in full
+        self.assertEqual(self.used()[('restore_staging_bytes', 'bytes')], 0)
+        child = self.load(handle)
+        self.assertEqual(child.limits[('catalog_main', 'main')], families['catalog_main']['main_bytes'])
+        self.assertGreater(families['catalog_main']['main_bytes'], sizes['catalog_main'])
+
+    def test_a_failed_writer_grant_puts_the_held_reservations_back(self):
+        restored, request = self.restored(), {'operation': 'unit'}
+        session.activate_generation(restored, self.out, request)
+        before = self.used()
+        families = self.context.policy['families']
+        self.assertLess(1, families['catalog_main']['database_bytes'])
+        self.context.ledger.limits[('snapshot_spool_bytes', 'bytes')] = 1
+        with self.assertRaises(physical.PhysicalIncomplete):
+            self.context.issue(request, self.out)
+        self.assertEqual(self.used(), before)
+        for name in ('catalog.sqlite', 'verifier.sqlite'):
+            self.assertEqual(len(self.owners(self.out / 'state' / name)), 1)
+
+
+class RestoreMainLimitReachabilityTests(unittest.TestCase):
+    """A restore validator holds only an attachment; no code it runs may need a verifier_main limit."""
+    CHECKER = ROOT / 'verification' / 'async-driver-refinement' / 'paged_checker.py'
+    CODEC = ROOT / 'verification' / 'async-driver-refinement' / 'paged_codec.py'
+    LOOKUPS = ('enforce_database_cap(', 'check_database(', 'family_limits(', 'prospective_commit(', 'RecordIndex(')
+
+    @staticmethod
+    def body(text, name, kind='def'):
+        start = re.search(r'^(?: *)%s %s\b' % (kind, name), text, re.M)
+        assert start is not None, name
+        indent = len(start.group(0)) - len(start.group(0).lstrip())
+        end = re.search(r'^ {0,%d}\S' % indent, text[start.end():], re.M)
+        return text[start.start():start.end() + (end.start() if end else len(text))]
+
+    def test_restore_validators_and_their_read_only_views_never_look_up_a_main_limit(self):
+        checker, codec_text = self.CHECKER.read_text(), self.CODEC.read_text()
+        for name in ('validate_restore', 'validate_restored_verifier', 'private_input_view'):
+            body = self.body(checker, name)
+            for lookup in self.LOOKUPS:
+                self.assertNotIn(lookup, body, (name, lookup))
+        view = self.body(codec_text, 'readonly_view')
+        for lookup in self.LOOKUPS:
+            self.assertNotIn(lookup, view, lookup)
+
+    def test_the_only_verifier_family_a_restore_validator_enforces_is_the_granted_continuation_scratch(self):
+        codec_text = self.CODEC.read_text()
+        resolver = self.body(codec_text, 'ContinuationResolver', 'class')
+        self.assertIn("enforce_database_cap(self.db, 'verifier_continuation_scratch')", resolver)
+        self.assertNotIn("'verifier_main'", resolver)
 
 
 if __name__ == '__main__':
