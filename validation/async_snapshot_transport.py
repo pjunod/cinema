@@ -469,6 +469,45 @@ class PublicationLedger:
             raise
 
 
+class AuthenticatedResolver:
+    """Resolve content bytes only through authenticated native batch locators.
+
+    `database` is the controller dependency index whose native_locators rows are
+    inserted solely after the exact API/upload/ZIP/member transaction and lineage
+    checks. Local presence, a matching hash elsewhere, or a parent attestation is
+    never authority. Every returned byte string is rehashed against the ContentRef.
+    """
+    def __init__(self, database, parts_root: Path):
+        self.db = database
+        self.parts_root = Path(parts_root)
+
+    def __call__(self, reference: dict) -> bytes:
+        _require(set(reference) == {'kind', 'sha256', 'bytes'} and bool(_DIGEST.fullmatch(reference['sha256'])) and
+                 bool(re.fullmatch('[a-z][a-z0-9_]*', reference['kind'])) and type(reference['bytes']) is int
+                 and 0 < reference['bytes'] <= 8 * CHUNK_BYTES, 'invalid ContentRef')
+        name = 'content/' + reference['kind'] + '/' + reference['sha256']
+        row = self.db.execute('SELECT artifact_id FROM native_locators WHERE member_path=? AND sha256=? AND bytes=? '
+                              'ORDER BY batch_receipt_sha256 LIMIT 1',
+                              (name, reference['sha256'], reference['bytes'])).fetchone()
+        _require(row is not None, 'content has no authenticated native locator')
+        base = self.parts_root / str(row[0])
+        _require(base.is_dir() and not base.is_symlink() and base.resolve() == base, 'authenticated part directory unsafe')
+        fd = os.open(base / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            _require(stat.S_ISREG(info.st_mode) and info.st_size == reference['bytes'], 'authenticated member length differs')
+            data = bytearray()
+            while len(data) < reference['bytes']:
+                block = os.read(fd, min(65536, reference['bytes'] - len(data)))
+                _require(bool(block), 'authenticated member truncated')
+                data.extend(block)
+            _require(not os.read(fd, 1) and content_ref(reference['kind'], bytes(data)) == reference,
+                     'authenticated member bytes differ from ContentRef')
+            return bytes(data)
+        finally:
+            os.close(fd)
+
+
 def restore_image(root: dict, resolve, destination: OwnedDirectory, name: str, reserve, release):
     """Reconstruct every byte from authenticated roots; validate all tree summaries.
 
@@ -853,18 +892,68 @@ def iter_keyed_manifest(reference, resolve, binding, domain, kind):
     _require(len(summaries) == 1, 'keyed manifest traversal incomplete')
 
 
+PLANNED_KEYS = {'schema_version', 'planned_work_unit', 'checkpoint', 'initial_image', 'session',
+                'artifacts', 'stage_complete'}
+ACCEPTED_KEYS = {'schema_version', 'work_unit', 'checkpoint', 'initial_image', 'session',
+                 'artifacts', 'stage_complete'}
+
+
+def planned_result(execution_result: dict, execution_origin: dict) -> dict:
+    """Deterministic PlannedResult: the ordinary seven keys with an empty root list.
+
+    The bytes are hashed into the publication intent before any receipt exists, so
+    they can contain neither artifact roots nor any later hash (no result/ZIP/intent
+    cycle). The original execution origin is a source-owned execute dispatch.
+    """
+    _require(set(execution_result) == ACCEPTED_KEYS, 'ordinary result fields differ')
+    unit = execution_result['work_unit']
+    _require(type(unit) is dict and unit['artifact_roots'] == [] and
+             execution_origin['operation'] == 'execute' and execution_origin['attempt'] == 1 and
+             execution_origin['mode'] == 'unit', 'planned result already claims artifacts or has no original execution')
+    _require(all(unit[key] == execution_origin[key] for key in ('run', 'job', 'task', 'attempt', 'mode')),
+             'planned WorkUnit is not the original execution task')
+    planned = {key: value for key, value in execution_result.items() if key != 'work_unit'}
+    planned['planned_work_unit'] = unit
+    return planned
+
+
+def accepted_result(planned: dict, execution_origin: dict, original_receipts, reference) -> dict:
+    """Reconstruct the single ordinary result from authenticated original roots.
+
+    `original_receipts` are the ArtifactReceipt envelopes of the direct original
+    execution upload in original part order. Later publishers' receipts are never
+    accepted here: each must carry the original run/job/task identity. `reference`
+    is the controller's existing envelope reference function (id + transport hash).
+    """
+    _require(type(planned) is dict and set(planned) == PLANNED_KEYS, 'planned result fields differ')
+    unit = dict(planned['planned_work_unit'])
+    _require(unit['artifact_roots'] == [], 'preupload result already claims artifact authority')
+    _require((unit['run'], unit['job'], unit['task'], unit['attempt']) ==
+             (execution_origin['run'], execution_origin['job'], execution_origin['task'], 1),
+             'planned WorkUnit differs from original execution')
+    refs = []
+    for receipt in original_receipts:
+        record = receipt['record']
+        _require((record['run'], record['job'], record['task'], record['attempt']) ==
+                 (execution_origin['run'], execution_origin['job'], execution_origin['task'], 1) and
+                 record['unit_ordinal'] == unit['unit_ordinal'],
+                 'publisher receipt relabeled original execution')
+        refs.append(reference(receipt, record['artifact_id']))
+    _require(0 < len(refs) <= 32 and len({row['id'] for row in refs}) == len(refs),
+             'original direct artifacts absent, duplicate or excessive')
+    unit['artifact_roots'] = refs
+    result = {key: value for key, value in planned.items() if key != 'planned_work_unit'}
+    result['work_unit'] = unit
+    _require(set(result) == ACCEPTED_KEYS, 'accepted result fields differ')
+    return result
+
+
 def prepare_publication(inventory: ContentInventory, ledger: PublicationLedger, binding,
                         execution_origin, execution_result, catalog_root, verifier_root, evidence):
     """Freeze the planned result, then intent; no postupload receipt hash cycle."""
-    _require(set(execution_result) == {'schema_version', 'work_unit', 'checkpoint', 'initial_image',
-                                     'session', 'artifacts', 'stage_complete'}, 'ordinary result fields differ')
+    planned = planned_result(execution_result, execution_origin)
     unit = execution_result['work_unit']
-    _require(unit['artifact_roots'] == [] and execution_origin['operation'] == 'execute' and
-             execution_origin['attempt'] == 1 and execution_origin['mode'] == 'unit',
-             'planned result already claims artifacts or has no original execution')
-    planned = {key: value for key, value in execution_result.items() if key != 'work_unit'}
-    planned['planned_work_unit'] = unit
-    result_ref = inventory.put('execution_result', canonical(planned))
+    result_ref = inventory.put('planned_execution_result', canonical(planned))
     cp = execution_result['checkpoint']
     prior = unit['expected_prior_checkpoint']
     intent = {**binding, 'schema_version': 1, 'kind': 'publication_intent',
@@ -944,13 +1033,14 @@ def resume_publication(ledger: PublicationLedger, pending, batch, authenticated_
         raise
 
 
-def finish_publication(ledger: PublicationLedger, intent, pending, activation, planned_result,
-                       original_receipts, validate_prefix):
-    """Return ordinary progress exactly once, only after full current-prefix checks.
+def finish_publication(ledger: PublicationLedger, intent, pending, activation, planned,
+                       original_receipts, reference, validate_prefix):
+    """Return the ordinary accepted result exactly once, only after closure checks.
 
-    The parent authenticates terminal-success execution/publisher origins and all
-    native locators before this call. `validate_prefix` performs the existing
-    stage-appropriate Rust/M3/verifier/TLC checks on reconstructed full images.
+    The parent has already authenticated terminal-success execution/publisher
+    origins and every native locator. `validate_prefix` performs the existing
+    stage-appropriate Rust/M3/verifier/TLC checks on reconstructed full images
+    and the restored-validation evidence named by the activation.
     """
     _require(next(missing_content(ledger), None) is None, 'publication payload closure incomplete')
     _require(activation['schema_version'] == 1 and activation['kind'] == 'publication_activation' and
@@ -962,23 +1052,11 @@ def finish_publication(ledger: PublicationLedger, intent, pending, activation, p
                  'catalog_root', 'verifier_root', 'execution_result')), 'activation/intent identity differs')
     _require(ledger.db.execute('SELECT 1 FROM state WHERE key=?', ('activated:' + pending['intent']['sha256'],)).fetchone()
              is None, 'publication already activated')
-    _require(content_ref('execution_result', canonical(planned_result)) == intent['execution_result'],
+    _require(content_ref('planned_execution_result', canonical(planned)) == intent['execution_result'],
              'planned execution result changed')
-    unit = dict(planned_result['planned_work_unit'])
-    _require(unit['artifact_roots'] == [], 'preupload result already claims artifact authority')
-    origin = intent['execution_origin']
-    refs = []
-    for receipt in original_receipts:
-        record = receipt['record']
-        _require((record['run'], record['job'], record['task'], record['attempt']) ==
-                 (origin['run'], origin['job'], origin['task'], 1), 'publisher receipt relabeled original execution')
-        refs.append({'kind': 'ArtifactReceipt', 'id': record['artifact_id'],
-                     'sha256': hashlib.sha256(canonical(receipt)).hexdigest()})
-    _require(refs and len(refs) <= 32, 'original direct artifacts absent or excessive')
-    unit['artifact_roots'] = refs
-    result = {key: value for key, value in planned_result.items() if key != 'planned_work_unit'}
-    result['work_unit'] = unit
-    _require(result['stage_complete'] == activation['stage_complete'] and unit['stage'] == activation['stage'],
+    result = accepted_result(planned, intent['execution_origin'], original_receipts, reference)
+    _require(result['stage_complete'] == activation['stage_complete'] and
+             result['work_unit']['stage'] == activation['stage'],
              'activation stage differs from frozen result')
     validate_prefix(result, activation['validations'])
     ledger.db.execute('INSERT INTO state VALUES(?,?)',
@@ -987,11 +1065,13 @@ def finish_publication(ledger: PublicationLedger, intent, pending, activation, p
     return result
 
 
-def native_batch(inventory: ContentInventory, ledger: PublicationLedger, binding, part_plan):
+def native_batch(inventory: ContentInventory, ledger: PublicationLedger, binding, part_plan, *, only=None):
     """Pack one bounded native batch, reserving exact source-bounded tree space.
 
     The caller gives an existing native PartPlan (32 slots, 300 members, 512MiB).
     Transport manifest nodes are not themselves coverage or proof evidence.
+    `only` is the closed conformance recipe's offer set of content identities; it
+    restricts which genuine required payload is offered, never the slot/size caps.
     """
     import math
     # Every actual transfer leaf has these fixed generated path widths. This is
@@ -1018,6 +1098,8 @@ def native_batch(inventory: ContentInventory, ledger: PublicationLedger, binding
         part_plan.reserve('transfer/node-' + str(ordinal) + '.json', metadata_bound, 'transfer_manifest')
     selected = 0
     for reference in missing_content(ledger):
+        if only is not None and (reference['kind'], reference['sha256']) not in only:
+            continue
         _require(len(reference['kind']) <= 64 and bool(re.fullmatch('[a-z][a-z0-9_]*', reference['kind'])),
                  'content kind is not a registered generated transport name')
         name = 'content/' + reference['kind'] + '/' + reference['sha256']
@@ -1077,3 +1159,63 @@ def native_batch(inventory: ContentInventory, ledger: PublicationLedger, binding
     ledger.db.commit()
     part_plan.preflight()
     return transfer
+
+
+CONFORMANCE_CASE = 'native_snapshot_three_batch_v1'
+
+
+def conformance_case_sha256(registration_sha256: str, session_id: str, anchor_intent_sha256: str) -> str:
+    return hashlib.sha256(canonical({'registration_sha256': registration_sha256, 'session_id': session_id,
+        'case_id': CONFORMANCE_CASE, 'anchor_intent_sha256': anchor_intent_sha256})).hexdigest()
+
+
+def conformance_chunks(catalog_root: dict, verifier_root: dict, resolve) -> list[dict]:
+    """First two distinct genuine snapshot_chunk identities of both complete manifests.
+
+    Returns every distinct chunk identity sorted by canonical [kind,sha256]. The
+    walk streams the complete bounded trees and substitutes nothing; a closure with
+    fewer than two distinct chunks is not schedulable (the caller reports it).
+    """
+    import json
+    seen = {}
+    for root, domain in ((catalog_root, 'catalog'), (verifier_root, 'verifier')):
+        stack = [root['manifest_root']]
+        while stack:
+            reference = stack.pop()
+            raw = resolve(reference)
+            _require(content_ref('snapshot_manifest_node', raw) == reference, 'conformance manifest node differs')
+            node = json.loads(raw)
+            for entry in node['entries']:
+                if node['level']:
+                    stack.append(entry['child'])
+                else:
+                    content = entry['content']
+                    _require(content['kind'] == 'snapshot_chunk', 'conformance leaf is not a snapshot chunk')
+                    seen[content['sha256']] = content
+    return [seen[key] for key in sorted(seen)]
+
+
+def conformance_offer(batch_ordinal: int, chunks: list[dict]):
+    """Offer set for one rehearsal batch, or None for the normal remainder packing.
+
+    Batch zero offers exactly the first sorted chunk and batch one exactly the
+    second as their sole new payload; batch two onward offers the remaining genuine
+    closure. Transport-manifest/control framing is bounded metadata, not payload.
+    """
+    _require(len(chunks) >= 2, 'conformance case needs two distinct real snapshot chunks')
+    if batch_ordinal in (0, 1):
+        return {('snapshot_chunk', chunks[batch_ordinal]['sha256'])}
+    return None
+
+
+def check_conformance_payloads(chunks: list[dict], batches: list[list[tuple[str, str]]]) -> None:
+    """Recompute the forced three-batch shape from authenticated per-batch payload.
+
+    `batches` lists, in dispatch order, each terminal-successful transfer batch's
+    new payload identities (kind, sha256) from its authenticated transfer manifest.
+    """
+    _require(len(chunks) >= 2 and len(batches) >= 3 and all(batches), 'fewer than three nonempty transfer batches')
+    _require(batches[0] == [('snapshot_chunk', chunks[0]['sha256'])] and
+             batches[1] == [('snapshot_chunk', chunks[1]['sha256'])], 'first two batches are not the two sole real chunks')
+    flat = [identity for batch in batches for identity in batch]
+    _require(len(flat) == len(set(flat)), 'conformance payload credited twice')
