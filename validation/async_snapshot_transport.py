@@ -605,24 +605,30 @@ class AuthenticatedResolver:
 
 
 def restore_image(root: dict, resolve, destination: OwnedDirectory, name: str, reserve, release):
-    """Reconstruct every byte from authenticated roots; validate all tree summaries.
+    """Reconstruct every byte of a catalog/verifier root from authenticated content.
 
     `resolve` must authenticate ContentRef lineage before returning exact bytes.
     The destination reservation covers the complete new file before creation.
     No partial target becomes visible, and a failed restore never grants credit.
     """
-    import json
     kind = root['kind']
     _require(kind in ('catalog_backup', 'verifier_backup') and root['schema_version'] == 2,
              'obsolete snapshot root')
     size_key, hash_key = (('catalog_bytes', 'catalog_sha256') if kind == 'catalog_backup'
                           else ('work_db_bytes', 'work_db_sha256'))
-    expected_size, expected_hash = root[size_key], root[hash_key]
-    _require(type(expected_size) is int and expected_size > 0 and
-             root['chunk_bytes_limit'] == CHUNK_BYTES and
-             root['chunk_count'] == (expected_size + CHUNK_BYTES - 1) // CHUNK_BYTES,
+    _require(root['chunk_bytes_limit'] == CHUNK_BYTES and type(root[size_key]) is int and root[size_key] > 0 and
+             root['chunk_count'] == (root[size_key] + CHUNK_BYTES - 1) // CHUNK_BYTES,
              'snapshot chunk geometry differs')
-    scope = scope_digest(root, 'catalog' if kind == 'catalog_backup' else 'verifier')
+    return restore_tree(root['manifest_root'], root['chunk_count'], root[size_key], root[hash_key],
+                        scope_digest(root, 'catalog' if kind == 'catalog_backup' else 'verifier'),
+                        resolve, destination, name, reserve, release)
+
+
+def restore_tree(manifest_root: dict, chunk_count: int, expected_size: int, expected_hash: str, scope: str,
+                 resolve, destination: OwnedDirectory, name: str, reserve, release):
+    """Stream one complete chunk tree into a fresh owned file; verify EOF and hash."""
+    import json
+    root = {'manifest_root': manifest_root, 'chunk_count': chunk_count}
     _require(Path(name).name == name and name not in ('', '.', '..'), 'invalid restore filename')
     reserve(expected_size)
     temporary = '.restore-' + uuid.uuid4().hex

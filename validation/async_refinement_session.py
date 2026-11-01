@@ -17,6 +17,9 @@ import os
 from pathlib import Path
 import resource
 import re
+import secrets
+import hashlib
+import sqlite3
 import shutil
 import subprocess
 import sys
@@ -476,7 +479,139 @@ def advance(state, result, root):
     return new
 
 
-def child_environment(reg, request, source, output):
+GRANT_ENV = ('PLURX_ASYNC_PHYSICAL_GRANT_FD', 'PLURX_ASYNC_PHYSICAL_GRANT_SHA256',
+             'PLURX_ASYNC_PHYSICAL_LEASE_FD')
+
+
+def process_start_ticks(pid):
+    """Kernel start time of a live process; binds a grant to its exact parent."""
+    raw = Path('/proc/' + str(pid) + '/stat').read_text()
+    fields = raw[raw.rindex(')') + 2:].split()
+    return int(fields[19])
+
+
+class HeldLease:
+    """The validated owned-slot lease, held open for the whole parent lifetime.
+
+    The descriptor, not a filename, is what an allocation-capable child inherits;
+    the child never reopens a lease and claims authority from a path.
+    """
+    def __init__(self, storage, source_root):
+        root = validate_storage(storage, source_root)
+        path = Path(storage['lease_file'])
+        self.fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        info = os.fstat(self.fd)
+        p.require(info.st_dev == storage['mount_device']
+                  and os.path.samestat(info, path.lstat()) and p.file_sha(path) == storage['lease_sha256'],
+                  'held lease descriptor is not the registered lease')
+        self.relative_path = p.safe_path(path.relative_to(root).as_posix())
+        self.device, self.inode = info.st_dev, info.st_ino
+
+    def close(self):
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+
+class PhysicalContext:
+    """Parent-owned ledger, lease and child-grant lifetime for one controller process.
+
+    The parent deducts every delegated allocation in its single ledger, writes a
+    private descriptor, launches the child with explicit pass_fds and keeps the
+    lease and deductions held until the child is reaped and owned files are
+    reconciled. A child never receives the full policy budget again.
+    """
+    def __init__(self, reg, plan, session_id, root, owned):
+        self.reg, self.session_id, self.owned = reg, session_id, Path(owned).resolve()
+        self.plan = p.envelope(plan, 'ResourcePlan', root)
+        wrapper = operational_bounds(self.plan['source_bounds_utf8'], reg, root, measurement_pending=True)
+        self.policy = wrapper['physical_policy']
+        self.policy_sha256 = p.digest(p.canonical(self.policy))
+        self.lease = HeldLease(reg['storage'], root)
+        info = self.owned.stat()
+        self.ledger = physical.ReservationLedger(self.policy, self.owned)
+        self.root_identity = {'path': str(self.owned), 'device': info.st_dev, 'inode': info.st_ino}
+        # output directory -> read-only attachments of already held parent reservations
+        self.attachments = {}
+
+    def binding(self):
+        return {'source': self.reg['source'], 'session_id': self.session_id,
+                'resource_plan_sha256': self.plan['plan_sha256'],
+                'physical_policy_sha256': self.policy_sha256, 'owned_root': self.root_identity,
+                'parent': {'pid': os.getpid(), 'start_ticks': process_start_ticks(os.getpid())}}
+
+    def relative(self, path):
+        path = Path(path).absolute()
+        p.require(self.owned in path.parents, 'physical allocation path escapes the exact owned root')
+        return p.safe_path(path.relative_to(self.owned).as_posix())
+
+    def allocation(self, resource, component, path, recursive=False):
+        """One source-selected owned file/subtree sized to what the parent still holds."""
+        owner = physical.FAMILY_OWNERS.get(resource, physical.POOL_OWNERS.get(resource))
+        p.require(owner is not None, 'unknown physical family/pool')
+        amount = self.ledger.remaining(resource, component)
+        p.require(type(amount) is int and amount > 0, 'physical capacity exhausted before child startup')
+        return {'reservation_id': secrets.token_hex(32), 'owner': owner, 'resource': resource,
+                'component': component, 'bytes': amount, 'relative_path': self.relative(path),
+                'recursive': recursive}
+
+    def child_plan(self, request, output):
+        """Disjoint owned allocations for exactly the files a child may write."""
+        out = Path(output)
+        files = [('catalog_main', Path(request.get('catalog_path', out / 'catalog.sqlite'))),
+                 ('verifier_main', Path(request.get('verifier_work_db', out / 'verifier.sqlite'))),
+                 ('catalog_export_scratch', out / '.manifest-closure.sqlite')]
+        allocations = []
+        for resource, path in files:
+            for component in ('main', 'journal', 'temp'):
+                allocations.append(self.allocation(resource, component, path))
+        for name in ('catalog-backup.sqlite', 'verifier-backup.sqlite'):
+            allocations.append(self.allocation('snapshot_spool_bytes', 'bytes', out / name))
+        for name in ('child-home', 'child-temp'):
+            allocations.append(self.allocation('source_runtime_scratch_bytes', 'bytes', out / name, True))
+        return allocations, list(self.attachments.get(str(out), []))
+
+    def issue(self, request, output):
+        allocations, attachments = self.child_plan(request, output)
+        # B's issuer deducts, canonicalizes, fsyncs and reopens the descriptor
+        # read-only; the pre-issue descriptor reservation is charged to control_bytes.
+        return self.ledger.issue_child_grant(allocations, attachments, self.binding(), self.lease)
+
+    def finish(self, handle):
+        """After the child is reaped: reconcile every surviving owned file, then close."""
+        try:
+            handle.reconcile_after_reap()
+        finally:
+            handle.close()
+
+    def close(self):
+        self.lease.close()
+
+
+_PHYSICAL = []
+
+
+class physical_session:
+    """Install the one controller PhysicalContext for run_quantum in this process."""
+    def __init__(self, context):
+        self.context = context
+
+    def __enter__(self):
+        p.require(not _PHYSICAL, 'nested physical controller context')
+        _PHYSICAL.append(self.context)
+        return self.context
+
+    def __exit__(self, *_exc):
+        _PHYSICAL.clear()
+        self.context.close()
+
+
+def current_physical():
+    p.require(len(_PHYSICAL) == 1, 'allocation-capable child has no physical grant context')
+    return _PHYSICAL[0]
+
+
+def child_environment(reg, request, source, output, grant=None):
     # Never copy os.environ: API tokens, checkout credentials and CI payloads
     # stay in the trusted controller. HOME is a fresh private child directory.
     home = Path(output) / 'child-home'
@@ -506,6 +641,15 @@ def child_environment(reg, request, source, output):
     rustup = os.environ.get('RUSTUP_HOME', str(Path.home()/'.rustup'))
     p.require(Path(rustup).is_absolute(), 'toolchain home is not absolute')
     env['RUSTUP_HOME'] = rustup
+    # The environment is built from scratch, so no inherited grant variable can
+    # survive; each child receives only its own explicit current grant.
+    p.require(not any(key.startswith('PLURX_ASYNC_PHYSICAL_') for key in env),
+              'stale physical grant variable inherited')
+    p.require(grant is not None, 'allocation-capable child requires an explicit physical grant')
+    granted = grant.environment()
+    p.require(type(granted) is dict and set(granted) == set(GRANT_ENV)
+              and all(type(value) is str for value in granted.values()), 'child grant environment differs')
+    env.update(granted)
     return env
 
 
@@ -548,12 +692,29 @@ def run_quantum(request_path, reg, source, output, command):
         resource.setrlimit(resource.RLIMIT_AS, (child_address_limit, child_address_limit))
         os.umask(0o077)
     log_path = Path(output) / ('quantum-' + str(time.time_ns()) + '.log')
-    environment=child_environment(reg,request_path,source,output)
+    context = current_physical()
+    # Deduct every delegated allocation before the child exists; the lease and the
+    # deductions stay held through reap and owned-file reconciliation (finish).
+    grant = context.issue(request, output)
+    try:
+        return _run_granted_child(context, grant, request, request_path, reg, source, output, command,
+                                  operational, limits, deadline, limit, session_id, log_path)
+    finally:
+        context.finish(grant)
+
+
+def _run_granted_child(context, grant, request, request_path, reg, source, output, command,
+                       operational, limits, deadline, limit, session_id, log_path):
+    import selectors
+    import signal
+    unit = request.get('work_unit')
+    environment=child_environment(reg,request_path,source,output,grant)
     if operational:
         environment.pop('PLURX_ASYNC_PAGED_REQUEST',None)
         environment['PLURX_ASYNC_CATALOG_CALIBRATION']=str(Path(output)/'catalog-calibration.json')
     process = subprocess.Popen(command, cwd=source, env=environment,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               pass_fds=(grant.fd, context.lease.fd),
                                preexec_fn=limits, start_new_session=True)
     size = 0
     last_guard=0
@@ -1038,9 +1199,10 @@ def upload_outputs(metadata, staging):
             stream.write(f'part_{n}_path={Path(staging).resolve() / "parts" / str(n)}\n')
 
 
-def authenticate_output(api, reg, run_id, mode, destination, root):
+def download_parts(api, reg, run_id, mode, destination, root):
+    """Authenticate every native ZIP of one terminal producer; no semantic reading."""
     run, job, event = p.producer(api, run_id, reg, mode, ('success',))
-    if event['inputs']['operation']=='execute':
+    if event['inputs']['operation'] in ('execute','publish'):
         bound=p.decode(event['inputs']['control'].encode())
         declared=p.envelope(bound['resource_plan'],'ResourcePlan',root)
         p.require(declared['source']==reg['source'],'current producer resource source differs')
@@ -1083,6 +1245,16 @@ def authenticate_output(api, reg, run_id, mode, destination, root):
                                     'zip_bytes': archive.stat().st_size, 'members': descriptor['members']}
         finally:
             archive.unlink(missing_ok=True)
+    return {'run': run, 'job': job, 'event': event, 'lines': lines, 'metadata': metadata,
+            'parts': parts, 'receipts': artifact_receipts, 'total': total}
+
+
+def authenticate_output(api, reg, run_id, mode, destination, root):
+    got = download_parts(api, reg, run_id, mode, destination, root)
+    run, job, event, lines = got['run'], got['job'], got['event'], got['lines']
+    metadata, parts, artifact_receipts, total = got['metadata'], got['parts'], got['receipts'], got['total']
+    checkpoint_digest = None
+    result = None
     reject_current_control_members(parts,metadata['unit_ordinal'])
     result_path = p.safe_path(metadata['result_path'])
     locations = [directory / result_path for directory in parts.values() if (directory / result_path).is_file()]
@@ -1152,6 +1324,630 @@ def authenticate_output(api, reg, run_id, mode, destination, root):
     live_pr(api,reg)
     return result, {'parts': parts, 'receipts': artifact_receipts, 'bytes': total,
                     'control':carrier,'control_sha256':control_sha}, metadata
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint-capacity publication controller. Pending publication is transport
+# state outside semantic progress; only finish_publication yields the ordinary
+# result, and `advance` runs once for it.
+# ---------------------------------------------------------------------------
+
+def open_database(family, path):
+    """Physically granted connection on the proof host; plain on a read-only consumer."""
+    if _PHYSICAL:
+        context = _PHYSICAL[0]
+        grant = physical.reserve_database(context.ledger, family, path,
+                                          context.policy['families'][family]['database_bytes'])
+        connection = grant.connect()
+        context.grants.append(grant)  # retained: files survive until actually removed
+        return connection
+    return sqlite3.connect(path)
+
+
+class PoolBudget:
+    """Sub-accounting of one pool reservation the parent holds for its own copies."""
+    def __init__(self, context, pool, existing=0):
+        amount = context.ledger.remaining(pool, 'bytes')
+        self.reservation = context.ledger.reserve(physical.POOL_OWNERS[pool], pool, 'bytes', amount)
+        self.reservation_id = self.reservation.reservation_id
+        self.capacity, self.used, self.pool = amount, 0, pool
+        self.reserve(existing)  # files that survived an earlier job remain charged
+
+    def reserve(self, size):
+        if type(size) is not int or size < 0 or self.used + size > self.capacity:
+            raise physical.PhysicalIncomplete('physical pool exhausted: ' + self.pool)
+        self.used += size
+
+    def release(self, size):
+        self.used -= size
+        p.require(self.used >= 0, 'physical pool released below zero')
+
+
+def owned_directory(path, reg=None, root=None):
+    """Private owned directory capability; lease-checked on the proof host."""
+    path = Path(path)
+    if reg is not None:
+        return snapshots.OwnedDirectory(path, Path(reg['storage']['root']),
+                                        lambda: validate_storage(reg['storage'], root))
+    return snapshots.OwnedDirectory(path, path.parent, lambda: None)
+
+
+class PublicationStore:
+    """Owned spool of one pending publication: CAS, ledger, evidence copies.
+
+    Spool bytes are sender-side cache only. Coverage is credited from authenticated
+    native batches during replay and overwritten into this ledger before sending.
+    """
+    def __init__(self, reg, root, name, *, create):
+        context = current_physical()
+        self.reg, self.root_source = reg, root
+        self.root = context.owned / name
+        self.root.mkdir(mode=0o700, exist_ok=not create)
+        for sub in ('cas', 'evidence'):
+            (self.root / sub).mkdir(mode=0o700, exist_ok=True)
+        self.cas = owned_directory(self.root / 'cas', reg, root)
+        self.cas_budget = PoolBudget(context, 'cas_bytes', directory_bytes(self.root / 'cas'))
+        self.inventory = snapshots.ContentInventory(
+            open_database('publication_pack_scratch', self.root / 'inventory.sqlite'),
+            self.cas, self.cas_budget.reserve, self.cas_budget.release)
+        self.ledger = snapshots.PublicationLedger(
+            open_database('publication_pending_scratch', self.root / 'ledger.sqlite'))
+        self.evidence = None
+        if create:
+            self.spool_budget = PoolBudget(context, 'snapshot_spool_bytes')
+            self.evidence = snapshots.EvidencePlan(
+                owned_directory(self.root / 'evidence', reg, root),
+                open_database('publication_pack_scratch', self.root / 'evidence.sqlite'),
+                self.spool_budget.reserve, self.spool_budget.release)
+
+    def close(self):
+        if self.evidence is not None:
+            self.evidence.close()
+        self.cas.close()
+
+
+def current_origin(state, reg, run, job, operation):
+    p.require(operation in ('execute', 'publish'), 'unknown publication operation')
+    return {'repository': reg['repository'], 'pr': reg['pr'], 'event_base': reg['event_base'],
+            'workflow_id': p.WORKFLOW, 'event_name': 'workflow_dispatch', 'mode': 'unit',
+            'operation': operation, 'run': run, 'job': job['id'], 'task': job['task_id'], 'attempt': 1,
+            'dispatch_ordinal': state['next_dispatch_ordinal']}
+
+
+def publication_binding(reg, unit, initial_image_sha256):
+    return {'source': reg['source'], 'session_id': unit['session_id'], 'unit_ordinal': unit['unit_ordinal'],
+            'resource_plan_sha256': unit['resource_plan_sha256'], 'initial_image_sha256': initial_image_sha256}
+
+
+def lineage_references(index):
+    """Content already credited by accepted-unit authenticated native batches."""
+    for kind_name, sha, size in index.db.execute(
+            "SELECT DISTINCT substr(member_path,9,instr(substr(member_path,9),'/')-1),sha256,bytes "
+            "FROM native_locators WHERE member_path LIKE 'content/%'"):
+        yield {'kind': kind_name, 'sha256': sha, 'bytes': size}
+
+
+def build_publication(store, state, reg, root, index, quantum, produced, checked, origin):
+    """Seal snapshot roots, evidence tree and immutable intent; no native upload yet."""
+    cp = produced['checkpoint']
+    binding = publication_binding(reg, produced['work_unit'], cp['record']['initial_image_id'])
+    quantum = Path(quantum)
+    qdir = owned_directory(quantum, reg, root)
+    try:
+        catalog, catalog_ref = snapshots.snapshot_root(
+            store.inventory, binding, origin, cp, p.read(quantum / 'backup-descriptor.json'), qdir,
+            'catalog-backup.sqlite', predecessor_root=state.get('catalog_root_ref'))
+        p.auxiliary(catalog, root)
+        p.write(quantum / 'catalog-backup/root.json', catalog)
+        store.evidence.fulfill('catalog-backup/root.json', quantum / 'catalog-backup/root.json')
+        verifier_ref = None
+        if checked:
+            verifier, verifier_ref = snapshots.snapshot_root(
+                store.inventory, binding, origin, cp, p.read(quantum / 'verifier-backup-descriptor.json'), qdir,
+                'verifier-backup.sqlite', predecessor_root=state.get('verifier_root_ref'), verifier=True)
+            p.verifier_auxiliary(verifier, root)
+            p.write(quantum / 'verifier-backup/root.json', verifier)
+            store.evidence.fulfill('verifier-backup/root.json', quantum / 'verifier-backup/root.json')
+        evidence_ref = snapshots.evidence_root(store.inventory, binding, store.evidence)
+    finally:
+        qdir.close()
+    # Unchanged content is credited only from the exact accepted authenticated lineage.
+    snapshots.seed_coverage(store.ledger, lineage_references(index))
+    intent, pending = snapshots.prepare_publication(store.inventory, store.ledger, binding, origin, produced,
+                                                    catalog_ref, verifier_ref, evidence_ref)
+    p.auxiliary(intent, root)
+    p.auxiliary(pending, root)
+    return {'binding': binding, 'intent': intent, 'pending': pending, 'catalog_ref': catalog_ref,
+            'verifier_ref': verifier_ref, 'evidence_ref': evidence_ref}
+
+
+def plan_transfer(store, state, reg, output, pending, execution_origin, publication_origin, binding, *,
+                  purpose, offer=None, extra=()):
+    """Pack one bounded native batch and the pre-upload batch draft (no receipts yet).
+
+    `extra` rows are (kind, bytes) genuine payload (activation validation receipts)
+    first stored in the CAS and queued; they are offered like any required content.
+    """
+    context = current_physical()
+    plan_record = state['resource_plan']['record']
+    budget = PoolBudget(context, 'transfer_staging_bytes')
+    plan = p.PartPlan(Path(output) / 'upload', limits={'owned_root': str(output),
+        'disk_bytes': plan_record['total_session_disk_bytes'], 'unit_bytes': plan_record['unit_byte_allowance'],
+        'deadline_monotonic': time.monotonic() + 1800},
+        database=lambda path: open_database('publication_pack_scratch', path), budget=budget)
+    try:
+        offered = set() if offer is None else set(offer)
+        for kind, data in extra:
+            reference = store.inventory.put(kind, data)
+            store.ledger.db.execute('INSERT OR IGNORE INTO queue VALUES(?,?,?)',
+                                    (reference['kind'], reference['sha256'], reference['bytes']))
+            offered.add((reference['kind'], reference['sha256']))
+        store.ledger.db.commit()
+        transfer = snapshots.native_batch(store.inventory, store.ledger, binding, plan,
+                                          only=offered if (offer is not None or extra) else None)
+        refs = []
+        for name, size, sha in plan.db.execute(
+                "SELECT path,bytes,digest FROM members WHERE path LIKE 'content/%' ORDER BY path"):
+            _, kind, identity = name.split('/')
+            refs.append({'kind': kind, 'sha256': identity, 'bytes': size})
+        after_sha, after_count = snapshots.coverage_after(store.ledger, refs)
+        batch = {**binding, 'schema_version': 1, 'kind': 'transfer_batch_receipt',
+                 'intent_sha256': pending['intent']['sha256'], 'execution_origin': execution_origin,
+                 'publication_origin': publication_origin, 'batch_ordinal': pending['next_batch_ordinal'],
+                 'purpose': purpose, 'previous_batch': pending['previous_batch'],
+                 'transfer_manifest': transfer, 'coverage_before_sha256': pending['coverage_sha256'],
+                 'coverage_after_sha256': after_sha, 'coverage_count': after_count,
+                 'artifact_receipts': [], 'retained_artifact_bytes': 0, 'acceptance': False,
+                 'proof_checkpoint_advanced': False}
+        return batch, plan, refs
+    except BaseException:
+        plan.close()
+        raise
+
+
+def write_publication_draft(output, role, state, control, unit, pending_before, batch, refs, extra=None):
+    """Pre-upload facts the post-upload finalizer completes with native receipts."""
+    p.write(Path(output) / 'finalizer-state.json', {'state': state, 'control': control, 'unit': unit,
+        'role': role, 'pending_before': pending_before, 'batch': batch, 'payload': refs,
+        'verified': None, 'main_records': [], **(extra or {})})
+
+
+EMPTY_SHA = hashlib.sha256(b'').hexdigest()
+
+
+def native_receipts(reg, got, unit, produced):
+    """ArtifactReceipts of one publisher's actual ZIPs.
+
+    For transfer-context receipts `produced_checkpoint` is the candidate checkpoint
+    named by the publication intent (not yet accepted); expected_prior_checkpoint is
+    the unit's actual accepted predecessor. The publisher's own run/job/task is the
+    receipt origin, never the original execution's.
+    """
+    result = {}
+    for n, row in got['receipts'].items():
+        artifact = row['artifact']
+        value = {'artifact_id': artifact['id'], 'session_id': unit['session_id'],
+                 'unit_ordinal': unit['unit_ordinal'], 'run': got['run']['id'], 'job': got['job']['id'],
+                 'task': got['job']['task_id'], 'attempt': 1, 'source': reg['source'],
+                 'name': artifact['name'], 'expired': False, 'zip_sha256': row['zip_sha256'],
+                 'zip_bytes': row['zip_bytes'], 'extracted_bytes': sum(v['bytes'] for v in row['members']),
+                 'member_count': len(row['members']), 'members': row['members'],
+                 'upload_log_sha256': p.upload_slice(got['lines'], artifact['name'], artifact['id'],
+                                                     artifact['size_in_bytes'])[0],
+                 'event_payload_sha256': p.digest(p.canonical(got['event'])),
+                 'expected_prior_checkpoint': unit['expected_prior_checkpoint'], 'produced_checkpoint': produced}
+        result[n] = {'schema_version': 6, 'kind': 'ArtifactReceipt', 'record': value}
+    return result
+
+
+def intent_content(reference, parts, resolver):
+    """The frozen intent: from this batch's own ZIP when it carries it, else lineage."""
+    name = 'content/publication_intent/' + reference['sha256']
+    for directory in parts.values():
+        path = Path(directory) / name
+        if path.is_file() and not path.is_symlink():
+            data = path.read_bytes()
+            p.require(snapshots.content_ref('publication_intent', data) == reference, 'intent bytes differ')
+            return data
+    return resolver(reference)
+
+
+class ReplayLedger:
+    """Receiver-side authenticated coverage and closure for one pending publication."""
+    def __init__(self, path):
+        self.path = Path(path)
+        self.db = sqlite3.connect(self.path)
+        self.ledger = snapshots.PublicationLedger(self.db)
+
+    def close(self):
+        self.db.close()
+
+
+def authenticate_publication(api, reg, run_id, root, work, state, index, *, case_sha256=None):
+    """One terminal execute/publish producer: native chain, carrier, credited rows."""
+    got = download_parts(api, reg, run_id, 'unit', work, root)
+    metadata, parts, lines = got['metadata'], got['parts'], got['lines']
+    p.require(metadata['operation'] in ('execute', 'publish')
+              and got['event']['inputs']['operation'] == metadata['operation'], 'publication operation differs')
+    carrier, control_sha, begin, _ = p.parse_control_frame(lines)
+    validate_control_identity(carrier, reg, metadata, run_id, got['job'], root)
+    selected = [got['receipts'][n]['artifact'] for n in sorted(got['receipts'])]
+    p.validate_upload_order(lines, selected, begin)
+    resolver = snapshots.AuthenticatedResolver(index.db, Path(api.scratch).parent / 'authenticated-parts')
+    pending_ref = (carrier['pending_publication']['intent'] if carrier['pending_publication'] is not None
+                   else state['pending_publication']['pending']['intent'])
+    intent = p.decode(intent_content(pending_ref, parts, resolver))
+    unit = p.envelope(carrier['work_unit'], 'WorkUnit', root)
+    receipts = native_receipts(reg, got, unit, intent['candidate_checkpoint']['sha256'])
+    p.require(carrier['artifact_receipts'] == [receipts[n] for n in sorted(receipts)],
+              'carrier receipts differ from reconstructed native receipts')
+    rows = p.authenticate_transfer_context(api, reg, carrier, metadata, parts, receipts, root,
+                                           state['next_dispatch_ordinal'], case_sha256=case_sha256)
+    return {'carrier': carrier, 'control_sha256': control_sha, 'rows': rows, 'intent': intent,
+            'unit': unit, 'receipts': receipts, 'got': got, 'resolver': resolver}
+
+
+def credit_rows(index, ledger, resolver, unit_ordinal, pending_before, batch, rows):
+    """Record authenticated locators, then commit exact coverage and grow closure."""
+    for _reference, _path, locator in rows:
+        index.add_locator(unit_ordinal, locator)
+    after = snapshots.resume_publication(ledger, pending_before, batch, [row[0] for row in rows])
+    snapshots.expand_with_resolver(ledger, resolver)
+    return after
+
+
+def begin_pending(state, reg, root, work, authenticated, index, execution_run_item):
+    """Create receiver state from an authenticated original-execution carrier."""
+    carrier, batch = authenticated['carrier'], authenticated['carrier']['transfer_batch']
+    p.require(carrier['role'] == 'publication_batch' and batch['batch_ordinal'] == 0
+              and batch['previous_batch'] is None and batch['purpose'] == 'transfer'
+              and batch['execution_origin'] == batch['publication_origin']
+              and batch['execution_origin']['operation'] == 'execute', 'first publication batch differs')
+    ledger_path = Path(work) / ('pending-' + str(batch['execution_origin']['dispatch_ordinal']) + '.sqlite')
+    replay = ReplayLedger(ledger_path)
+    try:
+        seed = list(lineage_references(index))
+        snapshots.seed_coverage(replay.ledger, seed)
+        sha, count = replay.ledger.coverage()
+        intent_ref = carrier['pending_publication']['intent']
+        before = {'schema_version': 1, 'kind': 'pending_publication', 'intent': intent_ref,
+                  'previous_batch': None, 'coverage_sha256': sha, 'coverage_count': count, 'next_batch_ordinal': 0}
+        replay.db.execute('INSERT OR IGNORE INTO queue VALUES(?,?,?)',
+                          (intent_ref['kind'], intent_ref['sha256'], intent_ref['bytes']))
+        replay.db.commit()
+        after = credit_rows(index, replay.ledger, authenticated['resolver'], authenticated['unit']['unit_ordinal'],
+                            before, batch, authenticated['rows'])
+        p.require(after == carrier['pending_publication'], 'carrier pending publication differs from replay')
+    finally:
+        replay.close()
+    original = [authenticated['receipts'][n] for n in sorted(authenticated['receipts'])]
+    check_original_roots(carrier['work_unit'], original)
+    return {'pending': after, 'ledger_path': str(ledger_path), 'unit': carrier['work_unit'],
+            'execution_origin': batch['execution_origin'],
+            'original_receipts': original,
+            'bytes': batch['retained_artifact_bytes'], 'carriers': [authenticated['control_sha256']],
+            'intent': intent_ref}
+
+
+def check_original_roots(carrier_unit, original_receipts):
+    expected = [p.ref(r, r['record']['artifact_id']) for r in original_receipts]
+    p.require(carrier_unit['record']['artifact_roots'] == expected,
+              'carrier WorkUnit roots are not the exact direct original-execution receipts')
+
+
+def reconstruct_evidence(intent, resolver, binding, destination, reg, root, budget):
+    """Rebuild every logical evidence member into one local resolver directory."""
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=False, mode=0o700)
+    for entry in snapshots.iter_keyed_manifest(intent['evidence_root'], resolver, binding,
+                                               'evidence_index', 'evidence_manifest_node'):
+        member = entry['member']
+        name = p.safe_path(member['member_path'])
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if entry['chunks'] is None:
+            p.require(member['bytes'] == 0 and member['sha256'] == EMPTY_SHA, 'zero-length evidence identity differs')
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            os.close(fd)
+            continue
+        directory = owned_directory(target.parent, reg if _PHYSICAL else None, root)
+        try:
+            snapshots.restore_tree(entry['chunks'], (member['bytes'] + snapshots.CHUNK_BYTES - 1) // snapshots.CHUNK_BYTES,
+                member['bytes'], member['sha256'], snapshots.scope_digest(binding, 'evidence/' + name),
+                resolver, directory, target.name, budget.reserve, budget.release)
+        finally:
+            directory.close()
+    return destination
+
+
+def accepted_transport(intent, resolver, binding, evidence_dir, carrier, control_sha, retained):
+    """Dict consumed by the historical-member machinery (single logical evidence directory)."""
+    return {'parts': {0: evidence_dir}, 'receipts': {}, 'bytes': retained, 'control': carrier,
+            'control_sha256': control_sha, 'evidence_directory': evidence_dir,
+            'logical_members': lambda: (entry['member'] for entry in snapshots.iter_keyed_manifest(
+                intent['evidence_root'], resolver, binding, 'evidence_index', 'evidence_manifest_node'))}
+
+
+def expected_validations(checkpoint, catalog_root, input_preparation):
+    """Exact restored-catalog correspondence receipts the validators must have emitted."""
+    cp = checkpoint['record']
+    shared = {'catalog_sha256': catalog_root['catalog_sha256'], 'checkpoint_sha256': p.digest(p.canonical(checkpoint)),
+              'source': cp['source'], 'session_id': cp['session_id'], 'catalog_commit': cp['committed_transaction'],
+              'catalog_logical_digest': cp['catalog_logical_digest'], 'counts': cp['counts'], 'contexts': cp['contexts']}
+    private = {'schema_version': 6, 'operation': 'validate_restore', **shared,
+               'catalog_bytes': catalog_root['catalog_bytes'], 'semantic_manifest_root': cp['page_root'],
+               'initial_image_sha256': cp['initial_image_id'], 'resource_plan_sha256': cp['resource_plan_id']
+               if 'resource_plan_id' in cp else cp['resource_plan_sha256']}
+    semantic = {'schema_version': 6, **shared, 'manifest_root': cp['page_root'], 'complete': True,
+                'acceptance': False, 'scope': FINAL_INPUT_SCOPE}
+    if input_preparation:
+        semantic.update(complete=False, scope='input_preparation')
+    return private, semantic
+
+
+def check_activation_validations(result, intent, validations, resolver, ledger, index_path):
+    """Recompute every activation validation receipt from authenticated roots."""
+    catalog_root = p.decode(resolver(intent['catalog_root']))
+    private, semantic = expected_validations(result['checkpoint'], catalog_root, False)
+    _, partial = expected_validations(result['checkpoint'], catalog_root, True)
+    for key in ('catalog_private', 'catalog_semantic', 'verifier', 'final_input'):
+        reference = validations[key]
+        if reference is None:
+            continue
+        p.require(reference['kind'] == 'validation_receipt' and ledger.db.execute(
+            'SELECT 1 FROM coverage WHERE kind=? AND sha256=? AND bytes=?',
+            (reference['kind'], reference['sha256'], reference['bytes'])).fetchone() is not None,
+            'validation receipt is not authenticated activation payload')
+    got_private = p.decode(resolver(validations['catalog_private']))
+    got_semantic = p.decode(resolver(validations['catalog_semantic']))
+    p.require(got_private == private and got_semantic in (semantic, partial),
+              'activation catalog validation differs from authenticated root')
+    if validations['final_input'] is not None:
+        p.require(validations['final_input'] == validations['catalog_semantic'] and got_semantic == semantic,
+                  'final-input validation is not the exact complete correspondence')
+    verifier_root = intent['verifier_root']
+    p.require((verifier_root is None) == (validations['verifier'] is None), 'verifier validation presence differs')
+    if verifier_root is not None:
+        backup = p.decode(resolver(verifier_root))
+        receipt = p.decode(resolver(validations['verifier']))
+        expected = {'schema_version': 1, 'operation': 'validate_restored_verifier', 'source': backup['source'],
+            'session_id': backup['session_id'], 'unit_ordinal': backup['unit_ordinal'],
+            'checkpoint_sha256': backup['checkpoint_sha256'], 'resource_plan_sha256': backup['resource_plan_sha256'],
+            'initial_image_sha256': backup['initial_image_sha256'],
+            'verifier_schema_sha256': backup['verifier_schema_sha256'], 'verifier_commit': backup['verifier_commit'],
+            'verifier_logical_digest': backup['verifier_logical_digest'], 'work_db_sha256': backup['work_db_sha256'],
+            'work_db_bytes': backup['work_db_bytes'], 'progress_sha256': backup['progress_sha256'],
+            'result_chain_root_sha256': verifier_chain_digest(index_path, backup['unit_ordinal']),
+            'complete': True, 'acceptance': False}
+        p.require(receipt == expected, 'activation verifier/result-chain validation differs')
+
+
+def restore_snapshots(state, source, request, output, reg, root, index_path, resolver, catalog_ref,
+                      verifier_ref, checkpoint, budget):
+    """Reconstruct both complete files from authenticated content and validate them.
+
+    Used by the accepted-checkpoint restore at job start and by activation. The
+    restored files already occupy the held restore_staging reservation; read-only
+    validators attach it and reserve only their own temp/journal/scratch. Returns
+    the three validation receipts (raw dicts) for activation evidence.
+    """
+    context = current_physical()
+    output = Path(output)
+    generation = output / 'state.restore'
+    generation.mkdir(exist_ok=False, mode=0o700)
+    directory = owned_directory(generation, reg, root)
+    try:
+        catalog_root = p.auxiliary(p.decode(resolver(catalog_ref)), root)
+        staged = snapshots.restore_image(catalog_root, resolver, directory, 'catalog.staged.sqlite',
+                                         budget.reserve, budget.release)
+        p.write(output / 'restored-catalog-root.json', catalog_root)
+        verifier_root = None
+        verifier_staged = None
+        if verifier_ref is not None:
+            verifier_root = p.verifier_auxiliary(p.decode(resolver(verifier_ref)), root)
+            verifier_staged = snapshots.restore_image(verifier_root, resolver, directory,
+                                                      'verifier.staged.sqlite', budget.reserve, budget.release)
+    finally:
+        directory.close()
+    attachments = []
+    for path, resource_size in ((staged, catalog_root['catalog_bytes']),
+                                *(((verifier_staged, verifier_root['work_db_bytes']),) if verifier_staged else ())):
+        attachments.append({'reservation_id': budget.reservation_id, 'owner': 'snapshot_restore',
+            'resource': 'restore_staging_bytes', 'component': 'bytes', 'bytes': resource_size,
+            'relative_path': context.relative(path), 'recursive': False, 'access': 'read_only'})
+    request['catalog_path'] = str(staged)
+    restore = {**request, 'operation': 'validate_restore', 'catalog_path': str(staged),
+               'checkpoint': checkpoint, 'dependency_index': str(index_path)}
+    restore['output_dir'] = str(output / 'restore-validation')
+    Path(restore['output_dir']).mkdir(mode=0o700)
+    context.attachments[restore['output_dir']] = attachments
+    path = output / 'restore-request.json'
+    p.write(path, restore)
+    for argv in ([sys.executable, str(Path(source) / 'scripts/check-async-driver-refinement'), 'paged-unit', '--request', str(path)],
+                 [sys.executable, str(Path(source) / 'verification/async-driver-refinement/paged_checker.py'), 'validate-restore', '--request', str(path)]):
+        run_quantum(path, reg, source, Path(restore['output_dir']), argv)
+    private = p.read(Path(restore['output_dir']) / 'restore-validation.json')
+    semantic = p.read(Path(restore['output_dir']) / 'restore-semantic.json')
+    input_preparation = semantic.get('complete') is False and semantic.get('scope') == 'input_preparation'
+    verifier_receipt = None
+    if verifier_staged is not None:
+        vrequest = {**request, 'operation': 'validate_restore', 'verifier_work_db': str(verifier_staged),
+                    'verifier_checkpoint': checkpoint, 'verifier_backup_root': str(output / 'restored-verifier-root.json'),
+                    'output_dir': str(output / 'verifier-restore-validation'), 'dependency_index': str(index_path)}
+        p.write(output / 'restored-verifier-root.json', verifier_root)
+        Path(vrequest['output_dir']).mkdir(mode=0o700)
+        context.attachments[vrequest['output_dir']] = attachments
+        vpath = output / 'verifier-restore-request.json'
+        p.write(vpath, vrequest)
+        run_quantum(vpath, reg, source, Path(vrequest['output_dir']),
+                    [sys.executable, str(Path(source) / 'verification/async-driver-refinement/paged_checker.py'),
+                     'validate-restored-verifier', '--request', str(vpath)])
+        verifier_receipt = p.read(Path(vrequest['output_dir']) / 'verifier-restore-validation.json')
+    # Both complete validations passed; only now may either file become writer-visible.
+    p.atomic_install(staged, generation / 'catalog.sqlite', private, semantic, checkpoint,
+                     backup_root=catalog_root, input_preparation=input_preparation)
+    if verifier_staged is not None:
+        p.require(p.file_sha(verifier_staged) == verifier_root['work_db_sha256']
+                  and verifier_staged.stat().st_size == verifier_root['work_db_bytes'],
+                  'verifier staged bytes differ from authenticated root')
+        os.replace(verifier_staged, generation / 'verifier.sqlite')
+    p.write(output / 'restored-input-readiness.json', {'semantic_ready': not input_preparation})
+    return {'catalog_private': private, 'catalog_semantic': semantic, 'verifier': verifier_receipt,
+            'input_preparation': input_preparation, 'generation': generation}
+
+
+def install_generation(generation, output, request):
+    active = Path(output) / 'state'
+    p.require(not active.exists() and not active.is_symlink(), 'refuse replace an active catalog/verifier generation')
+    for target in (generation, active.parent):
+        fd = os.open(target, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    os.replace(generation, active)
+    fd = os.open(active.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    request['catalog_path'] = str(active / 'catalog.sqlite')
+    request['verifier_work_db'] = str(active / 'verifier.sqlite')
+
+
+def restore_latest(state, latest, source, request, output, reg, root):
+    """Restore the last accepted checkpoint's complete snapshots from the authenticated lineage."""
+    result, _transport = latest
+    index_path = Path(output) / 'dependencies.sqlite'
+    shutil.copyfile(state['index_path'], index_path)
+    index = p.DependencyIndex(index_path)
+    try:
+        resolver = snapshots.AuthenticatedResolver(index.db, Path(state['parts_root']))
+        budget = PoolBudget(current_physical(), 'restore_staging_bytes')
+        restored = restore_snapshots(state, source, request, output, reg, root, index_path, resolver,
+                                     state['catalog_root_ref'], state.get('verifier_root_ref'),
+                                     state['checkpoint'], budget)
+        verifier_digest = restored['verifier']
+        if state.get('verifier_root_ref') is None:
+            p.require(state.get('verifier_progress') is None, 'authenticated verifier state disappeared')
+        else:
+            p.require(verifier_digest is not None, 'verifier validation absent')
+    finally:
+        index.close()
+    install_generation(restored['generation'], output, request)
+    return index_path
+
+
+def run_publish(api, reg, state, latest, control, root, source, output, job, run_id, identity, measurement, deadline):
+    """A bounded publish dispatch: one transfer batch or the separate activation.
+
+    It executes no proof operation. The receiver-authenticated coverage replaces any
+    sender-side cache claim before content is offered, so lost or stale spool bytes
+    can only fail the batch, never credit it.
+    """
+    conformance = control['transport_conformance']
+    if conformance is None:
+        pend = state['pending_publication']
+        p.require(pend is not None, 'no pending publication to publish')
+        spool = 'publication-' + str(pend['execution_origin']['dispatch_ordinal'])
+    else:
+        pend = state['conformance_pending']
+        p.require(pend is not None, 'rehearsal has no authenticated first batch to continue')
+        spool = 'conformance-' + conformance['case_sha256'][:32]
+    index_path = Path(output) / 'dependencies.sqlite'
+    shutil.copyfile(state['conformance_index_path'] if conformance else state['index_path'], index_path)
+    index = p.DependencyIndex(index_path)
+    store = None
+    try:
+        parts_root = Path(state['conformance_parts_root'] if conformance else state['parts_root'])
+        resolver = snapshots.AuthenticatedResolver(index.db, parts_root)
+        store = PublicationStore(reg, root, spool, create=False)
+        receiver = ReplayLedger(pend['ledger_path'])
+        try:
+            store.ledger.db.execute('DELETE FROM coverage')
+            for row in receiver.db.execute('SELECT kind,sha256,bytes FROM coverage'):
+                store.ledger.db.execute('INSERT INTO coverage VALUES(?,?,?)', row)
+            store.ledger.db.commit()
+            intent = p.decode(resolver(pend['pending']['intent']))
+            binding = {key: intent[key] for key in ('source', 'session_id', 'unit_ordinal',
+                                                    'resource_plan_sha256', 'initial_image_sha256')}
+            origin = current_origin(state, reg, run_id, job, 'publish')
+            complete = snapshots.closure_complete(receiver.ledger)
+            if not complete:
+                offer = None
+                if conformance is not None:
+                    chunks = snapshots.conformance_chunks(p.decode(resolver(intent['catalog_root'])),
+                        p.decode(resolver(intent['verifier_root'])), resolver)
+                    offer = snapshots.conformance_offer(pend['pending']['next_batch_ordinal'], chunks)
+                batch, plan, refs = plan_transfer(store, state, reg, output, pend['pending'],
+                    pend['execution_origin'], origin, binding, purpose='transfer', offer=offer)
+                extra = None
+            else:
+                batch, plan, refs, extra = prepare_activation(store, state, reg, root, source, output, pend, intent,
+                                                              binding, origin, index, index_path, resolver,
+                                                              conformance)
+        finally:
+            receiver.close()
+        role = 'transport_conformance' if conformance is not None else (
+            'unit_checkpoint' if extra is not None else 'publication_batch')
+        unit = pend['unit']
+        write_publication_draft(output, role, state, control, unit, pend['pending'], batch, refs,
+                                {'activation': extra, 'conformance': conformance})
+        try:
+            upload_outputs(output_metadata(reg, control['session_id'], binding['unit_ordinal'], plan,
+                                           'transfer/node-0.json', 'publish'), Path(output) / 'upload')
+        finally:
+            plan.close()
+    finally:
+        index.close()
+        if store is not None:
+            store.close()
+    p.require(time.monotonic() <= deadline, 'publication dispatch exceeded admitted time')
+    live_pr(api, reg)
+    p.producer(api, run_id, reg, 'unit', ('running', 'in_progress'))
+
+
+def prepare_activation(store, state, reg, root, source, output, pend, intent, binding, origin, index, index_path,
+                       resolver, conformance):
+    """Separate activation dispatch: restore, validate, then upload bounded evidence."""
+    planned = p.decode(resolver(intent['execution_result']))
+    accepted = snapshots.accepted_result(planned, pend['execution_origin'], pend['original_receipts'], p.ref)
+    context = current_physical()
+    budget = PoolBudget(context, 'restore_staging_bytes')
+    evidence_dir = reconstruct_evidence(intent, resolver, binding, Path(output) / 'evidence', reg, root, budget)
+    transport = accepted_transport(intent, resolver, binding, evidence_dir, pend['unit'], pend['carriers'][-1], 0)
+    authenticated_roots(transport['parts'], index, root)
+    add_authenticated_members(index, accepted, transport, root)
+    request = {'schema_version': 6, 'operation': 'validate_restore', 'work_unit': accepted['work_unit'],
+               'resource_plan': state['resource_plan'], 'initial_image': accepted['initial_image'],
+               'prior_checkpoint': state['checkpoint'], 'checkpoint': accepted['checkpoint'],
+               'source_files': reg['source_files'], 'runtime': reg['runtime'],
+               'deadline_monotonic': time.monotonic() + 1800, 'dependency_index': str(index_path),
+               'tlc': {'java': reg['runtime']['java']['path'], 'jar': reg['runtime']['tlc']['path'],
+                       'java_sha256': reg['runtime']['java']['sha256'], 'jar_sha256': reg['runtime']['tlc']['sha256']}}
+    restored = restore_snapshots(state, source, request, Path(output) / 'activation', reg, root, index_path,
+                                 resolver, intent['catalog_root'], intent['verifier_root'],
+                                 accepted['checkpoint'], budget)
+    extra = [('validation_receipt', p.canonical(restored['catalog_private'])),
+             ('validation_receipt', p.canonical(restored['catalog_semantic']))]
+    if restored['verifier'] is not None:
+        extra.append(('validation_receipt', p.canonical(restored['verifier'])))
+    refs = {key: snapshots.content_ref('validation_receipt', p.canonical(restored[key]))
+            for key in ('catalog_private', 'catalog_semantic')}
+    refs['verifier'] = (None if restored['verifier'] is None
+                        else snapshots.content_ref('validation_receipt', p.canonical(restored['verifier'])))
+    refs['final_input'] = refs['catalog_semantic'] if accepted['work_unit']['stage'] == 'complete' else None
+    batch, plan, payload = plan_transfer(store, state, reg, output, pend['pending'], pend['execution_origin'],
+                                         origin, binding, purpose='activate', extra=extra)
+    activation = {**binding, 'schema_version': 1, 'kind': 'publication_activation',
+                  'intent_sha256': pend['pending']['intent']['sha256'],
+                  'execution_origin': pend['execution_origin'], 'activation_origin': origin, 'final_batch': None,
+                  'previous_checkpoint': intent['previous_checkpoint'],
+                  'candidate_checkpoint': intent['candidate_checkpoint'], 'catalog_root': intent['catalog_root'],
+                  'verifier_root': intent['verifier_root'], 'execution_result': intent['execution_result'],
+                  'validations': refs, 'stage': accepted['work_unit']['stage'],
+                  'stage_complete': accepted['stage_complete'], 'activated': True, 'acceptance': False}
+    return batch, plan, payload, activation
 
 
 def replay_control(api,control,root,work):

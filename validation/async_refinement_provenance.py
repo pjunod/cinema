@@ -594,10 +594,10 @@ class PartPlan:
         self.root.mkdir(parents=True)
         self.slots = slots
         self.limits = limits
-        # A controller passes a physically granted connection and the transfer
+        # A controller passes a physically granted connection factory and the transfer
         # staging pool; every staged copy is reserved before it is created.
         self.budget = budget
-        self.db = sqlite3.connect(self.root / 'inventory.sqlite') if database is None else database
+        self.db = (sqlite3.connect if database is None else database)(self.root / 'inventory.sqlite')
         self.db.execute('CREATE TABLE members(path TEXT PRIMARY KEY,part INTEGER,bytes INTEGER,digest TEXT)')
         self.db.execute('CREATE TABLE indexes(level INTEGER,first_chunk INTEGER,path TEXT,part INTEGER,digest TEXT,chunk_count INTEGER,offset INTEGER,bytes INTEGER,PRIMARY KEY(level,first_chunk))')
         self.db.commit()
@@ -912,7 +912,9 @@ SEMANTIC_SOURCE_KINDS=('PhysicalRows','Episode','Store','Product','Applied','Ora
     'ProductEdge','FairPair','Enabledness','Expansion','Counts','ContextRoot','InitialImage','MonitorNode',
     'MonitorEdge','Scc','Counterexample','Outcome','BoundaryObservation')
 CONTROL_ACCOUNTING_KINDS=('Page','ManifestNode','Checkpoint','ResourcePlan','Session','WorkUnit','Completion','ArtifactReceipt')
-AUXILIARY_ACCOUNTING_KINDS=('catalog_backup','catalog_chunk_index','verifier_backup','verifier_chunk_index',
+AUXILIARY_ACCOUNTING_KINDS=('catalog_backup','verifier_backup','snapshot_manifest_node','evidence_manifest_node',
+    'transfer_manifest_node','publication_intent','pending_publication','transfer_batch_receipt',
+    'publication_activation','native_transport_conformance','validation_receipt',
     'verifier_unit_progress','verifier_check_result','verifier_evidence_index','source_bound_receipt','async_session_control')
 
 
@@ -924,9 +926,11 @@ def accounting_mapping():
     for kind in CONTROL_ACCOUNTING_KINDS+AUXILIARY_ACCOUNTING_KINDS:
         rows.append({'kind':kind,'role':'operational_only','lifetime':'session_retained_unit_member',
                      'source_record_kind':None,'overhead_field':None})
-    for kind,field in (('logs','retained_bytes'),('source_archive','scratch_bytes'),
-                       ('backup_and_chunks','duplicate_backup_bytes'),('downloads_and_restores','duplicate_backup_bytes'),
-                       ('sql_indexes','index_bytes'),('sql_wal','wal_bytes')):
+    # v3 physical caps: each nonsemantic class is charged to an explicit pool/family
+    # of PhysicalPolicy3 (never multiplied against logical record allowances).
+    for kind,field in (('logs','retained_artifact_bytes'),('source_archive','source_runtime_scratch_bytes'),
+                       ('backup_and_chunks','snapshot_spool_bytes'),('downloads_and_restores','restore_staging_bytes'),
+                       ('sql_indexes','family_main_bytes'),('sql_wal','family_journal_bytes')):
         rows.append({'kind':kind,'role':'operational_overhead','lifetime':'peak_workspace',
                      'source_record_kind':None,'overhead_field':field})
     rows.append({'kind':'decoded_objects_and_cache','role':'operational_overhead','lifetime':'resident_working_set',
