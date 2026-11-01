@@ -67,6 +67,12 @@ pub(crate) struct SharingManager {
     pub network: SharingNetworkConfig,
     pub(crate) network_invite_error: Mutex<Option<&'static str>>,
     pub(crate) network_invite_lock: tokio::sync::Mutex<()>,
+    /// What the Tailscale control API last said about this node's device
+    /// shares; an observation for operators, never authority.
+    pub(crate) network_observation: Mutex<crate::sharing_network::NetworkObservation>,
+    /// The host's Tailscale CLI is reachable from this process (not a
+    /// container), so connection checks can consult this host's netmap.
+    native_host: std::sync::atomic::AtomicBool,
     automatic_egress: RwLock<Option<std::net::IpAddr>>,
     host_egress_guard: std::sync::atomic::AtomicBool,
     key_directory: PathBuf,
@@ -283,6 +289,8 @@ impl SharingManager {
         Self {
             network_invite_error: Mutex::new(None),
             network_invite_lock: tokio::sync::Mutex::new(()),
+            network_observation: Mutex::new(Default::default()),
+            native_host: std::sync::atomic::AtomicBool::new(false),
             receiver_starts: Default::default(),
             accepted_drivers: Default::default(),
             key,
@@ -417,6 +425,13 @@ impl SharingManager {
             .parent()
             .expect("node TLS directory parent")
             .join("sharing-host")
+    }
+    pub(crate) fn observe_native_host(&self, native: bool) {
+        self.native_host
+            .store(native, std::sync::atomic::Ordering::Release);
+    }
+    pub(crate) fn native_host(&self) -> bool {
+        self.native_host.load(std::sync::atomic::Ordering::Acquire)
     }
     pub(crate) fn observe_host_setup(
         &self,
@@ -1204,8 +1219,23 @@ impl SharingManager {
                                             _ => "unavailable",
                                         };
                                         let mut status = self.status.write().expect("sharing status lock");
+                                        let previous = status.imports.iter().find(|old| old.import_id == id).map(|old| old.connection);
+                                        if previous != Some(observation.connection) {
+                                            if observation.connection == "responding" {
+                                                tracing::info!(import_id = %id, connection = observation.connection, previous = previous.unwrap_or("unknown"), "shared library source connection changed");
+                                            } else {
+                                                tracing::warn!(import_id = %id, connection = observation.connection, previous = previous.unwrap_or("unknown"), "shared library source connection changed; open Settings → Sharing and choose Check connection for the cause");
+                                            }
+                                        }
                                         status.imports.retain(|old| old.import_id != id);
                                         if status.imports.len() < 32 { status.imports.push(observation); }
+                                    } else {
+                                        let failures = retry.get(&id).map_or(0, |(attempts, _, _)| *attempts);
+                                        match &result {
+                                            Err(error) if failures == 0 => tracing::warn!(import_id = %id, phase = "claim", code = crate::http::sharing::peer_error_code(error), "shared library pairing request could not reach the source; retrying"),
+                                            Ok(()) if failures > 0 => tracing::info!(import_id = %id, phase = "claim", failures, "shared library pairing request reached the source"),
+                                            _ => {}
+                                        }
                                     }
                                     let attempts=if result.is_ok(){0}else{retry.get(&id).map_or(1,|(attempts,_,_)|attempts.saturating_add(1))};
                                     retry.insert(id,(attempts,tokio::time::Instant::now()+claim_retry_delay(attempts,active),generation));
