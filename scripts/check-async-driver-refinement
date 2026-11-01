@@ -52,6 +52,8 @@ FILES = ('.github/workflows/async-proof-session.yml',
  'verification/async-driver-refinement/paged-catalog-transport.schema.json',
  'tests/operations/test_async_refinement_session.py','tests/operations/test_async_refinement_provenance.py',
  'tests/operations/test_async_physical_accounting.py','tests/operations/test_async_refinement_integration.py',
+ 'tests/operations/test_async_refinement_validation_receipts.py','tests/operations/fixtures/physical-policy/parity.json',
+ 'tests/operations/fixtures/catalog-calibration/catalog-calibration.json',
  'tests/operations/test_async_snapshot_transport.py','tests/operations/test_paged_request_fixtures.py',
  'tests/operations/test_paged_bounds.py','tests/operations/test_paged_codec.py',
  'tests/operations/test_paged_input_continuation.py','tests/operations/test_paged_temporal.py',
@@ -698,8 +700,12 @@ def run_rust_case(argv, *, env, log, timeout=1800):
             return len(block) <= remaining
         try:
             delegated_group=bool(environment.get('PLURX_ASYNC_PAGED_REQUEST') or environment.get('PLURX_ASYNC_CATALOG_CALIBRATION'))
+            # The child grant and its lease are inherited descriptors named by the
+            # environment (RESULT-GRANT ABI); Popen closes every other fd, so pass them.
+            inherited=tuple(int(environment[name]) for name in
+              ('PLURX_ASYNC_PHYSICAL_GRANT_FD','PLURX_ASYNC_PHYSICAL_LEASE_FD') if name in environment)
             proc = subprocess.Popen(argv,cwd=ROOT,env=environment,stdout=subprocess.PIPE,
-              stderr=subprocess.PIPE,start_new_session=not delegated_group)
+              stderr=subprocess.PIPE,start_new_session=not delegated_group,pass_fds=inherited)
             with selectors.DefaultSelector() as poll:
                 for index,pipe in enumerate((proc.stdout,proc.stderr)):
                     os.set_blocking(pipe.fileno(),False)
