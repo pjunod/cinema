@@ -917,4 +917,16 @@ class RegisteredSessionBoundary(OwnedScratch):
         self.assertNotIn('catalog_backup',schema['$defs']['Ref']['properties']['kind']['enum'])
         self.assertNotIn('catalog_backup',schema['$defs']['Checkpoint']['properties'])
         adjunct=json.loads((ROOT/paged.TRANSPORT_SCHEMA).read_text())
-        self.assertEqual(set(adjunct['$defs']),{'CatalogBackup','CatalogChunkIndex','ChunkDescriptor','IndexRef'})
+        self.assertNotIn('verifier_backup',schema['$defs']['Ref']['properties']['kind']['enum'])
+        self.assertNotIn('verifier_backup',schema['$defs']['Checkpoint']['properties'])
+        # the whole transport vocabulary (snapshot, evidence and publication carriers) is the adjunct's, exactly
+        self.assertEqual(set(adjunct['$defs']),{
+            'ActivationResult','CatalogBackup','CatalogPrivateValidation','CatalogSemanticValidation','ConformanceCarrier',
+            'ConformanceRequest','ConformanceResult','ContentRef','EvidenceManifestNode','MemberRef','Origin','PendingPublication',
+            'PublicationIntent','SafePath','SnapshotManifestNode','TransferBatchReceipt','TransferManifestNode','ValidationReceipt',
+            'VerifierBackup','VerifierRestoreValidation'})
+        # the backup root is a separate field next to, never inside, the semantic checkpoint
+        backup=adjunct['$defs']['CatalogBackup']['properties']
+        self.assertIn('checkpoint_sha256',backup)
+        self.assertIn('manifest_root',backup)
+        self.assertNotIn('manifest_root',schema['$defs']['Checkpoint']['properties'])
