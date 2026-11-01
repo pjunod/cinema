@@ -1601,8 +1601,33 @@ impl TranscodeManager {
         }
         self.outage_owner_active.store(true, Release);
         let _owner_active = OwnerActive(&self.outage_owner_active);
+        // Set once an outage has been resolved `Expired`: its sessions are
+        // gone, and `Expired` stays on the channel until authority returns.
+        // Without it the loop would publish a fresh `Pending` for the same
+        // dead outage every grace, and every read held against it would wait
+        // a grace for a 503 it should get at once.
+        let mut torn_down: Option<u64> = None;
         loop {
             let state = *serving.borrow_and_update();
+            if let Some(expired_generation) = torn_down {
+                if !state.ready {
+                    // A recovery this loop never saw, then a new loss: there
+                    // is still nothing running to keep, and the gate stayed
+                    // closed throughout, so that loss is expired too.
+                    if state.loss_generation != expired_generation {
+                        self.publish_outage_expired(state.loss_generation);
+                        torn_down = Some(state.loss_generation);
+                    }
+                    self.serving_ready.store(false, Release);
+                    self.serving_loss_generation
+                        .store(state.loss_generation, Release);
+                    if serving.changed().await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                // Back: fall through, which opens the gate below.
+            }
             let previous_generation = self.serving_loss_generation.load(Acquire);
             if !state.ready || state.loss_generation != previous_generation {
                 // Publish this outage's deadline before waiting on it, so a
@@ -1651,11 +1676,13 @@ impl TranscodeManager {
                     crate::serving_fence::LossOutcome::Expired => {
                         // Expired is published first: a held request must
                         // not outwait a teardown that has already begun.
-                        self.publish_outage_expired(resolved_generation);
+                        let expired_generation = serving.borrow().loss_generation;
+                        self.publish_outage_expired(expired_generation);
                         self.stop_all_sessions_for_serving_fence().await;
+                        torn_down = Some(expired_generation);
                     }
                     crate::serving_fence::LossOutcome::Closed => {
-                        self.publish_outage_expired(resolved_generation);
+                        self.publish_outage_expired(serving.borrow().loss_generation);
                         self.stop_all_sessions_for_serving_fence().await;
                         break;
                     }
@@ -1666,9 +1693,13 @@ impl TranscodeManager {
                 .store(state.loss_generation, Release);
             self.serving_ready.store(state.ready, Release);
             if !state.ready {
-                // Lost again, or never recovered: resolve it on the next turn.
+                // Lost again, or never recovered: resolve it on the next turn
+                // (or, once torn down, wait there for authority to return).
                 continue;
             }
+            // Authority is back and the gate is open again, so the next loss
+            // has running work to keep and gets its own resolution.
+            torn_down = None;
             if serving.changed().await.is_err() {
                 break;
             }

@@ -61,6 +61,53 @@ async fn an_arrival_four_seconds_into_an_outage_waits_about_one_second() {
     );
 }
 
+/// Once an outage has expired its sessions are gone, and a read arriving
+/// later in the same outage gets its 503 at once: the manager does not
+/// re-arm a fresh `Pending` grace for an outage it has already torn down.
+#[tokio::test(start_paused = true)]
+async fn an_arrival_six_seconds_into_an_outage_fails_fast() {
+    let (fence, manager, _owner, _base) = fenced_manager().await;
+    fence.validation_set_ready(false).await;
+    settle().await;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    settle().await;
+    let baseline = fence
+        .authority()
+        .outage_baseline()
+        .expect("still fenced six seconds in");
+    assert_eq!(
+        manager.outage_resolution_now().state,
+        crate::serving_fence::OutageState::Expired,
+        "an expired outage stays expired until authority returns"
+    );
+    let arrived = tokio::time::Instant::now();
+    let outcome = manager
+        .wait_for_outage_resolution(baseline, far_deadline())
+        .await;
+    assert_eq!(outcome, crate::serving_fence::OutageWait::Expired);
+    assert_eq!(arrived.elapsed(), Duration::ZERO, "nothing is left to wait for");
+
+    // Still expired a full grace later, and a recovery then reopens normally:
+    // the next loss gets a grace of its own.
+    tokio::time::advance(Duration::from_secs(6)).await;
+    settle().await;
+    assert_eq!(
+        manager.outage_resolution_now().state,
+        crate::serving_fence::OutageState::Expired
+    );
+    fence.validation_set_ready(true).await;
+    settle().await;
+    fence.validation_set_ready(false).await;
+    settle().await;
+    assert!(
+        matches!(
+            manager.outage_resolution_now().state,
+            crate::serving_fence::OutageState::Pending { .. }
+        ),
+        "a loss after authority returned is a new outage with its own grace"
+    );
+}
+
 /// Losses that follow each other inside a grace spend one budget, and
 /// requests held across them, including ones that are cancelled, neither
 /// spend nor reset it.
