@@ -388,6 +388,20 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     );
     drop(background_legacy);
     assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
+    // Production runs the VodServe maintenance tick from startup. A new
+    // retained artifact is exposed only after that startup inventory has
+    // converged; before it, exposure is a Retry with the artifact kept.
+    for _ in 0..16 {
+        serve.maintain().await;
+        if serve.shared.retained_artifacts.cold_ready() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        serve.shared.retained_artifacts.cold_ready(),
+        "the real maintenance tick converges the startup retained inventory"
+    );
     assert!(manager
         .produce_encoded_output_job(
             &file,
