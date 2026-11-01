@@ -70,6 +70,12 @@ pub(in crate::adaptive_resources::runtime) fn planning_retained_structural_bytes
         .pad_to_align()
         .size();
     let bytes = size_of::<AsyncMutex<Bundle>>()
+        // Original SourceCell plus its registered blocking worker can each
+        // retain the same negative clock value. Incremental inline payload;
+        // this does not claim Tokio/native allocator headers or full M0 RSS.
+        .checked_add(
+            size_of::<Option<crate::cluster::clock::ContinuousDeadline>>().checked_mul(2)?,
+        )?
         .checked_add(arc)?
         .checked_add(MAX_PLANNING_BUNDLE_SLOTS.checked_mul(size_of::<OwnedRole>())?)?
         .checked_add(MAX_PLANNING_BUNDLE_SLOTS.checked_mul(size_of::<Uuid>())?)?

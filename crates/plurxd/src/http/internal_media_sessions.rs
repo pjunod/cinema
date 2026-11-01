@@ -248,6 +248,11 @@ pub(crate) async fn adaptive_attempt_prepare(
     if let Err(status) = authorize(&state, &headers, ADAPTIVE_ATTEMPT_PREPARE_PATH, &body).await {
         return status.into_response();
     }
+    if let Ok(control) =
+        serde_json::from_slice::<crate::media_sessions::AdaptiveAttemptPrepareControlV2>(&body)
+    {
+        return adaptive_attempt_causal_prepare(&state, control).await;
+    }
     let Some(request) = serde_json::from_slice::<AdaptiveAttemptPrepareV1>(&body)
         .ok()
         .filter(AdaptiveAttemptPrepareV1::is_valid)
@@ -287,6 +292,111 @@ pub(crate) async fn adaptive_attempt_prepare(
         )
             .into_response(),
         Err(_) => StatusCode::CONFLICT.into_response(),
+    }
+}
+
+/// Authentication and bounded body decoding are performed once by the SAME
+/// existing Prepare route before this private versioned dispatch.
+#[cfg(target_os = "linux")]
+async fn adaptive_attempt_causal_prepare(
+    state: &AppState,
+    control: crate::media_sessions::AdaptiveAttemptPrepareControlV2,
+) -> Response {
+    use crate::media_sessions::{AdaptiveAttemptPrepareControlV2, ADAPTIVE_CAUSAL_PREPARE_VERSION};
+    use crate::transcode::adaptive_attempts::{
+        AdaptivePrepareReplay, AdaptiveRemoteRegistrationStart,
+    };
+    match control {
+        AdaptiveAttemptPrepareControlV2::Register { version, prepare } => {
+            if version != ADAPTIVE_CAUSAL_PREPARE_VERSION || !prepare.is_valid() {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            if prepare.claim.key.worker_node_id != state.node_id
+                || prepare.claim.binding.principal.local_user_id().is_none()
+                || state.resource_runtime.as_ref().is_none_or(|runtime| {
+                    runtime.owner().owner_id != prepare.claim.worker_instance_id
+                })
+            {
+                return StatusCode::CONFLICT.into_response();
+            }
+            // Original registered replay does not acquire fresh restart or
+            // serving authority, including while a drain waits for its owner.
+            let started = match state
+                .transcode
+                .replay_remote_adaptive_registration(&prepare)
+                .await
+            {
+                Ok(Some(original)) => Ok(original),
+                Err(error) => Err(error),
+                Ok(None) => {
+                    if state.serving.authority().admit() != Some(prepare.claim.serving_generation) {
+                        return StatusCode::CONFLICT.into_response();
+                    }
+                    let Some(admission) = state.serving.try_restart_admission().await else {
+                        return RemoteStartError::RestartDrain.into_response();
+                    };
+                    state
+                        .transcode
+                        .begin_remote_adaptive_registration(state.clone(), prepare, admission)
+                        .await
+                }
+            };
+            match started {
+                Ok(AdaptiveRemoteRegistrationStart::Registered(reply)) => {
+                    (StatusCode::OK, Json(reply)).into_response()
+                }
+                Ok(AdaptiveRemoteRegistrationStart::Pending) => {
+                    StatusCode::ACCEPTED.into_response()
+                }
+                Ok(AdaptiveRemoteRegistrationStart::Started { reply, deadline }) => {
+                    match tokio::time::timeout_at(deadline.into(), reply).await {
+                        Ok(Ok(Ok(reply))) => (StatusCode::OK, Json(reply)).into_response(),
+                        Err(_) => StatusCode::ACCEPTED.into_response(),
+                        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                    }
+                }
+                Err(_) => StatusCode::PRECONDITION_REQUIRED.into_response(),
+            }
+        }
+        AdaptiveAttemptPrepareControlV2::Grant {
+            version,
+            claim,
+            nonce,
+            allowance_ms,
+        } => {
+            if version != ADAPTIVE_CAUSAL_PREPARE_VERSION || claim.validate().is_err() {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            if claim.key.worker_node_id != state.node_id
+                || claim.binding.principal.local_user_id().is_none()
+                || state
+                    .resource_runtime
+                    .as_ref()
+                    .is_none_or(|runtime| runtime.owner().owner_id != claim.worker_instance_id)
+            {
+                return StatusCode::CONFLICT.into_response();
+            }
+            match state
+                .transcode
+                .grant_remote_adaptive_registration(&claim, nonce, allowance_ms)
+                .await
+            {
+                Ok(AdaptivePrepareReplay::Prepared(reply)) => {
+                    (StatusCode::OK, Json(reply)).into_response()
+                }
+                Ok(AdaptivePrepareReplay::Pending) => {
+                    match state
+                        .transcode
+                        .wait_remote_adaptive_prepared(claim.key.attempt_id)
+                        .await
+                    {
+                        Ok(reply) => (StatusCode::OK, Json(reply)).into_response(),
+                        Err(_) => StatusCode::ACCEPTED.into_response(),
+                    }
+                }
+                Err(_) => StatusCode::PRECONDITION_REQUIRED.into_response(),
+            }
+        }
     }
 }
 

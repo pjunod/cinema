@@ -60,6 +60,82 @@ mod tests {
         )])
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn continuous_capture_does_not_soften_unknown_when_clock_enforcement_is_off() {
+        let guard = Arc::new(ClusterClockGuard::new(true));
+        assert!(!guard.is_enforced());
+        assert!(matches!(
+            guard.capture_continuous(),
+            Err(ClockRefusal::Unknown)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn continuous_deadline_replay_requires_original_capture_not_equal_public_stamps() {
+        let guard = Arc::new(ClusterClockGuard::new(false));
+        let first = guard
+            .capture_continuous()
+            .expect("actual healthy standalone clock");
+        let second = guard
+            .capture_continuous()
+            .expect("independent actual clock capture");
+        let first = first
+            .deadline_after(Duration::from_secs(1))
+            .expect("live original cutoff");
+        let mut second = second
+            .deadline_after(Duration::from_secs(1))
+            .expect("live independent cutoff");
+        // Pure identity comparison only, AFTER actual strict construction.
+        // No edited value is read by remaining(), scheduling or native work.
+        second.capture.captured_ns = first.capture.captured_ns;
+        second.capture.monotonic_before = first.capture.monotonic_before;
+        second.capture.decision = first.capture.decision;
+        second.capture.admission_generation = first.capture.admission_generation;
+        second.cutoff_ns = first.cutoff_ns;
+        assert!(first.same_original(&first.clone()));
+        assert!(!first.same_original(&second));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn continuous_deadline_queries_keep_original_cutoff_and_reject_discontinuity() {
+        let guard = Arc::new(ClusterClockGuard::new(false));
+        let original = guard
+            .capture_continuous()
+            .expect("actual healthy standalone clock");
+        assert!(matches!(
+            original.deadline_after(Duration::ZERO),
+            Err(ClockRefusal::Unknown)
+        ));
+        let deadline = original
+            .deadline_after(Duration::from_secs(1))
+            .expect("live original cutoff");
+        let cutoff = deadline.cutoff_ns;
+        let before = deadline.remaining().expect("first actual BOOTTIME read");
+        let after = deadline.remaining().expect("second actual BOOTTIME read");
+        assert!(after <= before);
+        assert_eq!(deadline.cutoff_ns, cutoff);
+        assert_eq!(
+            deadline
+                .monotonic_cutoff()
+                .expect("original scheduling instant"),
+            original.monotonic_before + Duration::from_secs(1)
+        );
+        // Existing real guard continuity mechanism sees a wall/monotonic
+        // disagreement. Advisory mode must not redeem the original deadline.
+        guard
+            .inner
+            .lock()
+            .expect("original clock lock")
+            .anchor_wall_ms = Some(0);
+        assert!(matches!(
+            deadline.remaining(),
+            Err(ClockRefusal::LocalDiscontinuity)
+        ));
+    }
+
     #[test]
     fn local_discontinuity_invalidates_generation() {
         // Before the next probe, during t1/t4, after a decision ticket, and
@@ -1456,6 +1532,126 @@ pub struct ClockAcquisitionTicket<'guard> {
     advisory_counted: bool,
 }
 
+/// An original Linux elapsed-time anchor captured by this exact clock guard.
+/// This is a negative deadline condition, never native acquisition, capacity,
+/// native absence, or release authority. Its fields cannot be reconstructed
+/// from public generation counters or an authenticated peer timestamp.
+///
+/// The platform contract is Linux CLOCK_BOOTTIME with a healthy kernel clock
+/// rate. BOOTTIME advances across suspend. Causal grant ordering removes clock
+/// offset and transport delay; it cannot certify arbitrary hardware/VM clock
+/// rate defects. Unknown samples and known continuity changes fail closed.
+#[derive(Clone)]
+pub struct ContinuousClockCapture {
+    identity: u64,
+    monotonic_before: Instant,
+    guard: Arc<ClusterClockGuard>,
+    decision: ClockDecisionTicket,
+    admission_generation: u64,
+    captured_ns: u64,
+}
+
+/// One immutable cutoff on the SAME original continuous anchor. Cloning this
+/// value retains its deadline and guard identity; it never samples a new start.
+#[derive(Clone)]
+pub struct ContinuousDeadline {
+    capture: ContinuousClockCapture,
+    cutoff_ns: u64,
+}
+
+impl ContinuousClockCapture {
+    /// Fix a cutoff from the original anchor, not from the time of this call.
+    /// A delayed grant therefore expires instead of receiving a fresh window.
+    pub fn deadline_after(&self, allowance: Duration) -> Result<ContinuousDeadline, ClockRefusal> {
+        let nanos = u64::try_from(allowance.as_nanos()).map_err(|_| ClockRefusal::Unknown)?;
+        let cutoff_ns = self
+            .captured_ns
+            .checked_add(nanos)
+            .ok_or(ClockRefusal::Unknown)?;
+        let deadline = ContinuousDeadline {
+            capture: self.clone(),
+            cutoff_ns,
+        };
+        deadline.remaining()?;
+        Ok(deadline)
+    }
+}
+
+impl ContinuousDeadline {
+    /// Internal replay identity only. Equal public counters alone cannot
+    /// substitute another guard, original anchor or fixed cutoff.
+    pub(crate) fn same_original(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.capture.guard, &other.capture.guard)
+            && self.capture.identity == other.capture.identity
+            && self.cutoff_ns == other.cutoff_ns
+    }
+    /// A conservative local scheduling instant paired BEFORE the original
+    /// BOOTTIME read. This never replaces remaining(): the standard monotonic
+    /// clock may pause during suspend, so native entry retains this whole value.
+    pub fn monotonic_cutoff(&self) -> Result<Instant, ClockRefusal> {
+        let nanos = self
+            .cutoff_ns
+            .checked_sub(self.capture.captured_ns)
+            .ok_or(ClockRefusal::Unknown)?;
+        self.capture
+            .monotonic_before
+            .checked_add(Duration::from_nanos(nanos))
+            .ok_or(ClockRefusal::Unknown)
+    }
+
+    /// Strict, serialized revalidation, independent of the operator's advisory
+    /// cluster-clock enforcement switch. Expiry only rejects new work; owners
+    /// must still join/close already acquired work through their original APIs.
+    pub fn remaining(&self) -> Result<Duration, ClockRefusal> {
+        let ticket = ClockAcquisitionTicket {
+            guard: &self.capture.guard,
+            decision: self.capture.decision,
+            admission_generation: self.capture.admission_generation,
+            advisory_counted: false,
+        };
+        let mut remaining = None;
+        self.capture.guard.revalidate_strict_with(&ticket, |_| {
+            let now = continuous_clock_ns()?;
+            if now < self.capture.captured_ns {
+                return Err(ClockRefusal::LocalDiscontinuity);
+            }
+            let nanos = self
+                .cutoff_ns
+                .checked_sub(now)
+                .filter(|value| *value != 0)
+                .ok_or(ClockRefusal::Unknown)?;
+            remaining = Some(Duration::from_nanos(nanos));
+            Ok(())
+        })?;
+        remaining.ok_or(ClockRefusal::Unknown)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn continuous_clock_ns() -> Result<u64, ClockRefusal> {
+    let mut sample = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: sample points to writable timespec storage; success initializes
+    // it before assume_init. CLOCK_BOOTTIME is read-only and owns no native fd.
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, sample.as_mut_ptr()) } != 0 {
+        return Err(ClockRefusal::Unknown);
+    }
+    // SAFETY: the successful clock_gettime initialized this exact timespec.
+    let sample = unsafe { sample.assume_init() };
+    if !(0..1_000_000_000).contains(&sample.tv_nsec) {
+        return Err(ClockRefusal::Unknown);
+    }
+    u64::try_from(sample.tv_sec)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+        .and_then(|nanos| nanos.checked_add(u64::try_from(sample.tv_nsec).ok()?))
+        .ok_or(ClockRefusal::Unknown)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn continuous_clock_ns() -> Result<u64, ClockRefusal> {
+    Err(ClockRefusal::Unknown)
+}
+
 /// Original node-local observation for a reduction, not admission by itself.
 /// Only an exact durable removal fence can qualify exclusion of its target.
 #[cfg(feature = "hiqlite-store")]
@@ -1688,6 +1884,39 @@ impl ClusterClockGuard {
             }
             Self::recompute(inner);
         }
+    }
+
+    /// Capture one original continuous elapsed-time anchor. The first sample
+    /// precedes any potentially contended clock-state lock, so waiting here
+    /// cannot renew the original create/registration budget. Strict evidence
+    /// and both serialized generations are retained from THIS guard. This API
+    /// does not use decide(): advisory mode cannot soften an unknown clock.
+    pub fn capture_continuous(self: &Arc<Self>) -> Result<ContinuousClockCapture, ClockRefusal> {
+        // This private identity distinguishes independent captures even if
+        // platform clock resolution gives them equal timestamp/counter data.
+        static NEXT_CAPTURE: AtomicU64 = AtomicU64::new(1);
+        let monotonic_before = Instant::now();
+        let captured_ns = continuous_clock_ns()?;
+        let identity = NEXT_CAPTURE
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| ClockRefusal::Unknown)?;
+        let (ticket, strict) = self.capture_with(|_| {
+            if continuous_clock_ns()? < captured_ns {
+                return Err(ClockRefusal::LocalDiscontinuity);
+            }
+            Ok(())
+        });
+        strict?;
+        Ok(ContinuousClockCapture {
+            identity,
+            monotonic_before,
+            guard: Arc::clone(self),
+            decision: ticket.decision,
+            admission_generation: ticket.admission_generation,
+            captured_ns,
+        })
     }
 
     /// Apply the operator's enforcement setting. Off (the default) makes

@@ -181,6 +181,7 @@ pub(crate) struct SourceOpenSpec {
 }
 
 pub(super) struct SourceCell {
+    continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     spec: Option<SourceOpenSpec>,
     plan: v2::MemberPlan,
     acquisition_id: v2::Id,
@@ -273,8 +274,37 @@ pub(in crate::adaptive_resources::runtime) const fn direct_source_frame_bytes() 
         + std::mem::size_of::<SourceOpenPlan>()
         + std::mem::size_of::<JoinHandle<SourceResult>>()
         + std::mem::size_of::<JoinHandle<ParentCloseOutcome>>()
+        // The same negative deadline also resides in the original blocking
+        // worker while SourceCell retains its own immutable copy.
+        + std::mem::size_of::<Option<crate::cluster::clock::ContinuousDeadline>>()
 }
 impl SourceCell {
+    pub(super) fn retain_continuous_entry_deadline(
+        &mut self,
+        limit: crate::cluster::clock::ContinuousDeadline,
+    ) -> Result<(), OperationError> {
+        // A replay never renews a registered worker or its original deadline.
+        // The caller installs this condition exactly once before first entry.
+        if let Some(original) = &self.continuous_entry_deadline {
+            // Retry only the SAME condition. Expiry cannot block joining an
+            // already registered original worker or delivering its result.
+            return if original.same_original(&limit) {
+                Ok(())
+            } else {
+                Err(OperationError::State)
+            };
+        }
+        if self.spec.is_none()
+            || self.pending.is_some()
+            || self.result.is_some()
+            || self.failed_join
+        {
+            return Err(OperationError::State);
+        }
+        limit.remaining().map_err(|_| OperationError::Deadline)?;
+        self.continuous_entry_deadline = Some(limit);
+        Ok(())
+    }
     #[cfg_attr(
         not(target_os = "linux"),
         allow(
@@ -487,8 +517,13 @@ impl SourceCell {
         let runtime = tokio::runtime::Handle::try_current().map_err(std::io::Error::other)?;
         let spec = self.spec.take().ok_or(OperationError::State)?;
         let (enter, registered) = tokio::sync::oneshot::channel();
+        let continuous_entry_deadline = self.continuous_entry_deadline.clone();
         self.pending = Some(runtime.spawn_blocking(move || {
-            if registered.blocking_recv().is_err() {
+            if registered.blocking_recv().is_err()
+                || continuous_entry_deadline
+                    .as_ref()
+                    .is_some_and(|limit| limit.remaining().is_err())
+            {
                 return SourceResult {
                     file: None,
                     observed: None,
@@ -869,6 +904,7 @@ impl NodeResourceRuntime {
         role.sources.insert(
             member,
             SourceCell {
+                continuous_entry_deadline: None,
                 spec: request.take(),
                 plan,
                 acquisition_id,

@@ -14,6 +14,7 @@ use crate::process::fixed_probe::{
 };
 
 pub(super) struct PlanningTasks {
+    continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     pub(super) probe_plan: v2::FixedProbeDiscoverTaskV1,
     pub(super) engine_plan: v2::FixedPlanningEngineTaskV1,
     pub(super) source_member: Uuid,
@@ -254,6 +255,7 @@ enum EngineTaskOutcome {
     NeverEntered(PlanningTaskNeverEntered),
 }
 struct EngineTaskInput {
+    continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     plan: v2::FixedPlanningEngineTaskV1,
     boot: Option<Uuid>,
     deadline: Instant,
@@ -262,6 +264,7 @@ struct EngineTaskInput {
 }
 
 struct ProbeTaskInput {
+    continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     binding: ReservationBinding,
     member: Uuid,
     join_operation: Uuid,
@@ -300,6 +303,19 @@ async fn original_probe_task(
         let input = input.ok_or_else(|| {
             AdmittedProbeNativeFailure::before_entry(DecodeFactError::CacheInvariant)
         })?;
+        // Consuming the start latch entered this wrapper. A continuous
+        // deadline refusal is NOT the receiver-error NeverEntered witness.
+        // Keep the actual failure owner and charge unless ordinary native
+        // closure can prove its disposition.
+        if input
+            .continuous_entry_deadline
+            .as_ref()
+            .is_some_and(|limit| limit.remaining().is_err())
+        {
+            return Err(AdmittedProbeNativeFailure::before_entry(
+                DecodeFactError::Deadline,
+            ));
+        }
         let FixedPlanningProbeRequest {
             probe_program_locator,
             cache,
@@ -319,6 +335,7 @@ async fn original_probe_task(
             input.deadline,
             input.version_close,
             input.document_close,
+            input.continuous_entry_deadline,
         )
         .await
     }
@@ -352,17 +369,34 @@ async fn original_engine_task(
         return EngineTaskOutcome::NeverEntered(absent);
     }
     let result = async move {
+        let input = input.ok_or_else(|| std::io::Error::other("missing original engine input"))?;
+        // This wrapper consumed the original start. Do not mint the distinct
+        // receiver-error NeverEntered signal from a later clock refusal.
+        if input
+            .continuous_entry_deadline
+            .as_ref()
+            .is_some_and(|limit| limit.remaining().is_err())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "original continuous planning deadline is unavailable or expired",
+            )
+            .into());
+        }
         let EngineTaskInput {
             plan,
             boot,
             deadline,
+            continuous_entry_deadline,
             ..
-        } = input.ok_or_else(|| std::io::Error::other("missing original engine input"))?;
+        } = input;
         #[cfg(test)]
         tests::stages::before_engine_native(plan.member_id.uuid()).await;
         #[cfg(any(test, feature = "fixtures"))]
         let original_version_close = plan.version_close_operation_id.uuid();
-        let result = planning_collector::run_fixed_engine(plan, boot, deadline).await;
+        let result =
+            planning_collector::run_fixed_engine(plan, boot, deadline, continuous_entry_deadline)
+                .await;
         // A genuine JoinError/lost result AFTER the actual collector returns.
         // This does not inject a kernel wait failure or construct any close proof.
         #[cfg(any(test, feature = "fixtures"))]
@@ -396,6 +430,29 @@ pub(in crate::adaptive_resources::runtime) type PlanningOwnerFences = (
 );
 
 impl NodeResourceRuntime {
+    /// Attach only before any original P source/task acquisition. The real
+    /// owner was already charged and installed. This condition can only deny
+    /// future native entry; it cannot release or replace that owner.
+    pub(in crate::adaptive_resources::runtime) fn retain_planning_continuous_deadline(
+        &self,
+        owner: &OwnedPreparation,
+        limit: crate::cluster::clock::ContinuousDeadline,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        limit.remaining().map_err(|_| OperationError::Deadline)?;
+        let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+        let role = bundle.roles.get_mut(0).ok_or(OperationError::State)?;
+        if !role.sources.is_empty() || !role.roots.is_empty() || !role.armed.is_empty() {
+            return Err(OperationError::State);
+        }
+        let tasks = role.planning_tasks.as_mut().ok_or(OperationError::State)?;
+        tasks.never_entered_members()?;
+        if tasks.continuous_entry_deadline.is_some() || !tasks.source_spec_retained() {
+            return Err(OperationError::State);
+        }
+        tasks.continuous_entry_deadline = Some(limit);
+        Ok(())
+    }
     pub(super) fn retain_planning_uncertainty(
         &self,
         binding: ReservationBinding,
@@ -484,6 +541,7 @@ impl PreparedPlanningTasks {
         let probe_task_observation = PlanningObservation::new(probe.member_id.uuid());
         let engine_task_observation = PlanningObservation::new(engine.member_id.uuid());
         Self(PlanningTasks {
+            continuous_entry_deadline: None,
             probe_observed: None,
             engine_observed: None,
             root_observations,
@@ -562,6 +620,22 @@ impl NodeResourceRuntime {
                 .ok_or(OperationError::State)?
                 .source_spec = spec;
             result?;
+        }
+        {
+            let mut bundle = owner.state.lock().await;
+            let role = bundle.roles.get_mut(0).ok_or(OperationError::State)?;
+            let limit = role
+                .planning_tasks
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .continuous_entry_deadline
+                .clone();
+            if let Some(limit) = limit {
+                role.sources
+                    .get_mut(&member)
+                    .ok_or(OperationError::State)?
+                    .retain_continuous_entry_deadline(limit)?;
+            }
         }
         self.acquire_prepared_source(owner, 0, member, deadline)
             .await
@@ -689,6 +763,7 @@ impl NodeResourceRuntime {
             task.probe_join_operation = Some(probe_join);
             task.engine_join_operation = Some(engine_join);
             let input = ProbeTaskInput {
+                continuous_entry_deadline: task.continuous_entry_deadline.clone(),
                 binding,
                 member: task.probe_plan.member_id.uuid(),
                 join_operation: probe_join,
@@ -710,6 +785,7 @@ impl NodeResourceRuntime {
             let (engine_start, engine_wait) = tokio::sync::oneshot::channel();
             task.engine = Some(tokio::spawn(original_engine_task(
                 Some(EngineTaskInput {
+                    continuous_entry_deadline: task.continuous_entry_deadline.clone(),
                     plan: task.engine_plan.clone(),
                     boot,
                     deadline,

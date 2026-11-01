@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
 use crate::process::fixed_planning_engine::{
-    collect_fixed_engine, FixedEngineNativeCompletion, FixedEngineNativeFailure,
+    collect_fixed_engine_with_continuous, FixedEngineNativeCompletion, FixedEngineNativeFailure,
 };
 use crate::process::fixed_probe::{
     AdmittedProbeCompletion, DecodeFactCache, DecodeFactError, DecodeFactSource,
@@ -75,6 +75,7 @@ pub(in crate::adaptive_resources::runtime) async fn run_fixed_probe(
     deadline: Instant,
     version_close_operation_id: Uuid,
     document_close_operation_id: Uuid,
+    continuous: Option<crate::cluster::clock::ContinuousDeadline>,
 ) -> Result<AdmittedProbeCompletion, crate::process::fixed_probe::AdmittedProbeNativeFailure> {
     if !cfg!(target_os = "linux")
         || Instant::now() >= deadline
@@ -94,6 +95,7 @@ pub(in crate::adaptive_resources::runtime) async fn run_fixed_probe(
     let image = DecodeProbeIdentity::discover_admitted(
         &configured_probe_locator,
         version_close_operation_id,
+        continuous,
     )
     .await?;
     let source = DecodeFactSource::new(
@@ -128,6 +130,7 @@ pub(in crate::adaptive_resources::runtime) async fn run_fixed_engine(
     task: v2::FixedPlanningEngineTaskV1,
     boot_id: Option<Uuid>,
     deadline: Instant,
+    continuous: Option<crate::cluster::clock::ContinuousDeadline>,
 ) -> Result<FixedEngineNativeCompletion, FixedEngineNativeFailure> {
-    collect_fixed_engine(task, boot_id, deadline).await
+    collect_fixed_engine_with_continuous(task, boot_id, deadline, continuous).await
 }

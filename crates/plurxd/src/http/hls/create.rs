@@ -438,6 +438,9 @@ async fn prepare_claimed_adaptive_origin(
         recipe,
     };
     let mut prepared = None;
+    // Frozen only after the authenticated original registration receipt. A
+    // retry reuses this exact grant; it never computes a later now+allowance.
+    let mut remote_grant = None;
     for _ in 0..2 {
         if tokio::time::Instant::now() >= deadline {
             break;
@@ -470,12 +473,74 @@ async fn prepare_claimed_adaptive_origin(
                 crate::transcode::adaptive_attempts::AdaptivePrepareStart::Pending => {}
             }
         } else {
+            if remote_grant.is_none() {
+                let register = crate::media_sessions::AdaptiveAttemptPrepareControlV2::Register {
+                    version: crate::media_sessions::ADAPTIVE_CAUSAL_PREPARE_VERSION,
+                    prepare: prepare.clone(),
+                };
+                let Ok(receipt) = state
+                    .media_sessions
+                    .adaptive_attempt_peer_request(
+                        &owner_node_id,
+                        crate::media_sessions::ADAPTIVE_ATTEMPT_PREPARE_PATH,
+                        &register,
+                        deadline,
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                if receipt.status == reqwest::StatusCode::ACCEPTED {
+                    continue;
+                }
+                if receipt.status != reqwest::StatusCode::OK {
+                    return Err(adaptive_retry::prepare_http_refusal(receipt.status));
+                }
+                let receipt: crate::media_sessions::AdaptiveAttemptRegisteredV2 =
+                    serde_json::from_slice(&receipt.body).map_err(|_| {
+                        AdaptivePrepareFailure::Hold(ApiError::ServiceUnavailable(
+                            "adaptive original registration receipt is invalid".into(),
+                        ))
+                    })?;
+                if receipt.version != crate::media_sessions::ADAPTIVE_CAUSAL_PREPARE_VERSION
+                    || receipt.nonce.is_nil()
+                    || receipt.attempt_id != claim.key.attempt_id
+                    || receipt.worker_instance_id != claim.worker_instance_id
+                    || receipt.serving_generation != claim.serving_generation
+                {
+                    return Err(AdaptivePrepareFailure::Hold(ApiError::ServiceUnavailable(
+                        "adaptive registration differs from the original worker".into(),
+                    )));
+                }
+                // O2 follows the actual ACK. W0 preceded that ACK, so fixing
+                // W0+floor(B_prepare-O2) can only shorten the original window.
+                // Strict original continuous health/epoch remains mandatory.
+                let allowance_ms =
+                    crate::media_pool::create_remote_grant_ms(deadline).ok_or_else(|| {
+                        AdaptivePrepareFailure::Hold(ApiError::ServiceUnavailable(
+                            "deadline_budget: no proved original create allowance remains".into(),
+                        ))
+                    })?;
+                remote_grant = Some(
+                    crate::media_sessions::AdaptiveAttemptPrepareControlV2::Grant {
+                        version: crate::media_sessions::ADAPTIVE_CAUSAL_PREPARE_VERSION,
+                        claim: claim.clone(),
+                        nonce: receipt.nonce,
+                        allowance_ms,
+                    },
+                );
+            }
+            let original_grant = remote_grant.as_ref().ok_or_else(|| {
+                AdaptivePrepareFailure::Hold(ApiError::ServiceUnavailable(
+                    "original remote grant is absent".into(),
+                ))
+            })?;
             let answer = state
                 .media_sessions
                 .adaptive_attempt_peer_request(
                     &owner_node_id,
                     crate::media_sessions::ADAPTIVE_ATTEMPT_PREPARE_PATH,
-                    &prepare,
+                    original_grant,
                     deadline,
                 )
                 .await;
@@ -3510,7 +3575,10 @@ async fn create_with_purpose(
             "no startup allowance remains",
         ));
     }
-    let budget = crate::media_pool::CreateStartupBudget::new(remaining);
+    let budget = crate::media_pool::CreateStartupBudget::new_with_clock(
+        remaining,
+        &state.membership.clock_guard(),
+    );
     let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
     let before = counts.snapshot();
     let store_before = counts.store_time();

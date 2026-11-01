@@ -564,6 +564,17 @@ impl FixedPlanningProbeOwner {
             .take_application_lease(bytes)
             .ok_or_else(|| OperationError::State.into())
     }
+    /// Add an immutable continuous negative-entry condition to this SAME
+    /// already charged owner before source/collector entry. Cleanup stays
+    /// available after expiry and no clock datum authorizes native closure.
+    pub fn retain_continuous_entry_deadline(
+        &mut self,
+        limit: crate::cluster::clock::ContinuousDeadline,
+    ) -> Result<(), FixedPlanningProbeError> {
+        self.runtime
+            .retain_planning_continuous_deadline(self.selection()?, limit)
+            .map_err(Into::into)
+    }
     pub async fn prepare_inputs(
         &mut self,
         deadline: Instant,

@@ -795,8 +795,12 @@ async fn run_original_command(
     stderr_close_operation_id: Uuid,
     phase: FixedEngineFailurePhase,
     deadline: Instant,
+    continuous: Option<&crate::cluster::clock::ContinuousDeadline>,
 ) -> Result<ClosedCommand, FixedEngineNativeFailure> {
-    if close_operation_id.is_nil() || Instant::now() >= deadline {
+    if close_operation_id.is_nil()
+        || Instant::now() >= deadline
+        || continuous.is_some_and(|limit| limit.remaining().is_err())
+    {
         return Err(FixedEngineNativeFailure::at(
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -845,6 +849,16 @@ async fn run_original_command(
             }
             Ok(())
         });
+    }
+    if continuous.is_some_and(|limit| limit.remaining().is_err()) {
+        return Err(FixedEngineNativeFailure::at(
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "original continuous engine root deadline",
+            ),
+            phase,
+            None,
+        ));
     }
     let (child, child_job) = match spawn_job_custodied(&mut command, ENGINE_WORK) {
         Ok(value) => value,
@@ -1072,11 +1086,31 @@ async fn run_original_command(
 /// Invoke from the original, retained P task only after its durable arm. The
 /// task owns the command roots and the sequential object File loop. A failure
 /// does not produce a close capability; P remains held until explicit recovery.
+#[cfg(any(test, feature = "fixtures"))]
 pub(crate) async fn collect_fixed_engine(
     task: FixedPlanningEngineTaskV1,
     boot_id: Option<Uuid>,
     deadline: Instant,
 ) -> Result<FixedEngineNativeCompletion, FixedEngineNativeFailure> {
+    collect_fixed_engine_with_continuous(task, boot_id, deadline, None).await
+}
+
+pub(crate) async fn collect_fixed_engine_with_continuous(
+    task: FixedPlanningEngineTaskV1,
+    boot_id: Option<Uuid>,
+    deadline: Instant,
+    continuous: Option<crate::cluster::clock::ContinuousDeadline>,
+) -> Result<FixedEngineNativeCompletion, FixedEngineNativeFailure> {
+    if continuous
+        .as_ref()
+        .is_some_and(|limit| limit.remaining().is_err())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "original continuous engine entry deadline",
+        )
+        .into());
+    }
     if task.file_slots.len() != FIXED_PLANNING_ENGINE_MAX_OBJECTS {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1134,6 +1168,7 @@ pub(crate) async fn collect_fixed_engine(
         task.version_diagnostic_close_operation_id.uuid(),
         FixedEngineFailurePhase::VersionEntered,
         deadline,
+        continuous.as_ref(),
     )
     .await;
     let version = match version {
@@ -1176,6 +1211,7 @@ pub(crate) async fn collect_fixed_engine(
         task.dependency_diagnostic_close_operation_id.uuid(),
         FixedEngineFailurePhase::DependencyEntered,
         deadline,
+        continuous.as_ref(),
     )
     .await
     {
@@ -1402,6 +1438,7 @@ mod tests {
             ids[4],
             FixedEngineFailurePhase::DependencyEntered,
             Instant::now() + Duration::from_secs(5),
+            None,
         )
         .await
         .unwrap_or_else(|failure| panic!("original child: {}", failure.error));
@@ -1432,6 +1469,7 @@ mod tests {
             ids[4],
             FixedEngineFailurePhase::VersionEntered,
             Instant::now() + Duration::from_millis(150),
+            None,
         )
         .await
         {

@@ -425,6 +425,9 @@ pub(crate) struct BudgetedCatalogRequest {
 
 #[derive(Clone)]
 pub(crate) struct CreateStartupBudget {
+    /// Linux original elapsed-time cutoff, independent of Tokio suspension.
+    /// Absence refuses new remote grants; it does not mint fallback time.
+    continuous_prepare_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     pub deadline: tokio::time::Instant,
     calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     binding: std::sync::Arc<std::sync::Mutex<Option<PlanningBinding>>>,
@@ -481,6 +484,7 @@ impl CreateStartupBudget {
     pub(crate) fn new(remaining_ms: u64) -> Self {
         Self {
             deadline: tokio::time::Instant::now() + Duration::from_millis(remaining_ms.min(10_000)),
+            continuous_prepare_cutoff: None,
             calls: Default::default(),
             binding: Default::default(),
             advisory: Default::default(),
@@ -488,6 +492,35 @@ impl CreateStartupBudget {
             phases: Default::default(),
         }
     }
+    /// Production ingress captures the original elapsed budget before any
+    /// awaited work. The standard instant starts before the potentially
+    /// contended strict capture; neither lock wait nor scope transfer can
+    /// renew B. Unknown continuous evidence keeps local scheduling bounded
+    /// and refuses fresh cross-node grants.
+    pub(crate) fn new_with_clock(
+        remaining_ms: u64,
+        clock: &std::sync::Arc<plurx_core::cluster::clock::ClusterClockGuard>,
+    ) -> Self {
+        let started = tokio::time::Instant::now();
+        let allowance = Duration::from_millis(remaining_ms.min(10_000));
+        let original = clock.capture_continuous().ok();
+        let mut budget = Self::new(remaining_ms);
+        budget.deadline = started + allowance;
+        if let Some(original) = original {
+            if let Some(paired) = original
+                .deadline_after(allowance)
+                .ok()
+                .and_then(|total| total.monotonic_cutoff().ok())
+            {
+                budget.deadline = budget.deadline.min(paired.into());
+            }
+            budget.continuous_prepare_cutoff = allowance
+                .checked_sub(CREATE_ACTIVATION_ALLOWANCE)
+                .and_then(|prepare| original.deadline_after(prepare).ok());
+        }
+        budget
+    }
+
     pub(crate) fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -565,6 +598,30 @@ pub(crate) fn create_preparation_deadline() -> Option<tokio::time::Instant> {
     CREATE_STARTUP_BUDGET
         .try_with(|budget| budget.deadline - CREATE_ACTIVATION_ALLOWANCE)
         .ok()
+}
+
+/// Grant duration is derived only after the genuine registration receipt.
+/// Both original clocks and the caller's already clipped stage constrain it.
+/// Millisecond flooring never grants the fractional tail to the worker.
+#[cfg(target_os = "linux")]
+pub(crate) fn create_remote_grant_ms(stage_deadline: tokio::time::Instant) -> Option<u32> {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            let continuous = budget
+                .continuous_prepare_cutoff
+                .as_ref()?
+                .remaining()
+                .ok()?;
+            let cutoff =
+                stage_deadline.min(budget.deadline.checked_sub(CREATE_ACTIVATION_ALLOWANCE)?);
+            let remaining =
+                continuous.min(cutoff.checked_duration_since(tokio::time::Instant::now())?);
+            u32::try_from(remaining.as_millis())
+                .ok()
+                .filter(|millis| *millis != 0)
+        })
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn create_stage_deadline(maximum: Duration) -> tokio::time::Instant {
@@ -876,9 +933,9 @@ impl MediaPool {
                 .adaptive_worker_quote
                 .filter(AdaptiveWorkerQuote::valid);
         }
-        // Even a fresh peer identity quote does not carry an original
-        // monotonic create-deadline projection. Do not create a new remote
-        // attempt from it; old peer advertisements cannot bypass this rule.
+        // Fresh remote placement stays unadvertised until the causal P path
+        // is composed with the SAME continuous guard on dormant finite R
+        // Source/root entry. Identity alone cannot authorize that boundary.
         None
     }
 
@@ -2580,6 +2637,50 @@ mod tests {
     use super::*;
     use plurx_core::domain::{AudioStream, SubtitleStream};
     use tokio::sync::mpsc;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn original_continuous_create_grant_keeps_activation_and_decreases_after_receipt_delay() {
+        let clock = std::sync::Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(false));
+        let budget = CreateStartupBudget::new_with_clock(1_000, &clock);
+        let original_deadline = budget.deadline;
+        budget
+            .scope(async {
+                let first = create_remote_grant_ms(original_deadline)
+                    .expect("actual healthy original budget");
+                assert!(first <= 750 && first > 0);
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                let second = create_remote_grant_ms(original_deadline)
+                    .expect("same original budget after actual delay");
+                assert!(second < first);
+                assert_eq!(
+                    CREATE_STARTUP_BUDGET.with(|original| original.deadline),
+                    original_deadline
+                );
+                assert!(create_remote_grant_ms(tokio::time::Instant::now()).is_none());
+            })
+            .await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unknown_original_continuous_clock_cannot_mint_cross_node_grant() {
+        let clock = std::sync::Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(true));
+        assert!(
+            !clock.is_enforced(),
+            "operator advisory mode cannot grant elapsed-time authority"
+        );
+        let budget = CreateStartupBudget::new_with_clock(1_000, &clock);
+        budget
+            .scope(async {
+                assert!(
+                    create_preparation_deadline().expect("actual local scheduling budget")
+                        > tokio::time::Instant::now()
+                );
+                assert!(create_remote_grant_ms(budget.deadline).is_none());
+            })
+            .await;
+    }
 
     #[tokio::test]
     async fn retained_receipt_receiver_requires_fresh_actual_peer_advertisement() {
