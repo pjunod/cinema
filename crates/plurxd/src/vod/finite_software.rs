@@ -903,8 +903,10 @@ async fn completed_output_state(
 /// The serving rendition for a session that an exposed retained S captured
 /// before any R was admitted. The retained registry alone owns that S: this
 /// rendition borrows its counted output in the recovered-S shape, with no
-/// producer, build slot, metadata partition or cache admission of its own.
+/// producer, build slot or cache admission of its own. Its metadata and
+/// reader partitions are charged to the settled S's own role.
 pub(super) async fn retained_carrier(
+    shared: &Shared,
     key: &str,
     index: Option<FragmentIndex>,
     recipe: Recipe,
@@ -914,15 +916,31 @@ pub(super) async fn retained_carrier(
 ) -> Result<Arc<Rendition>, String> {
     let segment_count = u32::try_from(plan.len())
         .map_err(|_| "finite software segment count overflows".to_owned())?;
-    let (manifest, identity) = completed_output_state(
-        &output,
+    let deadline = Instant::now() + settings.materialize_budget;
+    // The carrier's daemon metadata and reader tables are charged to the
+    // settled S's own role partitions, like a recovered S. The carrier never
+    // mints a closing owner, so no closing-owner heap is projected.
+    let projected_metadata = finite_metadata::projected_requested_heap_bytes(
         &recipe,
+        index.as_ref(),
         &plan,
-        segment_count,
-        Instant::now() + settings.materialize_budget,
+        key,
+        &shared.base.join(key),
+    )
+    .and_then(|bytes| bytes.checked_add(output.requested_heap_bytes()?))
+    .ok_or("retained carrier metadata projection overflowed or is unsupported")?;
+    let (metadata_lease, client_lease) = reserve_metadata_until(
+        shared,
+        key,
+        &output,
+        projected_metadata,
+        finite_profile::CLIENT_STATE_BYTES as usize,
+        deadline,
     )
     .await?;
-    Ok(Shared::construct_rendition(
+    let (manifest, identity) =
+        completed_output_state(&output, &recipe, &plan, segment_count, deadline).await?;
+    let rendition = Shared::construct_rendition(
         key,
         RenditionDir::from_retained_finite(output),
         recipe,
@@ -938,7 +956,9 @@ pub(super) async fn retained_carrier(
             identity: Some(identity),
             from_disk: true,
         },
-    ))
+    );
+    attach_metadata_partitions(rendition, metadata_lease, client_lease)
+        .map_err(|(error, _rendition)| error)
 }
 
 pub(super) async fn run(

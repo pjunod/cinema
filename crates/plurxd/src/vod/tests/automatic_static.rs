@@ -511,6 +511,11 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         .retained_output
         .as_ref()
         .expect("actual settled complete output");
+    let carrier = session.rendition.as_ref().expect("retained carrier rendition");
+    assert!(
+        carrier.finite_metadata_lease.is_some() && carrier.finite_client_lease.is_some(),
+        "a retained carrier charges its metadata and readers to the settled S role"
+    );
     let output = artifact
         .finite_output
         .as_ref()
