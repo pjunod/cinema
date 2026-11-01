@@ -1,6 +1,20 @@
 use super::*;
 
 impl TranscodeManager {
+    /// Admit one publication against serving authority. A refusal here is
+    /// the fence's alone, so it carries the generation this node last held
+    /// authority under for a buffered response to wait after.
+    fn admit_publication(&self) -> Result<u64, MediaResponsePublicationRejection> {
+        self.serving_authority.admit().ok_or_else(|| {
+            MediaResponsePublicationRejection::AuthorityLost {
+                admitted_generation: self
+                    .serving_authority
+                    .outage_baseline()
+                    .unwrap_or_else(|| self.serving_authority.state().loss_generation),
+            }
+        })
+    }
+
     /// Admit a fully prepared response against the exact owner that resolved
     /// its bytes. The registry identity is checked on both sides of actor
     /// admission so a replacement cannot take the reusable session id during
@@ -22,15 +36,17 @@ impl TranscodeManager {
         if release_gate.released.load(Acquire) {
             return Err(MediaResponsePublicationRejection::StateChanged);
         }
-        let admitted_serving_generation = self
-            .serving_authority
-            .admit()
-            .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+        let admitted_serving_generation = self.admit_publication()?;
+        // Two separate refusals: losing serving authority is the one a
+        // buffered response may wait out; a released session never is.
         macro_rules! require_publication_authority {
             () => {
-                if !self.publication_authority_is_current(admitted_serving_generation)
-                    || release_gate.released.load(Acquire)
-                {
+                if !self.publication_authority_is_current(admitted_serving_generation) {
+                    return Err(MediaResponsePublicationRejection::AuthorityLost {
+                        admitted_generation: admitted_serving_generation,
+                    });
+                }
+                if release_gate.released.load(Acquire) {
                     return Err(MediaResponsePublicationRejection::StateChanged);
                 }
             };
@@ -93,10 +109,10 @@ impl TranscodeManager {
             if !session.actor_managed_response_publication {
                 if session.control.current_producer_attempt() != *producer_attempt
                     || session.control.is_retired()
-                    || !self.publication_authority_is_current(admitted_serving_generation)
                 {
                     return Err(MediaResponsePublicationRejection::StateChanged);
                 }
+                require_publication_authority!();
                 return Ok(MediaResponseAuthorization {
                     session_id: session_id.to_owned(),
                     owner: owner.clone(),
@@ -366,9 +382,8 @@ impl TranscodeManager {
                 .await;
                 return Err(MediaResponsePublicationRejection::StateChanged);
             }
-            if !self.publication_authority_is_current(admitted_serving_generation)
-                || session.control.is_retired()
-            {
+            require_publication_authority!();
+            if session.control.is_retired() {
                 return Err(MediaResponsePublicationRejection::StateChanged);
             }
             if actor_authorization.first_producer_media_publication {
@@ -446,15 +461,15 @@ impl TranscodeManager {
         if self.session_release_is_active(session_id) {
             return Err(MediaResponsePublicationRejection::StateChanged);
         }
-        let admitted_serving_generation = self
-            .serving_authority
-            .admit()
-            .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+        let admitted_serving_generation = self.admit_publication()?;
         macro_rules! require_error_authority {
             () => {
-                if !self.publication_authority_is_current(admitted_serving_generation)
-                    || self.session_release_is_active(session_id)
-                {
+                if !self.publication_authority_is_current(admitted_serving_generation) {
+                    return Err(MediaResponsePublicationRejection::AuthorityLost {
+                        admitted_generation: admitted_serving_generation,
+                    });
+                }
+                if self.session_release_is_active(session_id) {
                     return Err(MediaResponsePublicationRejection::StateChanged);
                 }
             };
@@ -567,7 +582,9 @@ impl TranscodeManager {
         let retired_integrity_owner =
             current.is_none() && session.owns_retired_cache_integrity_failure(error);
         if !self.publication_authority_is_current(admitted_serving_generation) {
-            Err(MediaResponsePublicationRejection::StateChanged)
+            Err(MediaResponsePublicationRejection::AuthorityLost {
+                admitted_generation: admitted_serving_generation,
+            })
         } else if exact_current || retired_integrity_owner {
             Ok(())
         } else {
@@ -598,9 +615,18 @@ impl TranscodeManager {
         }
         let _serving_transition = self
             .serving_authority
-            .commit_guard_before(authorization.admitted_serving_generation, deadline)
+            .commit_guard_or_refusal_before(authorization.admitted_serving_generation, deadline)
             .await
-            .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+            .map_err(|refusal| match refusal {
+                crate::serving_fence::CommitGuardRefusal::AuthorityLost => {
+                    MediaResponsePublicationRejection::AuthorityLost {
+                        admitted_generation: authorization.admitted_serving_generation,
+                    }
+                }
+                crate::serving_fence::CommitGuardRefusal::DeadlinePassed => {
+                    MediaResponsePublicationRejection::StateChanged
+                }
+            })?;
         if let Some(presentation_contract_fingerprint) = authorization
             .rolling_generation_metadata_fingerprint
             .as_deref()

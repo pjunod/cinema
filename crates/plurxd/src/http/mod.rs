@@ -3157,12 +3157,12 @@ async fn mutable_media_serving_gate(
         return serving_gate(&state, request, next).await;
     };
     let path = request.uri().path().to_owned();
-    hls::fence::observe_hls_session_response(
-        &state.serving,
-        route,
-        &path,
-        serving_gate(&state, request, next),
-    )
+    hls::fence::observe_hls_session_response(&state.serving, route, &path, async {
+        if route.existing_session_read {
+            hls::fence::hold_for_outage_resolution(&state).await;
+        }
+        serving_gate(&state, request, next).await
+    })
     .await
 }
 

@@ -104,6 +104,39 @@ pub(crate) fn note_relay(owner_node_id: &str) {
     });
 }
 
+/// Hold a read of an existing session that arrived while this node is
+/// fenced until `TranscodeManager::serving_fence_loop` resolves the outage.
+///
+/// Returns as soon as authority is held, so the request then runs exactly as
+/// a fresh arrival: through the gate, the relay check and its handler, with
+/// every admission made against the generation that came back. If the
+/// outage expires, the manager is gone or the hold's own bound passes, it
+/// returns with the node still fenced and the gate answers the
+/// `serving_fenced` 503 it answers today.
+///
+/// The hold is read-only: it never creates a `SessionGrace`, so dropping the
+/// request cannot spend or reset the outage budget the manager owns, and a
+/// node that keeps flapping is accounted for once, there. It is bounded by
+/// [`crate::serving_fence::SERVING_FENCE_SESSION_GRACE`] from arrival and by
+/// the outage's own `expires_at`, whichever is first.
+pub(crate) async fn hold_for_outage_resolution(state: &AppState) {
+    let deadline =
+        tokio::time::Instant::now().into_std() + crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+    while let Some(baseline) = state.serving.authority().outage_baseline() {
+        match state
+            .transcode
+            .wait_for_outage_resolution(baseline, deadline)
+            .await
+        {
+            // Authority came back; check again, since it may already have
+            // been lost again, which is a new outage after a newer baseline.
+            crate::serving_fence::OutageWait::Recovered => {}
+            crate::serving_fence::OutageWait::Expired
+            | crate::serving_fence::OutageWait::TimedOut => return,
+        }
+    }
+}
+
 /// Run one `/hls/{session}` request and, when it fails in a way a player
 /// treats as fatal, log the refusal with what is needed to attribute it: the
 /// typed code, the serving loss generation at arrival and at answer, the

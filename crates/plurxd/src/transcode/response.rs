@@ -93,6 +93,14 @@ pub(crate) enum MediaResponsePublicationRejection {
     OwnerGone,
     StateChanged,
     ProducerEnded(String),
+    /// Serving authority, and nothing else, caused the refusal: the node was
+    /// fenced at admission, or the loss generation moved after
+    /// `admitted_generation`. A buffered response may wait for the manager's
+    /// resolution of the outage after that generation and authorize again
+    /// from the top; nothing else may treat it as retryable.
+    AuthorityLost {
+        admitted_generation: u64,
+    },
 }
 
 /// Frozen presentation facts resolved without erasing the distinction between
@@ -166,6 +174,7 @@ pub(super) enum MediaResponsePublicationBinding {
 /// The response class requested by HTTP before any bytes become visible.
 /// Object names are retained only for exact EOF/frontier accounting; actor
 /// admission is derived from this typed class, never from URL parsing.
+#[derive(Clone)]
 pub(crate) struct MediaResponsePublication {
     pub(super) kind: &'static str,
     pub(super) object_name: Option<String>,

@@ -987,7 +987,7 @@
                     Instant::now() + Duration::from_secs(1),
                 )
                 .await,
-            Err(MediaResponsePublicationRejection::StateChanged)
+            Err(MediaResponsePublicationRejection::AuthorityLost { .. })
         ));
     }
 
@@ -1079,7 +1079,7 @@
 
         assert!(matches!(
             authorization.await.expect("VOD authorization task"),
-            Err(MediaResponsePublicationRejection::StateChanged)
+            Err(MediaResponsePublicationRejection::AuthorityLost { .. })
         ));
         assert!(
             manager.serving_ready.load(Acquire),
@@ -1134,7 +1134,7 @@
             )
             .await
             .expect("a refused admission answers without waiting"),
-            Err(MediaResponsePublicationRejection::StateChanged)
+            Err(MediaResponsePublicationRejection::AuthorityLost { .. })
         ));
         assert!(
             !point.was_reached(),
@@ -1232,7 +1232,7 @@
                     Instant::now() + Duration::from_secs(1),
                 )
                 .await,
-            Err(MediaResponsePublicationRejection::StateChanged)
+            Err(MediaResponsePublicationRejection::AuthorityLost { .. })
         ));
     }
 
