@@ -89,6 +89,10 @@ pub(super) fn change(
     else {
         return Err(codec::invalid());
     };
+    // The frozen snapshot is the producer R member's inventory at transfer;
+    // this obligation's one slot is the retained S member it was moved into.
+    // The custody contract keeps those two ids distinct, so the snapshot is
+    // bound to the transfer's source and the slot to its target.
     if custody.target_obligation_id.uuid() != key.handle.obligation_id
         || custody.target_graph_id.uuid() != key.handle.graph_id
         || custody.target_owner_id.uuid() != owner
@@ -96,7 +100,7 @@ pub(super) fn change(
         || custody.rendition_id != rendition_id
         || custody.generation_epoch != generation_epoch
         || original_plan != plan
-        || snapshot.member_id != slot.member_id
+        || snapshot.member_id != custody.transfer.source_member_id
         || custody.transfer.target_member_id != slot.member_id
         || slot.owned_by.is_some()
         || !slot.depends_on.is_empty()
