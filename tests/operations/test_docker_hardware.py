@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -103,27 +105,52 @@ class DockerHardwareTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("docker"), "Docker Compose CLI is unavailable")
     def test_real_compose_tracked_memory_reservation_accepts_host_nvidia_override(self):
         override = self.root / "host.json"
+        output = self.root / "generated.json"
         devices = [{"driver": "nvidia", "count": 1, "capabilities": ["gpu"]}]
-        override.write_text(json.dumps({"services": {"plurxd": {
-            "deploy": {"resources": {"reservations": {"devices": devices}}}
-        }}}))
-        for memory, expected in ((None, 3221225472), ("512m", 536870912)):
-            with self.subTest(memory=memory):
-                environment = dict(os.environ)
+        cases = ((None, None, True, 3221225472), ("512m", None, True, 536870912),
+                 (None, "384m", False, 402653184), (None, "384m", True, 402653184))
+        for memory, literal, gpu, expected in cases:
+            with self.subTest(memory=memory, literal=literal, gpu=gpu):
+                host = {"environment": {"LITERAL": "$${KEEP_LITERAL}"}}
+                if literal is not None:
+                    host["mem_reservation"] = literal
+                if gpu:
+                    host["deploy"] = {"resources": {"reservations": {"devices": devices}}}
+                override.write_text(json.dumps({"services": {"plurxd": host}}))
+                environment = dict(os.environ,
+                    COMPOSE_FILE=str(ROOT / "deploy/docker-compose.yml") + os.pathsep + str(override),
+                    COMPOSE_PATH_SEPARATOR=os.pathsep, PLURX_DOCKER_GPU="manual")
                 environment.pop("PLURX_MEM_RESERVATION", None)
                 if memory is not None:
                     environment["PLURX_MEM_RESERVATION"] = memory
+                with mock.patch("pathlib.Path.cwd", return_value=self.root), mock.patch.dict(
+                    os.environ, environment, clear=True
+                ):
+                    # docker-up derives its period before preparing hardware.
+                    captured = io.StringIO()
+                    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(io.StringIO()):
+                        status = HELPER["HTTPS"]["INPUTS"]["main"](["--emit-start-period"])
+                    self.assertEqual(status, 0)
+                    self.assertTrue(captured.getvalue().strip())
+                    initial = HELPER["HTTPS"]["INPUTS"]["resolved_compose_document"]()
+                    self.assertEqual(int(initial["services"]["plurxd"]["mem_reservation"]), expected)
+                    self.assertEqual(initial["services"]["plurxd"]["environment"]["LITERAL"], "$${KEEP_LITERAL}")
+                    files = HELPER["prepare"](output)
                 config = subprocess.run(
-                    ["docker", "compose", "-f", str(ROOT / "deploy/docker-compose.yml"),
-                     "-f", str(override), "config", "--format", "json"],
-                    cwd=self.root, env=environment, capture_output=True, text=True,
+                    ["docker", "compose", "config", "--format", "json"],
+                    cwd=self.root, env=dict(environment, COMPOSE_FILE=files),
+                    capture_output=True, text=True,
                 )
                 self.assertEqual(config.returncode, 0, config.stderr)
                 service = json.loads(config.stdout)["services"]["plurxd"]
-                reservation = service["deploy"]["resources"]["reservations"]
                 self.assertEqual(int(service["mem_reservation"]), expected)
-                self.assertEqual(int(reservation["memory"]), expected)
-                self.assertEqual(reservation["devices"], devices)
+                self.assertEqual(service["environment"]["LITERAL"], "$${KEEP_LITERAL}")
+                if gpu:
+                    reservation = service["deploy"]["resources"]["reservations"]
+                    self.assertEqual(int(reservation["memory"]), expected)
+                    self.assertEqual(reservation["devices"], devices)
+                else:
+                    self.assertNotIn("deploy", service)
 
     def test_cpu_only_and_empty_dri_do_not_require_devices(self):
         self.assertEqual(self.overlay(), {})
