@@ -1789,11 +1789,8 @@ mod tests {
     /// `make_room` found nothing to evict or an inventory was left dirty.
     #[tokio::test]
     async fn a_refused_reservation_logs_its_cause_and_sweep_report() {
-        use tracing_subscriber::prelude::*;
         let buffer = Arc::new(crate::logbuf::LogBuffer::new(16));
-        let _subscriber = tracing::subscriber::set_default(
-            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&buffer))),
-        );
+        let _capture = crate::logbuf::capture_for_test(&buffer);
         let fixture = Fixture::new();
         let held = fixture.file(0, "held.m4s", 16 * 1024);
         let baseline = fixture.used().await;

@@ -664,3 +664,8 @@ Every new test was revert-proven (old line back, test fails, fix restored).
 | F14 | Both watermark readers share one `WatermarkView` read and binding check |
 | F15 | Declined: `coherent_path_producer_attempt()` reads atomics, not the actor, so there is no snapshot to fold into; M5 adds one bounded snapshot per 100 ms poll |
 | F16 | The M2 tests wait on `outage_owner_started()`, and the router-hold test runs on a paused clock |
+
+Not a finding: M0's cache-refusal log test failed in crowded runs. With one
+dispatcher registered, tracing-core 0.1.36 takes a callsite's interest from
+whichever thread reaches it first, so another test cached "never" for it.
+`logbuf::capture_for_test` keeps a second dispatcher registered.

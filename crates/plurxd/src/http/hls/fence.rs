@@ -289,11 +289,8 @@ mod tests {
     #[tokio::test]
     async fn a_failed_hls_session_response_logs_code_generation_owner_and_relay() {
         use plurx_core::cluster::migration::status::ReplicationMonitor;
-        use tracing_subscriber::prelude::*;
         let buffer = Arc::new(crate::logbuf::LogBuffer::new(16));
-        let _subscriber = tracing::subscriber::set_default(
-            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&buffer))),
-        );
+        let _capture = crate::logbuf::capture_for_test(&buffer);
         let fence =
             crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
         fence.validation_set_ready(false).await;
