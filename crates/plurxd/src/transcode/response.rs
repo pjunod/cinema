@@ -32,6 +32,17 @@ pub(crate) struct VodResponsePublication<T> {
 }
 
 impl MediaResponseOwner {
+    /// Which kind of owner this is, and the exact producer attempt a rolling
+    /// owner is bound to, for correlating a failed response in the log.
+    pub(crate) fn log_identity(&self) -> (&'static str, Option<u64>) {
+        match &self.0 {
+            MediaResponseOwnerKind::Rolling {
+                producer_attempt, ..
+            } => ("rolling", Some(*producer_attempt)),
+            MediaResponseOwnerKind::Vod(_) => ("vod", None),
+        }
+    }
+
     /// AVC is init-derived only for fMP4 sessions. Rolling full transcodes use
     /// MPEG-TS and have no initialization object to inspect.
     pub(crate) fn avc_master_uses_init(&self) -> bool {

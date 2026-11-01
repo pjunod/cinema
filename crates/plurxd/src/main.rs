@@ -2274,7 +2274,8 @@ impl StartupClockObserver for StartupObservationHttp {
                 },
             ));
             let stop = self.stop.clone();
-            let server = tokio::spawn(serve_http(
+            let server = tokio::spawn(serve_http_listener(
+                "startup_observation",
                 listener,
                 dispatch,
                 async move { stop.cancelled().await },
@@ -3817,7 +3818,7 @@ async fn serve(
 ) -> anyhow::Result<HttpDrain> {
     // The shutdown future stops both listeners at once; the standard port
     // finishes draining before progress is flushed, like the main one.
-    let main = serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await;
+    let main = serve_http_listener("main", listener, app, shutdown, HTTP_TIMEOUTS).await;
     let tls = https.drain().await;
     let jellyfin = jellyfin.drain().await;
     let cleanup = drain_serving_state(progress, mdns).await;
@@ -3900,7 +3901,8 @@ impl JellyfinStandardListener {
                 tracing::info!(addr = %bound, "listening for Jellyfin clients at the server root");
                 status.record(http::JellyfinStandardPort::Listening(bound));
                 let stop = listener.stop.clone();
-                listener.task = Some(tokio::spawn(serve_http(
+                listener.task = Some(tokio::spawn(serve_http_listener(
+                    "jellyfin_standard",
                     socket,
                     http::jellyfin_standard_port_app(app.clone()),
                     async move { stop.cancelled().await },
@@ -4140,7 +4142,22 @@ impl SharingConnectionCancellation {
     }
 }
 
+/// [`serve_http_listener`] for tests, which run one anonymous listener each.
+#[cfg(test)]
 async fn serve_http<A: HttpAcceptor>(
+    listener: A,
+    app: axum::Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    timeouts: HttpTimeouts,
+) -> anyhow::Result<HttpDrain> {
+    serve_http_listener("test", listener, app, shutdown, timeouts).await
+}
+
+/// Serve one HTTP listener until `shutdown`, then drain it. `name` says
+/// which of the daemon's listeners this is in every line it logs, so a
+/// drain on one listener is never read as the daemon shutting down.
+async fn serve_http_listener<A: HttpAcceptor>(
+    name: &'static str,
     listener: A,
     app: axum::Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -4178,7 +4195,7 @@ async fn serve_http<A: HttpAcceptor>(
                 // descriptor and buffer exhaustion are expected to clear.
                 // Backing off keeps a persistent condition from turning the
                 // loop into a CPU/log spinner while preserving availability.
-                tracing::error!(%error, "HTTP listener accept failed; retrying");
+                tracing::error!(%error, listener = name, "HTTP listener accept failed; retrying");
                 tokio::select! {
                     () = &mut shutdown => break,
                     () = tokio::time::sleep(timeouts.accept_error_backoff) => continue,
@@ -4246,7 +4263,7 @@ async fn serve_http<A: HttpAcceptor>(
     tokio::pin!(connections_drained);
     let drain = tokio::select! {
         () = &mut connections_drained => {
-            tracing::info!("shutdown complete");
+            tracing::info!(listener = name, "shutdown complete");
             HttpDrain::Complete
         }
         // Only starts counting once the signal has actually arrived: if the
@@ -4256,6 +4273,7 @@ async fn serve_http<A: HttpAcceptor>(
             tokio::time::sleep(timeouts.shutdown_drain).await;
         } => {
             tracing::warn!(
+                listener = name,
                 after = ?timeouts.shutdown_drain,
                 "drain timed out with connections still open; exiting anyway"
             );

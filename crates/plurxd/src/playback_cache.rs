@@ -517,9 +517,32 @@ impl PlaybackCacheBudget {
                 "write exceeds shared playback cache budget",
             ));
         }
-        self.make_room(Some((device, bytes))).await?;
+        let report = self.make_room(Some((device, bytes))).await?;
         let mut state = self.lock();
         if state.dirty || state.ceiling == 0 || state.remaining(device) < bytes {
+            // The sweep report says which refusal this is: an inventory a
+            // concurrent drop or cancelled eviction left dirty, a zero
+            // ceiling, or a full cache `make_room` found nothing to evict in.
+            let cause = if state.dirty {
+                "inventory_dirty"
+            } else if state.ceiling == 0 {
+                "zero_ceiling"
+            } else {
+                "no_room"
+            };
+            tracing::warn!(
+                cause,
+                requested_bytes = bytes,
+                ceiling = state.ceiling,
+                used = state.used(),
+                remaining = state.remaining(device),
+                dirty_revision = state.dirty_revision,
+                evicted = report.evicted,
+                protected = report.protected,
+                bytes_before = report.bytes_before,
+                bytes_after = report.bytes_after,
+                "shared playback cache reservation refused"
+            );
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
                 "shared playback cache budget or filesystem reserve exhausted",
@@ -1439,6 +1462,47 @@ mod tests {
         })
         .await
         .expect("detached inventory releases callback slot");
+    }
+
+    /// M0: a refusal carries the sweep report, so the log alone says whether
+    /// `make_room` found nothing to evict or an inventory was left dirty.
+    #[tokio::test]
+    async fn a_refused_reservation_logs_its_cause_and_sweep_report() {
+        use tracing_subscriber::prelude::*;
+        let buffer = Arc::new(crate::logbuf::LogBuffer::new(16));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&buffer))),
+        );
+        let fixture = Fixture::new();
+        let held = fixture.file(0, "held.m4s", 16 * 1024);
+        let baseline = fixture.used().await;
+        fixture.limit(baseline);
+        fixture.budget.register(Files::new(vec![held.clone()]));
+        let _pin = pin(&held).expect("pin").expect("managed");
+        let refused = reserve(&fixture.roots[1].join("next.ts"), 8 * 1024).await;
+        assert_eq!(
+            refused.expect_err("nothing is evictable").kind(),
+            io::ErrorKind::StorageFull
+        );
+        let lines = buffer.tail("trace", 16);
+        let line = lines
+            .iter()
+            .find(|entry| entry.message.contains("reservation refused"))
+            .unwrap_or_else(|| panic!("no refusal line in {lines:?}"));
+        for field in [
+            "cause=\"no_room\"",
+            "requested_bytes=8192",
+            "remaining=0",
+            "evicted=0",
+            "protected=1",
+            "dirty_revision=",
+        ] {
+            assert!(
+                line.message.contains(field),
+                "{field} missing from {}",
+                line.message
+            );
+        }
     }
 
     #[tokio::test]

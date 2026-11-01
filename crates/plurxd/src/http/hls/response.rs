@@ -39,6 +39,7 @@ pub(super) async fn authorize_response_publication(
     publication: crate::transcode::MediaResponsePublication,
     deadline: Instant,
 ) -> Result<crate::transcode::MediaResponseAuthorization, ApiError> {
+    fence::note_response_owner(owner);
     match tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         state

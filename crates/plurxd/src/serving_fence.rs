@@ -313,6 +313,8 @@ pub(crate) struct ServingHttpPolicy {
     pub(crate) content_type: &'static str,
     pub(crate) body: &'static str,
     pub(crate) retry_after: bool,
+    /// The typed `code` in `body`, when it carries one.
+    pub(crate) code: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -826,24 +828,28 @@ impl ServingFence {
                 content_type: "text/plain",
                 body: "ok\n",
                 retry_after: false,
+                code: None,
             }),
             "/readyz" if self.is_ready() => Some(ServingHttpPolicy {
                 status: 200,
                 content_type: "text/plain",
                 body: "ready\n",
                 retry_after: false,
+                code: None,
             }),
             "/readyz" => Some(ServingHttpPolicy {
                 status: 503,
                 content_type: "text/plain",
                 body: "quorum unavailable\n",
                 retry_after: false,
+                code: None,
             }),
             path if Self::requires_authority(path) && !self.is_ready() => Some(ServingHttpPolicy {
                 status: 503,
                 content_type: "application/json",
                 body: SERVING_FENCED_JSON,
                 retry_after: true,
+                code: Some("serving_fenced"),
             }),
             _ => None,
         }

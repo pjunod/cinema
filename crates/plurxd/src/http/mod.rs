@@ -3147,6 +3147,30 @@ async fn mutable_media_serving_gate(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    let hls_route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .and_then(|matched| {
+            hls::fence::hls_session_route(request.method().as_str(), matched.as_str())
+        });
+    let Some(route) = hls_route else {
+        return serving_gate(&state, request, next).await;
+    };
+    let path = request.uri().path().to_owned();
+    hls::fence::observe_hls_session_response(
+        &state.serving,
+        route,
+        &path,
+        serving_gate(&state, request, next),
+    )
+    .await
+}
+
+async fn serving_gate(
+    state: &AppState,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
     let starts_media = crate::serving_fence::ServingFence::starts_mutable_media(
         request.method().as_str(),
         request.uri().path(),
@@ -3164,6 +3188,9 @@ async fn mutable_media_serving_gate(
                 response
                     .headers_mut()
                     .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+                response
+                    .extensions_mut()
+                    .insert(error::ApiErrorCode("restart_drain_active"));
                 return response;
             }
         }
@@ -3186,6 +3213,9 @@ async fn mutable_media_serving_gate(
         response
             .headers_mut()
             .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    if let Some(code) = policy.code {
+        response.extensions_mut().insert(error::ApiErrorCode(code));
     }
     response
 }
