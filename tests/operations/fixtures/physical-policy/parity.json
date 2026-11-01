@@ -1,0 +1,83 @@
+{
+  "comment": "Shared arithmetic vectors for the Python physical policy (validation/async_physical_policy.py) and the Rust plan validator (async_driver_catalog.rs). tests/operations/test_async_physical_accounting.py and the Rust test `physical_policy_arithmetic_matches_the_shared_vectors` assert the same numbers; a change to either side's arithmetic fails one of them.",
+  "constants": {
+    "CONTROL_OUTPUT_BYTES": 67108864,
+    "CONTROL_OUTPUT_DIRECTORIES": 4,
+    "MIB": 1048576,
+    "UNIT_LOG_RESERVE": 33554432
+  },
+  "lifetime_reservation": [
+    {
+      "database_bytes": 40960,
+      "journal_bytes": 1130496,
+      "live": 1,
+      "main_bytes": 40960,
+      "temp_bytes": 81920
+    },
+    {
+      "database_bytes": 67108864,
+      "journal_bytes": 270532608,
+      "live": 2,
+      "main_bytes": 134217728,
+      "temp_bytes": 268435456
+    },
+    {
+      "database_bytes": 67108864,
+      "journal_bytes": 405798912,
+      "live": 3,
+      "main_bytes": 201326592,
+      "temp_bytes": 402653184
+    },
+    {
+      "database_bytes": 1073741824,
+      "journal_bytes": 10742661120,
+      "live": 5,
+      "main_bytes": 5368709120,
+      "temp_bytes": 10737418240
+    }
+  ],
+  "restore_staging_requirement": [
+    {
+      "catalog_database_bytes": 40960,
+      "required": 3227648,
+      "total_retained_artifact_bytes": 1048576,
+      "unit_byte_allowance": 1048576,
+      "verifier_database_bytes": 40960
+    },
+    {
+      "catalog_database_bytes": 67108864,
+      "required": 152994944,
+      "total_retained_artifact_bytes": 1000000,
+      "unit_byte_allowance": 16777216,
+      "verifier_database_bytes": 67108864
+    },
+    {
+      "catalog_database_bytes": 67108864,
+      "required": 3489660928,
+      "total_retained_artifact_bytes": 1073741824,
+      "unit_byte_allowance": 1073741824,
+      "verifier_database_bytes": 134217728
+    },
+    {
+      "catalog_database_bytes": 268435456,
+      "required": 2685403136,
+      "total_retained_artifact_bytes": 1073741824,
+      "unit_byte_allowance": 1048576,
+      "verifier_database_bytes": 67108864
+    }
+  ],
+  "runtime_pool_demand": [
+    {
+      "demand": 301989889,
+      "unit_byte_allowance": 1
+    },
+    {
+      "demand": 318767104,
+      "unit_byte_allowance": 16777216
+    },
+    {
+      "demand": 1375731712,
+      "unit_byte_allowance": 1073741824
+    }
+  ]
+}

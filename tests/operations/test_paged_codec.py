@@ -176,6 +176,28 @@ class PagedBudgetPhysicalAdmission(unittest.TestCase):
         with self.assertRaisesRegex(codec.Invalid, 'physical calibration differs'):
             codec.Budget(self.edited(widen), self.root, grant_from_environment=False)
 
+    def rebound(self, mutate):
+        """A plan whose policy is edited and whose calibration digest is re-bound to it, so only the inequalities can refuse it."""
+        def edit(accounting):
+            mutate(accounting['physical_policy'])
+            accounting['calibration']['policy_sha256'] = fixture.physical().digest(accounting['physical_policy'])
+        return self.edited(edit)
+
+    def test_the_budget_applies_the_restore_pool_and_simultaneous_reservation_inequalities(self):
+        physical = fixture.physical()
+        accounting = json.loads(self.plan['source_bounds_utf8'])
+        need = physical.restore_staging_requirement(accounting['physical_policy'], self.plan)
+        exact = self.rebound(lambda policy: policy['pools'].update(restore_staging_bytes=need))
+        codec.Budget(exact, self.root, grant_from_environment=False)
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'restore staging pool'):
+            codec.Budget(self.rebound(lambda policy: policy['pools'].update(restore_staging_bytes=need - 1)), self.root, grant_from_environment=False)
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'simultaneous database lifetimes'):
+            codec.Budget(self.rebound(lambda policy: policy['families']['authentication_index'].update(
+                journal_bytes=policy['families']['authentication_index']['journal_bytes'] - 1)), self.root, grant_from_environment=False)
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'source/runtime pool'):
+            codec.Budget(self.rebound(lambda policy: policy['pools'].update(
+                source_runtime_scratch_bytes=physical.runtime_pool_demand(self.plan['unit_byte_allowance']))), self.root, grant_from_environment=False)
+
     def test_allocation_capable_child_without_an_inherited_grant_is_incomplete(self):
         names = ('PLURX_ASYNC_PHYSICAL_GRANT_FD', 'PLURX_ASYNC_PHYSICAL_GRANT_SHA256', 'PLURX_ASYNC_PHYSICAL_LEASE_FD')
         with patch.dict(os.environ, {}, clear=False):

@@ -61,6 +61,24 @@ def runtime_pool_demand(unit_byte_allowance):
     return unit_output_bytes(unit_byte_allowance) + CONTROL_OUTPUT_DIRECTORIES * CONTROL_OUTPUT_BYTES
 
 
+def restore_staging_requirement(policy, plan):
+    """What `restore_staging_bytes` must hold: the history twice, two restored databases and the evidence allowance.
+
+    Downloaded artifact ZIPs and their extractions, restored catalog/verifier images and the evidence
+    rebuilt from a restore all charge this one pool (`charge_download`, the restore staging reservations).
+    Every job replays the whole retained history, so the pool holds `total_retained_artifact_bytes` of
+    downloaded and extracted members AND, in the evidence `reconstruct_evidence` rebuilds for every accepted
+    publication replayed in the job, a second copy of the same bytes: `2*total_retained_artifact_bytes`.
+    `2*max(catalog_main, verifier_main database_bytes)` is the staged catalog plus verifier image of one
+    restore, and `unit_byte_allowance` bounds the evidence of the one unit being prepared. The Rust plan
+    validator (`restore_staging_requirement` in async_driver_catalog.rs) and the verifier `Budget` apply the
+    identical inequality.
+    """
+    ceilings = (policy['families']['catalog_main']['database_bytes'], policy['families']['verifier_main']['database_bytes'])
+    return (2 * integer(plan.get('total_retained_artifact_bytes'), positive=True) + 2 * max(ceilings)
+            + integer(plan.get('unit_byte_allowance'), positive=True))
+
+
 class PhysicalPolicyError(ValueError):
     """A policy, source map, or restored identity is invalid."""
 
@@ -186,7 +204,11 @@ def minimum_family_policy(source_map, family, database_bytes):
     Each live database is charged its own ceiling main file, its 2*ceiling+1MiB
     journal/WAL/rollback reservation and its 2*ceiling FILE temporaries.
     """
-    live = max(1, family_instances(source_map, family))
+    return lifetime_reservation(max(1, family_instances(source_map, family)), database_bytes)
+
+
+def lifetime_reservation(live, database_bytes):
+    """`live` simultaneous databases of ceiling c reserve live*c main, live*(2c+1MiB) journal, live*2c temp bytes."""
     return {'database_bytes': database_bytes, 'main_bytes': live * database_bytes,
             'journal_bytes': live * (2 * database_bytes + MIB), 'temp_bytes': live * 2 * database_bytes}
 
@@ -282,6 +304,21 @@ def observe_geometry(connection, database_role, source_map):
             'page_count': connection.execute('PRAGMA page_count').fetchone()[0], 'tables': tables, 'indexes': indexes}
 
 
+def require_pool_inequalities(policy, baseline, plan):
+    """The pool inequalities every plan validator applies: calibration, the verifier Budget and the Rust plan validator.
+
+    The source/runtime pool covers the measured source baseline, every output directory and at least a byte of
+    runtime scratch; `restore_staging_bytes` covers the retained history twice, two staged databases and the evidence
+    allowance (`restore_staging_requirement`).
+    """
+    pools = policy['pools']
+    require(baseline['source_workspace_bytes'] <= pools['source_runtime_scratch_bytes'], 'source/runtime pool does not fit measured source baseline')
+    require(baseline['source_workspace_bytes'] + runtime_pool_demand(plan.get('unit_byte_allowance')) < pools['source_runtime_scratch_bytes'],
+            'source/runtime pool does not cover the source baseline, every output directory and runtime scratch')
+    require(pools['restore_staging_bytes'] >= restore_staging_requirement(policy, plan),
+            'restore staging pool does not cover the retained history twice, two restored databases and the evidence allowance')
+
+
 def calibrate_physical_policy(policy, observed_geometry, observed_baseline, plan, *, source_map=None):
     source_map = load_source_map() if source_map is None else source_map
     validate_physical_policy(policy, source_map)
@@ -290,10 +327,7 @@ def calibrate_physical_policy(policy, observed_geometry, observed_baseline, plan
     closed(observed_baseline, ('source_workspace_bytes', 'existing_unpooled_bytes'), 'physical baseline')
     for value in observed_baseline.values():
         integer(value)
-    require(observed_baseline['source_workspace_bytes'] <= policy['pools']['source_runtime_scratch_bytes'], 'source/runtime pool does not fit measured source baseline')
-    require(observed_baseline['source_workspace_bytes'] + runtime_pool_demand(plan.get('unit_byte_allowance'))
-            < policy['pools']['source_runtime_scratch_bytes'],
-            'source/runtime pool does not cover the source baseline, every output directory and runtime scratch')
+    require_pool_inequalities(policy, observed_baseline, plan)
     for family, observations in observed_geometry.items():
         declared = {x['database_role'] for x in source_map['families'][family]}
         require(type(observations) is list and (observations or not declared), 'missing actual physical family geometry')
@@ -1331,7 +1365,8 @@ def _prepare_transfer(self, reservation_id, destination_owner, resource, compone
         destination.track(destination_path)
         transfer_id = secrets.token_hex(32)
         record = {'schema_version': 1, 'kind': 'physical_transfer', 'transfer_id': transfer_id, 'bytes': source.bytes,
-                  'source': {'reservation_id': source.reservation_id, 'relative_path': str(source_path.relative_to(self.directory)), **_identity(info)},
+                  'source': {'reservation_id': source.reservation_id, 'owner': source.owner, 'resource': source.key[0], 'component': source.key[1],
+                             'relative_path': str(source_path.relative_to(self.directory)), **_identity(info)},
                   'destination': {'reservation_id': destination.reservation_id, 'owner': destination_owner, 'resource': resource,
                                   'component': component, 'relative_path': str(destination_path.relative_to(self.directory))}}
         raw = canonical(record)

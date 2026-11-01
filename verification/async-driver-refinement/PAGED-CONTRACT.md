@@ -654,10 +654,21 @@ only once an owner is covered or packed earlier in the same batch. A snapshot
 therefore need not fit one job. Remaining content is carried by further
 closed `publish` dispatches (`Origin.operation` `execute` or `publish`) on the
 same registered route, runtime and storage lease. These execute no proof
-operation. Each dispatch's `dispatch_ordinal` is the length of the authenticated
-attempt inventory read from the source repository's own event history and
-re-derived by every replay (a local counter could diverge from that inventory,
-so none is kept), and failed or uncertain dispatches, publish dispatches and the final
+operation. Each dispatch's `dispatch_ordinal` is reserved durably **before** the API call:
+the controller creates and fsyncs `dispatch-<n>.reserved.json` (registration,
+control digest, mode, operation) in its owned output directory, then
+`dispatch-<n>.sent.json` immediately before the POST (removed again only if the
+server definitively refuses the request). The authenticated attempt inventory
+read from the source repository's event history stays the authority on what ran,
+and the ordinal is still the length of that inventory (`len(attempt_runs)` of the
+dispatched control). On restart every reservation is reconciled against the
+inventory: an ordinal inside it must have been reserved for exactly the control
+that ran, no reservation lies beyond the next ordinal, and the reservation at the
+next ordinal is adopted if its run is visible, resent with the same payload only
+if it was never sent, and otherwise refused as uncertain (it stays consumed: it
+is neither reused by another dispatch nor skipped). The reservations are owned
+files, not a database, so they have no table-map role. Failed and uncertain
+dispatches, publish dispatches and the final
 activation dispatch all consume the immutable `maximum_units`; there is no
 hidden transfer loop, dynamic matrix, runtime slot increase or operator-created
 batch receipt. No direct action-bundle execution or separate uploader task is
@@ -928,7 +939,29 @@ sibling `<output>-aux` directory that the controller, the checker and the Rust
 catalog derive identically. Calibration therefore requires the pool to exceed
 the measured source baseline plus those output shares (the Python calibration and
 the Rust plan validator apply the identical inequality); the remainder is the
-runtime scratch. The preparation-only unit's controller-made copy of the restored
+runtime scratch. The runtime pool exceeds the measured source workspace plus
+every output directory's share by at least one byte. The controller's ledger
+deducts only the output shares, so after them a child is delegated at least
+`1 + source_workspace_bytes` bytes of runtime scratch; a delegation that would be
+zero bytes is refused with `PhysicalIncomplete` before the child starts, never
+granted empty. Downloads, restores and rebuilt evidence all charge `restore_staging_bytes`,
+and the controller re-authenticates and re-extracts the whole retained history
+each job, rebuilding the evidence of every accepted publication it replays (a
+second copy of the same bytes that stays on disk because the authenticated
+member rows point at it). Calibration therefore also requires
+`restore_staging_bytes >= 2*total_retained_artifact_bytes +
+2*max(catalog_main.database_bytes, verifier_main.database_bytes) +
+unit_byte_allowance`: the retained history as downloaded and extracted members
+and again as rebuilt evidence, one staged catalog and one staged verifier image,
+and the evidence of the unit being prepared (`restore_staging_requirement`; the
+verifier `Budget` and the Rust plan validator re-apply the identical inequality
+with the calibration's baseline). A pool below it halts the session
+deterministically once the history grows past it, so it is refused at
+calibration, not discovered at the first download. The unadmitted example's
+`restore_staging_bytes` (5 GiB) satisfies it for the illustrative figures of
+2 GiB retained (four 512 MiB artifacts) and a 512 MiB evidence allowance; it
+still validates no fit.
+The preparation-only unit's controller-made copy of the restored
 catalog (`catalog-backup.sqlite`) takes its own `snapshot_spool_bytes` claim before
 the first byte is written. The next job removes the earlier job outputs, found with the
 same `run-<n>` constructor that places a job's own output.
@@ -946,9 +979,11 @@ engine and the declared PRIMARY KEY/UNIQUE constraints. Every database role also
 declares its `role_lifetime` `{simultaneous,holders}`: the largest number of
 databases of that role live at once in one job or ledger (active input plus
 pending output generation for the catalog and the verifier; the pack job's part
-plan and its content and evidence inventories; the working, conformance and
-controller dependency indexes; the store, replay and conformance pending
-ledgers) and who holds them. Loading the map also requires each object's
+plan and its content and evidence inventories; the replayed history and
+conformance dependency indexes with the controller's copy in an execute job; the
+publication store ledger and the one open replay pending ledger, because a
+receiver ledger is discarded once its publication is accepted) and who holds
+them. Loading the map also requires each object's
 constructor to resolve to a real definition in its pinned source (a Python
 class method or function, a Rust impl function, or a CREATE statement of the
 source SQL), so a removed constructor cannot stay calibrated. Calibration rejects an
@@ -957,7 +992,10 @@ DDL that differs from the map, and requires each family's reservations to cover
 its declared live databases: with `n` the sum of the family's role
 `simultaneous` counts (at least one), `main_bytes >= n*database_bytes`,
 `journal_bytes >= n*(2*database_bytes + 1 MiB)` and
-`temp_bytes >= n*2*database_bytes`. The map supports relational planning and source
+`temp_bytes >= n*2*database_bytes`; the Rust plan validator
+(`ResourceLimits::from_plan`) and the verifier `Budget` require the identical inequality, so Python and
+Rust admit the same policy set (`tests/operations/fixtures/physical-policy/parity.json`
+holds the shared arithmetic vectors both test suites assert). The map supports relational planning and source
 review; it is not a packing theorem. The nonsemantic accounting classes of the
 registered inventory each name exactly one physical charge:
 `backup_and_chunks` charges `snapshot_spool_bytes`, `downloads_and_restores`
@@ -1031,7 +1069,12 @@ the rename and directory fsync; an alias never creates fresh quota. The attached
 restored database is checked against its effective page ceiling (its destination
 family's `database_bytes` rounded down to the file's own page size) from its
 header, before it is first opened, by both private restore validators; a
-database beyond it is an incomplete disposition. The descriptor's `parent` is
+database beyond it is an incomplete disposition. The catalog restore validator
+checks the staged verifier it names (`verifier_work_db`) the same way, under its
+own held attachment, before `private_input_view` opens it; a checkpoint with no
+verifier snapshot yet (a catalog-only expansion unit) stages no verifier file, and
+the validator then returns the incomplete `input_preparation` receipt instead of
+opening a missing file. The descriptor's `parent` is
 `{pid,start_ticks}` where `start_ticks` is the platform's exact process start
 identity (field 22 of `/proc/<pid>/stat` on Linux; the kernel start time of
 `sysctl kern.proc.pid` in microseconds on macOS), compared for equality with the
@@ -1062,6 +1105,34 @@ cannot pass admission; no plan has been admitted, calibrated or measured, and
 actual service capability and fresh owned resources remain prerequisites after
 final review.
 
+
+### Deviations from the sealed ABI
+
+The capacity amendment's implementation departs from the sealed interface ABI
+(`ASTRA-CHECKPOINT-CAPACITY-INTERFACE-ABI.md`) in the following places. Each is
+recorded here for the sealer; none is an accepted change until the user accepts
+it, and each can be reverted to the ABI wording without touching the others.
+
+1. **No `snapshot_restore` database role.** The ABI table lists the role
+   `snapshot_restore` ("Restore queues") for `catalog_or_verifier_restore_scratch`.
+   The code has no such database: a restored catalog or verifier image is
+   attached read-only from its held `restore_staging_bytes` reservation, and the
+   read-only restore validators keep no restore queue of their own. The table map
+   therefore declares the family with no database role (`[]`), the family stays in
+   the closed policy with a reservation of one database ceiling because the ABI
+   requires the family to exist, and no constructor is pinned for a database that
+   is never created. *Reason:* a declared role with no constructor would be a
+   phantom reservation that calibration measures and nothing uses. *Awaiting the
+   user's acceptance;* the alternative is to give the restore validators a real
+   queue database and map role.
+2. **Download charging.** The ABI preserves the conservative
+   `6*total_retained_artifact_bytes` retained/download term of the disk peak but
+   names no pool for a job's own downloads. The implementation charges downloaded
+   artifact ZIPs and their extractions to `restore_staging_bytes` (accounting class
+   `downloads_and_restores`) as they are written, and calibration states the
+   inequality above. *Reason:* the pool's owner, `snapshot_restore`, performs the
+   download and the restore, and a charge made before the first byte is written is
+   the only one that can refuse growth. *Awaiting the user's acceptance.*
 
 ### Post-upload session control
 

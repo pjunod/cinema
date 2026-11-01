@@ -1903,9 +1903,7 @@ pub fn backup_connection(
 #[cfg(test)]
 mod physical_cap_tests {
     use super::*;
-    use crate::store::async_driver_catalog::{
-        fixture_configuration_shaped, FamilyLimits, ResourceLimits,
-    };
+    use crate::store::async_driver_catalog::{fixture_configuration, FamilyLimits, ResourceLimits};
 
     const PAGE: u64 = 4096;
 
@@ -1921,8 +1919,14 @@ mod physical_cap_tests {
         let temp = (2 * database_bytes)
             .checked_add_signed(temp_extra)
             .expect("temp");
-        let config = fixture_configuration_shaped(
-            path.to_path_buf(),
+        // The plan validator refuses a family below the declared simultaneous reservation, so the
+        // mutated catalog_main shape is applied to the admitted plan's limits afterwards: these tests
+        // exercise the storage layer's own cap enforcement against deliberately short reservations.
+        let config = fixture_configuration(path.to_path_buf());
+        let mut limits =
+            ResourceLimits::from_plan(&config.resource_plan).expect("fixture physical limits");
+        limits.families.insert(
+            "catalog_main".to_owned(),
             FamilyLimits {
                 database_bytes,
                 main_bytes: database_bytes.max(1024 * 1024),
@@ -1930,7 +1934,7 @@ mod physical_cap_tests {
                 temp_bytes: temp,
             },
         );
-        ResourceLimits::from_plan(&config.resource_plan).expect("fixture physical limits")
+        limits
     }
     fn pragma(storage: &SqliteStorage, name: &str) -> u64 {
         storage

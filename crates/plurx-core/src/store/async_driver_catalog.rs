@@ -46,6 +46,83 @@ pub fn runtime_pool_demand(unit_byte_allowance: u64) -> CatalogResult<u64> {
         .ok_or_else(|| CatalogError::ResourceIncomplete("runtime pool demand overflow".into()))
 }
 
+pub const MIB: u64 = 1024 * 1024;
+
+fn physical_overflow() -> CatalogError {
+    CatalogError::ResourceIncomplete("physical reservation overflow".into())
+}
+
+/// The smallest `FamilyLimits` that reserve every database the table map declares simultaneously
+/// live in `family` (`n` the sum of the roles' `role_lifetime.simultaneous`, at least one):
+/// `main = n*c`, `journal = n*(2*c + 1 MiB)`, `temp = n*2*c`. This is
+/// `validation/async_physical_policy.py::minimum_family_policy`, and `ResourceLimits::from_plan`
+/// applies it as `require_simultaneous_reservation` does, so Python and Rust admit the same
+/// policy set (`tests/operations/test_async_physical_accounting.py` pins both to
+/// `tests/operations/fixtures/physical-policy/parity.json`).
+pub fn minimum_family_limits(
+    source_map: &Value,
+    family: &str,
+    database_bytes: u64,
+) -> CatalogResult<FamilyLimits> {
+    let roles = source_map["families"][family]
+        .as_array()
+        .ok_or_else(|| CatalogError::SourceMismatch(format!("source map family {family}")))?;
+    let mut declared = 0u64;
+    for role in roles {
+        let simultaneous = role["role_lifetime"]["simultaneous"]
+            .as_u64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| {
+                CatalogError::SourceMismatch(format!("source map role lifetime of {family}"))
+            })?;
+        declared = declared
+            .checked_add(simultaneous)
+            .ok_or_else(physical_overflow)?;
+    }
+    lifetime_reservation(declared.max(1), database_bytes)
+}
+
+/// `live` simultaneous databases of ceiling `c` reserve `live*c` main bytes,
+/// `live*(2*c + 1 MiB)` journal bytes and `live*2*c` temp bytes.
+pub fn lifetime_reservation(live: u64, database_bytes: u64) -> CatalogResult<FamilyLimits> {
+    let scaled = |bytes: Option<u64>| {
+        bytes
+            .and_then(|bytes| bytes.checked_mul(live))
+            .ok_or_else(physical_overflow)
+    };
+    Ok(FamilyLimits {
+        database_bytes,
+        main_bytes: scaled(Some(database_bytes))?,
+        journal_bytes: scaled(
+            database_bytes
+                .checked_mul(2)
+                .and_then(|bytes| bytes.checked_add(MIB)),
+        )?,
+        temp_bytes: scaled(database_bytes.checked_mul(2))?,
+    })
+}
+
+/// What `restore_staging_bytes` must hold: the retained history twice (downloaded and extracted
+/// members, plus the evidence rebuilt from them for every replayed publication), two staged
+/// databases (one catalog and one verifier image) and the evidence allowance of the unit being
+/// prepared. The Python calibration's `restore_staging_requirement` is the same sum.
+pub fn restore_staging_requirement(
+    total_retained_artifact_bytes: u64,
+    catalog_database_bytes: u64,
+    verifier_database_bytes: u64,
+    unit_byte_allowance: u64,
+) -> CatalogResult<u64> {
+    let images = catalog_database_bytes
+        .max(verifier_database_bytes)
+        .checked_mul(2);
+    total_retained_artifact_bytes
+        .checked_mul(2)
+        .zip(images)
+        .and_then(|(history, images)| history.checked_add(images))
+        .and_then(|bytes| bytes.checked_add(unit_byte_allowance))
+        .ok_or_else(physical_overflow)
+}
+
 /// The sibling of `output_dir` named `<name>-aux`.
 pub fn auxiliary_directory(output_dir: &Path) -> CatalogResult<PathBuf> {
     let name = output_dir
@@ -336,6 +413,18 @@ impl ResourceLimits {
                     "invalid physical family policy".into(),
                 ));
             }
+            // The same simultaneous reservation the Python calibration requires
+            // (`require_simultaneous_reservation`): the family covers every database the
+            // reviewed table map declares live together.
+            let needed = minimum_family_limits(&source_map, family, limits.database_bytes)?;
+            if limits.main_bytes < needed.main_bytes
+                || limits.journal_bytes < needed.journal_bytes
+                || limits.temp_bytes < needed.temp_bytes
+            {
+                return Err(CatalogError::ResourceIncomplete(format!(
+                    "family reservation below its simultaneous database lifetimes: {family}"
+                )));
+            }
             for bytes in [limits.main_bytes, limits.journal_bytes, limits.temp_bytes] {
                 peak = add(peak, bytes)?;
             }
@@ -402,6 +491,20 @@ impl ResourceLimits {
         {
             return Err(CatalogError::ResourceIncomplete(
                 "source/runtime pool does not cover the baseline, every output directory and scratch".into(),
+            ));
+        }
+        // And the restore staging pool: the history twice, two staged databases and the evidence
+        // allowance (`restore_staging_requirement`), by the Python calibration's inequality.
+        if pools["restore_staging_bytes"]
+            < restore_staging_requirement(
+                number(body, "total_retained_artifact_bytes")?,
+                families["catalog_main"].database_bytes,
+                families["verifier_main"].database_bytes,
+                number(body, "unit_byte_allowance")?,
+            )?
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "restore staging pool does not cover the retained history twice, two restored databases and the evidence allowance".into(),
             ));
         }
         peak = add(
@@ -3363,15 +3466,30 @@ pub fn same_file_bytes(
     Ok(())
 }
 
+/// The fixture's per-database ceiling.
+const FIXTURE_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
+/// The fixture's restore staging pool: covers the fixture's retained history twice, two staged
+/// databases and its evidence allowance, with room to spare.
+const FIXTURE_RESTORE_POOL: u64 = 256 * 1024 * 1024;
+
+/// The reviewed table map the policy is checked against.
+pub(super) fn fixture_source_map() -> Value {
+    strict_json(include_bytes!(
+        "../../../../validation/async_physical_table_map.json"
+    ))
+    .expect("fixture source map")
+}
+
+/// A family reservation that covers exactly the databases the map declares live together.
+pub(super) fn fixture_minimum_family(family: &str, database_bytes: u64) -> FamilyLimits {
+    minimum_family_limits(&fixture_source_map(), family, database_bytes)
+        .expect("fixture minimum family")
+}
+
 pub(super) fn fixture_configuration(path: PathBuf) -> CatalogConfig {
     fixture_configuration_shaped(
         path,
-        FamilyLimits {
-            database_bytes: 64 * 1024 * 1024,
-            main_bytes: 128 * 1024 * 1024,
-            journal_bytes: 129 * 1024 * 1024,
-            temp_bytes: 128 * 1024 * 1024,
-        },
+        fixture_minimum_family("catalog_main", FIXTURE_DATABASE_BYTES),
     )
 }
 /// The admitted fixture plan with an explicit `catalog_main` physical policy.
@@ -3386,6 +3504,23 @@ pub(super) fn fixture_configuration_pooled(
     path: PathBuf,
     catalog_main: FamilyLimits,
     runtime_pool: u64,
+) -> CatalogConfig {
+    fixture_configuration_adjusted(
+        path,
+        catalog_main,
+        runtime_pool,
+        FIXTURE_RESTORE_POOL,
+        &|_, family| family,
+    )
+}
+/// The admitted fixture plan with explicit pools, and `adjust` applied to every family
+/// reservation (the identity by default) so a test can lower or raise one family.
+pub(super) fn fixture_configuration_adjusted(
+    path: PathBuf,
+    catalog_main: FamilyLimits,
+    runtime_pool: u64,
+    restore_pool: u64,
+    adjust: &dyn Fn(&str, FamilyLimits) -> FamilyLimits,
 ) -> CatalogConfig {
     let source = SourceIdentity {
         commit: "0".repeat(40),
@@ -3447,29 +3582,25 @@ pub(super) fn fixture_configuration_pooled(
         ("authentication_index", "provenance"),
         ("publication_pending_scratch", "session_controller"),
     ] {
-        let shape = if name == "catalog_main" {
-            catalog_main.clone()
-        } else {
-            FamilyLimits {
-                database_bytes: 64 * 1024 * 1024,
-                main_bytes: 128 * 1024 * 1024,
-                journal_bytes: 129 * 1024 * 1024,
-                temp_bytes: 128 * 1024 * 1024,
-            }
-        };
+        let shape = adjust(
+            name,
+            if name == "catalog_main" {
+                catalog_main.clone()
+            } else {
+                fixture_minimum_family(name, FIXTURE_DATABASE_BYTES)
+            },
+        );
         family_total += shape.main_bytes + shape.journal_bytes + shape.temp_bytes;
         families.insert(name.into(),json!({"owner":owner,"database_bytes":shape.database_bytes,"main_bytes":shape.main_bytes,"journal_bytes":shape.journal_bytes,"temp_bytes":shape.temp_bytes}));
     }
-    let source_map = strict_json(include_bytes!(
-        "../../../../validation/async_physical_table_map.json"
-    ))
-    .expect("fixture source map");
+    let source_map = fixture_source_map();
     let table_map_sha = digest(canonical(&source_map).as_bytes());
     let policy = json!({"schema_version":3,"kind":"physical_policy","table_map_sha256":table_map_sha,"families":families,
-        "pools":{"snapshot_spool_bytes":64*1024*1024u64,"restore_staging_bytes":64*1024*1024u64,"transfer_staging_bytes":64*1024*1024u64,
+        "pools":{"snapshot_spool_bytes":64*1024*1024u64,"restore_staging_bytes":restore_pool,"transfer_staging_bytes":64*1024*1024u64,
         "cas_bytes":64*1024*1024u64,"source_runtime_scratch_bytes":runtime_pool,"control_bytes":64*1024*1024u64}});
     let peak = family_total
-        + 5 * 64 * 1024 * 1024u64
+        + 4 * 64 * 1024 * 1024u64
+        + restore_pool
         + runtime_pool
         + 6 * number(p, "total_retained_artifact_bytes").expect("fixture retention")
         + 32 * 1024 * 1024u64 * 19;
@@ -3497,6 +3628,22 @@ pub(super) fn fixture_configuration_pooled(
 mod tests {
     use super::*;
 
+    /// The real empty-harness report `catalog_sqlite_empty_schema_reports_actual_engine_geometry`
+    /// writes, measured on a fresh database in a scratch directory under `parent`.
+    fn empty_catalog_report(parent: &Path) -> Value {
+        let directory = tempfile::tempdir_in(parent).expect("owned persistent measurement scratch");
+        let storage = sqlite::SqliteStorage::open(
+            &directory.path().join("empty-harness.sqlite"),
+            4 * 1024 * 1024,
+        )
+        .expect("actual empty harness DDL");
+        let report = storage
+            .empty_geometry()
+            .expect("actual linked engine geometry");
+        assert_eq!(report["acceptance"], false);
+        report
+    }
+
     /// MANUAL OPERATIONAL MEASUREMENT ENTRY. No behavioral regression or proof
     /// credit: M4 registers the exact ignored invocation and captures its origin.
     #[test]
@@ -3512,16 +3659,7 @@ mod tests {
             "fresh absolute owned measurement output"
         );
         let parent = output.parent().expect("owned measurement directory");
-        let directory = tempfile::tempdir_in(parent).expect("owned persistent measurement scratch");
-        let storage = sqlite::SqliteStorage::open(
-            &directory.path().join("empty-harness.sqlite"),
-            4 * 1024 * 1024,
-        )
-        .expect("actual empty harness DDL");
-        let report = storage
-            .empty_geometry()
-            .expect("actual linked engine geometry");
-        assert_eq!(report["acceptance"], false);
+        let report = empty_catalog_report(parent);
         let bytes = canonical(&report);
         assert!(bytes.len() <= 64 * 1024, "bounded operational marker");
         let mut file = std::fs::OpenOptions::new()
@@ -4142,17 +4280,203 @@ mod tests {
             16 * 1024 * 1024 + UNIT_LOG_RESERVE + CONTROL_OUTPUT_DIRECTORIES * CONTROL_OUTPUT_BYTES
         );
         let limits = |runtime_pool| {
-            let shape = FamilyLimits {
-                database_bytes: 64 * 1024 * 1024,
-                main_bytes: 128 * 1024 * 1024,
-                journal_bytes: 129 * 1024 * 1024,
-                temp_bytes: 128 * 1024 * 1024,
-            };
+            let shape = fixture_minimum_family("catalog_main", FIXTURE_DATABASE_BYTES);
             let config =
                 fixture_configuration_pooled(PathBuf::from("/unused"), shape, runtime_pool);
             ResourceLimits::from_plan(&config.resource_plan)
         };
         assert!(limits(demand).is_err(), "no byte left for runtime scratch");
         assert!(limits(demand + 1).is_ok());
+    }
+
+    fn parity_vectors() -> Value {
+        serde_json::from_slice(
+            &std::fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/operations/fixtures/physical-policy/parity.json"),
+            )
+            .expect("checked-in physical policy parity vectors"),
+        )
+        .expect("parity vectors json")
+    }
+
+    /// The Python policy (`validation/async_physical_policy.py`) asserts the same file in
+    /// `test_async_physical_accounting.py`, so the two admit the identical policy set: a change to
+    /// either side's constants or arithmetic fails one of the two tests.
+    #[test]
+    fn physical_policy_arithmetic_matches_the_shared_vectors() {
+        let vectors = parity_vectors();
+        let constant = |name: &str| vectors["constants"][name].as_u64().expect(name);
+        assert_eq!(constant("MIB"), MIB);
+        assert_eq!(constant("UNIT_LOG_RESERVE"), UNIT_LOG_RESERVE);
+        assert_eq!(constant("CONTROL_OUTPUT_BYTES"), CONTROL_OUTPUT_BYTES);
+        assert_eq!(
+            constant("CONTROL_OUTPUT_DIRECTORIES"),
+            CONTROL_OUTPUT_DIRECTORIES
+        );
+        let field = |row: &Value, name: &str| row[name].as_u64().expect(name);
+        for row in vectors["runtime_pool_demand"].as_array().expect("demand") {
+            assert_eq!(
+                runtime_pool_demand(field(row, "unit_byte_allowance")).expect("demand"),
+                field(row, "demand")
+            );
+        }
+        for row in vectors["lifetime_reservation"]
+            .as_array()
+            .expect("lifetimes")
+        {
+            let got = lifetime_reservation(field(row, "live"), field(row, "database_bytes"))
+                .expect("reservation");
+            assert_eq!(got.main_bytes, field(row, "main_bytes"));
+            assert_eq!(got.journal_bytes, field(row, "journal_bytes"));
+            assert_eq!(got.temp_bytes, field(row, "temp_bytes"));
+        }
+        for row in vectors["restore_staging_requirement"]
+            .as_array()
+            .expect("restore")
+        {
+            assert_eq!(
+                restore_staging_requirement(
+                    field(row, "total_retained_artifact_bytes"),
+                    field(row, "catalog_database_bytes"),
+                    field(row, "verifier_database_bytes"),
+                    field(row, "unit_byte_allowance"),
+                )
+                .expect("requirement"),
+                field(row, "required")
+            );
+        }
+    }
+
+    /// Calibration's restore inequality: twice the retained history + two staged databases + the
+    /// evidence allowance. Exactly the requirement is admitted; one byte less is not.
+    #[test]
+    fn the_restore_staging_pool_must_cover_the_history_twice_two_databases_and_the_evidence() {
+        let limits = |restore_pool: u64, verifier_database: u64| {
+            let config = fixture_configuration_adjusted(
+                PathBuf::from("/unused"),
+                fixture_minimum_family("catalog_main", FIXTURE_DATABASE_BYTES),
+                512 * 1024 * 1024,
+                restore_pool,
+                &|name, family| {
+                    if name == "verifier_main" {
+                        fixture_minimum_family(name, verifier_database)
+                    } else {
+                        family
+                    }
+                },
+            );
+            ResourceLimits::from_plan(&config.resource_plan)
+        };
+        // The fixture plan: 1_000_000 retained bytes and a 16 MiB evidence allowance.
+        let base = 2 * 1_000_000 + 16 * 1024 * 1024;
+        let small = 2 * FIXTURE_DATABASE_BYTES + base;
+        assert!(limits(small - 1, FIXTURE_DATABASE_BYTES).is_err());
+        assert!(limits(small, FIXTURE_DATABASE_BYTES).is_ok());
+        // The larger of the two database ceilings counts twice.
+        let large = 2 * (2 * FIXTURE_DATABASE_BYTES) + base;
+        assert!(limits(large - 1, 2 * FIXTURE_DATABASE_BYTES).is_err());
+        assert!(limits(large, 2 * FIXTURE_DATABASE_BYTES).is_ok());
+    }
+
+    /// Python `require_simultaneous_reservation`, mirrored: every family reserves the databases the
+    /// reviewed table map declares live together, and one byte short in any component is refused.
+    #[test]
+    fn every_family_must_reserve_its_declared_simultaneous_lifetimes() {
+        let source_map = fixture_source_map();
+        let admitted = |only: Option<(&str, &str)>| {
+            let config = fixture_configuration_adjusted(
+                PathBuf::from("/unused"),
+                fixture_minimum_family("catalog_main", FIXTURE_DATABASE_BYTES),
+                512 * 1024 * 1024,
+                FIXTURE_RESTORE_POOL,
+                &|name, mut family| {
+                    match only {
+                        Some((target, "main")) if target == name => family.main_bytes -= 1,
+                        Some((target, "journal")) if target == name => family.journal_bytes -= 1,
+                        Some((target, "temp")) if target == name => family.temp_bytes -= 1,
+                        _ => {}
+                    }
+                    family
+                },
+            );
+            ResourceLimits::from_plan(&config.resource_plan)
+        };
+        assert!(
+            admitted(None).is_ok(),
+            "exactly the declared minimum is admitted"
+        );
+        for family in source_map["families"].as_object().expect("families").keys() {
+            for component in ["main", "journal", "temp"] {
+                assert!(
+                    admitted(Some((family, component))).is_err(),
+                    "{family}/{component} one byte below its simultaneous lifetimes"
+                );
+            }
+        }
+        // A family the map holds one database of reserves exactly one; a restore family with no
+        // declared database still reserves one (the ABI requires the family to exist).
+        let restore = minimum_family_limits(
+            &source_map,
+            "catalog_or_verifier_restore_scratch",
+            FIXTURE_DATABASE_BYTES,
+        )
+        .expect("restore family");
+        assert_eq!(restore.main_bytes, FIXTURE_DATABASE_BYTES);
+    }
+
+    /// N5: the real empty-catalog `catalog-calibration.json`, emitted from the real engine and
+    /// checked in so the Python calibration fixtures consume generated rather than hand-written
+    /// geometry (`RustCalibrationFixtureTests`). `compiled_sources` is the only volatile member
+    /// (it re-hashes the sources this test lives in), so only its key set is compared; every other
+    /// byte must match. With `PLURX_ASYNC_WRITE_FIXTURE=<path>` the test writes the exact report
+    /// the calibrate-catalog harness emits to `<path>` instead of comparing; to regenerate the
+    /// checked-in file run
+    ///
+    /// `PLURX_ASYNC_WRITE_FIXTURE=$PWD/tests/operations/fixtures/catalog-calibration/catalog-calibration.json cargo +1.97.1 test -p plurx-core --lib store::async_driver_catalog::tests::the_checked_in_catalog_calibration_is_the_real_empty_catalog_report`
+    ///
+    /// from the repository root (the `compiled_sources` hashes then refresh as well).
+    #[test]
+    fn the_checked_in_catalog_calibration_is_the_real_empty_catalog_report() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/operations/fixtures/catalog-calibration/catalog-calibration.json");
+        let scratch = tempfile::tempdir().expect("scratch");
+        let report = empty_catalog_report(scratch.path());
+        let regenerate = "PLURX_ASYNC_WRITE_FIXTURE=$PWD/tests/operations/fixtures/catalog-calibration/catalog-calibration.json cargo +1.97.1 test -p plurx-core --lib store::async_driver_catalog::tests::the_checked_in_catalog_calibration_is_the_real_empty_catalog_report";
+        if let Some(target) = std::env::var_os("PLURX_ASYNC_WRITE_FIXTURE") {
+            let target = PathBuf::from(target);
+            assert!(
+                target.is_absolute(),
+                "PLURX_ASYNC_WRITE_FIXTURE must be absolute"
+            );
+            std::fs::create_dir_all(target.parent().expect("fixture directory"))
+                .expect("fixture directory");
+            std::fs::write(&target, canonical(&report)).expect("write regenerated fixture");
+            return;
+        }
+        let checked_in: Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap_or_else(|error| {
+                panic!(
+                    "missing {}: {error}; regenerate with: {regenerate}",
+                    path.display()
+                )
+            }))
+            .expect("fixture json");
+        let comparable = |value: &Value| {
+            let mut value = value.clone();
+            let keys: Vec<String> = value["compiled_sources"]
+                .as_object()
+                .expect("compiled_sources")
+                .keys()
+                .cloned()
+                .collect();
+            value["compiled_sources"] = json!(keys);
+            value
+        };
+        assert_eq!(
+            comparable(&checked_in),
+            comparable(&report),
+            "the checked-in catalog calibration differs from the real empty catalog; regenerate with: {regenerate}"
+        );
     }
 }

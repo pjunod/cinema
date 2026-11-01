@@ -459,6 +459,10 @@ class Budget:
         calibration = self.accounting['calibration']
         require(calibration['policy_sha256'] == physical.digest(policy) and calibration['table_map_sha256'] == policy['table_map_sha256'],
                 'physical calibration differs from the immutable physical policy')
+        # The inequalities calibration established and the Rust plan validator re-applies.
+        source_map = physical.load_source_map()
+        physical.require_simultaneous_reservation(policy, source_map)
+        physical.require_pool_inequalities(policy, calibration['baseline'], plan)
         self.physical_policy = policy
         # An allocation-capable child owns ONLY what its parent deducted and
         # handed down (LocalPhysicalGrant1); it never re-instantiates the full

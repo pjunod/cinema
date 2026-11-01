@@ -1671,7 +1671,7 @@
         "database_role": "authenticated_dependencies",
         "role_lifetime": {
           "simultaneous": 3,
-          "holders": "the working dependency index copy, the conformance case index copy and the controller persistent index, all open in one rehearsal or restore job"
+          "holders": "in an execute job: the replayed history dependency index, the replayed conformance dependency index and the controller's output/dependencies.sqlite copy handed to the unit child; a publish or rehearsal job holds two of them"
         },
         "objects": [
           {
@@ -1751,8 +1751,8 @@
       {
         "database_role": "pending_publication",
         "role_lifetime": {
-          "simultaneous": 3,
-          "holders": "the publication store ledger, the receiver replay ledger over the pending ledger and the conformance pending ledger open in one rehearsal or restore job"
+          "simultaneous": 2,
+          "holders": "the publication store ledger and the one replay pending ledger of the open pending or rehearsal chain: a receiver ledger is discarded once its publication is accepted and the finished rehearsal ledger is discarded, so never more than these two are live together"
         },
         "objects": [
           {

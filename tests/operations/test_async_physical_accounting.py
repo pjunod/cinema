@@ -211,7 +211,7 @@ class SimultaneousLifetimeTests(CalibrationHelpers, PhysicalBase):
     """F8/F9: calibration reserves every declared simultaneous database lifetime; the map has no phantom."""
     DECLARED = {'catalog_main': 2, 'verifier_main': 2, 'catalog_export_scratch': 1, 'verifier_continuation_scratch': 1,
                 'catalog_or_verifier_restore_scratch': 0, 'publication_pack_scratch': 3, 'authentication_index': 3,
-                'publication_pending_scratch': 3}
+                'publication_pending_scratch': 2}
 
     def test_the_map_declares_the_simultaneous_lifetime_of_every_database_role(self):
         self.assertEqual({f: physical.family_instances(self.source_map, f) for f in physical.FAMILY_OWNERS}, self.DECLARED)
@@ -308,6 +308,111 @@ class SimultaneousLifetimeTests(CalibrationHelpers, PhysicalBase):
             path.write_bytes(json.dumps(value).encode())
             with self.assertRaises(physical.PhysicalPolicyError):
                 physical.load_source_map(path)
+
+
+RUST_CATALOG = ROOT / 'crates' / 'plurx-core' / 'src' / 'store' / 'async_driver_catalog.rs'
+PARITY = ROOT / 'tests' / 'operations' / 'fixtures' / 'physical-policy' / 'parity.json'
+
+
+def rust_constant(name):
+    """The value of `pub const NAME: u64 = a * b * c;` read from the Rust source text."""
+    import re
+    match = re.search(r'^pub const ' + name + r': u64 = ([0-9_ *]+);$', RUST_CATALOG.read_text(), re.M)
+    assert match, name
+    value = 1
+    for factor in match[1].split('*'):
+        value *= int(factor.replace('_', ''))
+    return value
+
+
+class RestoreStagingCalibrationTests(CalibrationHelpers, PhysicalBase):
+    """N4: downloads, restores and rebuilt evidence charge restore_staging_bytes, so calibration must size it for them."""
+
+    def plan(self, **overrides):
+        return dict({'unit_byte_allowance': MIB, 'total_retained_artifact_bytes': 3 * MIB, 'maximum_units': 2,
+                     'total_session_disk_bytes': 1 << 40}, **overrides)
+
+    def required(self, policy, plan):
+        families = policy['families']
+        return (2 * plan['total_retained_artifact_bytes']
+                + 2 * max(families['catalog_main']['database_bytes'], families['verifier_main']['database_bytes'])
+                + plan['unit_byte_allowance'])
+
+    def test_the_pool_must_cover_the_history_twice_two_databases_and_the_evidence_allowance(self):
+        plan = self.plan()
+        need = self.required(self.policy, plan)
+        self.assertEqual(physical.restore_staging_requirement(self.policy, plan), need)
+        exact = copy.deepcopy(self.policy)
+        exact['pools']['restore_staging_bytes'] = need
+        self.assertEqual(self.calibrate(exact, plan)['kind'], 'physical_calibration')
+        short = copy.deepcopy(self.policy)
+        short['pools']['restore_staging_bytes'] = need - 1
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'restore staging pool does not cover'):
+            self.calibrate(short, plan)
+
+    def test_each_term_of_the_inequality_is_binding(self):
+        base = self.plan()
+        floor = self.required(self.policy, base)
+        for name, grown in (('total_retained_artifact_bytes', 2 * base['total_retained_artifact_bytes']),
+                            ('unit_byte_allowance', 2 * base['unit_byte_allowance'])):
+            plan = self.plan(**{name: grown})
+            policy = copy.deepcopy(self.policy)
+            policy['pools']['restore_staging_bytes'] = floor
+            self.assertGreater(self.required(policy, plan), floor, name)
+            with self.assertRaisesRegex(physical.PhysicalPolicyError, 'restore staging pool does not cover', msg=name):
+                self.calibrate(policy, plan)
+        # The larger of the catalog and verifier ceilings counts, twice.
+        policy = copy.deepcopy(self.policy)
+        policy['families']['verifier_main'] = {'owner': 'verifier', **physical.minimum_family_policy(
+            self.source_map, 'verifier_main', 4 * self.policy['families']['catalog_main']['database_bytes'])}
+        policy['pools']['restore_staging_bytes'] = floor
+        self.assertEqual(self.required(policy, base) - floor, 2 * 3 * self.policy['families']['catalog_main']['database_bytes'])
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'restore staging pool does not cover'):
+            self.calibrate(policy, base)
+        policy['pools']['restore_staging_bytes'] = self.required(policy, base)
+        self.calibrate(policy, base)
+
+    def test_the_unadmitted_example_states_the_same_inequality_for_its_own_figures(self):
+        example = json.loads((ROOT / 'verification' / 'async-driver-refinement' / 'paged-resource-plan.example.json').read_bytes())
+        policy = json.loads(example['record']['source_bounds_utf8'])['physical_policy']
+        illustrative = {'total_retained_artifact_bytes': 4 * example['record']['artifact_retained_bytes'],
+                        'unit_byte_allowance': example['record']['artifact_extracted_bytes']}
+        self.assertGreaterEqual(policy['pools']['restore_staging_bytes'], physical.restore_staging_requirement(policy, illustrative))
+
+
+class PythonRustPolicyParityTests(unittest.TestCase):
+    """N6: the Python calibration and the Rust plan validator admit the identical policy set.
+
+    Both read tests/operations/fixtures/physical-policy/parity.json (the Rust test
+    `physical_policy_arithmetic_matches_the_shared_vectors` asserts the same numbers), and the Rust
+    constants are read here straight from the Rust source text.
+    """
+
+    def setUp(self):
+        self.vectors = json.loads(PARITY.read_bytes())
+
+    def test_the_constants_are_equal_in_python_the_rust_source_and_the_vectors(self):
+        for name, value in self.vectors['constants'].items():
+            self.assertEqual(rust_constant(name), value, 'Rust ' + name)
+            self.assertEqual(getattr(physical, name), value, 'Python ' + name)
+
+    def test_the_arithmetic_is_the_vectors_exactly(self):
+        for row in self.vectors['runtime_pool_demand']:
+            self.assertEqual(physical.runtime_pool_demand(row['unit_byte_allowance']), row['demand'])
+        for row in self.vectors['lifetime_reservation']:
+            self.assertEqual(physical.lifetime_reservation(row['live'], row['database_bytes']),
+                             {k: row[k] for k in ('database_bytes', 'main_bytes', 'journal_bytes', 'temp_bytes')})
+        for row in self.vectors['restore_staging_requirement']:
+            policy = {'families': {'catalog_main': {'database_bytes': row['catalog_database_bytes']},
+                                   'verifier_main': {'database_bytes': row['verifier_database_bytes']}}}
+            plan = {'total_retained_artifact_bytes': row['total_retained_artifact_bytes'], 'unit_byte_allowance': row['unit_byte_allowance']}
+            self.assertEqual(physical.restore_staging_requirement(policy, plan), row['required'])
+
+    def test_the_rust_validator_applies_every_python_calibration_inequality(self):
+        text = RUST_CATALOG.read_text()
+        for needle in ('minimum_family_limits(&source_map, family, limits.database_bytes)',
+                       'restore_staging_requirement(', 'runtime_pool_demand(number(body, "unit_byte_allowance")?)'):
+            self.assertIn(needle, text)
 
 
 class ParentIdentityTests(PhysicalBase):
@@ -474,6 +579,14 @@ class RestoredDatabaseCeilingTests(PhysicalBase):
             self.assertTrue(checks, name + ' never checks the restored database ceiling')
             if name == 'validate_restore':  # the catalog is opened by sqlite3.connect after the check
                 self.assertLess(checks[0], opens[0], name + ' opens the restored database before checking its ceiling')
+        # The catalog validator checks the staged verifier it names under the same rule: private_input_view is called
+        # with a precheck that checks 'verifier_main', and a checkpoint without a verifier file never reaches it.
+        views = [n for n in ast.walk(functions['validate_restore']) if isinstance(n, ast.Call)
+                 and getattr(n.func, 'id', '') == 'private_input_view']
+        self.assertEqual([[k.arg for k in call.keywords] for call in views], [['precheck']])
+        verifier_checks = [n for n in ast.walk(functions['validate_restore']) if isinstance(n, ast.Call) and ceiling(n)
+                           and getattr(n.args[0], 'value', None) == 'verifier_main']
+        self.assertEqual(len(verifier_checks), 1)
         # The verifier validator runs the check as the precheck of the first open, before any read.
         view = functions['private_input_view']
         self.assertLess(lines(view, lambda c: getattr(c.func, 'id', '') == 'precheck')[0],
@@ -902,6 +1015,12 @@ class TransferTests(PhysicalBase):
         self.assertEqual(self.ledger.used[('restore_staging_bytes', 'bytes')], 4096, 'source stays charged')
         self.assertEqual(self.ledger.used[('catalog_main', 'main')], 4096, 'destination reserved before the rename')
         self.assertTrue(handle.record[0].exists(), 'both identities are durably recorded')
+        record = json.loads(handle.record[0].read_bytes())
+        self.assertEqual({k: record['source'][k] for k in ('owner', 'resource', 'component')},
+                         {'owner': 'snapshot_restore', 'resource': 'restore_staging_bytes', 'component': 'bytes'},
+                         'the record names the source side itself; crash reconciliation never assumes it')
+        self.assertEqual({k: record['destination'][k] for k in ('owner', 'resource', 'component')},
+                         {'owner': 'catalog', 'resource': 'catalog_main', 'component': 'main'})
         with self.assertRaisesRegex(physical.PhysicalPolicyError, 'still exists'):
             self.ledger.commit_transfer_after_rename_fsync(handle, (handle.identity[0], handle.identity[1]))
         identity = self.finish_rename(source, destination)

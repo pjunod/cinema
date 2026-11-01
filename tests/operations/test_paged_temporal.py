@@ -46,8 +46,12 @@ def fixture_policy(source_map):
     pools = {name: 64 * MIB for name in physical().POOL_OWNERS}
     # The source/runtime pool covers every output directory of a unit_byte_allowance plan (calibration requires it).
     pools['source_runtime_scratch_bytes'] = physical().runtime_pool_demand(UNIT_BYTE_ALLOWANCE) + MIB
-    return {'schema_version': 3, 'kind': 'physical_policy', 'table_map_sha256': physical().digest(source_map),
-            'families': families, 'pools': pools}
+    policy = {'schema_version': 3, 'kind': 'physical_policy', 'table_map_sha256': physical().digest(source_map),
+              'families': families, 'pools': pools}
+    # Downloads, two restored databases and the evidence reconstruction charge the restore pool (calibration requires it).
+    pools['restore_staging_bytes'] = physical().restore_staging_requirement(
+        policy, {'total_retained_artifact_bytes': TOTAL_RETAINED, 'unit_byte_allowance': UNIT_BYTE_ALLOWANCE}) + MIB
+    return policy
 
 
 @functools.lru_cache(maxsize=None)
@@ -97,7 +101,7 @@ def fixture_source_receipt():
             'acceptance': False}
 
 
-TOTAL_DISK = 2**34
+TOTAL_DISK = 2**35  # the restore pool now covers the retained artifacts and the evidence allowance
 TOTAL_RETAINED = 2**30
 UNIT_BYTE_ALLOWANCE = 2**30
 MAXIMUM_UNITS = 100
