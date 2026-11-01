@@ -481,20 +481,13 @@
                   "$ref": "paged-proof.schema.json#/$defs/RelativePath"
                 },
                 "module_closure_root": {
-                  "$ref": "#/$defs/EvidenceRef"
+                  "$ref": "paged-proof.schema.json#/$defs/Sha256"
                 },
                 "config_sha256": {
                   "$ref": "paged-proof.schema.json#/$defs/Sha256"
                 },
                 "generated_inputs_root": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/$defs/EvidenceRef"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
+                  "$ref": "paged-proof.schema.json#/$defs/Sha256"
                 },
                 "local_id_map_sha256": {
                   "$ref": "paged-proof.schema.json#/$defs/Sha256"
