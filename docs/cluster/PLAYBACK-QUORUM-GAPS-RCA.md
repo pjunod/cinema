@@ -414,10 +414,11 @@ Store call happens under `operations`.
 
 | State | Behaviour |
 |---|---|
-| Before the first successful read | Reservations fail exactly as they do today (fail closed) |
+| Before the first successful read | A writer waits for that first read, at most `IO_TIMEOUT` (10 s, the bound the Store read had), then fails closed; a read that fails, or a settings task that dies first, refuses at once |
 | Read fails or hangs | The last value is kept, with a WARN at most once a minute |
 | Known ceiling of zero | Preserved and enforced |
 | Ceiling updated | Takes effect within about 1 s, as today |
+| Settings task ends while the cache is in use | Logged once; the next writer starts it again |
 
 *Rejected:* backoff in hiqlite's `leader changed` helper. It slows every
 Store call, and the media path would still depend on quorum.
@@ -542,10 +543,12 @@ bounded, and an ad-hoc agent container can still starve a voter.
 
 ## 5. Build plan
 
-Branch `effort/playback-quorum-gaps`. `fix(...)` commits carry their
-`Regression-Test:` line and a `validation/regressions.d` row. Every
-acceptance check includes a revert: the old line is put back, and the new
-test must fail.
+Branch `effort/playback-quorum-gaps`. Each `fix(...)` commit's regression
+test is named by a `Regression-Test:` line in the pull request description
+(and, at landing, in the merge commit), not by a `validation/regressions.d`
+row: `validation/history.py` refuses `regressions.d` entries for commits past
+the merge-errata boundary. Every acceptance check includes a revert: the old
+line is put back, and the new test must fail.
 
 | # | Milestone | Acceptance |
 |---|---|---|
@@ -635,10 +638,29 @@ Recorded by the build agent on `effort/playback-quorum-gaps` (M0–M6).
 | §4.2 (2) `commit_guard_before` has one other caller | Seven more (`create.rs`, `control.rs`) | Its `Option` signature stays; `commit_guard_or_refusal_before` says why, for publication commits only |
 | §4.5 `terminal_prepublication_failure: bool` | A bool cannot carry the reason when no decision exists | `Option<&'static str>` with the kind (`executor_lost`, `failure_applied`) |
 | §4.5 "both sleep branches" | Three sleeps | The two before any object opens. The third waits on an attempt that has published, which `published_producer_ended_before` already covers |
-| §5 `validation/regressions.d` rows | Refused past the merge-errata boundary (`validation/history.py`, phase B) | `Regression-Test:` lines in the pull request instead |
+| §5 `validation/regressions.d` rows | Refused past the merge-errata boundary (`validation/history.py`, phase B) | `Regression-Test:` lines in the pull request instead; §5 now says so |
 
-Not covered: a pre-publication segment request (not `master.m3u8`) whose
-producer dies still ends `response_state_changed`, because
-`authorize_playlist_error_publication` publishes `ProducerEnded` only with the
-published-producer proof. With no running `serving_fence_loop`, a held
-request fails fast, as it did before the hold.
+With no running `serving_fence_loop`, a held request fails fast, as it did
+before the hold.
+
+### 10.1 After the Fable review of PR #1341
+
+Every new test was revert-proven (old line back, test fails, fix restored).
+
+| Finding | What changed |
+|---|---|
+| F1 | Once an outage resolves `Expired`, `serving_fence_loop` leaves `Expired` published until authority returns instead of re-arming a fresh `Pending` every grace, so a read 6 s into an outage gets its 503 at once |
+| F2 | `LossOutcome::Recovered` carries the generation seen with `ready`; that is what the loop publishes |
+| F3 | No `debug_assert!` inside the seqlock write section: a dropped live ring entry is counted and logged once after `end_write`, and fails closed in every build |
+| F4 | `ready` and the loss generation share one `AtomicU64`, so a loss is one store; `admit_or_outage_baseline` reads both in one observation |
+| F5 | The two missing acceptance tests exist (handoff then reauthorize; paused-clock dead producer and retry). The admitted gap is closed without a redesign: `authorize_playlist_error_publication` accepts the exact attempt's pre-publication verdict as the proof for `ProducerEnded` (the actor already refuses every response authorization once it is terminal), so a pre-publication segment request on a dead attempt gets `ProducerEnded`, not `response_state_changed` |
+| F6 | `voter-build` refuses `CARGO_BUILD_JOBS` in every `-e`/`--env` spelling, `--env-file`, `--oom-score-adj` and `--cap-add SYS_RESOURCE`/`SYS_ADMIN`/`ALL`, and puts its caps after the caller's options |
+| F7 | The publication retry waits past a loss that already superseded the recovery, and is spent only under held authority |
+| F8 | The cache settings task clears its started flag on exit (the next writer restarts it), logs once, and turns an unread ceiling into an immediate refusal |
+| F9, F12 | §4.3 and §5 say what the code does |
+| F10 | `${PLURX_CGROUP_PARENT-plurx.slice}`: an empty value means no slice |
+| F11 | `voter-isolation-check` reports a container that exits mid-scan as a mismatch, and a cgroup-v1 host as "cgroup v2 required" |
+| F13 | The route-classification test scans every product source under `http/` |
+| F14 | Both watermark readers share one `WatermarkView` read and binding check |
+| F15 | Declined: `coherent_path_producer_attempt()` reads atomics, not the actor, so there is no snapshot to fold into; M5 adds one bounded snapshot per 100 ms poll |
+| F16 | The M2 tests wait on `outage_owner_started()`, and the router-hold test runs on a paused clock |
