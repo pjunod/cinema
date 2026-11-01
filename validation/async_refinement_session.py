@@ -513,6 +513,51 @@ class HeldLease:
             self.fd = -1
 
 
+CHILD_SCRATCH = 'child-scratch'
+EXPORT_SCRATCH = 'manifest-closure.sqlite'
+CONTINUATION_SCRATCH = 'continuation-validation.sqlite'
+RESTORE_SCRATCH = 'restore-scratch.sqlite'
+SCRATCH_RESOURCES = ('catalog_export_scratch', 'verifier_continuation_scratch',
+                     'catalog_or_verifier_restore_scratch', 'source_runtime_scratch_bytes')
+
+
+class GrantPlan:
+    """Explicit delegation for one child grant.
+
+    A family component is delegated at most once. Pool shares are named amounts whose sum
+    per pool is checked against what the parent still holds, so no capacity is ever
+    delegated twice (a second delegation would deduct the pool a second time).
+    """
+    def __init__(self, context):
+        self.context, self.entries, self.delegated = context, [], {}
+
+    def add(self, resource, component, path, amount, recursive=False):
+        owner = physical.FAMILY_OWNERS.get(resource, physical.POOL_OWNERS.get(resource))
+        p.require(owner is not None, 'unknown physical family/pool')
+        p.require(type(amount) is int, 'physical delegation share must be an integer')
+        key = resource, component
+        if resource in physical.FAMILY_OWNERS:
+            p.require(key not in self.delegated, 'physical family component delegated twice: ' + '/'.join(key))
+        total = self.delegated.get(key, 0) + amount
+        if amount <= 0 or total > self.context.ledger.remaining(resource, component):
+            raise physical.PhysicalIncomplete('physical capacity exhausted before child startup: ' + '/'.join(key))
+        self.delegated[key] = total
+        self.entries.append({'reservation_id': secrets.token_hex(32), 'owner': owner, 'resource': resource,
+                             'component': component, 'bytes': amount, 'relative_path': self.context.relative(path),
+                             'recursive': recursive})
+
+    def family(self, resource, component, path):
+        """The whole family component (only this child holds that family while it runs)."""
+        self.add(resource, component, path, self.context.ledger.remaining(resource, component))
+
+    def database(self, resource, path):
+        for component in ('main', 'journal', 'temp'):
+            self.family(resource, component, path)
+
+    def pool(self, resource, path, amount, recursive=False):
+        self.add(resource, 'bytes', path, amount, recursive)
+
+
 class PhysicalContext:
     """Parent-owned ledger, lease and child-grant lifetime for one controller process.
 
@@ -547,31 +592,53 @@ class PhysicalContext:
         p.require(self.owned in path.parents, 'physical allocation path escapes the exact owned root')
         return p.safe_path(path.relative_to(self.owned).as_posix())
 
-    def allocation(self, resource, component, path, recursive=False):
-        """One source-selected owned file/subtree sized to what the parent still holds."""
-        owner = physical.FAMILY_OWNERS.get(resource, physical.POOL_OWNERS.get(resource))
-        p.require(owner is not None, 'unknown physical family/pool')
-        amount = self.ledger.remaining(resource, component)
-        p.require(type(amount) is int and amount > 0, 'physical capacity exhausted before child startup')
-        return {'reservation_id': secrets.token_hex(32), 'owner': owner, 'resource': resource,
-                'component': component, 'bytes': amount, 'relative_path': self.relative(path),
-                'recursive': recursive}
+    def attach_restore(self, output_dir, budget, generation):
+        """Read-only Attachment of the held restore_staging reservation for one validator output.
+
+        The restored files already occupy that single reservation (tracked as the generation
+        subtree). The validator attaches it and gets no spending, release or ownership authority,
+        and no second main-file allocation.
+        """
+        reservation = budget.reservation
+        relative = self.relative(generation)
+        p.require((relative, True) in reservation.scope() and reservation.bytes > 0
+                  and not reservation.released and not reservation.delegated,
+                  'restore attachment names no held tracked restore_staging reservation')
+        self.attachments[str(output_dir)] = [{
+            'reservation_id': reservation.reservation_id, 'owner': reservation.owner,
+            'resource': reservation.key[0], 'component': reservation.key[1], 'bytes': reservation.bytes,
+            'relative_path': relative, 'recursive': True, 'access': 'read_only'}]
 
     def child_plan(self, request, output):
-        """Disjoint owned allocations for exactly the files a child may write."""
+        """Disjoint, explicitly sized allocations for exactly the files this child may write.
+
+        Every family component is delegated once; a shared pool is split into named shares
+        whose sum never exceeds what the parent still holds. A restore validator receives the
+        read-only attachment instead of any main-file allocation.
+        """
         out = Path(output)
-        files = [('catalog_main', Path(request.get('catalog_path', out / 'catalog.sqlite'))),
-                 ('verifier_main', Path(request.get('verifier_work_db', out / 'verifier.sqlite'))),
-                 ('catalog_export_scratch', out / '.manifest-closure.sqlite')]
-        allocations = []
-        for resource, path in files:
-            for component in ('main', 'journal', 'temp'):
-                allocations.append(self.allocation(resource, component, path))
-        for name in ('catalog-backup.sqlite', 'verifier-backup.sqlite'):
-            allocations.append(self.allocation('snapshot_spool_bytes', 'bytes', out / name))
-        for name in ('child-home', 'child-temp'):
-            allocations.append(self.allocation('source_runtime_scratch_bytes', 'bytes', out / name, True))
-        return allocations, list(self.attachments.get(str(out), []))
+        attached = list(self.attachments.get(str(out), []))
+        restoring = request.get('operation') == 'validate_restore'
+        p.require(restoring == bool(attached),
+                  'restore validators attach the held restore reservation and nothing else attaches')
+        plan = GrantPlan(self)
+        if restoring:
+            # Journal/temp for ancillary writes only; the restored main file is never re-reserved.
+            for component in ('journal', 'temp'):
+                plan.family('catalog_or_verifier_restore_scratch', component, out / RESTORE_SCRATCH)
+        else:
+            plan.database('catalog_main', Path(request.get('catalog_path', out / 'catalog.sqlite')))
+            plan.database('verifier_main', Path(request.get('verifier_work_db', out / 'verifier.sqlite')))
+            plan.database('catalog_export_scratch', out / EXPORT_SCRATCH)
+            families = self.policy['families']
+            # A standalone backup is at most its database's ceiling: one named share each.
+            plan.pool('snapshot_spool_bytes', out / 'catalog-backup.sqlite', families['catalog_main']['database_bytes'])
+            plan.pool('snapshot_spool_bytes', out / 'verifier-backup.sqlite', families['verifier_main']['database_bytes'])
+        plan.database('verifier_continuation_scratch', out / CONTINUATION_SCRATCH)
+        # HOME and TMPDIR share one subtree allocation, so the pool is delegated exactly once.
+        plan.pool('source_runtime_scratch_bytes', out / CHILD_SCRATCH,
+                  self.ledger.remaining('source_runtime_scratch_bytes', 'bytes'), recursive=True)
+        return plan.entries, attached
 
     def issue(self, request, output):
         allocations, attachments = self.child_plan(request, output)
@@ -580,11 +647,53 @@ class PhysicalContext:
         return self.ledger.issue_child_grant(allocations, attachments, self.binding(), self.lease)
 
     def finish(self, handle):
-        """After the child is reaped: reconcile every surviving owned file, then close."""
+        """After the child is reaped: drop its scratch, then reconcile every surviving owned file.
+
+        Scratch (runtime HOME/TMPDIR, export, continuation and restore scratch) has no value
+        after exit and would otherwise keep its whole allocation charged and its path claimed.
+        It is removed only when the child stayed within its grant, so an overage is still
+        observed by reconciliation. Sealed outputs (databases, backups) stay charged.
+        """
         try:
+            try:
+                handle.check()
+            except (physical.PhysicalIncomplete, physical.PhysicalPolicyError):
+                pass
+            else:
+                self.discard_scratch(handle)
             handle.reconcile_after_reap()
         finally:
             handle.close()
+
+    def discard_scratch(self, handle):
+        for entry in handle.descriptor['allocations']:
+            if entry['resource'] not in SCRATCH_RESOURCES:
+                continue
+            target = self.owned / entry['relative_path']
+            if entry['recursive']:
+                if target.is_symlink():
+                    target.unlink()
+                elif target.exists():
+                    shutil.rmtree(target)
+                continue
+            for suffix in ('', *physical.DB_COMPANIONS):
+                companion = Path(str(target) + suffix)
+                if companion.is_symlink() or companion.exists():
+                    companion.unlink()
+
+    def attach_retained(self, output_dir, paths):
+        """Read-only Attachments of reservations still held for files an earlier child left behind."""
+        attachments = []
+        for path in paths:
+            relative = self.relative(path)
+            holders = [r for r in self.ledger.reservations if not r.released and not r.delegated
+                       and r.transfer is None and (relative, False) in r.scope()]
+            p.require(len(holders) == 1, 'read-only validation needs exactly one held reservation: ' + relative)
+            held = holders[0]
+            attachments.append({'reservation_id': held.reservation_id, 'owner': held.owner, 'resource': held.key[0],
+                                'component': held.key[1], 'bytes': held.bytes, 'relative_path': relative,
+                                'recursive': False, 'access': 'read_only'})
+        self.attachments[str(output_dir)] = attachments
 
     def close(self):
         self.lease.close()
@@ -616,9 +725,11 @@ def current_physical():
 def child_environment(reg, request, source, output, grant=None):
     # Never copy os.environ: API tokens, checkout credentials and CI payloads
     # stay in the trusted controller. HOME is a fresh private child directory.
-    home = Path(output) / 'child-home'
-    home.mkdir(exist_ok=True)
-    temporary=Path(output)/'child-temp';temporary.mkdir(exist_ok=True)
+    scratch = Path(output) / CHILD_SCRATCH  # the one granted runtime-scratch subtree
+    home = scratch / 'home'
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = scratch / 'temp'
+    temporary.mkdir(exist_ok=True, mode=0o700)
     compiler=os.environ.get('CARGO_TARGET_DIR')
     p.require(type(compiler) is str and Path(compiler).is_absolute()
               and Path(output).resolve() not in (Path(compiler).resolve(),*Path(compiler).resolve().parents),
@@ -1365,6 +1476,10 @@ class PoolBudget:
         self.pool, self.used, self.high = pool, 0, 0
         self.reserve(existing)  # files that survived an earlier job remain charged
 
+    def track_subtree(self, path):
+        """Name the owned subtree these bytes live in (what a read-only attachment refers to)."""
+        self.reservation.track_subtree(path)
+
     def reserve(self, size):
         if type(size) is not int or size < 0:
             raise physical.PhysicalIncomplete('invalid physical pool charge: ' + self.pool)
@@ -1772,6 +1887,7 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
     output = Path(output)
     generation = output / 'state.restore'
     generation.mkdir(exist_ok=False, mode=0o700)
+    budget.track_subtree(generation)  # restored files stay in this one held reservation
     request['verifier_work_db'] = str(generation / 'verifier.sqlite')
     directory = owned_directory(generation, reg, root)
     try:
@@ -1787,18 +1903,12 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
                                                       'verifier.staged.sqlite', budget.reserve, budget.release)
     finally:
         directory.close()
-    attachments = []
-    for path, resource_size in ((staged, catalog_root['catalog_bytes']),
-                                *(((verifier_staged, verifier_root['work_db_bytes']),) if verifier_staged else ())):
-        attachments.append({'reservation_id': budget.reservation_id, 'owner': 'snapshot_restore',
-            'resource': 'restore_staging_bytes', 'component': 'bytes', 'bytes': resource_size,
-            'relative_path': context.relative(path), 'recursive': False, 'access': 'read_only'})
     request['catalog_path'] = str(staged)
     restore = {**request, 'operation': 'validate_restore', 'catalog_path': str(staged),
                'checkpoint': checkpoint, 'dependency_index': str(index_path)}
     restore['output_dir'] = str(output / 'restore-validation')
     Path(restore['output_dir']).mkdir(mode=0o700)
-    context.attachments[restore['output_dir']] = attachments
+    context.attach_restore(restore['output_dir'], budget, generation)
     path = output / 'restore-request.json'
     p.write(path, restore)
     for argv in ([sys.executable, str(Path(source) / 'scripts/check-async-driver-refinement'), 'paged-unit', '--request', str(path)],
@@ -1814,7 +1924,7 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
                     'output_dir': str(output / 'verifier-restore-validation'), 'dependency_index': str(index_path)}
         p.write(output / 'restored-verifier-root.json', verifier_root)
         Path(vrequest['output_dir']).mkdir(mode=0o700)
-        context.attachments[vrequest['output_dir']] = attachments
+        context.attach_restore(vrequest['output_dir'], budget, generation)
         vpath = output / 'verifier-restore-request.json'
         p.write(vpath, vrequest)
         run_quantum(vpath, reg, source, Path(vrequest['output_dir']),
@@ -3115,6 +3225,8 @@ def seal_final_input(request,produced,reg,source,output,request_path):
     validate={**request,'operation':'validate_restore','verifier_work_db':str(backup),
               'checkpoint':produced['checkpoint']}
     p.write(request_path,validate)
+    # Both sealed files remain in the reservations their writer left held; attach, never re-reserve.
+    current_physical().attach_retained(output,(catalog,backup))
     run_quantum(request_path,reg,source,output,[sys.executable,
         str(Path(source)/'verification/async-driver-refinement/paged_checker.py'),
         'validate-restore','--request',str(request_path)])
