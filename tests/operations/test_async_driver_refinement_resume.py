@@ -325,6 +325,7 @@ class ReuseIdentities(OwnedScratch):
         selected.update({'store-'+case.rsplit('::',1)[-1]:case
           for case in runner.STORE_TESTS['core_tests']
           if case.rsplit('::',1)[-1] in {
+            'product_paged_disk_and_reference_complete_predecessors_agree',
             'actual_ordinary_settlement_payload_and_time_conformance',
             'actual_ordinary_local_guard_and_response_conformance',
             'actual_queued_eligibility_progress_witness'}})
