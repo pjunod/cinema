@@ -2843,6 +2843,8 @@ def main(argv=None):
     controller.add_argument('--output', type=Path, required=True)
     controller.add_argument('--maximum-dispatches', type=int, default=1)
     args = parser.parse_args(argv)
+    # Every owned spool, database, grant descriptor and restored image is private.
+    os.umask(0o077)
     root = Path(__file__).resolve().parents[1]
     if args.command == 'main-aggregate':
         ordinary_main()
