@@ -6,8 +6,8 @@
     "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs": "28ed59648ccdc8be9c8fae752556a12179f792aebfa38fc056b6234e970b7261",
     "crates/plurx-core/src/store/async_driver_catalog.rs": "54c58e4762746cb35e98eb695ab304db684f734578036a1cee1b4ffb0073bf24",
     "verification/async-driver-refinement/paged-verifier-state.sql": "598c28c51b90ce12fa81f9826c88cdcd496e691079f924b0c39fc61fe76530a6",
-    "verification/async-driver-refinement/paged_codec.py": "0f441494962904c72629dda123bc093209f97d09a4e6c04fa50453bf63b97cdd",
-    "verification/async-driver-refinement/paged_checker.py": "f7e6571bc0405ca0903332d9cd54c1e3c20622560a7e8c62f8a9a1d948e1317e",
+    "verification/async-driver-refinement/paged_codec.py": "63c65643522e35247e3a211e2cafac8cac1a1d825857e28d4331e9d674c27882",
+    "verification/async-driver-refinement/paged_checker.py": "5452f2e1c0a2606c3d24fa73e4b38719d387e5a9409478c152a51541a7565818",
     "validation/async_refinement_provenance.py": "2817108e6d1784f5e417547096e194ba430a9c6d62f228b2cc9ba62bdd21ae4a",
     "validation/async_snapshot_transport.py": "6df2925af7e5eb233abb920b3670c725f64706cbc5cc5639b213d0fb7e51d24a"
   },
