@@ -552,62 +552,14 @@ async fn build_inner(
             )
             .await
             .map_err(|error| format!("reserving recovered finite rendition metadata: {error}"))?;
-        let deadline = Instant::now() + settings.materialize_budget;
-        let identity_len = output
-            .file_len(FiniteFile::IdentityMetadata)
-            .await
-            .map_err(|error| format!("reading recovered finite identity length: {error}"))?
-            .ok_or("recovered finite identity is missing")?;
-        let mut identity_file = ReadyFile::Finite {
-            output: output.clone(),
-            file: FiniteFile::IdentityMetadata,
-            len: identity_len,
-        };
-        let identity_bytes = identity_file
-            .read_all_bounded(IDENTITY_METADATA_BYTES, deadline)
-            .await
-            .map_err(|error| format!("reading recovered finite identity: {error}"))?;
-        let identity = init::decode_identity(&identity_bytes)
-            .ok_or("recovered finite identity is malformed")?;
-        drop(identity_bytes);
-        if !output.has_encoded_process_metadata() {
-            return Err("recovered finite process marker is absent".into());
-        }
-        let marker_len = output
-            .file_len(FiniteFile::EncodedProcessMetadata)
-            .await
-            .map_err(|error| format!("reading recovered finite marker length: {error}"))?
-            .ok_or("recovered finite process marker is missing")?;
-        let mut marker_file = ReadyFile::Finite {
-            output: output.clone(),
-            file: FiniteFile::EncodedProcessMetadata,
-            len: marker_len,
-        };
-        let marker = marker_file
-            .read_all_bounded(ENCODED_MARKER_BYTES, deadline)
-            .await
-            .map_err(|error| format!("reading recovered finite process marker: {error}"))?;
-        let current = recipe
-            .encoding
-            .as_ref()
-            .ok_or("recovered finite encoding is missing")?
-            .engine
-            .stable_software_digest()
-            .ok_or("same-boot finite software engine identity unavailable")?;
-        if std::str::from_utf8(&marker).ok().map(str::trim) != Some(current) {
-            return Err("recovered finite output belongs to another boot or engine".into());
-        }
-        let mut manifest = Manifest::new(plan.clone());
-        for entry in 0..segment_count {
-            let len = output
-                .file_len(FiniteFile::Segment(entry))
-                .await
-                .map_err(|error| format!("reading recovered finite segment {entry}: {error}"))?
-                .ok_or_else(|| format!("recovered finite segment {entry} is missing"))?;
-            if !manifest.materialize(entry, len, now_ms()) {
-                return Err("recovered finite segment is outside the immutable plan".into());
-            }
-        }
+        let (manifest, identity) = completed_output_state(
+            &output,
+            &recipe,
+            &plan,
+            segment_count,
+            Instant::now() + settings.materialize_budget,
+        )
+        .await?;
         let dir = RenditionDir::from_finite(output);
         let rendition = Shared::construct_rendition(
             key,
@@ -888,6 +840,115 @@ async fn build_inner(
             Err(error)
         }
     }
+}
+
+/// Read the complete immutable serving state of an existing finite S: its
+/// identity, same-boot encoded process marker and every planned segment
+/// length. This opens counted reads only; it never acquires or closes S.
+async fn completed_output_state(
+    output: &FiniteOutput,
+    recipe: &Recipe,
+    plan: &SegmentPlan,
+    segment_count: u32,
+    deadline: Instant,
+) -> Result<(Manifest, InitIdentity), String> {
+    let identity_len = output
+        .file_len(FiniteFile::IdentityMetadata)
+        .await
+        .map_err(|error| format!("reading finite output identity length: {error}"))?
+        .ok_or("finite output identity is missing")?;
+    let mut identity_file = ReadyFile::Finite {
+        output: output.clone(),
+        file: FiniteFile::IdentityMetadata,
+        len: identity_len,
+    };
+    let identity_bytes = identity_file
+        .read_all_bounded(IDENTITY_METADATA_BYTES, deadline)
+        .await
+        .map_err(|error| format!("reading finite output identity: {error}"))?;
+    let identity =
+        init::decode_identity(&identity_bytes).ok_or("finite output identity is malformed")?;
+    drop(identity_bytes);
+    if !output.has_encoded_process_metadata() {
+        return Err("finite output process marker is absent".into());
+    }
+    let marker_len = output
+        .file_len(FiniteFile::EncodedProcessMetadata)
+        .await
+        .map_err(|error| format!("reading finite output marker length: {error}"))?
+        .ok_or("finite output process marker is missing")?;
+    let mut marker_file = ReadyFile::Finite {
+        output: output.clone(),
+        file: FiniteFile::EncodedProcessMetadata,
+        len: marker_len,
+    };
+    let marker = marker_file
+        .read_all_bounded(ENCODED_MARKER_BYTES, deadline)
+        .await
+        .map_err(|error| format!("reading finite output process marker: {error}"))?;
+    let current = recipe
+        .encoding
+        .as_ref()
+        .ok_or("finite output encoding is missing")?
+        .engine
+        .stable_software_digest()
+        .ok_or("same-boot finite software engine identity unavailable")?;
+    if std::str::from_utf8(&marker).ok().map(str::trim) != Some(current) {
+        return Err("finite output output belongs to another boot or engine".into());
+    }
+    let mut manifest = Manifest::new(plan.clone());
+    for entry in 0..segment_count {
+        let len = output
+            .file_len(FiniteFile::Segment(entry))
+            .await
+            .map_err(|error| format!("reading finite output segment {entry}: {error}"))?
+            .ok_or_else(|| format!("finite output segment {entry} is missing"))?;
+        if !manifest.materialize(entry, len, now_ms()) {
+            return Err("finite output segment is outside the immutable plan".into());
+        }
+    }
+    Ok((manifest, identity))
+}
+
+/// The serving rendition for a session that an exposed retained S captured
+/// before any R was admitted. The retained registry alone owns that S: this
+/// rendition borrows its counted output in the recovered-S shape, with no
+/// producer, build slot, metadata partition or cache admission of its own.
+pub(super) async fn retained_carrier(
+    key: &str,
+    index: Option<FragmentIndex>,
+    recipe: Recipe,
+    plan: SegmentPlan,
+    settings: &VodSettings,
+    output: FiniteOutput,
+) -> Result<Arc<Rendition>, String> {
+    let segment_count = u32::try_from(plan.len())
+        .map_err(|_| "finite software segment count overflows".to_owned())?;
+    let (manifest, identity) = completed_output_state(
+        &output,
+        &recipe,
+        &plan,
+        segment_count,
+        Instant::now() + settings.materialize_budget,
+    )
+    .await?;
+    Ok(Shared::construct_rendition(
+        key,
+        RenditionDir::from_retained_finite(output),
+        recipe,
+        None,
+        plan,
+        index,
+        settings,
+        None,
+        false,
+        None,
+        manifest,
+        IdentityState {
+            identity: Some(identity),
+            from_disk: true,
+        },
+    ))
 }
 
 pub(super) async fn run(

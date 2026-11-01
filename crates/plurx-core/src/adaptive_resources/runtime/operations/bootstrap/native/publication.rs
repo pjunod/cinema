@@ -317,12 +317,7 @@ impl NodeResourceRuntime {
             OutputKey::CompleteArtifactManifest => "complete-v1.json".to_owned(),
         };
         let content_binding = format!("sha256:{:x}", Sha256::digest(payload.as_slice()));
-        let metadata = matches!(
-            output,
-            OutputKey::IdentityMetadata
-                | OutputKey::EncodedProcessMetadata
-                | OutputKey::CompleteArtifactManifest
-        );
+        let metadata = output.is_fixed_metadata();
         let validated = if matches!(output, OutputKey::Playlist) {
             if let Some((_, old)) = prior_playlist {
                 PublicationRequest::for_playlist_replacement(Vec::new(), io_id.uuid(), old)?
@@ -495,10 +490,7 @@ impl NodeResourceRuntime {
                     payload_capacity: publication.payload_capacity,
                     copy_id: publication.copy_id,
                 }
-            } else if matches!(
-                publication.output,
-                OutputKey::IdentityMetadata | OutputKey::EncodedProcessMetadata
-            ) {
+            } else if publication.output.is_fixed_metadata() {
                 AssetIoV1::PublishMetadata {
                     slot_id: FileSlotId(publication.io_id),
                     output: publication.output,

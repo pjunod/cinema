@@ -220,6 +220,26 @@ impl RenditionDir {
         self.writes.finite.is_some()
     }
 
+    /// A serving view over a retained S that the retained registry owns. Its
+    /// rendition never retires that output; dropping the view only releases
+    /// the borrowed application alias.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_retained_finite(output: FiniteOutput) -> RenditionDir {
+        RenditionDir {
+            dir: output.path().to_owned(),
+            writes: std::sync::Arc::new(PendingWrites {
+                finite: Some(FinitePublication::new(output)),
+                retained_carrier: true,
+                ..PendingWrites::default()
+            }),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn borrows_retained_output(&self) -> bool {
+        self.writes.retained_carrier
+    }
+
     /// Return the finite output selector without exposing or duplicating its
     /// held native directory handle.
     pub(crate) fn finite_output(&self) -> Option<FiniteOutput> {

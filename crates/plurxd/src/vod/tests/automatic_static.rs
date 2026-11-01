@@ -359,6 +359,49 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     );
     drop(legacy);
     assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
+    // A background legacy occupant does not trip the foreground-idle guard,
+    // so the selected static constructor itself must refuse the shared
+    // compatibility alias. The same original P stays with the entry and the
+    // resume below must settle it.
+    let background_legacy = compatibility_pool
+        .try_admit_software(0, 1, crate::admission::Priority::Background)
+        .expect("actual original background legacy owner");
+    let error = manager
+        .produce_encoded_output_job(
+            &file,
+            controller.job(),
+            fence.clone(),
+            deadline,
+            observation,
+        )
+        .await
+        .expect_err("selected static R must not bypass the background legacy owner");
+    assert!(
+        matches!(&error, crate::background_jobs::PreparationError::Retry(message)
+            if message.contains("compatibility pool")),
+        "the actual static R compatibility refusal: {error:?}"
+    );
+    assert_eq!(
+        compatibility_pool.snapshot().software_used,
+        compatibility_baseline.software_used + 1,
+        "R refusal leaves only the same original background legacy claim"
+    );
+    drop(background_legacy);
+    assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
+    // Production runs the VodServe maintenance tick from startup. A new
+    // retained artifact is exposed only after that startup inventory has
+    // converged; before it, exposure is a Retry with the artifact kept.
+    for _ in 0..16 {
+        serve.maintain().await;
+        if serve.shared.retained_artifacts.cold_ready() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        serve.shared.retained_artifacts.cold_ready(),
+        "the real maintenance tick converges the startup retained inventory"
+    );
     assert!(manager
         .produce_encoded_output_job(
             &file,
@@ -523,7 +566,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         serve
             .shared
             .retained_artifacts
-            .acquire_prepared_candidate(&rendition, &logical, &resolved_file, &wrong_offset)
+            .acquire_prepared_candidate(&rendition.retained_probe(), &logical, &resolved_file, &wrong_offset)
             .await
             .is_none(),
         "a different audio offset cannot borrow the settled origin"
@@ -538,7 +581,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         serve
             .shared
             .retained_artifacts
-            .acquire_prepared_candidate(&rendition, &logical, &resolved_file, &wrong_geometry)
+            .acquire_prepared_candidate(&rendition.retained_probe(), &logical, &resolved_file, &wrong_geometry)
             .await
             .is_none(),
         "a different candidate geometry cannot borrow the settled origin"
@@ -585,7 +628,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         retained_charge,
         "pressure alone cannot refund the original live-body S"
     );
-    serve.shared.retained_artifacts.collect(base.path()).await;
+    serve.shared.retained_artifacts.collect(&serve.shared.base).await;
     assert_eq!(
         serve.shared.retained_artifacts.test_capacity_snapshot().0,
         retained_charge,
@@ -595,7 +638,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     // Existing maintenance resumes the same queued original eviction; no
     // replacement native operation or daemon/path-based refund is minted.
     for _ in 0..16 {
-        serve.shared.retained_artifacts.collect(base.path()).await;
+        serve.shared.retained_artifacts.collect(&serve.shared.base).await;
         if serve.shared.retained_artifacts.test_capacity_snapshot().0 == 0 {
             break;
         }

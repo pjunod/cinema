@@ -9,6 +9,12 @@
 pub mod publication;
 pub mod sync_files;
 
+/// Fixed metadata names a finite artifact directory may publish and sync.
+/// Core `OutputKey` naming maps its three metadata keys to exactly these
+/// names, so secure publication and sync accept the same set.
+pub const FIXED_METADATA_NAMES: [&str; 3] =
+    ["identity.json", "encoded-process", "complete-v1.json"];
+
 use std::ffi::{CStr, CString, OsString};
 use std::fs::File;
 use std::io;

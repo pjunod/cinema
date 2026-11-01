@@ -273,7 +273,7 @@ impl VodServe {
         .ok_or(PreparationError::Yield("retention_capacity"))?;
         let mut storage_run =
             super::preparation_storage::ConstructionOwner::new(Arc::clone(&allowance));
-        let (attachment, logical) = self
+        let (attachment, logical, _) = self
             .resolve_rendition(
                 &mut prepared,
                 file,
@@ -281,6 +281,7 @@ impl VodServe {
                 None,
                 Some(Arc::clone(&allowance)),
                 None,
+                false,
             )
             .await?;
         let rendition = Arc::clone(&attachment.rendition);
@@ -588,6 +589,10 @@ impl VodServe {
     /// Resolve immutable media without attaching a public playback handle.
     /// The returned build guard protects the lookup/reader-attachment gap;
     /// callers must commit their parent-owned reader graph before dropping it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Only the parent create may capture a retained S before build; its companion, soundtrack and preparation resolves share this frame and must say they do not."
+    )]
     pub(super) async fn resolve_rendition(
         &self,
         prepared: &mut VodRecipeRequest<'_>,
@@ -596,10 +601,12 @@ impl VodServe {
         viewer: Option<&crate::state::PlaybackViewerDemand>,
         private_preparation: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         expected_attempt: Option<&Arc<Rendition>>,
+        capture_before_build: bool,
     ) -> Result<
         (
             RenditionAttachment,
             Option<crate::vodserve::retained_manifest::LogicalOutput>,
+            Option<Arc<crate::vodserve::retained::RetainedVodArtifact>>,
         ),
         String,
     > {
@@ -663,6 +670,7 @@ impl VodServe {
                     _build_guard: gate,
                 },
                 incoming_logical,
+                None,
             ));
         }
         let processing_instance = prepared
@@ -709,8 +717,30 @@ impl VodServe {
                     _build_guard: gate,
                 },
                 incoming_logical,
+                None,
             ));
         }
+        #[cfg(target_os = "linux")]
+        if capture_before_build && private_preparation.is_none() && processing_instance.is_none() {
+            // Boxed: every create awaits this frame, captured or not.
+            if let Some((attachment, artifact)) = Box::pin(self.attach_captured_retained_output(
+                prepared,
+                file,
+                &key,
+                &identity,
+                &index,
+                &recipe,
+                duration_ms,
+                settings,
+                &incoming_logical,
+            ))
+            .await?
+            {
+                return Ok((attachment, incoming_logical, Some(artifact)));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = capture_before_build;
         let attachment = self
             .shared
             .attach_rendition_with_storage(
@@ -738,7 +768,7 @@ impl VodServe {
                     "the fragment index produced an empty VOD plan",
                 )
             })?;
-        Ok((attachment, incoming_logical))
+        Ok((attachment, incoming_logical, None))
     }
 
     /// Resolve the ordinary selected recipe without admitting any native
@@ -851,6 +881,19 @@ impl VodServe {
             .as_ref()
             .ok_or("static artifact has no resolved delivery identity")?
             .clone();
+        let provenance = {
+            let encoding = recipe
+                .encoding
+                .as_ref()
+                .ok_or("static artifact has no selected encoding")?;
+            super::background_artifact::StaticArtifactProvenance {
+                candidate: recipe.measured_candidate.clone(),
+                executable: encoding.executable.digest.clone(),
+                engine: encoding.engine.digest.clone(),
+                source_metadata: super::retained::manual_source_metadata(&recipe.file)
+                    .ok_or("static artifact source metadata exceeds its bounded identity")?,
+            }
+        };
         let source_version = finite_profile::source_version(&recipe)?;
         let workspace = retained_manifest::projected_static_manifest_workspace_bytes(
             plan.len(),
@@ -949,6 +992,7 @@ impl VodServe {
             cache_grant,
             compatibility,
             policy,
+            provenance,
             workspace,
             publication,
             logical,
@@ -987,6 +1031,7 @@ impl VodServe {
             cache_grant,
             compatibility,
             policy,
+            provenance,
             workspace,
             publication,
             logical,
@@ -1028,6 +1073,7 @@ impl VodServe {
             logical,
             application_lease,
             policy,
+            provenance,
         ))
     }
 
@@ -1082,17 +1128,39 @@ impl VodServe {
                 } else if req.candidate_context.is_some() {
                     self.shared
                         .retained_artifacts
-                        .acquire_prepared_candidate(rendition, incoming_logical, file, req)
+                        .acquire_prepared_candidate(
+                            &rendition.retained_probe(),
+                            incoming_logical,
+                            file,
+                            req,
+                        )
                         .await
                 } else {
                     self.shared
                         .retained_artifacts
-                        .acquire_prepared_manual(rendition, incoming_logical, file)
+                        .acquire_prepared_manual(
+                            &rendition.retained_probe(),
+                            incoming_logical,
+                            file,
+                        )
                         .await
                 }
             }
         };
         #[cfg(target_os = "linux")]
+        let selected = self
+            .retain_current_static_policy(selected, issued_restore)
+            .await?;
+        Ok(selected)
+    }
+
+    /// An obsolete static policy withdraws the selected S before attachment.
+    #[cfg(target_os = "linux")]
+    async fn retain_current_static_policy(
+        &self,
+        selected: Option<Arc<crate::vodserve::retained::RetainedVodArtifact>>,
+        issued_restore: bool,
+    ) -> Result<Option<Arc<crate::vodserve::retained::RetainedVodArtifact>>, String> {
         if let Some(artifact) = selected.as_ref() {
             if !artifact
                 .static_policy_current(self.shared.store.as_ref())
@@ -1111,6 +1179,171 @@ impl VodServe {
             }
         }
         Ok(selected)
+    }
+
+    /// Select an exposed retained S for a selected finite software recipe
+    /// BEFORE any R is admitted: a session that S can serve must not reserve,
+    /// install or start its own producer. Only a typed finite S qualifies;
+    /// no capture leaves the ordinary attach-then-capture path unchanged.
+    #[cfg(target_os = "linux")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The resolved recipe, plan inputs and request capture are borrowed from one resolve frame; nothing is cloned unless an S is captured."
+    )]
+    async fn attach_captured_retained_output(
+        &self,
+        prepared: &VodRecipeRequest<'_>,
+        file: &MediaFile,
+        key: &str,
+        identity: &SourceIdentity,
+        index: &Option<FragmentIndex>,
+        recipe: &Recipe,
+        duration_ms: i64,
+        settings: &VodSettings,
+        incoming_logical: &Option<crate::vodserve::retained_manifest::LogicalOutput>,
+    ) -> Result<
+        Option<(
+            RenditionAttachment,
+            Arc<crate::vodserve::retained::RetainedVodArtifact>,
+        )>,
+        String,
+    > {
+        if !finite_software::selected(key, recipe, false, false)
+            || matches!(
+                prepared.retained_capture,
+                RetainedOutputCapture::Restore(None) | RetainedOutputCapture::ReceiverUnavailable
+            )
+        {
+            return Ok(None);
+        }
+        let gate = self.shared.rendition_build_gate(key).lock_owned().await;
+        if self.shared.finite_closing.lock().await.contains_key(key) {
+            return Ok(None);
+        }
+        let existing = self.shared.renditions.lock().await.get(key).cloned();
+        if let Some(existing) = existing {
+            // A registered carrier is reused only when this request's own
+            // capture selects its S; any other registered rendition keeps
+            // today's attach-then-capture.
+            if !existing.dir.borrows_retained_output() || existing.closed.load(Acquire) {
+                return Ok(None);
+            }
+            let Some(artifact) = self
+                .capture_retained_before_build(
+                    &prepared.retained_capture,
+                    &existing.retained_probe(),
+                    incoming_logical,
+                    prepared.request,
+                    file,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            return Ok(Some((
+                RenditionAttachment {
+                    rendition: existing,
+                    _build_guard: gate,
+                },
+                artifact,
+            )));
+        }
+        let plan = self
+            .shared
+            .stored_plan(key, identity, index, recipe, duration_ms)
+            .await?;
+        if plan.is_empty() {
+            return Ok(None);
+        }
+        let playlist = plan.playlist().into_bytes();
+        let probe = crate::vodserve::RetainedAttachProbe::finite(key, &playlist, recipe);
+        let Some(artifact) = self
+            .capture_retained_before_build(
+                &prepared.retained_capture,
+                &probe,
+                incoming_logical,
+                prepared.request,
+                file,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(output) = artifact.finite_output.clone() else {
+            return Ok(None);
+        };
+        let rendition = match finite_software::retained_carrier(
+            key,
+            index.clone(),
+            recipe.clone(),
+            plan,
+            settings,
+            output,
+        )
+        .await
+        {
+            Ok(rendition) => rendition,
+            Err(error) => {
+                tracing::warn!(target: "plurxd::vodserve", rendition = %key, %error,
+                    "captured retained output cannot carry this session; building its own output");
+                return Ok(None);
+            }
+        };
+        {
+            let closings = self.shared.finite_closing.lock().await;
+            let mut renditions = self.shared.renditions.lock().await;
+            if closings.contains_key(key) || renditions.contains_key(key) {
+                return Ok(None);
+            }
+            renditions.insert(key.to_owned(), Arc::clone(&rendition));
+        }
+        // A finite rendition without a producer registers an empty driver.
+        let _driver = super::driver::spawn_driver(Arc::clone(&self.shared), Arc::clone(&rendition));
+        Ok(Some((
+            RenditionAttachment {
+                rendition,
+                _build_guard: gate,
+            },
+            artifact,
+        )))
+    }
+
+    /// The retained capture for a target that has no rendition yet. A
+    /// finite target has no daemon source fence, so an issued restore is
+    /// decided by the exact fast match alone, as the late path decides it.
+    #[cfg(target_os = "linux")]
+    async fn capture_retained_before_build(
+        &self,
+        capture: &RetainedOutputCapture,
+        probe: &crate::vodserve::RetainedAttachProbe<'_>,
+        incoming_logical: &Option<crate::vodserve::retained_manifest::LogicalOutput>,
+        req: &SessionRequest,
+        file: &MediaFile,
+    ) -> Result<Option<Arc<crate::vodserve::retained::RetainedVodArtifact>>, String> {
+        let registry = &self.shared.retained_artifacts;
+        let (selected, issued_restore) = match capture {
+            RetainedOutputCapture::Restore(Some(expected)) => (
+                registry.acquire_expected_for_request(expected, probe, incoming_logical),
+                true,
+            ),
+            RetainedOutputCapture::Restore(None) | RetainedOutputCapture::ReceiverUnavailable => {
+                (None, true)
+            }
+            RetainedOutputCapture::New if req.candidate_context.is_some() => (
+                registry
+                    .acquire_prepared_candidate(probe, incoming_logical, file, req)
+                    .await,
+                false,
+            ),
+            RetainedOutputCapture::New => (
+                registry
+                    .acquire_prepared_manual(probe, incoming_logical, file)
+                    .await,
+                false,
+            ),
+        };
+        self.retain_current_static_policy(selected, issued_restore)
+            .await
     }
 
     /// Resolve native prerequisites without reserving a reader or attaching a
@@ -1789,6 +2022,7 @@ impl VodServe {
                         fences.viewer.as_ref(),
                         None,
                         None,
+                        false,
                     )
                     .await?
                     .0;
@@ -1827,6 +2061,7 @@ impl VodServe {
                         fences.viewer.as_ref(),
                         None,
                         None,
+                        false,
                     )
                     .await?
                     .0;
@@ -1836,7 +2071,9 @@ impl VodServe {
             }
             None => None,
         };
-        let (attachment, incoming_logical) = self
+        // Continuous parents serve role-split private children, which no
+        // complete retained output can stand in for (see the late capture).
+        let (attachment, incoming_logical, early_retained) = self
             .resolve_rendition(
                 &mut prepared,
                 file,
@@ -1844,6 +2081,7 @@ impl VodServe {
                 fences.viewer.as_ref(),
                 None,
                 fences.expected_attempt,
+                !continuous,
             )
             .await?;
         let rendition = Arc::clone(&attachment.rendition);
@@ -1970,7 +2208,10 @@ impl VodServe {
             .transpose()?;
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
-        let retained_output = if rendition.ephemeral_processing {
+        let retained_output = if early_retained.is_some() {
+            // Selected before build; this session admitted no R of its own.
+            early_retained
+        } else if rendition.ephemeral_processing {
             None
         } else {
             self.capture_retained_output(
@@ -2025,7 +2266,11 @@ impl VodServe {
         if retained_output.as_ref().is_some_and(|artifact| {
             self.shared
                 .retained_artifacts
-                .acquire_expected_for_request(&artifact.facts(), &rendition, &incoming_logical)
+                .acquire_expected_for_request(
+                    &artifact.facts(),
+                    &rendition.retained_probe(),
+                    &incoming_logical,
+                )
                 .is_none()
         }) {
             return Err(crate::transcode::vod_refusal_error(

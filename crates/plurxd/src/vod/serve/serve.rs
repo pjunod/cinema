@@ -768,7 +768,13 @@ impl VodServe {
                     }
                     if let Some(rendition) = rendition {
                         rendition.detach_reader(&shared.pool, &id).await;
-                        if rendition.ephemeral_processing {
+                        // A retained carrier leaves with its last session so
+                        // that its borrowed S stays evictable.
+                        #[cfg(target_os = "linux")]
+                        let carrier = rendition.dir.borrows_retained_output();
+                        #[cfg(not(target_os = "linux"))]
+                        let carrier = false;
+                        if rendition.ephemeral_processing || carrier {
                             shared
                                 .purge_if_dormant(&rendition.key, Duration::ZERO)
                                 .await;

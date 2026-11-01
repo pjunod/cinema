@@ -171,12 +171,7 @@ impl ScratchFold {
                         payload_capacity,
                         copy_id,
                     } => {
-                        let metadata = matches!(
-                            output,
-                            OutputKey::IdentityMetadata
-                                | OutputKey::EncodedProcessMetadata
-                                | OutputKey::CompleteArtifactManifest
-                        );
+                        let metadata = output.is_fixed_metadata();
                         if metadata != matches!(operation, AssetIoV1::PublishMetadata { .. })
                             || self.state.directory.is_none()
                             || slot_id.0 != *io_id
