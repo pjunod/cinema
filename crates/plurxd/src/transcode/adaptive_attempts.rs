@@ -396,9 +396,6 @@ pub(super) struct AdaptiveAttemptRegistry {
 pub(super) struct AttemptEntry {
     remote_changed: tokio::sync::Notify,
     remote_registration: Mutex<Option<RemoteRegistration>>,
-    /// The original local create's continuous cutoff, retained once from the
-    /// actual create scope. A remote attempt instead carries its grant.
-    local_continuous_cutoff: std::sync::OnceLock<plurx_core::cluster::clock::ContinuousDeadline>,
     coordinator_frame_bytes: std::sync::atomic::AtomicUsize,
     attempt_id: Uuid,
     request_incarnation_id: Uuid,
@@ -562,7 +559,6 @@ impl AdaptiveAttemptRegistry {
         let entry = Arc::new(AttemptEntry {
             remote_changed: tokio::sync::Notify::new(),
             remote_registration: Mutex::new(None),
-            local_continuous_cutoff: std::sync::OnceLock::new(),
             coordinator_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
             attempt_id,
             request_incarnation_id,
@@ -673,16 +669,6 @@ impl AttemptEntry {
             .lock()
             .map(|held| held.as_ref().and_then(|remote| remote.deadline.clone()))
             .map_err(|_| "remote original deadline is uncertain".into())
-    }
-    /// The one original continuous cutoff this attempt's R owner must honour:
-    /// the local create's, or the remote grant's after it arrived.
-    fn original_continuous_cutoff(
-        &self,
-    ) -> Result<Option<plurx_core::cluster::clock::ContinuousDeadline>, String> {
-        if let Some(local) = self.local_continuous_cutoff.get() {
-            return Ok(Some(local.clone()));
-        }
-        self.remote_deadline()
     }
     fn remote_failure_fence(
         &self,
@@ -1417,11 +1403,6 @@ impl super::TranscodeManager {
                 request.claim.serving_generation,
             )
             .map_err(str::to_owned)?;
-        // Retain the actual create scope's continuous cutoff by value now; the
-        // R owner built later must not read a task-local or recapture.
-        if let Some(cutoff) = crate::media_pool::create_continuous_prepare_cutoff() {
-            let _ = entry.local_continuous_cutoff.set(cutoff);
-        }
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let manager = Arc::clone(self);
@@ -1614,7 +1595,9 @@ impl super::TranscodeManager {
             settings,
             planning_application_limit_bytes: _,
         } = planned;
-        let continuous_entry_deadline = entry.original_continuous_cutoff()?;
+        // The SAME original remote grant P retained; a local create carries
+        // none, so its R keeps the original local monotonic deadline.
+        let continuous_entry_deadline = entry.remote_deadline()?;
         let built = self
             .vod
             .build_adaptive_recipe(

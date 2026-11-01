@@ -474,10 +474,7 @@ impl NodeResourceRuntime {
             .ok_or(OperationError::State)?;
         if publication.request.is_some() && state.asset.totals.pending_jobs == 0 {
             if !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
-                || crate::adaptive_resources::runtime::operations::entry_window_closed(
-                    role.continuous_entry_deadline.as_ref(),
-                    deadline,
-                )
+                || Instant::now() >= deadline
             {
                 return Err(OperationError::State);
             }
@@ -540,10 +537,7 @@ impl NodeResourceRuntime {
             .ok_or(OperationError::State)?;
         if publication.request.is_some() {
             if !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
-                || crate::adaptive_resources::runtime::operations::entry_window_closed(
-                    role.continuous_entry_deadline.as_ref(),
-                    deadline,
-                )
+                || Instant::now() >= deadline
                 || bootstrap.change.is_some()
                 || state
                     .asset
@@ -566,9 +560,7 @@ impl NodeResourceRuntime {
                     .ok_or(OperationError::State)?,
                 directory,
             )?;
-            self.release_native_entry(
-                role.binding,
-                role.continuous_entry_deadline.as_ref(),
+            self.release_native_entry(role.binding, None,
                 enter,
             )?;
         }

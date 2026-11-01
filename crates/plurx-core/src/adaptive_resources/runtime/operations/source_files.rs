@@ -901,10 +901,13 @@ impl NodeResourceRuntime {
         }) {
             return Err(OperationError::State);
         }
+        let continuous_entry_deadline = role.continuous_entry_deadline.clone();
         role.sources.insert(
             member,
             SourceCell {
-                continuous_entry_deadline: None,
+                // The queued blocking open rechecks the same original cutoff
+                // after its latch, as planning sources already do.
+                continuous_entry_deadline,
                 spec: request.take(),
                 plan,
                 acquisition_id,

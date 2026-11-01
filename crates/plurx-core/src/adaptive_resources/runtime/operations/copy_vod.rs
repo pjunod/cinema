@@ -695,12 +695,6 @@ impl NodeResourceRuntime {
             if role.invoked.contains(&member) || role.graph.is_none() {
                 return Err(OperationError::State);
             }
-            // No fresh arm once the original continuous cutoff has passed.
-            if crate::adaptive_resources::runtime::operations::continuous_window_closed(
-                role.continuous_entry_deadline.as_ref(),
-            ) {
-                return Err(OperationError::Deadline);
-            }
             if !role.armed.contains(&member) {
                 start_transition(
                     &self.journal,
@@ -795,6 +789,9 @@ impl NodeResourceRuntime {
             .take_copy_start(task)
             .await?;
         self.release_native_entry(role.binding, role.continuous_entry_deadline.as_ref(), start)?;
+        // The copy producer has entered; the original create cutoff closes
+        // only first entry, never its later output work.
+        role.continuous_entry_deadline = None;
         // No suspension separates successful send from its delivery record.
         // A refused send never grants replay success or a fresh sender.
         copy.start_released = true;

@@ -600,18 +600,6 @@ pub(crate) fn create_preparation_deadline() -> Option<tokio::time::Instant> {
         .ok()
 }
 
-/// The same original continuous create cutoff, retained by value for the R
-/// owner this create admits. Absence is no continuous evidence, never a fresh
-/// window.
-#[cfg(target_os = "linux")]
-pub(crate) fn create_continuous_prepare_cutoff(
-) -> Option<plurx_core::cluster::clock::ContinuousDeadline> {
-    CREATE_STARTUP_BUDGET
-        .try_with(|budget| budget.continuous_prepare_cutoff.clone())
-        .ok()
-        .flatten()
-}
-
 /// Grant duration is derived only after the genuine registration receipt.
 /// Both original clocks and the caller's already clipped stage constrain it.
 /// Millisecond flooring never grants the fractional tail to the worker.

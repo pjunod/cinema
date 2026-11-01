@@ -1857,6 +1857,13 @@ fn start_named_transition(
     if role.transition.is_some() || role.refunded {
         return Err(OperationError::State);
     }
+    // No fresh Arm once the original continuous create cutoff has passed. A
+    // transition already started still finishes through its original owner.
+    if matches!(effect, Effect::Arm(_))
+        && continuous_window_closed(role.continuous_entry_deadline.as_ref())
+    {
+        return Err(OperationError::Deadline);
+    }
     let handle = role.handle.clone().ok_or(OperationError::State)?;
     let key = TransitionKey {
         handle,
