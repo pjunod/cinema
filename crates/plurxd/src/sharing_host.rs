@@ -156,14 +156,89 @@ pub(crate) enum SetupState {
 pub(crate) struct SetupStatus {
     pub state: SetupState,
     pub message: String,
+    /// The concrete step that failed, in the host tool's own words where it
+    /// gave any. Empty when the state needs no further explanation.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     pub checked_at_ms: Option<i64>,
     /// Fresh control-plane observation, separate from forwarding readiness.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tailscale_online: Option<bool>,
+    /// Which Tailscale account and tailnet this host is signed in to, when
+    /// the host could be observed. Another owner's device share must be
+    /// accepted with this account for this Cinema to reach their server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tailscale: Option<TailscaleIdentity>,
+}
+/// This host's own Tailscale identity, as reported by its local CLI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TailscaleIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailnet: Option<String>,
+    pub dns_name: String,
+    pub ipv4: Ipv4Addr,
+}
+/// A failed setup observation and the concrete step that failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Failure {
+    pub state: SetupState,
+    pub detail: String,
+}
+impl From<SetupState> for Failure {
+    fn from(state: SetupState) -> Self {
+        Self {
+            state,
+            detail: String::new(),
+        }
+    }
+}
+impl Failure {
+    fn new(state: SetupState, detail: impl Into<String>) -> Self {
+        Self {
+            state,
+            detail: detail.into(),
+        }
+    }
+}
+type Setup<T> = Result<T, Failure>;
+/// Host tool output shown to an administrator: one bounded printable line,
+/// with links removed so a sign-in URL never reaches a log or a page.
+fn excerpt(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let mut out = String::new();
+    for word in line.split_whitespace() {
+        let word = if word.contains("http://") || word.contains("https://") {
+            "<link>"
+        } else {
+            word
+        };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.extend(word.chars().filter(|c| !c.is_control()));
+        if out.chars().count() > 240 {
+            out = out.chars().take(240).collect::<String>() + "…";
+            break;
+        }
+    }
+    out
+}
+fn bounded_label(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control))
+        .map(str::to_owned)
 }
 impl SetupState {
     fn status(self) -> SetupStatus {
-        SetupStatus { state: self, checked_at_ms: Some(clock_ms()), tailscale_online: None, message: match self {
+        SetupStatus { state: self, detail: String::new(), checked_at_ms: Some(clock_ms()), tailscale_online: None, tailscale: None, message: match self {
             Self::Pending => "Setting up the private connection…",
             Self::Disabled => "Sharing is disabled.",
             Self::Ready => "Private host setup is configured. Pair another Cinema to verify the connection.",
@@ -171,7 +246,7 @@ impl SetupState {
             Self::SignInRequired => "Open Tailscale on this Cinema's host and sign in. Cinema will retry automatically.",
             Self::PermissionRequired => "Allow Cinema's host setup component to configure Tailscale, then retry.",
             Self::PortConflict => "Another Tailscale rule uses Cinema's private port. Cinema has preserved that rule; resolve the conflict on this host.",
-            Self::HostHelperRequired => "Install Cinema's sharing host component on the Docker host. The container cannot configure the host's Tailscale service.",
+            Self::HostHelperRequired => "Cinema runs in a container and cannot see this host's Tailscale. Install Cinema's sharing host component on the Docker host for automatic setup and status; forwarding you configured by hand may still work, and other Cinemas' connection checks show whether it does.",
             Self::NativeSetupRequired => "Native sharing needs Cinema's listener at 127.0.0.1:32444 and private TCP forwarding from port 32443. Start the installed Cinema service for automatic setup, or configure this forwarding on the host.",
             Self::DeploymentRequired => "The Docker host setup must publish Cinema's sharing listener on host loopback and select its private bridge.",
             Self::Unavailable => "Private host setup could not be verified. Check Tailscale on this host; Cinema will retry automatically.",
@@ -187,8 +262,21 @@ pub(crate) struct HostAddress {
     ts_fqdn: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tailscale_online: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tailnet: Option<String>,
 }
 impl HostAddress {
+    pub(crate) fn identity(&self) -> TailscaleIdentity {
+        // A Docker host report is another process's file: bound it here too.
+        TailscaleIdentity {
+            login_name: bounded_label(self.login_name.as_deref()),
+            tailnet: bounded_label(self.tailnet.as_deref()),
+            dns_name: self.ts_fqdn.clone(),
+            ipv4: self.ipv4,
+        }
+    }
     fn endpoint(&self, pin: String) -> Result<Endpoint, SetupState> {
         let endpoint = Endpoint {
             ipv4: self.ipv4,
@@ -351,74 +439,327 @@ fn tailscale_program() -> Result<PathBuf, SetupState> {
     }
     Err(SetupState::TailscaleMissing)
 }
-async fn command(program: &Path, args: &[&str]) -> Result<Vec<u8>, SetupState> {
-    command_with_timeout(program, args, Duration::from_secs(8)).await
+/// Run the host's Tailscale CLI.
+///
+/// `TAILSCALE_BE_CLI=1` is required on macOS: the Tailscale app's binary
+/// decides from its launch context whether it is the CLI or the menu-bar app.
+/// Started by a process that launchd owns (the Cinema LaunchAgent), it takes
+/// the GUI path, prints "The Tailscale GUI failed to start" on stdout and
+/// exits 0, so every observation failed as unreadable output. The variable
+/// is the app's documented CLI switch and is ignored by other platforms' CLI.
+async fn command(program: &Path, args: &[&str]) -> Setup<Vec<u8>> {
+    command_with_env(
+        program,
+        args,
+        Duration::from_secs(8),
+        TAILSCALE_CLI,
+        LIMIT,
+        SetupState::Unavailable,
+    )
+    .await
+}
+/// A Tailscale change (`serve`). Its unexplained refusal is the host denying
+/// Cinema the change, as before; read-only observations do not assume that.
+async fn command_mutation(program: &Path, args: &[&str]) -> Setup<Vec<u8>> {
+    command_with_env(
+        program,
+        args,
+        Duration::from_secs(8),
+        TAILSCALE_CLI,
+        LIMIT,
+        SetupState::PermissionRequired,
+    )
+    .await
+}
+const TAILSCALE_CLI: &[(&str, &str)] = &[("TAILSCALE_BE_CLI", "1")];
+
+#[cfg(any(target_os = "macos", test))]
+async fn command_with_timeout(program: &Path, args: &[&str], deadline: Duration) -> Setup<Vec<u8>> {
+    command_with_env(program, args, deadline, &[], LIMIT, SetupState::Unavailable).await
 }
 
-async fn command_with_timeout(
+fn invocation(program: &Path, args: &[&str]) -> String {
+    let name = program
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            if name.eq_ignore_ascii_case("tailscale") || name.eq_ignore_ascii_case("tailscale.exe")
+            {
+                "tailscale"
+            } else {
+                name
+            }
+        })
+        .unwrap_or("host tool");
+    std::iter::once(name)
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+async fn command_with_env(
     program: &Path,
     args: &[&str],
     deadline: Duration,
-) -> Result<Vec<u8>, SetupState> {
+    env: &[(&str, &str)],
+    max_output: usize,
+    refusal: SetupState,
+) -> Setup<Vec<u8>> {
     let mut process = tokio::process::Command::new(program);
     process.args(args);
+    for (key, value) in env {
+        process.env(key, value);
+    }
+    // Bounded and link-free like the tool's own words: the fixed Tailscale
+    // arguments carry nothing secret, and a test or future caller's may.
+    let shown = excerpt(invocation(program, args).as_bytes());
     // Host tooling keeps its existing user/IPC environment. The shared owner
     // isolates its process group and reaps it before timeout/cancellation returns.
     let output = plurx_core::process::bounded::output_command_inherited_env(
         &mut process,
         deadline,
-        LIMIT + 1,
+        max_output + 1,
         crate::process_control::ChildWork::background("private sharing host setup"),
     )
     .await
     .map_err(|error| match error.kind() {
-        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound => {
-            SetupState::PermissionRequired
-        }
-        _ => SetupState::Unavailable,
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound => Failure::new(
+            SetupState::PermissionRequired,
+            format!("`{shown}` could not be started ({}).", error.kind()),
+        ),
+        std::io::ErrorKind::TimedOut => Failure::new(
+            SetupState::Unavailable,
+            format!("`{shown}` did not answer within {} s.", deadline.as_secs()),
+        ),
+        kind => Failure::new(
+            SetupState::Unavailable,
+            format!("`{shown}` could not be run ({kind})."),
+        ),
     })?;
-    if output.stdout.len() > LIMIT {
-        return Err(SetupState::Unavailable);
+    if output.stdout.len() > max_output {
+        return Err(Failure::new(
+            SetupState::Unavailable,
+            format!("`{shown}` printed more output than Cinema accepts."),
+        ));
     }
     if !output.status.success() {
-        return Err(SetupState::PermissionRequired);
+        let said = excerpt(if output.stderr.is_empty() {
+            &output.stdout
+        } else {
+            &output.stderr
+        });
+        // Classify on everything the tool said, not only the line shown.
+        let lower = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase()
+            + "\n"
+            + &String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+        let state = if lower.contains("access denied")
+            || lower.contains("permission denied")
+            || lower.contains("not permitted")
+            || lower.contains("operator")
+        {
+            SetupState::PermissionRequired
+        } else if lower.contains("logged out")
+            || lower.contains("not logged in")
+            || lower.contains("needslogin")
+            || lower.contains("log in")
+        {
+            SetupState::SignInRequired
+        } else {
+            refusal
+        };
+        let status = output
+            .status
+            .code()
+            .map_or_else(|| "a signal".to_owned(), |code| format!("status {code}"));
+        return Err(Failure::new(
+            state,
+            if said.is_empty() {
+                format!("`{shown}` exited with {status}.")
+            } else {
+                format!("`{shown}` exited with {status}: {said}")
+            },
+        ));
     }
     Ok(output.stdout)
 }
-async fn command_json(program: &Path, args: &[&str]) -> Result<serde_json::Value, SetupState> {
-    serde_json::from_slice(&command(program, args).await?).map_err(|_| SetupState::Unavailable)
+async fn command_json(program: &Path, args: &[&str]) -> Setup<serde_json::Value> {
+    let output = command(program, args).await?;
+    serde_json::from_slice(&output).map_err(|_| {
+        let said = excerpt(&output);
+        Failure::new(
+            SetupState::Unavailable,
+            if said.is_empty() {
+                format!(
+                    "`{}` printed nothing Cinema could read.",
+                    invocation(program, args)
+                )
+            } else {
+                format!(
+                    "`{}` did not answer with status information. It printed: {said}",
+                    invocation(program, args)
+                )
+            },
+        )
+    })
 }
-fn host_address(status: &serde_json::Value) -> Result<HostAddress, SetupState> {
+fn host_address(status: &serde_json::Value) -> Setup<HostAddress> {
     if status["BackendState"] != "Running" {
-        return Err(SetupState::SignInRequired);
+        let backend = bounded_label(status["BackendState"].as_str());
+        return Err(Failure::new(
+            if backend.as_deref() == Some("Stopped") {
+                SetupState::Unavailable
+            } else {
+                SetupState::SignInRequired
+            },
+            match backend {
+                Some(backend) => format!("Tailscale reports its state as {backend}, not Running."),
+                None => "Tailscale did not report a running state.".to_owned(),
+            },
+        ));
     }
     let self_node = &status["Self"];
-    let ips: Vec<IpAddr> = serde_json::from_value(self_node["TailscaleIPs"].clone())
-        .map_err(|_| SetupState::Unavailable)?;
+    let ips: Vec<IpAddr> =
+        serde_json::from_value(self_node["TailscaleIPs"].clone()).map_err(|_| {
+            Failure::new(
+                SetupState::Unavailable,
+                "Tailscale reported no addresses for this machine.",
+            )
+        })?;
     let ipv4 = ips
         .iter()
         .find_map(|ip| match ip {
             IpAddr::V4(ip) if is_tailnet_address((*ip).into()) => Some(*ip),
             _ => None,
         })
-        .ok_or(SetupState::Unavailable)?;
+        .ok_or_else(|| {
+            Failure::new(
+                SetupState::Unavailable,
+                "Tailscale reported no private 100.x IPv4 address for this machine.",
+            )
+        })?;
     let ipv6 = ips.iter().find_map(|ip| match ip {
         IpAddr::V6(ip) if is_tailnet_address((*ip).into()) => Some(*ip),
         _ => None,
     });
     let ts_fqdn = self_node["DNSName"]
         .as_str()
-        .ok_or(SetupState::Unavailable)?
+        .ok_or_else(|| {
+            Failure::new(
+                SetupState::Unavailable,
+                "Tailscale reported no machine name (MagicDNS name) for this machine.",
+            )
+        })?
         .trim_end_matches('.')
         .to_owned();
+    // The signed-in account. Personal tailnets are named after the account;
+    // a device share must be accepted by exactly this login to reach a peer.
+    let login_name = self_node["UserID"]
+        .as_u64()
+        .map(|id| id.to_string())
+        .or_else(|| self_node["UserID"].as_str().map(str::to_owned))
+        .and_then(|id| bounded_label(status["User"][id.as_str()]["LoginName"].as_str()));
+    let tailnet = bounded_label(status["CurrentTailnet"]["MagicDNSSuffix"].as_str())
+        .or_else(|| bounded_label(status["CurrentTailnet"]["Name"].as_str()));
     let address = HostAddress {
         ipv4,
         ipv6,
         ts_fqdn,
         tailscale_online: self_node.get("Online").and_then(serde_json::Value::as_bool),
+        login_name,
+        tailnet,
     };
-    address.endpoint("0".repeat(64))?;
+    address.endpoint("0".repeat(64)).map_err(|state| {
+        Failure::new(
+            state,
+            format!(
+                "Tailscale's machine name {} is not a private Tailnet name Cinema can publish.",
+                address.ts_fqdn
+            ),
+        )
+    })?;
     Ok(address)
+}
+const SWITCH_UNREADABLE: &str = "The saved sharing switch could not be read from the store.";
+const MARKER_UNWRITABLE: &str =
+    "Cinema could not update its record of the private forward it owns in its data directory.";
+fn conflict(config: &serde_json::Value) -> Failure {
+    let current = config
+        .get("TCP")
+        .and_then(|v| v.get(PORT.to_string()))
+        .and_then(|rule| rule.get("TCPForward"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|target| bounded_label(Some(target)));
+    Failure::new(
+        SetupState::PortConflict,
+        match current {
+            Some(target) => format!("Tailscale Serve already forwards port {PORT} to {target}, not to Cinema's listener at {TARGET}."),
+            None => format!("Port {PORT} already has a Tailscale Serve, foreground or Funnel rule that Cinema does not own."),
+        },
+    )
+}
+/// A peer this host's Tailscale can currently reach, from its own netmap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VisiblePeer {
+    pub dns_name: String,
+    pub online: Option<bool>,
+    /// False for a sharee node: the other owner's device, present only so it
+    /// can connect in after this host was shared to them. It cannot be
+    /// dialled (observed on a real cross-account pair: the source appeared
+    /// as `device-of-shared-to-user` with `ShareeNode: true`).
+    pub dialable: bool,
+}
+/// The peers this native host's Tailscale can see, keyed by Tailscale IP.
+/// `None` means the host could not be observed (a container, a missing CLI,
+/// or Tailscale not running), never that no peer is visible.
+pub(crate) async fn visible_peers() -> Option<std::collections::HashMap<IpAddr, VisiblePeer>> {
+    let program = tailscale_program().ok()?;
+    let output = command_with_env(
+        &program,
+        &["status", "--json"],
+        Duration::from_secs(3),
+        TAILSCALE_CLI,
+        // A full netmap runs to about 1.5 KiB a peer; large tailnets must
+        // not silently lose the visibility answer.
+        8 * 1024 * 1024,
+        SetupState::Unavailable,
+    )
+    .await
+    .ok()?;
+    parse_visible_peers(&serde_json::from_slice(&output).ok()?)
+}
+fn parse_visible_peers(
+    status: &serde_json::Value,
+) -> Option<std::collections::HashMap<IpAddr, VisiblePeer>> {
+    if status["BackendState"] != "Running" {
+        return None;
+    }
+    let mut visible = std::collections::HashMap::new();
+    let peers = match &status["Peer"] {
+        serde_json::Value::Null => return Some(visible),
+        serde_json::Value::Object(peers) => peers,
+        _ => return None,
+    };
+    for peer in peers.values() {
+        let Ok(ips) = serde_json::from_value::<Vec<IpAddr>>(peer["TailscaleIPs"].clone()) else {
+            continue;
+        };
+        let row = VisiblePeer {
+            dns_name: bounded_label(peer["DNSName"].as_str().map(|n| n.trim_end_matches('.')))
+                .unwrap_or_default(),
+            online: peer["Online"].as_bool(),
+            dialable: peer["ShareeNode"] != true,
+        };
+        for ip in ips {
+            // A dialable entry for the same address always wins.
+            match visible.get(&ip) {
+                Some(VisiblePeer { dialable: true, .. }) => {}
+                _ => {
+                    visible.insert(ip, row.clone());
+                }
+            }
+        }
+    }
+    Some(visible)
 }
 #[derive(Debug, PartialEq, Eq)]
 enum ServeRule {
@@ -459,14 +800,19 @@ async fn native_setup(
     directory: &Path,
     enabled: bool,
     state: &AppState,
-    discovered: &mut Option<IpAddr>,
+    discovered: &mut Option<HostAddress>,
     managed: bool,
-) -> Result<Option<HostAddress>, SetupState> {
+) -> Setup<Option<HostAddress>> {
     let marker = directory.join("serve-owned.json");
     if !enabled && (!managed || !marker.exists()) {
         return Ok(None);
     }
-    let program = tailscale_program()?;
+    let program = tailscale_program().map_err(|state| {
+        Failure::new(
+            state,
+            "No Tailscale command-line tool was found in its standard install locations.",
+        )
+    })?;
     native_setup_with_program(
         directory,
         enabled,
@@ -482,10 +828,10 @@ async fn native_setup_with_program(
     directory: &Path,
     enabled: bool,
     store: &dyn plurx_core::store::Store,
-    discovered: &mut Option<IpAddr>,
+    discovered: &mut Option<HostAddress>,
     managed: bool,
     program: &Path,
-) -> Result<Option<HostAddress>, SetupState> {
+) -> Setup<Option<HostAddress>> {
     let marker = directory.join("serve-owned.json");
     if !enabled && (!managed || !marker.exists()) {
         return Ok(None);
@@ -497,13 +843,16 @@ async fn native_setup_with_program(
     } else {
         None
     };
-    *discovered = address.as_ref().map(|address| IpAddr::V4(address.ipv4));
+    discovered.clone_from(&address);
     let config = command_json(program, &["serve", "status", "--json"]).await?;
     if !managed {
         return match serve_rule(&config) {
             ServeRule::Ours => Ok(address),
-            ServeRule::Missing => Err(SetupState::NativeSetupRequired),
-            ServeRule::Conflict => Err(SetupState::PortConflict),
+            ServeRule::Missing => Err(Failure::new(
+                SetupState::NativeSetupRequired,
+                format!("Tailscale Serve has no rule for port {PORT}. This Cinema was not started by its installed service, so it does not change host settings; on this machine run: tailscale serve --bg --tcp={PORT} tcp://{TARGET}"),
+            )),
+            ServeRule::Conflict => Err(conflict(&config)),
         };
     }
     let owned =
@@ -512,16 +861,16 @@ async fn native_setup_with_program(
         (true, ServeRule::Missing, _) => {
             if crate::sharing::enabled(store)
                 .await
-                .map_err(|_| SetupState::Unavailable)?
+                .map_err(|_| Failure::new(SetupState::Unavailable, SWITCH_UNREADABLE))?
                 != enabled
             {
-                return Err(SetupState::Pending);
+                return Err(SetupState::Pending.into());
             }
             // Persist the finite creation intent before crossing the host
             // boundary so a restart can finish or clean up this exact rule.
             write_json(&marker, &serde_json::json!({"port":PORT,"target":TARGET}))
-                .map_err(|_| SetupState::Unavailable)?;
-            command(
+                .map_err(|_| Failure::new(SetupState::Unavailable, MARKER_UNWRITABLE))?;
+            command_mutation(
                 program,
                 &["serve", "--bg", "--tcp=32443", "tcp://127.0.0.1:32444"],
             )
@@ -529,25 +878,30 @@ async fn native_setup_with_program(
             if serve_rule(&command_json(program, &["serve", "status", "--json"]).await?)
                 != ServeRule::Ours
             {
-                return Err(SetupState::Unavailable);
+                return Err(Failure::new(
+                    SetupState::Unavailable,
+                    format!("Tailscale accepted the private forward for port {PORT}, but its Serve status does not show it."),
+                ));
             }
         }
         (true, ServeRule::Conflict, _) | (false, ServeRule::Conflict, true) => {
-            return Err(SetupState::PortConflict)
+            return Err(conflict(&config))
         }
         (false, ServeRule::Ours, true) => {
             if crate::sharing::enabled(store)
                 .await
-                .map_err(|_| SetupState::Unavailable)?
+                .map_err(|_| Failure::new(SetupState::Unavailable, SWITCH_UNREADABLE))?
                 != enabled
             {
-                return Err(SetupState::Pending);
+                return Err(SetupState::Pending.into());
             }
-            command(program, &["serve", "--tcp=32443", "off"]).await?;
-            std::fs::remove_file(marker).map_err(|_| SetupState::Unavailable)?;
+            command_mutation(program, &["serve", "--tcp=32443", "off"]).await?;
+            std::fs::remove_file(marker)
+                .map_err(|_| Failure::new(SetupState::Unavailable, MARKER_UNWRITABLE))?;
         }
         (false, ServeRule::Missing, true) => {
-            std::fs::remove_file(marker).map_err(|_| SetupState::Unavailable)?;
+            std::fs::remove_file(marker)
+                .map_err(|_| Failure::new(SetupState::Unavailable, MARKER_UNWRITABLE))?;
         }
         _ => {}
     }
@@ -560,10 +914,14 @@ fn external_report(
     enabled: bool,
     now: i64,
     guard: &mut bool,
-) -> Result<Option<HostAddress>, SetupState> {
+) -> Setup<Option<HostAddress>> {
     *guard = false;
-    let raw = read_json_owned(&directory.join("report.json"), true)
-        .map_err(|_| SetupState::HostHelperRequired)?;
+    let raw = read_json_owned(&directory.join("report.json"), true).map_err(|_| {
+        Failure::new(
+            SetupState::HostHelperRequired,
+            "There is no current report from Cinema's sharing host component (sharing-host/report.json in Cinema's data directory).",
+        )
+    })?;
     validate_external_report(raw, generation, node, enabled, now, guard)
 }
 fn validate_external_report(
@@ -573,18 +931,27 @@ fn validate_external_report(
     enabled: bool,
     now: i64,
     guard: &mut bool,
-) -> Result<Option<HostAddress>, SetupState> {
+) -> Setup<Option<HostAddress>> {
     *guard = false;
-    let report: HostReport =
-        serde_json::from_value(raw).map_err(|_| SetupState::HostHelperRequired)?;
-    if report.schema_version != 1
-        || report.generation != generation
-        || report.node_id != node
-        || report.enabled != enabled
-        || report.checked_at_ms > now.saturating_add(5000)
+    let helper = |detail: &str| Failure::new(SetupState::HostHelperRequired, detail);
+    let report: HostReport = serde_json::from_value(raw).map_err(|_| {
+        helper("The sharing host component's report could not be read; update the component.")
+    })?;
+    if report.schema_version != 1 {
+        return Err(helper("The sharing host component writes a report version this Cinema does not read; update the component."));
+    }
+    if report.generation != generation || report.node_id != node {
+        return Err(helper("The sharing host component has not yet answered this Cinema process; it answers within a few seconds of a restart."));
+    }
+    if report.enabled != enabled {
+        return Err(helper(
+            "The sharing host component has not yet seen the current sharing switch.",
+        ));
+    }
+    if report.checked_at_ms > now.saturating_add(5000)
         || now.saturating_sub(report.checked_at_ms) > 30_000
     {
-        return Err(SetupState::HostHelperRequired);
+        return Err(helper("The sharing host component's last report is more than 30 seconds old; check that its service is running on the host."));
     }
     if let Some(address) = &report.address {
         address.endpoint("0".repeat(64))?;
@@ -597,13 +964,22 @@ fn validate_external_report(
             SetupState::Disabled
         }
     {
-        return Err(report.state);
+        return Err(Failure::new(
+            report.state,
+            "Reported by Cinema's sharing host component.",
+        ));
     }
     if enabled && report.address.is_none() {
-        return Err(SetupState::Unavailable);
+        return Err(Failure::new(
+            SetupState::Unavailable,
+            "The sharing host component reported no Tailscale address for this host.",
+        ));
     }
     if enabled && !report.egress_guard {
-        return Err(SetupState::DeploymentRequired);
+        return Err(Failure::new(
+            SetupState::DeploymentRequired,
+            "The sharing host component has not established the private outbound guard for this container.",
+        ));
     }
     Ok(report.address)
 }
@@ -627,21 +1003,30 @@ fn merge_endpoint(
     validate_endpoints(&endpoints).map_err(|_| SetupState::Unavailable)?;
     Ok(Some(endpoints))
 }
-async fn publish_endpoint(state: &AppState, address: &HostAddress) -> Result<(), SetupState> {
+async fn publish_endpoint(state: &AppState, address: &HostAddress) -> Setup<()> {
     let Some(certificate) = state.sharing.status().certificate else {
-        return Err(SetupState::Pending);
+        return Err(Failure::new(
+            SetupState::Pending,
+            "Waiting for this node's sharing listener and certificate to start.",
+        ));
     };
     let endpoint = address.endpoint(certificate.spki_sha256)?;
-    let manifest = state
-        .store
-        .sharing_endpoint_manifest()
-        .await
-        .map_err(|_| SetupState::Unavailable)?;
+    let manifest = state.store.sharing_endpoint_manifest().await.map_err(|_| {
+        Failure::new(
+            SetupState::Unavailable,
+            "This Cinema's published address list could not be read from the store.",
+        )
+    })?;
     let revision = manifest.as_ref().map_or(0, |m| m.revision);
     // A Cinema can advertise four ingress hosts. Preserve that selection on
     // larger clusters; configuring another host does not evict one.
-    let Some(endpoints) =
-        merge_endpoint(manifest.map_or_else(Vec::new, |m| m.endpoints), endpoint)?
+    let Some(endpoints) = merge_endpoint(manifest.map_or_else(Vec::new, |m| m.endpoints), endpoint)
+        .map_err(|state| {
+            Failure::new(
+                state,
+                "This node's address could not be added to the published address list.",
+            )
+        })?
     else {
         return Ok(());
     };
@@ -649,10 +1034,24 @@ async fn publish_endpoint(state: &AppState, address: &HostAddress) -> Result<(),
         .store
         .set_sharing_endpoint_manifest(revision, endpoints)
         .await
-        .map_err(|_| SetupState::Unavailable)?
-    {
-        MutationOutcome::Applied => Ok(()),
-        _ => Err(SetupState::Pending),
+        .map_err(|_| {
+            Failure::new(
+                SetupState::Unavailable,
+                "This node's address could not be saved to the published address list.",
+            )
+        })? {
+        MutationOutcome::Applied => {
+            tracing::info!(
+                ts_fqdn = %address.ts_fqdn,
+                ipv4 = %address.ipv4,
+                "sharing published this node's private address"
+            );
+            Ok(())
+        }
+        _ => Err(Failure::new(
+            SetupState::Pending,
+            "Another node changed the published address list at the same time; retrying.",
+        )),
     }
 }
 pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_managed: bool) {
@@ -671,7 +1070,10 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
             .unwrap_or(false));
     let mode = HostMode::select(native_managed, container);
     tracing::info!(?mode, "sharing host setup mode selected");
-    let mut last_setup = None;
+    state
+        .sharing
+        .observe_native_host(mode != HostMode::ExternalContainer);
+    let mut last_setup: Option<(SetupState, String)> = None;
     loop {
         if shutdown.is_cancelled() {
             return;
@@ -679,8 +1081,11 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
         if let Ok(enabled) = crate::sharing::enabled(state.store.as_ref()).await {
             let mut discovered = None;
             let mut guard = false;
-            let result = if private_directory(&directory).is_err() {
-                Err(SetupState::Unavailable)
+            let result: Setup<Option<HostAddress>> = if private_directory(&directory).is_err() {
+                Err(Failure::new(
+                    SetupState::Unavailable,
+                    "Cinema's private sharing-host directory is missing or has unsafe permissions.",
+                ))
             } else if mode == HostMode::ExternalContainer {
                 let request = HostRequest {
                     schema_version: 1,
@@ -704,7 +1109,10 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
                     },
                 };
                 if write_json(&directory.join("request.json"), &request).is_err() {
-                    Err(SetupState::Unavailable)
+                    Err(Failure::new(
+                        SetupState::Unavailable,
+                        "Cinema could not write its request for the sharing host component.",
+                    ))
                 } else {
                     match external_report(
                         &directory,
@@ -714,12 +1122,21 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
                         clock_ms(),
                         &mut guard,
                     ) {
-                        Err(SetupState::HostHelperRequired) if !enabled => Ok(None),
+                        Err(Failure {
+                            state: SetupState::HostHelperRequired,
+                            ..
+                        }) if !enabled => Ok(None),
                         result => result,
                     }
                 }
             } else if enabled && state.sharing.network.bind.to_string() != TARGET {
-                Err(SetupState::NativeSetupRequired)
+                Err(Failure::new(
+                    SetupState::NativeSetupRequired,
+                    format!(
+                        "Cinema's sharing listener is configured at {}; automatic native setup forwards only to {TARGET}.",
+                        state.sharing.network.bind
+                    ),
+                ))
             } else {
                 // Signal the child owner and await settlement; dropping this
                 // future on shutdown would skip its confirmed reap path.
@@ -735,36 +1152,46 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
                 )
                 .await
             };
-            let tailscale_online = result
-                .as_ref()
-                .ok()
-                .and_then(Option::as_ref)
-                .and_then(|address| address.tailscale_online);
-            let (setup, address) = match result {
-                Ok(Some(address)) if enabled => match publish_endpoint(&state, &address).await {
-                    Ok(()) => (SetupState::Ready, Some(IpAddr::V4(address.ipv4))),
-                    Err(error) => (error, Some(IpAddr::V4(address.ipv4))),
-                },
-                Ok(_) => (SetupState::Disabled, None),
-                Err(error) => (error, discovered),
+            let observed = match &result {
+                Ok(Some(address)) => Some(address.clone()),
+                _ => discovered.clone(),
             };
-            if last_setup != Some(setup) {
+            let (setup, detail, address) = match result {
+                Ok(Some(address)) if enabled => match publish_endpoint(&state, &address).await {
+                    Ok(()) => (SetupState::Ready, String::new(), Some(address)),
+                    Err(error) => (error.state, error.detail, Some(address)),
+                },
+                Ok(_) => (SetupState::Disabled, String::new(), None),
+                Err(error) => (error.state, error.detail, discovered),
+            };
+            let changed = last_setup
+                .as_ref()
+                .is_none_or(|(state, text)| *state != setup || *text != detail);
+            if changed {
+                let account = observed
+                    .as_ref()
+                    .and_then(|a| a.identity().login_name)
+                    .unwrap_or_default();
                 if matches!(setup, SetupState::Ready | SetupState::Disabled) {
-                    tracing::info!(?mode, ?setup, "sharing host setup changed");
+                    tracing::info!(?mode, ?setup, %account, "sharing host setup changed");
                 } else {
-                    tracing::warn!(?mode, ?setup, "sharing host setup needs attention");
+                    tracing::warn!(?mode, ?setup, %detail, %account, "sharing host setup needs attention");
                 }
-                last_setup = Some(setup);
+                last_setup = Some((setup, detail.clone()));
             }
             let mut observation = setup.status();
-            observation.tailscale_online = tailscale_online;
-            state
-                .sharing
-                .observe_host_setup(observation, address, guard);
+            observation.detail = detail;
+            observation.tailscale_online = observed.as_ref().and_then(|a| a.tailscale_online);
+            observation.tailscale = observed.as_ref().map(HostAddress::identity);
+            state.sharing.observe_host_setup(
+                observation,
+                address.map(|address| IpAddr::V4(address.ipv4)),
+                guard,
+            );
         } else {
-            state
-                .sharing
-                .observe_host_setup(SetupState::Unavailable.status(), None, false);
+            let mut observation = SetupState::Unavailable.status();
+            observation.detail = SWITCH_UNREADABLE.into();
+            state.sharing.observe_host_setup(observation, None, false);
         }
         tokio::select! { () = shutdown.cancelled() => return, () = tokio::time::sleep(POLL) => {} }
     }
@@ -852,9 +1279,15 @@ mod tests {
         std::fs::write(&program, r#"#!/bin/sh
 set -eu
 root=$(dirname "$0")
+# The macOS Tailscale app answers as its menu-bar app, on stdout and with a
+# zero exit, unless the CLI switch is set; Cinema runs it from launchd.
+if [ "${TAILSCALE_BE_CLI:-}" != 1 ]; then
+  printf '%s\n' 'The Tailscale GUI failed to start: The operation could not be completed. (Tailscale.CLIError error 3.)'
+  exit 0
+fi
 printf '%s\n' "$*" >> "$root/calls"
 case "$*" in
-  'status --json --peers=false') printf '%s' '{"BackendState":"Running","Self":{"DNSName":"cinema.tail123.ts.net.","TailscaleIPs":["100.80.1.2"]}}' ;;
+  'status --json --peers=false') printf '%s' '{"BackendState":"Running","Self":{"DNSName":"cinema.tail123.ts.net.","TailscaleIPs":["100.80.1.2"],"UserID":42},"User":{"42":{"LoginName":"owner@example.com"}},"CurrentTailnet":{"Name":"owner@example.com","MagicDNSSuffix":"tail123.ts.net"}}' ;;
   'serve status --json') cat "$root/serve.json" ;;
   'serve --bg --tcp=32443 tcp://127.0.0.1:32444') cp "$root/expected.json" "$root/serve.json" ;;
   'serve --tcp=32443 off') printf '{}' > "$root/serve.json" ;;
@@ -890,7 +1323,11 @@ esac
         .expect("automatic private forwarding")
         .expect("host address");
         assert_eq!(address.ipv4, Ipv4Addr::new(100, 80, 1, 2));
-        assert_eq!(discovered, Some(IpAddr::V4(address.ipv4)));
+        assert_eq!(discovered.as_ref().map(|a| a.ipv4), Some(address.ipv4));
+        let identity = address.identity();
+        assert_eq!(identity.login_name.as_deref(), Some("owner@example.com"));
+        assert_eq!(identity.tailnet.as_deref(), Some("tail123.ts.net"));
+        assert_eq!(identity.dns_name, "cinema.tail123.ts.net");
         assert!(directory.path().join("serve-owned.json").is_file());
         let calls = std::fs::read_to_string(directory.path().join("calls")).expect("calls");
         assert_eq!(
@@ -949,8 +1386,14 @@ esac
                 &program,
             )
             .await;
-            assert_eq!(result.map(|address| address.is_some()), expected);
-            assert_eq!(discovered, Some(IpAddr::V4(Ipv4Addr::new(100, 80, 1, 2))));
+            assert_eq!(
+                result.map(|address| address.is_some()).map_err(|f| f.state),
+                expected
+            );
+            assert_eq!(
+                discovered.as_ref().map(|a| a.ipv4),
+                Some(Ipv4Addr::new(100, 80, 1, 2))
+            );
             assert_eq!(read_json(&directory.path().join("serve.json")), Ok(config));
             assert!(!directory.path().join("serve-owned.json").exists());
         }
@@ -1004,7 +1447,10 @@ esac
             std::time::Duration::from_secs(2),
         )
         .await;
-        assert_eq!(result, Err(super::SetupState::Unavailable));
+        assert_eq!(
+            result.map_err(|f| f.state),
+            Err(super::SetupState::Unavailable)
+        );
         assert_reaped(&pid_file);
     }
 
@@ -1051,7 +1497,10 @@ esac
             .await
             .expect("settled cancellation")
             .expect("joined fixture");
-        assert_eq!(result, Err(super::SetupState::Unavailable));
+        assert_eq!(
+            result.map_err(|f| f.state),
+            Err(super::SetupState::Unavailable)
+        );
         assert_reaped(&pid_file);
     }
 
@@ -1059,21 +1508,71 @@ esac
     #[tokio::test]
     async fn host_command_preserves_status_and_output_bound() {
         let shell = std::path::Path::new("/bin/sh");
+        let state = |r: super::Setup<Vec<u8>>| r.map_err(|f| f.state);
         assert_eq!(
-            super::command(shell, &["-c", "printf ready"]).await,
+            state(super::command(shell, &["-c", "printf ready"]).await),
             Ok(b"ready".to_vec())
         );
+        // A failed command reports what the tool said; only its own words
+        // about permission or sign-in choose those states.
+        let failed = super::command(
+            shell,
+            &[
+                "-c",
+                "echo 'serve config denied: Access denied' >&2; exit 7",
+            ],
+        )
+        .await
+        .expect_err("nonzero exit");
+        assert_eq!(failed.state, super::SetupState::PermissionRequired);
+        assert!(failed.detail.contains("status 7"), "{}", failed.detail);
+        assert!(failed.detail.contains("Access denied"), "{}", failed.detail);
+        let failed = super::command(shell, &["-c", "echo 'To authenticate, visit: https://login.example/a/secret' >&2; echo 'Logged out.' >&2; exit 1"])
+            .await
+            .expect_err("nonzero exit");
+        assert!(
+            !failed.detail.contains("secret"),
+            "links never reach a page or log: {}",
+            failed.detail
+        );
         assert_eq!(
-            super::command(shell, &["-c", "exit 7"]).await,
+            state(super::command(shell, &["-c", "exit 7"]).await),
+            Err(super::SetupState::Unavailable)
+        );
+        assert_eq!(
+            state(super::command(shell, &["-c", "yes x | head -c 262145"]).await),
+            Err(super::SetupState::Unavailable)
+        );
+        assert_eq!(
+            state(super::command(shell, &["-c", "yes x | head -c 262145; exit 7"]).await),
+            Err(super::SetupState::Unavailable)
+        );
+        // An unexplained refusal of a Serve change keeps meaning the host
+        // denied Cinema the change; a read-only observation does not.
+        assert_eq!(
+            super::command_mutation(shell, &["-c", "echo 'serve: request failed' >&2; exit 1"])
+                .await
+                .map_err(|f| f.state),
             Err(super::SetupState::PermissionRequired)
         );
+        // Classification reads all of stderr, not only the line shown.
         assert_eq!(
-            super::command(shell, &["-c", "yes x | head -c 262145"]).await,
-            Err(super::SetupState::Unavailable)
+            state(
+                super::command(
+                    shell,
+                    &[
+                        "-c",
+                        "printf 'error\\nAccess denied: serve config\\n' >&2; exit 1"
+                    ]
+                )
+                .await
+            ),
+            Err(super::SetupState::PermissionRequired)
         );
+        // The macOS CLI switch reaches every Tailscale invocation.
         assert_eq!(
-            super::command(shell, &["-c", "yes x | head -c 262145; exit 7"]).await,
-            Err(super::SetupState::Unavailable)
+            state(super::command(shell, &["-c", "printf %s \"$TAILSCALE_BE_CLI\""]).await),
+            Ok(b"1".to_vec())
         );
     }
 
@@ -1100,6 +1599,8 @@ esac
             ipv6: None,
             ts_fqdn: format!("cinema{index}.tail123.ts.net"),
             tailscale_online: None,
+            login_name: None,
+            tailnet: None,
         }
         .endpoint(format!("{index:064x}"))
         .expect("synthetic sharing host fixture")
@@ -1247,6 +1748,29 @@ esac
             .is_none());
     }
 
+    #[test]
+    fn visible_peers_exclude_sharee_nodes_and_unknown_hosts() {
+        let status = json!({"BackendState":"Running","Peer":{
+            "a":{"DNSName":"source.tail111.ts.net.","TailscaleIPs":["100.64.1.1","fd7a:115c:a1e0::1"],"Online":true},
+            "b":{"DNSName":"","TailscaleIPs":["100.64.2.2"],"Online":true,"ShareeNode":true}
+        }});
+        let peers = parse_visible_peers(&status).expect("running host");
+        let source: IpAddr = "100.64.1.1".parse().expect("fixture");
+        assert_eq!(peers[&source].dns_name, "source.tail111.ts.net");
+        assert_eq!(peers[&source].online, Some(true));
+        assert!(peers.contains_key(&"fd7a:115c:a1e0::1".parse::<IpAddr>().expect("fixture")));
+        assert!(
+            !peers[&"100.64.2.2".parse::<IpAddr>().expect("fixture")].dialable,
+            "a sharee node may connect in but cannot be dialled"
+        );
+        assert!(peers[&source].dialable);
+        assert!(
+            parse_visible_peers(&json!({"BackendState":"Running","Peer":null}))
+                .expect("no peers")
+                .is_empty()
+        );
+        assert!(parse_visible_peers(&json!({"BackendState":"NeedsLogin"})).is_none());
+    }
     #[test]
     fn sharing_setup_never_replaces_other_services_or_public_rules() {
         assert_eq!(
