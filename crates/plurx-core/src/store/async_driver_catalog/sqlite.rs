@@ -1966,6 +1966,34 @@ mod physical_cap_tests {
     }
 
     #[test]
+    fn a_delegated_populated_main_file_reopens_under_the_same_cap_with_its_data() {
+        // A held main file handed to the next writer by reservation id arrives populated: it
+        // is neither recreated nor re-reserved, and the effective page cap still applies.
+        let directory = tempfile::tempdir().expect("owned scratch");
+        let path = directory.path().join("catalog.sqlite");
+        let limits = shaped(&path, 400 * PAGE, 0, 0);
+        {
+            let first = SqliteStorage::open_reserved(&path, 4 * 1024 * 1024, &limits)
+                .expect("first writer");
+            first
+                .connection
+                .execute_batch(
+                    "CREATE TABLE kept(x BLOB); INSERT INTO kept VALUES(zeroblob(9000));",
+                )
+                .expect("surviving content");
+        }
+        let second = SqliteStorage::open_reserved(&path, 4 * 1024 * 1024, &limits)
+            .expect("next writer over the surviving file");
+        assert_eq!(pragma(&second, "max_page_count"), 400);
+        let kept: i64 = second
+            .connection
+            .query_row("SELECT count(*) FROM kept", [], |row| row.get(0))
+            .expect("surviving rows");
+        assert_eq!(kept, 1, "the delegated file keeps its existing contents");
+        second.check_storage().expect("populated file fits its cap");
+    }
+
+    #[test]
     fn restored_database_beyond_the_effective_ceiling_is_refused_unopened() {
         let directory = tempfile::tempdir().expect("owned scratch");
         let path = directory.path().join("catalog.sqlite");
