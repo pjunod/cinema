@@ -2824,6 +2824,10 @@ async fn restart_guarded_adoption<T>(
 /// factory supplies the SAME original pending owner, never a DTO close proof.
 #[cfg(all(test, feature = "cluster-integration-tests"))]
 impl super::TranscodeManager {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "One real foreign-fence fixture covers plain, refused-Adopt and expired refused-Adopt cases over the same original owner."
+    )]
     pub(crate) async fn foreign_fence_cleanup_regression<F, Fut>(
         self: &Arc<Self>,
         claim: AttemptClaim,

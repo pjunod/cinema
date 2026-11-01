@@ -854,6 +854,20 @@ impl TranscodeManager {
         {
             let mut finite = entry.finite.lock().await;
             if matches!(&*finite, StaticFinite::Planned(_)) {
+                // Compatibility, cache-quota and P/native/journal waits
+                // consume the capacity observation taken while planning.
+                // Reobserve before R; keep the finalized resource demand
+                // and allocation epoch unchanged: changed policy, lower
+                // capacity or Unknown evidence still refuses it. Planned
+                // stays installed on failure so the same owner resumes it.
+                runtime
+                    .refresh_admission_capacity(deadline)
+                    .await
+                    .map_err(|error| {
+                        PreparationError::Retry(format!(
+                            "observing final static artifact admission: {error:?}"
+                        ))
+                    })?;
                 let StaticFinite::Planned(planned) =
                     std::mem::replace(&mut *finite, StaticFinite::Empty)
                 else {
