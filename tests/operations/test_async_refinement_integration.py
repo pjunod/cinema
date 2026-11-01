@@ -6,6 +6,7 @@ process are replaced, exactly where the neighbouring transport fixtures replace 
 asserts a decision the previous code got wrong.
 """
 import ast
+import copy
 import hashlib
 import json
 import os
@@ -21,6 +22,9 @@ from unittest import mock
 from tests.operations.test_async_snapshot_transport import (
     EXECUTION, ERRORS, MIB, PAGE, REGISTRATION, ChildPlanBase, PublicationChainCase, carrier_for, check_identity,
     stub_schema)
+from tests.operations import test_paged_temporal as paged_fixture  # puts the verifier package on sys.path
+import paged_checker as checker  # noqa: E402
+import paged_codec as codec  # noqa: E402
 from validation import async_physical_policy as physical
 from validation import async_refinement_provenance as provenance
 from validation import async_refinement_session as session
@@ -74,7 +78,8 @@ class CalibrationAdmissionTests(IntegrationBase):
         calibration = physical.calibrate_physical_policy(policy, geometry, baseline, plan, source_map=self.source_map)
         return policy, plan, allowances, geometry, calibration
 
-    def admission(self, measurement_changes=None, calibration_changes=None):
+    def admission_inputs(self, measurement_changes=None, calibration_changes=None):
+        """Everything physical_admission reads, built here so a failure of the setup is never the asserted refusal."""
         policy, plan, allowances, _geometry, calibration = self.calibrated()
         reg = {'accounting_method_sha256': 'a' * 64, 'source_files': {provenance.SOURCE_BOUND_SPEC: 'b' * 64}}
         inventory = {'kind_a': {'tables': 1}}
@@ -83,7 +88,11 @@ class CalibrationAdmissionTests(IntegrationBase):
         measurement = {'free_disk_bytes': 1 << 40, 'resource_calibration': calibration,
                        'resource_method': session.physical_method(reg, plan, policy, inventory, allowances)}
         measurement.update(measurement_changes or {})
-        return session.physical_admission(plan, reg, measurement, bounds, inventory), calibration
+        return (plan, reg, measurement, bounds, inventory), calibration
+
+    def admission(self, measurement_changes=None, calibration_changes=None):
+        arguments, calibration = self.admission_inputs(measurement_changes, calibration_changes)
+        return session.physical_admission(*arguments), calibration
 
     def test_every_source_map_role_is_measured_and_the_restore_family_declares_no_database(self):
         _policy, _plan, _allowances, geometry, _calibration = self.calibrated()
@@ -109,16 +118,21 @@ class CalibrationAdmissionTests(IntegrationBase):
         self.calibrated(runtime_pool=demand + MIB + 1)
 
     def test_the_retired_record_times_table_overheads_cannot_authorize_a_plan(self):
-        with self.assertRaises(receipts.ReceiptError):
-            self.admission({'resource_overheads': {'index_bytes': 1, 'wal_bytes': 1}})
+        arguments, _calibration = self.admission_inputs({'resource_overheads': {'index_bytes': 1, 'wal_bytes': 1}})
+        with self.assertRaisesRegex(receipts.ReceiptError, 'retired record-times-table overheads'):
+            session.physical_admission(*arguments)
 
     def test_a_missing_changed_or_foreign_calibration_or_method_is_refused(self):
-        with self.assertRaises(receipts.ReceiptError):
-            self.admission({'resource_calibration': None})
-        with self.assertRaises(receipts.ReceiptError):
-            self.admission(calibration_changes={'peak_bytes': 1})
-        with self.assertRaises(receipts.ReceiptError):
-            self.admission({'resource_method': {'id': 'record_times_table'}})
+        for changes, calibration_changes, message in (
+                ({'resource_calibration': None}, None, 'actual physical calibration is missing or changed'),
+                ({}, {'peak_bytes': 1}, 'actual physical calibration is missing or changed'),
+                ({'resource_method': {'id': 'record_times_table'}}, None, 'closed measured physical method differs')):
+            arguments, _calibration = self.admission_inputs(changes, calibration_changes)
+            with self.subTest(message=message, changes=sorted(changes)):
+                with self.assertRaisesRegex(receipts.ReceiptError, message):
+                    session.physical_admission(*arguments)
+        arguments, calibration = self.admission_inputs()
+        self.assertEqual(session.physical_admission(*arguments), calibration)  # the unchanged inputs are admitted
 
     def test_the_calibration_does_not_scale_with_record_allowances_or_predecessors(self):
         # The retired model multiplied record counts by table counts (and added backup/WAL terms); the typed
@@ -154,10 +168,11 @@ class CalibrationAdmissionTests(IntegrationBase):
             self.assertEqual(rust[key], python[key], key)
 
     def test_a_drifted_rust_schema_digest_is_refused_by_the_calibration(self):
-        rust = dict(self.rust_fixture()['geometry'])
-        rust['schema_sha256'] = '0' * 64
-        with self.assertRaises(physical.PhysicalPolicyError):
-            self.calibrated(rust_geometry=rust)
+        genuine = self.rust_fixture()['geometry']
+        self.calibrated(rust_geometry=genuine)  # the undrifted report calibrates: only the digest is at fault below
+        drifted = dict(genuine, schema_sha256='0' * 64)
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'installed schema/map drift'):
+            self.calibrated(rust_geometry=drifted)
 
 
 # ---------------------------------------------------------------------------
@@ -482,8 +497,11 @@ class ReplayLifetimeTests(PublicationChainCase):
                 mock.patch.object(session.snapshots, 'finish_publication', return_value={'checkpoint': checkpoint}):
             return session.accept_activation(state, {}, ROOT, work, auth, self.index)
 
-    def rehearse(self, number):
-        """The final rehearsal batch of a case: only the byte-level authentication is stubbed."""
+    def rehearse(self, number, observe=None):
+        """The final rehearsal batch of a case: only the byte-level authentication is stubbed.
+
+        `observe` is called at the moment the rehearsal credits its batch, with every index it holds open.
+        """
         ledger_path = self.root / ('conformance-%d.sqlite' % number)
         session.ReplayLedger(ledger_path).close()
         anchor = {'sha256': 'a' * 64, 'unit': {'unit': 1}, 'execution_origin': {'run': 5}}
@@ -502,7 +520,11 @@ class ReplayLifetimeTests(PublicationChainCase):
                  'conformance_pending': {'ledger_path': str(ledger_path), 'pending': {'next_batch_ordinal': 0},
                                          'batches': [], 'bytes': 0, 'carriers': []}}
         auth = {'carrier': carrier, 'rows': [], 'control_sha256': 'd' * 64}
-        with mock.patch.object(session, 'credit_rows', return_value=after), \
+        def credit(*_args, **_kwargs):
+            if observe is not None:
+                observe()
+            return after
+        with mock.patch.object(session, 'credit_rows', side_effect=credit), \
                 mock.patch.object(session, 'check_conformance_final'), \
                 mock.patch.object(session, 'chain_carrier'):
             session.replay_conformance(state, {}, ROOT, self.root, auth, self.index, 'c' * 64)
@@ -527,7 +549,7 @@ class ReplayLifetimeTests(PublicationChainCase):
                                 'activation': {'activation_origin': {}}, 'origin': {}, 'transfer_batch': {'publication_origin': {}},
                                 'transport_conformance': None},
                     'intent': self.intent, 'resolver': lambda _reference: b'{}', 'unit': {}}
-            with self.assertRaises(receipts.ReceiptError):
+            with self.assertRaisesRegex(receipts.ReceiptError, 'activation before publication closure is complete'):
                 session.accept_activation({'pending_publication': pend, 'control_sha256': None}, {}, ROOT, work, auth,
                                           self.index)
         self.assertTrue(Path(pend['ledger_path']).exists())
@@ -546,15 +568,18 @@ class ReplayLifetimeTests(PublicationChainCase):
         again.close()
         self.assertEqual(len(self.live()), 1)
 
-    def test_the_map_declares_every_authentication_index_a_job_really_holds_at_once(self):
-        # An execute job holds the replay history index, the replay conformance index and the controller's
-        # dependencies copy handed to the unit child; no publish job holds a copy of either replay index.
-        needed = 3
-        self.assertGreaterEqual(physical.family_instances(self.source_map, 'authentication_index'), needed)
-        held = [session.open_index(self.root / ('index-%d.sqlite' % n)) for n in range(needed)]
-        for index in held:
-            self.addCleanup(index.close)
-        self.assertEqual(len(self.live('authentication_index')), needed)
+    def test_the_map_declares_the_authentication_indexes_the_rehearsal_and_publish_flows_really_hold(self):
+        # Measured on the real flows, not on indexes the test opens itself: the controller's replay history index
+        # is open while replay_conformance opens the rehearsal index, so the peak is whatever the flow holds then.
+        history = session.open_index(self.root / 'history.sqlite')
+        self.addCleanup(history.close)
+        peaks = []
+        with mock.patch.object(self, 'index', history):
+            self.rehearse(0, observe=lambda: peaks.append(len(self.live('authentication_index'))))
+        self.assertEqual(peaks, [2])  # a copy held by the rehearsal would raise this and fail the next line
+        # The execute job additionally hands the unit child its dependencies copy (output/dependencies.sqlite).
+        self.assertGreaterEqual(physical.family_instances(self.source_map, 'authentication_index'), peaks[0] + 1)
+        # run_publish opens the same two replay indexes and no copy: test_run_publish_works_on_the_replay_indexes_directly...
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +642,7 @@ class CrashReconciliationTests(IntegrationBase):
     def test_a_descriptor_of_a_live_parent_refuses_the_job(self):
         path = self.grant_descriptor('b' * 64, os.getpid(), physical.process_start_ticks(os.getpid()))
         fresh = self.restarted()
-        with self.assertRaises(receipts.ReceiptError):
+        with self.assertRaisesRegex(receipts.ReceiptError, 'live foreign parent'):
             fresh.reconcile_crash()
         self.assertTrue(path.exists())
 
@@ -729,7 +754,7 @@ class ObservedIdentityTests(IntegrationBase):
 class RootOriginTests(IntegrationBase):
     def test_a_snapshot_root_sealed_by_another_execution_is_refused(self):
         session.check_root_origin({'execution_origin': EXECUTION}, EXECUTION)
-        with self.assertRaises(receipts.ReceiptError):
+        with self.assertRaisesRegex(receipts.ReceiptError, 'snapshot root execution origin differs'):
             session.check_root_origin({'execution_origin': dict(EXECUTION, run=99)}, EXECUTION)
 
     def test_restore_checks_the_root_origin_before_staging_any_byte(self):
@@ -739,7 +764,7 @@ class RootOriginTests(IntegrationBase):
                                   side_effect=lambda path, reg=None, root=None:
                                   transport.OwnedDirectory(Path(path), Path(path).parent, lambda: None)), \
                 mock.patch.object(provenance, 'auxiliary', side_effect=lambda value, root: value):
-            with self.assertRaises(receipts.ReceiptError):
+            with self.assertRaisesRegex(receipts.ReceiptError, 'snapshot root execution origin differs'):
                 session.restore_snapshots({}, ROOT, {}, self.out, {}, ROOT, self.root / 'index.sqlite',
                                           lambda reference: foreign, {'kind': 'catalog_backup'}, None, {}, EXECUTION)
         self.assertEqual(list((self.out / 'state.restore').iterdir()), [])
@@ -773,6 +798,232 @@ class CompletionAndHygieneTests(unittest.TestCase):
     def test_the_parent_identity_is_the_platform_neutral_physical_helper(self):
         self.assertIs(session.process_start_ticks.__globals__['physical'], physical)
         self.assertEqual(session.process_start_ticks(os.getpid()), physical.process_start_ticks(os.getpid()))
+
+
+# ---------------------------------------------------------------------------
+# R1: the retained allowance bounds the EXTRACTED bytes of the history, on both sides of the wire, because
+# the restore pool is charged in extracted bytes. R5: a download never writes past the size it reserved.
+# ---------------------------------------------------------------------------
+def chained(prior, digest, zip_bytes, extracted):
+    """An authenticated carrier whose batch retains `zip_bytes` of ZIPs holding `extracted` member bytes each."""
+    return {'control_sha256': digest, 'carrier': {'previous_control_sha256': prior, 'transfer_batch': {
+        'retained_artifact_bytes': zip_bytes,
+        'artifact_receipts': [{'record': {'extracted_bytes': n}} for n in extracted]}}}
+
+
+class ExtractedRetentionTests(unittest.TestCase):
+    PLAN = {'total_retained_artifact_bytes': 100}
+
+    def state(self, **changes):
+        return {'control_sha256': None, 'retained_bytes': 0, 'extracted_bytes': 0,
+                'resource_plan': {'record': self.PLAN}, **changes}
+
+    def test_a_compressed_history_cannot_extract_past_the_allowance_its_archives_fit_in(self):
+        state = self.state()
+        with mock.patch.object(session, 'enforce_control_caps', return_value={}):
+            session.chain_carrier(state, chained(None, 'a' * 64, 10, [60]), ROOT)  # 10 archived bytes, 60 extracted
+            self.assertEqual((state['retained_bytes'], state['extracted_bytes']), (10, 60))
+            with self.assertRaisesRegex(receipts.ReceiptError, 'extracted artifact bytes exceed the retained'):
+                session.chain_carrier(state, chained('a' * 64, 'b' * 64, 10, [20, 30]), ROOT)  # 20 archived, 110 extracted
+            self.assertLessEqual(state['retained_bytes'] + 10, self.PLAN['total_retained_artifact_bytes'])  # the ZIP total alone fits
+            state = self.state(extracted_bytes=60)
+            session.chain_carrier(state, chained(None, 'c' * 64, 10, [40]), ROOT)  # exactly the allowance is admitted
+            self.assertEqual(state['extracted_bytes'], 100)
+
+    def test_the_activation_batch_counts_toward_the_extracted_total_too(self):
+        def activate(prior_extracted, extracted):
+            prior = {'retained_bytes': 0, 'extracted_bytes': prior_extracted, 'pending_publication': {
+                'execution_origin': {}, 'batch_receipts': [], 'unit': {}, 'original_receipts': [], 'pending': {}},
+                'accepted_batches': [], 'anchor': None}
+            auth = chained(None, 'd' * 64, 5, [extracted])
+            auth.update(intent={'catalog_root': {}, 'verifier_root': None}, unit={})
+            with mock.patch.object(session, 'accept_activation', return_value=({'checkpoint': {}}, {'parts': {}}, None)), \
+                    mock.patch.object(session, 'enforce_control_caps', return_value={}), \
+                    mock.patch.object(session, 'advance', side_effect=lambda state, _result, _root: dict(state)), \
+                    mock.patch.object(session, 'authenticate_verifier_progress', side_effect=lambda _p, new, *_rest: new), \
+                    mock.patch.object(session, 'validate_backend_progress'):
+                return session.replay_activation(prior, {}, ROOT, ROOT, auth, None, self.PLAN)
+        new, _result, _transport = activate(70, 30)
+        self.assertEqual(new['extracted_bytes'], 100)
+        with self.assertRaisesRegex(receipts.ReceiptError, 'extracted artifact bytes exceed the retained'):
+            activate(70, 31)
+
+    def drive_publish(self, prior_extracted, upload):
+        """run_publish with only the byte-level machinery replaced; returns the upload spy and the plan."""
+        state = {'index_path': 'index.sqlite', 'parts_root': 'parts', 'anchor': None, 'conformance_pending': None,
+                 'extracted_bytes': prior_extracted, 'resource_plan': {'record': self.PLAN},
+                 'pending_publication': {'execution_origin': {'dispatch_ordinal': 3}, 'ledger_path': 'x', 'unit': {},
+                                         'pending': {'intent': {}, 'next_batch_ordinal': 1}}}
+        control = {'session_id': str(uuid.UUID(int=1)), 'transport_conformance': None}
+        intent = {key: key for key in ('source', 'session_id', 'unit_ordinal', 'resource_plan_sha256',
+                                       'initial_image_sha256')}
+        intent['candidate_checkpoint'] = {'sha256': 'b' * 64}
+        plan = mock.MagicMock()
+        plan.db.execute.return_value = [(n,) for n in upload]
+        uploaded = mock.MagicMock()
+        with mock.patch.object(session, 'open_index'), mock.patch.object(session.snapshots, 'AuthenticatedResolver'), \
+                mock.patch.object(session, 'PublicationStore'), mock.patch.object(session, 'ReplayLedger'), \
+                mock.patch.object(session.p, 'decode', return_value=intent), \
+                mock.patch.object(session, 'current_origin'), \
+                mock.patch.object(session.snapshots, 'closure_complete', return_value=False), \
+                mock.patch.object(session, 'plan_transfer', return_value=({}, plan, [])), \
+                mock.patch.object(session, 'write_publication_draft'), mock.patch.object(session, 'output_metadata'), \
+                mock.patch.object(session, 'upload_outputs', uploaded), mock.patch.object(session, 'live_pr'), \
+                mock.patch.object(session.p, 'producer'):
+            try:
+                session.run_publish(None, {}, state, None, control, ROOT, ROOT, ROOT / 'unused-output', {}, 7, None,
+                                    None, 10 ** 9)
+            finally:
+                self.last_plan = plan
+        return uploaded
+
+    def test_a_publish_that_would_push_the_history_past_the_allowance_uploads_nothing(self):
+        uploaded = self.drive_publish(60, [20, 20])  # 40 more extracted bytes on top of 60: exactly the allowance
+        uploaded.assert_called_once()
+        with self.assertRaisesRegex(receipts.ReceiptError, 'extracted artifact bytes exceed the retained'):
+            self.drive_publish(60, [20, 21])
+        self.last_plan.close.assert_called_once()  # refused before any byte is offered, and the plan is released
+
+
+class ReservedDownloadSizeTests(unittest.TestCase):
+    def test_no_byte_past_the_reserved_size_is_written(self):
+        guarded = []
+        blocks = [b'a' * 8, b'b' * 8]  # the server reported 10 bytes and streams 16
+
+        class Stream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read1(self, _size):
+                return blocks.pop(0) if blocks else b''
+        scratch = ROOT / '.agent-proof-fixtures' / 'download-size'
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            api = SimpleNamespace(root='https://forge.invalid/api', token='t', scratch=directory,
+                                  reserve_request=lambda: None, guard_storage=guarded.append,
+                                  opener=SimpleNamespace(open=lambda _request, timeout: Stream()))
+            with self.assertRaisesRegex(receipts.ReceiptError, 'exceeded its reserved size'):
+                provenance.artifact_bytes(api, {'id': 5, 'expired': False, 'size_in_bytes': 10})
+            self.assertEqual(guarded, [8])  # the second block was refused before it reached the storage guard
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+
+# ---------------------------------------------------------------------------
+# (f) The restore seam end to end in one process: a staged catalog (and verifier) built from the pinned DDL,
+# the controller's own request builders and held-reservation attachment, a REAL child grant, and the
+# checker's own validate_restore. The receipt it writes is compared with the one the activation expects.
+# ---------------------------------------------------------------------------
+class RestoreValidatorIntegrationTests(ChildPlanBase):
+    def setUp(self):
+        super().setUp()
+        self.plan = copy.deepcopy(paged_fixture.admitted(self.root).plan)
+        self.envelope = codec.envelope('ResourcePlan', self.plan)
+        self.source, self.session_id = self.plan['source'], self.plan['session_id']
+        # The context deducts from the very policy the plan was admitted with, for the very session and plan.
+        policy = codec.strict_json(self.plan['source_bounds_utf8'])['physical_policy']
+        context = self.make_context(policy)
+        context.reg, context.session_id, context.plan = {'source': self.source}, self.session_id, self.plan
+        self.context = context
+        mapping = codec.strict_json((paged_fixture.PACKAGE / 'paged-outcomes.json').read_bytes())
+        contexts = [{'context': name, 'initial_product': n * 3 + 1, 'reachable_products': 3, 'expanded_products': 3,
+                     'frontier': 0} for n, name in enumerate(mapping['contexts'])]
+        self.checkpoint = codec.envelope('Checkpoint', {
+            'session_id': self.session_id, 'source': self.source, 'sequence': 0, 'initial_image_id': '6' * 64,
+            'resource_plan_sha256': self.plan['plan_sha256'], 'unit_ordinal': 0, 'previous_checkpoint': None,
+            'committed_transaction': 1, 'oldest_pending_ticket': None,
+            'counts': {**{kind: 0 for kind in codec.COUNT_KINDS}, 'frontier': 0}, 'contexts': contexts,
+            'page_root': '7' * 64, 'catalog_logical_digest': '8' * 64})
+        self.dependencies = self.root / 'dependencies.sqlite'
+        with sqlite3.connect(self.dependencies) as db:
+            db.execute('CREATE TABLE authenticated_members(unit_ordinal INTEGER,member_path TEXT,bytes INTEGER,'
+                       'sha256 TEXT,local_path TEXT,PRIMARY KEY(unit_ordinal,member_path))')
+
+    def build_catalog(self, path, binding=None):
+        """The catalog the Rust side writes, reduced to the rows validate_restore reads, on the pinned DDL."""
+        record = self.checkpoint['record']
+        connection = sqlite3.connect(path)
+        try:
+            physical.install_empty_role(connection, 'rust_catalog', self.source_map)
+            connection.execute('INSERT INTO catalog_commits VALUES(?,?,?)', (record['committed_transaction'], 'initial', 0))
+            connection.execute('INSERT INTO catalog_meta VALUES(1,?,6,?,?,?)',
+                               (record['committed_transaction'], codec.encoded(self.source), self.session_id,
+                                self.plan['plan_sha256']))
+            connection.execute("INSERT INTO resource_plans VALUES(?,?,'admitted')",
+                               (codec.digest(self.envelope), codec.encoded(self.envelope)))
+            connection.execute("INSERT INTO catalog_control VALUES('binding',?)", (codec.encoded(
+                binding or {'source': self.source, 'session_id': self.session_id, 'resource_plan': self.envelope}),))
+            connection.commit()
+        finally:
+            connection.close()
+
+    def build_verifier(self, path):
+        """A verifier work database as the writer creates it (the pinned verifier schema, no input scope yet)."""
+        index = codec.RecordIndex(path, source=self.source, session_id=self.session_id,
+                                  budget=paged_fixture.granted_budget(self.plan, self.root))
+        index.close()
+
+    def stage(self, name, build):
+        """One restored file in its own restore_staging reservation, owned before its first byte is written."""
+        generation = self.out / 'state.restore'
+        generation.mkdir(mode=0o700, exist_ok=True)
+        path = generation / name
+        budget = session.PoolBudget(self.context, 'restore_staging_bytes')
+        budget.track(path)
+        build(path)
+        path.chmod(0o600)
+        budget.reserve(path.stat().st_size)
+        return path, budget
+
+    def validate(self, catalog, verifier, held):
+        reg = {'source_files': {}, 'runtime': {'java': {'path': 'j', 'sha256': 'x'}, 'tlc': {'path': 't', 'sha256': 'y'}}}
+        state = {'resource_plan': self.envelope, 'checkpoint': None}
+        unit = {'source': self.source, 'session_id': self.session_id, 'artifact_roots': []}
+        base = session.restore_request_base(state, reg, unit, EXECUTION, {'kind': 'InitialImage'}, self.checkpoint,
+                                            self.dependencies, self.root / 'driver-graph.json', self.out)
+        request = session.catalog_restore_request(base, catalog, verifier, self.checkpoint, self.dependencies, self.out)
+        Path(request['output_dir']).mkdir(mode=0o700)
+        self.context.attach_restore(request['output_dir'], held)
+        handle = self.issue(request, Path(request['output_dir']))
+        # validate_private_request (the runtime/Python-binary identity of a real run) is the one stand-in; the
+        # request shape itself is pinned by test_paged_request_fixtures.
+        with mock.patch.dict(os.environ, handle.environment()), \
+                mock.patch.object(checker, 'validate_private_request'):
+            return checker.validate_restore(request), request
+
+    def semantic(self, catalog, partial):
+        root = {'catalog_sha256': hashlib.sha256(catalog.read_bytes()).hexdigest(), 'catalog_bytes': catalog.stat().st_size}
+        return session.expected_validations(self.checkpoint, root, partial)[1]
+
+    def test_a_catalog_only_checkpoint_gets_the_incomplete_receipt_the_activation_expects(self):
+        catalog, catalog_budget = self.stage('catalog.staged.sqlite', self.build_catalog)
+        receipt, request = self.validate(catalog, None, [(catalog_budget, catalog)])
+        self.assertFalse(Path(request['verifier_work_db']).exists())  # nothing staged, nothing opened
+        self.assertEqual((receipt['complete'], receipt['scope']), (False, 'input_preparation'))
+        self.assertEqual(receipt, self.semantic(catalog, partial=True))  # exactly check_activation_validations' partial
+        self.assertEqual(receipt, json.loads((Path(request['output_dir']) / 'restore-semantic.json').read_bytes()))
+        self.assertNotEqual(receipt, self.semantic(catalog, partial=False))
+
+    def test_a_staged_verifier_without_a_ready_input_scope_is_opened_attached_and_still_incomplete(self):
+        catalog, catalog_budget = self.stage('catalog.staged.sqlite', self.build_catalog)
+        verifier, verifier_budget = self.stage('verifier.staged.sqlite', self.build_verifier)
+        receipt, request = self.validate(catalog, verifier, [(catalog_budget, catalog), (verifier_budget, verifier)])
+        self.assertEqual(request['verifier_work_db'], str(verifier))
+        self.assertEqual(receipt, self.semantic(catalog, partial=True))
+
+    def test_a_catalog_whose_private_binding_differs_from_the_request_is_refused(self):
+        wrong = {'source': self.source, 'session_id': self.session_id, 'resource_plan': {'kind': 'ResourcePlan'}}
+        catalog, catalog_budget = self.stage('catalog.staged.sqlite', lambda path: self.build_catalog(path, wrong))
+        with self.assertRaisesRegex(codec.Invalid, 'restored private source/session/plan binding differs'):
+            self.validate(catalog, None, [(catalog_budget, catalog)])
+
+    def test_a_staged_file_the_validator_was_not_attached_to_is_refused_before_it_is_opened(self):
+        catalog, catalog_budget = self.stage('catalog.staged.sqlite', self.build_catalog)
+        other, other_budget = self.stage('other.staged.sqlite', self.build_catalog)
+        with self.assertRaisesRegex(codec.Incomplete, 'no single held restore reservation'):
+            self.validate(catalog, None, [(other_budget, other)])
 
 
 if __name__ == '__main__':

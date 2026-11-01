@@ -444,9 +444,9 @@ class ChildGrantEnvironmentTests(unittest.TestCase):
 
     def test_a_child_without_an_explicit_grant_or_with_a_malformed_one_is_refused(self):
         with mock.patch.dict(os.environ, {'CARGO_TARGET_DIR': str(self.target)}):
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(receipts.ReceiptError, 'requires an explicit physical grant'):
                 session.child_environment({}, self.output / 'request.json', self.output, self.output, None)
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(receipts.ReceiptError, 'child grant environment differs'):
                 session.child_environment({}, self.output / 'request.json', self.output, self.output,
                                           FakeGrant({'PLURX_ASYNC_PHYSICAL_GRANT_FD': '7'}))
 
@@ -1951,7 +1951,7 @@ class RecordedOwnerReconciliationTests(ChildPlanBase):
         record = json.loads(record_path.read_bytes())
         del record['source']['owner']
         record_path.write_bytes(physical.canonical(record))
-        with self.assertRaises(receipts.ReceiptError):
+        with self.assertRaisesRegex(receipts.ReceiptError, 'does not name the owner it was moving from'):
             restarted.reconcile_crash()
 
     def test_run_zero_is_not_a_job_output_and_does_not_break_the_discard(self):

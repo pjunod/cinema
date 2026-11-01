@@ -128,18 +128,32 @@ class ActivationValidationTests(unittest.TestCase):
     def test_a_raw_unwrapped_receipt_is_no_longer_accepted(self):
         validations = self.validations()
         raw = self.store('validation_receipt', p.canonical(self.private))
-        with self.assertRaises(p.receipts.ReceiptError):
+        self.check(validations)  # the same call with the wrapped record passes: only the raw body is at fault
+        with self.assertRaises(p.receipts.ReceiptError) as refused:
             self.check({**validations, 'catalog_private': raw})
+        self.assertNotIn('not authenticated activation payload', str(refused.exception))  # it was covered; it is not a record
 
     def test_receipts_swapped_between_validators_are_refused(self):
-        swapped = self.validations(private=self.semantic, semantic=self.private)
-        with self.assertRaises(p.receipts.ReceiptError):
+        # Each stored record is a valid, correctly labelled record (built outside the assertion); the swap is
+        # only in which record the activation names for which validator, so the unwrap is what refuses it.
+        validations = self.validations()
+        swapped = {**validations, 'catalog_private': validations['catalog_semantic'],
+                   'catalog_semantic': validations['catalog_private']}
+        with self.assertRaisesRegex(p.receipts.ReceiptError, 'belongs to a different validator'):
             self.check(swapped)
+
+    def test_a_validator_body_cannot_be_recorded_under_the_other_validators_label(self):
+        # The producer refuses to build the mislabelled record at all (the declared if/then binding).
+        with self.assertRaises(p.receipts.ReceiptError):
+            session.validation_receipt('catalog_private', self.semantic, ROOT)
+        with self.assertRaises(p.receipts.ReceiptError):
+            session.validation_receipt('catalog_semantic', self.private, ROOT)
 
     def test_a_receipt_that_differs_from_the_authenticated_root_is_refused(self):
         wrong = {**self.private, 'catalog_bytes': self.private['catalog_bytes'] + 1}
-        with self.assertRaises(p.receipts.ReceiptError):
-            self.check(self.validations(private=wrong))
+        validations = self.validations(private=wrong)  # a valid record of a wrong body, built outside the assertion
+        with self.assertRaisesRegex(p.receipts.ReceiptError, 'differs from authenticated root'):
+            self.check(validations)
 
 
 if __name__ == '__main__':

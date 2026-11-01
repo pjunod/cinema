@@ -111,7 +111,7 @@ class CapabilityAndStorageTests(unittest.TestCase):
         import json
         reg={'source':{'commit':'a'*40}}
         base={'schema_version':1,'registration':reg,'resource_plan':{'immutable':'plan'},
-              'probe_run':{},'unit_runs':[],'attempt_runs':[],'resume_decisions':[],
+              'probe_run':{},'unit_runs':[],'attempt_runs':[],'resume_decisions':[],'uncertain_dispatches':[],
               'main_run':None,'session_id':'00000000-0000-4000-8000-000000000001','transport_conformance':None}
         self.assertEqual(set(base),set(s.CONTROL_KEYS))  # a closed control: every key the controller replays, no more
         rows=[]
@@ -403,7 +403,7 @@ class DedicatedRouteTests(unittest.TestCase):
                 reservations=s.DispatchReservations(Path(directory)/('reservations-'+stage))
                 with self.assertRaises(receipts.ReceiptError):s.dispatch(api,state,{'session_id':'00000000-0000-4000-8000-000000000001'},ROOT,reservations)
             control={key:None for key in s.CONTROL_KEYS}
-            control.update(registration=reg,unit_runs=[],attempt_runs=[],resume_decisions=[],
+            control.update(registration=reg,unit_runs=[],attempt_runs=[],resume_decisions=[],uncertain_dispatches=[],
                 probe_case='success',probe_nonce='a'*64)
             with patch.object(s,'api_environment',return_value=api),self.assertRaises(receipts.ReceiptError):
                 s.dispatch_probe(control,ROOT,directory)
@@ -571,3 +571,145 @@ class DispatchReservationTests(unittest.TestCase):
             expected, adopted = s.dispatch(None, state, self.control(), ROOT, self.restarted())
         self.assertEqual(adopted, {'id': 9})
         self.assertEqual(posts, [0])
+
+
+    # R3: an uncertain dispatch consumes its unit and ordinal; the retry takes a new ordinal, reconciled with the inventory.
+    def digest(self, marker='a'):
+        return p.digest(p.canonical(self.control(marker)))
+
+    def sent(self, ordinal=0, marker='a'):
+        s.claim_dispatch(self.reservations, self.record(ordinal, marker), lambda _r: [], [self.digest()] * ordinal)
+        self.reservations.mark_sent(ordinal)
+        return self.reservations.read(ordinal)
+
+    def later(self, held, seconds):
+        return s.utc(held['reserved_at']) + seconds
+
+    def test_a_sent_dispatch_is_waited_for_and_then_settled_as_uncertain_consuming_its_ordinal(self):
+        held = self.sent()
+        before = self.later(held, s.UNCERTAIN_DISPATCH_SECONDS - 1)
+        with self.assertRaisesRegex(receipts.ReceiptError, 'not visible yet'):
+            s.claim_dispatch(self.restarted(), self.record(0), lambda _r: [], [], now=before)
+        self.assertEqual(self.restarted().state(0), 'sent')  # the wait changed nothing
+        after = self.later(held, s.UNCERTAIN_DISPATCH_SECONDS)
+        action, settled = s.claim_dispatch(self.restarted(), self.record(0), lambda _r: [], [], now=after)
+        self.assertEqual((action, settled), ('uncertain', held))
+        self.assertEqual(self.restarted().state(0), 'uncertain')
+        self.assertEqual(self.restarted().uncertain(), [{'ordinal': 0, 'control_sha256': self.digest()}])
+        # settling is idempotent and never turns into a second POST of the same ordinal
+        again = s.claim_dispatch(self.restarted(), self.record(0), lambda _r: [], [], now=after + 10 ** 6)
+        self.assertEqual(again[0], 'uncertain')
+
+    def test_the_retry_of_an_uncertain_dispatch_takes_a_new_ordinal_and_the_old_one_is_never_sent_again(self):
+        held = self.sent()
+        s.claim_dispatch(self.restarted(), self.record(0), lambda _r: [], [], now=self.later(held, 10 ** 6))
+        folded = s.fold_uncertain({'uncertain_dispatches': []}, self.restarted())
+        self.assertEqual(folded['uncertain_dispatches'], [{'ordinal': 0, 'control_sha256': self.digest()}])
+        self.assertEqual(s.control_ordinal({'attempt_runs': [], **folded}), 1)  # the uncertain dispatch consumed ordinal 0
+        dispatched = [row['control_sha256'] for row in folded['uncertain_dispatches']]
+        action, retry = s.claim_dispatch(self.restarted(), self.record(1, 'b'), lambda _r: [], dispatched)
+        self.assertEqual((action, retry['ordinal']), ('post', 1))
+        self.assertEqual(self.restarted().ordinals(), [0, 1])  # nothing reused, nothing skipped
+        self.assertEqual(self.restarted().state(0), 'uncertain')
+        with self.assertRaises(receipts.ReceiptError):  # the old ordinal can never be claimed again by another dispatch
+            s.claim_dispatch(self.restarted(), self.record(0, 'b'), lambda _r: [], dispatched)
+
+    def test_an_uncertain_dispatch_whose_run_appears_later_is_refused_not_spliced(self):
+        held = self.sent()
+        s.claim_dispatch(self.restarted(), self.record(0), lambda _r: [], [], now=self.later(held, 10 ** 6))
+        with self.assertRaisesRegex(receipts.ReceiptError, 'settled as uncertain but its run appeared'):
+            s.claim_dispatch(self.restarted(), self.record(0), lambda _r: [{'id': 7}], [])
+
+    def test_coordinate_folds_the_uncertain_dispatch_and_dispatches_again_with_the_next_ordinal(self):
+        import json
+        self.sent()  # reserved and sent by an earlier controller process; its run never became visible
+        reg = {'source': {'commit': 'a' * 40}}
+        control = {key: None for key in s.CONTROL_KEYS}
+        control.update(registration=reg, session_id=self.SESSION, attempt_runs=[], unit_runs=[], resume_decisions=[],
+                       uncertain_dispatches=[])
+        replayed, sent = [], []
+
+        class Stop(Exception):
+            pass
+
+        def replay(_api, current, _root, _work):
+            replayed.append(current)
+            return {'next_dispatch_ordinal': s.control_ordinal(current),
+                    'resource_plan': {'record': {'maximum_units': 5}}}, None
+
+        def dispatch(_api, state, current, _root, reservations):
+            sent.append(state['next_dispatch_ordinal'])
+            if state['next_dispatch_ordinal'] == 0:
+                reservations.mark_uncertain(0)  # what claim_dispatch does once the wait has elapsed
+                raise s.UncertainDispatch(0)
+            return {'control': current, 'ordinal': state['next_dispatch_ordinal']}, None
+
+        def write(path, _value):
+            if Path(path).name == 'dispatch-0.json':
+                raise Stop
+
+        with patch.object(s, 'api_environment', return_value=SimpleNamespace()), \
+                patch.object(s, 'reconcile_control', side_effect=lambda _api, current, _root: (current, None)), \
+                patch.object(s, 'replay_control', side_effect=replay), patch.object(s, 'dispatch', side_effect=dispatch), \
+                patch.object(s.p, 'write', side_effect=write):
+            with self.assertRaises(Stop):
+                s.coordinate(control, ROOT, self.directory.parent)
+        self.assertEqual(sent, [0, 1])  # the uncertain ordinal is not retried: the retry takes ordinal 1
+        self.assertEqual([current['uncertain_dispatches'] for current in replayed],
+                         [[], [{'ordinal': 0, 'control_sha256': self.digest()}]])
+
+    def test_the_inventory_explains_an_uncertain_ordinal_and_refuses_a_late_run_for_it(self):
+        import json
+        reg = {'source': {'commit': 'a' * 40}}
+        base = {'schema_version': 1, 'registration': reg, 'resource_plan': {'immutable': 'plan'}, 'probe_run': {},
+                'unit_runs': [], 'attempt_runs': [], 'resume_decisions': [], 'uncertain_dispatches': [],
+                'main_run': None, 'session_id': self.SESSION, 'transport_conformance': None}
+        row = {'ordinal': 0, 'control_sha256': self.digest()}
+
+        def event(run_id, control):
+            return {'id': run_id, 'workflow_id': p.WORKFLOW, 'event': 'workflow_dispatch', 'event_payload':
+                    json.dumps({'inputs': {'operation': 'execute', 'mode': 'unit', 'control': json.dumps(control)}})}
+
+        def producer(_api, run_id, *_args):
+            return {'id': run_id}, {'id': run_id + 100, 'task_id': run_id + 200, 'status': 'success'}, {}
+
+        def inventory(rows, control):
+            api = SimpleNamespace(pages=lambda *args, **kwargs: rows)
+            with patch.object(p, 'producer', producer):
+                return s.attempt_inventory(api, reg, control)
+        retry = event(8, {**base, 'uncertain_dispatches': [row]})  # ordinal 1: the retry of the uncertain ordinal 0
+        current = {**base, 'attempt_runs': [8], 'uncertain_dispatches': [row]}
+        items = inventory([retry], current)
+        self.assertEqual([item['ordinal'] for item in items], [1])
+        self.assertEqual(list(items.uncertain), [row])
+        self.assertEqual(s.control_ordinal(current), 2)
+        # a run at ordinal 1 with no run and no declaration at ordinal 0 is an unexplained gap
+        skipped = event(8, {**base, 'attempt_runs': [7]})
+        with self.assertRaisesRegex(receipts.ReceiptError, 'unexplained attempted-ordinal gap'):
+            inventory([skipped], {**base, 'attempt_runs': [8]})
+        # declared by the current control but not by the control of the run that followed it
+        with self.assertRaisesRegex(receipts.ReceiptError, 'omitted or changed an uncertain dispatch'):
+            inventory([skipped], {**base, 'attempt_runs': [8], 'uncertain_dispatches': [row]})
+        # the uncertain dispatch's own run appears later: it takes ordinal 0, which was declared uncertain
+        late = event(7, base)
+        with self.assertRaisesRegex(receipts.ReceiptError, 'settled as uncertain but its run appeared'):
+            inventory([late, retry], {**current, 'attempt_runs': [7, 8]})
+
+    def test_a_reservation_directory_belongs_to_one_session_and_registration(self):
+        identity = {'session_id': self.SESSION, 'registration_sha256': 'b' * 64}
+        directory = self.directory.parent / 'bound'
+        s.DispatchReservations(directory, identity)
+        s.DispatchReservations(directory, identity)  # the same session may reopen it
+        for changed in ({**identity, 'session_id': '00000000-0000-4000-8000-000000000002'},
+                        {**identity, 'registration_sha256': 'c' * 64}):
+            with self.assertRaisesRegex(receipts.ReceiptError, 'different session or registration'):
+                s.DispatchReservations(directory, changed)
+
+    def test_settle_reads_only_the_reservations_that_exist_and_names_the_session_of_each(self):
+        bound = s.DispatchReservations(self.directory.parent / 'settled',
+                                       {'session_id': self.SESSION, 'registration_sha256': 'b' * 64})
+        self.assertIsNone(s.settle_dispatch(bound, [self.digest()]))  # an ordinal nobody here reserved passes
+        foreign = {**self.record(0), 'session_id': '00000000-0000-4000-8000-000000000002'}
+        bound.reserve(foreign)
+        with self.assertRaisesRegex(receipts.ReceiptError, 'names a different session'):
+            s.settle_dispatch(bound, [self.digest()])

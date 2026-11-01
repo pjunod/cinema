@@ -335,6 +335,7 @@ class RestoreStagingCalibrationTests(CalibrationHelpers, PhysicalBase):
     def required(self, policy, plan):
         families = policy['families']
         return (2 * plan['total_retained_artifact_bytes']
+                + min(512 * MIB, plan['total_retained_artifact_bytes'])  # the largest ZIP of a job stays deducted
                 + 2 * max(families['catalog_main']['database_bytes'], families['verifier_main']['database_bytes'])
                 + plan['unit_byte_allowance'])
 
@@ -372,12 +373,28 @@ class RestoreStagingCalibrationTests(CalibrationHelpers, PhysicalBase):
         policy['pools']['restore_staging_bytes'] = self.required(policy, base)
         self.calibrate(policy, base)
 
+    def test_the_transient_zip_high_water_is_a_term_of_the_inequality(self):
+        # The job-wide high-water ZIP reservation is min(ARTIFACT_BYTES, T): T itself while T is the smaller,
+        # one 512 MiB artifact once the retained total is larger. Without the term the old sum is short by it.
+        for retained, term in ((3 * MIB, 3 * MIB), (2048 * MIB, 512 * MIB)):
+            plan = self.plan(total_retained_artifact_bytes=retained)
+            old_sum = (2 * retained + 2 * max(self.policy['families']['catalog_main']['database_bytes'],
+                                              self.policy['families']['verifier_main']['database_bytes'])
+                       + plan['unit_byte_allowance'])
+            need = physical.restore_staging_requirement(self.policy, plan)
+            self.assertEqual(need - old_sum, term)
+            policy = copy.deepcopy(self.policy)
+            policy['pools']['restore_staging_bytes'] = old_sum
+            with self.assertRaisesRegex(physical.PhysicalPolicyError, 'transient ZIP'):
+                self.calibrate(policy, dict(plan, total_session_disk_bytes=1 << 60))
+
     def test_the_unadmitted_example_states_the_same_inequality_for_its_own_figures(self):
         example = json.loads((ROOT / 'verification' / 'async-driver-refinement' / 'paged-resource-plan.example.json').read_bytes())
         policy = json.loads(example['record']['source_bounds_utf8'])['physical_policy']
         illustrative = {'total_retained_artifact_bytes': 4 * example['record']['artifact_retained_bytes'],
                         'unit_byte_allowance': example['record']['artifact_extracted_bytes']}
-        self.assertGreaterEqual(policy['pools']['restore_staging_bytes'], physical.restore_staging_requirement(policy, illustrative))
+        # The example's pool is exactly what the shared helper gives for its illustrative figures (not a hand figure).
+        self.assertEqual(policy['pools']['restore_staging_bytes'], physical.restore_staging_requirement(policy, illustrative))
 
 
 class PythonRustPolicyParityTests(unittest.TestCase):
