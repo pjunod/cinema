@@ -9,10 +9,9 @@ production, everything else), disks, and the janitor and watchdog receipts.
 Controls are executed by the tool that already owns the resource:
   * an Incus runner VM: the runner watchdog (pause marker, `--vm`), which keeps
     its memory-headroom check and restart backoff;
-  * a host-mode systemd runner: `systemctl stop --no-block` (one SIGTERM: the
-    runner stops polling and finishes its job) plus a pause marker;
-  * a launchd runner: `launchctl disable` + SIGTERM, which the Apple janitor
-    already honours;
+  * a host-mode systemd runner: a pause marker, then `systemctl stop` once idle;
+  * a launchd runner: `launchctl disable`, then SIGTERM once idle (the Apple
+    janitor already honours a disabled service);
   * the standby (backup) Apple runner: the standby controller's pause marker.
 
 Python 3.9 compatible: macOS runner hosts have only the system python3.
@@ -393,6 +392,7 @@ class Agent:
             except (RuntimeError, subprocess.TimeoutExpired):
                 state = "unknown"
             paused = (self.paused_dir / runner["name"]).exists()
+            report["draining"] = self._draining(runner)
             report.update(state=state, paused=paused,
                           usage=self.cgroups.read(self.root / "system.slice" / runner["unit"]))
             report["controls"] = ["resume"] if paused else ["drain"]
@@ -402,14 +402,16 @@ class Agent:
             vm = next((v for v in self.incus["vms"] if v["name"] == runner["vm"]), None)
             paused = (self.watchdog_paused / runner["vm"]).exists()
             report["paused"] = paused
+            report["draining"] = self._draining(runner)
             if vm is None:
                 report["offline_reason"] = "VM not found"
             elif vm["status"] != "Running":
                 report["offline_reason"] = f"VM {vm['status'].lower()}" + self._deferred(runner["vm"])
             report["controls"] = ["resume"] if paused else (["drain"] if vm and vm["status"] == "Running" else [])
         elif kind == "launchd":
-            disabled = self._launchd_disabled(runner)
+            disabled = self._launchd_disabled(runner) or (self.paused_dir / runner["name"]).exists()
             report["paused"] = disabled
+            report["draining"] = self._draining(runner)
             report["controls"] = ["resume"] if disabled else ["drain"]
         elif kind == "standby":
             paused = Path(runner["pause_marker"]).exists()
@@ -429,6 +431,13 @@ class Agent:
                                "pids": len(procs)}
         report["hygiene"] = self.hygiene(runner)
         return report
+
+    def _draining(self, runner: dict) -> bool:
+        marker = self._marker_path(runner)
+        try:
+            return bool(marker) and json.loads(marker.read_text()).get("state") == "draining"
+        except (OSError, ValueError):
+            return False
 
     def _deferred(self, vm: str) -> str:
         state = self._json(self.config.get("watchdog_state", "/var/lib/plurx-runner-watchdog/state.json")) or {}
@@ -484,48 +493,108 @@ class Agent:
             result["result"] = f"failed: {error}"[:300]
         return result
 
-    def _marker(self, path: Path, command: dict) -> None:
+    def _marker(self, path: Path, command: dict, state: str = "draining") -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"actor": command.get("actor"), "reason": command.get("reason"),
-                                    "at": int(time.time())}) + "\n")
+                                    "at": int(time.time()), "state": state}) + "\n")
+
+    def _marker_path(self, runner: dict) -> Path | None:
+        kind = runner.get("kind", "systemd")
+        if kind == "incus":
+            return self.watchdog_paused / runner["vm"]
+        if kind in ("systemd", "launchd"):
+            return self.paused_dir / runner["name"]
+        if kind == "standby":
+            return Path(runner["pause_marker"])
+        return None
 
     def _perform(self, action: str, runner: dict, command: dict) -> str:
+        """Drain marks first, stops only when idle (see progress_drains).
+
+        Stopping a runner mid-job can cancel the job (a container runner's
+        stop timeout does not protect it), so a drain never stops a busy
+        runner: the marker keeps the watchdog from restarting it, and the stop
+        waits until no task container and no runner child process is left.
+        """
         kind = runner.get("kind", "systemd")
         watchdog = self.config.get("watchdog", "/usr/local/sbin/plurx-runner-watchdog")
-        if kind == "systemd" and action == "drain":
-            self._marker(self.paused_dir / runner["name"], command)
-            self.execute("systemctl", "stop", "--no-block", runner["unit"])
-            return "draining: SIGTERM sent; the runner finishes its job, then stays stopped"
-        if kind == "systemd" and action == "resume":
-            (self.paused_dir / runner["name"]).unlink(missing_ok=True)
-            self.execute("systemctl", "start", "--no-block", runner["unit"])
-            return "resumed"
-        if kind == "incus" and action == "drain":
-            self._marker(self.watchdog_paused / runner["vm"], command)
-            self.execute("incus", "exec", "--project", self.config["incus_project"], runner["vm"], "--",
-                         "systemctl", "stop", "--no-block", runner["unit"])
-            return "draining: watchdog paused for this VM; SIGTERM sent"
-        if kind == "incus" and action == "resume":
-            (self.watchdog_paused / runner["vm"]).unlink(missing_ok=True)
-            return "resumed: " + self.execute(watchdog, "--vm", runner["vm"], timeout=180).strip()[-200:]
-        if kind == "incus" and action == "start_vm":
-            return self.execute(watchdog, "--vm", runner["vm"], timeout=180).strip()[-300:]
-        if kind == "launchd" and action in ("drain", "resume"):
+        marker = self._marker_path(runner)
+        if action == "drain" and kind in ("systemd", "incus", "launchd"):
+            if kind == "launchd":
+                self.execute("launchctl", "disable", f"{runner.get('domain', 'system')}/{runner['label']}")
+            self._marker(marker, command)
+            self.progress_drains()
+            return "draining: paused now; the runner stops once its current job is done"
+        if action == "resume" and kind in ("systemd", "incus", "launchd"):
+            marker.unlink(missing_ok=True)
+            if kind == "incus":
+                return "resumed: " + self.execute(watchdog, "--vm", runner["vm"], timeout=180).strip()[-200:]
+            if kind == "systemd":
+                self.execute("systemctl", "start", "--no-block", runner["unit"])
+                return "resumed"
             service = f"{runner.get('domain', 'system')}/{runner['label']}"
-            if action == "drain":
-                self.execute("launchctl", "disable", service)
-                self.execute("launchctl", "kill", "SIGTERM", service)
-                return "draining: disabled in launchd; SIGTERM sent"
             self.execute("launchctl", "enable", service)
+            try:
+                self.execute("launchctl", "bootstrap", runner.get("domain", "system"), runner["plist"])
+            except (RuntimeError, KeyError):
+                pass  # already loaded
             self.execute("launchctl", "kickstart", service)
             return "resumed"
+        if kind == "incus" and action == "start_vm":
+            return self.execute(watchdog, "--vm", runner["vm"], timeout=180).strip()[-300:]
         if kind == "standby" and action == "drain":
-            self._marker(Path(runner["pause_marker"]), command)
+            self._marker(marker, command, state="stopped")
             return "draining: the standby controller drains the backup and stops offering it"
         if kind == "standby" and action == "resume":
-            Path(runner["pause_marker"]).unlink(missing_ok=True)
+            marker.unlink(missing_ok=True)
             return "resumed: the standby controller offers the backup again during an outage"
         raise ValueError(f"{action} is not available for a {kind} runner")
+
+    def _busy(self, runner: dict) -> bool:
+        kind = runner.get("kind", "systemd")
+        probe = ("docker ps -q --filter name=ACTIONS-TASK- 2>/dev/null; "
+                 "p=$(systemctl show -p MainPID --value %s); [ \"$p\" -gt 0 ] && pgrep -P \"$p\"; true")
+        if kind == "incus":
+            out = self.execute("incus", "exec", "--project", self.config["incus_project"], runner["vm"], "--",
+                               "sh", "-c", probe % runner["unit"])
+            return bool(out.strip())
+        if kind == "systemd":
+            return bool(self.execute("sh", "-c", probe % runner["unit"]).strip())
+        if kind == "launchd":
+            return len(self._mac_trees().get(runner["name"], [])) > 1
+        return False
+
+    def progress_drains(self) -> None:
+        """Stop each draining runner once it is idle; record the stop for audit."""
+        for runner in self.config.get("runners", []):
+            marker = self._marker_path(runner)
+            if runner.get("kind") not in ("systemd", "incus", "launchd") or not marker or not marker.exists():
+                continue
+            try:
+                detail = json.loads(marker.read_text())
+            except (OSError, ValueError):
+                continue
+            if detail.get("state") != "draining":
+                continue
+            try:
+                if self._busy(runner):
+                    continue
+                kind = runner["kind"]
+                if kind == "incus":
+                    self.execute("incus", "exec", "--project", self.config["incus_project"], runner["vm"], "--",
+                                 "systemctl", "stop", "--no-block", runner["unit"])
+                elif kind == "systemd":
+                    self.execute("systemctl", "stop", "--no-block", runner["unit"])
+                else:
+                    self.execute("launchctl", "kill", "SIGTERM", f"{runner.get('domain', 'system')}/{runner['label']}")
+            except (RuntimeError, subprocess.TimeoutExpired) as error:
+                self.results.append({"action": "drain", "target": runner["name"], "actor": detail.get("actor"),
+                                     "result": f"stop failed: {error}"[:300]})
+                continue
+            detail["state"] = "stopped"
+            marker.write_text(json.dumps(detail) + "\n")
+            self.results.append({"action": "drain", "target": runner["name"], "actor": detail.get("actor"),
+                                 "reason": detail.get("reason"), "result": "idle: runner stopped"})
 
     # -- loop --------------------------------------------------------------------
     def push(self, body: dict) -> dict:
@@ -544,6 +613,7 @@ class Agent:
             try:
                 if self.config.get("incus_project"):
                     self.incus_vms()
+                self.progress_drains()
                 reply = self.push(self.report())
                 for command in reply.get("commands", []):
                     self.results.append(self.perform(command))

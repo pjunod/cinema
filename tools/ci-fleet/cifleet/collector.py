@@ -345,7 +345,7 @@ class Collector:
             used = metrics_.get("cpu_used") or {}
             mem = metrics_.get("mem_used") or {}
             self.store.record_usage("host", report.get("host", agent), now, sum(used.values()), sum(mem.values()),
-                                    {"cpu": used, "mem": mem})
+                                    {"cpu_by": used, "mem_by": mem})
         placements = {}
         for job in self.queue:
             if job["status"] == "running" and job.get("task_id"):

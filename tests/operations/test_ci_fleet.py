@@ -419,16 +419,28 @@ class AgentCase(unittest.TestCase):
                   "paused_dir": f"{folder}/paused", "watchdog_paused_dir": f"{folder}/watchdog"}
         return agent_module.Agent(config, execute=execute), commands
 
-    def test_incus_drain_pauses_the_watchdog_then_stops_without_blocking(self):
+    def test_incus_drain_never_stops_a_busy_runner(self):
         with tempfile.TemporaryDirectory() as folder:
             runner = {"name": "gha-lab6-general-01", "kind": "incus", "vm": "gha-lab6-general-01",
                       "unit": "forgejo-runner-gha-lab6-general-01.service"}
             agent, commands = self.agent([runner], folder)
+            busy = {"value": "4f2a9c\n"}  # a task container is running
+            agent.execute = lambda *args, timeout=20: commands.append(args) or (busy["value"] if "sh" in args else "")
             result = agent.perform({"action": "drain", "target": runner["name"], "actor": "op", "reason": "r"})
-            self.assertTrue((Path(folder) / "watchdog" / runner["vm"]).exists(), result)
-            self.assertEqual(commands[-1][-4:], ("systemctl", "stop", "--no-block", runner["unit"]))
+            marker = Path(folder) / "watchdog" / runner["vm"]
+            self.assertTrue(marker.exists(), result)
+            stop = ("systemctl", "stop", "--no-block", runner["unit"])
+            self.assertFalse([c for c in commands if c[-4:] == stop])
+            busy["value"] = ""
+            agent.progress_drains()
+            self.assertEqual([c for c in commands if c[-4:] == stop][0][:5],
+                             ("incus", "exec", "--project", "github-runners", runner["vm"]))
+            self.assertEqual(json.loads(marker.read_text())["state"], "stopped")
+            self.assertEqual(agent.results[-1]["result"], "idle: runner stopped")
+            agent.progress_drains()
+            self.assertEqual(len([c for c in commands if c[-4:] == stop]), 1)
             agent.perform({"action": "resume", "target": runner["name"]})
-            self.assertFalse((Path(folder) / "watchdog" / runner["vm"]).exists())
+            self.assertFalse(marker.exists())
             self.assertEqual(commands[-1][1:], ("--vm", runner["vm"]))
 
     def test_standby_drain_is_the_controllers_marker(self):
