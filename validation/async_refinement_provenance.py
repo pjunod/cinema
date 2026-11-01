@@ -554,7 +554,8 @@ def auxiliary(value, root):
              'snapshot_manifest_node':'SnapshotManifestNode', 'evidence_manifest_node':'EvidenceManifestNode',
              'transfer_manifest_node':'TransferManifestNode', 'publication_intent':'PublicationIntent',
              'pending_publication':'PendingPublication', 'transfer_batch_receipt':'TransferBatchReceipt',
-             'publication_activation':'ActivationResult','native_transport_conformance':'ConformanceResult'}
+             'publication_activation':'ActivationResult','native_transport_conformance':'ConformanceResult',
+             'validation_receipt':'ValidationReceipt'}
     require(kind in kinds, 'unknown transport auxiliary envelope')
     validate(value, schema['$defs'][kinds[kind]], schema)
     return value

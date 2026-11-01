@@ -32,6 +32,9 @@
     },
     {
       "$ref": "#/$defs/ConformanceResult"
+    },
+    {
+      "$ref": "#/$defs/ValidationReceipt"
     }
   ],
   "$defs": {
@@ -1282,6 +1285,314 @@
         "result"
       ],
       "additionalProperties": false
+    },
+    "CatalogPrivateValidation": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "operation": {
+          "const": "validate_restore"
+        },
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "catalog_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "checkpoint_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "catalog_logical_digest": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "catalog_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "counts": {
+          "$ref": "paged-proof.schema.json#/$defs/Counts"
+        },
+        "contexts": {
+          "type": "array",
+          "items": {
+            "$ref": "paged-proof.schema.json#/$defs/ContextRoot"
+          }
+        },
+        "catalog_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "semantic_manifest_root": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "schema_version",
+        "operation",
+        "source",
+        "session_id",
+        "catalog_sha256",
+        "checkpoint_sha256",
+        "catalog_logical_digest",
+        "catalog_commit",
+        "counts",
+        "contexts",
+        "catalog_bytes",
+        "semantic_manifest_root",
+        "initial_image_sha256",
+        "resource_plan_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "CatalogSemanticValidation": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "catalog_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "checkpoint_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "catalog_logical_digest": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "catalog_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "counts": {
+          "$ref": "paged-proof.schema.json#/$defs/Counts"
+        },
+        "contexts": {
+          "type": "array",
+          "items": {
+            "$ref": "paged-proof.schema.json#/$defs/ContextRoot"
+          }
+        },
+        "manifest_root": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "acceptance": {
+          "const": false
+        },
+        "scope": {
+          "enum": [
+            "input_preparation",
+            "restored catalog/page identity correspondence; production replay and full semantic qualification remain separate"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "source",
+        "session_id",
+        "catalog_sha256",
+        "checkpoint_sha256",
+        "catalog_logical_digest",
+        "catalog_commit",
+        "counts",
+        "contexts",
+        "manifest_root",
+        "complete",
+        "acceptance",
+        "scope"
+      ],
+      "additionalProperties": false
+    },
+    "VerifierRestoreValidation": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation": {
+          "const": "validate_restored_verifier"
+        },
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "checkpoint_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "verifier_schema_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "verifier_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "verifier_logical_digest": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "work_db_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "work_db_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "progress_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "result_chain_root_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "complete": {
+          "const": true
+        },
+        "acceptance": {
+          "const": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "operation",
+        "source",
+        "session_id",
+        "unit_ordinal",
+        "checkpoint_sha256",
+        "resource_plan_sha256",
+        "initial_image_sha256",
+        "verifier_schema_sha256",
+        "verifier_commit",
+        "verifier_logical_digest",
+        "work_db_sha256",
+        "work_db_bytes",
+        "progress_sha256",
+        "result_chain_root_sha256",
+        "complete",
+        "acceptance"
+      ],
+      "additionalProperties": false
+    },
+    "ValidationReceipt": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "validation_receipt"
+        },
+        "validator": {
+          "enum": [
+            "catalog_private",
+            "catalog_semantic",
+            "verifier"
+          ]
+        },
+        "receipt": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CatalogPrivateValidation"
+            },
+            {
+              "$ref": "#/$defs/CatalogSemanticValidation"
+            },
+            {
+              "$ref": "#/$defs/VerifierRestoreValidation"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "validator",
+        "receipt"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "validator": {
+                "const": "catalog_private"
+              }
+            },
+            "required": [
+              "validator"
+            ]
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/CatalogPrivateValidation"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "validator": {
+                "const": "catalog_semantic"
+              }
+            },
+            "required": [
+              "validator"
+            ]
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/CatalogSemanticValidation"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "validator": {
+                "const": "verifier"
+              }
+            },
+            "required": [
+              "validator"
+            ]
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/VerifierRestoreValidation"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

@@ -807,12 +807,12 @@ class PhysicalContext:
             raw = record_path.read_bytes()
             record = physical._strict_json(raw)
             where = physical.locate_transfer(self.owned, record_path)
-            if where == 'source':
-                owner, resource, component = physical.POOL_OWNERS['restore_staging_bytes'], 'restore_staging_bytes', 'bytes'
-            else:
-                destination = record['destination']
-                owner, resource, component = destination['owner'], destination['resource'], destination['component']
+            # Either side of the record names its own owner/resource/component, so the located object is
+            # charged to exactly the reservation the crash left it in, whatever pool that was.
             side = record['source' if where == 'source' else 'destination']
+            p.require(all(type(side.get(key)) is str for key in ('owner', 'resource', 'component', 'relative_path')),
+                      'physical transfer record does not name the owner it was moving from')
+            owner, resource, component = side['owner'], side['resource'], side['component']
             held = ledger.reserve(owner, resource, component, record['bytes'])
             held.track(self.owned / side['relative_path'])
             self.survivors.append(held)
@@ -844,8 +844,9 @@ class PhysicalContext:
         found = []
         for entry in sorted(self.owned.iterdir()):
             number = entry.name[len(JOB_OUTPUT_PREFIX):]
+            # Run numbers are positive: `run-0` is not a name the constructor produces, so it is not an output.
             if (entry.name.startswith(JOB_OUTPUT_PREFIX) and number.isascii() and number.isdigit()
-                    and entry == job_output_directory(self.owned, int(number))):
+                    and int(number) > 0 and entry == job_output_directory(self.owned, int(number))):
                 found.append(entry)
         return found
 
@@ -863,6 +864,24 @@ class PhysicalContext:
         for entry in outputs:
             if entry != output and not entry.is_symlink() and entry.is_dir():
                 shutil.rmtree(entry)
+        self.release_removed_survivors()
+
+    def release_removed_survivors(self):
+        """A reservation re-tracked after a crash for a file that has since been removed is released.
+
+        reconcile_crash charges every survivor it finds; one that lived inside an earlier job's output
+        tree is gone once that tree is discarded, and keeping its charge would name a file that no longer
+        exists. A survivor whose file still exists stays charged.
+        """
+        kept = []
+        for held in self.survivors:
+            if held.released:
+                continue
+            if held.surviving_files():
+                kept.append(held)
+            else:
+                held.release_after_removal()
+        self.survivors = kept
 
     def discard_dead_spools(self, live):
         """Remove the publication/rehearsal spools no authenticated pending chain still needs."""
@@ -891,6 +910,7 @@ class physical_session:
     def __exit__(self, *_exc):
         _PHYSICAL.clear()
         _DOWNLOADS.clear()
+        _ARCHIVES.clear()
         self.context.close()
 
 
@@ -1209,8 +1229,157 @@ def api_environment(scratch):
     return api
 
 
-def dispatch(api, state, control, root):
-    """One bounded registered successor. A failed dispatch never advances state."""
+class DispatchReservations:
+    """The durable, fsynced record of every dispatch ordinal, written BEFORE the API call.
+
+    One ordinal is one `dispatch-<n>.reserved.json` (its registration, control digest, mode and
+    operation), created exclusively and fsynced with its directory before anything is sent. A
+    `dispatch-<n>.sent.json` marker is created, the same way, immediately before the POST begins; it
+    is removed again only when the server definitively refused the request, so a marker that survives
+    means "this POST may have reached the server".
+
+    The authenticated attempt inventory (the Actions runs and their controls) stays the authority on what
+    ran; this record is what lets a restarted controller reconcile a crash between reservation and
+    POST, or after the POST and before the run is visible, without ever reusing the ordinal for another
+    dispatch or skipping it (see `claim_dispatch`).
+    """
+    def __init__(self, directory):
+        self.directory = Path(directory)
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        p.require(self.directory.is_dir() and not self.directory.is_symlink(),
+                  'dispatch reservation directory is not a private directory')
+
+    def file(self, ordinal, stage):
+        p.require(type(ordinal) is int and ordinal >= 0 and stage in ('reserved', 'sent'),
+                  'invalid dispatch reservation name')
+        return self.directory / ('dispatch-%d.%s.json' % (ordinal, stage))
+
+    def ordinals(self):
+        found = []
+        for entry in self.directory.glob('dispatch-*.reserved.json'):
+            number = entry.name[len('dispatch-'):-len('.reserved.json')]
+            p.require(number.isascii() and number.isdigit() and entry == self.file(int(number), 'reserved'),
+                      'unrecognized dispatch reservation file')
+            found.append(int(number))
+        return sorted(found)
+
+    def _create(self, target, value):
+        """Create `target` exclusively with its complete, fsynced content (never a partial record)."""
+        partial = Path(str(target) + '.partial')
+        partial.unlink(missing_ok=True)  # a leftover of an earlier crash: never reachable under the final name
+        raw = p.canonical(value)
+        fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            written = 0
+            while written < len(raw):
+                written += os.write(fd, raw[written:])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(partial, target)  # fails if the name exists: an ordinal is reserved at most once
+        finally:
+            partial.unlink(missing_ok=True)
+        fsync_directory(self.directory)
+
+    def read(self, ordinal):
+        return p.read(self.file(ordinal, 'reserved'))
+
+    def reserve(self, record):
+        self._create(self.file(record['ordinal'], 'reserved'), record)
+
+    def state(self, ordinal):
+        """None (never reserved), 'reserved' (nothing sent) or 'sent' (the POST may have reached the server)."""
+        if not self.file(ordinal, 'reserved').exists():
+            return None
+        return 'sent' if self.file(ordinal, 'sent').exists() else 'reserved'
+
+    def mark_sent(self, ordinal):
+        if not self.file(ordinal, 'sent').exists():
+            self._create(self.file(ordinal, 'sent'), {'ordinal': ordinal, 'kind': 'dispatch_sent'})
+
+    def mark_refused(self, ordinal):
+        """The server definitively refused the request: nothing was created, the ordinal is unsent again."""
+        self.file(ordinal, 'sent').unlink(missing_ok=True)
+        fsync_directory(self.directory)
+
+
+def dispatch_record(ordinal, session_id, expected, control):
+    """What an ordinal is reserved for. Every field is derived from replay-authenticated state."""
+    return {'schema_version': 1, 'kind': 'dispatch_reservation', 'ordinal': ordinal, 'session_id': session_id,
+            'registration_sha256': expected['registration_sha256'], 'mode': expected['mode'],
+            'operation': expected['operation'], 'control_sha256': p.digest(p.canonical(control)),
+            'reserved_at': datetime.now(timezone.utc).isoformat()}
+
+
+def settle_dispatch(reservations, dispatched):
+    """Reconcile the reserved ordinals with the authenticated attempt inventory.
+
+    `dispatched` lists the digest of the control each authenticated attempt ran with, by ordinal. An
+    ordinal inside the inventory must have been reserved for exactly the control that ran; no
+    reservation may lie beyond the next ordinal (an ordinal is never skipped). The reservation at the
+    next ordinal, if any, is the one dispatch whose outcome the inventory cannot show yet: it is
+    returned for `claim_dispatch`.
+    """
+    ordinals = reservations.ordinals()
+    p.require(all(ordinal <= len(dispatched) for ordinal in ordinals),
+              'a reserved dispatch ordinal lies beyond the authenticated attempt inventory; ordinals are never skipped')
+    for ordinal in ordinals:
+        if ordinal < len(dispatched):
+            p.require(reservations.read(ordinal)['control_sha256'] == dispatched[ordinal],
+                      'a dispatch ran with a control other than the one its ordinal was reserved for')
+    return len(dispatched) if len(dispatched) in ordinals else None
+
+
+def claim_dispatch(reservations, record, runs, dispatched):
+    """Reserve the next ordinal durably, or recover the reservation a crashed controller left there.
+
+    Returns ('post', record) when the request must be sent and ('adopt', run) when the dispatch already
+    created its run. A recovered reservation is never replaced: it keeps its ordinal and its payload.
+
+      * never sent: the crash was before the POST; the very same request is sent for the same ordinal;
+      * its run is visible (any status): the crash was after the POST; the run is adopted, nothing is sent;
+      * sent but no run visible yet: the outcome is uncertain. The ordinal stays consumed - it is neither
+        reused for another dispatch nor skipped - and the controller refuses until the run is visible.
+    """
+    unsettled = settle_dispatch(reservations, dispatched)
+    ordinal = record['ordinal']
+    p.require(ordinal == len(dispatched), 'dispatch ordinal is not the next authenticated ordinal')
+    if unsettled is None:
+        reservations.reserve(record)
+        return 'post', record
+    held = reservations.read(ordinal)
+    same = {key: value for key, value in held.items() if key != 'reserved_at'} == \
+           {key: value for key, value in record.items() if key != 'reserved_at'}
+    p.require(same, 'the reserved dispatch ordinal belongs to a different dispatch; it is not reused')
+    found = runs(held)
+    p.require(len(found) <= 1, 'ambiguous duplicate dispatch; no attempt splicing')
+    if found:
+        reservations.mark_sent(ordinal)
+        return 'adopt', found[0]
+    p.require(reservations.state(ordinal) == 'reserved',
+              'dispatch ordinal %d was sent but its run is not visible yet; the ordinal stays consumed '
+              '(neither reused nor skipped) until the run appears' % ordinal)
+    return 'post', held
+
+
+def matching_runs(api, expected, control, floor):
+    """The workflow runs created by exactly this dispatch (same registration, inputs and control)."""
+    matches = []
+    for run in api.pages('/actions/runs', {'workflow_id': p.WORKFLOW}, field='workflow_runs'):
+        if run.get('commit_sha') != control['registration']['source']['commit'] or run.get('event') != 'workflow_dispatch':
+            continue
+        inputs = p.decode(run.get('event_payload', '').encode()).get('inputs', {})
+        if (inputs.get('registration_sha256') == expected['registration_sha256']
+                and inputs.get('mode') == expected['mode'] and inputs.get('operation') == expected['operation']
+                and p.decode(inputs.get('control', '{}').encode()) == control
+                and utc(run['created']) >= utc(floor) - 1):
+            matches.append(run)
+    return matches
+
+
+def plan_dispatch(api, state, control, root):
+    """Everything a dispatch needs, checked, with nothing sent and nothing reserved."""
     reg = state['registration']
     registration(reg, root)
     live_pr(api, reg)
@@ -1230,18 +1399,52 @@ def dispatch(api, state, control, root):
               'control': p.canonical(control).decode()}
     payload = p.canonical({'ref': reg['ref'], 'inputs': inputs})
     p.require(len(payload) <= p.SMALL, 'dispatch payload too large')
+    return {'registration_sha256': inputs['registration_sha256'], 'mode': mode, 'operation': operation,
+            'kind': kind, 'control': control, 'ordinal': state['next_dispatch_ordinal'], 'payload': payload,
+            'reg': reg, 'expected_prior_checkpoint':
+            p.digest(p.canonical(state['checkpoint'])) if state['checkpoint'] else None}
+
+
+def post_dispatch(api, plan, root, reservations):
+    """Send the reserved dispatch. The `sent` marker is durable before the first byte leaves."""
     path = '/actions/workflows/' + p.WORKFLOW + '/dispatches'
-    request = urllib.request.Request(api.root + path, data=payload, method='POST',
+    request = urllib.request.Request(api.root + path, data=plan['payload'], method='POST',
               headers={'Authorization': 'token ' + api.token, 'Content-Type': 'application/json'})
-    authenticate_runner_route(api,reg,root)
-    with api.opener.open(request, timeout=30) as response:
-        p.require(response.status in (200, 201, 204), 'dispatch was not accepted')
+    authenticate_runner_route(api, plan['reg'], root)
+    reservations.mark_sent(plan['ordinal'])
+    try:
+        with api.opener.open(request, timeout=30) as response:
+            p.require(response.status in (200, 201, 204), 'dispatch was not accepted')
+    except urllib.error.HTTPError as error:
+        if 400 <= error.code < 500:  # the server read and refused it: no run exists for this ordinal
+            reservations.mark_refused(plan['ordinal'])
+        raise
+
+
+def dispatch(api, state, control, root, reservations):
+    """One bounded registered successor. A failed dispatch never advances state.
+
+    The ordinal is reserved durably before the API call and reconciled against the authenticated attempt
+    inventory (`claim_dispatch`), so a restarted controller adopts, resends or refuses - never reuses or
+    skips - an ordinal. Returns the dispatch description and, when the reservation's run already existed,
+    that run (nothing was sent).
+    """
+    plan = plan_dispatch(api, state, control, root)
+    record = dispatch_record(plan['ordinal'], control['session_id'], plan, plan['control'])
+    action, held = claim_dispatch(
+        reservations, record,
+        lambda reserved: matching_runs(api, plan, plan['control'], reserved['reserved_at']),
+        state['attempt_control_sha256'])
+    adopted = held if action == 'adopt' else None
+    reserved_at = reservations.read(plan['ordinal'])['reserved_at']
+    if adopted is None:
+        post_dispatch(api, plan, root, reservations)
     # API acceptance is not run authentication/capability; controller polls
     # separately and admits only the exact event/registration/task result.
-    return {'registration_sha256': inputs['registration_sha256'], 'mode': mode, 'operation': operation,
-            'kind': kind, 'control': control, 'ordinal': state['next_dispatch_ordinal'], 'expected_prior_checkpoint':
-            p.digest(p.canonical(state['checkpoint'])) if state['checkpoint'] else None,
-            'dispatched_at': datetime.now(timezone.utc).isoformat()}
+    return {'registration_sha256': plan['registration_sha256'], 'mode': plan['mode'],
+            'operation': plan['operation'], 'kind': plan['kind'], 'control': plan['control'],
+            'ordinal': plan['ordinal'], 'expected_prior_checkpoint': plan['expected_prior_checkpoint'],
+            'dispatched_at': reserved_at}, adopted
 
 
 
@@ -1501,29 +1704,72 @@ def upload_outputs(metadata, staging):
             stream.write(f'part_{n}_path={Path(staging).resolve() / "parts" / str(n)}\n')
 
 
-_DOWNLOADS = {}
+_DOWNLOADS = {}  # extraction directory -> the PoolBudget holding its members (charged once per job)
+_ARCHIVES = []   # at most one transient-ZIP budget per job: only one downloaded ZIP exists at a time
 
 
-def charge_download(directory, archive, members):
-    """Downloads and their extraction belong to restore_staging_bytes (accounting `downloads_and_restores`).
+def reserve_download(directory, archive_bytes, members):
+    """Charge a download to restore_staging_bytes BEFORE its first byte is written.
 
-    The transient ZIP and the extracted members are reserved before they are written; the extraction
-    subtree is tracked so every surviving member keeps its charge. A directory that survived an
-    earlier stage of this job is charged at its actual size and reserves nothing twice.
+    Downloads and their extraction belong to restore_staging_bytes (accounting `downloads_and_restores`);
+    the calibration inequality `restore_staging_bytes >= total_retained_artifact_bytes + 2*max(catalog,
+    verifier database_bytes) + evidence allowance` is what makes the sum of every authenticated artifact fit.
+
+    Two different things are charged, and neither cumulatively:
+
+      * the extracted members, once per artifact per job, in a reservation that tracks the extraction
+        subtree (they stay on disk and keep their charge until the subtree is removed). A directory that
+        survived an earlier stage of this job (or an earlier job) is charged at its actual size and reserves
+        nothing twice;
+      * the transient ZIP, every time one is downloaded (a cached artifact is re-downloaded to be
+        re-verified), in one job-wide reservation that grows to the largest ZIP held at any moment: it is
+        reserved before the download writes and released when the ZIP is unlinked.
+
+    `archive_bytes` is the size the API reported for the artifact (the download refuses any other size).
+    Returns the transient charge actually made, which the caller hands back to release_download.
     """
     if not _PHYSICAL:
-        return
+        return 0
     context = _PHYSICAL[0]
+    if not _ARCHIVES:
+        _ARCHIVES.append(PoolBudget(context, 'restore_staging_bytes'))
     key = str(Path(directory))
-    if key in _DOWNLOADS:
-        return
-    present = Path(directory).exists()
-    budget = PoolBudget(context, 'restore_staging_bytes', directory_bytes(directory) if present else 0)
-    budget.track_subtree(directory)  # every extracted member keeps this charge until it is removed
-    if not present:
-        # The transient ZIP and the members extracted from it exist together before the ZIP is dropped.
-        budget.reserve(Path(archive).stat().st_size + sum(member['bytes'] for member in members))
-    _DOWNLOADS[key] = budget
+    if key not in _DOWNLOADS:
+        present = Path(directory).exists()
+        budget = PoolBudget(context, 'restore_staging_bytes', directory_bytes(directory) if present else 0)
+        budget.track_subtree(directory)
+        if not present:
+            budget.reserve(sum(member['bytes'] for member in members))
+        _DOWNLOADS[key] = budget
+    _ARCHIVES[0].reserve(archive_bytes)
+    return archive_bytes
+
+
+def release_download(charged):
+    """The ZIP was unlinked: the transient charge `reserve_download` returned is free for the next download."""
+    if charged:
+        _ARCHIVES[0].release(charged)
+
+
+def fetch_part(api, artifact, descriptor, directory, lines):
+    """Download one authenticated ZIP, verify it against the native upload transaction and extract it.
+
+    Returns (zip_sha256, zip_bytes). The ZIP is reserved before it is written and removed before this
+    returns, whatever happens in between.
+    """
+    charged, archive = 0, None
+    try:
+        charged = reserve_download(directory, artifact['size_in_bytes'], descriptor['members'])
+        archive = p.artifact_bytes(api, artifact)
+        sha, size = p.file_sha(archive), archive.stat().st_size
+        p.require(sha == transport_hash(lines, artifact), 'native upload/API/local hash differs')
+        p.unpack(archive, directory, descriptor['members'], storage_guard=api.guard_storage,
+                 verify_existing=Path(directory).exists())
+        return sha, size
+    finally:
+        if archive is not None:
+            archive.unlink(missing_ok=True)
+        release_download(charged)
 
 
 def download_parts(api, reg, run_id, mode, destination, root):
@@ -1560,19 +1806,13 @@ def download_parts(api, reg, run_id, mode, destination, root):
         p.require(len(artifacts) == 1 and artifacts[0].get('run_id', run_id) == run_id,
                   'part producer missing/ambiguous')
         artifact = artifacts[0]
-        archive = p.artifact_bytes(api, artifact)
-        try:
-            p.require(p.file_sha(archive) == transport_hash(lines, artifact), 'native upload/API/local hash differs')
-            directory = Path(api.scratch).parent/'authenticated-parts'/str(artifact['id'])
-            charge_download(directory,archive,descriptor['members'])
-            p.unpack(archive,directory,descriptor['members'],storage_guard=api.guard_storage,verify_existing=directory.exists())
-            parts[n] = directory
-            total += archive.stat().st_size + sum(v['bytes'] for v in descriptor['members'])
-            # Build receipt after exact uploaded result/checkpoint is read.
-            artifact_receipts[n] = {'artifact': artifact, 'zip_sha256': p.file_sha(archive),
-                                    'zip_bytes': archive.stat().st_size, 'members': descriptor['members']}
-        finally:
-            archive.unlink(missing_ok=True)
+        directory = Path(api.scratch).parent/'authenticated-parts'/str(artifact['id'])
+        zip_sha256, zip_bytes = fetch_part(api, artifact, descriptor, directory, lines)
+        parts[n] = directory
+        total += zip_bytes + sum(v['bytes'] for v in descriptor['members'])
+        # Build receipt after exact uploaded result/checkpoint is read.
+        artifact_receipts[n] = {'artifact': artifact, 'zip_sha256': zip_sha256,
+                                'zip_bytes': zip_bytes, 'members': descriptor['members']}
     return {'run': run, 'job': job, 'event': event, 'lines': lines, 'metadata': metadata,
             'parts': parts, 'receipts': artifact_receipts, 'total': total}
 
@@ -2126,7 +2366,28 @@ def expected_validations(checkpoint, catalog_root, input_preparation):
     return private, semantic
 
 
-def check_activation_validations(result, intent, validations, resolver, ledger, index_path):
+VALIDATORS = ('catalog_private', 'catalog_semantic', 'verifier')
+
+
+def validation_receipt(validator, receipt, root):
+    """The one transported record for a validator's raw output (closed `ValidationReceipt`).
+
+    Every producer builds the record here and every consumer reads it through `unwrap_validation`, so
+    the bytes the session authenticates are exactly the bytes the pinned transport schema declares.
+    """
+    p.require(validator in VALIDATORS and type(receipt) is dict, 'validation receipt names no validator')
+    return p.auxiliary({'schema_version': 1, 'kind': 'validation_receipt', 'validator': validator,
+                        'receipt': receipt}, root)
+
+
+def unwrap_validation(data, validator, root):
+    """Decode one authenticated validation receipt record and return the validator's raw output."""
+    record = p.auxiliary(data, root)
+    p.require(record['validator'] == validator, 'validation receipt belongs to a different validator')
+    return record['receipt']
+
+
+def check_activation_validations(result, intent, validations, resolver, ledger, index_path, root):
     """Recompute every activation validation receipt from authenticated roots."""
     catalog_root = p.decode(resolver(intent['catalog_root']))
     private, semantic = expected_validations(result['checkpoint'], catalog_root, False)
@@ -2139,8 +2400,8 @@ def check_activation_validations(result, intent, validations, resolver, ledger, 
             'SELECT 1 FROM coverage WHERE kind=? AND sha256=? AND bytes=?',
             (reference['kind'], reference['sha256'], reference['bytes'])).fetchone() is not None,
             'validation receipt is not authenticated activation payload')
-    got_private = p.decode(resolver(validations['catalog_private']))
-    got_semantic = p.decode(resolver(validations['catalog_semantic']))
+    got_private = unwrap_validation(p.decode(resolver(validations['catalog_private'])), 'catalog_private', root)
+    got_semantic = unwrap_validation(p.decode(resolver(validations['catalog_semantic'])), 'catalog_semantic', root)
     p.require(got_private == private and got_semantic in (semantic, partial),
               'activation catalog validation differs from authenticated root')
     if validations['final_input'] is not None:
@@ -2150,7 +2411,7 @@ def check_activation_validations(result, intent, validations, resolver, ledger, 
     p.require((verifier_root is None) == (validations['verifier'] is None), 'verifier validation presence differs')
     if verifier_root is not None:
         backup = p.decode(resolver(verifier_root))
-        receipt = p.decode(resolver(validations['verifier']))
+        receipt = unwrap_validation(p.decode(resolver(validations['verifier'])), 'verifier', root)
         expected = {'schema_version': 1, 'operation': 'validate_restored_verifier', 'source': backup['source'],
             'session_id': backup['session_id'], 'unit_ordinal': backup['unit_ordinal'],
             'checkpoint_sha256': backup['checkpoint_sha256'], 'resource_plan_sha256': backup['resource_plan_sha256'],
@@ -2173,15 +2434,22 @@ def restore_generation(output):
     return Path(output) / 'state.restore'
 
 
-def catalog_restore_request(request, staged, checkpoint, index_path, output):
+def catalog_restore_request(request, staged, verifier_staged, checkpoint, index_path, output):
     """The closed request the catalog restore validators read (Rust QuantumRequest.validate_restore and
-    the checker): `request` is restore_request_base, which lacks the three per-restore paths added here.
+    the checker): `request` is restore_request_base, which lacks the per-restore paths added here.
+
+    The catalog validator reads the restored verifier's input scopes and result credits, so
+    `verifier_work_db` is the STAGED verifier file the same restore produced. Nothing creates a file at any
+    other name: the verifier is moved into the active generation only after both validations passed. A
+    checkpoint with no verifier snapshot yet has no staged file; the request then names the name the
+    generation would give it (see E1-NEEDS-FROM-E2: the checker has no "no verifier yet" form).
 
     tests/operations/test_paged_request_fixtures.py pins this builder to the checked-in fixture that the
     Rust catalog parses with QuantumRequest::read_shape.
     """
+    verifier = restore_generation(output) / 'verifier.sqlite' if verifier_staged is None else verifier_staged
     return {**request, 'operation': 'validate_restore', 'catalog_path': str(staged),
-            'verifier_work_db': str(restore_generation(output) / 'verifier.sqlite'),
+            'verifier_work_db': str(verifier),
             'checkpoint': checkpoint, 'dependency_index': str(index_path),
             'output_dir': str(Path(output) / 'restore-validation')}
 
@@ -2206,7 +2474,6 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
     output = Path(output)
     generation = restore_generation(output)
     generation.mkdir(exist_ok=False, mode=0o700)
-    request['verifier_work_db'] = str(generation / 'verifier.sqlite')
     directory = owned_directory(generation, reg, root)
 
     def stage(root_record, name):
@@ -2227,9 +2494,11 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
     finally:
         directory.close()
     request['catalog_path'] = str(staged)
-    restore = catalog_restore_request(request, staged, checkpoint, index_path, output)
+    restore = catalog_restore_request(request, staged, verifier_staged, checkpoint, index_path, output)
     Path(restore['output_dir']).mkdir(mode=0o700)
-    context.attach_restore(restore['output_dir'], [(catalog_budget, staged)])
+    # The catalog validator opens both restored files read-only: each is attached by its own held reservation.
+    held = [(catalog_budget, staged)] + ([] if verifier_staged is None else [(verifier_budget, verifier_staged)])
+    context.attach_restore(restore['output_dir'], held)
     path = output / 'restore-request.json'
     p.write(path, restore)
     for argv in ([sys.executable, str(Path(source) / 'scripts/check-async-driver-refinement'), 'paged-unit', '--request', str(path)],
@@ -2420,8 +2689,10 @@ def run_publish(api, reg, state, latest, control, root, source, output, job, run
                   'rehearsal anchor is not the first authenticated snapshot pair')
         spool = 'conformance-' + case[:32]
         pend = state['conformance_pending']
-    index_path = Path(output) / 'dependencies.sqlite'
-    shutil.copyfile(state['index_path'], index_path)
+    # The replay's own indexes are job-local and nothing reads them again after this dispatch, so the
+    # dispatch works on them directly: a second working copy would hold a further authentication_index
+    # database for the whole job (the map declares the true simultaneous count).
+    index_path = Path(state['index_path'])
     index = open_index(index_path)
     case_index = None
     store = None
@@ -2433,9 +2704,7 @@ def run_publish(api, reg, state, latest, control, root, source, output, job, run
             pend = fresh_conformance_pending(state['anchor'], Path(output) / ('conformance-' + case[:32] + '.sqlite'),
                                              resolver)
         if conformance is not None and not first_rehearsal:
-            case_path = Path(output) / 'case-dependencies.sqlite'
-            shutil.copyfile(state['conformance_index_path'], case_path)
-            case_index = open_index(case_path)
+            case_index = open_index(state['conformance_index_path'])
             restore_resolver = snapshots.AuthenticatedResolver(case_index.db, Path(state['conformance_parts_root']))
         store = PublicationStore(reg, root, spool, create=first_rehearsal, evidence=False, resume=first_rehearsal)
         receiver = ReplayLedger(pend['ledger_path'])
@@ -2538,14 +2807,11 @@ def prepare_activation(store, state, reg, root, source, output, pend, intent, bi
     restored = restore_snapshots(state, source, request, activation_output, reg, root, index_path,
                                  resolver, intent['catalog_root'], intent['verifier_root'],
                                  accepted['checkpoint'], pend['execution_origin'])
-    extra = [('validation_receipt', p.canonical(restored['catalog_private'])),
-             ('validation_receipt', p.canonical(restored['catalog_semantic']))]
-    if restored['verifier'] is not None:
-        extra.append(('validation_receipt', p.canonical(restored['verifier'])))
-    refs = {key: snapshots.content_ref('validation_receipt', p.canonical(restored[key]))
-            for key in ('catalog_private', 'catalog_semantic')}
-    refs['verifier'] = (None if restored['verifier'] is None
-                        else snapshots.content_ref('validation_receipt', p.canonical(restored['verifier'])))
+    records = {key: p.canonical(validation_receipt(key, restored[key], root))
+               for key in VALIDATORS if restored[key] is not None}
+    extra = [('validation_receipt', records[key]) for key in VALIDATORS if key in records]
+    refs = {key: snapshots.content_ref('validation_receipt', records[key]) if key in records else None
+            for key in VALIDATORS}
     refs['final_input'] = refs['catalog_semantic'] if accepted['work_unit']['stage'] == 'complete' else None
     batch, plan, payload = plan_transfer(store, state, reg, output, pend['pending'], pend['execution_origin'],
                                          origin, binding, purpose='activate', extra=extra)
@@ -2660,13 +2926,15 @@ def accept_activation(state, reg, root, work, auth, index):
         add_authenticated_members(index, provisional, transport, root)
 
         def validate_prefix(result, validations):
-            check_activation_validations(result, intent, validations, resolver, receiver.ledger, state['index_path'])
+            check_activation_validations(result, intent, validations, resolver, receiver.ledger, state['index_path'], root)
         result = snapshots.finish_publication(receiver.ledger, intent, pend['pending'], activation, planned,
                                               pend['original_receipts'], p.ref, validate_prefix)
     finally:
         receiver.close()
     p.require(p.digest(p.canonical(result['checkpoint'])) == intent['candidate_checkpoint']['sha256'],
               'accepted checkpoint is not the frozen candidate')
+    # The publication is accepted: nothing reads its receiver ledger again, so the retained set stays the live set.
+    receiver.discard()
     return result, transport, after
 
 
@@ -2719,6 +2987,7 @@ def replay_conformance(state, reg, root, work, auth, index, case):
         p.require(batch['execution_origin'] == anchor['execution_origin'] and batch['batch_ordinal'] == pend['pending']['next_batch_ordinal']
                   and (batch['purpose'] == 'activate') == final, 'conformance batch chain differs')
         receiver = ReplayLedger(pend['ledger_path'])
+        finished = False
         try:
             after = credit_rows(conf_index, receiver.ledger, resolver, carrier['unit_ordinal'], pend['pending'], batch,
                                 auth['rows'])
@@ -2734,8 +3003,11 @@ def replay_conformance(state, reg, root, work, auth, index, case):
                 check_conformance_final(state, reg, root, carrier, pend, payload, receiver.ledger, resolver, conf_index, case)
                 state['conformance_result'] = conformance['result']
                 state['conformance_pending'] = None
+                finished = True
         finally:
             receiver.close()
+        if finished:
+            receiver.discard()  # the case is complete: its rehearsal ledger has no further reader
     finally:
         conf_index.close()
     chain_carrier(state, auth, root)
@@ -2754,7 +3026,7 @@ def check_conformance_final(state, reg, root, carrier, pend, payload, ledger, re
     expected_checkpoint = p.digest(p.canonical(state['checkpoint']))
     p.require(intent['candidate_checkpoint']['sha256'] == expected_checkpoint, 'rehearsal anchor is not the unchanged checkpoint')
     check_activation_validations({'checkpoint': state['checkpoint']}, intent, result['validations'], resolver, ledger,
-                                 state['index_path'])
+                                 state['index_path'], root)
     p.require(result['kind'] == 'native_transport_conformance' and result['case_sha256'] == case
               and result['case_id'] == snapshots.CONFORMANCE_CASE and result['complete'] is True
               and result['acceptance'] is False and result['proof_checkpoint_advanced'] is False
@@ -2867,6 +3139,9 @@ def replay_control(api,control,root,work):
     p.require(successes==control['unit_runs'] and set(decisions)<=set(range(len(inventory))),
               'successful roots/decisions do not match actual attempted inventory')
     state['next_dispatch_ordinal']=len(inventory)
+    # The control each authenticated attempt actually ran with, by ordinal: what a durable dispatch
+    # reservation is reconciled against (settle_dispatch).
+    state['attempt_control_sha256']=[p.digest(p.canonical(item['control'])) for item in inventory]
     state['next_ordinal']=len(state['units'])
     state['retry_authorized']=not inventory or inventory[-1]['job']['status']=='success' or len(inventory)-1 in decisions
     return state,latest
@@ -3266,6 +3541,7 @@ def coordinate(control, root, output, maximum_dispatches=1):
     output = Path(output); output.mkdir(parents=True, exist_ok=True)
     api = api_environment(output / 'api')
     p.require(type(maximum_dispatches) is int and maximum_dispatches > 0, 'invalid controller dispatch bound')
+    reservations = DispatchReservations(output / 'dispatch-reservations')
     for iteration in range(maximum_dispatches):
         control,completed=reconcile_control(api,control,root)
         if completed is not None:
@@ -3275,25 +3551,14 @@ def coordinate(control, root, output, maximum_dispatches=1):
         state, _ = replay_control(api, control, root, output / ('replay-' + str(iteration)))
         p.require(state['next_dispatch_ordinal'] + maximum_dispatches - iteration <=
                   state['resource_plan']['record']['maximum_units'], 'controller exceeds immutable dispatch limit')
-        expected = dispatch(api, state, {**control}, root)
+        expected, _adopted = dispatch(api, state, {**control}, root, reservations)
         control = expected['control']
         p.write(output / ('dispatch-' + str(iteration) + '.json'), expected)
         # No guessed next run ID. Match the actual immutable dispatch input.
         deadline = time.monotonic() + 1800
         selected = None
         while time.monotonic() < deadline:
-            runs = api.pages('/actions/runs', {'workflow_id': p.WORKFLOW}, field='workflow_runs')
-            matches = []
-            for run in runs:
-                if run.get('commit_sha') != control['registration']['source']['commit'] or run.get('event') != 'workflow_dispatch':
-                    continue
-                event = p.decode(run.get('event_payload', '').encode())
-                inputs = event.get('inputs', {})
-                if (inputs.get('registration_sha256') == expected['registration_sha256']
-                    and inputs.get('mode') == expected['mode'] and inputs.get('operation') == expected['operation']
-                    and p.decode(inputs.get('control', '{}').encode()) == control
-                    and utc(run['created']) >= utc(expected['dispatched_at']) - 1):
-                    matches.append(run)
+            matches = matching_runs(api, expected, control, expected['dispatched_at'])
             p.require(len(matches) <= 1, 'ambiguous duplicate dispatch; no attempt splicing')
             if matches:
                 selected = matches[0]
