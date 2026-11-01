@@ -39,8 +39,8 @@ from validation.python_unit_receipts import (
 
 JOB = 'Apple compile and native TV navigation'
 WORKFLOW = '.github/workflows/main-fast-lane.yml'
-RUNS_ON = ['self-hosted', 'macOS', 'ARM64', 'lab', 'apple', 'xcode-27.1']
-XCODE = 'Xcode 27.1\nBuild version 27A9275'
+RUNS_ON = ['self-hosted', 'macOS', 'ARM64', 'lab', 'apple', 'xcode-27.2']
+XCODE = 'Xcode 27.2\nBuild version 27B52'
 RUNTIME = 'com.apple.CoreSimulator.SimRuntime.tvOS-26-5'
 # Reviewed schema-1 producer: unconditional pinned-tool checks; native make
 # commands conditional only on affected scope; failure-preserving artifacts.
@@ -335,7 +335,7 @@ def origin(api, artifact, scope, current, current_run, *, tv_cases=False):
     log = api.bytes(f"/actions/jobs/{positive(job['id'])}/logs").decode()
     require(commit + f":refs/remotes/pull/{old_scope['pr']}/head" in log
             and log.count(f'Artifact {name} has been successfully uploaded!') == 1
-            and 'Xcode 27.1' in log and 'Build version 27A9275' in log,
+            and 'Xcode 27.2' in log and 'Build version 27B52' in log,
             'Original checkout/toolchain/publication proof unavailable')
     return {'repository': scope['repository'], 'pr': old_scope['pr'], 'run': rid,
             'job': job['id'], 'attempt': 1, 'commit': commit, 'artifact': artifact['id'],
