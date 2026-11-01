@@ -2453,8 +2453,36 @@ impl ReadSnapshot {
                 "export prior high-water is in future".into(),
             ));
         }
-        std::fs::create_dir_all(output)?;
+        // Refuse BEFORE creating the scratch file: its family must be granted,
+        // the file must lie in the granted allocation and the journal/temp
+        // reservations must cover the database ceiling.
+        let family = resource.family("catalog_export_scratch")?;
         let scratch = output.join(".manifest-closure.sqlite");
+        let granted = self
+            .catalog
+            .inner
+            .config
+            .grant
+            .as_ref()
+            .is_none_or(|grant| {
+                grant.allocation_covers("catalog_export_scratch", "main", &scratch)
+            });
+        if !granted
+            || family
+                .database_bytes
+                .checked_mul(2)
+                .and_then(|n| n.checked_add(1024 * 1024))
+                .is_none_or(|n| n > family.journal_bytes)
+            || family
+                .database_bytes
+                .checked_mul(2)
+                .is_none_or(|n| n > family.temp_bytes)
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "export prospective database/journal/temp reservation or grant scope".into(),
+            ));
+        }
+        std::fs::create_dir_all(output)?;
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -2470,21 +2498,10 @@ impl ReadSnapshot {
         )?;
         let page_size: u64 =
             work.query_row("PRAGMA page_size", [], |row| sqlite::row_uint(row, 0))?;
-        let family = resource.family("catalog_export_scratch")?;
         let pages = family.database_bytes / page_size;
-        if pages == 0
-            || family
-                .database_bytes
-                .checked_mul(2)
-                .and_then(|n| n.checked_add(1024 * 1024))
-                .is_none_or(|n| n > family.journal_bytes)
-            || family
-                .database_bytes
-                .checked_mul(2)
-                .is_none_or(|n| n > family.temp_bytes)
-        {
+        if pages == 0 {
             return Err(CatalogError::ResourceIncomplete(
-                "export prospective database/journal/temp reservation".into(),
+                "export database ceiling below one page".into(),
             ));
         }
         let effective = work.query_row(&format!("PRAGMA max_page_count={pages}"), [], |row| {
