@@ -20175,7 +20175,7 @@
       "id": "json.0",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "0"
     },
     {
@@ -20183,7 +20183,7 @@
       "id": "json.1",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "1"
     },
     {
@@ -20191,7 +20191,7 @@
       "id": "json.2",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "2"
     },
     {
@@ -20199,7 +20199,7 @@
       "id": "json.20",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "20"
     },
     {
@@ -20207,7 +20207,7 @@
       "id": "json.256",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "256"
     },
     {
@@ -20215,7 +20215,7 @@
       "id": "json.3",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "3"
     },
     {
@@ -20223,7 +20223,7 @@
       "id": "json.36",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "36"
     },
     {
@@ -20231,7 +20231,7 @@
       "id": "json.4",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "4"
     },
     {
@@ -20239,7 +20239,7 @@
       "id": "json.40",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "40"
     },
     {
@@ -20247,7 +20247,7 @@
       "id": "json.5",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "5"
     },
     {
@@ -20255,7 +20255,7 @@
       "id": "json.6",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "6"
     },
     {
@@ -20263,7 +20263,7 @@
       "id": "json.64",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "64"
     },
     {
@@ -20271,7 +20271,7 @@
       "id": "json.8",
       "rule_id": "canonical_json_punctuation_escape_and_digit_alphabet_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
       "value": "8"
     },
     {
@@ -20495,8 +20495,8 @@
       "id": "source_bytes.25",
       "rule_id": "exact_registered_utf8_file_bytes_v1",
       "source_path": "verification/async-driver-refinement/paged_codec.py",
-      "source_sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604",
-      "value": "123615"
+      "source_sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
+      "value": "124271"
     },
     {
       "anchor": "\"\"\"Independent bounded schema6 semantic verifier and work-unit entry point.",
@@ -32280,7 +32280,7 @@
     },
     {
       "path": "verification/async-driver-refinement/paged_codec.py",
-      "sha256": "97c8120b0f95326a96a3b77ef2994ead9e65d9ac14636375878a5c2278395604"
+      "sha256": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16"
     },
     {
       "path": "verification/async-driver-refinement/paged_scc.py",
