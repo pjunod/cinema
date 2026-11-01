@@ -90,11 +90,53 @@ fn parse_ceiling(value: Option<String>) -> io::Result<u64> {
 /// the budget exists. Runs on its own task, so a Store read that fails or
 /// hangs during an election delays only this loop: every writer keeps the
 /// last ceiling it was told.
+///
+/// If the loop ends while the budget is still in use (a panic in the source,
+/// a runtime that went away under it), its guard says so once, clears the
+/// started flag so the next writer's `refresh` starts it again, and turns an
+/// unread ceiling into a refusal instead of leaving writers waiting on a
+/// read that will never come. That is the existing start-on-demand path,
+/// not a watchdog: nothing polls for it.
 async fn ceiling_settings_loop(
     budget: Weak<PlaybackCacheBudget>,
     source: Arc<dyn CacheCeilingSource>,
     ceiling: Arc<tokio::sync::watch::Sender<CeilingSetting>>,
+    started: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    struct Running {
+        budget: Weak<PlaybackCacheBudget>,
+        ceiling: Arc<tokio::sync::watch::Sender<CeilingSetting>>,
+        started: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for Running {
+        fn drop(&mut self) {
+            if self.budget.strong_count() > 0 {
+                self.ceiling.send_if_modified(|current| match current {
+                    CeilingSetting::Unread => {
+                        *current = CeilingSetting::Unavailable(
+                            "the playback cache settings task ended before its first read"
+                                .to_owned(),
+                        );
+                        true
+                    }
+                    _ => false,
+                });
+                tracing::warn!(
+                    panicked = std::thread::panicking(),
+                    kept = ?*self.ceiling.borrow(),
+                    "playback cache settings task ended while the cache is in use; the next \
+                     writer restarts it"
+                );
+            }
+            self.started
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _running = Running {
+        budget: budget.clone(),
+        ceiling: Arc::clone(&ceiling),
+        started,
+    };
     let mut interval = tokio::time::interval(SAMPLE_AGE);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_warning: Option<Instant> = None;
@@ -417,7 +459,8 @@ pub(crate) struct PlaybackCacheBudget {
     ceiling_source: Arc<dyn CacheCeilingSource>,
     /// Published by `ceiling_settings_loop`; read without any Store call.
     ceiling_setting: Arc<tokio::sync::watch::Sender<CeilingSetting>>,
-    ceiling_task_started: std::sync::atomic::AtomicBool,
+    /// Set while `ceiling_settings_loop` runs; the loop clears it as it ends.
+    ceiling_task_started: Arc<std::sync::atomic::AtomicBool>,
     roots: Vec<PathBuf>,
     owners: Mutex<Vec<Arc<dyn CacheOwner>>>,
     state: Mutex<State>,
@@ -464,7 +507,7 @@ impl PlaybackCacheBudget {
         let budget = Arc::new(Self {
             ceiling_source,
             ceiling_setting: Arc::new(tokio::sync::watch::Sender::new(CeilingSetting::Unread)),
-            ceiling_task_started: std::sync::atomic::AtomicBool::new(false),
+            ceiling_task_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             roots: disjoint,
             owners: Mutex::default(),
             state: Mutex::default(),
@@ -510,8 +553,8 @@ impl PlaybackCacheBudget {
             })
     }
 
-    /// Start the settings task once. The sweep loop starts it at boot; the
-    /// first writer starts it if nothing has yet.
+    /// Start the settings task unless it is running. The sweep loop starts it
+    /// at boot; a writer starts it if nothing has yet, or again if it ended.
     pub(crate) fn start_ceiling_settings(self: &Arc<Self>) {
         if self
             .ceiling_task_started
@@ -523,6 +566,7 @@ impl PlaybackCacheBudget {
             Arc::downgrade(self),
             Arc::clone(&self.ceiling_source),
             Arc::clone(&self.ceiling_setting),
+            Arc::clone(&self.ceiling_task_started),
         ));
     }
 
@@ -1619,6 +1663,7 @@ mod tests {
         value: Mutex<Option<String>>,
         hang: std::sync::atomic::AtomicBool,
         fail: std::sync::atomic::AtomicBool,
+        panic_next: std::sync::atomic::AtomicBool,
         entered_hang: tokio::sync::Notify,
     }
 
@@ -1632,6 +1677,10 @@ mod tests {
             if self.fail.load(Ordering::SeqCst) {
                 return Err(io::Error::other("CheckIsLeaderError: no leader"));
             }
+            assert!(
+                !self.panic_next.swap(false, Ordering::SeqCst),
+                "the ceiling source panicked"
+            );
             Ok(self.value.lock().expect("value").clone())
         }
     }
@@ -1685,6 +1734,33 @@ mod tests {
         let fixture = fixture_with(source);
         assert!(reserve(&fixture.roots[0].join("first"), 1).await.is_err());
         assert!(fixture.budget.used_bytes().await.is_err());
+    }
+
+    /// C3: a settings task that dies does not freeze the ceiling. The
+    /// writers waiting on its first read are refused at once rather than
+    /// after a timeout, and the next writer starts it again, so a ceiling
+    /// read after that takes effect.
+    #[tokio::test]
+    async fn a_settings_task_that_dies_is_restarted_by_the_next_writer() {
+        let source = Arc::new(ControlledCeiling::default());
+        *source.value.lock().expect("value") = Some("3".to_owned());
+        source.panic_next.store(true, Ordering::SeqCst);
+        let fixture = fixture_with(Arc::clone(&source));
+        let first = tokio::time::timeout(Duration::from_secs(2), fixture.budget.ceiling_bytes())
+            .await
+            .expect("a dead settings task does not leave the writer waiting");
+        assert!(first.is_err(), "nothing was ever read: fail closed");
+        let ceiling = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(bytes) = fixture.budget.ceiling_bytes().await {
+                    return bytes;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a writer restarted the settings task and it read the ceiling");
+        assert_eq!(ceiling, 3 * GIB);
     }
 
     /// C3: a known ceiling of zero is enforced, and a failed read afterwards
