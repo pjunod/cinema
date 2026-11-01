@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -48,8 +49,10 @@ class MainCompletionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=scratch) as directory:
             with patch.dict(os.environ,{'GITHUB_TOKEN':'private','ACTIONS_RUNTIME_TOKEN':'private',
                                         'GITHUB_EVENT_PATH':'private','CARGO_TARGET_DIR':str(ROOT/'target/async-fixture-compiler')},clear=False):
-                env=s.child_environment({},Path(directory)/'request.json',ROOT,directory)
+                grant=SimpleNamespace(environment=lambda:dict(zip(s.GRANT_ENV,('7','1'*64,'8'))))
+                env=s.child_environment({},Path(directory)/'request.json',ROOT,directory,grant)
             self.assertFalse({'GITHUB_TOKEN','ACTIONS_RUNTIME_TOKEN','GITHUB_EVENT_PATH'} & set(env))
+            self.assertEqual({key:env[key] for key in s.GRANT_ENV},dict(zip(s.GRANT_ENV,('7','1'*64,'8'))))
             self.assertEqual(env['CARGO_NET_OFFLINE'],'true')
             self.assertEqual(env['PLURX_ASYNC_PAGED_REQUEST'],str(Path(directory)/'request.json'))
 
@@ -109,7 +112,8 @@ class CapabilityAndStorageTests(unittest.TestCase):
         reg={'source':{'commit':'a'*40}}
         base={'schema_version':1,'registration':reg,'resource_plan':{'immutable':'plan'},
               'probe_run':{},'unit_runs':[],'attempt_runs':[],'resume_decisions':[],
-              'main_run':None,'session_id':'00000000-0000-4000-8000-000000000001'}
+              'main_run':None,'session_id':'00000000-0000-4000-8000-000000000001','transport_conformance':None}
+        self.assertEqual(set(base),set(s.CONTROL_KEYS))  # a closed control: every key the controller replays, no more
         rows=[]
         for ordinal,run_id in enumerate((8,9,10)):
             prior=copy.deepcopy(base);prior['attempt_runs']=[8,9,10][:ordinal]
