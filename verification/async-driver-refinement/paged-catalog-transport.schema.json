@@ -49,7 +49,7 @@
             "publication_intent",
             "transfer_batch_receipt",
             "publication_activation",
-            "execution_result",
+            "planned_execution_result",
             "validation_receipt"
           ]
         },
