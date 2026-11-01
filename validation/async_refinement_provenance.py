@@ -360,6 +360,8 @@ def artifact_bytes(api, artifact, maximum=MAX_ARTIFACT):
             while block := incoming.read1(MIB):
                 count += len(block)
                 require(count <= maximum, 'artifact download exceeded limit')
+                # The caller reserved exactly size_in_bytes: no byte past it is ever written.
+                require(count <= artifact['size_in_bytes'], 'artifact download exceeded its reserved size')
                 if hasattr(api,'guard_storage'):api.guard_storage(len(block))
                 out.write(block)
         require(count == artifact['size_in_bytes'], 'artifact API size differs')

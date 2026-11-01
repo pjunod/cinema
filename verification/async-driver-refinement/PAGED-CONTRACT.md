@@ -658,15 +658,35 @@ operation. Each dispatch's `dispatch_ordinal` is reserved durably **before** the
 the controller creates and fsyncs `dispatch-<n>.reserved.json` (registration,
 control digest, mode, operation) in its owned output directory, then
 `dispatch-<n>.sent.json` immediately before the POST (removed again only if the
-server definitively refuses the request). The authenticated attempt inventory
-read from the source repository's event history stays the authority on what ran,
-and the ordinal is still the length of that inventory (`len(attempt_runs)` of the
-dispatched control). On restart every reservation is reconciled against the
-inventory: an ordinal inside it must have been reserved for exactly the control
-that ran, no reservation lies beyond the next ordinal, and the reservation at the
-next ordinal is adopted if its run is visible, resent with the same payload only
-if it was never sent, and otherwise refused as uncertain (it stays consumed: it
-is neither reused by another dispatch nor skipped). The reservations are owned
+server definitively refuses the request). The directory is bound to one session
+and registration by `session.json`, written on first use and compared on every
+later one, so the controller's `--output` must be stable for the session. The
+authenticated attempt inventory read from the source repository's event history
+stays the authority on what ran. A dispatch's ordinal is the number of runs
+before it plus the number of uncertain dispatches before it
+(`len(attempt_runs) + len(uncertain_dispatches)` of the dispatched control). On
+restart every reservation is reconciled against the inventory: every reserved
+ordinal inside it was reserved, for this session, for exactly the control that
+ran (an inventory ordinal with no reservation passes, because the dispatch may
+have come from a controller whose directory this process never saw; the inventory
+itself refuses duplicates), no reservation lies beyond the next ordinal, and the
+reservation at the next ordinal is adopted if its run is visible, resent with
+the same payload only if it was never sent, waited for while a sent dispatch
+may only be late, and otherwise settled.
+
+A sent dispatch whose run is still not visible `UNCERTAIN_DISPATCH_SECONDS`
+(1800) after it was reserved is **uncertain**. It is settled durably
+(`dispatch-<n>.uncertain.json`), consumes its ordinal and its unit of
+`maximum_units` for good, is never sent again, and the controller declares it in
+the control's closed `uncertain_dispatches` rows (`ordinal`, `control_sha256`).
+The retry is a new dispatch with the next ordinal. The inventory reconciles the
+declarations with the runs: every ordinal below the total is either a run or a
+declared uncertain dispatch (otherwise an unexplained gap), the control of each
+run must carry exactly the declarations before its own ordinal, and an ordinal
+that is declared uncertain and later also appears as a run refuses the session
+(no attempt splicing: both the late run and its retry exist, and neither is
+adopted). Nothing is therefore reused or silently skipped, and no operator edits
+scratch. The reservations are owned
 files, not a database, so they have no table-map role. Failed and uncertain
 dispatches, publish dispatches and the final
 activation dispatch all consume the immutable `maximum_units`; there is no
@@ -948,19 +968,36 @@ granted empty. Downloads, restores and rebuilt evidence all charge `restore_stag
 and the controller re-authenticates and re-extracts the whole retained history
 each job, rebuilding the evidence of every accepted publication it replays (a
 second copy of the same bytes that stays on disk because the authenticated
-member rows point at it). Calibration therefore also requires
+member rows point at it).
+
+`total_retained_artifact_bytes` (T) bounds the archived bytes AND the extracted
+bytes of the retained history: the sender refuses a batch whose members, added
+to the cumulative extracted bytes already accepted, exceed T, and the receiver
+refuses a carrier chain whose cumulative `extracted_bytes` (the sum of the
+authenticated `ArtifactReceipt.extracted_bytes`) exceeds T, exactly as it
+already refuses cumulative `zip_bytes` above T. A highly compressed history
+therefore cannot extract beyond the pool the plan was admitted with.
+
+A job also keeps its largest artifact ZIP deducted from the pool for the whole
+job (the download reservation is a high-water mark that releasing a ZIP never
+lowers), while the members, the two staged images and the unit's evidence are
+charged beside it. One ZIP is at most `ARTIFACT_BYTES` (512 MiB) and at most T.
+Calibration therefore also requires
 `restore_staging_bytes >= 2*total_retained_artifact_bytes +
+min(ARTIFACT_BYTES, total_retained_artifact_bytes) +
 2*max(catalog_main.database_bytes, verifier_main.database_bytes) +
-unit_byte_allowance`: the retained history as downloaded and extracted members
-and again as rebuilt evidence, one staged catalog and one staged verifier image,
-and the evidence of the unit being prepared (`restore_staging_requirement`; the
-verifier `Budget` and the Rust plan validator re-apply the identical inequality
-with the calibration's baseline). A pool below it halts the session
-deterministically once the history grows past it, so it is refused at
-calibration, not discovered at the first download. The unadmitted example's
-`restore_staging_bytes` (5 GiB) satisfies it for the illustrative figures of
-2 GiB retained (four 512 MiB artifacts) and a 512 MiB evidence allowance; it
-still validates no fit.
+unit_byte_allowance`: the retained history as extracted members and again as
+rebuilt evidence, the transient ZIP high water, one staged catalog and one
+staged verifier image, and the evidence of the unit being prepared
+(`restore_staging_requirement`; the verifier `Budget` and the Rust plan
+validator re-apply the identical inequality with the calibration's baseline,
+and `tests/operations/fixtures/physical-policy/parity.json` pins the numbers
+for both sides). A pool below it halts the session deterministically once the
+history grows past it, so it is refused at calibration, not discovered at the
+first download. The unadmitted example's `restore_staging_bytes` is the value
+that inequality gives for the illustrative figures of 2 GiB retained (four
+512 MiB artifacts), a 512 MiB evidence allowance and 64 MiB database ceilings;
+it still validates no fit.
 The preparation-only unit's controller-made copy of the restored
 catalog (`catalog-backup.sqlite`) takes its own `snapshot_spool_bytes` claim before
 the first byte is written. The next job removes the earlier job outputs, found with the
@@ -1133,6 +1170,15 @@ it, and each can be reverted to the ABI wording without touching the others.
    inequality above. *Reason:* the pool's owner, `snapshot_restore`, performs the
    download and the restore, and a charge made before the first byte is written is
    the only one that can refuse growth. *Awaiting the user's acceptance.*
+3. **A closed control row for uncertain dispatches.** The ABI says uncertain
+   outcomes consume `maximum_units` and retries get new ordinals, but the
+   dispatch ordinal was derived from `len(attempt_runs)`, which cannot name an
+   ordinal that has no run. The session control (`CONTROL_KEYS`) therefore gains
+   the closed list `uncertain_dispatches`, and the ordinal becomes
+   `len(attempt_runs) + len(uncertain_dispatches)`. *Reason:* without it the only
+   recovery from a dispatch that never became visible is hand-deleting scratch.
+   *Awaiting the user's acceptance;* a control file written before this change
+   lacks the key and must be rewritten with `[]`.
 
 ### Post-upload session control
 

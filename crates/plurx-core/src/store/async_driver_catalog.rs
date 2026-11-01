@@ -102,10 +102,13 @@ pub fn lifetime_reservation(live: u64, database_bytes: u64) -> CatalogResult<Fam
     })
 }
 
-/// What `restore_staging_bytes` must hold: the retained history twice (downloaded and extracted
-/// members, plus the evidence rebuilt from them for every replayed publication), two staged
-/// databases (one catalog and one verifier image) and the evidence allowance of the unit being
-/// prepared. The Python calibration's `restore_staging_requirement` is the same sum.
+/// What `restore_staging_bytes` must hold: the retained history twice (extracted members, plus
+/// the evidence rebuilt from them for every replayed publication), the transient ZIP high water
+/// (the largest artifact ZIP of a job stays deducted beside everything else: the smaller of
+/// `ARTIFACT_BYTES` and the retained total), two staged databases (one catalog and one verifier
+/// image) and the evidence allowance of the unit being prepared. The retained total bounds the
+/// cumulative extracted bytes as well as the archived ones (the session's sender and receiver
+/// both enforce it). The Python calibration's `restore_staging_requirement` is the same sum.
 pub fn restore_staging_requirement(
     total_retained_artifact_bytes: u64,
     catalog_database_bytes: u64,
@@ -119,6 +122,7 @@ pub fn restore_staging_requirement(
         .checked_mul(2)
         .zip(images)
         .and_then(|(history, images)| history.checked_add(images))
+        .and_then(|bytes| bytes.checked_add(total_retained_artifact_bytes.min(ARTIFACT_BYTES)))
         .and_then(|bytes| bytes.checked_add(unit_byte_allowance))
         .ok_or_else(physical_overflow)
 }
@@ -493,7 +497,7 @@ impl ResourceLimits {
                 "source/runtime pool does not cover the baseline, every output directory and scratch".into(),
             ));
         }
-        // And the restore staging pool: the history twice, two staged databases and the evidence
+        // And the restore staging pool: the history twice, the transient ZIP, two staged databases and the evidence
         // allowance (`restore_staging_requirement`), by the Python calibration's inequality.
         if pools["restore_staging_bytes"]
             < restore_staging_requirement(
@@ -504,7 +508,7 @@ impl ResourceLimits {
             )?
         {
             return Err(CatalogError::ResourceIncomplete(
-                "restore staging pool does not cover the retained history twice, two restored databases and the evidence allowance".into(),
+                "restore staging pool does not cover the retained history twice, the transient ZIP, two restored databases and the evidence allowance".into(),
             ));
         }
         peak = add(
@@ -4348,10 +4352,12 @@ mod tests {
         }
     }
 
-    /// Calibration's restore inequality: twice the retained history + two staged databases + the
-    /// evidence allowance. Exactly the requirement is admitted; one byte less is not.
+    /// Calibration's restore inequality: twice the retained history, the transient ZIP high water,
+    /// two staged databases and the evidence allowance. Exactly the requirement is admitted; one
+    /// byte less is not.
     #[test]
-    fn the_restore_staging_pool_must_cover_the_history_twice_two_databases_and_the_evidence() {
+    fn the_restore_staging_pool_must_cover_the_history_twice_the_zip_two_databases_and_the_evidence(
+    ) {
         let limits = |restore_pool: u64, verifier_database: u64| {
             let config = fixture_configuration_adjusted(
                 PathBuf::from("/unused"),
@@ -4368,8 +4374,9 @@ mod tests {
             );
             ResourceLimits::from_plan(&config.resource_plan)
         };
-        // The fixture plan: 1_000_000 retained bytes and a 16 MiB evidence allowance.
-        let base = 2 * 1_000_000 + 16 * 1024 * 1024;
+        // The fixture plan: 1_000_000 retained bytes (smaller than one artifact, so the transient
+        // ZIP term is the retained total itself) and a 16 MiB evidence allowance.
+        let base = 2 * 1_000_000 + 1_000_000 + 16 * 1024 * 1024;
         let small = 2 * FIXTURE_DATABASE_BYTES + base;
         assert!(limits(small - 1, FIXTURE_DATABASE_BYTES).is_err());
         assert!(limits(small, FIXTURE_DATABASE_BYTES).is_ok());

@@ -49,7 +49,7 @@ MAIN_ENV = {'paperwork': 'PAPERWORK_RESULT', 'scope': 'SCOPE_RESULT', 'preflight
             'async_refinement': 'ASYNC_DRIVER_RESULT', 'web_compile': 'WEB_RESULT',
             'apple_compile': 'APPLE_RESULT', 'android_compile': 'ANDROID_RESULT'}
 CONTROL_KEYS=('schema_version','registration','resource_plan','probe_run','unit_runs','attempt_runs',
-              'resume_decisions','main_run','session_id','transport_conformance')
+              'resume_decisions','main_run','session_id','transport_conformance','uncertain_dispatches')
 NULL_PROGRESS = {'context': None, 'record_kind': None, 'after_key': None, 'fifo_ticket': None,
                  'component_id': None, 'family': None, 'case_index': 0}
 REGISTRATION_KEYS = ('schema_version', 'source', 'repository', 'repository_name', 'pr', 'event_base',
@@ -369,7 +369,7 @@ def admit(reg, plan, probe, measurement, root, now=None):
             'capability': probe, 'measurement': measurement, 'arithmetic': arithmetic,
             'units': [], 'attempts': [], 'next_ordinal':0, 'next_dispatch_ordinal':0, 'pending_publication':None, 'session': None, 'checkpoint': None, 'initial_image': None,
             'stage': 'expand', 'progress': copy.deepcopy(NULL_PROGRESS), 'phase': 'admitted',
-            'retained_bytes': 0, 'dispatched_runs': [], 'created_at': time.time() if now is None else now}
+            'retained_bytes': 0, 'extracted_bytes': 0, 'dispatched_runs': [], 'created_at': time.time() if now is None else now}
 
 
 FINAL_INPUT_SCOPE = 'restored catalog/page identity correspondence; production replay and full semantic qualification remain separate'
@@ -1229,6 +1229,33 @@ def api_environment(scratch):
     return api
 
 
+def declared_uncertain(control):
+    """The closed, ordered rows of the control's `uncertain_dispatches`: dispatches that were sent, never seen
+    and settled as uncertain. Each consumed its ordinal and its unit of `maximum_units`."""
+    rows = control['uncertain_dispatches']
+    p.require(type(rows) is list, 'uncertain dispatch declaration is not a list')
+    for row in rows:
+        p.closed(row, ('ordinal', 'control_sha256'))
+        p.require(type(row['ordinal']) is int and row['ordinal'] >= 0 and type(row['control_sha256']) is str
+                  and p.SHA.fullmatch(row['control_sha256']), 'invalid uncertain dispatch declaration')
+    ordinals = [row['ordinal'] for row in rows]
+    p.require(ordinals == sorted(set(ordinals)), 'uncertain dispatch declarations are unordered or duplicated')
+    return rows
+
+
+def control_ordinal(control):
+    """The ordinal a dispatch with this control takes: every run before it plus every uncertain dispatch."""
+    return len(control['attempt_runs']) + len(declared_uncertain(control))
+
+
+class Inventory(list):
+    """The authenticated attempt items by ordinal, with the uncertain declarations that explain the other ordinals."""
+    uncertain = ()
+
+
+UNCERTAIN_DISPATCH_SECONDS = 1800  # how long a sent dispatch may stay invisible before it is settled as uncertain
+
+
 class DispatchReservations:
     """The durable, fsynced record of every dispatch ordinal, written BEFORE the API call.
 
@@ -1236,21 +1263,46 @@ class DispatchReservations:
     operation), created exclusively and fsynced with its directory before anything is sent. A
     `dispatch-<n>.sent.json` marker is created, the same way, immediately before the POST begins; it
     is removed again only when the server definitively refused the request, so a marker that survives
-    means "this POST may have reached the server".
+    means "this POST may have reached the server". A sent dispatch whose run is still not visible after
+    `UNCERTAIN_DISPATCH_SECONDS` is settled as uncertain by `dispatch-<n>.uncertain.json`: the ordinal
+    is consumed for good and the retry takes the next one (see `claim_dispatch`).
 
     The authenticated attempt inventory (the Actions runs and their controls) stays the authority on what
     ran; this record is what lets a restarted controller reconcile a crash between reservation and
     POST, or after the POST and before the run is visible, without ever reusing the ordinal for another
-    dispatch or skipping it (see `claim_dispatch`).
+    dispatch or skipping it.
+
+    The directory belongs to ONE session and registration (`session.json`, written on first use and
+    compared on every later one), so a restart that points the controller at the same directory can only
+    ever reconcile that session's ordinals; the controller's `--output` must therefore be stable for the
+    session, and a different directory has, by construction, no reservation to recover.
     """
-    def __init__(self, directory):
+    STAGES = ('reserved', 'sent', 'uncertain')
+
+    def __init__(self, directory, identity=None):
         self.directory = Path(directory)
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         p.require(self.directory.is_dir() and not self.directory.is_symlink(),
                   'dispatch reservation directory is not a private directory')
+        self.identity = None
+        if identity is not None:
+            self.bind(identity)
+
+    def bind(self, identity):
+        p.require(type(identity) is dict and set(identity) == {'session_id', 'registration_sha256'},
+                  'dispatch reservation identity is not closed')
+        target = self.directory / 'session.json'
+        try:
+            self._create(target, {'schema_version': 1, 'kind': 'dispatch_reservation_session', **identity})
+        except FileExistsError:
+            pass
+        held = p.read(target)
+        p.require(held == {'schema_version': 1, 'kind': 'dispatch_reservation_session', **identity},
+                  'the dispatch reservation directory belongs to a different session or registration')
+        self.identity = identity
 
     def file(self, ordinal, stage):
-        p.require(type(ordinal) is int and ordinal >= 0 and stage in ('reserved', 'sent'),
+        p.require(type(ordinal) is int and ordinal >= 0 and stage in self.STAGES,
                   'invalid dispatch reservation name')
         return self.directory / ('dispatch-%d.%s.json' % (ordinal, stage))
 
@@ -1289,10 +1341,26 @@ class DispatchReservations:
         self._create(self.file(record['ordinal'], 'reserved'), record)
 
     def state(self, ordinal):
-        """None (never reserved), 'reserved' (nothing sent) or 'sent' (the POST may have reached the server)."""
+        """None (never reserved), 'reserved' (nothing sent), 'sent' (the POST may have reached the server)
+        or 'uncertain' (sent, never seen, settled: the ordinal is consumed and will not be sent again)."""
         if not self.file(ordinal, 'reserved').exists():
             return None
+        if self.file(ordinal, 'uncertain').exists():
+            return 'uncertain'
         return 'sent' if self.file(ordinal, 'sent').exists() else 'reserved'
+
+    def uncertain(self):
+        """The reservations settled as uncertain, by ordinal, as the closed control rows that declare them."""
+        rows = []
+        for ordinal in self.ordinals():
+            if self.state(ordinal) == 'uncertain':
+                rows.append({'ordinal': ordinal, 'control_sha256': self.read(ordinal)['control_sha256']})
+        return rows
+
+    def mark_uncertain(self, ordinal):
+        p.require(self.state(ordinal) in ('sent', 'uncertain'), 'only a sent dispatch can be settled as uncertain')
+        if not self.file(ordinal, 'uncertain').exists():
+            self._create(self.file(ordinal, 'uncertain'), {'ordinal': ordinal, 'kind': 'dispatch_uncertain'})
 
     def mark_sent(self, ordinal):
         if not self.file(ordinal, 'sent').exists():
@@ -1315,32 +1383,44 @@ def dispatch_record(ordinal, session_id, expected, control):
 def settle_dispatch(reservations, dispatched):
     """Reconcile the reserved ordinals with the authenticated attempt inventory.
 
-    `dispatched` lists the digest of the control each authenticated attempt ran with, by ordinal. An
-    ordinal inside the inventory must have been reserved for exactly the control that ran; no
-    reservation may lie beyond the next ordinal (an ordinal is never skipped). The reservation at the
-    next ordinal, if any, is the one dispatch whose outcome the inventory cannot show yet: it is
-    returned for `claim_dispatch`.
+    `dispatched` lists the digest of the control each consumed ordinal ran (or, for an ordinal settled as
+    uncertain, was reserved) with, by ordinal. Every reserved ordinal inside it must have been reserved
+    for exactly the control that ran, and for this session; no reservation may lie beyond the next
+    ordinal (an ordinal is never skipped). An ordinal without a reservation passes: a dispatch can come
+    from a controller whose directory this process never saw, and the inventory itself refuses duplicates.
+    The reservation at the next ordinal, if any, is the one dispatch whose outcome the inventory cannot
+    show yet: it is returned for `claim_dispatch`.
     """
     ordinals = reservations.ordinals()
     p.require(all(ordinal <= len(dispatched) for ordinal in ordinals),
               'a reserved dispatch ordinal lies beyond the authenticated attempt inventory; ordinals are never skipped')
     for ordinal in ordinals:
         if ordinal < len(dispatched):
-            p.require(reservations.read(ordinal)['control_sha256'] == dispatched[ordinal],
+            held = reservations.read(ordinal)
+            p.require(held['control_sha256'] == dispatched[ordinal],
                       'a dispatch ran with a control other than the one its ordinal was reserved for')
+            p.require(reservations.identity is None or held['session_id'] == reservations.identity['session_id'],
+                      'a dispatch reservation names a different session')
     return len(dispatched) if len(dispatched) in ordinals else None
 
 
-def claim_dispatch(reservations, record, runs, dispatched):
+def claim_dispatch(reservations, record, runs, dispatched, now=None):
     """Reserve the next ordinal durably, or recover the reservation a crashed controller left there.
 
-    Returns ('post', record) when the request must be sent and ('adopt', run) when the dispatch already
-    created its run. A recovered reservation is never replaced: it keeps its ordinal and its payload.
+    Returns ('post', record) when the request must be sent, ('adopt', run) when the dispatch already
+    created its run and ('uncertain', record) when the dispatch is settled as uncertain. A recovered
+    reservation is never replaced: it keeps its ordinal and its payload.
 
       * never sent: the crash was before the POST; the very same request is sent for the same ordinal;
       * its run is visible (any status): the crash was after the POST; the run is adopted, nothing is sent;
-      * sent but no run visible yet: the outcome is uncertain. The ordinal stays consumed - it is neither
-        reused for another dispatch nor skipped - and the controller refuses until the run is visible.
+      * sent, no run visible, and `UNCERTAIN_DISPATCH_SECONDS` not yet elapsed since it was reserved: the
+        run may only be late; the controller refuses and waits, the ordinal stays consumed;
+      * sent, no run visible after that time: the outcome is uncertain. It is settled durably as
+        uncertain, consumes its unit of `maximum_units` for good, and the controller folds it into the
+        control's `uncertain_dispatches`; the retry is a new dispatch with the next ordinal. Nothing is
+        reused (the ordinal is never sent again) and nothing is silently skipped (the settled ordinal is
+        declared in the control and reconciled against the authenticated attempt inventory, which refuses
+        the session if that run ever appears).
     """
     unsettled = settle_dispatch(reservations, dispatched)
     ordinal = record['ordinal']
@@ -1354,13 +1434,26 @@ def claim_dispatch(reservations, record, runs, dispatched):
     p.require(same, 'the reserved dispatch ordinal belongs to a different dispatch; it is not reused')
     found = runs(held)
     p.require(len(found) <= 1, 'ambiguous duplicate dispatch; no attempt splicing')
+    if reservations.state(ordinal) == 'uncertain':
+        p.require(not found, 'dispatch ordinal %d was settled as uncertain but its run appeared; no attempt splicing'
+                  % ordinal)
+        return 'uncertain', held
     if found:
         reservations.mark_sent(ordinal)
         return 'adopt', found[0]
-    p.require(reservations.state(ordinal) == 'reserved',
+    if reservations.state(ordinal) == 'reserved':
+        return 'post', held
+    age = (datetime.now(timezone.utc).timestamp() if now is None else now) - utc(held['reserved_at'])
+    p.require(age >= UNCERTAIN_DISPATCH_SECONDS,
               'dispatch ordinal %d was sent but its run is not visible yet; the ordinal stays consumed '
-              '(neither reused nor skipped) until the run appears' % ordinal)
-    return 'post', held
+              '(neither reused nor skipped) until the run appears or %d seconds pass' %
+              (ordinal, UNCERTAIN_DISPATCH_SECONDS))
+    reservations.mark_uncertain(ordinal)
+    return 'uncertain', held
+
+
+class UncertainDispatch(Exception):
+    """A sent dispatch was settled as uncertain: re-derive the control and retry with the next ordinal."""
 
 
 def matching_runs(api, expected, control, floor):
@@ -1435,6 +1528,8 @@ def dispatch(api, state, control, root, reservations):
         reservations, record,
         lambda reserved: matching_runs(api, plan, plan['control'], reserved['reserved_at']),
         state['attempt_control_sha256'])
+    if action == 'uncertain':
+        raise UncertainDispatch(plan['ordinal'])
     adopted = held if action == 'adopt' else None
     reserved_at = reservations.read(plan['ordinal'])['reserved_at']
     if adopted is None:
@@ -1712,7 +1807,7 @@ def reserve_download(directory, archive_bytes, members):
     """Charge a download to restore_staging_bytes BEFORE its first byte is written.
 
     Downloads and their extraction belong to restore_staging_bytes (accounting `downloads_and_restores`);
-    the calibration inequality `restore_staging_bytes >= total_retained_artifact_bytes + 2*max(catalog,
+    the calibration inequality `restore_staging_bytes >= 2*total_retained_artifact_bytes + min(ARTIFACT_BYTES, total_retained_artifact_bytes) + 2*max(catalog,
     verifier database_bytes) + evidence allowance` is what makes the sum of every authenticated artifact fit.
 
     Two different things are charged, and neither cumulatively:
@@ -2747,6 +2842,8 @@ def run_publish(api, reg, state, latest, control, root, source, output, job, run
             'candidate_checkpoint_sha256': intent['candidate_checkpoint']['sha256'],
             'candidate_checkpoint': intent['candidate_checkpoint']})
         try:
+            # Refused before any byte is offered: the receiver refuses the same cumulative extracted total.
+            require_upload_fits_retention(state, upload_member_bytes(plan))
             upload_outputs(output_metadata(reg, control['session_id'], binding['unit_ordinal'], plan,
                                            'transfer/node-0.json', 'publish'), Path(output) / 'upload')
         finally:
@@ -2869,6 +2966,31 @@ def conformance_request(state, reg, session_id):
     return {'case_id': snapshots.CONFORMANCE_CASE, 'anchor_intent_sha256': anchor['sha256']}, case
 
 
+def batch_extracted_bytes(batch):
+    """Extracted member bytes of the artifacts one authenticated transfer batch retains."""
+    return sum(receipt['record']['extracted_bytes'] for receipt in batch['artifact_receipts'])
+
+
+def require_extracted_within(extracted, plan):
+    """`total_retained_artifact_bytes` bounds the extracted bytes of the whole retained history, not only its ZIPs.
+
+    The restore pool is sized (`restore_staging_requirement`) for a history of at most that many extracted
+    bytes; a highly compressed history would otherwise extract past the pool and halt the session at a download.
+    """
+    p.require(extracted <= plan['total_retained_artifact_bytes'],
+              'extracted artifact bytes exceed the retained artifact allowance the restore pool was sized for')
+
+
+def upload_member_bytes(inventory):
+    """The extracted bytes of every member one upload plan or inventory will upload."""
+    return sum(row[0] for row in inventory.db.execute('SELECT bytes FROM members'))
+
+
+def require_upload_fits_retention(state, upload_bytes):
+    """Sender side of `require_extracted_within`: refuse an upload that would push the history past the allowance."""
+    require_extracted_within(state['extracted_bytes'] + upload_bytes, state['resource_plan']['record'])
+
+
 def chain_carrier(state, auth, root):
     """Linear control chain over every successful publisher carrier."""
     carrier = auth['carrier']
@@ -2876,6 +2998,8 @@ def chain_carrier(state, auth, root):
               'carrier skips or reorders the authenticated control chain')
     state['control_sha256'] = auth['control_sha256']
     state['retained_bytes'] += carrier['transfer_batch']['retained_artifact_bytes']
+    state['extracted_bytes'] += batch_extracted_bytes(carrier['transfer_batch'])
+    require_extracted_within(state['extracted_bytes'], state['resource_plan']['record'])
     state['operational_usage'] = enforce_control_caps(state, {'parts': {}, 'control': carrier}, root)
 
 
@@ -2953,8 +3077,10 @@ def replay_activation(state, reg, root, work, auth, index, plan):
                accepted_batches=[*prior['accepted_batches'], *held['batch_receipts'],
                                  batch_digest(auth['carrier']['transfer_batch'])],
                catalog_root_ref=intent['catalog_root'], verifier_root_ref=intent['verifier_root'],
-               retained_bytes=prior['retained_bytes'] + auth['carrier']['transfer_batch']['retained_artifact_bytes'])
+               retained_bytes=prior['retained_bytes'] + auth['carrier']['transfer_batch']['retained_artifact_bytes'],
+               extracted_bytes=prior['extracted_bytes'] + batch_extracted_bytes(auth['carrier']['transfer_batch']))
     p.require(new['retained_bytes'] <= plan['total_retained_artifact_bytes'], 'retained artifact allowance exhausted')
+    require_extracted_within(new['extracted_bytes'], plan)
     if new['anchor'] is None and intent['verifier_root'] is not None:
         # First normally authenticated catalog+verifier pair; never manufactured.
         new['anchor'] = {'intent': held['pending']['intent'], 'sha256': held['pending']['intent']['sha256'],
@@ -3057,7 +3183,7 @@ def replay_control(api,control,root,work):
               'attempt/root run IDs must be positive integers')
     reg=registration(control['registration'],root)
     plan=p.envelope(control['resource_plan'],'ResourcePlan',root)
-    p.require(len(control['attempt_runs'])<=plan['maximum_units'],'attempts exceed immutable dispatch allowance')
+    p.require(control_ordinal(control)<=plan['maximum_units'],'attempts exceed immutable dispatch allowance')
     api.maximum_session_requests=max(api.maximum_session_requests,400+(len(control['attempt_runs'])+3)*(32+3*p.UPLOAD_SLOTS))
     api.bind_storage(control['resource_plan'],reg,control['session_id']);live_pr(api,reg)
     inventory=attempt_inventory(api,reg,control,getattr(api,'current_run',None))
@@ -3073,7 +3199,8 @@ def replay_control(api,control,root,work):
     state.update(pending_publication=None,accepted_batches=[],execution_origin=None,conformance_pending=None,conformance_result=None,anchor=None,
                  index_path=str(work/'dependencies.sqlite'),conformance_index_path=str(work/'conformance.sqlite'),
                  parts_root=parts_root,conformance_parts_root=parts_root,catalog_root_ref=None,verifier_root_ref=None,
-                 next_dispatch_ordinal=0,control_sha256=None,retained_bytes=state.get('retained_bytes',0))
+                 next_dispatch_ordinal=0,control_sha256=None,retained_bytes=state.get('retained_bytes',0),
+                 extracted_bytes=state.get('extracted_bytes',0))
     decisions={}
     for decision in control['resume_decisions']:
         ordinal=decision['failed_ordinal']
@@ -3083,11 +3210,12 @@ def replay_control(api,control,root,work):
     latest=None;history=[];successes=[]
     index=open_index(state['index_path'])
     try:
-        for ordinal,item in enumerate(inventory):
+        for position,item in enumerate(inventory):
+            ordinal=item['ordinal']  # runs and settled-uncertain dispatches share one ordinal sequence
             state['next_dispatch_ordinal']=ordinal
             state['next_ordinal']=len(state['units'])
             before=item['control']
-            p.require(before['unit_runs']==successes and before['attempt_runs']==control['attempt_runs'][:ordinal]
+            p.require(before['unit_runs']==successes and before['attempt_runs']==control['attempt_runs'][:position]
                       and before['resume_decisions']==[d for d in control['resume_decisions'] if d['failed_ordinal']<ordinal],
                       'attempt event omitted/changed its authenticated predecessor inventory or decision')
             kind=item_kind(item)
@@ -3100,8 +3228,9 @@ def replay_control(api,control,root,work):
             else:
                 case=None
                 p.require(before['transport_conformance'] is None,'ordinary dispatch carries a conformance request')
-            if ordinal and inventory[ordinal-1]['job']['status']!='success':
-                validate_resume_decision(api,decisions.get(ordinal-1),inventory[ordinal-1],state,reg)
+            previous=inventory[position-1] if position else None
+            if previous is not None and previous['job']['status']!='success':
+                validate_resume_decision(api,decisions.get(previous['ordinal']),previous,state,reg)
             if item['job']['status']!='success':
                 p.require(state['initial_image'] is not None,'failed initial attempt has no authenticated Init; new session required')
                 if ordinal in decisions:validate_resume_decision(api,decisions[ordinal],item,state,reg)
@@ -3136,14 +3265,19 @@ def replay_control(api,control,root,work):
                  'task':item['job']['task_id'],'attempt':1,'status':item['job']['status']})
     finally:
         index.close()
-    p.require(successes==control['unit_runs'] and set(decisions)<=set(range(len(inventory))),
+    p.require(successes==control['unit_runs'] and set(decisions)<={item['ordinal'] for item in inventory},
               'successful roots/decisions do not match actual attempted inventory')
-    state['next_dispatch_ordinal']=len(inventory)
-    # The control each authenticated attempt actually ran with, by ordinal: what a durable dispatch
-    # reservation is reconciled against (settle_dispatch).
-    state['attempt_control_sha256']=[p.digest(p.canonical(item['control'])) for item in inventory]
+    consumed=len(inventory)+len(inventory.uncertain)  # every run and every settled-uncertain dispatch consumed a unit
+    state['next_dispatch_ordinal']=consumed
+    # The control each consumed ordinal actually ran (or, if uncertain, was reserved) with, by ordinal: what a
+    # durable dispatch reservation is reconciled against (settle_dispatch).
+    by_ordinal={item['ordinal']:p.digest(p.canonical(item['control'])) for item in inventory}
+    by_ordinal.update({row['ordinal']:row['control_sha256'] for row in inventory.uncertain})
+    state['attempt_control_sha256']=[by_ordinal[i] for i in range(consumed)]
     state['next_ordinal']=len(state['units'])
-    state['retry_authorized']=not inventory or inventory[-1]['job']['status']=='success' or len(inventory)-1 in decisions
+    last=inventory[-1] if inventory else None
+    state['retry_authorized']=(last is None or last['job']['status']=='success' or last['ordinal'] in decisions
+                               or (bool(inventory.uncertain) and inventory.uncertain[-1]['ordinal']>last['ordinal']))
     return state,latest
 
 
@@ -3287,10 +3421,10 @@ def _runner_body(control, root, output, mode, operation, reg, owned):
     output.mkdir(parents=True, exist_ok=False)
     current_physical().discard_prior_outputs(output)
     if operation in ('execute','publish'):
-        guard=owned/control['session_id']/('ordinal-'+str(len(control['attempt_runs']))+'.json')
+        guard=owned/control['session_id']/('ordinal-'+str(control_ordinal(control))+'.json')
         p.require(not guard.exists(),'executed ordinal already attempted; preserve failed state and start a new admitted session')
         with guard.open('xb') as stream:
-            stream.write(p.canonical({'run':int(os.environ['GITHUB_RUN_ID']),'ordinal':len(control['attempt_runs']),
+            stream.write(p.canonical({'run':int(os.environ['GITHUB_RUN_ID']),'ordinal':control_ordinal(control),
                                       'registration_sha256':p.digest(p.canonical(reg))}))
             stream.flush();os.fsync(stream.fileno())
         fd=os.open(guard.parent,os.O_RDONLY)
@@ -3379,6 +3513,7 @@ def _runner_body(control, root, output, mode, operation, reg, owned):
         p.require(actual <= resource['unit_byte_allowance']
                   and actual + state['retained_bytes'] <= resource['total_retained_artifact_bytes'],
                   'actual upload bytes exceed immutable admission')
+        require_upload_fits_retention(state, actual)
         upload_outputs(output_metadata(reg, control['session_id'], unit['record']['unit_ordinal'], inventory,
                                        'transfer/node-0.json', 'execute'), output / 'upload')
     finally:
@@ -3536,22 +3671,45 @@ def require_completion(root, output):
     raise receipts.ReceiptError('Async qualification session pending; complete registered Main verdict required')
 
 
+def fold_uncertain(control, reservations):
+    """The control with every dispatch the reservations settled as uncertain declared in it.
+
+    The rows are only ever added here, never removed, and the attempt inventory reconciles them: a row
+    that collides with a run, leaves an ordinal gap or conflicts with a later run's control refuses.
+    """
+    known = {row['ordinal']: row for row in declared_uncertain(control)}
+    for row in reservations.uncertain():
+        p.require(known.setdefault(row['ordinal'], row) == row, 'conflicting uncertain dispatch declarations')
+    return {**control, 'uncertain_dispatches': [known[ordinal] for ordinal in sorted(known)]}
+
+
 def coordinate(control, root, output, maximum_dispatches=1):
     """Finite trusted controller; authenticate every predecessor before dispatch."""
     output = Path(output); output.mkdir(parents=True, exist_ok=True)
     api = api_environment(output / 'api')
     p.require(type(maximum_dispatches) is int and maximum_dispatches > 0, 'invalid controller dispatch bound')
-    reservations = DispatchReservations(output / 'dispatch-reservations')
+    reservations = DispatchReservations(output / 'dispatch-reservations', {
+        'session_id': control['session_id'], 'registration_sha256': p.digest(p.canonical(control['registration']))})
     for iteration in range(maximum_dispatches):
-        control,completed=reconcile_control(api,control,root)
-        if completed is not None:
-            result=authenticate_completion(api,control['registration'],completed,root,output/'complete')
-            p.write(output/'completion.json',result);return
-        p.write(output/'control.json',control)
-        state, _ = replay_control(api, control, root, output / ('replay-' + str(iteration)))
-        p.require(state['next_dispatch_ordinal'] + maximum_dispatches - iteration <=
-                  state['resource_plan']['record']['maximum_units'], 'controller exceeds immutable dispatch limit')
-        expected, _adopted = dispatch(api, state, {**control}, root, reservations)
+        while True:
+            control = fold_uncertain(control, reservations)
+            control,completed=reconcile_control(api,control,root)
+            if completed is not None:
+                result=authenticate_completion(api,control['registration'],completed,root,output/'complete')
+                p.write(output/'completion.json',result);return
+            p.write(output/'control.json',control)
+            state, _ = replay_control(api, control, root, output / ('replay-' + str(iteration)))
+            p.require(control_ordinal(control) == state['next_dispatch_ordinal'],
+                      'the control takes a different dispatch ordinal than the authenticated inventory')
+            p.require(state['next_dispatch_ordinal'] + maximum_dispatches - iteration <=
+                      state['resource_plan']['record']['maximum_units'], 'controller exceeds immutable dispatch limit')
+            try:
+                expected, _adopted = dispatch(api, state, {**control}, root, reservations)
+            except UncertainDispatch:
+                # The sent dispatch never became visible: it consumed its ordinal and unit. Fold it into the
+                # control and dispatch again with the next ordinal (bounded by the immutable maximum_units).
+                continue
+            break
         control = expected['control']
         p.write(output / ('dispatch-' + str(iteration) + '.json'), expected)
         # No guessed next run ID. Match the actual immutable dispatch input.
@@ -3596,7 +3754,7 @@ def coordinate(control, root, output, maximum_dispatches=1):
 def dispatch_probe(control, root, output):
     """Establish exact candidate/native-slot capability without proof admission."""
     output = Path(output); output.mkdir(parents=True,exist_ok=True)
-    p.require(control['probe_run'] is None and not control['unit_runs'] and not control['attempt_runs'] and not control['resume_decisions'] and control['main_run'] is None,
+    p.require(control['probe_run'] is None and not control['unit_runs'] and not control['attempt_runs'] and not control['resume_decisions'] and not control['uncertain_dispatches'] and control['main_run'] is None,
               'probe cannot reuse or execute a session unit')
     reg = registration(control['registration'],root)
     p.require(control.get('probe_case') in ('success','failure','post_failure')
@@ -4875,7 +5033,7 @@ def authenticate_probe_pair(api,reg,pair):
         run_id=receipts.positive(pair[key]);_,job,event=p.producer(api,run_id,reg,'unit',(status,))
         request=p.decode(event['inputs']['control'].encode())
         p.require(event['inputs']['operation']=='probe' and request['registration']==reg and request['probe_case']==case
-                  and not request['unit_runs'] and not request['attempt_runs'] and not request['resume_decisions'] and request['probe_run'] is None,'capability event is not a fresh probe')
+                  and not request['unit_runs'] and not request['attempt_runs'] and not request['resume_decisions'] and not request['uncertain_dispatches'] and request['probe_run'] is None,'capability event is not a fresh probe')
         _,lines=p.producer_log(api,run_id,job,'unit');value,begin=capability_frame(lines)
         validate_probe_node_runtime(lines,reg,request,begin)
         p.closed(value,('registration_sha256','source_archive_sha256','run','job','task','attempt','case','nonce','uploads'))
@@ -4939,7 +5097,15 @@ def enforce_control_caps(state,transport,root):
 
 
 def attempt_inventory(api,reg,control,current_run=None,*,require_declared=True):
+    """Every authenticated attempt, by ordinal, reconciled with the uncertain dispatches the controls declare.
+
+    A dispatch's ordinal is the number of runs before it plus the number of uncertain dispatches before it.
+    An ordinal without a run must be declared uncertain (by the current control or by the control of a
+    later run, which prove the controller settled it before dispatching again); an ordinal that is both a
+    run and declared uncertain is a late run that no control accounted for and refuses the session.
+    """
     found={}
+    declared={row['ordinal']:row for row in declared_uncertain(control)}
     for run in api.pages('/actions/runs',{'workflow_id':p.WORKFLOW},field='workflow_runs'):
         if run.get('id')==current_run or run.get('workflow_id')!=p.WORKFLOW or run.get('event')!='workflow_dispatch':continue
         event=p.decode(run.get('event_payload','').encode());inputs=event.get('inputs',{})
@@ -4954,16 +5120,26 @@ def attempt_inventory(api,reg,control,current_run=None,*,require_declared=True):
                   and type(prior['attempt_runs']) is list and type(prior['unit_runs']) is list
                   and all(type(value) is int and value>0 for value in prior['attempt_runs']+prior['unit_runs']),
                   'actual attempted control has invalid source/run identities')
-        ordinal=len(prior['attempt_runs'])
+        ordinal=control_ordinal(prior)
         p.require(ordinal not in found,'duplicate/reused actual attempted ordinal')
+        for row in declared_uncertain(prior):
+            p.require(declared.setdefault(row['ordinal'],row)==row,'conflicting uncertain dispatch declarations')
         actual,job,_=p.producer(api,run['id'],reg,inputs['mode'],('success','failure','cancelled'))
-        found[ordinal]={'run':actual,'job':job,'control':prior,'mode':inputs['mode'],
+        found[ordinal]={'run':actual,'job':job,'control':prior,'mode':inputs['mode'],'ordinal':ordinal,
                         'operation':inputs['operation'],'conformance':prior['transport_conformance']}
-    p.require(sorted(found)==list(range(len(found))),'unexplained attempted-ordinal gap')
-    items=[found[i] for i in range(len(found))]
+    late=sorted(set(declared)&set(found))
+    p.require(not late,'dispatch ordinal %d was settled as uncertain but its run appeared; no attempt splicing'%(late[0] if late else -1))
+    p.require(sorted({*found,*declared})==list(range(len(found)+len(declared))),'unexplained attempted-ordinal gap')
+    for ordinal,item in found.items():
+        p.require(declared_uncertain(item['control'])==[row for _,row in sorted(declared.items()) if row['ordinal']<ordinal],
+                  'a dispatch control omitted or changed an uncertain dispatch before it')
+    items=Inventory(found[i] for i in sorted(found))
+    items.uncertain=tuple(row for _,row in sorted(declared.items()))
     if require_declared:
         p.require([item['run']['id'] for item in items]==control['attempt_runs'],
                   'actual attempted inventory missing from controller; reconcile before dispatch')
+        p.require(list(items.uncertain)==declared_uncertain(control),
+                  'an uncertain dispatch declared by an attempt is missing from the controller; reconcile before dispatch')
     return items
 
 
@@ -4977,7 +5153,7 @@ def validate_resume_decision(api,decision,failed,state,reg):
     p.closed(decision,('schema_version','kind','registration_sha256','source','session_id','failed_run',
         'failed_job','failed_task','failed_ordinal','expected_prior_checkpoint','previous_control_sha256',
         'failed_log_sha256','reason','diagnosis','repair','decided_at','acceptance'))
-    ordinal=len(failed['control']['attempt_runs'])
+    ordinal=control_ordinal(failed['control'])
     p.require(type(decision['schema_version']) is int and decision['schema_version']==1 and decision['kind']=='infrastructure_resume_decision'
               and decision['acceptance'] is False and decision['source']==reg['source']
               and decision['registration_sha256']==p.digest(p.canonical(reg))
@@ -5267,7 +5443,7 @@ def reconcile_control(api,control,root):
         return control,completed[0]['run']['id']
     successes=[item['run']['id'] for item in items if item['job']['status']=='success']
     p.require(successes[:len(control['unit_runs'])]==control['unit_runs'],'saved success prefix conflicts with actual history')
-    return {**control,'attempt_runs':ids,'unit_runs':successes,
+    return {**control,'attempt_runs':ids,'unit_runs':successes,'uncertain_dispatches':list(items.uncertain),
             'resume_decisions':[decisions[k] for k in sorted(decisions)]},None
 
 if __name__ == '__main__':

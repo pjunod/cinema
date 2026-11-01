@@ -1,6 +1,7 @@
 {
   "comment": "Shared arithmetic vectors for the Python physical policy (validation/async_physical_policy.py) and the Rust plan validator (async_driver_catalog.rs). tests/operations/test_async_physical_accounting.py and the Rust test `physical_policy_arithmetic_matches_the_shared_vectors` assert the same numbers; a change to either side's arithmetic fails one of them.",
   "constants": {
+    "ARTIFACT_BYTES": 536870912,
     "CONTROL_OUTPUT_BYTES": 67108864,
     "CONTROL_OUTPUT_DIRECTORIES": 4,
     "MIB": 1048576,
@@ -39,28 +40,28 @@
   "restore_staging_requirement": [
     {
       "catalog_database_bytes": 40960,
-      "required": 3227648,
+      "required": 4276224,
       "total_retained_artifact_bytes": 1048576,
       "unit_byte_allowance": 1048576,
       "verifier_database_bytes": 40960
     },
     {
       "catalog_database_bytes": 67108864,
-      "required": 152994944,
+      "required": 153994944,
       "total_retained_artifact_bytes": 1000000,
       "unit_byte_allowance": 16777216,
       "verifier_database_bytes": 67108864
     },
     {
       "catalog_database_bytes": 67108864,
-      "required": 3489660928,
+      "required": 4026531840,
       "total_retained_artifact_bytes": 1073741824,
       "unit_byte_allowance": 1073741824,
       "verifier_database_bytes": 134217728
     },
     {
       "catalog_database_bytes": 268435456,
-      "required": 2685403136,
+      "required": 3222274048,
       "total_retained_artifact_bytes": 1073741824,
       "unit_byte_allowance": 1048576,
       "verifier_database_bytes": 67108864

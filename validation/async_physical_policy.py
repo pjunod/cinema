@@ -22,6 +22,8 @@ import sys
 
 MAXIMUM = (1 << 63) - 1
 MIB = 1024 * 1024
+# The largest single artifact ZIP (async_refinement_provenance.MAX_ARTIFACT; ARTIFACT_BYTES in the Rust plan validator).
+ARTIFACT_BYTES = 512 * MIB
 FAMILY_OWNERS = {
     'catalog_main': 'catalog', 'verifier_main': 'verifier',
     'catalog_export_scratch': 'catalog_export',
@@ -62,20 +64,25 @@ def runtime_pool_demand(unit_byte_allowance):
 
 
 def restore_staging_requirement(policy, plan):
-    """What `restore_staging_bytes` must hold: the history twice, two restored databases and the evidence allowance.
+    """What `restore_staging_bytes` must hold: the history twice, a transient ZIP, two restored databases and the evidence allowance.
 
     Downloaded artifact ZIPs and their extractions, restored catalog/verifier images and the evidence
-    rebuilt from a restore all charge this one pool (`charge_download`, the restore staging reservations).
-    Every job replays the whole retained history, so the pool holds `total_retained_artifact_bytes` of
-    downloaded and extracted members AND, in the evidence `reconstruct_evidence` rebuilds for every accepted
-    publication replayed in the job, a second copy of the same bytes: `2*total_retained_artifact_bytes`.
-    `2*max(catalog_main, verifier_main database_bytes)` is the staged catalog plus verifier image of one
-    restore, and `unit_byte_allowance` bounds the evidence of the one unit being prepared. The Rust plan
-    validator (`restore_staging_requirement` in async_driver_catalog.rs) and the verifier `Budget` apply the
-    identical inequality.
+    rebuilt from a restore all charge this one pool (`reserve_download`, the restore staging reservations).
+    `total_retained_artifact_bytes` (T) bounds BOTH the archived ZIP bytes the session retains and, because
+    the sender and the receiver each enforce `cumulative extracted_bytes <= T`, every extracted member byte
+    of the retained history. Every job replays the whole retained history, so the pool holds T of extracted
+    members AND, in the evidence `reconstruct_evidence` rebuilds for every accepted publication replayed in
+    the job, a second copy of the same bytes: `2*T`. Independently, the largest ZIP of the job stays deducted
+    as a job-wide high-water reservation (`reserve_download` never lowers it) while the members, the staged
+    images and the unit's evidence are charged beside it: `min(ARTIFACT_BYTES, T)`, because one ZIP is at most
+    `ARTIFACT_BYTES` and at most the retained total. `2*max(catalog_main, verifier_main database_bytes)` is the
+    staged catalog plus verifier image of one restore, and `unit_byte_allowance` bounds the evidence of the one
+    unit being prepared. The Rust plan validator (`restore_staging_requirement` in async_driver_catalog.rs) and
+    the verifier `Budget` apply the identical inequality.
     """
     ceilings = (policy['families']['catalog_main']['database_bytes'], policy['families']['verifier_main']['database_bytes'])
-    return (2 * integer(plan.get('total_retained_artifact_bytes'), positive=True) + 2 * max(ceilings)
+    retained = integer(plan.get('total_retained_artifact_bytes'), positive=True)
+    return (2 * retained + min(ARTIFACT_BYTES, retained) + 2 * max(ceilings)
             + integer(plan.get('unit_byte_allowance'), positive=True))
 
 
@@ -308,15 +315,15 @@ def require_pool_inequalities(policy, baseline, plan):
     """The pool inequalities every plan validator applies: calibration, the verifier Budget and the Rust plan validator.
 
     The source/runtime pool covers the measured source baseline, every output directory and at least a byte of
-    runtime scratch; `restore_staging_bytes` covers the retained history twice, two staged databases and the evidence
-    allowance (`restore_staging_requirement`).
+    runtime scratch; `restore_staging_bytes` covers the retained history twice, the transient ZIP high water, two staged
+    databases and the evidence allowance (`restore_staging_requirement`).
     """
     pools = policy['pools']
     require(baseline['source_workspace_bytes'] <= pools['source_runtime_scratch_bytes'], 'source/runtime pool does not fit measured source baseline')
     require(baseline['source_workspace_bytes'] + runtime_pool_demand(plan.get('unit_byte_allowance')) < pools['source_runtime_scratch_bytes'],
             'source/runtime pool does not cover the source baseline, every output directory and runtime scratch')
     require(pools['restore_staging_bytes'] >= restore_staging_requirement(policy, plan),
-            'restore staging pool does not cover the retained history twice, two restored databases and the evidence allowance')
+            'restore staging pool does not cover the retained history twice, the transient ZIP, two restored databases and the evidence allowance')
 
 
 def calibrate_physical_policy(policy, observed_geometry, observed_baseline, plan, *, source_map=None):
