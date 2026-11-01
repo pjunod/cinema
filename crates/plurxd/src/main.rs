@@ -54,6 +54,7 @@ mod manifest_cache;
 mod media_pool;
 mod media_sessions;
 mod meter;
+mod mkv_sparse;
 mod offline;
 mod online_subtitles;
 mod panics;
