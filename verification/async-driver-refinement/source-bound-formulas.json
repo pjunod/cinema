@@ -1,7 +1,7 @@
 {
   "algorithm_version": 1,
   "complete": true,
-  "finite_inventory_sha256": "714a2a274067f26a1c630ae11e48f9f5e14d5072503396b182204c27dd191ce2",
+  "finite_inventory_sha256": "b33a7370ae456d11af0bbcb053736f125a236975f29c2acc8066660b46fed78e",
   "formulas": [
     {
       "id": "json.0.ref",
@@ -32160,7 +32160,7 @@
     },
     {
       "path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30"
+      "sha256": "012aeffc8256d195a31f0c6cadd69613914d421dc4818587284a90ef2c2185cd"
     },
     {
       "path": "crates/plurx-core/src/store/async_driver_refinement.rs",
@@ -32244,15 +32244,15 @@
     },
     {
       "path": "verification/async-driver-refinement/finite-inventory.json",
-      "sha256": "714a2a274067f26a1c630ae11e48f9f5e14d5072503396b182204c27dd191ce2"
+      "sha256": "b33a7370ae456d11af0bbcb053736f125a236975f29c2acc8066660b46fed78e"
     },
     {
       "path": "verification/async-driver-refinement/paged-catalog-transport.schema.json",
-      "sha256": "ec6acc5d9371b086d562beecdf53edcdcc17fc4e441851653ac73487be3e01ff"
+      "sha256": "6efb23ca365985451bda12e499e1d6988092b5953ca4576b8aef1830d4ab0a72"
     },
     {
       "path": "verification/async-driver-refinement/paged-control-carrier.schema.json",
-      "sha256": "dbb369ff7ee1317b95d635bbb4552abed1978f68d043c038b0c73c843291c6e9"
+      "sha256": "08d3a3ec8ef839827a01c8fe5e5ed340f570d106ea3988349d5141fbb5758b99"
     },
     {
       "path": "verification/async-driver-refinement/paged-outcomes.json",
@@ -32260,11 +32260,11 @@
     },
     {
       "path": "verification/async-driver-refinement/paged-proof.schema.json",
-      "sha256": "31dc09d2f18d983a1cdd6ac8f9a72d1d1621cf57b3eb102f845ee1fae73b541e"
+      "sha256": "2aefe3f0cadb5243d18e0256840e5c1ef3611a29d21d68dddc50ce98dde947d5"
     },
     {
       "path": "verification/async-driver-refinement/paged-verifier-continuation.schema.json",
-      "sha256": "ce0e3d07074b2561c6eb2f26ddd5c0d2bb3dfb084f95b58070e956a46af5760f"
+      "sha256": "4a172a1499109d8c59c6b669f56a0dd100d9d259cad9d8e28e404f79f2b5cdf2"
     },
     {
       "path": "verification/async-driver-refinement/paged-verifier-state.sql",
@@ -32272,15 +32272,15 @@
     },
     {
       "path": "verification/async-driver-refinement/paged_bounds.py",
-      "sha256": "e27637ab51bc485d5d94079696fc24dff78f30194938fb37d475a801cd4aa07e"
+      "sha256": "d2692ff2eec34cfbed5d53be7d4828780acac87f18c36cb954c888718644bdd9"
     },
     {
       "path": "verification/async-driver-refinement/paged_checker.py",
-      "sha256": "28cf48786546572b75681d7d05240980034101cd698d60287e83f022903771ab"
+      "sha256": "f7e6571bc0405ca0903332d9cd54c1e3c20622560a7e8c62f8a9a1d948e1317e"
     },
     {
       "path": "verification/async-driver-refinement/paged_codec.py",
-      "sha256": "f2d77b2f681c901dabeea5ea55f010164781ea0402ccc4897f0abb760538ef3b"
+      "sha256": "0f441494962904c72629dda123bc093209f97d09a4e6c04fa50453bf63b97cdd"
     },
     {
       "path": "verification/async-driver-refinement/paged_scc.py",
@@ -32288,7 +32288,7 @@
     },
     {
       "path": "verification/async-driver-refinement/source-bound-receipt.schema.json",
-      "sha256": "9610c2da8a4defd7bdea2431df0606ccb9ad0c531f4e9165be92b7281f805645"
+      "sha256": "8a53862207f8361e3095e3204fbfe5ca859487906ae7d1f78ed4a4f58e686937"
     }
   ]
 }

@@ -3,13 +3,13 @@
   "kind": "physical_table_map",
   "sources": {
     "verification/async-driver-refinement/paged-catalog.sql": "8095448d489d7a5b6488dcad1d08481967585ac654f71732d6cd2b5b5dd1c6bc",
-    "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs": "2d2bb5741daef0ba92f075eed78a18dd0150f312ba26c88c713a72be94e55009",
-    "crates/plurx-core/src/store/async_driver_catalog.rs": "af675d28865584d93ecabd02f1267b4f5409b9eeb0f1fbce84a6ea744e68116c",
+    "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs": "28ed59648ccdc8be9c8fae752556a12179f792aebfa38fc056b6234e970b7261",
+    "crates/plurx-core/src/store/async_driver_catalog.rs": "54c58e4762746cb35e98eb695ab304db684f734578036a1cee1b4ffb0073bf24",
     "verification/async-driver-refinement/paged-verifier-state.sql": "598c28c51b90ce12fa81f9826c88cdcd496e691079f924b0c39fc61fe76530a6",
-    "verification/async-driver-refinement/paged_codec.py": "317f20c1e623a6097b5a3c05dfb1694ad75c6f49ff1f6c20bc872062222f16c8",
-    "verification/async-driver-refinement/paged_checker.py": "197490f1c05dccaeb066897dc1ba9109fa15731af59c3cec6ef0e223c15a5dde",
-    "validation/async_refinement_provenance.py": "2dc182e536fe59d13dd0b4156f9421c856047a2c5d040d8f90f95f3aa705814d",
-    "validation/async_snapshot_transport.py": "1459146c644ea88b94cf751205a71b98b932a88104c684252c910a49c58611bf"
+    "verification/async-driver-refinement/paged_codec.py": "0f441494962904c72629dda123bc093209f97d09a4e6c04fa50453bf63b97cdd",
+    "verification/async-driver-refinement/paged_checker.py": "f7e6571bc0405ca0903332d9cd54c1e3c20622560a7e8c62f8a9a1d948e1317e",
+    "validation/async_refinement_provenance.py": "2817108e6d1784f5e417547096e194ba430a9c6d62f228b2cc9ba62bdd21ae4a",
+    "validation/async_snapshot_transport.py": "6df2925af7e5eb233abb920b3670c725f64706cbc5cc5639b213d0fb7e51d24a"
   },
   "families": {
     "catalog_main": [

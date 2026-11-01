@@ -37,7 +37,7 @@
     },
     "product": {
       "path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "sha256": "8b9b9301a1bc96c5c34aff02661d0e650156fb36e12cf4d1fdc74858a5020f30",
+      "sha256": "012aeffc8256d195a31f0c6cadd69613914d421dc4818587284a90ef2c2185cd",
       "anchors": [
         {
           "text": "struct Valuation {",
