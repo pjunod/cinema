@@ -628,7 +628,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         retained_charge,
         "pressure alone cannot refund the original live-body S"
     );
-    serve.shared.retained_artifacts.collect(base.path()).await;
+    serve.shared.retained_artifacts.collect(&serve.shared.base).await;
     assert_eq!(
         serve.shared.retained_artifacts.test_capacity_snapshot().0,
         retained_charge,
@@ -638,7 +638,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     // Existing maintenance resumes the same queued original eviction; no
     // replacement native operation or daemon/path-based refund is minted.
     for _ in 0..16 {
-        serve.shared.retained_artifacts.collect(base.path()).await;
+        serve.shared.retained_artifacts.collect(&serve.shared.base).await;
         if serve.shared.retained_artifacts.test_capacity_snapshot().0 == 0 {
             break;
         }
