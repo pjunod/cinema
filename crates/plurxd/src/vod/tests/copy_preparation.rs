@@ -181,17 +181,17 @@ async fn manual_copy_manager_queue_worker_and_matching_new_attachment_use_only_l
         ("hdr", { let mut r = manual.clone(); r.hdr10 = true; r }),
     ] {
         let logical = Some(super::retained_manifest::LogicalOutput::resolve(&changed, None, &file, video));
-        assert!(registry.acquire_prepared_manual(&rendition, &logical, &file).await.is_none(),
+        assert!(registry.acquire_prepared_manual(&rendition.retained_probe(), &logical, &file).await.is_none(),
             "{name} cannot inherit private artifact facts");
     }
     let mut wrong_container = file.clone();
     wrong_container.container = Some("mp4".into());
     let logical = Some(super::retained_manifest::LogicalOutput::resolve(&manual, None, &file, video));
-    assert!(registry.acquire_prepared_manual(&rendition, &logical, &wrong_container).await.is_none(),
+    assert!(registry.acquire_prepared_manual(&rendition.retained_probe(), &logical, &wrong_container).await.is_none(),
         "incoming metadata, not discarded healthy Recipe, must match");
     let mut forged = later.facts();
     forged.output_identity = "f".repeat(64);
-    assert!(registry.acquire_expected_for_request(&forged, &rendition, &logical).is_none(),
+    assert!(registry.acquire_expected_for_request(&forged, &rendition.retained_probe(), &logical).is_none(),
         "serialized facts do not mint private proof");
     let restarted = local_serve(base.path().to_owned(), Arc::clone(&store));
     restarted.try_create(&manual, &file, &settings(), VodAttribution {
@@ -203,7 +203,7 @@ async fn manual_copy_manager_queue_worker_and_matching_new_attachment_use_only_l
     let mut changed_source = std::fs::OpenOptions::new().append(true).open(&file.path)
         .expect("owned source");
     std::io::Write::write_all(&mut changed_source, b"new physical incarnation").expect("source change");
-    assert!(registry.acquire_prepared_manual(&rendition, &logical, &file).await.is_none(),
+    assert!(registry.acquire_prepared_manual(&rendition.retained_probe(), &logical, &file).await.is_none(),
         "changed physical source refuses new attachment authority");
     serve.end("cold-manual", Terminal::Deleted).await;
     serve.end("later-manual", Terminal::Deleted).await;

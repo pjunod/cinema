@@ -566,7 +566,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         serve
             .shared
             .retained_artifacts
-            .acquire_prepared_candidate(&rendition, &logical, &resolved_file, &wrong_offset)
+            .acquire_prepared_candidate(&rendition.retained_probe(), &logical, &resolved_file, &wrong_offset)
             .await
             .is_none(),
         "a different audio offset cannot borrow the settled origin"
@@ -581,7 +581,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         serve
             .shared
             .retained_artifacts
-            .acquire_prepared_candidate(&rendition, &logical, &resolved_file, &wrong_geometry)
+            .acquire_prepared_candidate(&rendition.retained_probe(), &logical, &resolved_file, &wrong_geometry)
             .await
             .is_none(),
         "a different candidate geometry cannot borrow the settled origin"

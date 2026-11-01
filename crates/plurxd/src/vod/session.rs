@@ -159,29 +159,77 @@ pub(super) struct Rendition {
         Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientStateLease>,
 }
 
+/// The exact facts a retained-output attachment compares. It can exist
+/// before any rendition is built, so a capturable retained S is selected
+/// without admitting or starting a replacement finite producer.
 #[cfg(target_os = "linux")]
-impl Rendition {
-    /// Whether this rendition attaches under the held source `version` a
+pub(super) struct RetainedAttachProbe<'a> {
+    pub(super) key: &'a str,
+    pub(super) playlist: &'a [u8],
+    pub(super) recipe: &'a Recipe,
+    source: RetainedAttachSource<'a>,
+}
+
+#[cfg(target_os = "linux")]
+enum RetainedAttachSource<'a> {
+    /// A legacy rendition's own daemon source fence.
+    Fence(&'a crate::fragment_index_cluster::SourceFence),
+    /// Finite output: core holds the source; the recipe freezes its version.
+    Finite,
+    Absent,
+}
+
+#[cfg(target_os = "linux")]
+impl<'a> RetainedAttachProbe<'a> {
+    /// The finite output a selected software recipe would produce under `key`.
+    pub(super) fn finite(key: &'a str, playlist: &'a [u8], recipe: &'a Recipe) -> Self {
+        Self {
+            key,
+            playlist,
+            recipe,
+            source: RetainedAttachSource::Finite,
+        }
+    }
+
+    pub(super) fn source_present(&self) -> bool {
+        matches!(self.source, RetainedAttachSource::Fence(_))
+    }
+
+    pub(super) fn source_unchanged(&self) -> bool {
+        matches!(self.source, RetainedAttachSource::Fence(source) if source.unchanged())
+    }
+
+    /// Whether this target attaches under the held source `version` a
     /// retained artifact was produced from. A legacy rendition holds its own
     /// daemon `SourceFence` for its whole life, and that fence must still be
     /// unchanged. Finite output has no daemon fence: core owns the actual held
     /// source, and the exact object version frozen in its recipe and encoding
     /// is the identity every artifact of that output carries.
     pub(super) fn attaches_under_source_version(&self, version: &str) -> bool {
-        match self.source.as_ref() {
-            Some(source) => source.unchanged() && source.object_version() == version,
-            None => {
-                #[cfg(target_os = "linux")]
-                {
-                    self.dir.is_finite()
-                        && super::finite_profile::source_version(&self.recipe)
-                            .is_ok_and(|held| held == version)
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    false
-                }
+        match self.source {
+            RetainedAttachSource::Fence(source) => {
+                source.unchanged() && source.object_version() == version
             }
+            RetainedAttachSource::Finite => {
+                super::finite_profile::source_version(self.recipe).is_ok_and(|held| held == version)
+            }
+            RetainedAttachSource::Absent => false,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Rendition {
+    pub(super) fn retained_probe(&self) -> RetainedAttachProbe<'_> {
+        RetainedAttachProbe {
+            key: &self.key,
+            playlist: &self.playlist,
+            recipe: &self.recipe,
+            source: match self.source.as_ref() {
+                Some(source) => RetainedAttachSource::Fence(source),
+                None if self.dir.is_finite() => RetainedAttachSource::Finite,
+                None => RetainedAttachSource::Absent,
+            },
         }
     }
 

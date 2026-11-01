@@ -93,6 +93,10 @@ struct PendingWrites {
     #[cfg(target_os = "linux")]
     finite_producer:
         Option<std::sync::Arc<crate::vodserve::finite_software::FiniteSoftwareProducer>>,
+    /// The finite output is a retained S owned by the retained registry; this
+    /// directory only borrows its counted reads and never closes or evicts it.
+    #[cfg(target_os = "linux")]
+    retained_carrier: bool,
     #[cfg(test)]
     native_barrier: std::sync::Mutex<Option<NativePublicationBarrier>>,
 }
