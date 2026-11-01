@@ -74,3 +74,7 @@ scripts/*.fleet.json
 # every `git status` and every search.
 /Claude outputs/
 /_stage_stats/
+
+# Scratch trees created by async proof-session tests inside the checkout
+.agent-proof-fixtures/
+.async-proof-sessions/

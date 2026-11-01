@@ -425,8 +425,10 @@ def unpack(archive, destination, manifest, *, storage_guard=None, verify_existin
 
 class DependencyIndex:
     """Disk-backed exact key/content index; hash collisions do not imply equality."""
-    def __init__(self, path):
-        self.db = sqlite3.connect(path)
+    def __init__(self, path, database=None):
+        # `database` is an already granted connection (a physical DatabaseGrant on the proof
+        # host); without one the index opens its own plain connection on a read-only consumer.
+        self.db = sqlite3.connect(path) if database is None else database
         self.db.execute('CREATE TABLE IF NOT EXISTS objects(kind TEXT,key BLOB,digest TEXT,payload BLOB,path TEXT,PRIMARY KEY(kind,key))')
         self.db.execute('CREATE TABLE IF NOT EXISTS authenticated_members(unit_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(unit_ordinal,member_path))')
         self.db.execute('CREATE TABLE IF NOT EXISTS authenticated_snapshot_roots(kind TEXT,unit_ordinal INTEGER,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(kind,unit_ordinal))')

@@ -680,7 +680,8 @@ class PublicationChainCase(unittest.TestCase):
         return Sent(auth, final, pending_after, plan)
 
     def begin(self, sent):
-        return session.begin_pending({}, {}, ROOT, self.root / 'history', sent.auth, self.index, None)
+        return session.begin_pending({'accepted_batches': []}, {}, ROOT, self.root / 'history', sent.auth,
+                                     self.index, None)
 
     @staticmethod
     def fork(sent):
@@ -699,8 +700,13 @@ class PublicationChainCase(unittest.TestCase):
         finally:
             replay.close()
 
+    def first_offer(self):
+        """The intent with every structured parent: a chunk is creditable only once its parent is covered."""
+        return {(kind, sha) for kind, sha in self.sender.db.execute(
+            "SELECT kind,sha256 FROM queue WHERE kind!='snapshot_chunk'")}
+
     def started(self):
-        first = self.send(self.pending, {('publication_intent', self.intent_ref['sha256'])}, operation='execute')
+        first = self.send(self.pending, self.first_offer(), operation='execute')
         pend = self.begin(first)
         self.sync(pend)
         return first, pend
@@ -717,8 +723,8 @@ class PublicationChainCase(unittest.TestCase):
         self.sender.db.commit()
 
     def deliver(self):
-        """Intent, then one real chunk, then the remaining closure: three nonempty transfer batches."""
-        first = self.send(self.pending, {('publication_intent', self.intent_ref['sha256'])}, operation='execute')
+        """Intent and parents, then one real chunk, then the remaining closure: three nonempty batches."""
+        first = self.send(self.pending, self.first_offer(), operation='execute')
         pend = self.begin(first)
         self.sync(pend)
         second = self.send(pend['pending'], {('snapshot_chunk', self.chunks[0])})

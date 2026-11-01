@@ -455,6 +455,7 @@ class PublicationLedger:
                                 (reference['kind'], reference['sha256'], reference['bytes']))
         return self.coverage()
 
+
     def reserve_dispatch(self, operation, intent_sha256, maximum_units):
         _require(operation in ('execute', 'publish', 'complete'), 'unknown dispatch operation')
         self.db.execute('BEGIN IMMEDIATE')
@@ -497,12 +498,14 @@ def child_refs(kind: str, raw: bytes) -> list[dict]:
     raise SnapshotTransportError('unstructured content kind has no children: ' + kind)
 
 
-def expand_with_resolver(ledger: 'PublicationLedger', resolve) -> int:
+def expand_with_resolver(ledger: 'PublicationLedger', resolve, *, commit: bool = True) -> int:
     """Grow the required closure from authenticated bytes only; return new entries.
 
     Children of covered structured content are queued so the receiver recomputes
     the complete closure itself. Uncovered content is never parsed, so a sender's
     claim about a graph confers nothing until its parent bytes are authenticated.
+    `commit=False` leaves the growth inside the caller's open transaction, so a
+    refused batch rolls back its coverage and its closure growth together.
     """
     added = 0
     while True:
@@ -521,7 +524,8 @@ def expand_with_resolver(ledger: 'PublicationLedger', resolve) -> int:
                                   (child['kind'], child['sha256'], child['bytes']))
                 added += ledger.db.total_changes - before
             ledger.db.execute('INSERT OR IGNORE INTO expanded VALUES(?,?)', (kind, sha))
-        ledger.db.commit()
+        if commit:
+            ledger.db.commit()
 
 
 def closure_complete(ledger: 'PublicationLedger') -> bool:
@@ -1099,8 +1103,18 @@ def missing_content(ledger: PublicationLedger):
         yield {'kind': kind, 'sha256': sha, 'bytes': size}
 
 
-def resume_publication(ledger: PublicationLedger, pending, batch, authenticated_contents):
-    """Commit exact validated batch coverage; incomplete transport never advances."""
+def resume_publication(ledger: PublicationLedger, pending, batch, authenticated_contents, resolve=None):
+    """Commit exact validated batch coverage; incomplete transport never advances.
+
+    Progress is closure-relative. A `transfer` batch may credit only identities that
+    belong to the pending publication's required closure (the `queue`, grown from the
+    authenticated bytes of covered parents, `resolve` giving this batch's own bytes),
+    and must newly cover at least one. Authenticated bytes of unrelated content are
+    never credited: they would consume a dispatch and retained bytes and permanently
+    enter the cumulative coverage digest. An `activate` batch carries only the
+    validation receipts, which are activation payload, not closure content. Any
+    refusal rolls the coverage and the closure growth back together.
+    """
     _require(batch['schema_version'] == 1 and batch['kind'] == 'transfer_batch_receipt' and
              batch['intent_sha256'] == pending['intent']['sha256'] and
              batch['previous_batch'] == pending['previous_batch'] and
@@ -1110,20 +1124,34 @@ def resume_publication(ledger: PublicationLedger, pending, batch, authenticated_
     before_sha, before_count = ledger.coverage()
     _require((before_sha, before_count) == (pending['coverage_sha256'], pending['coverage_count']) and
              batch['coverage_before_sha256'] == before_sha, 'publication before-coverage differs')
+    references = list(authenticated_contents)
+    _require(bool(references), 'publication batch carries no authenticated content')
     # Authenticate within one transaction including the advertised after digest.
     ledger.db.execute('BEGIN IMMEDIATE')
     try:
-        for reference in authenticated_contents:
+        fresh = 0
+        for reference in references:
             old = ledger.db.execute('SELECT bytes FROM coverage WHERE kind=? AND sha256=?',
                 (reference['kind'], reference['sha256'])).fetchone()
             _require(old is None or old == (reference['bytes'],), 'authenticated coverage collision')
+            if old is None:
+                fresh += 1
             ledger.db.execute('INSERT OR IGNORE INTO coverage VALUES(?,?,?)',
                 (reference['kind'], reference['sha256'], reference['bytes']))
         after_sha, after_count = ledger.coverage()
         _require((after_sha, after_count) == (batch['coverage_after_sha256'], batch['coverage_count']),
                  'publication advertised after-coverage differs')
-        _require(batch['purpose'] == 'activate' or after_count > before_count,
-                 'transfer-only batch made no authenticated progress')
+        if batch['purpose'] == 'activate':
+            _require(all(reference['kind'] == 'validation_receipt' for reference in references),
+                     'activation batch carries content other than validation receipts')
+        else:
+            _require(fresh > 0 and after_count > before_count, 'transfer-only batch made no authenticated progress')
+            if resolve is not None:
+                expand_with_resolver(ledger, resolve, commit=False)
+            for reference in references:
+                _require(ledger.db.execute('SELECT 1 FROM queue WHERE kind=? AND sha256=? AND bytes=?',
+                         (reference['kind'], reference['sha256'], reference['bytes'])).fetchone() is not None,
+                         'transfer content is outside the pending publication closure')
         reference = content_ref('transfer_batch_receipt', canonical(batch))
         result = {**pending, 'previous_batch': reference, 'coverage_sha256': after_sha,
                   'coverage_count': after_count, 'next_batch_ordinal': pending['next_batch_ordinal'] + 1}
@@ -1199,26 +1227,64 @@ def native_batch(inventory: ContentInventory, ledger: PublicationLedger, binding
     for ordinal in range(maximum_nodes):
         part_plan.reserve('transfer/node-' + str(ordinal) + '.json', metadata_bound, 'transfer_manifest')
     selected = 0
-    for reference in missing_content(ledger):
-        if only is not None and (reference['kind'], reference['sha256']) not in only:
-            continue
-        _require(len(reference['kind']) <= 64 and bool(re.fullmatch('[a-z][a-z0-9_]*', reference['kind'])),
-                 'content kind is not a registered generated transport name')
-        name = 'content/' + reference['kind'] + '/' + reference['sha256']
-        # Ask the actual bounded allocator before copying; capacity refusal ends
-        # this batch, while corrupt bytes and every other failure remain fatal.
-        can_fit = False
-        for part in range(part_plan.slots):
-            count, size = part_plan.db.execute(
-                'SELECT count(*),coalesce(sum(bytes),0) FROM members WHERE part=?', (part,)).fetchone()
-            if count < 299 and size + reference['bytes'] <= 512 * CHUNK_BYTES - 16 * CHUNK_BYTES:
-                can_fit = True
+    # The receiver credits a transfer batch only for identities that belong to the
+    # required closure it has recomputed from covered parents. Ordinary packing
+    # therefore offers content only once an owner is covered or packed earlier in
+    # this very batch (the intent has no owner). An explicit `only` offer is the
+    # caller's closed recipe (the conformance case, whose receiver is pre-seeded
+    # with the anchor closure, and the activation receipts) and is not gated.
+    gated = only is None
+    if gated:
+        ledger.db.execute('CREATE TEMP TABLE IF NOT EXISTS batch_selected(kind TEXT,sha256 TEXT,PRIMARY KEY(kind,sha256))')
+        ledger.db.execute('DELETE FROM batch_selected')
+
+    def ready(reference):
+        if reference['kind'] == 'publication_intent':
+            return True
+        for owner_kind, owner_sha in inventory.db.execute(
+                'SELECT owner_kind,owner_sha256 FROM edges WHERE kind=? AND sha256=?',
+                (reference['kind'], reference['sha256'])).fetchall():
+            if ledger.db.execute('SELECT 1 FROM coverage WHERE kind=? AND sha256=?',
+                                 (owner_kind, owner_sha)).fetchone() is not None or ledger.db.execute(
+                    'SELECT 1 FROM batch_selected WHERE kind=? AND sha256=?', (owner_kind, owner_sha)).fetchone() is not None:
+                return True
+        return False
+
+    full = False
+    while not full:
+        added = 0
+        for reference in missing_content(ledger):
+            key = (reference['kind'], reference['sha256'])
+            if only is not None and key not in only:
+                continue
+            if gated:
+                if ledger.db.execute('SELECT 1 FROM batch_selected WHERE kind=? AND sha256=?', key).fetchone() is not None:
+                    continue
+                if not ready(reference):
+                    continue
+            _require(len(reference['kind']) <= 64 and bool(re.fullmatch('[a-z][a-z0-9_]*', reference['kind'])),
+                     'content kind is not a registered generated transport name')
+            name = 'content/' + reference['kind'] + '/' + reference['sha256']
+            # Ask the actual bounded allocator before copying; capacity refusal ends
+            # this batch, while corrupt bytes and every other failure remain fatal.
+            can_fit = False
+            for part in range(part_plan.slots):
+                count, size = part_plan.db.execute(
+                    'SELECT count(*),coalesce(sum(bytes),0) FROM members WHERE part=?', (part,)).fetchone()
+                if count < 299 and size + reference['bytes'] <= 512 * CHUNK_BYTES - 16 * CHUNK_BYTES:
+                    can_fit = True
+                    break
+            if not can_fit:
+                full = True
                 break
-        if not can_fit:
+            inventory.bytes(reference)
+            part_plan.add_file(name, inventory.cas.path / reference['sha256'])
+            selected += 1
+            added += 1
+            if gated:
+                ledger.db.execute('INSERT INTO batch_selected VALUES(?,?)', key)
+        if not gated or added == 0:
             break
-        inventory.bytes(reference)
-        part_plan.add_file(name, inventory.cas.path / reference['sha256'])
-        selected += 1
     _require(selected > 0, 'resource_blocked: native transfer cannot fit any required content')
 
     def leaves():
@@ -1258,6 +1324,7 @@ def native_batch(inventory: ContentInventory, ledger: PublicationLedger, binding
         name = 'transfer/node-' + str(ordinal) + '.json'
         part_plan.db.execute("DELETE FROM members WHERE path=? AND digest LIKE 'reserved:%'", (name,))
     part_plan.db.commit()
+    ledger.db.execute('DROP TABLE IF EXISTS batch_selected')
     ledger.db.commit()
     part_plan.preflight()
     return transfer

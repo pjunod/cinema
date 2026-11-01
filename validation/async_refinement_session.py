@@ -314,25 +314,40 @@ def resource_plan(plan_envelope, reg, measurement, root, now=None):
                                         plan['total_session_disk_bytes'])
     allowances=bounds['record_allowances'];inventory=accounting_inventory(bounds['source_receipt'])
     p.require(set(allowances)==set(inventory),'operational accounting kind inventory differs')
-    policy=bounds['physical_policy']
-    calibration=bounds['calibration']
-    p.require(type(calibration) is dict and measurement.get('resource_calibration')==calibration,
-              'actual physical calibration is missing or changed')
-    expected=physical.calibrate_physical_policy(policy,calibration['geometry'],calibration['baseline'],plan)
-    p.require(calibration==expected and expected['peak_bytes']<=measurement['free_disk_bytes'],
-              'physical calibration/available disk differs')
-    method={'id':'typed_physical_caps_v1','source_sha256':reg['accounting_method_sha256'],
-        'policy_sha256':p.digest(p.canonical(policy)),'table_map_sha256':policy['table_map_sha256'],
-        'accounting_inventory':inventory,'record_allowances':allowances,
-        'source_bound_specification_sha256':reg['source_files'][p.SOURCE_BOUND_SPEC],
-        'plan_inputs':accounting_plan_inputs(plan),'prefix_policy':'late_bound_per_batch_v1'}
-    p.require(measurement.get('resource_method')==method,'closed measured physical method differs')
+    expected=physical_admission(plan,reg,measurement,bounds,inventory)
     p.require(plan['total_retained_artifact_bytes']<=plan['total_session_disk_bytes'],
               'retained artifacts exceed immutable session disk')
     return {'operational_peak_bytes':expected['peak_bytes'],'source_global_widths':widths,
             'finite_worst_case_expressions':finite,'record_allowances':allowances,
             'accounting_inventory':inventory}
 
+
+
+def physical_method(reg, plan, policy, inventory, allowances):
+    """The one closed typed_physical_caps_v1 method; probe and admission both build it here."""
+    return {'id':'typed_physical_caps_v1','source_sha256':reg['accounting_method_sha256'],
+            'policy_sha256':p.digest(p.canonical(policy)),'table_map_sha256':policy['table_map_sha256'],
+            'accounting_inventory':inventory,'record_allowances':allowances,
+            'source_bound_specification_sha256':reg['source_files'][p.SOURCE_BOUND_SPEC],
+            'plan_inputs':accounting_plan_inputs(plan),'prefix_policy':'late_bound_per_batch_v1'}
+
+
+def physical_admission(plan, reg, measurement, bounds, inventory):
+    """Admission is exact equality with the typed physical calibration; nothing is inferred.
+
+    The retired index/WAL/backup overheads and the whole-image-in-current-slots inequality
+    have no place here: per-batch native packing is exact and late-bound.
+    """
+    p.require('resource_overheads' not in measurement,'retired record-times-table overheads cannot authorize v3')
+    policy,allowances,calibration=bounds['physical_policy'],bounds['record_allowances'],bounds['calibration']
+    p.require(type(calibration) is dict and measurement.get('resource_calibration')==calibration,
+              'actual physical calibration is missing or changed')
+    expected=physical.calibrate_physical_policy(policy,calibration['geometry'],calibration['baseline'],plan)
+    p.require(calibration==expected and expected['peak_bytes']<=measurement['free_disk_bytes'],
+              'physical calibration/available disk differs')
+    p.require(measurement.get('resource_method')==physical_method(reg,plan,policy,inventory,allowances),
+              'closed measured physical method differs')
+    return expected
 
 
 def admit(reg, plan, probe, measurement, root, now=None):
@@ -484,10 +499,8 @@ GRANT_ENV = ('PLURX_ASYNC_PHYSICAL_GRANT_FD', 'PLURX_ASYNC_PHYSICAL_GRANT_SHA256
 
 
 def process_start_ticks(pid):
-    """Kernel start time of a live process; binds a grant to its exact parent."""
-    raw = Path('/proc/' + str(pid) + '/stat').read_text()
-    fields = raw[raw.rindex(')') + 2:].split()
-    return int(fields[19])
+    """Kernel start time of a live process; binds a grant to its exact parent (platform-neutral)."""
+    return physical.process_start_ticks(pid)
 
 
 class HeldLease:
@@ -595,6 +608,7 @@ class PhysicalContext:
         # output directory -> read-only attachments of already held parent reservations
         self.attachments = {}
         self.grants = []
+        self.survivors = []  # reservations re-tracked for objects a crashed parent left mid-transfer
 
     def binding(self):
         return {'source': self.reg['source'], 'session_id': self.session_id,
@@ -722,6 +736,74 @@ class PhysicalContext:
                                 'recursive': False, 'access': 'read_only'})
         self.attachments[str(output_dir)] = attachments
 
+    def reconcile_crash(self):
+        """Settle what a crashed earlier parent left in the session's owned ledger directories.
+
+        A `physical-transfers/` record names ONE file moving between two reservations. Its exact
+        location is established with locate_transfer (ambiguity or loss refuses the job: both
+        charges stay), the located object is charged to exactly the side that holds it, and only
+        then is the record removed. A `physical-grants/` descriptor of a dead parent confers
+        nothing: it is charged while it exists and removed; a descriptor of a live foreign parent
+        refuses the job. Everything is charged before anything is removed.
+        """
+        ledger = self.ledger
+        for record_path in sorted(self.owned.glob(physical.TRANSFER_DIRECTORY + '/*.json')):
+            raw = record_path.read_bytes()
+            record = physical._strict_json(raw)
+            where = physical.locate_transfer(self.owned, record_path)
+            if where == 'source':
+                owner, resource, component = physical.POOL_OWNERS['restore_staging_bytes'], 'restore_staging_bytes', 'bytes'
+            else:
+                destination = record['destination']
+                owner, resource, component = destination['owner'], destination['resource'], destination['component']
+            side = record['source' if where == 'source' else 'destination']
+            held = ledger.reserve(owner, resource, component, record['bytes'])
+            held.track(self.owned / side['relative_path'])
+            self.survivors.append(held)
+            control = ledger.reserve('session_controller', 'control_bytes', 'bytes', len(raw))
+            control.track(record_path)
+            record_path.unlink()
+            fsync_directory(record_path.parent)
+            control.release_after_removal()
+        for descriptor_path in sorted(self.owned.glob(physical.GRANT_DIRECTORY + '/*.json')):
+            raw = descriptor_path.read_bytes()
+            parent = physical._strict_json(raw)['parent']
+            try:
+                live = physical.process_start_ticks(parent['pid']) == parent['start_ticks']
+            except (physical.PhysicalPolicyError, OSError):
+                live = False
+            p.require(not live, 'a live foreign parent still holds a physical grant in this session')
+            control = ledger.reserve('session_controller', 'control_bytes', 'bytes', len(raw))
+            control.track(descriptor_path)
+            descriptor_path.unlink()
+            fsync_directory(descriptor_path.parent)
+            control.release_after_removal()
+
+    PERSISTENT_NAMES = ('publication-', 'conformance-', 'controller-api', 'physical-', 'ordinal-', 'execution.lock')
+
+    def discard_prior_outputs(self, output):
+        """Earlier jobs' output trees have no value: everything is re-authenticated from the API.
+
+        Left in place they would occupy owned storage no pool ever charged. Only siblings of this
+        job's output under the session directory are removed; the persistent spools, the API cache,
+        the ledger directories and the ordinal guards are never touched here.
+        """
+        output = Path(output).resolve()
+        if output.parent != self.owned:
+            return
+        for entry in sorted(self.owned.iterdir()):
+            if (entry == output or entry.name.startswith(self.PERSISTENT_NAMES)
+                    or entry.is_symlink() or not entry.is_dir()):
+                continue
+            shutil.rmtree(entry)
+
+    def discard_dead_spools(self, live):
+        """Remove the publication/rehearsal spools no authenticated pending chain still needs."""
+        for entry in sorted(self.owned.iterdir()):
+            if (entry.name.startswith(('publication-', 'conformance-')) and entry.name not in live
+                    and entry.is_dir() and not entry.is_symlink()):
+                shutil.rmtree(entry)
+
     def close(self):
         self.lease.close()
 
@@ -741,6 +823,7 @@ class physical_session:
 
     def __exit__(self, *_exc):
         _PHYSICAL.clear()
+        _DOWNLOADS.clear()
         self.context.close()
 
 
@@ -947,6 +1030,12 @@ def transport_hash(lines, artifact):
 def completion(state, verifier, main_receipts, fresh, unit, root):
     p.require(state['stage'] == 'complete' and state['phase'] == 'qualified',
               'session not globally qualified')
+    # Completion/Main admission requires the exact current-source native transport case result.
+    case_result = state.get('conformance_result')
+    p.require(type(case_result) is dict and case_result.get('kind') == 'native_transport_conformance'
+              and case_result.get('case_id') == snapshots.CONFORMANCE_CASE and case_result.get('complete') is True
+              and case_result.get('acceptance') is False and case_result.get('source') == state['registration']['source'],
+              'completion requires the exact current-source native transport conformance result')
     checkpoint = state['checkpoint']['record']
     p.require(checkpoint['counts']['frontier'] == 0 and len(checkpoint['contexts']) == 7,
               'complete root lacks global closure')
@@ -1345,6 +1434,31 @@ def upload_outputs(metadata, staging):
             stream.write(f'part_{n}_path={Path(staging).resolve() / "parts" / str(n)}\n')
 
 
+_DOWNLOADS = {}
+
+
+def charge_download(directory, archive, members):
+    """Downloads and their extraction belong to restore_staging_bytes (accounting `downloads_and_restores`).
+
+    The transient ZIP and the extracted members are reserved before they are written; the extraction
+    subtree is tracked so every surviving member keeps its charge. A directory that survived an
+    earlier stage of this job is charged at its actual size and reserves nothing twice.
+    """
+    if not _PHYSICAL:
+        return
+    context = _PHYSICAL[0]
+    key = str(Path(directory))
+    if key in _DOWNLOADS:
+        return
+    present = Path(directory).exists()
+    budget = PoolBudget(context, 'restore_staging_bytes', directory_bytes(directory) if present else 0)
+    budget.track_subtree(directory)  # every extracted member keeps this charge until it is removed
+    if not present:
+        # The transient ZIP and the members extracted from it exist together before the ZIP is dropped.
+        budget.reserve(Path(archive).stat().st_size + sum(member['bytes'] for member in members))
+    _DOWNLOADS[key] = budget
+
+
 def download_parts(api, reg, run_id, mode, destination, root):
     """Authenticate every native ZIP of one terminal producer; no semantic reading."""
     run, job, event = p.producer(api, run_id, reg, mode, ('success',))
@@ -1383,6 +1497,7 @@ def download_parts(api, reg, run_id, mode, destination, root):
         try:
             p.require(p.file_sha(archive) == transport_hash(lines, artifact), 'native upload/API/local hash differs')
             directory = Path(api.scratch).parent/'authenticated-parts'/str(artifact['id'])
+            charge_download(directory,archive,descriptor['members'])
             p.unpack(archive,directory,descriptor['members'],storage_guard=api.guard_storage,verify_existing=directory.exists())
             parts[n] = directory
             total += archive.stat().st_size + sum(v['bytes'] for v in descriptor['members'])
@@ -1417,7 +1532,10 @@ def authenticate_output(api, reg, run_id, mode, destination, root):
                   'capability probe/source/slot identity differs')
         rust=validate_catalog_calibration(p.read(find_member(parts,'calibration/catalog-calibration-execution.json')),
              find_member(parts,'calibration/catalog-calibration.json').parent,reg,root)
-        p.require(rust in result['measurement']['resource_method']['geometry'],
+        measured=result['measurement']
+        p.require(rust['geometry'] in measured['resource_calibration']['geometry']['catalog_main']
+                  and measured['resource_method']['id']=='typed_physical_caps_v1'
+                  and 'resource_overheads' not in measured,
                   'actual Rust calibration evidence is missing from measured admission geometry')
         capability = {'registration_sha256': metadata['registration_sha256'],
                       'source_archive_sha256': reg['source_archive_sha256'], 'run': run_id,
@@ -1478,16 +1596,51 @@ def authenticate_output(api, reg, run_id, mode, destination, root):
 # result, and `advance` runs once for it.
 # ---------------------------------------------------------------------------
 
+def database_grant(context, path):
+    for grant in context.grants:
+        if grant.path == Path(path):
+            return grant
+    return None
+
+
 def open_database(family, path):
-    """Physically granted connection on the proof host; plain on a read-only consumer."""
+    """Physically granted connection on the proof host; plain on a read-only consumer.
+
+    One file has exactly one grant for the whole process: reopening a path (a database
+    copied or reused by a later stage of the same job) reconnects through its existing grant
+    instead of reserving the same file a second time.
+    """
     if _PHYSICAL:
         context = _PHYSICAL[0]
-        grant = physical.reserve_database(context.ledger, family, path,
-                                          context.policy['families'][family]['database_bytes'])
-        connection = grant.connect()
-        context.grants.append(grant)  # retained: files survive until actually removed
-        return connection
+        grant = database_grant(context, path)
+        if grant is None:
+            grant = physical.reserve_database(context.ledger, family, path,
+                                              context.policy['families'][family]['database_bytes'])
+            context.grants.append(grant)  # retained: files survive until actually removed
+        else:
+            p.require(grant.family == family, 'database path already granted to another family')
+            grant.connection = None
+        return grant.connect()
     return sqlite3.connect(path)
+
+
+def discard_database(path):
+    """Remove a finished scratch database, then release its reservation (caller closed it)."""
+    target = Path(path)
+    for suffix in ('', *physical.DB_COMPANIONS):
+        Path(str(target) + suffix).unlink(missing_ok=True)
+    if _PHYSICAL:
+        context = _PHYSICAL[0]
+        grant = database_grant(context, target)
+        if grant is not None:
+            grant.connection = None
+            grant.release_after_removal()
+            context.grants.remove(grant)
+
+
+def open_index(path):
+    """A dependency/locator index on its declared authentication_index grant."""
+    return p.DependencyIndex(Path(path), open_database('authentication_index', path))
 
 
 class PoolBudget:
@@ -1506,6 +1659,10 @@ class PoolBudget:
     def track(self, path):
         """Name the one physical file these bytes hold (what an attachment or a transfer refers to)."""
         self.reservation.track(path)
+
+    def track_subtree(self, path):
+        """Name the owned directory whose files these bytes hold."""
+        self.reservation.track_subtree(path)
 
     def reserve(self, size):
         if type(size) is not int or size < 0:
@@ -1547,11 +1704,16 @@ class PublicationStore:
     Spool bytes are sender-side cache only. Coverage is credited from authenticated
     native batches during replay and overwritten into this ledger before sending.
     """
-    def __init__(self, reg, root, name, *, create, evidence=None):
+    def __init__(self, reg, root, name, *, create, evidence=None, resume=False):
         context = current_physical()
         self.reg, self.root_source = reg, root
         self.root = context.owned / name
-        self.root.mkdir(mode=0o700, exist_ok=not create)
+        # `resume` reopens the spool a failed earlier attempt of the same dispatch kind left behind:
+        # the spool is sender cache only (coverage is credited from authenticated batches), so a
+        # retry must never depend on an operator deleting a scratch directory.
+        self.root.mkdir(mode=0o700, exist_ok=resume or not create)
+        p.require(self.root.is_dir() and not self.root.is_symlink() and self.root.resolve() == self.root,
+                  'publication spool is not a private owned directory')
         for sub in ('cas', 'evidence'):
             (self.root / sub).mkdir(mode=0o700, exist_ok=True)
         self.cas = owned_directory(self.root / 'cas', reg, root)
@@ -1588,12 +1750,25 @@ def publication_binding(reg, unit, initial_image_sha256):
             'resource_plan_sha256': unit['resource_plan_sha256'], 'initial_image_sha256': initial_image_sha256}
 
 
-def lineage_references(index):
-    """Content already credited by accepted-unit authenticated native batches."""
-    for kind_name, sha, size in index.db.execute(
-            "SELECT DISTINCT substr(member_path,9,instr(substr(member_path,9),'/')-1),sha256,bytes "
+def batch_digest(batch):
+    """Identity under which a transfer batch's locators are stored (`batch_receipt_sha256`)."""
+    return p.digest(p.canonical(batch))
+
+
+def lineage_references(index, accepted):
+    """Content credited by the batches of ACCEPTED predecessor publications only.
+
+    `accepted` is the replay-derived set of batch-receipt digests of publications whose activation
+    was accepted. Locators of a pending publication, of a discarded one and of rehearsal batches
+    are never a seed: reusing them requires the rebuilt snapshot to bind identical roots, which
+    the ordinary pending chain (not this seed) establishes batch by batch.
+    """
+    accepted = frozenset(accepted)
+    for kind_name, sha, size, batch in index.db.execute(
+            "SELECT DISTINCT substr(member_path,9,instr(substr(member_path,9),'/')-1),sha256,bytes,batch_receipt_sha256 "
             "FROM native_locators WHERE member_path LIKE 'content/%'"):
-        yield {'kind': kind_name, 'sha256': sha, 'bytes': size}
+        if batch in accepted:
+            yield {'kind': kind_name, 'sha256': sha, 'bytes': size}
 
 
 def build_publication(store, state, reg, root, index, quantum, produced, checked, origin):
@@ -1621,7 +1796,7 @@ def build_publication(store, state, reg, root, index, quantum, produced, checked
     finally:
         qdir.close()
     # Unchanged content is credited only from the exact accepted authenticated lineage.
-    snapshots.seed_coverage(store.ledger, lineage_references(index))
+    snapshots.seed_coverage(store.ledger, lineage_references(index, state['accepted_batches']))
     intent, pending = snapshots.prepare_publication(store.inventory, store.ledger, binding, origin, produced,
                                                     catalog_ref, verifier_ref, evidence_ref)
     p.auxiliary(intent, root)
@@ -1727,11 +1902,16 @@ class ReplayLedger:
     """Receiver-side authenticated coverage and closure for one pending publication."""
     def __init__(self, path):
         self.path = Path(path)
-        self.db = sqlite3.connect(self.path)
+        self.db = open_database('publication_pending_scratch', self.path)
         self.ledger = snapshots.PublicationLedger(self.db)
 
     def close(self):
         self.db.close()
+
+    def discard(self):
+        """The publication is finished: its receiver ledger has no further value."""
+        self.close()
+        discard_database(self.path)
 
 
 def authenticate_publication(api, reg, run_id, root, work, state, index, *, case_sha256=None):
@@ -1759,10 +1939,25 @@ def authenticate_publication(api, reg, run_id, root, work, state, index, *, case
 
 
 def credit_rows(index, ledger, resolver, unit_ordinal, pending_before, batch, rows):
-    """Record authenticated locators, then commit exact coverage and grow closure."""
+    """Commit exact closure-relative coverage first; only a batch that advances gains locators.
+
+    The batch's own authenticated bytes resolve its structured members while the closure is
+    recomputed (a parent and its children may travel together); anything else resolves through
+    the lineage. A refused batch leaves neither coverage nor locators behind.
+    """
+    local = {(reference['kind'], reference['sha256']): path for reference, path, _locator in rows}
+
+    def resolve(reference):
+        path = local.get((reference['kind'], reference['sha256']))
+        if path is None:
+            return resolver(reference)
+        p.require(0 < reference['bytes'] <= 8 * snapshots.CHUNK_BYTES, 'batch content length is not admitted')
+        data = Path(path).read_bytes()
+        p.require(snapshots.content_ref(reference['kind'], data) == reference, 'batch content differs from its ContentRef')
+        return data
+    after = snapshots.resume_publication(ledger, pending_before, batch, [row[0] for row in rows], resolve)
     for _reference, _path, locator in rows:
         index.add_locator(unit_ordinal, locator)
-    after = snapshots.resume_publication(ledger, pending_before, batch, [row[0] for row in rows])
     snapshots.expand_with_resolver(ledger, resolver)
     return after
 
@@ -1777,7 +1972,7 @@ def begin_pending(state, reg, root, work, authenticated, index, execution_run_it
     ledger_path = Path(work) / ('pending-' + str(batch['execution_origin']['dispatch_ordinal']) + '.sqlite')
     replay = ReplayLedger(ledger_path)
     try:
-        seed = list(lineage_references(index))
+        seed = list(lineage_references(index, state['accepted_batches']))
         snapshots.seed_coverage(replay.ledger, seed)
         sha, count = replay.ledger.coverage()
         intent_ref = carrier['pending_publication']['intent']
@@ -1797,7 +1992,7 @@ def begin_pending(state, reg, root, work, authenticated, index, execution_run_it
             'execution_origin': batch['execution_origin'],
             'original_receipts': original,
             'bytes': batch['retained_artifact_bytes'], 'carriers': [authenticated['control_sha256']],
-            'intent': intent_ref}
+            'intent': intent_ref, 'batch_receipts': [batch_digest(batch)]}
 
 
 def check_original_roots(carrier_unit, original_receipts):
@@ -1855,8 +2050,7 @@ def expected_validations(checkpoint, catalog_root, input_preparation):
               'catalog_logical_digest': cp['catalog_logical_digest'], 'counts': cp['counts'], 'contexts': cp['contexts']}
     private = {'schema_version': 6, 'operation': 'validate_restore', **shared,
                'catalog_bytes': catalog_root['catalog_bytes'], 'semantic_manifest_root': cp['page_root'],
-               'initial_image_sha256': cp['initial_image_id'], 'resource_plan_sha256': cp['resource_plan_id']
-               if 'resource_plan_id' in cp else cp['resource_plan_sha256']}
+               'initial_image_sha256': cp['initial_image_id'], 'resource_plan_sha256': cp['resource_plan_sha256']}
     semantic = {'schema_version': 6, **shared, 'manifest_root': cp['page_root'], 'complete': True,
                 'acceptance': False, 'scope': FINAL_INPUT_SCOPE}
     if input_preparation:
@@ -1901,8 +2095,13 @@ def check_activation_validations(result, intent, validations, resolver, ledger, 
         p.require(receipt == expected, 'activation verifier/result-chain validation differs')
 
 
+def check_root_origin(record, origin):
+    """A snapshot root was sealed by exactly the execution its publication names."""
+    p.require(record['execution_origin'] == origin, 'snapshot root execution origin differs from its publication')
+
+
 def restore_snapshots(state, source, request, output, reg, root, index_path, resolver, catalog_ref,
-                      verifier_ref, checkpoint):
+                      verifier_ref, checkpoint, origin):
     """Reconstruct both complete files from authenticated content and validate them.
 
     Used by the accepted-checkpoint restore at job start and by activation. Each restored file
@@ -1924,11 +2123,13 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
         return budget, path
     try:
         catalog_root = p.auxiliary(p.decode(resolver(catalog_ref)), root)
+        check_root_origin(catalog_root, origin)
         catalog_budget, staged = stage(catalog_root, 'catalog.staged.sqlite')
         p.write(output / 'restored-catalog-root.json', catalog_root)
         verifier_root = verifier_budget = verifier_staged = None
         if verifier_ref is not None:
             verifier_root = p.verifier_auxiliary(p.decode(resolver(verifier_ref)), root)
+            check_root_origin(verifier_root, origin)
             verifier_budget, verifier_staged = stage(verifier_root, 'verifier.staged.sqlite')
     finally:
         directory.close()
@@ -2016,8 +2217,10 @@ def activate_generation(restored, output, request):
             ledger.abort_transfer(handle)
         active.rmdir()
         raise
-    for _entry, handle in prepared:
-        ledger.commit_transfer_after_rename_fsync(handle, handle.identity)
+    for entry, handle in prepared:
+        # The identity the filesystem reports for the file now at its active name, never the prepared one.
+        observed = os.lstat(active / entry['name'])
+        ledger.commit_transfer_after_rename_fsync(handle, (observed.st_dev, observed.st_ino))
     restored['generation'].rmdir()
     fsync_directory(active.parent)
     request['catalog_path'] = str(active / 'catalog.sqlite')
@@ -2029,12 +2232,12 @@ def restore_latest(state, latest, source, request, output, reg, root):
     result, _transport = latest
     index_path = Path(output) / 'dependencies.sqlite'
     shutil.copyfile(state['index_path'], index_path)
-    index = p.DependencyIndex(index_path)
+    index = open_index(index_path)
     try:
         resolver = snapshots.AuthenticatedResolver(index.db, Path(state['parts_root']))
         restored = restore_snapshots(state, source, request, output, reg, root, index_path, resolver,
                                      state['catalog_root_ref'], state.get('verifier_root_ref'),
-                                     state['checkpoint'])
+                                     state['checkpoint'], state['execution_origin'])
         verifier_digest = restored['verifier']
         if state.get('verifier_root_ref') is None:
             p.require(state.get('verifier_progress') is None, 'authenticated verifier state disappeared')
@@ -2046,15 +2249,39 @@ def restore_latest(state, latest, source, request, output, reg, root):
     return index_path
 
 
-def fresh_conformance_pending(anchor, ledger_path):
-    """Empty rehearsal receiver over the anchor's immutable intent; zero historical credit."""
+def seed_closure_queue(ledger, resolver, intent_ref):
+    """Queue the complete closure of an immutable intent from authenticated lineage bytes.
+
+    Reads only: nothing is credited. The queue is the set of identities a transfer batch may
+    legitimately cover; coverage still comes solely from authenticated batches.
+    """
+    stack, seen = [intent_ref], set()
+    while stack:
+        reference = stack.pop()
+        key = (reference['kind'], reference['sha256'])
+        if key in seen:
+            continue
+        seen.add(key)
+        ledger.db.execute('INSERT OR IGNORE INTO queue VALUES(?,?,?)',
+                          (reference['kind'], reference['sha256'], reference['bytes']))
+        if reference['kind'] in snapshots.STRUCTURED_KINDS:
+            stack.extend(snapshots.child_refs(reference['kind'], resolver(reference)))
+    ledger.db.commit()
+
+
+def fresh_conformance_pending(anchor, ledger_path, lineage_resolver):
+    """Empty rehearsal receiver over the anchor's immutable intent; zero historical credit.
+
+    The rehearsal forces its first two batches to carry sole snapshot chunks whose parents are
+    not (and, with zero credit, cannot be) covered. The receiver therefore starts from the anchor's
+    complete closure as its required queue, read from the accepted lineage; a transfer batch is
+    still credited only for queued identities.
+    """
     replay = ReplayLedger(ledger_path)
     try:
         sha, count = replay.ledger.coverage()
         intent_ref = anchor['intent']
-        replay.db.execute('INSERT OR IGNORE INTO queue VALUES(?,?,?)',
-                          (intent_ref['kind'], intent_ref['sha256'], intent_ref['bytes']))
-        replay.db.commit()
+        seed_closure_queue(replay.ledger, lineage_resolver, intent_ref)
     finally:
         replay.close()
     return {'pending': {'schema_version': 1, 'kind': 'pending_publication', 'intent': intent_ref,
@@ -2067,18 +2294,7 @@ def fresh_conformance_pending(anchor, ledger_path):
 
 def seed_sender_queue(store, resolver, intent_ref):
     """Sender-side closure queue from authenticated lineage bytes (reads only, no credit)."""
-    stack, seen = [intent_ref], set()
-    while stack:
-        reference = stack.pop()
-        key = (reference['kind'], reference['sha256'])
-        if key in seen:
-            continue
-        seen.add(key)
-        store.ledger.db.execute('INSERT OR IGNORE INTO queue VALUES(?,?,?)',
-                                (reference['kind'], reference['sha256'], reference['bytes']))
-        if reference['kind'] in snapshots.STRUCTURED_KINDS:
-            stack.extend(snapshots.child_refs(reference['kind'], resolver(reference)))
-    store.ledger.db.commit()
+    seed_closure_queue(store.ledger, resolver, intent_ref)
 
 
 def stage_sender_content(store, resolver, offer):
@@ -2115,23 +2331,24 @@ def run_publish(api, reg, state, latest, control, root, source, output, job, run
                   'rehearsal anchor is not the first authenticated snapshot pair')
         spool = 'conformance-' + case[:32]
         pend = state['conformance_pending']
-        if first_rehearsal:
-            pend = fresh_conformance_pending(state['anchor'], Path(output) / ('conformance-' + case[:32] + '.sqlite'))
     index_path = Path(output) / 'dependencies.sqlite'
     shutil.copyfile(state['index_path'], index_path)
-    index = p.DependencyIndex(index_path)
+    index = open_index(index_path)
     case_index = None
     store = None
     try:
         parts_root = Path(state['parts_root'])
         resolver = snapshots.AuthenticatedResolver(index.db, parts_root)  # sender reads lineage bytes
         restore_resolver = resolver
+        if first_rehearsal:
+            pend = fresh_conformance_pending(state['anchor'], Path(output) / ('conformance-' + case[:32] + '.sqlite'),
+                                             resolver)
         if conformance is not None and not first_rehearsal:
             case_path = Path(output) / 'case-dependencies.sqlite'
             shutil.copyfile(state['conformance_index_path'], case_path)
-            case_index = p.DependencyIndex(case_path)
+            case_index = open_index(case_path)
             restore_resolver = snapshots.AuthenticatedResolver(case_index.db, Path(state['conformance_parts_root']))
-        store = PublicationStore(reg, root, spool, create=first_rehearsal or False, evidence=False)
+        store = PublicationStore(reg, root, spool, create=first_rehearsal, evidence=False, resume=first_rehearsal)
         receiver = ReplayLedger(pend['ledger_path'])
         try:
             store.ledger.db.execute('DELETE FROM coverage')
@@ -2187,6 +2404,29 @@ def run_publish(api, reg, state, latest, control, root, source, output, job, run
     p.producer(api, run_id, reg, 'unit', ('running', 'in_progress'))
 
 
+def restore_request_base(state, reg, work_unit, execution_origin, initial_image, checkpoint, index_path,
+                         driver_graph, output):
+    """The closed private request shape every restore validation shares with the unit runner.
+
+    `work_unit` is the frozen WorkUnit record with empty `artifact_roots` (the direct original
+    receipts belong to the accepted result and carrier, never to a private request) and
+    `execution_origin` is the unit's original execute origin. restore_snapshots adds the staged
+    catalog/verifier paths and the per-validator output directory.
+    """
+    return {'schema_version': 6, 'operation': 'validate_restore', 'work_unit': work_unit,
+            'resource_plan': state['resource_plan'], 'initial_image': initial_image,
+            'prior_checkpoint': state['checkpoint'], 'checkpoint': checkpoint,
+            'source_files': reg['source_files'], 'runtime': reg['runtime'],
+            'deadline_monotonic': time.monotonic() + 1800, 'dependency_index': str(index_path),
+            'driver_graph': str(driver_graph), 'execution_origin': execution_origin,
+            'prepare_path': str(Path(output) / 'restore-prepare.json'),
+            'reservation_path': str(Path(output) / 'restore-reservation.json'),
+            'previous_verifier_progress_sha256': state.get('verifier_progress_sha256'),
+            'previous_verifier_backup_sha256': state.get('verifier_backup_sha256'),
+            'tlc': {'java': reg['runtime']['java']['path'], 'jar': reg['runtime']['tlc']['path'],
+                    'java_sha256': reg['runtime']['java']['sha256'], 'jar_sha256': reg['runtime']['tlc']['sha256']}}
+
+
 def prepare_activation(store, state, reg, root, source, output, pend, intent, binding, origin, index, index_path,
                        resolver, conformance):
     """Separate activation dispatch: restore, validate, then upload bounded evidence.
@@ -2201,19 +2441,14 @@ def prepare_activation(store, state, reg, root, source, output, pend, intent, bi
     transport = accepted_transport(intent, resolver, binding, evidence_dir, pend, 0)
     authenticated_roots(transport['parts'], index, root)
     add_authenticated_members(index, accepted, transport, root)
-    request = {'schema_version': 6, 'operation': 'validate_restore', 'work_unit': accepted['work_unit'],
-               'resource_plan': state['resource_plan'], 'initial_image': accepted['initial_image'],
-               'prior_checkpoint': state['checkpoint'], 'checkpoint': accepted['checkpoint'],
-               'source_files': reg['source_files'], 'runtime': reg['runtime'],
-               'deadline_monotonic': time.monotonic() + 1800, 'dependency_index': str(index_path),
-               'driver_graph': str(Path(evidence_dir) / 'driver-graph.json'),
-               'previous_verifier_progress_sha256': state.get('verifier_progress_sha256'),
-               'previous_verifier_backup_sha256': state.get('verifier_backup_sha256'),
-               'tlc': {'java': reg['runtime']['java']['path'], 'jar': reg['runtime']['tlc']['path'],
-                       'java_sha256': reg['runtime']['java']['sha256'], 'jar_sha256': reg['runtime']['tlc']['sha256']}}
-    restored = restore_snapshots(state, source, request, Path(output) / 'activation', reg, root, index_path,
+    activation_output = Path(output) / 'activation'
+    activation_output.mkdir(mode=0o700, exist_ok=False)
+    request = restore_request_base(state, reg, planned['planned_work_unit'], pend['execution_origin'],
+                                   accepted['initial_image'], accepted['checkpoint'], index_path,
+                                   Path(evidence_dir) / 'driver-graph.json', activation_output)
+    restored = restore_snapshots(state, source, request, activation_output, reg, root, index_path,
                                  resolver, intent['catalog_root'], intent['verifier_root'],
-                                 accepted['checkpoint'])
+                                 accepted['checkpoint'], pend['execution_origin'])
     extra = [('validation_receipt', p.canonical(restored['catalog_private'])),
              ('validation_receipt', p.canonical(restored['catalog_semantic']))]
     if restored['verifier'] is not None:
@@ -2320,6 +2555,9 @@ def accept_activation(state, reg, root, work, auth, index):
     binding = {key: intent[key] for key in ('source', 'session_id', 'unit_ordinal', 'resource_plan_sha256',
                                            'initial_image_sha256')}
     after = replay_batch(state, auth, index, pend, activation=True)
+    check_root_origin(p.decode(resolver(intent['catalog_root'])), intent['execution_origin'])
+    if intent['verifier_root'] is not None:
+        check_root_origin(p.decode(resolver(intent['verifier_root'])), intent['execution_origin'])
     receiver = ReplayLedger(pend['ledger_path'])
     try:
         p.require(snapshots.closure_complete(receiver.ledger), 'activation before publication closure is complete')
@@ -2352,13 +2590,16 @@ def replay_activation(state, reg, root, work, auth, index, plan):
     new = authenticate_verifier_progress(prior, new, result, transport, root)
     validate_backend_progress(prior, new, result, transport, root)
     intent = auth['intent']
+    held = prior['pending_publication']
     new.update(control_sha256=auth['control_sha256'], pending_publication=None,
+               execution_origin=held['execution_origin'],
+               accepted_batches=[*prior['accepted_batches'], *held['batch_receipts'],
+                                 batch_digest(auth['carrier']['transfer_batch'])],
                catalog_root_ref=intent['catalog_root'], verifier_root_ref=intent['verifier_root'],
                retained_bytes=prior['retained_bytes'] + auth['carrier']['transfer_batch']['retained_artifact_bytes'])
     p.require(new['retained_bytes'] <= plan['total_retained_artifact_bytes'], 'retained artifact allowance exhausted')
     if new['anchor'] is None and intent['verifier_root'] is not None:
         # First normally authenticated catalog+verifier pair; never manufactured.
-        held = prior['pending_publication']
         new['anchor'] = {'intent': held['pending']['intent'], 'sha256': held['pending']['intent']['sha256'],
                          'unit': held['unit'], 'execution_origin': held['execution_origin'],
                          'original_receipts': held['original_receipts']}
@@ -2376,11 +2617,12 @@ def replay_conformance(state, reg, root, work, auth, index, case):
               and carrier['checkpoint'] == p.ref(state['checkpoint'], p.digest(p.canonical(state['checkpoint'])))
               and carrier['activation'] is None and carrier['completion'] is None,
               'conformance carrier is not the fixed case over the unchanged accepted checkpoint')
-    conf_index = p.DependencyIndex(Path(state['conformance_index_path']))
+    conf_index = open_index(state['conformance_index_path'])
     try:
         pend = state['conformance_pending']
         if pend is None:
-            pend = fresh_conformance_pending(anchor, Path(work) / ('conformance-' + case[:32] + '.sqlite'))
+            pend = fresh_conformance_pending(anchor, Path(work) / ('conformance-' + case[:32] + '.sqlite'),
+                                         snapshots.AuthenticatedResolver(index.db, Path(state['parts_root'])))
         resolver = snapshots.AuthenticatedResolver(conf_index.db, Path(state['conformance_parts_root']))
         auth = {**auth, 'resolver': resolver}
         final = carrier['transport_conformance']['result'] is not None
@@ -2467,7 +2709,7 @@ def replay_control(api,control,root,work):
     controller_memory_limit(state['resource_plan'])
     p.require(control['session_id']==plan['session_id'],'control session UUID differs')
     parts_root=str(Path(api.scratch).parent/'authenticated-parts')
-    state.update(pending_publication=None,conformance_pending=None,conformance_result=None,anchor=None,
+    state.update(pending_publication=None,accepted_batches=[],execution_origin=None,conformance_pending=None,conformance_result=None,anchor=None,
                  index_path=str(work/'dependencies.sqlite'),conformance_index_path=str(work/'conformance.sqlite'),
                  parts_root=parts_root,conformance_parts_root=parts_root,catalog_root_ref=None,verifier_root_ref=None,
                  next_dispatch_ordinal=0,control_sha256=None,retained_bytes=state.get('retained_bytes',0))
@@ -2478,7 +2720,7 @@ def replay_control(api,control,root,work):
         decisions[ordinal]=decision
     p.require([d['failed_ordinal'] for d in control['resume_decisions']]==sorted(decisions),'unordered resume decisions')
     latest=None;history=[];successes=[]
-    index=p.DependencyIndex(Path(state['index_path']))
+    index=open_index(state['index_path'])
     try:
         for ordinal,item in enumerate(inventory):
             state['next_dispatch_ordinal']=ordinal
@@ -2525,7 +2767,8 @@ def replay_control(api,control,root,work):
                     else:
                         p.require(auth['carrier']['role']=='publication_batch','publish carrier role differs')
                         after=replay_batch(state,auth,index,pend,activation=False)
-                        state['pending_publication']={**pend,'pending':after,'carriers':[*pend['carriers'],auth['control_sha256']]}
+                        state['pending_publication']={**pend,'pending':after,'carriers':[*pend['carriers'],auth['control_sha256']],
+                                                      'batch_receipts':[*pend['batch_receipts'],batch_digest(auth['carrier']['transfer_batch'])]}
                         chain_carrier(state,auth,root)
                 successes.append(item['run']['id'])
             state['attempts'].append({'ordinal':ordinal,'run':item['run']['id'],'job':item['job']['id'],
@@ -2623,6 +2866,17 @@ def source_commands(root, stage):
     return [sys.executable, str(Path(root) / 'scripts/check-async-driver-refinement'), 'paged-unit', '--request']
 
 
+def live_spools(state, reg, control):
+    """Spool directories an authenticated pending chain can still use; every other spool is dead."""
+    live = set()
+    if state['pending_publication'] is not None:
+        live.add('publication-' + str(state['pending_publication']['execution_origin']['dispatch_ordinal']))
+    if state['anchor'] is not None and state['conformance_result'] is None:
+        live.add('conformance-' + snapshots.conformance_case_sha256(
+            p.digest(p.canonical(reg)), control['session_id'], state['anchor']['sha256'])[:32])
+    return live
+
+
 def runner_body(control, root, output, mode, operation):
     """Trusted CI entry: the one physical context spans authenticate, run, package and upload."""
     root = Path(root).resolve(); output = Path(output).resolve()
@@ -2631,6 +2885,7 @@ def runner_body(control, root, output, mode, operation):
     p.require(owned in output.parents,'session output escapes persistent owned storage')
     context=PhysicalContext(reg,control['resource_plan'],control['session_id'],root,owned/control['session_id'])
     with physical_session(context):
+        context.reconcile_crash()
         return _runner_body(control, root, output, mode, operation, reg, owned)
 
 
@@ -2642,6 +2897,7 @@ def _runner_body(control, root, output, mode, operation, reg, owned):
     api.maximum_session_requests=400+(len(control['attempt_runs'])+3)*(32+3*p.UPLOAD_SLOTS)
     reject_prior_ordinal_dispatch(api,reg,control,api.current_run)
     output.mkdir(parents=True, exist_ok=False)
+    current_physical().discard_prior_outputs(output)
     if operation in ('execute','publish'):
         guard=owned/control['session_id']/('ordinal-'+str(len(control['attempt_runs']))+'.json')
         p.require(not guard.exists(),'executed ordinal already attempted; preserve failed state and start a new admitted session')
@@ -2691,6 +2947,7 @@ def _runner_body(control, root, output, mode, operation, reg, owned):
         return
     p.require(operation in ('execute', 'publish'), 'unregistered operation')
     state, latest = replay_control(api, control, root, output / 'history')
+    current_physical().discard_dead_spools(live_spools(state, reg, control))
     live_resources(state['resource_plan']['record'], reg, measurement)
     controller_memory_limit(state['resource_plan'])
     expected = expected_dispatch(state)
@@ -3109,28 +3366,91 @@ def reserve_verifier(prepare, state, unit, final_checkpoint, source, output, pla
             'members':members,'metadata_reservations':reservations}
 
 
-def directory_bytes(directory):
+def directory_bytes(directory, exclude=()):
+    """Allocated bytes below `directory`, skipping the named subtrees/files (exact paths)."""
+    excluded={Path(item).absolute() for item in exclude}
     total=0
-    for path in Path(directory).rglob('*'):
-        info=path.lstat()
-        if path.is_symlink():
-            total+=info.st_blocks*512
-        elif path.is_file():total+=max(info.st_size,info.st_blocks*512)
-        elif path.is_dir():total+=info.st_blocks*512
+    stack=[Path(directory)]
+    while stack:
+        with os.scandir(stack.pop()) as entries:
+            for entry in entries:
+                path=Path(entry.path)
+                if path.absolute() in excluded:continue
+                info=entry.stat(follow_symlinks=False)
+                if entry.is_symlink():total+=info.st_blocks*512
+                elif entry.is_file(follow_symlinks=False):total+=max(info.st_size,info.st_blocks*512)
+                elif entry.is_dir(follow_symlinks=False):
+                    total+=info.st_blocks*512
+                    stack.append(path)
     return total
 
 
+def observed_role_geometry(context, family, role, source_map, output):
+    """Install one source-map role's exact empty DDL under a real DatabaseGrant and observe it.
+
+    The grant reserves the family's whole database ceiling before the file exists. The scratch
+    file is removed and fsynced before its reservation is released, so roles that share a family
+    are measured one at a time and never inflate one another.
+    """
+    path=Path(output)/('calibration-'+role+'.sqlite')
+    p.require(not path.exists() and not path.is_symlink(),'calibration DB must be fresh')
+    grant=physical.reserve_database(context.ledger,family,path,context.policy['families'][family]['database_bytes'])
+    connection=grant.connect()
+    try:
+        observed=physical.install_empty_role(connection,role,source_map)
+        grant.retain()
+    finally:
+        connection.close()
+        grant.connection=None
+    for suffix in ('',*physical.DB_COMPANIONS):
+        Path(str(path)+suffix).unlink(missing_ok=True)
+    grant.release_after_removal()
+    return observed
+
+
+def calibration_geometry(context, source_map, output, rust):
+    """Actual empty geometry of EVERY source-map database role, family by family.
+
+    The Rust catalog role is the engine's own report (validated against the map by
+    calibrate_physical_policy); every other role is installed from its pinned DDL.
+    """
+    geometry={}
+    for family,databases in source_map['families'].items():
+        geometry[family]=[rust['geometry'] if database['database_role']==rust['geometry']['database_role']
+                          else observed_role_geometry(context,family,database['database_role'],source_map,output)
+                          for database in databases]
+    return geometry
+
+
+def calibration_baseline(root, output, reg):
+    """Disjoint baseline: the source workspace, and whatever else already sits in owned storage.
+
+    The source archive and extraction are measured once into source_workspace_bytes; the job
+    output belongs to the pools. Neither is counted again in the unpooled baseline.
+    """
+    archive=Path(root).parent/('source-'+reg['source_archive_sha256']+'.tar')
+    workspace=directory_bytes(root)+archive.stat().st_size
+    owned=validate_storage(reg['storage'],root)
+    return {'source_workspace_bytes':workspace,
+            'existing_unpooled_bytes':directory_bytes(owned,exclude=(root,archive,output))}
+
+
 def calibrate_overheads(root, output, control, measurement, deadline):
-    """Fresh operational calibration/allocation, explicitly not a width proof."""
-    import sqlite3
+    """Fresh typed physical calibration, explicitly not a width proof or a fit receipt.
+
+    Measures actual engine geometry for every declared database role and the disjoint
+    storage baseline, then lets calibrate_physical_policy compute the simultaneous
+    reservation. There is no record-count x table-count term and no backup inequality.
+    """
     reg=control['registration'];plan=control['resource_plan']['record']
     wrapper=operational_bounds(plan['source_bounds_utf8'],reg,root,measurement_pending=True)
-    widths,_=p.source_bound_receipt(wrapper['source_receipt'],root,reg['source'],reg['source_files'],
-                                  plan['total_session_disk_bytes'])
+    p.source_bound_receipt(wrapper['source_receipt'],root,reg['source'],reg['source_files'],
+                           plan['total_session_disk_bytes'])
     counts=wrapper['record_allowances']
     inventory=accounting_inventory(wrapper['source_receipt'])
     p.require(set(counts)==set(inventory),'calibration operational kind inventory differs')
-    geometry=[]
+    policy=wrapper['physical_policy']
+    source_map=physical.load_source_map(Path(root)/'validation/async_physical_table_map.json')
     calibrated=Path(output)/'rust-calibration';calibrated.mkdir()
     request={'operation':'catalog_calibration','resource_plan':control['resource_plan'],'session_id':control['session_id'],
              'deadline_monotonic':deadline,'output_dir':str(calibrated)}
@@ -3138,53 +3458,11 @@ def calibrate_overheads(root, output, control, measurement, deadline):
     execution=run_quantum(request_path,reg,root,calibrated,
         [sys.executable,str(Path(root)/'scripts/check-async-driver-refinement'),'calibrate-catalog','--output-dir',str(calibrated)])
     rust=validate_catalog_calibration(execution,calibrated,reg,root)
-    geometry.append(rust)
-    for name in ('paged-verifier-state.sql',):
-        source=Path(root)/'verification/async-driver-refinement'/name
-        path=Path(output)/('calibration-'+name+'.sqlite')
-        p.require(not path.exists(),'calibration DB must be fresh')
-        db=sqlite3.connect(path)
-        try:
-            db.executescript(source.read_text());db.commit()
-            table_names=[row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
-            empty_rows={table:db.execute('SELECT count(*) FROM \"'+table.replace('\"','\"\"')+'\"').fetchone()[0] for table in table_names}
-            p.require(all(value==0 for value in empty_rows.values()),'calibration DDL instantiated nonempty harness/production state')
-            geometry.append({'engine':'python_sqlite3','source_path':'verification/async-driver-refinement/'+name,
-                             'source_sha256':p.file_sha(source),'sqlite_version':db.execute('SELECT sqlite_version()').fetchone()[0],
-                             'sqlite_source_id':db.execute('SELECT sqlite_source_id()').fetchone()[0],
-                             'empty_table_rows':empty_rows,'acceptance':False,
-                             'page_size':db.execute('PRAGMA page_size').fetchone()[0],
-                             'page_count':db.execute('PRAGMA page_count').fetchone()[0],
-                             'freelist_count':db.execute('PRAGMA freelist_count').fetchone()[0],
-                             'indexes':db.execute("SELECT count(*) FROM sqlite_schema WHERE type='index'").fetchone()[0],
-                             'tables':db.execute("SELECT count(*) FROM sqlite_schema WHERE type='table'").fetchone()[0]})
-        finally:db.close()
-    total_records=sum(row['records'] for row in counts.values())
-    record_bytes=sum(row['records']*row['max_encoded_bytes'] for row in counts.values())
-    # Conservative allocation under this reviewed method. Empty geometry is a
-    # measured input, never claimed to prove full SQLite growth. Runtime guards
-    # stop before an admitted allocation is exhausted.
-    index_bytes=sum(g['page_size']*(g['page_count']+total_records*max(1,g['indexes']+g['tables']))
-                    for g in geometry)+2*record_bytes
-    wal_bytes=2*(record_bytes+index_bytes)+sum(g['page_size'] for g in geometry)
-    source_workspace_bytes=directory_bytes(root)+(Path(root).parent/('source-'+reg['source_archive_sha256']+'.tar')).stat().st_size
-    actual_scratch=directory_bytes(output)+source_workspace_bytes
-    retained_dir=Path(output)/'history'
-    actual_retained=directory_bytes(validate_storage(reg['storage'],root))
-    maximum_backups=2*(record_bytes+index_bytes)
-    overheads={'index_bytes':index_bytes,'wal_bytes':wal_bytes,
-               'scratch_bytes':actual_scratch+plan['unit_byte_allowance'],
-               'retained_bytes':actual_retained+6*plan['total_retained_artifact_bytes']+32*p.MIB*(plan['maximum_units']+3),
-               'duplicate_backup_bytes':6*maximum_backups+2*plan['unit_byte_allowance']}
-    return {**measurement,'resource_overheads':overheads,
-            'resource_method':{'id':'sqlite_geometry_operational_allocation_v1','source_sha256':accounting_method_digest(reg['source_files']),
-               'source_bound_specification_sha256':reg['source_files'][p.SOURCE_BOUND_SPEC],
-               'geometry':geometry,'record_allowances':counts,'accounting_inventory':inventory,
-               'maximum_combined_backup_bytes':maximum_backups,'minimum_fixed_prefix_parts':1,
-               'actual_prefix_reserved_at_late_export':True,'plan_inputs':accounting_plan_inputs(plan),
-               'actual_scratch_bytes':actual_scratch,'source_workspace_bytes':source_workspace_bytes,
-               'actual_retained_bytes':actual_retained,'actual_resident_bytes':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,
-               'is_source_valuation_theorem':False,'indivisible_fit_guaranteed':False}}
+    geometry=calibration_geometry(current_physical(),source_map,output,rust)
+    calibration=physical.calibrate_physical_policy(policy,geometry,calibration_baseline(root,output,reg),plan,
+                                                   source_map=source_map)
+    return {**measurement,'resource_calibration':calibration,
+            'resource_method':physical_method(reg,plan,policy,inventory,counts)}
 
 
 
@@ -3461,8 +3739,11 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
             if not name.startswith(('catalog-backup/','verifier-backup/'))]
         p.write(Path(output)/'unit-finalizer-result.json',produced)
         advance(state,produced,root)  # dry run on the planned form; the single real advance follows closure
-        plan.preflight()
-        index=p.DependencyIndex(Path(request['dependency_index']))
+        # The transport roots (catalog-backup/root.json, verifier-backup/root.json) are reserved above and
+        # fulfilled only by build_publication once the sealed intent exists; evidence_root runs the full
+        # strict preflight after fulfilment. Only the pending form can be checked here.
+        plan.preflight(pending=True)
+        index=open_index(request['dependency_index'])
         try:
             built=build_publication(store,state,reg,root,index,quantum,produced,checked,origin)
         finally:
@@ -3701,6 +3982,13 @@ def validate_control_identity(value,reg,metadata,run_id,job,root):
         if role=='unit_checkpoint':
             p.require(batch['purpose']=='activate' and value['activation']['execution_origin']==execution,
                       'activation carrier shape differs')
+        elif role=='transport_conformance':
+            # The rehearsal has transfer batches, then ONE restore/validation batch of purpose `activate`
+            # that carries the case result. Rehearsal never activates a checkpoint.
+            case=value['transport_conformance']
+            p.require(case is not None and value['activation'] is None
+                      and batch['purpose']==('activate' if case['result'] is not None else 'transfer'),
+                      'rehearsal carrier shape differs')
         else:
             p.require(batch['purpose']=='transfer' and value['activation'] is None, 'transfer carrier shape differs')
     utc(value['postcheck']['checked_at'])
@@ -4459,9 +4747,11 @@ def validate_catalog_calibration(execution,directory,reg,root):
             'path':reg['runtime'][name]['path'],'sha256':reg['runtime'][name]['sha256']},'calibration compiler differs')
     value=p.read(Path(directory)/'catalog-calibration.json')
     fields=('schema_version','engine','source_path','source_sha256','auxiliary_ddl_sha256','ddl_sha256',
-            'compiled_sources','sqlite_version','sqlite_source_id','page_size','page_count','freelist_count',
-            'indexes','tables','empty_table_rows','acceptance')
+            'compiled_sources','geometry','sqlite_version','sqlite_source_id','page_size','page_count',
+            'freelist_count','indexes','tables','empty_table_rows','acceptance')
     p.closed(value,fields)
+    geometry=value['geometry']
+    p.closed(geometry,('database_role','sqlite_source_id','schema_sha256','page_size','page_count','tables','indexes'))
     p.require(value['schema_version']==1 and value['engine']=='rust_rusqlite' and value['acceptance'] is False
               and value['source_path']=='verification/async-driver-refinement/paged-catalog.sql'
               and value['source_sha256']==reg['source_files'][value['source_path']]
@@ -4485,6 +4775,17 @@ def validate_catalog_calibration(execution,directory,reg,root):
               and type(value['sqlite_source_id']) is str and value['sqlite_source_id']
               and all(p.SHA.fullmatch(value[k]) for k in ('auxiliary_ddl_sha256','ddl_sha256')),
               'actual Rust empty geometry/engine identity unavailable')
+    # The Rust engine's own typed geometry is the catalog_main family input; it must describe
+    # exactly the database whose scalar figures were just validated, never another one.
+    p.require(geometry['database_role']=='rust_catalog'
+              and geometry['sqlite_source_id']==value['sqlite_source_id']
+              and p.SHA.fullmatch(geometry['schema_sha256']) is not None
+              and geometry['page_size']==value['page_size'] and geometry['page_count']==value['page_count']
+              and all(type(geometry[k]) is list and all(type(name) is str and name for name in geometry[k])
+                      and len(geometry[k])==len(set(geometry[k])) for k in ('tables','indexes'))
+              and len(geometry['tables'])==value['tables'] and len(geometry['indexes'])==value['indexes']
+              and set(geometry['tables'])==set(value['empty_table_rows']),
+              'actual Rust typed geometry differs from the validated calibration')
     implementation=(Path(root)/compiled[2]).read_text()
     auxiliary=re.findall(r'(?m)^const AUX_SCHEMA:&str=\"(.*?)\";',implementation,re.DOTALL)
     p.require(len(auxiliary)==1 and '\\' not in auxiliary[0] and '\"' not in auxiliary[0],
