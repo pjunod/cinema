@@ -535,10 +535,10 @@
                   "const": true
                 },
                 "receipt_member": {
-                  "$ref": "#/$defs/Member"
+                  "$ref": "#/$defs/MemberRef2"
                 },
                 "log_member": {
-                  "$ref": "#/$defs/Member"
+                  "$ref": "#/$defs/MemberRef2"
                 }
               },
               "required": [
@@ -731,7 +731,7 @@
         }
       ]
     },
-    "Member": {
+    "MemberRef2": {
       "type": "object",
       "properties": {
         "unit_ordinal": {
@@ -759,7 +759,7 @@
       "type": "object",
       "properties": {
         "member": {
-          "$ref": "#/$defs/Member"
+          "$ref": "#/$defs/MemberRef2"
         },
         "level": {
           "$ref": "paged-proof.schema.json#/$defs/Nat"
@@ -939,7 +939,7 @@
           "const": "member"
         },
         "member": {
-          "$ref": "#/$defs/Member"
+          "$ref": "#/$defs/MemberRef2"
         }
       },
       "required": [
@@ -958,7 +958,7 @@
           "$ref": "paged-proof.schema.json#/$defs/Id"
         },
         "member": {
-          "$ref": "#/$defs/Member"
+          "$ref": "#/$defs/MemberRef2"
         }
       },
       "required": [
