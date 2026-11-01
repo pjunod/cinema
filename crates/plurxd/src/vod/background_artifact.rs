@@ -73,6 +73,27 @@ pub(crate) enum StaticArtifactExposure {
     Obsolete,
 }
 
+/// What a NEW candidate attachment later needs to borrow the settled static
+/// S: the same dispatch-attested candidate binding the run encoded under and
+/// the executable, engine and source metadata it ran with. It is captured
+/// from the original recipe before that recipe is released, and is the only
+/// authority the exposed artifact carries; a Store row or manifest never
+/// stands in for it.
+pub(crate) struct StaticArtifactProvenance {
+    pub(super) candidate: Option<RetainedCandidateBinding>,
+    pub(super) executable: String,
+    pub(super) engine: String,
+    pub(super) source_metadata: [u8; 32],
+}
+
+impl StaticArtifactProvenance {
+    pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
+        self.executable
+            .capacity()
+            .checked_add(self.engine.capacity())
+    }
+}
+
 /// Complete pure P-side output plan. The original P owner remains charged
 /// while the request, immutable plan and publication buffers are allocated.
 /// After its native close, R admission consumes this object synchronously.
@@ -81,6 +102,7 @@ pub(crate) struct StaticArtifactAdmission {
     pub(super) cache_grant: crate::playback_cache::CacheReservation,
     pub(super) compatibility: crate::vodencode::FiniteSoftwareCompatibility,
     pub(super) policy: StaticArtifactPolicy,
+    pub(super) provenance: StaticArtifactProvenance,
     pub(super) workspace: u64,
     pub(super) publication: StaticArtifactPublication,
     pub(super) logical: retained_manifest::LogicalOutput,
@@ -96,7 +118,8 @@ impl StaticArtifactAdmission {
             .checked_add(crate::vodencode::FiniteSoftwareCompatibility::requested_heap_bytes()?)?
             .checked_add(self.request.requested_heap_bytes()?)?
             .checked_add(self.publication.requested_heap_bytes()?)?
-            .checked_add(self.logical.requested_heap_bytes()?)
+            .checked_add(self.logical.requested_heap_bytes()?)?
+            .checked_add(self.provenance.requested_heap_bytes()?)
     }
 }
 
@@ -280,6 +303,7 @@ pub(crate) struct StaticArtifactRun {
     cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
     compatibility: Option<crate::vodencode::FiniteSoftwareCompatibility>,
     policy: StaticArtifactPolicy,
+    provenance: StaticArtifactProvenance,
     owner: SoftwareVodOwner,
     output: FiniteOutput,
     events: Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>>,
@@ -301,6 +325,7 @@ impl StaticArtifactRun {
         logical: retained_manifest::LogicalOutput,
         application_lease: FiniteApplicationLease,
         policy: StaticArtifactPolicy,
+        provenance: StaticArtifactProvenance,
     ) -> Self {
         let events = owner.take_events();
         let output = owner.output();
@@ -308,6 +333,7 @@ impl StaticArtifactRun {
             cache_grant: Some(cache_grant),
             compatibility: Some(compatibility),
             policy,
+            provenance,
             owner,
             output,
             events,
@@ -431,6 +457,18 @@ impl StaticArtifactRun {
             .clone();
         let mut artifact = manifest.into_finite_artifact(retained)?;
         artifact.static_policy = Some(self.policy);
+        // The settled S keeps the run's own candidate binding and origin so a
+        // later NEW candidate attachment resolves it exactly like a privately
+        // prepared complete output. The manifest it was built from carries
+        // neither: a discovered manifest must never mint this authority.
+        artifact.candidate = self.provenance.candidate.clone();
+        let _ = artifact
+            .private_preparation_origin
+            .set(super::retained::PreparedOrigin::settled_static(
+                uuid::Uuid::new_v4(),
+                artifact.id,
+                &self.provenance,
+            ));
         Ok(artifact)
     }
 }

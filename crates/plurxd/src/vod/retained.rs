@@ -394,6 +394,26 @@ pub(super) struct PreparedOrigin {
     source_metadata: [u8; 32],
 }
 
+impl PreparedOrigin {
+    /// Mint the origin of a settled static S from the same run that encoded
+    /// it. The run's own executable and engine digests and the admitted
+    /// source metadata are the authority; no Store row or manifest is read.
+    #[cfg(target_os = "linux")]
+    pub(super) fn settled_static(
+        reservation: uuid::Uuid,
+        artifact_id: uuid::Uuid,
+        provenance: &super::background_artifact::StaticArtifactProvenance,
+    ) -> Self {
+        Self {
+            _reservation: reservation,
+            artifact_id,
+            executable: provenance.executable.clone(),
+            engine: provenance.engine.clone(),
+            source_metadata: provenance.source_metadata,
+        }
+    }
+}
+
 /// Private versioned metadata identity complements the held physical object
 /// and LogicalOutput. It is never serialized as acquisition authority.
 pub(crate) fn manual_source_metadata(file: &MediaFile) -> Option<[u8; 32]> {
@@ -1296,9 +1316,7 @@ impl RetainedArtifactRegistry {
                     && artifact.logical.is_some()
                     && artifact.observation.preimage.playlist.as_slice()
                         == rendition.playlist.as_slice()))
-            && rendition.source.as_ref().is_some_and(|source| {
-                source.unchanged() && source.object_version() == artifact.source_version
-            }))
+            && rendition.attaches_under_source_version(&artifact.source_version))
         .then_some(artifact)
     }
 
@@ -1505,7 +1523,7 @@ impl RetainedArtifactRegistry {
                         playlist_matches = artifact.observation.preimage.playlist == rendition.playlist,
                         source_present = rendition.source.is_some(),
                         source_unchanged = rendition.source.as_ref().is_some_and(|s| s.unchanged()),
-                        source_version_matches = rendition.source.as_ref().is_some_and(|s| s.object_version() == artifact.source_version),
+                        source_version_matches = rendition.attaches_under_source_version(&artifact.source_version),
                         candidate_fields = %binding,
                         logical_fields = ?logical,
                         "Prepared retained output acquisition comparison");
@@ -1530,9 +1548,7 @@ impl RetainedArtifactRegistry {
                     && artifact.validated.load(Acquire)
                     && artifact.logical == *incoming_logical
                     && artifact.observation.preimage.playlist == rendition.playlist
-                    && rendition.source.as_ref().is_some_and(|source| {
-                        source.unchanged() && source.object_version() == artifact.source_version
-                    }))
+                    && rendition.attaches_under_source_version(&artifact.source_version))
                 .then(|| artifact.facts())
             })
         }?;

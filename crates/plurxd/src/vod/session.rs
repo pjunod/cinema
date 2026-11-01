@@ -161,6 +161,30 @@ pub(super) struct Rendition {
 
 #[cfg(target_os = "linux")]
 impl Rendition {
+    /// Whether this rendition attaches under the held source `version` a
+    /// retained artifact was produced from. A legacy rendition holds its own
+    /// daemon `SourceFence` for its whole life, and that fence must still be
+    /// unchanged. Finite output has no daemon fence: core owns the actual held
+    /// source, and the exact object version frozen in its recipe and encoding
+    /// is the identity every artifact of that output carries.
+    pub(super) fn attaches_under_source_version(&self, version: &str) -> bool {
+        match self.source.as_ref() {
+            Some(source) => source.unchanged() && source.object_version() == version,
+            None => {
+                #[cfg(target_os = "linux")]
+                {
+                    self.dir.is_finite()
+                        && super::finite_profile::source_version(&self.recipe)
+                            .is_ok_and(|held| held == version)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    false
+                }
+            }
+        }
+    }
+
     pub(super) fn requested_retained_metadata_bytes(&self) -> Option<usize> {
         super::finite_metadata::actual_rendition_bytes(self)
     }
