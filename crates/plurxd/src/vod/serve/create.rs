@@ -849,6 +849,19 @@ impl VodServe {
             .as_ref()
             .ok_or("static artifact has no resolved delivery identity")?
             .clone();
+        let provenance = {
+            let encoding = recipe
+                .encoding
+                .as_ref()
+                .ok_or("static artifact has no selected encoding")?;
+            super::background_artifact::StaticArtifactProvenance {
+                candidate: recipe.measured_candidate.clone(),
+                executable: encoding.executable.digest.clone(),
+                engine: encoding.engine.digest.clone(),
+                source_metadata: super::retained::manual_source_metadata(&recipe.file)
+                    .ok_or("static artifact source metadata exceeds its bounded identity")?,
+            }
+        };
         let source_version = finite_profile::source_version(&recipe)?;
         let workspace = retained_manifest::projected_static_manifest_workspace_bytes(
             plan.len(),
@@ -947,6 +960,7 @@ impl VodServe {
             cache_grant,
             compatibility,
             policy,
+            provenance,
             workspace,
             publication,
             logical,
@@ -985,6 +999,7 @@ impl VodServe {
             cache_grant,
             compatibility,
             policy,
+            provenance,
             workspace,
             publication,
             logical,
@@ -1026,6 +1041,7 @@ impl VodServe {
             logical,
             application_lease,
             policy,
+            provenance,
         ))
     }
 
