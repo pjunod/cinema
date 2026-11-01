@@ -380,14 +380,32 @@ extracted artifact, 300 members per artifact, 1,800 seconds per work unit,
 [plan example](paged-resource-plan.example.json) deliberately supplies no runner
 quota. Root must measure owned runner disk and bind immutable total session
 disk, total retained artifact bytes, maximum units, resident bytes/RSS and
-per-unit predecessor/record/byte allowances before dispatch.
+per-unit predecessor/record/byte allowances before dispatch. The example's
+nested wrapper shows only the closed version3 `PhysicalPolicy3` field set with
+illustrative round numbers; its `source_receipt`, `calibration`,
+`accounting_method_sha256` and `measurement_sha256` are null and its
+`record_allowances` are empty because they exist only after registration and
+calibration. It is unadmitted, validates no fit and cannot pass admission.
 
 Admission computes source-derived per-record encoded-width bounds `B_k` from
-field/row vocabularies and measures index/WAL/scratch/manifest overhead and live
-artifact retention. For operational record count/byte allocations `n_k,b_k`, require
-`sum(n_k*b_k)+index+WAL+scratch+retained+duplicate_backups <= admitted_disk` and
-`retained_artifacts <= admitted_artifact_total`. These allowances bound resource
-use, never the accepted graph: exceeding one leaves the session incomplete.
+field/row vocabularies as source-global evidence only. The operational plan is
+the closed `OperationalBounds3` wrapper carried inside
+`ResourcePlan.source_bounds_utf8` (see "Typed physical-cap resource amendment"):
+per-kind logical allowances `{records,max_encoded_bytes}`, which bound record
+counts and full canonical encodings and never estimate SQLite pages, plus a
+separate `PhysicalPolicy3` of immutable byte reservations for eight database
+families and six pools. No record-count-times-table product, per-table
+index/WAL/scratch multiplier, `duplicate_backup` term or
+whole-backups-in-fixed-upload-slots inequality remains: a logical allowance is
+never multiplied against a physical family. Admission instead requires the
+calibrated simultaneous peak
+`peak_bytes = sum(family main+journal+temp) + sum(pool bytes) +
+existing_unpooled_bytes + 6*total_retained_artifact_bytes +
+32 MiB*(maximum_units+3)` to satisfy `peak_bytes <= total_session_disk_bytes`
+and `peak_bytes <=` the measured free disk, and
+`total_retained_artifact_bytes <= total_session_disk_bytes`. These allowances
+and reservations bound resource use, never the accepted graph: exceeding one
+leaves the session incomplete.
 Separately report the finite worst-case cardinality expression `sum(N_k*B_k)`
 for all seven contexts, capacity-only Stores, products, demands, edges and
 monitors; do not claim that astronomical bound fits the operational quota.
@@ -538,70 +556,164 @@ one complete root consumed by exact-head Main aggregation. An incomplete old
 PR job is never relabeled success; no dummy source commit continues a session.
 
 
-## Catalog backup transport adjunct
+## Snapshot transport and publication adjunct
 
-The closed auxiliary [catalog transport schema](paged-catalog-transport.schema.json)
-uses schema_version 1 and exactly `catalog_backup` and `catalog_chunk_index`
-kinds. It changes neither schema6 semantic records nor the eight interfaces.
-Its bytes are included in the explicit proof_contract_sha256 preimage above.
+The closed [snapshot transport schema](paged-catalog-transport.schema.json)
+defines the operational auxiliary kinds `catalog_backup` and `verifier_backup`
+(snapshot roots, schema_version 2), `snapshot_manifest_node` (schema_version 2),
+`evidence_manifest_node`, `transfer_manifest_node`, `publication_intent`,
+`pending_publication`, `transfer_batch_receipt` and `publication_activation`
+(schema_version 1), and `native_transport_conformance`. The control carrier
+schema is version 2. These kinds change neither schema6 semantic records nor
+the eight interfaces, are never source-global record kinds, and their complete
+encodings, retained occurrences and physical bytes are charged as operational
+allowances and `PhysicalPolicy3` reservations. Their bytes are included in the
+explicit proof_contract_sha256 preimage above. The retired version1 roots
+(`catalog_chunk_index`, 256 MiB chunks addressed by part ordinal) carry no
+authority in a new session and are never silently converted.
 
 M1 takes a SQLite backup API snapshot in bounded page steps, with all source,
 temporal and bookkeeping writers paused, after the produced Checkpoint is
-recorded and before upload receipts exist (`post_checkpoint_pre_upload`).
-The standalone backup includes committed WAL contents, private IDs, FIFO,
-allocator state and indexes; copying live database/WAL files or reconstructing
-private catalog state from semantic pages is not permitted. The checkpoint
-never references its backup. The fixed `catalog-backup/root.json` in part0
-references that already fixed checkpoint, source, raw Init, plan, semantic
-manifest/high-water/logical digest and complete backup byte digest.
+recorded and before upload receipts exist (`snapshot_boundary`
+`post_checkpoint_pre_upload`; the verifier uses
+`post_verifier_commit_pre_upload`). The standalone backup (`format` `sqlite3`,
+`backup_method` `sqlite_backup_api_v1`) includes committed WAL contents,
+private IDs, FIFO, allocator state and indexes; copying live database/WAL files
+or reconstructing private catalog state from semantic pages is not permitted.
+The logical Checkpoint identity is independent of physical roots and never
+references its backup. A snapshot root binds source, session_id, unit_ordinal,
+resource_plan_sha256, initial_image_sha256, the original `execution_origin`,
+checkpoint_sha256, previous_checkpoint_sha256, `predecessor_root`,
+catalog_commit, catalog_logical_digest, semantic_manifest_root,
+`chunk_bytes_limit`, `chunk_count` and a `manifest_root` ContentRef
+`{kind,sha256,bytes}` that carries no native artifact locator. A catalog root
+adds catalog_bytes and catalog_sha256; a verifier root adds work_db_bytes,
+work_db_sha256, verifier_schema_sha256, verifier_algorithm_version,
+verifier_commit, verifier_logical_digest, previous_verifier_progress_sha256 and
+progress_sha256. The fixed member paths `catalog-backup/root.json` and
+`verifier-backup/root.json` hold these roots; neither binds a future upload
+receipt.
 
-M4 streams the entire backup into chunks of exactly 256 MiB except the final
-positive remainder. Closed index nodes contain at most 256 children and at most
-8 MiB canonical metadata. Each node covers consecutive ordinal and byte
-intervals exactly; higher nodes reference children exactly one level lower.
-The root covers every chunk and byte, with no gap, overlap, duplicate, cycle,
-alias or conflicting member. A disk index bounds descriptor memory. Chunk
-paths and part ordinals are authenticated by all current-unit ArtifactReceipt
-members; no new Ref kind, WorkUnit field or future ZIP self-reference is added.
-Every expected part is required before the checkpoint is resumable.
+The backup is streamed into immutable content-addressed chunks of exactly
+`chunk_bytes_limit` = 1 MiB (1,048,576 bytes) except the final positive
+remainder; this is transport granularity below the unchanged 256 MiB member
+limit, not a semantic page or record partition. Each chunk is identified by
+the SHA-256 of its original bytes. A snapshot manifest tree
+(`snapshot_manifest_node`: scope_sha256, level, first_chunk, chunk_count,
+offset, bytes and 1 to 256 entries; a leaf entry is
+`{ordinal,offset,bytes,content}` with a `snapshot_chunk` ContentRef, a branch
+entry is `{first_chunk,chunk_count,offset,bytes,child}`) describes every
+interval of the file, not only changed ones, with exact contiguous ranges,
+exact summaries, the exact end of file and the whole-file SHA-256. Holes,
+overlaps, duplicate intervals, inconsistent summaries, cycles, extra tails and
+scope/kind mixing are rejected. The scope hash binds source, session, plan and
+initial image, so a chunk hash alone never authorizes content for another
+snapshot. An unchanged chunk may be referenced through the authenticated
+`predecessor_root` lineage or an already authenticated batch of the same
+pending snapshot; local cache presence grants no provenance, and no
+repository-wide same-hash search is authority.
 
-The registered workflow contains a finite pinned sequence of runner-native
-`uses: upload-artifact` slots in the same producer job/task. Each used slot
-has one deterministic name `async-proof-<session>-<unit>-part-<ordinal>` and
-validated member inventory. Actual part count must fit the registered slot
-count before any upload. No direct action-bundle execution, separate uploader
-task, dynamic matrix, partial-part acceptance or runtime slot increase is
-authorized. Each member is at most 256 MiB (metadata at most 8 MiB); every
-part independently respects 300 members and 512 MiB extracted/retained ZIP
-limits, including ZIP overhead. The actual registered workflow/ref/native-slot
-capability must be established before admission; the declaration proves none.
+Producing a snapshot does not publish it. After the ordinary quantum and its
+complete result/backup descriptors succeed, the controller freezes a
+`publication_intent` (source, session, unit, plan, initial image,
+`execution_origin`, previous and candidate checkpoint, catalog_root,
+verifier_root or null, `execution_result`, `evidence_root`). The immutable
+planned result hashed by the intent is separate from the accepted result,
+which is reconstructed only after closure. A `pending_publication` state
+(intent, previous_batch, coverage_sha256, coverage_count, next_batch_ordinal)
+lives outside the semantic phase and cursor. Each `transfer_batch_receipt` has
+`purpose` `transfer` or `activate`, a batch_ordinal, a transfer_manifest
+(`transfer_manifest_node` tree whose leaves carry the physical
+`{content,part_ordinal,member_path}` locator), cumulative coverage hashes and
+counts, between 1 and 32 ArtifactReceipt envelopes and the actual
+retained_artifact_bytes, and fixes `acceptance` and
+`proof_checkpoint_advanced` to false. It separates the original `execution_origin`
+from the actual `publication_origin`; a later upload job is never relabelled as
+the original execution, and no ordinary same-origin rule is relaxed for it.
+Coverage is a streamed SHA-256 over sorted `{kind,sha256,bytes}` identities and
+is recomputed from disk-backed indexes, never carried as a control array.
+Already authenticated content is referenced, not retransmitted.
 
-Restore authenticates all part receipts and the complete index, then streams
-consecutive chunks into a fresh owned staging file, verifying per-chunk and
-whole-file bytes/hash. M1 checks SQLite integrity/foreign keys, exact installed
-catalog schema, source/session/raw Init/plan/checkpoint, commit sequence, ID and
-allocator relationships, FIFO/expansion correspondence and rooted witnesses.
-M3 independently recomputes streamed logical digest, counts, all seven context
-snapshots and semantic manifest correspondence. Only after both checks and
-closed validation handles may M4 atomically install the staged catalog with no
-active writer. Failure preserves the previous valid catalog/checkpoint.
-Production Init restoration and actual API replay remain mandatory; the backup
-is neither a live Store endpoint certificate nor semantic acceptance.
+The registered workflow still contains a finite pinned sequence of
+runner-native `uses: upload-artifact` slots in the same producer task. Packing
+is exact per dispatch: every batch independently respects 32 slots, 300
+members and 512 MiB extracted/retained ZIP limits including ZIP overhead,
+256 MiB members and 8 MiB metadata members; the batch first reserves the
+source-bounded space of its transfer-manifest nodes, then packs only content
+not already authenticated, and ends at the first content that no longer fits.
+A batch that can pack no required content is `resource_blocked`. A snapshot
+therefore need not fit one job. Remaining content is carried by further
+closed `publish` dispatches (`Origin.operation` `execute` or `publish`) on the
+same registered route, runtime and storage lease. These execute no proof
+operation. Each dispatch takes a durable `dispatch_ordinal` before the API
+call, and failed or uncertain dispatches, publish dispatches and the final
+activation dispatch all consume the immutable `maximum_units`; there is no
+hidden transfer loop, dynamic matrix, runtime slot increase or operator-created
+batch receipt. No direct action-bundle execution or separate uploader task is
+authorized. The actual registered workflow/ref/native-slot capability must be
+established before admission; the declaration proves none. A failed first execution cannot gain semantic
+or TLC authority from a later upload: its uploaded evidence stays charged, the
+pending authority is discarded and the session reruns from the last accepted
+checkpoint.
 
-The immutable admitted resource plan accounts for peak live catalog, standalone
-backup, chunk staging, packed/downloaded artifacts, restore scratch, metadata
-and retained prior artifacts. A full backup is transferred per checkpoint;
-cross-unit delta reuse is not authorized. A unit/slot/time/disk/RSS overrun
-remains incomplete and preserves prior progress. No automatic quota increase,
-source change, pruning or partial upload can satisfy continuation or Main.
+Completion of publication requires full snapshot and evidence closure, then
+streaming reconstruction of both entire files into fresh owned staging, with
+per-chunk and whole-file size and SHA-256 checked against the roots, and a
+final `publish` dispatch with `purpose` `activate`. M1 checks SQLite
+integrity/foreign keys, exact installed catalog schema, source/session/raw
+Init/plan/checkpoint, commit sequence, ID and allocator relationships, FIFO/
+expansion correspondence and rooted witnesses. M3 independently recomputes the
+streamed logical digest, counts, all seven context snapshots and semantic
+manifest correspondence, reconciles the restored verifier result chain and
+reauthenticates the original TLC logs and every historical member. The
+`publication_activation` record (`activated` true, `acceptance` false) binds
+the `validations` `{catalog_private,catalog_semantic,verifier,final_input}`
+ContentRefs, the `stage` and `stage_complete`. Activation concerns the entire
+current retained snapshot, not premature global closure: a partial expansion may
+activate with `stage_complete` false and its existing allowed frontier and
+open-context prefix, while later stages keep their existing closure
+requirements. Only after both validations and atomic installation with no
+active writer may `advance` run exactly once on the original ordinary result. A
+publication-only success never grants checkpoint, partial Main pass or
+Completion; the final complete operation remains mandatory. Failure preserves
+the previous valid catalog and checkpoint.
+
+On interruption the last fully published checkpoint remains authority. The
+exact pending publication resumes after its batch chain is authenticated and
+the immutable spool checked; the local chunk cache is rebuilt from authenticated
+native artifacts. If required unuploaded spool bytes are lost, the pending
+authority is discarded and the session reruns from the last accepted
+checkpoint; orphan bytes are reused only when the rebuilt snapshot has
+identical bound roots and provenance is reauthenticated. Production Init
+restoration and actual API replay remain mandatory; a snapshot is neither a live
+Store endpoint certificate nor semantic acceptance, and transport never grants
+proof acceptance.
+
+The `native_transport_conformance` result (case
+`native_snapshot_three_batch_v1`, carrier role `transport_conformance`) is a
+mandatory genuine native probe after the first authenticated pair: the first two
+distinct real snapshot chunks are each the sole new payload of batch zero and
+batch one, the remaining genuine closure is carried by batch two onward, and a
+fresh receiver reconstructs both files. It requires at least three nonempty
+transfer batches, uses no padding or fake graph, advances no checkpoint and
+grants no proof credit; all of its real dispatches and bytes are charged.
+
+The immutable admitted resource plan accounts for these physical peaks through
+the `PhysicalPolicy3` families and pools below: live catalog and verifier
+databases, the snapshot spool, restore staging, transfer staging, the verified
+chunk cache, packed/downloaded artifacts and retained prior artifacts. A unit/
+slot/time/disk/RSS overrun remains incomplete and preserves prior progress.
+No automatic quota increase, source change, pruning or partial upload can
+satisfy continuation or Main.
 
 
 ## Authenticated verifier continuation adjunct
 
 The closed [verifier continuation schema](paged-verifier-continuation.schema.json)
-has exactly five schema_version 1 envelope kinds: verifier_backup,
-verifier_chunk_index, verifier_unit_progress, verifier_check_result and
-verifier_evidence_index. Its bytes and the exact M3-owned
+has exactly four schema_version 2 envelope kinds: verifier_backup (the
+snapshot root defined above), verifier_unit_progress, verifier_check_result and
+verifier_evidence_index. The retired version1 verifier_chunk_index no longer
+exists. Its bytes and the exact M3-owned
 [paged-verifier-state.sql](paged-verifier-state.sql) join the explicit proof
 contract preimage above. Existing schema6 records and reference kinds are unchanged.
 
@@ -645,7 +757,10 @@ under the original strict expected-failure rules; tags, timeout or complete:true
 metadata cannot substitute.
 
 Bounded EvidenceIndex trees have at most256 children and8MiB per metadata member.
-They bind exact current or historical unit/part/member identities, typed record
+They bind exact current or historical `MemberRef2`
+`{unit_ordinal,member_path,bytes,sha256}` identities (the physical part_ordinal
+no longer belongs to a member identity; native location is authenticated
+separately by the transfer receipts), typed record
 keys, contiguous result sequences and ordered inventories. Empty roots are null
 with zero count; cycles, gaps, duplicate ownership, hidden inputs or forged
 member references fail. Restore reconciles every credit/progress row with the
@@ -654,14 +769,17 @@ from verified member references; derivative path indexes carry no checked credit
 
 After committed result reconciliation, M3 computes its source-pinned table/PK
 ordered domain-separated logical digest, emits progress, then takes a bounded
-consistent SQLite backup with all writers paused. verifier-backup/root.json in
-part0 binds progress and exact workDB bytes, never a future upload receipt.
+consistent SQLite backup with all writers paused. The `verifier_backup` root
+at verifier-backup/root.json binds progress_sha256 and the exact workDB
+work_db_bytes and work_db_sha256, never a future upload receipt.
 The private SQL defines all durable digest tables, including sqlite_sequence,
-and the only allowed relocatable/external-bookkeeping exclusions. The separate
-verifier chunk/index ordinal space shares the complete current-unit part set
-and exact part count with catalog backup. Both streams, evidence, source pages
-and all retained TLC bytes fit the same32 fixed native same-task upload slots
-and immutable total resources; no extra task or automatic slot/quota increase.
+and the only allowed relocatable/external-bookkeeping exclusions. The verifier
+snapshot is published by the same publication chain as the catalog snapshot
+through 1 MiB content-addressed chunks and a snapshot manifest tree. Each
+native batch fits the 32 fixed same-task upload slots; a snapshot spans as many
+counted dispatches as its missing content needs within the immutable
+`maximum_units` and total resources, with no extra task or automatic
+slot/quota increase.
 
 Before atomic installation, M3 validates the staged verifier schema/integrity/
 foreign keys/private sequence/logical digest and reconciles the authenticated
@@ -693,20 +811,27 @@ limit or sampled fixture substitutes. Actual unit0 validates the reviewed
 Init-class premises against its migrated DB/raw settings/IDs/rows before
 expansion; mismatch invalidates the session without normalization or clipping.
 
-ResourcePlan.source_bounds_utf8 uses only the version2 canonical wrapper
-{schema_version:2,accounting_rule:operational_encoded_caps_v1,source_receipt,
-record_allowances,overhead,accounting_method_sha256,measurement_sha256}. Each
-record_allowances entry is closed {records,max_encoded_bytes}; overhead is
-closed {index_bytes,wal_bytes,scratch_bytes,retained_bytes,duplicate_backup_bytes}.
-Source receipt/specification report_role is source_global_symbolic. Global
-B_k/N_k formulas are independently checked and reported symbolically; no
+ResourcePlan.source_bounds_utf8 uses only the version3 canonical
+`OperationalBounds3` wrapper {schema_version:3,
+accounting_rule:typed_physical_caps_v1,source_receipt,record_allowances,
+physical_policy,calibration,accounting_method_sha256,measurement_sha256}. Each
+record_allowances entry is closed {records,max_encoded_bytes}. The physical
+policy and its calibration appear only inside this string, never as a competing
+top-level plan field. The earlier version2 wrapper
+{operational_encoded_caps_v1, overhead:{index_bytes,wal_bytes,scratch_bytes,
+retained_bytes,duplicate_backup_bytes}} is retired: the receipt schema no longer
+defines it, and the verifier Budget, the session admission wrapper reader and
+the Rust catalog configuration each refuse it with no conversion or compatibility
+reader. Source receipt/specification report_role is source_global_symbolic.
+Global B_k/N_k formulas are independently checked and reported symbolically; no
 B_k<=b_k condition or n_k*B_k operational reservation remains. Operational
-counts/caps/overheads are immutable allocations under a source-pinned method,
-with explicit lifetimes/copy counts and nonsemantic mappings. Fresh measured
-overheads never claim to prove all future SQLite growth. Checked arbitrary-precision arithmetic
+counts and caps are immutable allocations under a source-pinned method, with
+explicit lifetimes and nonsemantic mappings, and physical reservations are
+operator capacities rather than measured consumption (see "Typed physical-cap
+resource amendment"). Checked arbitrary-precision arithmetic
 retains symbolic finite-cardinality DAGs where exact expansion is impractical;
 a proven greater-than comparison never prints a truncated value as exact.
-All catalog/verifier backup, chunk, artifact, restore scratch and prior
+All catalog/verifier snapshot, chunk, artifact, restore staging and prior
 retention peaks remain within the one immutable admitted plan. No practical
 closure/indivisible-component fit is inferred from the certificate.
 
@@ -716,23 +841,142 @@ SourceIdentity but is an admission input outside its own source preimage.
 Registration pins the specification, derivation algorithm and receipt schema.
 
 
-## Operational encoded-cap resource amendment
+## Typed physical-cap resource amendment
 
 This rule explicitly supersedes the earlier n_k*source-global-B_k admission
-formula and unfinished wrapper; no session was admitted under them and no
+formula and the version2 `operational_encoded_caps_v1` wrapper, including its
+per-table index/WAL/scratch/retained/duplicate-backup overhead inventory and the
+inequality that required both complete standalone backups to fit the current
+job's fixed upload slots. That inequality charged every logical record
+allowance against every catalog and verifier table and index, and could not be
+satisfied by more RAM, disk or slots; replacing it with a smaller multiplier
+would be unjustified. No session was admitted under the earlier rules and no
 compatibility waiver accepts both meanings. Complete global symbolic width/
 cardinality reports remain required source-coverage evidence under reviewed
 lemmas, not a tight-width theorem or practical memory reservation. In particular
 Scc arrays and Outcome component receipts may have enormous sound global bounds
-without forcing that allocation for every actual record.
+without forcing that allocation for every actual record. Nothing here changes
+the seven contexts, eleven outcomes, full-D and raw Store identity, production
+Init, the global SCC/outgoing-edge/fairness/stutter checks or the claim scope:
+a finite selected two-worker operation under explicit premises, not a complete
+Rust/Tokio/Raft simulation or cluster-wide deadlock freedom.
 
-Admission uses n_k*b_k plus every named overhead/backup/restore/retention peak.
-The exact accounting method is pinned by registration and enumerates canonical
-records, catalog rows, private index/algorithm state, SQL index/WAL, pages,
-packing, downloads and restore copies; nonsemantic logs/scratch/backup bytes
-carry explicit operational mappings rather than fabricated source cardinalities.
-The unadmitted example intentionally leaves source receipt/measurement/method
-values null and cannot pass admission.
+Logical and physical limits are separate. Per-kind `record_allowances`
+(`{records,max_encoded_bytes}`, with `max_encoded_bytes` at most the 256 MiB
+member limit and at most 8 MiB for operational auxiliary kinds) bound record
+counts and complete canonical encodings. They are never multiplied against
+tables and never estimate SQLite pages. Physical safety rests on independent
+enforced file and pool caps declared by `PhysicalPolicy3`, closed and carried
+only inside `ResourcePlan.source_bounds_utf8`:
+`{schema_version:3,kind:physical_policy,table_map_sha256,families,pools}`.
+`families` has exactly eight members, each a closed `FamilyPolicy`
+`{owner,database_bytes,main_bytes,journal_bytes,temp_bytes}` of positive
+integers with `main_bytes >= database_bytes`; `database_bytes` caps each
+database file, `main_bytes` reserves the family's simultaneous main files,
+`journal_bytes` covers WAL, shared-memory and rollback companions and
+`temp_bytes` covers SQLite FILE temporaries:
+
+| Family | Exact owner | Holds |
+|---|---|---|
+| `catalog_main` | `catalog` | live Rust catalogs |
+| `verifier_main` | `verifier` | live M3 verifier databases |
+| `catalog_export_scratch` | `catalog_export` | the manifest-closure export database |
+| `verifier_continuation_scratch` | `verifier_continuation` | continuation and work scratch |
+| `catalog_or_verifier_restore_scratch` | `snapshot_restore` | restore queues |
+| `publication_pack_scratch` | `snapshot_transport` | PartPlan and manifest queues |
+| `authentication_index` | `provenance` | dependency, member and locator indexes |
+| `publication_pending_scratch` | `session_controller` | pending, coverage and dispatch indexes |
+
+`pools` has exactly six positive byte members with these owners:
+`snapshot_spool_bytes` (`snapshot_transport`), `restore_staging_bytes`
+(`snapshot_restore`), `transfer_staging_bytes` (`snapshot_transport`),
+`cas_bytes` (`provenance`), `source_runtime_scratch_bytes` and `control_bytes`
+(both `session_controller`). Every directory or file family has exactly one
+owner and one reservation; a copy belongs to its pool, not to a second
+independent grant; there is no unnamed shared pool or unaccounted fallback.
+`database_bytes` values are operator capacity ceilings rounded down to the
+measured SQLite page size, neither observed consumption nor a promise of
+sufficiency, and no B-tree fill factor, average row width or one-page-per-row
+assumption is made.
+
+`table_map_sha256` is the digest of the canonical reviewed table-ownership map
+`validation/async_physical_table_map.json`. The map lists every explicit
+installed table, index and scratch DDL of each family's database roles with
+pinned constructor sources whose hashes are verified when the map loads; implicit
+objects (`sqlite_sequence` and `sqlite_autoindex_*`) are derived from the actual
+engine and the declared PRIMARY KEY/UNIQUE constraints. Calibration rejects an
+unknown or missing table or index, a drifted constructor source and an installed
+DDL that differs from the map. The map supports relational planning and source
+review; it is not a packing theorem. The nonsemantic accounting classes of the
+registered inventory each name exactly one physical charge:
+`backup_and_chunks` charges `snapshot_spool_bytes`, `downloads_and_restores`
+`restore_staging_bytes`, `logs` the retained-artifact term of the peak,
+`source_archive` `source_runtime_scratch_bytes`, `sql_indexes` the families'
+`main_bytes` and `sql_wal` their `journal_bytes`.
+
+The wrapper's `calibration` is `PhysicalCalibration1`
+`{schema_version:1,kind:physical_calibration,policy_sha256,table_map_sha256,
+geometry,baseline,peak_bytes}`. `geometry` lists, for every family, a
+`{database_role,sqlite_source_id,schema_sha256,page_size,page_count,tables,
+indexes}` observation of each source-declared database role, taken from the
+actual engine; every declared role is measured exactly once, each empty database
+must fit its family's `database_bytes` rounded down to the measured page size,
+and the empty databases of a family together must fit its `main_bytes`.
+`baseline` is `{source_workspace_bytes,existing_unpooled_bytes}`, disjoint from
+the pools; the measured source archive and extraction must fit
+`source_runtime_scratch_bytes` and are not added twice. The conservative
+simultaneous reservation is
+`peak_bytes = sum(family main+journal+temp) + sum(pool bytes) +
+existing_unpooled_bytes + 6*total_retained_artifact_bytes +
+32 MiB*(maximum_units+3)`, where the factor six keeps the conservative
+retained/download allowance and `32 MiB*(maximum_units+3)` the per-dispatch log
+reserve and the three pre-admission capability probes. Admission requires
+`peak_bytes` within `total_session_disk_bytes` and the measured free disk, a
+non-null calibration whose `policy_sha256` is the digest of the policy and whose
+`table_map_sha256` matches it, the same calibration as the measurement's
+`resource_calibration`, and a non-null `measurement_sha256`. A draft wrapper has
+null calibration and measurement. The measured closed `resource_method` is
+`{id:typed_physical_caps_v1,source_sha256,policy_sha256,table_map_sha256,
+accounting_inventory,record_allowances,source_bound_specification_sha256,
+plan_inputs,prefix_policy:late_bound_per_batch_v1}` where `plan_inputs` keeps the
+seven scalar plan inputs and adds `physical_policy_sha256`,
+`record_allowances_sha256`, `source_receipt_sha256` and
+`unit_predecessor_allowance`, each hash covering the complete canonical value.
+`prefix_policy` states that no fixed-prefix part count is an admission premise;
+exact packing is enforced per batch.
+
+Enforcement is prospective. Each reservation is made before the file is
+created, growth is refused before allocation, and a reservation is released only
+after the owned files are actually removed and the removal is made durable; a
+surviving file keeps its charge, including after a failure. For a writable
+database with ceiling `c` the grant reserves `c` main, `2c + 1 MiB` journal
+(WAL, shared memory and rollback overlap plus framing) and `2c` temp, sets
+`max_page_count` to `floor(c / page_size)`, requires the requested pragma
+result to equal it, and refuses a restored or existing database already beyond
+it. The verifier `Budget` and the Rust catalog (`catalog_main.database_bytes`)
+apply the same ceiling, re-verify it around SQL work and commits, and require
+their family's `journal_bytes` and `temp_bytes` to cover
+`2*database_bytes + 1 MiB` and `2*database_bytes`.
+Exhaustion rolls back the active transaction and is an incomplete disposition
+(`SQLITE_FULL` or a refused reservation), never a semantic result, never proof
+credit and never a reason to change the cursor or accepted checkpoint.
+
+An allocation-capable child owns only what its parent delegated. The closed
+private `LocalPhysicalGrant1` descriptor (`schema_version`, `kind`, `grant_id`,
+`source`, `session_id`, `resource_plan_sha256`, `physical_policy_sha256`,
+`owned_root`, `lease`, `parent`, `allocations`, `attachments`) is local and
+transient, never an uploaded receipt, a ResourcePlan field or a request field. The
+parent deducts every delegated allocation before the child starts and keeps the
+charges until the child is reaped and its surviving files are reconciled; the
+child, located only through the environment names
+`PLURX_ASYNC_PHYSICAL_GRANT_FD`, `PLURX_ASYNC_PHYSICAL_GRANT_SHA256` and
+`PLURX_ASYNC_PHYSICAL_LEASE_FD`, narrows every family and pool limit to that
+grant and never instantiates the full policy again; without a grant it refuses
+to run as allocation-capable. An already-restored read-only database attaches
+its held reservation instead of consuming another main allocation, and its
+journal and temp work need a separate allocation. Ownership transfer reserves
+the destination while the source stays charged and commits one owner only after
+the rename and directory fsync; an alias never creates fresh quota.
 
 Producers/readers enforce b_k on the full canonical outer record, including
 headers and every escaping layer, plus separate decoded-working-set/RSS limits.
@@ -745,12 +989,18 @@ indivisible: no truncation/slicing/omitted receipt or semantic refusal hides
 resource exhaustion. n_k uses the registered unique/retained lifetime boundary;
 required graph/history/results cannot be garbage-collected to reclaim quota.
 
-Reducing operational b_k/n_k may only produce incomplete/resource_blocked, never
-a new accepted execution. No zero-progress automatic retry, silent resource
-increase, source mutation or domain/fairness change is authorized. Combined
-source/verifier backup/result staging still fits the same32 pinned native slots
-and existing256MiB member/8MiB metadata/512MiB artifact limits. Actual service
-capability and fresh owned resources remain prerequisites after final review.
+Reducing operational b_k/n_k or any physical reservation may only produce
+incomplete/resource_blocked, never a new accepted execution. No zero-progress
+automatic retry, silent resource increase, source mutation or domain/fairness
+change is authorized. Per-batch native packing remains exact against the same
+32 pinned native slots and existing 256 MiB member, 8 MiB metadata and 512 MiB
+artifact limits. These guards are conditional operational enforcement, not a
+syscall-level allocation theorem or a guarantee that any admitted logical record
+set, indivisible component or complete-Outcome memory fits. The unadmitted
+example intentionally leaves source receipt/measurement/method values null and
+cannot pass admission; no plan has been admitted, calibrated or measured, and
+actual service capability and fresh owned resources remain prerequisites after
+final review.
 
 
 ### Post-upload session control
@@ -760,7 +1010,12 @@ only final WorkUnit, ArtifactReceipt and optional Completion envelopes after
 all native uploads in their actual producer task. Current ZIP members never
 contain their own final control envelopes. The canonical control has no self
 hash; its digest binds the next executed unit. A running or unsuccessful task
-never grants continuation or completion authority.
+never grants continuation or completion authority. The version2 carrier has
+`role` `unit_checkpoint`, `completion`, `publication_batch` or
+`transport_conformance`. A `unit_checkpoint` carries an `activation`
+(ActivationResult) and no pending publication; a `publication_batch` carries a
+`pending_publication` and `transfer_batch` and no completion, activation or Main
+postcheck authority; `completion` carries none of these.
 
 The registered synchronous last required finalizer emits the unique bounded
 BEGIN/chunk/END frame between its bound FINALIZER-BEGIN and FINALIZER-DONE
