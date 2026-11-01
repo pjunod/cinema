@@ -373,7 +373,7 @@ class Schema:
                 selected = self.documents[filename]
             require(fragment.startswith('/$defs/'), 'unsupported schema fragment')
             self._check(value, selected['$defs'][fragment[7:]], where, selected)
-        types = {'object': lambda: type(value) is dict, 'array': lambda: type(value) is list,
+        types = {'object': lambda: type(value) is dict, 'array': lambda: type(value) in (list, BoundedList),
                  'integer': lambda: type(value) is int, 'string': lambda: type(value) is str,
                  'boolean': lambda: type(value) is bool, 'null': lambda: value is None}
         if 'type' in rule:
