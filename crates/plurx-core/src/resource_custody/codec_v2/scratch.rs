@@ -68,6 +68,17 @@ pub(crate) enum OutputKey {
     EncodedProcessMetadata,
     CompleteArtifactManifest,
 }
+impl OutputKey {
+    /// Fixed-name metadata outputs. They publish through the metadata entry
+    /// and are journaled as `PublishMetadata`; every other output is media.
+    /// Runtime emission and the fold must classify from this one definition.
+    pub(crate) const fn is_fixed_metadata(&self) -> bool {
+        matches!(
+            self,
+            Self::IdentityMetadata | Self::EncodedProcessMetadata | Self::CompleteArtifactManifest
+        )
+    }
+}
 impl OutputNamesV1 {
     pub(crate) fn contains(&self, key: &OutputKey) -> bool {
         match key {
