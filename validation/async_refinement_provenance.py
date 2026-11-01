@@ -1038,7 +1038,7 @@ def authenticate_transfer_context(api, registration, carrier, metadata, parts, a
     # the exact fixed case namespace. A receipt is never relabeled across them.
     conformance=carrier['transport_conformance']
     if case_sha256 is None:
-        require(carrier['role']=='publication_batch' and conformance is None,
+        require(carrier['role'] in ('publication_batch','unit_checkpoint') and conformance is None,
                 'ordinary batch authentication refuses a conformance producer event')
     else:
         require(carrier['role']=='transport_conformance' and conformance is not None

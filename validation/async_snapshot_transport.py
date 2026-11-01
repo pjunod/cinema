@@ -1095,7 +1095,7 @@ def missing_content(ledger: PublicationLedger):
     for kind, sha, size in ledger.db.execute('''
         SELECT q.kind,q.sha256,q.bytes FROM queue q LEFT JOIN coverage c
         ON c.kind=q.kind AND c.sha256=q.sha256
-        WHERE c.sha256 IS NULL ORDER BY q.kind,q.sha256'''):
+        WHERE c.sha256 IS NULL ORDER BY (q.kind!='publication_intent'),q.kind,q.sha256'''):
         yield {'kind': kind, 'sha256': sha, 'bytes': size}
 
 
