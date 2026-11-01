@@ -1,7 +1,7 @@
 {
   "algorithm_version": 1,
   "complete": true,
-  "finite_inventory_sha256": "b33a7370ae456d11af0bbcb053736f125a236975f29c2acc8066660b46fed78e",
+  "finite_inventory_sha256": "003ec278b24e596a90698cffeaf2f96058287583859178b91c85df3ddccf0313",
   "formulas": [
     {
       "id": "json.0.ref",
@@ -32160,7 +32160,7 @@
     },
     {
       "path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "sha256": "012aeffc8256d195a31f0c6cadd69613914d421dc4818587284a90ef2c2185cd"
+      "sha256": "c94d1ab231f5e8558a66ba29c570be8f39f4f2bd135f5ae4e28534e9c45dd665"
     },
     {
       "path": "crates/plurx-core/src/store/async_driver_refinement.rs",
@@ -32244,7 +32244,7 @@
     },
     {
       "path": "verification/async-driver-refinement/finite-inventory.json",
-      "sha256": "b33a7370ae456d11af0bbcb053736f125a236975f29c2acc8066660b46fed78e"
+      "sha256": "003ec278b24e596a90698cffeaf2f96058287583859178b91c85df3ddccf0313"
     },
     {
       "path": "verification/async-driver-refinement/paged-catalog-transport.schema.json",
@@ -32276,11 +32276,11 @@
     },
     {
       "path": "verification/async-driver-refinement/paged_checker.py",
-      "sha256": "f7e6571bc0405ca0903332d9cd54c1e3c20622560a7e8c62f8a9a1d948e1317e"
+      "sha256": "b30366294c95c68c4a77893e5e732405e03d2750930c69814ff1ea7d04507990"
     },
     {
       "path": "verification/async-driver-refinement/paged_codec.py",
-      "sha256": "0f441494962904c72629dda123bc093209f97d09a4e6c04fa50453bf63b97cdd"
+      "sha256": "f809cec66f2fbcb831bfe1e40760a863a74c9561e60393e41f4428ddd446bf90"
     },
     {
       "path": "verification/async-driver-refinement/paged_scc.py",
