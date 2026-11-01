@@ -87,6 +87,21 @@ class RequestFixtureTests(unittest.TestCase):
         suffix = re.search(r'pub const AUXILIARY_SUFFIX: &str = "([^"]+)";', source)
         self.assertEqual(suffix.group(1), session.AUXILIARY_SUFFIX)
 
+    def test_the_rust_and_python_runtime_pool_constants_are_the_same_policy(self):
+        source = (ROOT / 'crates/plurx-core/src/store/async_driver_catalog.rs').read_text()
+
+        def rust(name):
+            match = re.search(r'pub const %s: u64 = ([0-9 *]+);' % name, source)
+            self.assertIsNotNone(match, name)
+            value = 1
+            for factor in match.group(1).split('*'):
+                value *= int(factor)
+            return value
+        physical = codec.physical_policy_module()
+        self.assertEqual(rust('UNIT_LOG_RESERVE'), physical.UNIT_LOG_RESERVE)
+        self.assertEqual(rust('CONTROL_OUTPUT_BYTES'), physical.CONTROL_OUTPUT_BYTES)
+        self.assertEqual(rust('CONTROL_OUTPUT_DIRECTORIES'), physical.CONTROL_OUTPUT_DIRECTORIES)
+
     def test_no_producer_or_consumer_still_names_a_writer_file_inside_the_output_directory(self):
         # The named single-file claims moved beside the output tree; a path joined onto the output
         # directory would put an unclaimed file back inside the one recursive grant.

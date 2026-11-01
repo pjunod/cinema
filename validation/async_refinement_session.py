@@ -3712,6 +3712,23 @@ def authenticate_final_input(state,result,transport,progress,backup,root):
     state['final_input_checkpoint_sha256']=p.digest(p.canonical(result['checkpoint'])) if ready else None
 
 
+def copy_restored_catalog(backup,quantum):
+    """The preparation-only unit re-snapshots the restored catalog from a controller-made copy.
+
+    No writer child produced it, so no grant covers it: the copy takes its own snapshot_spool_bytes
+    claim (the file family the writer's standalone catalog backup belongs to) BEFORE the first byte is
+    written. It stays charged while the file exists, and a later invocation on this tree delegates that
+    held claim by id instead of reserving the name twice.
+    """
+    target=auxiliary_directory(quantum)/CATALOG_BACKUP
+    target.parent.mkdir(mode=0o700,exist_ok=True)
+    spool=PoolBudget(current_physical(),'snapshot_spool_bytes')
+    spool.track(target)
+    spool.reserve(Path(backup).stat().st_size)
+    shutil.copyfile(backup,target)
+    return target
+
+
 def execute_and_package(state,reg,request,source,root,output,deadline):
     """Run one unit, then seal (never upload) its publication and plan batch zero.
 
@@ -3742,7 +3759,7 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
             backup=Path(request['catalog_path'])
             p.require(backup.stat().st_size==saved['catalog_bytes'] and p.file_sha(backup)==saved['catalog_sha256'],
                       'preparation changed the read-only catalog snapshot')
-            shutil.copyfile(backup,auxiliary_directory(quantum)/CATALOG_BACKUP)
+            copy_restored_catalog(backup,quantum)
             descriptor={k:saved[k] for k in ('source','session_id','checkpoint_sha256',
                 'resource_plan_sha256','initial_image_sha256','catalog_commit','catalog_logical_digest',
                 'semantic_manifest_root','snapshot_boundary','format','backup_method','catalog_bytes','catalog_sha256')}

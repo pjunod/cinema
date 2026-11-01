@@ -926,8 +926,11 @@ separately: the writer's named single-file claims (`catalog-backup.sqlite`,
 databases) and the runtime `child-scratch/` HOME and TMPDIR live in the
 sibling `<output>-aux` directory that the controller, the checker and the Rust
 catalog derive identically. Calibration therefore requires the pool to exceed
-the measured source baseline plus those output shares; the remainder is the
-runtime scratch. The next job removes the earlier job outputs, found with the
+the measured source baseline plus those output shares (the Python calibration and
+the Rust plan validator apply the identical inequality); the remainder is the
+runtime scratch. The preparation-only unit's controller-made copy of the restored
+catalog (`catalog-backup.sqlite`) takes its own `snapshot_spool_bytes` claim before
+the first byte is written. The next job removes the earlier job outputs, found with the
 same `run-<n>` constructor that places a job's own output.
 `database_bytes` values are operator capacity ceilings rounded down to the
 measured SQLite page size, neither observed consumption nor a promise of

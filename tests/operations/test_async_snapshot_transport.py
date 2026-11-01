@@ -1174,6 +1174,7 @@ class MainUmaskTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # PhysicalContext.child_plan: against B's real ReservationLedger and grant issuer.
 # ---------------------------------------------------------------------------
+import ast
 import uuid
 from pathlib import PurePosixPath
 from types import SimpleNamespace
@@ -1635,6 +1636,56 @@ class ActivationTransferTests(ChildPlanBase):
         # The next writer inherits the same reservation again; nothing was re-reserved in between.
         again = self.issue(request, self.out / 'quantum')
         self.assertIn(held.reservation_id, {a['reservation_id'] for a in again.descriptor['allocations']})
+
+
+class PreparationCopyChargeTests(ChildPlanBase):
+    """The controller-made copy of the restored catalog is a claimed, charged file, never an unowned fallback."""
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(session, 'current_physical', return_value=self.context)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.backup = self.root / 'restored.sqlite'
+        self.backup.write_bytes(b'c' * 5000)
+        self.quantum = self.root / 'quantum'
+        self.quantum.mkdir(mode=0o700)
+
+    def holders(self, target):
+        return [r for r in self.context.ledger.reservations if not r.released and target in r.paths]
+
+    def test_the_copy_holds_one_spool_claim_for_exactly_its_bytes(self):
+        target = session.copy_restored_catalog(self.backup, self.quantum)
+        self.assertEqual(target, self.root / 'quantum-aux' / 'catalog-backup.sqlite')
+        self.assertEqual(target.read_bytes(), b'c' * 5000)
+        self.assertEqual(self.context.ledger.used[('snapshot_spool_bytes', 'bytes')], 5000)
+        holders = self.holders(target)
+        self.assertEqual([(h.owner, h.key, h.bytes) for h in holders],
+                         [('snapshot_transport', ('snapshot_spool_bytes', 'bytes'), 5000)])
+
+    def test_a_pool_that_cannot_hold_the_copy_refuses_before_any_byte_is_written(self):
+        self.context = self.make_context(child_policy(self.source_map, snapshot_spool_bytes=4999))
+        with mock.patch.object(session, 'current_physical', return_value=self.context):
+            with self.assertRaises(physical.PhysicalIncomplete):
+                session.copy_restored_catalog(self.backup, self.quantum)
+        self.assertFalse((self.root / 'quantum-aux' / 'catalog-backup.sqlite').exists())
+
+    def test_a_later_invocation_on_the_tree_delegates_the_held_claim_instead_of_claiming_the_name_twice(self):
+        target = session.copy_restored_catalog(self.backup, self.quantum)
+        held = self.holders(target)[0]
+        handle = self.issue({'operation': 'unit'}, self.quantum)
+        entries = [e for e in handle.descriptor['allocations'] if e['relative_path'] == 'quantum-aux/catalog-backup.sqlite']
+        self.assertEqual([e['reservation_id'] for e in entries], [held.reservation_id])
+        self.assertEqual(self.holders(target), [held])
+
+    def test_the_preparation_unit_has_no_uncharged_copy_left_in_it(self):
+        tree = ast.parse(Path(session.__file__).read_text())
+        package = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'execute_and_package')
+        calls = [n for n in ast.walk(package) if isinstance(n, ast.Call)]
+        self.assertTrue(any(isinstance(c.func, ast.Name) and c.func.id == 'copy_restored_catalog' for c in calls))
+        for call in calls:
+            if isinstance(call.func, ast.Attribute) and call.func.attr == 'copyfile':
+                self.assertNotIn('CATALOG_BACKUP', ast.dump(call))
+                self.assertNotIn('catalog-backup', ast.dump(call))
 
 
 class RestoreMainLimitReachabilityTests(unittest.TestCase):

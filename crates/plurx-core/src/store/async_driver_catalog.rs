@@ -26,6 +26,26 @@ pub const PAGE_BYTES: u64 = 256 * 1024 * 1024;
 /// `tests/operations/test_paged_request_fixtures.py` pins all three.
 pub const AUXILIARY_SUFFIX: &str = "-aux";
 
+/// Every child output directory is one recursive share of
+/// `source_runtime_scratch_bytes` (see `validation/async_physical_policy.py`, which
+/// declares the same constants; `test_paged_request_fixtures.py` pins them equal): a unit
+/// writer's share is `unit_byte_allowance` plus the controller-written captures of its at
+/// most four invocations, and each control directory is bounded at
+/// `CONTROL_OUTPUT_BYTES`.
+pub const UNIT_LOG_RESERVE: u64 = 4 * 8 * 1024 * 1024;
+pub const CONTROL_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+pub const CONTROL_OUTPUT_DIRECTORIES: u64 = 4;
+
+/// What the source/runtime pool must hold for output directories, before any
+/// HOME/TMPDIR scratch.
+pub fn runtime_pool_demand(unit_byte_allowance: u64) -> CatalogResult<u64> {
+    CONTROL_OUTPUT_DIRECTORIES
+        .checked_mul(CONTROL_OUTPUT_BYTES)
+        .and_then(|controls| controls.checked_add(UNIT_LOG_RESERVE))
+        .and_then(|reserved| reserved.checked_add(unit_byte_allowance))
+        .ok_or_else(|| CatalogError::ResourceIncomplete("runtime pool demand overflow".into()))
+}
+
 /// The sibling of `output_dir` named `<name>-aux`.
 pub fn auxiliary_directory(output_dir: &Path) -> CatalogResult<PathBuf> {
     let name = output_dir
@@ -372,6 +392,16 @@ impl ResourceLimits {
         {
             return Err(CatalogError::ResourceIncomplete(
                 "source/runtime baseline exceeds pool".into(),
+            ));
+        }
+        // The same inequality the Python calibration requires: the pool covers the measured
+        // source baseline, every output directory and at least a byte of runtime scratch.
+        if number(&calibration["baseline"], "source_workspace_bytes")?
+            .checked_add(runtime_pool_demand(number(body, "unit_byte_allowance")?)?)
+            .is_none_or(|needed| needed >= pools["source_runtime_scratch_bytes"])
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "source/runtime pool does not cover the baseline, every output directory and scratch".into(),
             ));
         }
         peak = add(
@@ -3349,6 +3379,14 @@ pub(super) fn fixture_configuration_shaped(
     path: PathBuf,
     catalog_main: FamilyLimits,
 ) -> CatalogConfig {
+    fixture_configuration_pooled(path, catalog_main, 512 * 1024 * 1024)
+}
+/// The admitted fixture plan with explicit `catalog_main` and source/runtime pool sizes.
+pub(super) fn fixture_configuration_pooled(
+    path: PathBuf,
+    catalog_main: FamilyLimits,
+    runtime_pool: u64,
+) -> CatalogConfig {
     let source = SourceIdentity {
         commit: "0".repeat(40),
         tree: "1".repeat(40),
@@ -3429,9 +3467,10 @@ pub(super) fn fixture_configuration_shaped(
     let table_map_sha = digest(canonical(&source_map).as_bytes());
     let policy = json!({"schema_version":3,"kind":"physical_policy","table_map_sha256":table_map_sha,"families":families,
         "pools":{"snapshot_spool_bytes":64*1024*1024u64,"restore_staging_bytes":64*1024*1024u64,"transfer_staging_bytes":64*1024*1024u64,
-        "cas_bytes":64*1024*1024u64,"source_runtime_scratch_bytes":64*1024*1024u64,"control_bytes":64*1024*1024u64}});
+        "cas_bytes":64*1024*1024u64,"source_runtime_scratch_bytes":runtime_pool,"control_bytes":64*1024*1024u64}});
     let peak = family_total
-        + 6 * 64 * 1024 * 1024u64
+        + 5 * 64 * 1024 * 1024u64
+        + runtime_pool
         + 6 * number(p, "total_retained_artifact_bytes").expect("fixture retention")
         + 32 * 1024 * 1024u64 * 19;
     let calibration = json!({"schema_version":1,"kind":"physical_calibration","policy_sha256":digest(canonical(&policy).as_bytes()),"table_map_sha256":table_map_sha,
@@ -4091,5 +4130,29 @@ mod tests {
             );
         }
         assert!(auxiliary_directory(Path::new("/")).is_err());
+    }
+
+    /// The Rust validator admits exactly the policies the Python calibration admits: the source/runtime
+    /// pool must exceed the measured baseline (0 here) plus every output directory, by at least a byte.
+    #[test]
+    fn the_runtime_pool_must_cover_every_output_directory_as_the_python_calibration_requires() {
+        let demand = runtime_pool_demand(16 * 1024 * 1024).expect("fixture demand");
+        assert_eq!(
+            demand,
+            16 * 1024 * 1024 + UNIT_LOG_RESERVE + CONTROL_OUTPUT_DIRECTORIES * CONTROL_OUTPUT_BYTES
+        );
+        let limits = |runtime_pool| {
+            let shape = FamilyLimits {
+                database_bytes: 64 * 1024 * 1024,
+                main_bytes: 128 * 1024 * 1024,
+                journal_bytes: 129 * 1024 * 1024,
+                temp_bytes: 128 * 1024 * 1024,
+            };
+            let config =
+                fixture_configuration_pooled(PathBuf::from("/unused"), shape, runtime_pool);
+            ResourceLimits::from_plan(&config.resource_plan)
+        };
+        assert!(limits(demand).is_err(), "no byte left for runtime scratch");
+        assert!(limits(demand + 1).is_ok());
     }
 }
