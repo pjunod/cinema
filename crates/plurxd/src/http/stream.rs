@@ -1920,7 +1920,7 @@ async fn stored_markers_for_source(state: &AppState, file: &MediaFile) -> Vec<Ma
 }
 
 #[derive(Clone, Copy)]
-enum MarkerReadPolicy {
+enum PlanningReadPolicy {
     LocalDerivation,
     StoredSourceEvidence,
 }
@@ -2297,7 +2297,7 @@ pub async fn decision(
             identity.as_ref(),
             super::hls::link_receipts::requested_receipt(&headers),
         ),
-        MarkerReadPolicy::LocalDerivation,
+        PlanningReadPolicy::LocalDerivation,
     )
     .await
     .map(Json)
@@ -2310,80 +2310,19 @@ pub(super) async fn decision_for_source_file(
     file: MediaFile,
     q: Caps,
 ) -> Result<DecisionResponse, ApiError> {
-    let mut decision = decision_for_file(
+    // Source Start prepares a missing non-Dolby HEVC index under its owned
+    // admission. Keep the common capability plan: an absent index does not
+    // require video encoding or an HDR10 encoder for HDR10 copy delivery.
+    decision_for_file(
         state,
-        file.clone(),
-        q.clone(),
+        file,
+        q,
         None,
         None,
         (None, None),
-        MarkerReadPolicy::StoredSourceEvidence,
+        PlanningReadPolicy::StoredSourceEvidence,
     )
-    .await?;
-    // Shared copy delivery requires an immutable HLS index. Unlike Local,
-    // it has no continuous progressive remux fallback, and cold Source index
-    // preparation currently supports H.264 only. Select an actual encoded
-    // plan before Start instead of sending unindexed HEVC into copy admission.
-    // This is an Auto planning choice: Original and Dolby Vision keep their
-    // existing contracts, and a failed index read already returned above.
-    if q.force() == playback::Force::Auto
-        && decision.decision.method == playback::PlaybackMethod::Remux
-        && !decision.vod_indexed
-        && file
-            .video_codec
-            .as_deref()
-            .is_some_and(|codec| matches!(codec.to_ascii_lowercase().as_str(), "hevc" | "h265"))
-        && !playback::is_dolby_vision(&file)
-    {
-        let encoded = decision_for_file(
-            state,
-            file,
-            Caps {
-                force: Some("transcode".to_owned()),
-                ..q.clone()
-            },
-            None,
-            None,
-            (None, None),
-            MarkerReadPolicy::StoredSourceEvidence,
-        )
-        .await?;
-        let (codec, transfer) = match encoded.decision.delivered_dynamic_range {
-            "sdr" => ("h264", playback::Transfer::Sdr),
-            "hdr10" => ("hevc", playback::Transfer::Pq),
-            _ => {
-                return Err(ApiError::typed(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "sharing_decision_unsupported",
-                    "No supported Shared playback route is available",
-                ))
-            }
-        };
-        let supported = q.caps_v2.as_ref().is_some_and(|caps| {
-            caps.transports.iter().any(|transport| transport == "hls")
-                && caps
-                    .video
-                    .iter()
-                    .any(|video| video.codec == codec && video.present.contains(&transfer))
-        });
-        if !supported {
-            return Err(ApiError::typed(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "sharing_decision_unsupported",
-                "No supported Shared playback route is available",
-            ));
-        }
-        decision = encoded;
-        decision
-            .decision
-            .reasons
-            .retain(|reason| reason != "forced transcode (manual quality)");
-        decision
-            .decision
-            .reasons
-            .push("Shared HEVC copy has no usable HLS index; using an encoded stream".to_owned());
-    }
-    Ok(decision)
+    .await
 }
 
 async fn decision_for_file(
@@ -2393,7 +2332,7 @@ async fn decision_for_file(
     network_prior: Option<plurx_core::domain::NetworkPrior>,
     user: Option<&plurx_core::domain::User>,
     link_evidence: (Option<&crate::telemetry::NetworkIdentity>, Option<&str>),
-    marker_policy: MarkerReadPolicy,
+    marker_policy: PlanningReadPolicy,
 ) -> Result<DecisionResponse, ApiError> {
     let (identity, incumbent_receipt) = link_evidence;
     let id = file.id;
@@ -2575,15 +2514,19 @@ async fn decision_for_file(
         playback::resolve_audio_for_method(&file, &q.profile(decision_now_ms), decision.method);
     // Only a copy needs the census; an encode never carries the source's
     // parameter sets, and a direct play serves them untouched.
-    let probe_json = if decision.method == playback::PlaybackMethod::Remux {
+    let local_derivation = matches!(marker_policy, PlanningReadPolicy::LocalDerivation);
+    let probe_json = if local_derivation && decision.method == playback::PlaybackMethod::Remux {
         crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?
     } else {
+        // Source planning must not mutate its revision witness or launch an
+        // anonymous census. Actual Source preparation owns physical work.
         state.store.get_file_probe_json(id).await?
     };
+    let have_dovi = local_derivation && crate::ffmpeg::has_dovi_rpu().await;
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
         probe_json.as_deref(),
-        crate::ffmpeg::has_dovi_rpu().await,
+        have_dovi,
         decision.preserve_dolby_vision,
     )
     .with_dolby_vision_conversion(decision.convert_dolby_vision);
@@ -2669,8 +2612,8 @@ async fn decision_for_file(
         None
     };
     let markers = match marker_policy {
-        MarkerReadPolicy::LocalDerivation => markers_for(state, &file).await,
-        MarkerReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
+        PlanningReadPolicy::LocalDerivation => markers_for(state, &file).await,
+        PlanningReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
     };
 
     // DTO defaults and the verdict now come from the same selection above.

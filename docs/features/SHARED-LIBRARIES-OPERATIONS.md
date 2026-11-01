@@ -1,6 +1,6 @@
 # Shared libraries — operating the effort build
 
-**Status:** implemented paths with qualification open · **Updated:** 2026-10-06.
+**Status:** implemented paths with qualification open · **Updated:** 2026-10-29.
 This guide describes the effort build, not a released or fleet-qualified
 feature. See [current status](SHARED-LIBRARIES-STATUS.md) for outstanding
 cluster, topology and device work, and the
@@ -9,7 +9,10 @@ cluster, topology and device work, and the
 ## Prepare the private listener
 
 Managed native installations can prepare the private connection when sharing
-is enabled. Supported Linux Compose hosts use a separately installed host
+is enabled, including verified legacy macOS server-only LaunchAgents. A
+manually started native daemon observes the private connection without changing
+host forwarding and reports native setup guidance when that forward is absent.
+Supported Linux Compose hosts use a separately installed host
 component; its installer prepares the bridge and its worker follows the switch.
 See [automatic host setup](SHARING-HOST-SETUP.md) for installation, observations
 and source qualification. The configuration below describes the manual path.
@@ -68,17 +71,83 @@ private egress and real Tailscale playback still require qualification.
 1. In Settings → Developer, save the explicit sharing choice. Readiness is
    advisory and does not override the saved setting. Settings → Sharing shows
    the current listener and peer state.
-2. The exporting administrator selects local movie/show libraries and creates
-   an invitation. The recipient administrator imports it, both compare the
-   pairing code, and the exporter approves the recipient.
-3. The recipient assigns individual local viewers. An import starts with no
+2. The exporting administrator chooses **Share my libraries**, selects local
+   movie/show libraries and sends the invitation. The recipient chooses
+   **Accept an invitation**, imports it and completes any linked Tailscale
+   authorization using the account used by the recipient's Cinema server.
+   Keep that form open until it confirms the import was saved.
+3. The recipient sends the displayed pairing code to the exporter. Under
+   **People I share with**, the exporter compares the code and approves
+   pairing. Connection lists refresh automatically while the main page is
+   open. Revoked recipients are hidden unless **Show revoked connections**
+   is checked; their underlying records remain intact.
+4. Under **Libraries shared with me**, the recipient chooses **Assign
+   viewers** and selects individual local users, including their own user
+   if they want to browse the libraries. An import starts with no
    assigned audience. Reciprocal sharing uses a separate invitation/grant.
-4. Viewers browse Source-labelled libraries on the recipient. Playback,
+5. Viewers browse Source-labelled libraries on the recipient. Playback,
    history, Continue Watching and next episode keep that Source identity;
    matching Local title or file numbers do not merge their histories.
 
 The recipient serves its own clients; TVs and phones do not need access to
 the Source's tailnet. Pairing and assignment administration are web-first.
+
+### When an import does not appear
+
+Seeing a shared node in Tailscale does not establish a Cinema connection.
+The recipient first verifies the invitation's pinned private listener; no
+Cinema import exists before that succeeds. The import form shows the failed
+connection reason and pauses after ten automatic checks. Resolve that reason,
+then choose **Try connection again**. Leaving the form cancels the unsaved
+attempt; invitation secrets are not persisted in browser storage.
+
+Open **Connection setup and advanced options** on both servers. A listening
+TLS socket and configured addresses do not prove private forwarding. On
+Docker, `host_helper_required` means Cinema has no fresh authenticated host
+component report; use the [host setup procedure](SHARING-HOST-SETUP.md).
+An identity mismatch requires checking the source addresses and a fresh
+invitation, rather than bypassing its identity verification.
+
+Daemon logs distinguish `phase="probe"` (private connection verification),
+`phase="verify"` (invitation import verification), and `phase="claim"`
+(a saved import waiting to claim its source grant). Failures include a fixed
+code and correlation UUIDs; they do not include invitation secrets, Tailscale
+consent links or peer credentials. A probe failure never substitutes for an
+actual import or pairing approval.
+
+### When shared playback cannot prepare
+
+On a private HTTP origin, playback request identities use `getRandomValues`
+to form UUIDs because the browser's `randomUUID` API requires a secure
+context. Shared Start requires a UUID even when Local playback accepts a
+legacy request identifier. A `start_identity` client warning means Start was
+refused locally before an encoder was requested.
+
+Loading fresh file details precedes playback planning. A
+`sharing_source_unavailable` response means the receiver could not complete
+that Source read. Check the Source is awake, its Cinema listener is running
+and its private Serve forward still exists. The receiver logs
+`phase="catalogue_verify"` for failed peer connection/identity checks,
+`phase="catalogue_request"` for failed catalogue RPCs and
+`phase="catalogue_deadline"` for the overall read deadline. These include
+only correlation UUIDs, elapsed time and the closed peer error enum.
+
+The receiver distinguishes upstream, decision decoding and resource projection
+failures in daemon warnings with `phase="upstream"`, `phase="decode"` and
+`phase="project"`; Source planning failures use `phase="source_plan"`.
+Warnings include fixed codes and import/file identifiers, without peer
+credentials, file paths or raw decision payloads. The generic viewer error
+alone does not identify a codec or HDR problem.
+
+The browser also logs fixed client-validation phases (for example
+`details_identity` or `decision_identity`) and the HTTP status of refused
+requests. These warnings contain no peer payloads, locators or credentials;
+they distinguish a client contract refusal from a Source planning failure.
+
+The peer decoder accepts the current named 5.1/7.1 and limited-default audio
+downmix plans while refusing unknown fields. Process-local measured-output
+advisories are omitted from the private Source response; they cannot become
+peer authority.
 
 ## Understand playback and retirement
 

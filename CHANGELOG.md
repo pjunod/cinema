@@ -121,6 +121,23 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared HDR10 playback builds a missing HEVC copy index instead of forcing
+  video encoding and SDR on hosts without an HDR10 encoder. Unsupported EAC3
+  audio converts to AAC while the HDR10 video and static metadata stay intact.
+
+- Sharing hides revoked recipients by default, explains pairing and viewer
+  assignment steps, and refreshes incoming requests automatically. Invitation
+  imports verify an existing private connection immediately, show actionable
+  failures with bounded retries, and log connection/import failure codes
+  without exposing invitation secrets or credentials.
+  Native Mac setup recognizes legacy installed services and no longer treats
+  ordinary native daemons as Docker containers. Shared playback accepts the
+  current audio downmix plans and excludes public-only output advisories from
+  peer decisions instead of reporting an unexplained preparation failure.
+  HTTP browser sessions generate UUID request identities even without
+  `crypto.randomUUID`, allowing shared playback to start. Source connection
+  failures have a distinct message and catalogue-stage diagnostics.
+
 - Progressive subtitle translation keeps FFmpeg progress updates out of source
   clock evidence, preventing valid decoded ranges from failing before inference.
 
@@ -141,6 +158,11 @@ bump may break compatibility and a **patch** bump never does.
   Current nonretryable range failures are visible without hiding available
   coverage or offering unsupported retries.
 - Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
+- Sharing setup shows the Tailscale connection and saved account authorization
+  up front, confirms key saves by reading them back, and refreshes connection
+  status after setup. Cluster gateway addresses and node-local setup are labeled
+  separately.
+
 
 
 - Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.

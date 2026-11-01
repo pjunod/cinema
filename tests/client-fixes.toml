@@ -104,7 +104,7 @@ test_anchor = "fn abandoned_completed_network_job_keeps_durable_cleanup_intent()
 id = "sharing.external-recipient-consent"
 commits = ["ecba33b56a852a57d00ceb12339ec16e56530f67"]
 source = "crates/plurxd/src/web/pages/sharing-management.js"
-source_anchor = 'if(e.text.startsWith("cinema-connect-v1:")&&!e.connectionChecked)'
+source_anchor = 'if(e.text.startsWith("cinema-connect-v1:")&&!e.connectionVerified)'
 test = "tests/web/sharing-management.test.js"
 test_anchor = "combined invitation waits for private consent then imports once automatically"
 
