@@ -3218,6 +3218,10 @@ pub fn compiled_catalog_sources() -> BTreeMap<String, String> {
             include_str!("async_driver_catalog/memory.rs"),
         ),
         (
+            "crates/plurx-core/src/store/async_driver_catalog/grant.rs",
+            include_str!("async_driver_catalog/grant.rs"),
+        ),
+        (
             "verification/async-driver-refinement/paged-proof.schema.json",
             include_str!(
                 "../../../../verification/async-driver-refinement/paged-proof.schema.json"

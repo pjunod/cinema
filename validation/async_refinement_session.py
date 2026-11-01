@@ -4471,6 +4471,7 @@ def validate_catalog_calibration(execution,directory,reg,root):
         'crates/plurx-core/src/store/async_driver_catalog/records.rs',
         'crates/plurx-core/src/store/async_driver_catalog/sqlite.rs',
         'crates/plurx-core/src/store/async_driver_catalog/memory.rs',
+        'crates/plurx-core/src/store/async_driver_catalog/grant.rs',
         'verification/async-driver-refinement/paged-proof.schema.json',
         'verification/async-driver-refinement/paged-catalog.sql')
     p.require(type(value['compiled_sources']) is dict
