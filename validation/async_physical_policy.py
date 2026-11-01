@@ -455,6 +455,21 @@ class ReservationLedger:
         """Parent deducts every delegated allocation here BEFORE spawn; returns the sealed GrantHandle."""
         return _issue_child_grant(self, allocations, attachments, binding, held_lease)
 
+    def held_reservation(self, entry):
+        """The live, undelegated reservation that already holds exactly this allocation's claims.
+
+        A writer child inherits such a file by passing the returned reservation_id in its
+        allocation (see issue_child_grant); it is never released and reissued.
+        """
+        wanted = sorted((str(relative), recursive) for relative, recursive in _scope_claims(entry))
+        for reservation in self.reservations:
+            if (wanted and not reservation.released and not reservation.delegated and reservation.transfer is None
+                    and (reservation.owner, reservation.key) == (entry['owner'], (entry['resource'], entry['component']))
+                    and sorted(reservation.scope()) == wanted
+                    and all(handle._control is not reservation for handle in self.grants.values())):
+                return reservation
+        return None
+
     def prepare_transfer(self, reservation_id, destination_owner, resource, component, new_path):
         return _prepare_transfer(self, reservation_id, destination_owner, resource, component, new_path)
 
@@ -806,6 +821,19 @@ class GrantHandle:
         return {'released': released, 'retained': retained}
 
 
+def _require_delegable(ledger, held, item):
+    """An allocation may delegate a held reservation only if it is exactly that live, unaliased claim."""
+    require(not held.released and not held.delegated and held.transfer is None,
+            'physical grant reservation id already in use')
+    require(all(handle._control is not held for handle in ledger.grants.values()),
+            'a grant descriptor reservation cannot be delegated')
+    require((held.owner, held.key[0], held.key[1]) == (item['owner'], item['resource'], item['component']),
+            'delegated reservation differs in owner/resource/component')
+    require(item['bytes'] >= held.bytes, 'delegation cannot shrink a held reservation below its charge')
+    require(sorted(held.scope()) == sorted((str(relative), recursive) for relative, recursive in _scope_claims(item)),
+            'delegated reservation scope differs from its held claims')
+
+
 def _issue_child_grant(self, allocations, attachments, binding, held_lease):
     """Deduct every delegated allocation in this one ledger BEFORE spawn, then seal the descriptor."""
     self._authority()
@@ -834,8 +862,14 @@ def _issue_child_grant(self, allocations, attachments, binding, held_lease):
         prepared.append(item)
     attached = [dict(x) for x in attachments]
     validate_grant_lists(prepared, attached, policy=policy)
+    # An allocation carrying the id of a reservation this ledger already holds DELEGATES it:
+    # ownership moves to the grant in the one ledger, never through release and re-reserve.
+    existing = {}
     for item in prepared:
-        require(item['reservation_id'] not in self.by_id, 'physical grant reservation id already in use')
+        held = self.by_id.get(item['reservation_id'])
+        if held is not None:
+            _require_delegable(self, held, item)
+            existing[item['reservation_id']] = held
         ids.add(item['reservation_id'])
     # Attachments reference an existing held parent reservation and confer no authority.
     for item in attached:
@@ -848,18 +882,31 @@ def _issue_child_grant(self, allocations, attachments, binding, held_lease):
     lease_relative = held_lease.relative_path
     self.protected[str(lease_relative)] = 'owned-slot lease'
     for item in prepared:
+        owner = existing.get(item['reservation_id'])
         for relative, recursive in _scope_claims(item):
-            require(self._conflicts(relative, recursive) is None, 'physical grant aliases an owned file or another grant')
+            require(self._conflicts(relative, recursive, owner) is None, 'physical grant aliases an owned file or another grant')
+    deducted, grown = [], {}
+    control = path = None
     deducted = []
     control = path = None
     try:
         for item in prepared:
-            reservation = self.reserve(item['owner'], item['resource'], item['component'], item['bytes'],
-                                       reservation_id=item['reservation_id'])
-            deducted.append(reservation)
+            held = existing.get(item['reservation_id'])
+            if held is None:
+                deducted.append(self.reserve(item['owner'], item['resource'], item['component'], item['bytes'],
+                                             reservation_id=item['reservation_id']))
+                continue
+            increase = item['bytes'] - held.bytes
+            if self.used[held.key] + increase > self.limits[held.key]:
+                raise PhysicalIncomplete('physical delegation growth exhausted: ' + '/'.join(held.key))
+            self.used[held.key] += increase
+            grown[held.reservation_id] = held.bytes
+            held.bytes = item['bytes']
+            deducted.append(held)
         for item, reservation in zip(prepared, deducted):
-            for relative, recursive in _scope_claims(item):
-                reservation._claim(self.directory / relative, recursive)
+            if item['reservation_id'] not in existing:
+                for relative, recursive in _scope_claims(item):
+                    reservation._claim(self.directory / relative, recursive)
             reservation.delegated = True
         grant_id = secrets.token_hex(32)
         while grant_id in self.by_id or grant_id in self.grants or grant_id in ids:
@@ -888,7 +935,12 @@ def _issue_child_grant(self, allocations, attachments, binding, held_lease):
     except BaseException:
         for reservation in reversed(deducted):
             reservation.delegated = False
-            if not reservation.surviving_files():
+            if reservation.reservation_id in existing:
+                # A delegated held reservation goes back to the parent untouched: never released.
+                if reservation.reservation_id in grown:
+                    self.used[reservation.key] -= reservation.bytes - grown[reservation.reservation_id]
+                    reservation.bytes = grown[reservation.reservation_id]
+            elif not reservation.surviving_files():
                 reservation.release_after_removal()
         if control is not None:
             if path is not None and os.path.lexists(path):
