@@ -475,7 +475,7 @@ class Budget:
         self.working_bytes=0
         self.resident_base=process_resident_bytes()
 
-    def check(self, *, records=0, bytes_=0, predecessors=0):
+    def check(self, *, records=0, bytes_=0, predecessors=0, disk=True):
         self.records += records
         self.bytes += bytes_
         self.predecessors += predecessors
@@ -488,13 +488,21 @@ class Budget:
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == 'darwin' else 1024)
         if rss > self.plan['resident_rss_bytes']:
             raise Incomplete('resident RSS allowance exhausted')
+        if not disk:
+            # Read-only streaming (the logical digest) cannot grow owned storage; it scans once per pass.
+            return
         # Index, WAL, tables, extracted members and witnesses all live here.
         total = 0
-        for directory, _, files in os.walk(self.directory, followlinks=False):
-            for name in files:
-                path = Path(directory) / name
-                require(not path.is_symlink(), 'symlink in owned proof storage')
-                total += path.stat().st_size
+        pending = [self.directory]
+        while pending:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    if entry.is_dir():
+                        if not entry.is_symlink():
+                            pending.append(entry.path)
+                        continue
+                    require(not entry.is_symlink(), 'symlink in owned proof storage')
+                    total += entry.stat(follow_symlinks=False).st_size
         if total > self.plan['total_session_disk_bytes']:
             raise Incomplete('total session disk allowance exhausted')
 
@@ -1391,23 +1399,19 @@ class ExecutionState:
         order=strict_json(next(x for x in self.sql_path.read_text().splitlines() if x.startswith('-- logical-order: ')).split(': ',1)[1])
         h=hashlib.sha256(b'plurx-independent-verifier-state-v1\0')
         h.update(bytes.fromhex(self.schema_sha256))
+        budget=getattr(self,'budget',None)
         def cell(table,column,address):
             typ=self.db.execute('SELECT typeof("'+column+'") FROM "'+table+'" WHERE rowid=?',(address,)).fetchone()[0]
             if typ in ('blob','text'):
-                budget=getattr(self,'budget',None)
-                if budget:budget.reserve_working(262144)
-                try:
-                    yield b'{"blob_hex":"' if typ=='blob' else b'"'
-                    decoder=codecs.getincrementaldecoder('utf-8')('strict')
-                    with self.db.blobopen(table,column,address,readonly=True) as stream:
-                        while chunk:=stream.read(8192):
-                            data=chunk.hex().encode('ascii') if typ=='blob' else canonical(decoder.decode(chunk))[1:-1].encode('utf-8')
-                            if budget:budget.check(bytes_=len(chunk))
-                            yield data
-                    if typ=='text':yield canonical(decoder.decode(b'',final=True))[1:-1].encode('utf-8')
-                    yield b'"}' if typ=='blob' else b'"'
-                finally:
-                    if budget:budget.release_working(262144)
+                yield b'{"blob_hex":"' if typ=='blob' else b'"'
+                decoder=codecs.getincrementaldecoder('utf-8')('strict')
+                with self.db.blobopen(table,column,address,readonly=True) as stream:
+                    while chunk:=stream.read(8192):
+                        data=chunk.hex().encode('ascii') if typ=='blob' else canonical(decoder.decode(chunk))[1:-1].encode('utf-8')
+                        if budget:budget.check(bytes_=len(chunk),disk=False)
+                        yield data
+                if typ=='text':yield canonical(decoder.decode(b'',final=True))[1:-1].encode('utf-8')
+                yield b'"}' if typ=='blob' else b'"'
             else:
                 value=self.db.execute('SELECT "'+column+'" FROM "'+table+'" WHERE rowid=?',(address,)).fetchone()[0]
                 yield encoded(value)
@@ -1421,15 +1425,22 @@ class ExecutionState:
                 if i:yield b','
                 yield from cell(table,column,address)
             yield b']]'
-        for table,keys in order.items():
-            require(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',table),'bad pinned private table name')
-            columns=[row[1] for row in self.db.execute('PRAGMA table_info("'+table+'")')]
-            require(columns and set(keys)<=set(columns),'missing private durable table/key')
-            for address, in self.db.execute('SELECT rowid FROM "'+table+'" ORDER BY '+','.join('"'+k+'"' for k in keys)):
-                size=sum(len(chunk) for chunk in row_chunks(table,keys,columns,address))
-                h.update(size.to_bytes(8,'big'))
-                for chunk in row_chunks(table,keys,columns,address):h.update(chunk)
-                if hasattr(self,'budget'):self.budget.check()
+        # The digest streams one cell at a time through one fixed read window, so a single pass-long reservation has
+        # the same peak as the former per-cell one. It only reads: owned storage cannot grow while it runs, so the
+        # directory scan runs once per pass (reserve_working) instead of once per cell, chunk and row.
+        if budget:budget.reserve_working(262144)
+        try:
+            for table,keys in order.items():
+                require(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',table),'bad pinned private table name')
+                columns=[row[1] for row in self.db.execute('PRAGMA table_info("'+table+'")')]
+                require(columns and set(keys)<=set(columns),'missing private durable table/key')
+                for address, in self.db.execute('SELECT rowid FROM "'+table+'" ORDER BY '+','.join('"'+k+'"' for k in keys)):
+                    size=sum(len(chunk) for chunk in row_chunks(table,keys,columns,address))
+                    h.update(size.to_bytes(8,'big'))
+                    for chunk in row_chunks(table,keys,columns,address):h.update(chunk)
+                    if budget:budget.check(disk=False)
+        finally:
+            if budget:budget.release_working(262144)
         return h.hexdigest()
 
     def deterministic_initial(self):

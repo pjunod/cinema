@@ -33,8 +33,14 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         self.plan = copy.deepcopy(fixture.admitted(self.root).plan)
         self.plan.update(source=self.source, unit_predecessor_allowance=2, unit_record_allowance=25)
         if self._testMethodName.startswith('test_aggregate_'):
-            # A 2 MiB admitted resident bound still reaches the aggregate boundary (about 20 minutes here); the
-            # former 16 MiB needed hours because every quantum re-digests the growing journal.
+            # The boundary under test is the prospective decoded/generated accounting, which depends only on the
+            # aggregate's size. Measured process growth is a separate, noisy ceiling (a few MiB of interpreter and
+            # SQLite growth trips a small bound before the aggregate does), so hold it constant here; the admitted
+            # bound is then reached after a bounded number of receipts instead of growing with the machine.
+            resident = codec.process_resident_bytes()
+            patcher = patch.object(codec, 'process_resident_bytes', return_value=resident)
+            patcher.start()
+            self.addCleanup(patcher.stop)
             self.plan.update(resident_bytes=2 * 1024 * 1024, unit_predecessor_allowance=100000,
                              unit_record_allowance=100000)
         self.plan['plan_sha256'] = codec.digest(codec.envelope('ResourcePlan', self.plan))
@@ -449,6 +455,14 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         self.assertEqual(self.index.db.execute('SELECT count(*) FROM tlc_done').fetchone()[0], count)
         self.assertEqual((self.state.sequence(), self.state.cursor(), self.state.logical_digest()), before)
 
+    def verification_digest(self):
+        # The test's own read of the verifier state is not part of the quantum under test. It runs under a fresh
+        # allowance of the same admitted plan, so it can neither consume nor be refused by the live unit's working
+        # reservations (which the aggregate boundary deliberately exhausts).
+        own = fixture.granted_budget(copy.deepcopy(self.plan), self.output)
+        with patch.object(self.state, 'budget', own):
+            return self.state.logical_digest()
+
     def test_aggregate_boundary_reserves_before_growth_and_restores_same_plan(self):
         expected = []
         interrupted = False
@@ -492,7 +506,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
                     checker.write_json(directory / 'id-map.json', {'owned': number})
                     config = directory / 'paged-one-step.cfg'
                     config.write_text('SPECIFICATION PageSpec\n')
-                    before = (self.state.sequence(), self.state.cursor(), self.state.logical_digest(),
+                    before = (self.state.sequence(), self.state.cursor(), self.verification_digest(),
                         self.index.db.execute("SELECT state FROM operation_state WHERE operation='temporal_qualification'").fetchone()[0],
                         self.index.db.execute("SELECT count(*) FROM credit_links WHERE table_name='tlc_invocation'").fetchone()[0])
                     before_shape, before_charge = cursor.receipt_shape(), cursor.charged
@@ -509,7 +523,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
                             checker.run_temporal_tlc(self.index, self.output, self.tlc, tag, 'PagedOneStep',
                                 directory, config, completed=completed, cursor=cursor)
                     except codec.Incomplete as error:
-                        after = (self.state.sequence(), self.state.cursor(), self.state.logical_digest(),
+                        after = (self.state.sequence(), self.state.cursor(), self.verification_digest(),
                             self.index.db.execute("SELECT state FROM operation_state WHERE operation='temporal_qualification'").fetchone()[0],
                             self.index.db.execute("SELECT count(*) FROM credit_links WHERE table_name='tlc_invocation'").fetchone()[0])
                         self.assertEqual(after, before, 'failed aggregate quantum changed saved cursor/credit')
