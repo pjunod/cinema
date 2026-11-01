@@ -27,6 +27,8 @@ import urllib.parse
 import urllib.error
 
 from validation import async_refinement_provenance as p
+from validation import async_snapshot_transport as snapshots
+from validation import async_physical_policy as physical
 from validation import main_preflight_adoption as adoption
 from validation import main_unit_receipts
 from validation import python_unit_receipts as receipts
@@ -44,13 +46,14 @@ MAIN_ENV = {'paperwork': 'PAPERWORK_RESULT', 'scope': 'SCOPE_RESULT', 'preflight
             'async_refinement': 'ASYNC_DRIVER_RESULT', 'web_compile': 'WEB_RESULT',
             'apple_compile': 'APPLE_RESULT', 'android_compile': 'ANDROID_RESULT'}
 CONTROL_KEYS=('schema_version','registration','resource_plan','probe_run','unit_runs','attempt_runs',
-              'resume_decisions','main_run','session_id')
+              'resume_decisions','main_run','session_id','transport_conformance')
 NULL_PROGRESS = {'context': None, 'record_kind': None, 'after_key': None, 'fifo_ticket': None,
                  'component_id': None, 'family': None, 'case_index': 0}
 REGISTRATION_KEYS = ('schema_version', 'source', 'repository', 'repository_name', 'pr', 'event_base',
                      'ref', 'workflow', 'event', 'modes', 'source_files', 'source_archive_sha256',
                      'accounting_method_sha256','accounting_method',
-                     'storage', 'runtime', 'runner', 'route', 'expires_at', 'cases', 'main_workflow_sha256', 'upload_slot_count')
+                     'storage', 'runtime', 'runner', 'route', 'expires_at', 'cases', 'main_workflow_sha256', 'upload_slot_count',
+                     'transport_conformance_case')
 
 
 
@@ -153,7 +156,8 @@ def registration(value, root, now=None):
     p.require(value['schema_version'] == 6 and type(value['schema_version']) is int
               and value['workflow'] == p.WORKFLOW and value['event'] == 'workflow_dispatch'
               and value['upload_slot_count'] == p.UPLOAD_SLOTS
-              and value['modes'] == ['unit', 'complete'] and now < utc(value['expires_at']),
+              and value['modes'] == ['unit', 'complete'] and now < utc(value['expires_at'])
+              and value['transport_conformance_case']=='native_snapshot_three_batch_v1',
               'registration expired or unrecognized')
     schema = p.read(Path(root) / p.SCHEMA_PATH)
     p.validate(value['source'], schema['$defs']['SourceIdentity'], schema)
@@ -307,27 +311,25 @@ def resource_plan(plan_envelope, reg, measurement, root, now=None):
                                         plan['total_session_disk_bytes'])
     allowances=bounds['record_allowances'];inventory=accounting_inventory(bounds['source_receipt'])
     p.require(set(allowances)==set(inventory),'operational accounting kind inventory differs')
-    overhead=bounds['overhead']
-    p.require(measurement.get('resource_overheads')==overhead
-              and measurement.get('resource_method',{}).get('source_sha256')==reg['accounting_method_sha256']
-              and measurement.get('resource_method',{}).get('accounting_inventory')==inventory
-              and measurement.get('resource_method',{}).get('record_allowances')==allowances
-              and measurement.get('resource_method',{}).get('source_bound_specification_sha256')==reg['source_files'][p.SOURCE_BOUND_SPEC]
-              and measurement.get('resource_method',{}).get('plan_inputs')==accounting_plan_inputs(plan)
-              and measurement.get('resource_method',{}).get('actual_prefix_reserved_at_late_export') is True,
-              'unregistered/missing measured allocation method')
-    allocated=sum(row['records']*row['max_encoded_bytes'] for row in allowances.values())
-    peak=allocated+sum(overhead.values())
-    # Combined backup sizes are operational reservations, not global source Bk.
-    backup_bytes=measurement['resource_method']['maximum_combined_backup_bytes']
-    chunks=(backup_bytes+p.MAX_MEMBER-1)//p.MAX_MEMBER
-    p.require(chunks+measurement['resource_method']['minimum_fixed_prefix_parts']<=reg['upload_slot_count']
-              and peak<=plan['total_session_disk_bytes']
-              and plan['total_retained_artifact_bytes']<=plan['total_session_disk_bytes'],
-              'combined peak/retention or native-slot operational allowance exceeded')
-    return {'operational_peak_bytes':peak,'source_global_widths':widths,
+    policy=bounds['physical_policy']
+    calibration=bounds['calibration']
+    p.require(type(calibration) is dict and measurement.get('resource_calibration')==calibration,
+              'actual physical calibration is missing or changed')
+    expected=physical.calibrate_physical_policy(policy,calibration['geometry'],calibration['baseline'],plan)
+    p.require(calibration==expected and expected['peak_bytes']<=measurement['free_disk_bytes'],
+              'physical calibration/available disk differs')
+    method={'id':'typed_physical_caps_v1','source_sha256':reg['accounting_method_sha256'],
+        'policy_sha256':p.digest(p.canonical(policy)),'table_map_sha256':policy['table_map_sha256'],
+        'accounting_inventory':inventory,'record_allowances':allowances,
+        'source_bound_specification_sha256':reg['source_files'][p.SOURCE_BOUND_SPEC],
+        'plan_inputs':accounting_plan_inputs(plan),'prefix_policy':'late_bound_per_batch_v1'}
+    p.require(measurement.get('resource_method')==method,'closed measured physical method differs')
+    p.require(plan['total_retained_artifact_bytes']<=plan['total_session_disk_bytes'],
+              'retained artifacts exceed immutable session disk')
+    return {'operational_peak_bytes':expected['peak_bytes'],'source_global_widths':widths,
             'finite_worst_case_expressions':finite,'record_allowances':allowances,
             'accounting_inventory':inventory}
+
 
 
 def admit(reg, plan, probe, measurement, root, now=None):
@@ -347,7 +349,7 @@ def admit(reg, plan, probe, measurement, root, now=None):
     arithmetic = resource_plan(plan, reg, measurement, root, now)
     return {'schema_version': 6, 'registration': reg, 'resource_plan': plan,
             'capability': probe, 'measurement': measurement, 'arithmetic': arithmetic,
-            'units': [], 'attempts': [], 'next_ordinal':0, 'session': None, 'checkpoint': None, 'initial_image': None,
+            'units': [], 'attempts': [], 'next_ordinal':0, 'next_dispatch_ordinal':0, 'pending_publication':None, 'session': None, 'checkpoint': None, 'initial_image': None,
             'stage': 'expand', 'progress': copy.deepcopy(NULL_PROGRESS), 'phase': 'admitted',
             'retained_bytes': 0, 'dispatched_runs': [], 'created_at': time.time() if now is None else now}
 
@@ -377,6 +379,13 @@ def final_input_receipt(receipt,checkpoint,catalog_sha256):
               and p.canonical(receipt) in (p.canonical(expected),p.canonical(partial)),
               'final input readiness receipt is not exact current snapshot correspondence')
     return receipt['complete']
+
+
+def execution_origin(state, unit, operation):
+    p.require(operation in ('execute','publish'),'unknown proof publication operation')
+    return {key:unit[key] for key in ('repository','pr','event_base','workflow_id','event_name',
+        'mode','run','job','task','attempt')} | {'operation':operation,
+        'dispatch_ordinal':state['next_dispatch_ordinal']}
 
 
 def unit_request(state, run, job, root):
@@ -1414,6 +1423,7 @@ def runner_body(control, root, output, mode, operation):
                'prior_checkpoint': state['checkpoint'], 'checkpoint': state['checkpoint'],
                'catalog_path': str(output / 'catalog.sqlite'), 'output_dir': str(output / 'quantum'),
                'dependency_index': str(output / 'dependencies.sqlite'),
+               'execution_origin':execution_origin(state,unit['record'],operation),
                'source_files':reg['source_files'],'runtime':reg['runtime'],
                'driver_graph': str(output / 'driver-graph.json'),
                'verifier_work_db':str(output/'verifier.sqlite'),
@@ -1783,8 +1793,9 @@ def reserve_verifier(prepare, state, unit, final_checkpoint, source, output, pla
         p.require(name not in names and row['role'] in PREPARE_ROLES and target.is_file()
                   and target.stat().st_size==row['bytes'] and p.file_sha(target)==row['sha256'],
                   'prepare staged member preimage differs')
-        names.add(name);part=plan.add_file(name,target)
-        members.append({**row,'part_ordinal':part})
+        names.add(name)
+        plan.add_file(name,target)
+        members.append(row)
     for row in prepare['metadata_reservations']:
         p.closed(row,('path','maximum_bytes','role'))
         name=p.safe_path(row['path'])
@@ -1792,20 +1803,18 @@ def reserve_verifier(prepare, state, unit, final_checkpoint, source, output, pla
                          and name=='restore-semantic.json')
         p.require(name not in names and (allowed_receipt or row['role'] in ('result','evidence_index','progress','temporal_publication')),
                   'future metadata path/role not closed')
-        names.add(name);part=plan.reserve(name,row['maximum_bytes'],row['role'])
-        reservations.append({**row,'part_ordinal':part})
+        names.add(name)
+        plan.reserve(name,row['maximum_bytes'],row['role'])
+        reservations.append(row)
     for row in published_members:
         p.require(row['path'] not in names,'published member aliases prepared metadata')
         names.add(row['path']);members.append(row)
-    prefix=plan.preflight(pending=True)
-    p.require(prefix<p.UPLOAD_SLOTS,'fixed evidence prefix leaves no complete backup slots')
+    plan.preflight(pending=True)
     return {'protocol':'verifier_reservation_v1','prepare_sha256':p.digest(p.canonical(prepare)),
             'source':u['source'],'session_id':u['session_id'],'unit_ordinal':u['unit_ordinal'],
             'resource_plan_sha256':u['resource_plan_sha256'],'initial_image_sha256':cp['initial_image_id'],
             'input_checkpoint_sha256':prepare['input_checkpoint_sha256'],'final_checkpoint':final_checkpoint,
-            'members':members,'metadata_reservations':reservations,'fixed_prefix_part_count':prefix,
-            'backup_first_part':max(1,prefix),'upload_slot_count':p.UPLOAD_SLOTS,
-            'maximum_backup_parts':p.UPLOAD_SLOTS-max(1,prefix)}
+            'members':members,'metadata_reservations':reservations}
 
 
 def directory_bytes(directory):
@@ -1889,26 +1898,30 @@ def calibrate_overheads(root, output, control, measurement, deadline):
 
 def add_authenticated_members(index, result, transport, root):
     unit=result['work_unit']
-    for part,receipt_envelope in transport['receipts'].items():
-        receipt=p.envelope(receipt_envelope,'ArtifactReceipt',root)
-        for member in receipt['members']:
-            path=transport['parts'][part]/p.safe_path(member['path'])
-            p.require(path.is_file() and p.file_sha(path)==member['sha256'],'authenticated resolver member changed')
-            row=(unit['unit_ordinal'],part,member['path'],member['bytes'],member['sha256'],str(path.resolve()))
-            old=index.db.execute('SELECT bytes,sha256 FROM authenticated_members WHERE unit_ordinal=? AND part_ordinal=? AND member_path=?',row[:3]).fetchone()
-            p.require(old is None or old==(member['bytes'],member['sha256']),'historical member tuple conflicts')
-            index.db.execute('INSERT OR REPLACE INTO authenticated_members VALUES(?,?,?,?,?,?)',row)
-    progress=[];backup=[]
-    for directory in transport['parts'].values():
-        for name,target in (('verifier-progress/unit.json',progress),('verifier-backup/root.json',backup)):
-            path=directory/name
-            if path.is_file():target.append(path)
-    p.require(len(progress)==len(backup)<=1,'verifier progress/backup pair incomplete or duplicate')
-    if progress:
-        p.verifier_auxiliary(p.read(progress[0]),root);p.verifier_auxiliary(p.read(backup[0]),root)
-        index.db.execute('INSERT OR REPLACE INTO verifier_chain VALUES(?,?,?,?)',
-                         (unit['unit_ordinal'],str(progress[0].resolve()),str(backup[0].resolve()),
-                          p.canonical({'schema_version':6,'kind':'WorkUnit','record':unit})))
+    for member in transport['logical_members']():
+        path=transport['evidence_directory']/p.safe_path(member['member_path'])
+        p.require(path.is_file() and not path.is_symlink() and path.stat().st_size==member['bytes']
+                  and p.file_sha(path)==member['sha256'],'authenticated logical resolver bytes changed')
+        row=(unit['unit_ordinal'],member['member_path'],member['bytes'],member['sha256'],str(path.resolve()))
+        old=index.db.execute('SELECT bytes,sha256 FROM authenticated_members WHERE unit_ordinal=? AND member_path=?',row[:2]).fetchone()
+        p.require(old is None or old==(member['bytes'],member['sha256']),'historical member tuple conflicts')
+        index.db.execute('INSERT OR REPLACE INTO authenticated_members VALUES(?,?,?,?,?)',row)
+    for kind,name in (('catalog_backup','catalog-backup/root.json'),('verifier_backup','verifier-backup/root.json')):
+        path=transport['evidence_directory']/name
+        if not path.exists():continue
+        value=p.auxiliary(p.read(path),root)
+        p.require(value['kind']==kind and value['unit_ordinal']==unit['unit_ordinal'],'authenticated snapshot root differs')
+        index.db.execute('INSERT OR REPLACE INTO authenticated_snapshot_roots VALUES(?,?,?,?,?)',
+                         (kind,unit['unit_ordinal'],path.stat().st_size,p.file_sha(path),str(path.resolve())))
+    progress=transport['evidence_directory']/'verifier-progress/unit.json'
+    backup=transport['evidence_directory']/'verifier-backup/root.json'
+    p.require(progress.exists()==backup.exists(),'verifier progress/backup pair incomplete')
+    if progress.exists():
+        p.verifier_auxiliary(p.read(progress),root)
+        value=p.auxiliary(p.read(backup),root)
+        index.db.execute('INSERT OR REPLACE INTO verifier_chain VALUES(?,?,?,?,?)',
+            (unit['unit_ordinal'],str(progress.resolve()),str(backup.resolve()),
+             p.canonical({'schema_version':6,'kind':'WorkUnit','record':unit}),p.canonical(value['execution_origin'])))
     materialize_control(index,transport,root)
     index.db.commit()
 
@@ -2194,13 +2207,12 @@ def authenticate_verifier_progress(previous,state,result,transport,root):
               and progress['session_id']==backup['session_id']==unit['session_id']
               and progress['unit_ordinal']==backup['unit_ordinal']==unit['unit_ordinal']
               and progress['checkpoint_sha256']==backup['checkpoint_sha256']==checkpoint
-              and backup['artifact_part_count']==len(transport['parts'])
+              and backup['schema_version']==2
               and backup['progress_sha256']==p.file_sha(progress_paths[0])
               and progress['resource_plan_sha256']==backup['resource_plan_sha256']==unit['resource_plan_sha256']
               and progress['initial_image_sha256']==backup['initial_image_sha256']==result['initial_image']['record']['image_sha256'],
               'verifier progress/backup checkpoint/source binding differs')
-    origin={k:unit[k] for k in ('repository','pr','event_base','workflow_id','event_name','mode',
-                                'run','job','task','attempt','stage')}
+    origin=backup['execution_origin']
     p.require(progress['origin']==origin and progress['after_cursor']['position']==unit['progress']
               and progress['stage_complete']==result['stage_complete']
               and progress['previous_progress_sha256']==previous.get('verifier_progress_sha256')
@@ -2278,36 +2290,28 @@ def worker_affected(root,base,head):
 
 
 AUXILIARY_ACCOUNTING_KINDS=p.AUXILIARY_ACCOUNTING_KINDS
-ACCOUNTING_METHOD_FILES=('validation/async_refinement_provenance.py','validation/async_refinement_session.py')
+ACCOUNTING_METHOD_FILES=('validation/async_refinement_provenance.py','validation/async_refinement_session.py',
+    'validation/async_snapshot_transport.py','validation/async_physical_policy.py',
+    'validation/async_physical_table_map.json')
 
 
 def accounting_method_digest(files):
     return p.digest(p.canonical([[name,files[name]] for name in ACCOUNTING_METHOD_FILES]))
 
 
-ACCOUNTING_METHOD={'schema_version':1,'id':'operational_encoded_caps_v1',
+ACCOUNTING_METHOD={'schema_version':3,'id':'typed_physical_caps_v1',
     'source_report':'source_global_symbolic',
     'semantic_lifetime':'session_unique_global_record',
     'auxiliary_lifetime':'session_retained_unit_member',
-    'copy_inventory':[
-        {'class':'canonical_authoritative_records','copies':1,'charged_to':'record_allowances'},
-        {'class':'typed_payload_and_identity_copies','copies':2,'charged_to':'overhead.index_bytes'},
-        {'class':'catalog_row_keys_indexes_allocators','copies':1,'charged_to':'overhead.index_bytes'},
-        {'class':'verifier_record_index_algorithm_state','copies':1,'charged_to':'overhead.index_bytes'},
-        {'class':'source_archive_and_extraction','copies':2,'charged_to':'overhead.scratch_bytes'},
-        {'class':'semantic_pages_and_current_output','copies':1,'charged_to':'overhead.scratch_bytes'},
-        {'class':'sql_wal','copies':1,'charged_to':'overhead.wal_bytes'},
-        {'class':'retained_prior_live_backup_chunks_parts_restores','copies':6,'charged_to':'overhead.retained_bytes'},
-        {'class':'standalone_catalog_and_verifier_backups','copies':1,'charged_to':'overhead.duplicate_backup_bytes'},
-        {'class':'catalog_and_verifier_chunk_staging','copies':1,'charged_to':'overhead.duplicate_backup_bytes'},
-        {'class':'packed_downloaded_artifact_files','copies':1,'charged_to':'overhead.duplicate_backup_bytes'},
-        {'class':'catalog_and_verifier_restore_staging','copies':1,'charged_to':'overhead.duplicate_backup_bytes'}],
-    'nonsemantic_mapping':{'logs':'overhead.retained_bytes','source_archive':'overhead.scratch_bytes',
-        'backup_and_chunks':'overhead.duplicate_backup_bytes','downloads_and_restores':'overhead.duplicate_backup_bytes',
-        'decoded_objects_and_cache':'resident_bytes_and_resident_rss_bytes'},
-    'control_transport':{'maximum_raw_log_bytes':32*p.MIB,'maximum_control_bytes':p.SMALL,
-        'base64_numerator':4,'base64_denominator':3,'maximum_chunk_characters':2048,
-        'raw_log_lifetime':'session_retained','frame_and_decoded_lifetime':'resident_working_set'}}
+    'physical_policy_location':'ResourcePlan.source_bounds_utf8',
+    'table_map':'validation/async_physical_table_map.json',
+    'prefix_policy':'late_bound_per_batch_v1',
+    'content_identity':'sha256_original_bytes',
+    'snapshot_chunk_bytes':1048576,
+    'cache_presence_grants_authority':False,
+    'retained_download_multiplier':6,
+    'dispatch_log_reserve_bytes':32*p.MIB,
+    'capability_dispatch_allowance':3}
 
 
 def accounting_inventory(source_receipt):
@@ -2319,14 +2323,15 @@ def accounting_inventory(source_receipt):
 
 def operational_bounds(encoded,reg,root,measurement_pending=False):
     value=p.decode(encoded.encode())
-    p.closed(value,('schema_version','accounting_rule','source_receipt','record_allowances','overhead',
-                    'accounting_method_sha256','measurement_sha256'))
-    p.require(type(value['schema_version']) is int and value['schema_version']==2
-              and value['accounting_rule']=='operational_encoded_caps_v1'
+    p.closed(value,('schema_version','accounting_rule','source_receipt','record_allowances','physical_policy',
+                    'calibration','accounting_method_sha256','measurement_sha256'))
+    p.require(type(value['schema_version']) is int and value['schema_version']==3
+              and value['accounting_rule']=='typed_physical_caps_v1'
               and value['accounting_method_sha256']==reg['accounting_method_sha256'],
-              'obsolete/unregistered operational accounting wrapper')
-    p.closed(value['overhead'],('index_bytes','wal_bytes','scratch_bytes','retained_bytes','duplicate_backup_bytes'))
-    p.require(type(value['record_allowances']) is dict and value['record_allowances'], 'missing operational kinds')
+              'obsolete/unregistered physical accounting wrapper')
+    source_map=physical.load_source_map(Path(root)/'validation/async_physical_table_map.json')
+    physical.validate_physical_policy(value['physical_policy'],source_map)
+    p.require(type(value['record_allowances']) is dict and value['record_allowances'],'missing operational kinds')
     for kind,row in value['record_allowances'].items():
         p.closed(row,('records','max_encoded_bytes'))
         p.require(type(row['records']) is int and row['records']>=0
@@ -2335,9 +2340,11 @@ def operational_bounds(encoded,reg,root,measurement_pending=False):
         if kind in AUXILIARY_ACCOUNTING_KINDS:
             p.require(row['max_encoded_bytes']<=p.SMALL,'auxiliary metadata cap exceeds8MiB')
     if not measurement_pending:
-        p.require(all(type(v) is int and v>=0 for v in value['overhead'].values())
-                  and isinstance(value['measurement_sha256'],str) and p.SHA.fullmatch(value['measurement_sha256']),
-                  'actual measured operational overhead unavailable')
+        p.require(type(value['calibration']) is dict and type(value['measurement_sha256']) is str
+                  and p.SHA.fullmatch(value['measurement_sha256']), 'actual physical calibration unavailable')
+    else:
+        p.require(value['calibration'] is None and value['measurement_sha256'] is None,
+                  'draft calibration must be explicitly absent')
     return value
 
 
@@ -2910,8 +2917,13 @@ def validate_resume_decision(api,decision,failed,state,reg):
 
 
 def accounting_plan_inputs(plan):
+    wrapper=p.decode(plan['source_bounds_utf8'].encode())
     return {key:plan[key] for key in ('unit_byte_allowance','unit_record_allowance','maximum_units',
-        'total_session_disk_bytes','total_retained_artifact_bytes','resident_bytes','resident_rss_bytes')}
+        'total_session_disk_bytes','total_retained_artifact_bytes','resident_bytes','resident_rss_bytes')} | {
+        'physical_policy_sha256':p.digest(p.canonical(wrapper['physical_policy'])),
+        'record_allowances_sha256':p.digest(p.canonical(wrapper['record_allowances'])),
+        'source_receipt_sha256':p.digest(p.canonical(wrapper['source_receipt'])),
+        'unit_predecessor_allowance':plan['unit_predecessor_allowance']}
 
 
 

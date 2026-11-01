@@ -428,8 +428,10 @@ class DependencyIndex:
     def __init__(self, path):
         self.db = sqlite3.connect(path)
         self.db.execute('CREATE TABLE IF NOT EXISTS objects(kind TEXT,key BLOB,digest TEXT,payload BLOB,path TEXT,PRIMARY KEY(kind,key))')
-        self.db.execute('CREATE TABLE IF NOT EXISTS authenticated_members(unit_ordinal INTEGER,part_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(unit_ordinal,part_ordinal,member_path))')
-        self.db.execute('CREATE TABLE IF NOT EXISTS verifier_chain(unit_ordinal INTEGER PRIMARY KEY,progress_path TEXT,backup_root_path TEXT,work_unit_json BLOB)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS authenticated_members(unit_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(unit_ordinal,member_path))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS authenticated_snapshot_roots(kind TEXT,unit_ordinal INTEGER,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(kind,unit_ordinal))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS native_locators(unit_ordinal INTEGER,member_path TEXT,batch_receipt_sha256 TEXT,publication_origin BLOB,artifact_id INTEGER,part_ordinal INTEGER,bytes INTEGER,sha256 TEXT,PRIMARY KEY(unit_ordinal,member_path,batch_receipt_sha256,artifact_id,part_ordinal))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS verifier_chain(unit_ordinal INTEGER PRIMARY KEY,progress_path TEXT,backup_root_path TEXT,work_unit_json BLOB,execution_origin_json BLOB)')
         self.db.execute('CREATE TABLE IF NOT EXISTS roots(kind TEXT,key BLOB,digest TEXT,PRIMARY KEY(kind,key))')
         self.db.execute('CREATE TABLE IF NOT EXISTS edges(owner_kind TEXT,owner_key BLOB,kind TEXT,key BLOB,digest TEXT,PRIMARY KEY(owner_kind,owner_key,kind,key))')
 
@@ -532,8 +534,13 @@ def auxiliary(value, root):
     schema['$defs'].update(frozen['$defs'])
     schema = resolve(schema)
     kind = value.get('kind')
-    require(kind in ('catalog_backup', 'catalog_chunk_index'), 'unknown backup envelope')
-    validate(value, schema['$defs']['CatalogBackup' if kind == 'catalog_backup' else 'CatalogChunkIndex'], schema)
+    kinds = {'catalog_backup':'CatalogBackup', 'verifier_backup':'VerifierBackup',
+             'snapshot_manifest_node':'SnapshotManifestNode', 'evidence_manifest_node':'EvidenceManifestNode',
+             'transfer_manifest_node':'TransferManifestNode', 'publication_intent':'PublicationIntent',
+             'pending_publication':'PendingPublication', 'transfer_batch_receipt':'TransferBatchReceipt',
+             'publication_activation':'ActivationResult','native_transport_conformance':'ConformanceResult'}
+    require(kind in kinds, 'unknown transport auxiliary envelope')
+    validate(value, schema['$defs'][kinds[kind]], schema)
     return value
 
 
@@ -1249,7 +1256,7 @@ def control_frame(control):
 
 def parse_control_frame(lines, maximum=SMALL):
     """Unique canonical frame inside the mandatory synchronous finalizer."""
-    starts = [(i,re.fullmatch(r'ASYNC-PROOF-CONTROL-BEGIN 1 (unit_checkpoint|completion) ([1-9][0-9]*) ([1-9][0-9]*) ([0-9a-f]{64})',line))
+    starts = [(i,re.fullmatch(r'ASYNC-PROOF-CONTROL-BEGIN 1 (unit_checkpoint|completion|publication_batch|transport_conformance) ([1-9][0-9]*) ([1-9][0-9]*) ([0-9a-f]{64})',line))
               for i,line in enumerate(lines) if line.startswith(CONTROL_PREFIX+'BEGIN')]
     require(len(starts)==1 and starts[0][1] is not None, 'missing/duplicate/malformed control begin')
     start,match=starts[0];role,length,count,sha=match.groups();length=int(length);count=int(count)
@@ -1273,7 +1280,8 @@ def parse_control_frame(lines, maximum=SMALL):
     require(len(raw)==length and digest(raw)==sha and base64.b64encode(raw).decode('ascii')==encoded,
             'control length/hash/base64 differs')
     value=decode(raw,maximum)
-    require(canonical(value)==raw and value.get('role')==role,'noncanonical control')
+    require(canonical(value)==raw and value.get('role')==role and value.get('schema_version')==2,
+            'noncanonical or obsolete control')
     binding=control_binding(value)
     begin=f'ASYNC-PROOF-FINALIZER-BEGIN 1 {binding}'
     done=f'ASYNC-PROOF-FINALIZER-DONE 1 {binding} {sha}'
@@ -1293,3 +1301,88 @@ def validate_upload_order(lines, parts, finalizer_begin):
         r'With the provided path, there will be [1-9][0-9]* files? uploaded',line)]
     require(len(starts)==len(parts) and all(i<finalizer_begin for i in starts),
             'unplanned native upload transaction')
+
+
+def authenticate_transfer_context(api, registration, carrier, metadata, parts, artifact_receipts,
+                                  root, expected_dispatch_ordinal):
+    """Authenticate publisher locators without relaxing ordinary receipt origins.
+
+    The caller has already revalidated each exact native API/upload/ZIP/member
+    transaction. This separate context preserves the original WorkUnit producer.
+    Returned content rows gain authority only through this batch's frozen lineage.
+    """
+    from validation import async_snapshot_transport as snapshots
+    batch=auxiliary(carrier['transfer_batch'],root)
+    publication=batch['publication_origin']
+    execution=batch['execution_origin']
+    require(publication==carrier['origin'] and publication['dispatch_ordinal']==expected_dispatch_ordinal
+            and publication['mode']=='unit' and publication['attempt']==1,
+            'publication origin/dispatch differs')
+    _,job,event=producer(api,publication['run'],registration,'unit',('success',))
+    require((publication['job'],publication['task'],publication['attempt'])==(job['id'],job['task_id'],1),
+            'publication task differs')
+    inputs=event['inputs']
+    require(inputs['operation']==publication['operation'] and publication['operation'] in ('execute','publish'),
+            'publication event operation differs')
+    # Original execution success is indispensable even when every byte was later
+    # copied successfully. A failed original cannot be repaired by publication.
+    _,original,original_event=producer(api,execution['run'],registration,'unit',('success',))
+    require(execution['operation']=='execute' and execution['mode']=='unit'
+            and original_event['inputs']['operation']=='execute'
+            and (execution['job'],execution['task'],execution['attempt'])==
+                (original['id'],original['task_id'],1), 'original execution failed or foreign')
+    unit=envelope(carrier['work_unit'],'WorkUnit',root)
+    require((unit['run'],unit['job'],unit['task'],unit['attempt'])==
+            (execution['run'],execution['job'],execution['task'],1),
+            'publisher relabeled original WorkUnit')
+    require(batch['artifact_receipts']==[artifact_receipts[n] for n in sorted(artifact_receipts)]
+            and carrier['artifact_receipts']==batch['artifact_receipts'], 'current batch artifact set differs')
+    for receipt in batch['artifact_receipts']:
+        record=envelope(receipt,'ArtifactReceipt',root)
+        require((record['run'],record['job'],record['task'],record['attempt'])==
+                (publication['run'],publication['job'],publication['task'],1)
+                and record['unit_ordinal']==unit['unit_ordinal'] and record['source']==registration['source'],
+                'transfer receipt is not actual publisher')
+    require(batch['source']==unit['source']==registration['source']
+            and batch['session_id']==unit['session_id']==metadata['session_id']
+            and batch['unit_ordinal']==unit['unit_ordinal']==metadata['unit_ordinal']
+            and batch['resource_plan_sha256']==unit['resource_plan_sha256'], 'transfer unit binding differs')
+    native={member['path']:(part,member) for part,receipt in artifact_receipts.items()
+            for member in receipt['record']['members']}
+    require(len(native)==sum(len(receipt['record']['members']) for receipt in artifact_receipts.values()),
+            'current native member paths alias')
+    used_nodes=set()
+    def resolve(reference):
+        require(reference['kind']=='transfer_manifest_node','transfer tree child kind differs')
+        candidates=[(name,part,m) for name,(part,m) in native.items()
+                    if name.startswith('transfer/node-') and m['sha256']==reference['sha256']
+                    and m['bytes']==reference['bytes']]
+        require(len(candidates)==1,'transfer node absent/ambiguous')
+        name,part,_=candidates[0]
+        path=parts[part]/safe_path(name)
+        data=path.read_bytes()
+        require(snapshots.content_ref('transfer_manifest_node',data)==reference,'transfer node changed')
+        auxiliary(decode(data),root)
+        used_nodes.add(name)
+        return data
+    leaves=snapshots.iter_keyed_manifest(batch['transfer_manifest'],resolve,batch,
+                                         'transfer_index','transfer_manifest_node')
+    selected=set()
+    rows=[]  # at most32*300 native members; no session-global payload list
+    for leaf in leaves:
+        name=safe_path(leaf['member_path']);reference=leaf['content']
+        require(name not in selected and name in native,'transfer member duplicate/missing')
+        part,member=native[name]
+        require(part==leaf['part_ordinal'] and member['bytes']==reference['bytes']
+                and member['sha256']==reference['sha256'],'transfer locator/member differs')
+        path=parts[part]/name
+        require(path.is_file() and not path.is_symlink() and file_sha(path)==reference['sha256'],
+                'authenticated transfer bytes changed')
+        selected.add(name)
+        rows.append((reference,path,{'batch_receipt_sha256':digest(canonical(batch)),
+            'publication_origin':publication,'artifact_id':artifact_receipts[part]['record']['artifact_id'],
+            'part_ordinal':part,'member_path':name,'bytes':member['bytes'],'sha256':member['sha256']}))
+    require(set(native)==selected|used_nodes,'native ZIP has hidden or unreferenced payload')
+    _,again,_=producer(api,publication['run'],registration,'unit',('success',))
+    require((again['id'],again['task_id'])==(job['id'],job['task_id']), 'publication terminal identity changed')
+    return rows

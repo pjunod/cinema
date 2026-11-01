@@ -1,25 +1,165 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "paged-catalog-transport.schema.json",
-  "title": "Lossless schema6 catalog transport adjunct",
+  "title": "Bounded authenticated snapshot and publication transport",
   "oneOf": [
     {
       "$ref": "#/$defs/CatalogBackup"
     },
     {
-      "$ref": "#/$defs/CatalogChunkIndex"
+      "$ref": "#/$defs/VerifierBackup"
+    },
+    {
+      "$ref": "#/$defs/SnapshotManifestNode"
+    },
+    {
+      "$ref": "#/$defs/EvidenceManifestNode"
+    },
+    {
+      "$ref": "#/$defs/TransferManifestNode"
+    },
+    {
+      "$ref": "#/$defs/PublicationIntent"
+    },
+    {
+      "$ref": "#/$defs/PendingPublication"
+    },
+    {
+      "$ref": "#/$defs/TransferBatchReceipt"
+    },
+    {
+      "$ref": "#/$defs/ActivationResult"
+    },
+    {
+      "$ref": "#/$defs/ConformanceResult"
     }
   ],
   "$defs": {
+    "ContentRef": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "snapshot_chunk",
+            "snapshot_manifest_node",
+            "catalog_backup",
+            "verifier_backup",
+            "evidence_manifest_node",
+            "transfer_manifest_node",
+            "publication_intent",
+            "transfer_batch_receipt",
+            "publication_activation",
+            "execution_result",
+            "validation_receipt"
+          ]
+        },
+        "sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "bytes": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        }
+      },
+      "required": [
+        "kind",
+        "sha256",
+        "bytes"
+      ],
+      "additionalProperties": false
+    },
+    "Origin": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "pr": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "event_base": {
+          "$ref": "paged-proof.schema.json#/$defs/Commit"
+        },
+        "workflow_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event_name": {
+          "const": "workflow_dispatch"
+        },
+        "mode": {
+          "enum": [
+            "unit",
+            "complete"
+          ]
+        },
+        "operation": {
+          "enum": [
+            "execute",
+            "publish"
+          ]
+        },
+        "run": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "job": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "attempt": {
+          "const": 1
+        },
+        "dispatch_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        }
+      },
+      "required": [
+        "repository",
+        "pr",
+        "event_base",
+        "workflow_id",
+        "event_name",
+        "mode",
+        "operation",
+        "run",
+        "job",
+        "task",
+        "attempt",
+        "dispatch_ordinal"
+      ],
+      "additionalProperties": false
+    },
+    "MemberRef": {
+      "type": "object",
+      "properties": {
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "member_path": {
+          "$ref": "#/$defs/SafePath"
+        },
+        "bytes": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "unit_ordinal",
+        "member_path",
+        "bytes",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
     "CatalogBackup": {
       "type": "object",
       "properties": {
-        "schema_version": {
-          "const": 1
-        },
-        "kind": {
-          "const": "catalog_backup"
-        },
         "source": {
           "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
         },
@@ -28,6 +168,18 @@
         },
         "unit_ordinal": {
           "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "execution_origin": {
+          "$ref": "#/$defs/Origin"
         },
         "checkpoint_sha256": {
           "$ref": "paged-proof.schema.json#/$defs/Sha256"
@@ -42,11 +194,15 @@
             }
           ]
         },
-        "resource_plan_sha256": {
-          "$ref": "paged-proof.schema.json#/$defs/Sha256"
-        },
-        "initial_image_sha256": {
-          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        "predecessor_root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "catalog_commit": {
           "$ref": "paged-proof.schema.json#/$defs/Id"
@@ -57,68 +213,65 @@
         "semantic_manifest_root": {
           "$ref": "paged-proof.schema.json#/$defs/Sha256"
         },
-        "snapshot_boundary": {
-          "const": "post_checkpoint_pre_upload"
-        },
         "format": {
           "const": "sqlite3"
         },
         "backup_method": {
           "const": "sqlite_backup_api_v1"
         },
+        "chunk_bytes_limit": {
+          "const": 1048576
+        },
+        "chunk_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "manifest_root": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "kind": {
+          "const": "catalog_backup"
+        },
+        "snapshot_boundary": {
+          "const": "post_checkpoint_pre_upload"
+        },
         "catalog_bytes": {
-          "$ref": "paged-proof.schema.json#/$defs/Id"
+          "type": "integer",
+          "minimum": 1
         },
         "catalog_sha256": {
           "$ref": "paged-proof.schema.json#/$defs/Sha256"
-        },
-        "chunk_bytes_limit": {
-          "const": 268435456
-        },
-        "chunk_count": {
-          "$ref": "paged-proof.schema.json#/$defs/Id"
-        },
-        "artifact_part_count": {
-          "$ref": "paged-proof.schema.json#/$defs/Id"
-        },
-        "index_root": {
-          "$ref": "#/$defs/IndexRef"
         }
       },
       "required": [
-        "schema_version",
-        "kind",
         "source",
         "session_id",
         "unit_ordinal",
-        "checkpoint_sha256",
-        "previous_checkpoint_sha256",
         "resource_plan_sha256",
         "initial_image_sha256",
+        "schema_version",
+        "execution_origin",
+        "checkpoint_sha256",
+        "previous_checkpoint_sha256",
+        "predecessor_root",
         "catalog_commit",
         "catalog_logical_digest",
         "semantic_manifest_root",
-        "snapshot_boundary",
         "format",
         "backup_method",
-        "catalog_bytes",
-        "catalog_sha256",
         "chunk_bytes_limit",
         "chunk_count",
-        "artifact_part_count",
-        "index_root"
+        "manifest_root",
+        "kind",
+        "snapshot_boundary",
+        "catalog_bytes",
+        "catalog_sha256"
       ],
       "additionalProperties": false
     },
-    "CatalogChunkIndex": {
+    "VerifierBackup": {
       "type": "object",
       "properties": {
-        "schema_version": {
-          "const": 1
-        },
-        "kind": {
-          "const": "catalog_chunk_index"
-        },
         "source": {
           "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
         },
@@ -128,7 +281,147 @@
         "unit_ordinal": {
           "$ref": "paged-proof.schema.json#/$defs/Nat"
         },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "execution_origin": {
+          "$ref": "#/$defs/Origin"
+        },
         "checkpoint_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "previous_checkpoint_sha256": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predecessor_root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "catalog_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "catalog_logical_digest": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "semantic_manifest_root": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "format": {
+          "const": "sqlite3"
+        },
+        "backup_method": {
+          "const": "sqlite_backup_api_v1"
+        },
+        "chunk_bytes_limit": {
+          "const": 1048576
+        },
+        "chunk_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "manifest_root": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "kind": {
+          "const": "verifier_backup"
+        },
+        "snapshot_boundary": {
+          "const": "post_verifier_commit_pre_upload"
+        },
+        "work_db_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "work_db_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "verifier_schema_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "verifier_algorithm_version": {
+          "const": 1
+        },
+        "verifier_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "verifier_logical_digest": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "previous_verifier_progress_sha256": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "progress_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "source",
+        "session_id",
+        "unit_ordinal",
+        "resource_plan_sha256",
+        "initial_image_sha256",
+        "schema_version",
+        "execution_origin",
+        "checkpoint_sha256",
+        "previous_checkpoint_sha256",
+        "predecessor_root",
+        "catalog_commit",
+        "catalog_logical_digest",
+        "semantic_manifest_root",
+        "format",
+        "backup_method",
+        "chunk_bytes_limit",
+        "chunk_count",
+        "manifest_root",
+        "kind",
+        "snapshot_boundary",
+        "work_db_bytes",
+        "work_db_sha256",
+        "verifier_schema_sha256",
+        "verifier_algorithm_version",
+        "verifier_commit",
+        "verifier_logical_digest",
+        "previous_verifier_progress_sha256",
+        "progress_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "SnapshotManifestNode": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "snapshot_manifest_node"
+        },
+        "scope_sha256": {
           "$ref": "paged-proof.schema.json#/$defs/Sha256"
         },
         "level": {
@@ -138,16 +431,77 @@
           "$ref": "paged-proof.schema.json#/$defs/Nat"
         },
         "chunk_count": {
-          "$ref": "paged-proof.schema.json#/$defs/Id"
+          "type": "integer",
+          "minimum": 1
         },
         "offset": {
           "$ref": "paged-proof.schema.json#/$defs/Nat"
         },
         "bytes": {
-          "$ref": "paged-proof.schema.json#/$defs/Id"
+          "type": "integer",
+          "minimum": 1
         },
         "entries": {
           "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "ordinal": {
+                    "$ref": "paged-proof.schema.json#/$defs/Nat"
+                  },
+                  "offset": {
+                    "$ref": "paged-proof.schema.json#/$defs/Nat"
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "content": {
+                    "$ref": "#/$defs/ContentRef"
+                  }
+                },
+                "required": [
+                  "ordinal",
+                  "offset",
+                  "bytes",
+                  "content"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "first_chunk": {
+                    "$ref": "paged-proof.schema.json#/$defs/Nat"
+                  },
+                  "chunk_count": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "offset": {
+                    "$ref": "paged-proof.schema.json#/$defs/Nat"
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "child": {
+                    "$ref": "#/$defs/ContentRef"
+                  }
+                },
+                "required": [
+                  "first_chunk",
+                  "chunk_count",
+                  "offset",
+                  "bytes",
+                  "child"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
           "minItems": 1,
           "maxItems": 256
         }
@@ -155,10 +509,7 @@
       "required": [
         "schema_version",
         "kind",
-        "source",
-        "session_id",
-        "unit_ordinal",
-        "checkpoint_sha256",
+        "scope_sha256",
         "level",
         "first_chunk",
         "chunk_count",
@@ -166,108 +517,769 @@
         "bytes",
         "entries"
       ],
-      "additionalProperties": false,
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "level": {
-                "const": 0
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "entries": {
-                "items": {
-                  "$ref": "#/$defs/ChunkDescriptor"
-                }
-              }
-            }
-          },
-          "else": {
-            "properties": {
-              "entries": {
-                "items": {
-                  "$ref": "#/$defs/IndexRef"
-                }
-              }
-            }
-          }
-        }
-      ]
-    },
-    "ChunkDescriptor": {
-      "type": "object",
-      "properties": {
-        "ordinal": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
-        },
-        "offset": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
-        },
-        "bytes": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 268435456
-        },
-        "sha256": {
-          "$ref": "paged-proof.schema.json#/$defs/Sha256"
-        },
-        "member_path": {
-          "$ref": "paged-proof.schema.json#/$defs/RelativePath"
-        },
-        "part_ordinal": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
-        }
-      },
-      "required": [
-        "ordinal",
-        "offset",
-        "bytes",
-        "sha256",
-        "member_path",
-        "part_ordinal"
-      ],
       "additionalProperties": false
     },
-    "IndexRef": {
+    "EvidenceManifestNode": {
       "type": "object",
       "properties": {
-        "member_path": {
-          "$ref": "paged-proof.schema.json#/$defs/RelativePath"
+        "schema_version": {
+          "const": 1
         },
-        "sha256": {
+        "kind": {
+          "const": "evidence_manifest_node"
+        },
+        "scope_sha256": {
           "$ref": "paged-proof.schema.json#/$defs/Sha256"
-        },
-        "part_ordinal": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
         },
         "level": {
           "$ref": "paged-proof.schema.json#/$defs/Nat"
         },
-        "first_chunk": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        "first_key": {
+          "type": "string",
+          "minLength": 1
         },
-        "chunk_count": {
-          "$ref": "paged-proof.schema.json#/$defs/Id"
+        "last_key": {
+          "type": "string",
+          "minLength": 1
         },
-        "offset": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        "item_count": {
+          "type": "integer",
+          "minimum": 1
         },
-        "bytes": {
-          "$ref": "paged-proof.schema.json#/$defs/Id"
+        "entries": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "member": {
+                    "$ref": "#/$defs/MemberRef"
+                  },
+                  "chunks": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/ContentRef"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "member",
+                  "chunks"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "first_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "last_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "item_count": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "child": {
+                    "$ref": "#/$defs/ContentRef"
+                  }
+                },
+                "required": [
+                  "first_key",
+                  "last_key",
+                  "item_count",
+                  "child"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 256
         }
       },
       "required": [
-        "member_path",
-        "sha256",
-        "part_ordinal",
+        "schema_version",
+        "kind",
+        "scope_sha256",
         "level",
-        "first_chunk",
-        "chunk_count",
-        "offset",
-        "bytes"
+        "first_key",
+        "last_key",
+        "item_count",
+        "entries"
+      ],
+      "additionalProperties": false
+    },
+    "TransferManifestNode": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "transfer_manifest_node"
+        },
+        "scope_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "level": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "first_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "last_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "item_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "$ref": "#/$defs/ContentRef"
+                  },
+                  "part_ordinal": {
+                    "$ref": "paged-proof.schema.json#/$defs/Nat"
+                  },
+                  "member_path": {
+                    "$ref": "#/$defs/SafePath"
+                  }
+                },
+                "required": [
+                  "content",
+                  "part_ordinal",
+                  "member_path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "first_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "last_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "item_count": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "child": {
+                    "$ref": "#/$defs/ContentRef"
+                  }
+                },
+                "required": [
+                  "first_key",
+                  "last_key",
+                  "item_count",
+                  "child"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "scope_sha256",
+        "level",
+        "first_key",
+        "last_key",
+        "item_count",
+        "entries"
+      ],
+      "additionalProperties": false
+    },
+    "PublicationIntent": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "publication_intent"
+        },
+        "execution_origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "previous_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_checkpoint": {
+          "$ref": "paged-proof.schema.json#/$defs/Ref"
+        },
+        "catalog_root": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "verifier_root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_result": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "evidence_root": {
+          "$ref": "#/$defs/ContentRef"
+        }
+      },
+      "required": [
+        "source",
+        "session_id",
+        "unit_ordinal",
+        "resource_plan_sha256",
+        "initial_image_sha256",
+        "schema_version",
+        "kind",
+        "execution_origin",
+        "previous_checkpoint",
+        "candidate_checkpoint",
+        "catalog_root",
+        "verifier_root",
+        "execution_result",
+        "evidence_root"
+      ],
+      "additionalProperties": false
+    },
+    "PendingPublication": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "pending_publication"
+        },
+        "intent": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "previous_batch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coverage_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "coverage_count": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "next_batch_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "intent",
+        "previous_batch",
+        "coverage_sha256",
+        "coverage_count",
+        "next_batch_ordinal"
+      ],
+      "additionalProperties": false
+    },
+    "TransferBatchReceipt": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "transfer_batch_receipt"
+        },
+        "intent_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "execution_origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "publication_origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "batch_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "purpose": {
+          "enum": [
+            "transfer",
+            "activate"
+          ]
+        },
+        "previous_batch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "transfer_manifest": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "coverage_before_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "coverage_after_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "coverage_count": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "artifact_receipts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": 6
+              },
+              "kind": {
+                "const": "ArtifactReceipt"
+              },
+              "record": {
+                "$ref": "paged-proof.schema.json#/$defs/ArtifactReceipt"
+              }
+            },
+            "required": [
+              "schema_version",
+              "kind",
+              "record"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "retained_artifact_bytes": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "acceptance": {
+          "const": false
+        },
+        "proof_checkpoint_advanced": {
+          "const": false
+        }
+      },
+      "required": [
+        "source",
+        "session_id",
+        "unit_ordinal",
+        "resource_plan_sha256",
+        "initial_image_sha256",
+        "schema_version",
+        "kind",
+        "intent_sha256",
+        "execution_origin",
+        "publication_origin",
+        "batch_ordinal",
+        "purpose",
+        "previous_batch",
+        "transfer_manifest",
+        "coverage_before_sha256",
+        "coverage_after_sha256",
+        "coverage_count",
+        "artifact_receipts",
+        "retained_artifact_bytes",
+        "acceptance",
+        "proof_checkpoint_advanced"
+      ],
+      "additionalProperties": false
+    },
+    "ActivationResult": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "publication_activation"
+        },
+        "intent_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "execution_origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "activation_origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "final_batch": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "previous_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_checkpoint": {
+          "$ref": "paged-proof.schema.json#/$defs/Ref"
+        },
+        "catalog_root": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "verifier_root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_result": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "validations": {
+          "type": "object",
+          "properties": {
+            "catalog_private": {
+              "$ref": "#/$defs/ContentRef"
+            },
+            "catalog_semantic": {
+              "$ref": "#/$defs/ContentRef"
+            },
+            "verifier": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "final_input": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "catalog_private",
+            "catalog_semantic",
+            "verifier",
+            "final_input"
+          ],
+          "additionalProperties": false
+        },
+        "stage": {
+          "enum": [
+            "expand",
+            "semantic_verify",
+            "monitor_scc_verify",
+            "temporal_components",
+            "backend_qualification",
+            "complete"
+          ]
+        },
+        "stage_complete": {
+          "type": "boolean"
+        },
+        "activated": {
+          "const": true
+        },
+        "acceptance": {
+          "const": false
+        }
+      },
+      "required": [
+        "source",
+        "session_id",
+        "unit_ordinal",
+        "resource_plan_sha256",
+        "initial_image_sha256",
+        "schema_version",
+        "kind",
+        "intent_sha256",
+        "execution_origin",
+        "activation_origin",
+        "final_batch",
+        "previous_checkpoint",
+        "candidate_checkpoint",
+        "catalog_root",
+        "verifier_root",
+        "execution_result",
+        "validations",
+        "stage",
+        "stage_complete",
+        "activated",
+        "acceptance"
+      ],
+      "additionalProperties": false
+    },
+    "SafePath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$",
+      "maxLength": 4096
+    },
+    "ConformanceRequest": {
+      "type": "object",
+      "properties": {
+        "case_id": {
+          "const": "native_snapshot_three_batch_v1"
+        },
+        "anchor_intent_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "case_id",
+        "anchor_intent_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "ConformanceResult": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "native_transport_conformance"
+        },
+        "case_id": {
+          "const": "native_snapshot_three_batch_v1"
+        },
+        "case_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "registration_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "anchor_intent_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "execution_origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "restoration_origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "catalog_root": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "verifier_root": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "final_batch": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "nonempty_transfer_batches": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "catalog_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "verifier_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "validations": {
+          "type": "object",
+          "properties": {
+            "catalog_private": {
+              "$ref": "#/$defs/ContentRef"
+            },
+            "catalog_semantic": {
+              "$ref": "#/$defs/ContentRef"
+            },
+            "verifier": {
+              "$ref": "#/$defs/ContentRef"
+            },
+            "final_input": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "catalog_private",
+            "catalog_semantic",
+            "verifier",
+            "final_input"
+          ],
+          "additionalProperties": false
+        },
+        "complete": {
+          "const": true
+        },
+        "acceptance": {
+          "const": false
+        },
+        "proof_checkpoint_advanced": {
+          "const": false
+        }
+      },
+      "required": [
+        "source",
+        "session_id",
+        "resource_plan_sha256",
+        "initial_image_sha256",
+        "schema_version",
+        "kind",
+        "case_id",
+        "case_sha256",
+        "registration_sha256",
+        "anchor_intent_sha256",
+        "execution_origin",
+        "restoration_origin",
+        "catalog_root",
+        "verifier_root",
+        "final_batch",
+        "nonempty_transfer_batches",
+        "catalog_sha256",
+        "verifier_sha256",
+        "validations",
+        "complete",
+        "acceptance",
+        "proof_checkpoint_advanced"
+      ],
+      "additionalProperties": false
+    },
+    "ConformanceCarrier": {
+      "type": "object",
+      "properties": {
+        "case_id": {
+          "const": "native_snapshot_three_batch_v1"
+        },
+        "case_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "anchor_intent_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConformanceResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "case_id",
+        "case_sha256",
+        "anchor_intent_sha256",
+        "result"
       ],
       "additionalProperties": false
     }

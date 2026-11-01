@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "kind": {
       "const": "async_session_control"
@@ -13,7 +13,9 @@
     "role": {
       "enum": [
         "unit_checkpoint",
-        "completion"
+        "completion",
+        "publication_batch",
+        "transport_conformance"
       ]
     },
     "registration_sha256": {
@@ -32,60 +34,7 @@
       "$ref": "paged-proof.schema.json#/$defs/Nat"
     },
     "origin": {
-      "type": "object",
-      "properties": {
-        "repository": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
-        },
-        "pr": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
-        },
-        "event_base": {
-          "$ref": "paged-proof.schema.json#/$defs/Commit"
-        },
-        "workflow_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "event_name": {
-          "const": "workflow_dispatch"
-        },
-        "mode": {
-          "enum": [
-            "unit",
-            "complete"
-          ]
-        },
-        "operation": {
-          "const": "execute"
-        },
-        "run": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
-        },
-        "job": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
-        },
-        "task": {
-          "$ref": "paged-proof.schema.json#/$defs/Nat"
-        },
-        "attempt": {
-          "const": 1
-        }
-      },
-      "required": [
-        "repository",
-        "pr",
-        "event_base",
-        "workflow_id",
-        "event_name",
-        "mode",
-        "operation",
-        "run",
-        "job",
-        "task",
-        "attempt"
-      ],
-      "additionalProperties": false
+      "$ref": "paged-catalog-transport.schema.json#/$defs/Origin"
     },
     "previous_control_sha256": {
       "anyOf": [
@@ -108,7 +57,14 @@
       ]
     },
     "checkpoint": {
-      "$ref": "paged-proof.schema.json#/$defs/Ref"
+      "anyOf": [
+        {
+          "$ref": "paged-proof.schema.json#/$defs/Ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "work_unit": {
       "type": "object",
@@ -273,6 +229,46 @@
         "semantic_verification"
       ],
       "additionalProperties": false
+    },
+    "pending_publication": {
+      "anyOf": [
+        {
+          "$ref": "paged-catalog-transport.schema.json#/$defs/PendingPublication"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "transfer_batch": {
+      "anyOf": [
+        {
+          "$ref": "paged-catalog-transport.schema.json#/$defs/TransferBatchReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "activation": {
+      "anyOf": [
+        {
+          "$ref": "paged-catalog-transport.schema.json#/$defs/ActivationResult"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "transport_conformance": {
+      "anyOf": [
+        {
+          "$ref": "paged-catalog-transport.schema.json#/$defs/ConformanceCarrier"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
@@ -291,7 +287,11 @@
     "work_unit",
     "artifact_receipts",
     "completion",
-    "postcheck"
+    "postcheck",
+    "pending_publication",
+    "transfer_batch",
+    "activation",
+    "transport_conformance"
   ],
   "additionalProperties": false,
   "allOf": [
@@ -330,10 +330,28 @@
                 "type": "null"
               }
             }
+          },
+          "activation": {
+            "$ref": "paged-catalog-transport.schema.json#/$defs/ActivationResult"
+          },
+          "pending_publication": {
+            "type": "null"
+          },
+          "transport_conformance": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "completion"
           }
         }
       },
-      "else": {
+      "then": {
         "properties": {
           "origin": {
             "properties": {
@@ -397,6 +415,120 @@
                 "additionalProperties": false
               }
             }
+          },
+          "pending_publication": {
+            "type": "null"
+          },
+          "transfer_batch": {
+            "type": "null"
+          },
+          "activation": {
+            "type": "null"
+          },
+          "transport_conformance": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "publication_batch"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "origin": {
+            "properties": {
+              "mode": {
+                "const": "unit"
+              }
+            }
+          },
+          "completion": {
+            "type": "null"
+          },
+          "activation": {
+            "type": "null"
+          },
+          "pending_publication": {
+            "$ref": "paged-catalog-transport.schema.json#/$defs/PendingPublication"
+          },
+          "transfer_batch": {
+            "$ref": "paged-catalog-transport.schema.json#/$defs/TransferBatchReceipt"
+          },
+          "postcheck": {
+            "properties": {
+              "archived_fresh_head": {
+                "type": "null"
+              },
+              "main_receipts": {
+                "maxItems": 0
+              },
+              "main_conditions_sha256": {
+                "type": "null"
+              },
+              "semantic_verification": {
+                "type": "null"
+              }
+            }
+          },
+          "transport_conformance": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "transport_conformance"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "origin": {
+            "properties": {
+              "mode": {
+                "const": "unit"
+              }
+            }
+          },
+          "completion": {
+            "type": "null"
+          },
+          "activation": {
+            "type": "null"
+          },
+          "pending_publication": {
+            "$ref": "paged-catalog-transport.schema.json#/$defs/PendingPublication"
+          },
+          "transfer_batch": {
+            "$ref": "paged-catalog-transport.schema.json#/$defs/TransferBatchReceipt"
+          },
+          "postcheck": {
+            "properties": {
+              "archived_fresh_head": {
+                "type": "null"
+              },
+              "main_receipts": {
+                "maxItems": 0
+              },
+              "main_conditions_sha256": {
+                "type": "null"
+              },
+              "semantic_verification": {
+                "type": "null"
+              }
+            }
+          },
+          "transport_conformance": {
+            "$ref": "paged-catalog-transport.schema.json#/$defs/ConformanceCarrier"
           }
         }
       }
