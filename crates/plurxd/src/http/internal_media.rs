@@ -86,10 +86,13 @@ pub(crate) async fn snapshot(
     StatusCode,
 > {
     authorize(&state, &headers, "GET", SNAPSHOT_PATH, &[]).await?;
-    Ok((
-        private_no_store_headers(),
-        Json(local_snapshot(&state).await),
-    ))
+    let mut snapshot = local_snapshot(&state).await;
+    // Identity/readiness is not proof of an origin's remaining monotonic
+    // create budget across unknown clock skew/delivery. Local callers retain
+    // their actual budget; remote fresh preparation stays unadvertised until
+    // a genuine original-deadline projection is available.
+    snapshot.adaptive_worker_quote = None;
+    Ok((private_no_store_headers(), Json(snapshot)))
 }
 
 fn private_no_store_headers() -> [(HeaderName, &'static str); 1] {

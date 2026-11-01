@@ -555,10 +555,22 @@ pub(crate) fn mark_create_phase(name: &str) {
     });
 }
 
+/// Existing publication allowance, not a startup/cleanup performance bound.
+const CREATE_ACTIVATION_ALLOWANCE: Duration = Duration::from_millis(250);
+
+/// The same original local monotonic cutoff; absence is not permission to
+/// mint a fresh native preparation window after transport or caller loss.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn create_preparation_deadline() -> Option<tokio::time::Instant> {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| budget.deadline - CREATE_ACTIVATION_ALLOWANCE)
+        .ok()
+}
+
 pub(crate) fn create_stage_deadline(maximum: Duration) -> tokio::time::Instant {
     let deadline = deadline_after(maximum);
     CREATE_STARTUP_BUDGET
-        .try_with(|budget| deadline.min(budget.deadline - Duration::from_millis(250)))
+        .try_with(|budget| deadline.min(budget.deadline - CREATE_ACTIVATION_ALLOWANCE))
         .unwrap_or(deadline)
 }
 
@@ -864,13 +876,10 @@ impl MediaPool {
                 .adaptive_worker_quote
                 .filter(AdaptiveWorkerQuote::valid);
         }
-        let now = tokio::time::Instant::now();
-        self.snapshots.read().await.get(node_id).and_then(|cached| {
-            (now <= cached.expires_at && snapshot_is_bounded(&cached.snapshot, node_id))
-                .then(|| cached.snapshot.adaptive_worker_quote.clone())
-                .flatten()
-                .filter(AdaptiveWorkerQuote::valid)
-        })
+        // Even a fresh peer identity quote does not carry an original
+        // monotonic create-deadline projection. Do not create a new remote
+        // attempt from it; old peer advertisements cannot bypass this rule.
+        None
     }
 
     pub(crate) async fn retained_output_receiver(&self, node_id: &str) -> bool {
@@ -1641,23 +1650,43 @@ impl MediaPool {
         state: &AppState,
         request: MediaOfferRequest,
     ) -> PlacementDiagnostics {
-        let deadline = deadline_after(OFFER_DEADLINE);
-        if !request.is_valid() {
+        // Offer collection spends the same original create cutoff and must
+        // leave its activation allowance; no per-retry advisory reset past it.
+        let deadline = create_stage_deadline(OFFER_DEADLINE);
+        let exhausted = tokio::time::Instant::now() >= deadline;
+        if !request.is_valid() || exhausted {
             return PlacementDiagnostics {
                 request_fingerprint: request.request_fingerprint,
-                budget_ms: u64::try_from(OFFER_DEADLINE.as_millis()).unwrap_or(u64::MAX),
+                budget_ms: if exhausted {
+                    0
+                } else {
+                    u64::try_from(OFFER_DEADLINE.as_millis()).unwrap_or(u64::MAX)
+                },
                 selected_node_id: None,
                 offers: Vec::new(),
             };
         }
-        self.expire().await;
-        let snapshots = self
-            .snapshots
-            .read()
-            .await
-            .values()
-            .map(|cached| (cached.snapshot.node_id.clone(), cached.snapshot.clone()))
-            .collect::<HashMap<_, _>>();
+        let snapshots = match tokio::time::timeout_at(deadline, async {
+            self.expire().await;
+            self.snapshots
+                .read()
+                .await
+                .values()
+                .map(|cached| (cached.snapshot.node_id.clone(), cached.snapshot.clone()))
+                .collect::<HashMap<_, _>>()
+        })
+        .await
+        {
+            Ok(snapshots) => snapshots,
+            Err(_) => {
+                return PlacementDiagnostics {
+                    request_fingerprint: request.request_fingerprint,
+                    budget_ms: 0,
+                    selected_node_id: None,
+                    offers: Vec::new(),
+                }
+            }
+        };
         let (mut offers, local_snapshot) = match tokio::time::timeout_at(deadline, async {
             tokio::join!(local_offer(state, &request), local_snapshot(state))
         })
@@ -2748,6 +2777,167 @@ mod tests {
             create_enhancement_deadline(Duration::from_secs(8)) - now,
             Duration::from_secs(8)
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_peer_identity_quote_cannot_replace_original_deadline_evidence() {
+        let state = crate::http::internal_media_sessions::output_capture_test_state();
+        let peer = "peer-without-original-create-clock";
+        let mut observed = snapshot(peer, &["h264"], 1080);
+        observed.adaptive_worker_quote = Some(AdaptiveWorkerQuote {
+            version: 1,
+            owner_id: uuid::Uuid::new_v4(),
+            serving_generation: 7,
+        });
+        assert!(snapshot_is_bounded(&observed, peer));
+        state.media_pool.cache_snapshot_for_test(observed).await;
+        assert!(state.media_pool.snapshots.read().await[peer]
+            .snapshot
+            .adaptive_worker_quote
+            .is_some());
+        assert!(state.media_pool.adaptive_worker_quote(&state, peer).await.is_none(),
+            "current identity/readiness cannot authorize remote native entry without the original deadline");
+        state.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn owned_create_worker_keeps_original_prepare_cutoff_after_ingress_scope() {
+        let budget = CreateStartupBudget::new(1_000);
+        let original = budget.deadline - CREATE_ACTIVATION_ALLOWANCE;
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let worker = budget
+            .scope(async {
+                // The production wrapper owns its original budget past the
+                // ingress scope. Retain and positively join that SAME task.
+                spawn_create_worker(async move {
+                    entered
+                        .send(create_preparation_deadline())
+                        .expect("entry receiver");
+                    released.await.expect("original worker release");
+                    let first = create_preparation_deadline();
+                    tokio::task::yield_now().await;
+                    let retry = create_preparation_deadline();
+                    (first, retry, create_stage_deadline(Duration::from_secs(50)))
+                })
+            })
+            .await;
+        assert_eq!(
+            entry.await.expect("actual original worker entry"),
+            Some(original)
+        );
+        assert!(create_preparation_deadline().is_none());
+        release
+            .send(())
+            .expect("same original worker remains owned");
+        let (first, retry, stage) = worker.await.expect("original worker positively joined");
+        assert_eq!(first, Some(original));
+        assert_eq!(retry, first);
+        assert_eq!(stage, original);
+    }
+
+    fn offer_request_for_original_budget_test() -> MediaOfferRequest {
+        let mut request = MediaOfferRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_fingerprint: String::new(),
+            file_id: 1,
+            source_size: 1,
+            source_mtime: 1,
+            decoder: "h264".into(),
+            target_height: 720,
+            start_millis: 0,
+            audio_index: None,
+            subtitle_index: None,
+            hdr10: false,
+            output_contract: "hls-mpegts-v1".into(),
+            scratch_bytes_required: 1,
+        };
+        request.request_fingerprint = request.fingerprint();
+        assert!(request.is_valid());
+        request
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_original_offer_cutoff_reports_zero_budget_and_no_candidate() {
+        let state = crate::http::internal_media_sessions::output_capture_test_state();
+        let request = offer_request_for_original_budget_test();
+        let budget = CreateStartupBudget::new(10_000);
+        let original = budget.deadline - CREATE_ACTIVATION_ALLOWANCE;
+        let offers = budget
+            .scope(async {
+                tokio::time::advance(Duration::from_millis(9_800)).await;
+                assert!(tokio::time::Instant::now() > original);
+                assert!(tokio::time::Instant::now() < budget.deadline);
+                state.media_pool.offers(&state, request).await
+            })
+            .await;
+        assert_eq!(
+            offers.budget_ms, 0,
+            "expired placement cannot advertise a fresh200ms budget"
+        );
+        assert!(offers.offers.is_empty());
+        assert!(offers.selected_node_id.is_none());
+        assert!(
+            tokio::time::Instant::now() < budget.deadline,
+            "original activation time remains"
+        );
+        state.shutdown.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contended_offer_snapshot_stage_keeps_original_activation_allowance() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let state = crate::http::internal_media_sessions::output_capture_test_state();
+        let competing = state.media_pool.snapshots.write().await;
+        let budget = CreateStartupBudget::new(1_000);
+        budget
+            .scope(async {
+                tokio::time::advance(Duration::from_millis(600)).await;
+                let request = offer_request_for_original_budget_test();
+                let mut original = Box::pin(state.media_pool.offers(&state, request));
+                std::future::poll_fn(|cx| {
+                    assert!(
+                        matches!(original.as_mut().poll(cx), Poll::Pending),
+                        "the real original offer waits on its contended snapshot stage"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+                tokio::time::advance(Duration::from_millis(150)).await;
+                let result =
+                    tokio::time::timeout_at(budget.deadline - Duration::from_millis(1), original)
+                        .await
+                        .expect("snapshot contention cannot consume activation allowance");
+                assert_eq!(result.budget_ms, 0);
+                assert!(result.offers.is_empty());
+                assert!(result.selected_node_id.is_none());
+                assert!(tokio::time::Instant::now() < budget.deadline);
+                assert!(
+                    state.media_pool.snapshots.try_read().is_err(),
+                    "the same competing writer is still held, not artificially released"
+                );
+            })
+            .await;
+        drop(competing);
+        state.shutdown.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn original_prepare_cutoff_never_spends_activation_or_renews_after_expiry() {
+        let budget = CreateStartupBudget::new(10_000);
+        let original = budget.deadline - CREATE_ACTIVATION_ALLOWANCE;
+        budget
+            .scope(async {
+                assert_eq!(create_preparation_deadline(), Some(original));
+                tokio::time::advance(Duration::from_millis(9_800)).await;
+                assert_eq!(create_preparation_deadline(), Some(original));
+                assert!(original < tokio::time::Instant::now());
+                assert_eq!(create_stage_deadline(OFFER_DEADLINE), original);
+                assert!(budget.deadline > tokio::time::Instant::now());
+            })
+            .await;
     }
 
     #[tokio::test]

@@ -260,44 +260,32 @@ pub(crate) async fn adaptive_attempt_prepare(
             .resource_runtime
             .as_ref()
             .is_none_or(|runtime| runtime.owner().owner_id != request.claim.worker_instance_id)
-        || state.serving.authority().admit() != Some(request.claim.serving_generation)
     {
         return StatusCode::CONFLICT.into_response();
     }
-    let remaining = request
-        .claim
-        .binding
-        .original_deadline_ms
-        .saturating_sub(unix_ms());
-    let Ok(remaining) = u64::try_from(remaining) else {
-        return StatusCode::CONFLICT.into_response();
-    };
-    if remaining == 0 {
-        return StatusCode::CONFLICT.into_response();
-    }
-    let deadline = Instant::now() + Duration::from_millis(remaining);
-    let Some(restart_admission) = state.serving.try_restart_admission().await else {
-        return RemoteStartError::RestartDrain.into_response();
-    };
-    let started = state
+    // A foreign wall-clock expiry and even a received relative allowance
+    // cannot prove the origin's remaining monotonic B under unknown delivery
+    // or skew. Never mint a fresh native window here. Existing registered
+    // work may replay its original verdict without new restart admission.
+    match state
         .transcode
-        .begin_adaptive_prepare(state.clone(), request, deadline, restart_admission)
-        .await;
-    match started {
-        Ok(crate::transcode::adaptive_attempts::AdaptivePrepareStart::Prepared(reply)) => {
+        .replay_registered_adaptive_prepare(&request)
+        .await
+    {
+        Ok(Some(crate::transcode::adaptive_attempts::AdaptivePrepareReplay::Prepared(reply))) => {
             (StatusCode::OK, Json(reply)).into_response()
         }
-        Ok(crate::transcode::adaptive_attempts::AdaptivePrepareStart::Pending) => {
+        Ok(Some(crate::transcode::adaptive_attempts::AdaptivePrepareReplay::Pending)) => {
             StatusCode::ACCEPTED.into_response()
         }
-        Ok(crate::transcode::adaptive_attempts::AdaptivePrepareStart::Started(receiver)) => {
-            match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver).await
-            {
-                Ok(Ok(Ok(reply))) => (StatusCode::OK, Json(reply)).into_response(),
-                Ok(Ok(Err(_))) | Ok(Err(_)) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-                Err(_) => StatusCode::ACCEPTED.into_response(),
-            }
-        }
+        Ok(None) => (
+            StatusCode::PRECONDITION_REQUIRED,
+            Json(serde_json::json!({
+                "code": "insufficient_evidence",
+                "error": "new remote preparation requires proof of the original create deadline"
+            })),
+        )
+            .into_response(),
         Err(_) => StatusCode::CONFLICT.into_response(),
     }
 }

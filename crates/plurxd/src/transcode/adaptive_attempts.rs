@@ -33,6 +33,16 @@ const MAX_LOCAL_ATTEMPTS: usize = 64;
 /// or allocator upper bound.
 pub(super) const PLANNING_TO_R_HANDOFF_BYTES: usize = 16 * 1024 * 1024;
 
+/// Original registered reply only; never a newly launched coordinator.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the same bounded prepared acknowledgment inline during replay; no new Box allocation beside the original registered owner."
+)]
+pub(crate) enum AdaptivePrepareReplay {
+    Prepared(crate::media_sessions::AdaptiveAttemptPreparedV1),
+    Pending,
+}
+
 #[expect(
     clippy::large_enum_variant,
     reason = "Keep the original prepared acknowledgment inline in the bounded coordinator handoff; boxing introduces a new allocation beside the measured owner frame."
@@ -926,6 +936,36 @@ impl super::TranscodeManager {
         })
     }
 
+    /// Replay only an already registered original. This API cannot reserve
+    /// an entry, start a coordinator, or turn a peer timestamp into permission.
+    pub(crate) async fn replay_registered_adaptive_prepare(
+        &self,
+        request: &crate::media_sessions::AdaptiveAttemptPrepareV1,
+    ) -> Result<Option<AdaptivePrepareReplay>, String> {
+        if !request.is_valid() {
+            return Err("invalid original adaptive preparation".into());
+        }
+        let attempt_id = request.claim.key.attempt_id;
+        let Some(existing) = self.adaptive_attempts.get(attempt_id) else {
+            return Ok(None);
+        };
+        if existing.worker_instance_id() != request.claim.worker_instance_id
+            || existing.serving_generation() != request.claim.serving_generation
+        {
+            return Err("adaptive replay names a different original worker".into());
+        }
+        self.verify_adaptive_claim_for_phases(
+            &request.claim,
+            &[AttemptPhase::Provisional, AttemptPhase::Prepared],
+        )
+        .await
+        .map_err(str::to_owned)?;
+        if let Some(reply) = self.replay_adaptive_prepared(attempt_id).await {
+            return reply.map(AdaptivePrepareReplay::Prepared).map(Some);
+        }
+        Ok(Some(AdaptivePrepareReplay::Pending))
+    }
+
     pub(crate) async fn begin_adaptive_prepare(
         self: &Arc<Self>,
         state: crate::state::AppState,
@@ -947,6 +987,16 @@ impl super::TranscodeManager {
                 return reply.map(AdaptivePrepareStart::Prepared);
             }
             return Ok(AdaptivePrepareStart::Pending);
+        }
+        // Only the actual local create scope proves its remaining monotonic
+        // preparation allowance. Preserve registered replay above even after
+        // caller cancellation; refuse fresh registration without that scope.
+        let original_cutoff = crate::media_pool::create_preparation_deadline()
+            .ok_or("insufficient_evidence: original local create deadline is absent")?
+            .into_std();
+        let deadline = deadline.min(original_cutoff);
+        if std::time::Instant::now() >= deadline {
+            return Err("deadline_budget: original local preparation allowance expired".into());
         }
         let entry = self
             .adaptive_attempts
@@ -2135,6 +2185,16 @@ impl super::TranscodeManager {
         &self,
         claim: &AttemptClaim,
     ) -> Result<(), &'static str> {
+        self.verify_adaptive_claim_for_phases(claim, &[AttemptPhase::Provisional])
+            .await
+    }
+
+    // Prepared is allowed only by the replay-only API, never fresh native entry.
+    async fn verify_adaptive_claim_for_phases(
+        &self,
+        claim: &AttemptClaim,
+        allowed: &[AttemptPhase],
+    ) -> Result<(), &'static str> {
         claim.validate().map_err(|_| "invalid adaptive claim")?;
         let status = self
             .store
@@ -2153,7 +2213,7 @@ impl super::TranscodeManager {
             .iter()
             .find(|attempt| attempt.key == claim.key)
             .ok_or("adaptive attempt is absent")?;
-        if attempt.phase != AttemptPhase::Provisional
+        if !allowed.contains(&attempt.phase)
             || attempt.worker_instance_id != claim.worker_instance_id
             || attempt.serving_generation != claim.serving_generation
             || attempt.domains != claim.domains
