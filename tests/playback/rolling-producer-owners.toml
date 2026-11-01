@@ -6355,7 +6355,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # native_host_mode_keeps_unmanaged_hosts_out_of_container_handoff. It builds
 # the setup message and reads the clock; it starts no task, timer or process
 # and adds no child or producer owner. Existing command ownership is unchanged.
-expected_occurrences = 838
+# Tailscale online-state regression (Main c6fc870b2): +1 SetupState::Ready.status()
+# in the host_address online-state test, the same setup-message lookup as above;
+# the production setup.status() call moved without a net change. No task,
+# timer, process, child or producer owner is added. Main df27550d left this
+# count at 838 and failed this assertion on its own tree.
+expected_occurrences = 839
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
