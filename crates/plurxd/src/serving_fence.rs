@@ -4,6 +4,12 @@
 //! partition: that call owns a multi-second timeout, while the quorum
 //! watermark is already a short monotonic lease refreshed by the replication
 //! monitor. This projection turns that lease into one process-wide watch.
+//!
+//! Authority is current when this node has applied a quorum confirmation of
+//! the current generation that is still inside its own lease: the newest
+//! one at zero apply lag, or any one the passive metrics still keep
+//! (`PassiveRaftMetrics::eligible_serving_proof`). A newer confirmation this
+//! node has not applied yet does not take that away. No lease is extended.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -913,15 +919,21 @@ struct AuthorityOutcome {
 /// 3. a node that is *already serving* and has lost current eligibility may
 ///    continue on the proof it holds, for as long as that proof is valid on
 ///    its own original terms;
-/// 4. a node that is **not** already serving may never become ready this way.
+/// 4. a node that is **not** already serving may never become ready on a
+///    proof it retained. A fenced node may become ready again by having
+///    applied a still-live, quorum-confirmed index of the current generation
+///    (rule 2, through `authority_is_current`). No lease is extended.
+///    Eligibility is deliberately widened from "applied the newest
+///    confirmation" to "applied any live confirmation"
+///    (`docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md` §4.1).
 ///
-/// Rule 4 is the one that keeps this a continuation rather than a second route
-/// to authority. Once a loss is published the generation has bumped and every
-/// admission made under it refuses itself (existing sessions only survive a
-/// loss that a fresh proof ends within their grace), so returning on a
-/// retained proof would resume service on grounds this node had already
-/// declared insufficient.
-/// Recovery is a fresh proof's job, and only a fresh proof's.
+/// Rule 4 is the one that keeps retention a continuation rather than a
+/// second route to authority. Once a loss is published the generation has
+/// bumped and every admission made under it refuses itself (existing sessions
+/// only survive a loss that a fresh proof ends within their grace), so
+/// returning on a retained proof would resume service on grounds this node
+/// had already declared insufficient. Recovery is a live confirmation's job,
+/// and only a live confirmation's.
 fn decide_authority(
     unmanaged: bool,
     authority_is_current: bool,
@@ -997,14 +1009,23 @@ impl ServingFence {
 
     async fn refresh(&self) {
         let snapshot = self.metrics.snapshot();
-        let authority_is_current = snapshot.watermark_valid
-            && snapshot.watermark.is_some_and(|watermark| {
-                if snapshot.watermark_requires_local_binding {
-                    snapshot.local_source && watermark.apply_lag_entries == Some(0)
-                } else {
-                    !snapshot.local_source && watermark.apply_lag_entries.is_none()
-                }
-            });
+        // On a locally bound node, any live confirmation of the current
+        // generation that this node has applied is current authority, not
+        // only the newest one at zero lag (rule 4, amended). Read once, so
+        // the proof captured below is the one that made this poll ready.
+        let applied_proof = snapshot
+            .watermark_requires_local_binding
+            .then(|| self.metrics.eligible_serving_proof())
+            .flatten();
+        let authority_is_current = applied_proof.is_some()
+            || (snapshot.watermark_valid
+                && snapshot.watermark.is_some_and(|watermark| {
+                    if snapshot.watermark_requires_local_binding {
+                        snapshot.local_source && watermark.apply_lag_entries == Some(0)
+                    } else {
+                        !snapshot.local_source && watermark.apply_lag_entries.is_none()
+                    }
+                }));
         let previous = self.is_ready();
         let outcome = decide_authority(
             !self.is_quorum_managed(),
@@ -1016,7 +1037,9 @@ impl ServingFence {
             || self.continues_on_the_retained_proof(),
         );
         match outcome.retain {
-            Retain::FromCurrentProof => self.retain(self.metrics.eligible_serving_proof()),
+            Retain::FromCurrentProof => {
+                self.retain(applied_proof.or_else(|| self.metrics.eligible_serving_proof()))
+            }
             Retain::Clear => self.retain(None),
             Retain::Unchanged => {}
         }

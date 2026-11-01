@@ -5438,6 +5438,19 @@ pub mod status {
     const QUORUM_WATERMARK_REFRESH: Duration = Duration::from_millis(500);
     const QUORUM_WATERMARK_TIMEOUT: Duration = Duration::from_millis(750);
     const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
+    /// How many quorum confirmations of the current generation a node keeps,
+    /// so a confirmation it catches up to after a newer one has landed still
+    /// proves authority until its own lease ends (C1 of
+    /// `docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md`).
+    ///
+    /// The sampler starts one attempt at a time, on an interval that skips
+    /// missed ticks. So the start of attempt `k + 2` is always more than one
+    /// period after the start of attempt `k`, and the oldest of six entries is
+    /// at least three periods older than the newest: 1.5 s at the 500 ms
+    /// cadence, already past the 1 s lease. With evenly spaced starts at a
+    /// 250 ms cadence the oldest is 1.25 s old. Dropping it can only lose
+    /// eligibility, never grant it.
+    const QUORUM_CONFIRMATIONS: usize = 6;
 
     /// The durable backend serving this daemon process.
     #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -5648,6 +5661,15 @@ pub mod status {
         pub in_flight: bool,
     }
 
+    /// One quorum confirmation kept in the ring. Its term, leader, local
+    /// observation epoch and local-read protocol are the current watermark's:
+    /// the ring is cleared whenever any of them changes.
+    #[derive(Default)]
+    struct QuorumConfirmationSlot {
+        committed_index: AtomicU64,
+        started_nanos: AtomicU64,
+    }
+
     #[derive(Default)]
     struct PassiveRaftMetricsAtomics {
         sequence: AtomicU64,
@@ -5675,6 +5697,12 @@ pub mod status {
         watermark_local_epoch: AtomicU64,
         watermark_errors: AtomicU64,
         watermark_invalidated: AtomicBool,
+        /// Confirmations of the current watermark generation, oldest at
+        /// `confirmation_next` once the ring is full. Written and read under
+        /// `sequence`, like every other watermark field.
+        confirmations: [QuorumConfirmationSlot; QUORUM_CONFIRMATIONS],
+        confirmation_count: AtomicU64,
+        confirmation_next: AtomicU64,
         state_machine_bytes_present: AtomicBool,
         state_machine_db_bytes: AtomicU64,
         state_machine_wal_bytes: AtomicU64,
@@ -5821,6 +5849,7 @@ pub mod status {
             self.inner
                 .watermark_invalidated
                 .store(true, Ordering::Relaxed);
+            self.clear_confirmations();
             self.end_write(sequence);
         }
 
@@ -5986,14 +6015,121 @@ pub mod status {
             // zero grants state only when the applied index has reached the
             // committed one. Reusing it keeps one definition of an eligible
             // locally bound proof rather than a second that can drift from it.
-            let state = self.bounded_replica_state_at(elapsed_seconds, elapsed_nanos, 0)?;
-            Some(ServingProof {
-                term: state.current_term,
-                leader: state.leader_id,
-                local_observation_epoch: state.local_observation_epoch,
-                committed_index: state.committed_index,
-                started_nanos: state.watermark_started_nanos,
-            })
+            if let Some(state) = self.bounded_replica_state_at(elapsed_seconds, elapsed_nanos, 0) {
+                return Some(ServingProof {
+                    term: state.current_term,
+                    leader: state.leader_id,
+                    local_observation_epoch: state.local_observation_epoch,
+                    committed_index: state.committed_index,
+                    started_nanos: state.watermark_started_nanos,
+                });
+            }
+            // Failing that, any confirmation of the current generation that
+            // this node has applied and that is still inside its own lease.
+            // A newer watermark this node has not caught up to yet does not
+            // take away a proof it has already earned on an older one.
+            self.applied_confirmation_proof_at(elapsed_seconds, elapsed_nanos)
+        }
+
+        /// The newest kept confirmation this node has applied whose own lease
+        /// is still running, as a proof carrying that confirmation's original
+        /// deadline. Every binding and freshness check
+        /// `bounded_replica_state_at` applies to the current watermark is
+        /// applied to the confirmation; only the zero-lag test against the
+        /// *newest* committed index is replaced by `applied >= committed` for
+        /// this one. The bounded-replica read rules do not use this.
+        fn applied_confirmation_proof_at(
+            &self,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+        ) -> Option<ServingProof> {
+            if !self.local_source
+                || !self.watermark_source
+                || !self.watermark_requires_local_binding
+            {
+                return None;
+            }
+            loop {
+                let before = self.inner.sequence.load(Ordering::Acquire);
+                if before & 1 != 0 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                let published = self.inner.published.load(Ordering::Relaxed);
+                let sampled_elapsed = self.inner.sampled_elapsed.load(Ordering::Relaxed);
+                let current_term = self.inner.current_term.load(Ordering::Relaxed);
+                let last_applied_present = self.inner.last_applied_present.load(Ordering::Relaxed);
+                let applied_index = self.inner.last_applied_index.load(Ordering::Relaxed);
+                let leader_known = self.inner.leader_known.load(Ordering::Relaxed);
+                let current_leader_present =
+                    self.inner.current_leader_present.load(Ordering::Relaxed);
+                let leader_id = self.inner.current_leader.load(Ordering::Relaxed);
+                let local_observation_epoch =
+                    self.inner.local_observation_epoch.load(Ordering::Relaxed);
+                let watermark_published = self.inner.watermark_published.load(Ordering::Relaxed);
+                let watermark_term = self.inner.watermark_term.load(Ordering::Relaxed);
+                let watermark_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
+                let local_read_protocol_version = self
+                    .inner
+                    .watermark_local_read_protocol_version
+                    .load(Ordering::Relaxed);
+                let watermark_local_epoch =
+                    self.inner.watermark_local_epoch.load(Ordering::Relaxed);
+                let watermark_invalidated =
+                    self.inner.watermark_invalidated.load(Ordering::Relaxed);
+                let count = self.inner.confirmation_count.load(Ordering::Relaxed);
+                let next = self.inner.confirmation_next.load(Ordering::Relaxed);
+                let mut confirmations = [(0_u64, 0_u64); QUORUM_CONFIRMATIONS];
+                for (slot, kept) in self.inner.confirmations.iter().zip(&mut confirmations) {
+                    *kept = (
+                        slot.committed_index.load(Ordering::Relaxed),
+                        slot.started_nanos.load(Ordering::Relaxed),
+                    );
+                }
+                let after = self.inner.sequence.load(Ordering::Acquire);
+                if before != after {
+                    continue;
+                }
+                let local_valid = published
+                    && elapsed_seconds.saturating_sub(sampled_elapsed)
+                        <= PASSIVE_METRICS_FRESHNESS_SECS;
+                let local_binding_valid = last_applied_present
+                    && leader_known
+                    && current_leader_present
+                    && current_term == watermark_term
+                    && leader_id == watermark_leader
+                    && local_observation_epoch == watermark_local_epoch;
+                if !(local_valid
+                    && watermark_published
+                    && !watermark_invalidated
+                    && local_binding_valid
+                    && local_read_protocol_version == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION)
+                {
+                    return None;
+                }
+                let count = usize::try_from(count)
+                    .unwrap_or(QUORUM_CONFIRMATIONS)
+                    .min(QUORUM_CONFIRMATIONS);
+                let next = usize::try_from(next).unwrap_or(0) % QUORUM_CONFIRMATIONS;
+                // Newest first: the proof is anchored on the latest
+                // confirmation that qualifies, which has the latest deadline.
+                return (1..=count)
+                    .map(|back| {
+                        confirmations[(next + QUORUM_CONFIRMATIONS - back) % QUORUM_CONFIRMATIONS]
+                    })
+                    .find(|(committed_index, started_nanos)| {
+                        applied_index >= *committed_index
+                            && elapsed_nanos.saturating_sub(*started_nanos)
+                                < duration_nanos(QUORUM_WATERMARK_LEASE)
+                    })
+                    .map(|(committed_index, started_nanos)| ServingProof {
+                        term: watermark_term,
+                        leader: watermark_leader,
+                        local_observation_epoch: watermark_local_epoch,
+                        committed_index,
+                        started_nanos,
+                    });
+            }
         }
 
         /// Whether a captured proof may still be served under.
@@ -6307,6 +6443,7 @@ pub mod status {
                 self.inner
                     .watermark_invalidated
                     .store(true, Ordering::Relaxed);
+                self.clear_confirmations();
             }
             if let Some(leader) = source.current_leader {
                 if self
@@ -6360,7 +6497,51 @@ pub mod status {
             self.inner
                 .watermark_invalidated
                 .store(true, Ordering::Relaxed);
+            self.clear_confirmations();
             self.end_write(sequence);
+        }
+
+        /// Forget every kept confirmation. Called inside a write section.
+        fn clear_confirmations(&self) {
+            self.inner.confirmation_count.store(0, Ordering::Relaxed);
+        }
+
+        /// Keep one accepted confirmation. Called inside a write section, after
+        /// the watermark fields hold its generation.
+        fn append_confirmation(
+            &self,
+            committed_index: u64,
+            started_nanos: u64,
+            elapsed_nanos: u64,
+        ) {
+            let count = usize::try_from(self.inner.confirmation_count.load(Ordering::Relaxed))
+                .unwrap_or(QUORUM_CONFIRMATIONS)
+                .min(QUORUM_CONFIRMATIONS);
+            let next = usize::try_from(self.inner.confirmation_next.load(Ordering::Relaxed))
+                .unwrap_or(0)
+                % QUORUM_CONFIRMATIONS;
+            let slot = &self.inner.confirmations[next];
+            // When the ring is full, `next` holds the oldest entry. The
+            // sampler's spacing (see `QUORUM_CONFIRMATIONS`) means it has
+            // always expired by now; if it had not, dropping it would still
+            // only lose eligibility.
+            debug_assert!(
+                count < QUORUM_CONFIRMATIONS
+                    || elapsed_nanos.saturating_sub(slot.started_nanos.load(Ordering::Relaxed))
+                        >= duration_nanos(QUORUM_WATERMARK_LEASE),
+                "a full confirmation ring dropped an unexpired confirmation"
+            );
+            slot.committed_index
+                .store(committed_index, Ordering::Relaxed);
+            slot.started_nanos.store(started_nanos, Ordering::Relaxed);
+            self.inner.confirmation_next.store(
+                u64::try_from((next + 1) % QUORUM_CONFIRMATIONS).unwrap_or(0),
+                Ordering::Relaxed,
+            );
+            self.inner.confirmation_count.store(
+                u64::try_from((count + 1).min(QUORUM_CONFIRMATIONS)).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
         }
 
         fn elapsed_nanos(&self) -> u64 {
@@ -6404,8 +6585,27 @@ pub mod status {
                         .watermark_invalidated
                         .store(true, Ordering::Relaxed);
                 }
+                if successor_or_conflicting_generation || regressed {
+                    self.clear_confirmations();
+                }
                 self.end_write(sequence);
                 return false;
+            }
+            // A confirmation joins the kept ones only inside the generation
+            // they were all issued in; anything else starts the ring again.
+            let local_epoch = self.inner.local_observation_epoch.load(Ordering::Relaxed);
+            let same_generation = prior_published
+                && !self.inner.watermark_invalidated.load(Ordering::Relaxed)
+                && source.term == prior_term
+                && source.leader_id == prior_leader
+                && source.local_read_protocol_version
+                    == self
+                        .inner
+                        .watermark_local_read_protocol_version
+                        .load(Ordering::Relaxed)
+                && local_epoch == self.inner.watermark_local_epoch.load(Ordering::Relaxed);
+            if !same_generation {
+                self.clear_confirmations();
             }
             self.inner
                 .watermark_term
@@ -6432,6 +6632,7 @@ pub mod status {
             self.inner
                 .watermark_published
                 .store(true, Ordering::Relaxed);
+            self.append_confirmation(source.committed_index, started_nanos, elapsed_nanos);
             self.end_write(sequence);
             true
         }
@@ -7651,6 +7852,300 @@ pub mod status {
                 ),
                 "a local sample this stale cannot bind anything"
             );
+        }
+
+        /// C1 (a): W(n) is published while this node lags it, W(n+1) lands
+        /// and overwrites it, and only then does apply reach W(n). Today the
+        /// node never sees zero lag for W(n) and fences itself; with the ring
+        /// it is eligible on W(n), with W(n)'s original deadline and no later.
+        #[test]
+        fn a_confirmation_applied_after_a_newer_one_landed_proves_authority_on_its_own_deadline() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 46),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(10, 10_200_000_000)
+                    .is_none(),
+                "the fixture must start with this node behind W(n)"
+            );
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 47),
+                10_500_000_000,
+                10_600_000_000,
+            ));
+            // Apply reaches W(n) but not W(n+1).
+            assert!(metrics.publish_at(&local_sample(7, Some(46), Some(1)), 10));
+            assert_eq!(
+                metrics
+                    .snapshot_at_times(10, 10_700_000_000)
+                    .watermark
+                    .and_then(|watermark| watermark.apply_lag_entries),
+                Some(1),
+                "the newest confirmation is still ahead of local apply"
+            );
+            let proof = metrics
+                .eligible_serving_proof_at(10, 10_700_000_000)
+                .expect("an applied, live confirmation proves authority");
+            assert_eq!(proof.committed_index, 46);
+            assert_eq!(
+                proof.started_nanos, 10_000_000_000,
+                "the proof keeps W(n)'s own anchor, not W(n+1)'s"
+            );
+            assert!(metrics.serving_proof_remains_valid_at(&proof, 10, 10_999_999_999));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 11, 11_000_000_000),
+                "and expires exactly one lease after W(n) started"
+            );
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(11, 11_000_000_000)
+                    .is_none(),
+                "nothing else this node has applied is live at that instant"
+            );
+        }
+
+        /// C1 (b), Astra's 0/250/500 ms case: confirmations start at 0, 250
+        /// and 500 ms, and this node has applied only the first. The first
+        /// stays eligible until its own lease expires, however many newer
+        /// ones land, and the proof is always anchored on the newest one the
+        /// node has applied.
+        #[test]
+        fn the_first_of_three_quick_confirmations_stays_eligible_until_its_own_lease_ends() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(40), Some(1)), 10));
+            for (index, started) in [
+                (41, 10_000_000_000_u64),
+                (42, 10_250_000_000),
+                (43, 10_500_000_000),
+            ] {
+                assert!(metrics.publish_watermark_at(
+                    watermark(7, 1, index),
+                    started,
+                    started + 50_000_000,
+                ));
+            }
+            assert!(metrics.publish_at(&local_sample(7, Some(41), Some(1)), 10));
+            let proof = metrics
+                .eligible_serving_proof_at(10, 10_600_000_000)
+                .expect("the first confirmation has been applied");
+            assert_eq!(
+                (proof.committed_index, proof.started_nanos),
+                (41, 10_000_000_000)
+            );
+            assert!(metrics
+                .eligible_serving_proof_at(10, 10_999_999_999)
+                .is_some());
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(11, 11_000_000_000)
+                    .is_none(),
+                "the first confirmation's own lease is the limit"
+            );
+
+            // Catching up to the second moves the anchor to the second.
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 11));
+            let proof = metrics
+                .eligible_serving_proof_at(11, 11_000_000_000)
+                .expect("the second confirmation is applied and live");
+            assert_eq!(
+                (proof.committed_index, proof.started_nanos),
+                (42, 10_250_000_000)
+            );
+        }
+
+        /// C1 (c): a generation change, an invalidation and a regressed
+        /// watermark each clear the ring, and nothing kept before is honoured
+        /// after it — even once the same generation is confirmed again.
+        #[test]
+        fn a_generation_change_invalidation_or_regression_clears_the_confirmations() {
+            let lagging = || {
+                let metrics = PassiveRaftMetrics::new(true);
+                assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+                assert!(metrics.publish_watermark_at(
+                    watermark(7, 1, 46),
+                    10_000_000_000,
+                    10_050_000_000,
+                ));
+                assert!(metrics.publish_watermark_at(
+                    watermark(7, 1, 48),
+                    10_500_000_000,
+                    10_550_000_000,
+                ));
+                assert!(metrics.publish_at(&local_sample(7, Some(46), Some(1)), 10));
+                assert!(
+                    metrics
+                        .eligible_serving_proof_at(10, 10_600_000_000)
+                        .is_some(),
+                    "the fixture starts eligible on a kept confirmation"
+                );
+                metrics
+            };
+
+            let metrics = lagging();
+            assert!(metrics.publish_at(&local_sample(8, Some(46), Some(1)), 10));
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(10, 10_600_000_000)
+                    .is_none(),
+                "a new term clears the ring"
+            );
+
+            let metrics = lagging();
+            assert!(metrics.publish_at(&local_sample(7, Some(46), Some(2)), 10));
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(10, 10_600_000_000)
+                    .is_none(),
+                "a new leader clears the ring"
+            );
+
+            let metrics = lagging();
+            metrics.record_error();
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(10, 10_600_000_000)
+                    .is_none(),
+                "an invalidation clears the ring"
+            );
+            // The same generation confirmed again starts a new ring; the
+            // confirmation of 46 from before the invalidation stays gone.
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 48),
+                10_700_000_000,
+                10_750_000_000,
+            ));
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(10, 10_800_000_000)
+                    .is_none(),
+                "a confirmation from before an invalidation is never honoured after it"
+            );
+
+            let metrics = lagging();
+            assert!(!metrics.publish_watermark_at(
+                watermark(7, 1, 44),
+                10_560_000_000,
+                10_570_000_000,
+            ));
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(10, 10_600_000_000)
+                    .is_none(),
+                "a regressed watermark clears the ring"
+            );
+
+            let metrics = lagging();
+            assert!(!metrics.publish_watermark_at(
+                watermark(8, 2, 49),
+                10_560_000_000,
+                10_570_000_000,
+            ));
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(10, 10_600_000_000)
+                    .is_none(),
+                "a successor generation clears the ring even though its publish is rejected"
+            );
+        }
+
+        /// C1 (d): at both the 500 ms and the 250 ms cadence a full ring only
+        /// ever drops a confirmation that has already expired, and the newest
+        /// applied one stays usable throughout.
+        #[test]
+        fn a_full_confirmation_ring_only_drops_expired_entries_at_both_cadences() {
+            for period in [500_000_000_u64, 250_000_000] {
+                let metrics = PassiveRaftMetrics::new(true);
+                assert!(metrics.publish_at(&local_sample(7, Some(100), Some(1)), 10));
+                for step in 0..20_u64 {
+                    let started = 10_000_000_000 + step * period;
+                    // The debug assertion in `append_confirmation` is the
+                    // check: a dropped live entry panics this test.
+                    assert!(metrics.publish_watermark_at(
+                        watermark(7, 1, 101 + step),
+                        started,
+                        started + 40_000_000,
+                    ));
+                    // Apply trails the newest confirmation by one.
+                    assert!(metrics.publish_at(&local_sample(7, Some(100 + step), Some(1)), 10));
+                    if step > 0 {
+                        let proof = metrics
+                            .eligible_serving_proof_at(10, started + 50_000_000)
+                            .expect("the previous confirmation is applied and live");
+                        assert_eq!(proof.committed_index, 100 + step);
+                        assert_eq!(proof.started_nanos, started - period);
+                    }
+                }
+                assert_eq!(
+                    metrics.inner.confirmation_count.load(Ordering::Relaxed),
+                    QUORUM_CONFIRMATIONS as u64
+                );
+            }
+        }
+
+        /// C1 (d), the other side: a ring that is asked to drop a live entry
+        /// fails closed. Debug builds stop at the assertion; release builds
+        /// lose that entry's eligibility and grant nothing in its place.
+        #[test]
+        #[cfg_attr(
+            debug_assertions,
+            should_panic(expected = "a full confirmation ring dropped an unexpired confirmation")
+        )]
+        fn a_full_confirmation_ring_fails_closed_when_it_would_drop_a_live_entry() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(101), Some(1)), 10));
+            // Seven confirmations inside one lease: denser than the sampler
+            // can ever produce.
+            for step in 0..=QUORUM_CONFIRMATIONS as u64 {
+                let started = 10_000_000_000 + step * 10_000_000;
+                assert!(metrics.publish_watermark_at(
+                    watermark(7, 1, 101 + step),
+                    started,
+                    started + 1_000_000,
+                ));
+            }
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(10, 10_100_000_000)
+                    .is_none(),
+                "the only applied confirmation was dropped, so nothing is eligible"
+            );
+        }
+
+        /// C1 (e): the bounded-replica read path is untouched. A node that is
+        /// eligible to serve on a kept confirmation still has its lagging
+        /// local reads refused.
+        #[test]
+        fn bounded_replica_reads_still_refuse_on_lag_while_a_kept_confirmation_serves() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 46),
+                10_000_000_000,
+                10_050_000_000,
+            ));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 47),
+                10_500_000_000,
+                10_550_000_000,
+            ));
+            assert!(metrics.publish_at(&local_sample(7, Some(46), Some(1)), 10));
+            assert!(metrics
+                .eligible_serving_proof_at(10, 10_600_000_000)
+                .is_some());
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_600_000_000, 0)
+                    .is_none(),
+                "a zero-lag bounded read is still refused one entry behind"
+            );
+            assert!(metrics
+                .try_bounded_replica_at(10, 10_600_000_000, 1)
+                .is_some());
         }
 
         /// Continuity must never let a node serve past what an election could
