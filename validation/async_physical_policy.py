@@ -5,6 +5,9 @@ operational grants; exhausting one is an incomplete disposition, never proof.
 """
 from __future__ import annotations
 
+import ast
+import ctypes
+import functools
 import hashlib
 import fcntl
 import json
@@ -14,6 +17,8 @@ import re
 import secrets
 import sqlite3
 import stat
+import struct
+import sys
 
 MAXIMUM = (1 << 63) - 1
 MIB = 1024 * 1024
@@ -71,18 +76,108 @@ def sha(value):
     return value
 
 
+ROLE_FIELDS = ('database_role', 'role_lifetime', 'objects')
+MAXIMUM_SIMULTANEOUS_ROLE = 16
+_SQL_CREATE = r'CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX|VIEW|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?"?%s"?\b'
+
+
+def _validate_source_map_shape(value):
+    """Closed role declarations, each with its declared simultaneous lifetime."""
+    for family, databases in value['families'].items():
+        require(type(databases) is list, 'physical source map family must be a list of database roles: ' + family)
+        roles = [x.get('database_role') if type(x) is dict else None for x in databases]
+        require(len(roles) == len(set(roles)), 'duplicate physical database role in family: ' + family)
+        for entry in databases:
+            closed(entry, ROLE_FIELDS, 'physical source-map database role')
+            lifetime = entry['role_lifetime']
+            closed(lifetime, ('simultaneous', 'holders'), 'physical role lifetime')
+            require(type(lifetime['simultaneous']) is int and 1 <= lifetime['simultaneous'] <= MAXIMUM_SIMULTANEOUS_ROLE,
+                    'invalid simultaneous physical role lifetime: ' + entry['database_role'])
+            require(type(lifetime['holders']) is str and lifetime['holders'], 'physical role lifetime names no holder')
+            require(type(entry['objects']) is list and entry['objects'], 'physical database role declares no objects')
+
+
+@functools.lru_cache(maxsize=32)
+def _python_definitions(text):
+    """Module-level function/class names and `Class.method` names defined in one Python source."""
+    tree = ast.parse(text)
+    names = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            names.update(node.name + '.' + item.name for item in node.body if isinstance(item, ast.FunctionDef))
+    return frozenset(names)
+
+
+@functools.lru_cache(maxsize=32)
+def _rust_definitions(text):
+    """(`impl` target type names, `fn` names) declared in one Rust source."""
+    owners = {name for header in re.findall(r'\bimpl\b([^{;]*)\{', text) for name in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', header)}
+    return frozenset(owners), frozenset(re.findall(r'\bfn\s+([A-Za-z_][A-Za-z0-9_]*)', text))
+
+
+def constructor_defined(source_path, constructor, name, text):
+    """Does `constructor` resolve to a real definition in the pinned source text?
+
+    Python `Class.method` / `function`, Rust `Type::function` (an impl block naming Type
+    in a source that defines `fn function`) and `source SQL` (a CREATE statement for the object).
+    """
+    if source_path.endswith('.sql'):
+        return constructor == 'source SQL' and re.search(_SQL_CREATE % re.escape(name), text, re.I) is not None
+    if source_path.endswith('.rs'):
+        owner, separator, function = constructor.partition('::')
+        owners, functions = _rust_definitions(text)
+        return separator == '::' and owner in owners and function in functions
+    if source_path.endswith('.py'):
+        return constructor in _python_definitions(text)
+    return False
+
+
 def load_source_map(path=SOURCE_MAP_PATH):
     raw = Path(path).read_bytes()
     value = json.loads(raw)
     closed(value, ('schema_version', 'kind', 'sources', 'families'), 'physical source map')
     require(value['schema_version'] == 1 and value['kind'] == 'physical_table_map', 'physical source map version')
     require(set(value['families']) == set(FAMILY_OWNERS), 'physical source map family inventory')
+    _validate_source_map_shape(value)
     root = Path(__file__).resolve().parents[1]
+    texts = {}
     for name, expected in value['sources'].items():
         path = root / name
         require(path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(root), 'unsafe physical source-map path')
-        require(hashlib.sha256(path.read_bytes()).hexdigest() == sha(expected), 'physical source-map constructor drift: ' + name)
+        data = path.read_bytes()
+        require(hashlib.sha256(data).hexdigest() == sha(expected), 'physical source-map constructor drift: ' + name)
+        texts[name] = data.decode('utf-8')
+    for databases in value['families'].values():
+        for entry in databases:
+            for obj in entry['objects']:
+                require(obj['source_path'] in texts and constructor_defined(obj['source_path'], obj['constructor'], obj['name'], texts[obj['source_path']]),
+                        'physical source-map constructor does not resolve: ' + entry['database_role'] + '/' + obj['name'])
     return value
+
+
+def family_instances(source_map, family):
+    """Databases of this family that the map declares simultaneously live (0 when it holds none)."""
+    return sum(entry['role_lifetime']['simultaneous'] for entry in source_map['families'][family])
+
+
+def minimum_family_policy(source_map, family, database_bytes):
+    """The smallest FamilyPolicy fields that reserve every declared simultaneous lifetime.
+
+    Each live database is charged its own ceiling main file, its 2*ceiling+1MiB
+    journal/WAL/rollback reservation and its 2*ceiling FILE temporaries.
+    """
+    live = max(1, family_instances(source_map, family))
+    return {'database_bytes': database_bytes, 'main_bytes': live * database_bytes,
+            'journal_bytes': live * (2 * database_bytes + MIB), 'temp_bytes': live * 2 * database_bytes}
+
+
+def require_simultaneous_reservation(policy, source_map):
+    """Calibration's conservative simultaneous reservation from the declared role lifetimes."""
+    for family in FAMILY_OWNERS:
+        entry = policy['families'][family]
+        needed = minimum_family_policy(source_map, family, entry['database_bytes'])
+        for key in ('main_bytes', 'journal_bytes', 'temp_bytes'):
+            require(entry[key] >= needed[key], 'family reservation below its simultaneous database lifetimes: ' + family + '/' + key)
 
 
 def validate_physical_policy(policy, source_map):
@@ -170,14 +265,15 @@ def observe_geometry(connection, database_role, source_map):
 def calibrate_physical_policy(policy, observed_geometry, observed_baseline, plan, *, source_map=None):
     source_map = load_source_map() if source_map is None else source_map
     validate_physical_policy(policy, source_map)
+    require_simultaneous_reservation(policy, source_map)
     require(type(observed_geometry) is dict and set(observed_geometry) == set(FAMILY_OWNERS), 'complete actual geometry family inventory required')
     closed(observed_baseline, ('source_workspace_bytes', 'existing_unpooled_bytes'), 'physical baseline')
     for value in observed_baseline.values():
         integer(value)
     require(observed_baseline['source_workspace_bytes'] <= policy['pools']['source_runtime_scratch_bytes'], 'source/runtime pool does not fit measured source baseline')
     for family, observations in observed_geometry.items():
-        require(type(observations) is list and observations, 'missing actual physical family geometry')
         declared = {x['database_role'] for x in source_map['families'][family]}
+        require(type(observations) is list and (observations or not declared), 'missing actual physical family geometry')
         seen = set()
         empty_bytes = 0
         for geometry in observations:
@@ -233,6 +329,8 @@ def _owned(path, root):
     require(path.is_absolute() and path.resolve().is_relative_to(root) and not path.is_symlink(), 'unsafe physical reservation path')
     current = path.parent
     while current != root:
+        # A lexical path that only resolves under the root would otherwise climb to "/" forever.
+        require(current != current.parent, 'physical reservation path is not lexically under the owned root')
         require(not current.is_symlink(), 'symlink in physical storage parent')
         current = current.parent
     return path
@@ -253,9 +351,58 @@ def _fsync_existing_ancestor(path, root):
     _fsync_directory(current)
 
 
+# macOS identifies a process by the start time the kernel records in its proc
+# entry (sysctl kern.proc.pid.<pid>, `struct kinfo_proc`): the extern_proc
+# p_starttime timeval is at offset 0 (8-byte seconds, 4-byte microseconds) and
+# p_pid at offset 40 of the 64-bit layout. The pid echo makes a mismatched
+# layout fail closed instead of yielding an identity of something else.
+DARWIN_CTL_KERN, DARWIN_KERN_PROC, DARWIN_KERN_PROC_PID = 1, 14, 1
+DARWIN_KINFO_PID_OFFSET = 40
+DARWIN_KINFO_MINIMUM = 44
+
+
+def parse_darwin_kinfo_start(raw, pid):
+    """Start identity (microseconds since the epoch) from a `kinfo_proc` image of exactly `pid`."""
+    unavailable = 'parent process identity is unavailable/not live'
+    require(isinstance(raw, (bytes, bytearray)) and len(raw) >= DARWIN_KINFO_MINIMUM, unavailable)
+    seconds = struct.unpack_from('=q', raw, 0)[0]
+    microseconds = struct.unpack_from('=i', raw, 8)[0]
+    observed = struct.unpack_from('=i', raw, DARWIN_KINFO_PID_OFFSET)[0]
+    require(observed == pid and seconds > 0 and 0 <= microseconds < 1_000_000, unavailable)
+    return seconds * 1_000_000 + microseconds
+
+
+def _darwin_kinfo(pid):
+    """The kernel's `kinfo_proc` bytes for one pid via libc sysctl, or PhysicalPolicyError."""
+    unavailable = 'parent process identity is unavailable/not live'
+    try:
+        libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+        libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                                ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+        libc.sysctl.restype = ctypes.c_int
+        mib = (ctypes.c_int * 4)(DARWIN_CTL_KERN, DARWIN_KERN_PROC, DARWIN_KERN_PROC_PID, pid)
+        size = ctypes.c_size_t(0)
+        if libc.sysctl(mib, 4, None, ctypes.byref(size), None, 0) != 0 or size.value == 0:
+            raise PhysicalPolicyError(unavailable)  # an absent pid is rc 0 with an empty result
+        buffer = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(mib, 4, buffer, ctypes.byref(size), None, 0) != 0 or size.value == 0:
+            raise PhysicalPolicyError(unavailable)
+        return buffer.raw[:size.value]
+    except (OSError, AttributeError, ValueError) as error:
+        raise PhysicalPolicyError(unavailable) from error
+
+
 def process_start_ticks(pid):
-    """Linux process start identity (field 22 of /proc/<pid>/stat), fail-closed."""
-    require(type(pid) is int and pid > 0, 'invalid physical grant parent pid')
+    """Exact, fail-closed process start identity for the grant's `parent.start_ticks`.
+
+    Linux: field 22 of /proc/<pid>/stat (clock ticks since boot). macOS: the
+    kernel's recorded start time from sysctl kern.proc.pid (microseconds since the
+    epoch). The value is only ever compared for equality with the same platform's
+    reading of the same pid, so a recycled pid can never match.
+    """
+    require(type(pid) is int and 0 < pid < 2 ** 31, 'invalid physical grant parent pid')
+    if sys.platform == 'darwin':
+        return parse_darwin_kinfo_start(_darwin_kinfo(pid), pid)
     try:
         raw = Path('/proc/%d/stat' % pid).read_text()
         tail = raw[raw.rindex(')') + 2:].split()
@@ -887,8 +1034,6 @@ def _issue_child_grant(self, allocations, attachments, binding, held_lease):
             require(self._conflicts(relative, recursive, owner) is None, 'physical grant aliases an owned file or another grant')
     deducted, grown = [], {}
     control = path = None
-    deducted = []
-    control = path = None
     try:
         for item in prepared:
             held = existing.get(item['reservation_id'])
@@ -1087,6 +1232,25 @@ class ReadonlyDatabaseGrant:
         return sqlite3.connect(self.path.as_uri() + '?mode=ro&immutable=1', uri=True)
 
 
+def database_file_geometry(path, info=None):
+    """(page_size, pages) of a SQLite file from its 100-byte header and size alone; no pragma, no write."""
+    info = os.lstat(path) if info is None else info
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        header = os.pread(fd, 100, 0)
+    finally:
+        os.close(fd)
+    require(len(header) == 100 and header[:16] == b'SQLite format 3\x00', 'attached file is not a SQLite database')
+    page_size = int.from_bytes(header[16:18], 'big')
+    page_size = 65536 if page_size == 1 else page_size
+    require(page_size in (512, 1024, 2048, 4096, 8192, 16384, 32768, 65536) and info.st_size > 0 and info.st_size % page_size == 0,
+            'attached database page geometry is invalid')
+    pages = info.st_size // page_size
+    declared = int.from_bytes(header[28:32], 'big')
+    require(declared == 0 or header[24:28] != header[92:96] or declared == pages, 'attached database page count differs from file size')
+    return page_size, pages
+
+
 def validate_readonly_database(child_ledger, family, path, attachment_id):
     """Attach the already-held reservation; size/page ceilings only, no pragmas or writes."""
     require(isinstance(child_ledger, ChildLedger), 'a child grant ledger is required')
@@ -1106,19 +1270,7 @@ def validate_readonly_database(child_ledger, family, path, attachment_id):
     require(info.st_size <= entry['bytes'], 'attached database exceeds its held reservation')
     for suffix in DB_COMPANIONS:
         require(not os.path.lexists(str(path) + suffix), 'attached database has unaccounted companion files')
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    try:
-        header = os.pread(fd, 100, 0)
-    finally:
-        os.close(fd)
-    require(len(header) == 100 and header[:16] == b'SQLite format 3\x00', 'attached file is not a SQLite database')
-    page_size = int.from_bytes(header[16:18], 'big')
-    page_size = 65536 if page_size == 1 else page_size
-    require(page_size in (512, 1024, 2048, 4096, 8192, 16384, 32768, 65536) and info.st_size > 0 and info.st_size % page_size == 0,
-            'attached database page geometry is invalid')
-    pages = info.st_size // page_size
-    declared = int.from_bytes(header[28:32], 'big')
-    require(declared == 0 or header[24:28] != header[92:96] or declared == pages, 'attached database page count differs from file size')
+    page_size, pages = database_file_geometry(path, info)
     ceiling = min(child_ledger.policy['families'][family]['database_bytes'], entry['bytes'])
     effective = ceiling // page_size
     if effective == 0 or pages > effective:

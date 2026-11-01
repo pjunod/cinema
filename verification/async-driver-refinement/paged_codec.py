@@ -525,6 +525,45 @@ class Budget:
             raise Incomplete('child physical grant lacks the ' + pool + ' pool')
         return self.grant.limits[(pool, 'bytes')]
 
+    def restored_database(self, family, path, *, attached=True):
+        """Check an already restored database against its effective page ceiling BEFORE it is opened.
+
+        `attached`: the parent handed this validator a read-only Attachment of the
+        restore_staging reservation that already holds the file; that reservation is
+        attached (never re-reserved) and the file's size and page count are checked against the
+        destination family's ceiling without touching its bytes or pragmas. Otherwise the file is
+        the writer's own database under a writable allocation, and only the same effective
+        ceiling of that allocation applies. Exceeding it is an incomplete disposition.
+        """
+        physical = physical_policy_module()
+        path = Path(path)
+        require(path.is_absolute(), 'restored database path must be absolute')
+        path = path.parent.resolve() / path.name  # the final name is never followed: a symlink is refused by the ledger
+        require(self.grant is not None, 'a restored database is checked against an explicit physical grant')
+        if attached:
+            try:
+                relative = path.relative_to(self.grant.directory).as_posix()
+            except ValueError as error:
+                raise Invalid('restored database is outside the owned physical root') from error
+            matches = [key for key, entry in self.grant.attachments.items()
+                       if relative == entry['relative_path'] or (entry['recursive'] and relative.startswith(entry['relative_path'] + '/'))]
+            if len(matches) != 1:
+                raise Incomplete('restored database has no single held restore reservation attached to this validator')
+            try:
+                return physical.validate_readonly_database(self.grant, family, path, matches[0])
+            except physical.PhysicalIncomplete as error:
+                raise Incomplete(str(error)) from error
+            except physical.PhysicalPolicyError as error:
+                raise Invalid(str(error)) from error
+        try:
+            page_size, pages = physical.database_file_geometry(path)
+        except physical.PhysicalPolicyError as error:
+            raise Invalid(str(error)) from error
+        effective = self.family_limits(family)['database_bytes'] // page_size
+        if effective == 0 or pages > effective:
+            raise Incomplete('restored database exceeds its effective physical page ceiling')
+        return None
+
     def enforce_database_cap(self, db, family='verifier_main'):
         """Apply the verifier main file's effective page ceiling BEFORE any DDL or write.
 

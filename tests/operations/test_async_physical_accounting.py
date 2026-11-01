@@ -13,7 +13,9 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import signal
 import stat
+import struct
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -36,8 +38,7 @@ def owner_of(resource):
 
 
 def build_policy(source_map, *, database=10 * PAGE, **pools):
-    families = {name: {'owner': owner, 'database_bytes': database, 'main_bytes': 2 * database,
-                       'journal_bytes': 2 * database + MIB, 'temp_bytes': 2 * database}
+    families = {name: {'owner': owner, **physical.minimum_family_policy(source_map, name, database)}
                 for name, owner in physical.FAMILY_OWNERS.items()}
     pool_bytes = {name: 8 * MIB for name in physical.POOL_OWNERS}
     pool_bytes.update(pools)
@@ -109,11 +110,22 @@ class PhysicalBase(unittest.TestCase):
         return physical.load_child_grant(fd, sha, self.lease_fd, self.expected)
 
 
-class PolicyAndCalibrationTests(PhysicalBase):
+class CalibrationHelpers:
     def role_connection(self, role):
         connection = sqlite3.connect(':memory:')
         self.addCleanup(connection.close)
         return connection, physical.install_empty_role(connection, role, self.source_map)
+
+    def calibrate(self, policy, plan=None):
+        geometry = {}
+        for family, databases in self.source_map['families'].items():
+            geometry[family] = [self.role_connection(d['database_role'])[1] for d in databases]
+        plan = plan or {'total_retained_artifact_bytes': MIB, 'maximum_units': 2, 'total_session_disk_bytes': 1 << 40}
+        return physical.calibrate_physical_policy(policy, geometry, {'source_workspace_bytes': 0, 'existing_unpooled_bytes': 0},
+                                                  plan, source_map=self.source_map)
+
+
+class PolicyAndCalibrationTests(CalibrationHelpers, PhysicalBase):
 
     def test_unknown_installed_table_and_index_are_refused(self):
         connection, _ = self.role_connection('catalog_manifest_closure')
@@ -164,14 +176,6 @@ class PolicyAndCalibrationTests(PhysicalBase):
         with self.assertRaises(physical.PhysicalPolicyError):
             physical.validate_physical_policy(small_main, self.source_map)
 
-    def calibrate(self, policy, plan=None):
-        geometry = {}
-        for family, databases in self.source_map['families'].items():
-            geometry[family] = [self.role_connection(d['database_role'])[1] for d in databases]
-        plan = plan or {'total_retained_artifact_bytes': MIB, 'maximum_units': 2, 'total_session_disk_bytes': 1 << 40}
-        return physical.calibrate_physical_policy(policy, geometry, {'source_workspace_bytes': 0, 'existing_unpooled_bytes': 0},
-                                                  plan, source_map=self.source_map)
-
     def test_calibration_matches_the_complete_actual_inventory_and_is_logical_independent(self):
         first = self.calibrate(self.policy)
         families = sum(v['main_bytes'] + v['journal_bytes'] + v['temp_bytes'] for v in self.policy['families'].values())
@@ -200,6 +204,283 @@ class PolicyAndCalibrationTests(PhysicalBase):
                 {'total_retained_artifact_bytes': MIB, 'maximum_units': 1, 'total_session_disk_bytes': 1 << 40}, source_map=self.source_map)
         with self.assertRaisesRegex(physical.PhysicalPolicyError, 'peak exceeds immutable session disk ceiling'):
             self.calibrate(self.policy, {'total_retained_artifact_bytes': MIB, 'maximum_units': 1, 'total_session_disk_bytes': 1024})
+
+
+class SimultaneousLifetimeTests(CalibrationHelpers, PhysicalBase):
+    """F8/F9: calibration reserves every declared simultaneous database lifetime; the map has no phantom."""
+    DECLARED = {'catalog_main': 2, 'verifier_main': 2, 'catalog_export_scratch': 1, 'verifier_continuation_scratch': 1,
+                'catalog_or_verifier_restore_scratch': 0, 'publication_pack_scratch': 3, 'authentication_index': 3,
+                'publication_pending_scratch': 3}
+
+    def test_the_map_declares_the_simultaneous_lifetime_of_every_database_role(self):
+        self.assertEqual({f: physical.family_instances(self.source_map, f) for f in physical.FAMILY_OWNERS}, self.DECLARED)
+        for databases in self.source_map['families'].values():
+            for entry in databases:
+                self.assertTrue(entry['role_lifetime']['holders'])
+
+    def test_calibration_refuses_a_family_reservation_below_its_simultaneous_lifetimes(self):
+        database = self.policy['families']['catalog_main']['database_bytes']
+        self.calibrate(self.policy)  # exactly the declared minimum is admitted
+        for family in physical.FAMILY_OWNERS:
+            needed = physical.minimum_family_policy(self.source_map, family, database)
+            for key in ('main_bytes', 'journal_bytes', 'temp_bytes'):
+                policy = copy.deepcopy(self.policy)
+                policy['families'][family][key] = needed[key] - 1
+                with self.assertRaises(physical.PhysicalPolicyError, msg=family + '/' + key):
+                    self.calibrate(policy)
+
+    def test_the_one_database_journal_shape_that_failed_the_first_execute_job_is_no_longer_calibrated(self):
+        old = copy.deepcopy(self.policy)
+        database = old['families']['publication_pack_scratch']['database_bytes']
+        old['families']['publication_pack_scratch'].update(main_bytes=2 * database, journal_bytes=2 * database + MIB, temp_bytes=2 * database)
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'below its simultaneous database lifetimes: publication_pack_scratch'):
+            self.calibrate(old)
+        # What the old shape could not do: hold the pack job's second database.
+        ledger = physical.ReservationLedger(old, self.root, source_map=self.source_map)
+        physical.reserve_database(ledger, 'publication_pack_scratch', self.root / 'out' / 'old-0.sqlite', database)
+        with self.assertRaisesRegex(physical.PhysicalIncomplete, 'publication_pack_scratch/journal'):
+            physical.reserve_database(ledger, 'publication_pack_scratch', self.root / 'out' / 'old-1.sqlite', database)
+
+    def test_a_calibrated_policy_holds_every_declared_database_of_a_family_and_not_one_more(self):
+        for family, count in self.DECLARED.items():
+            count = max(count, 1)
+            database = self.policy['families'][family]['database_bytes']
+            ledger = physical.ReservationLedger(self.policy, self.root, source_map=self.source_map)
+            for index in range(count):
+                physical.reserve_database(ledger, family, self.root / 'out' / ('%s-%d.sqlite' % (family, index)), database)
+            before = dict(ledger.used)
+            with self.assertRaises(physical.PhysicalIncomplete, msg=family):
+                physical.reserve_database(ledger, family, self.root / 'out' / ('%s-extra.sqlite' % family), database)
+            self.assertEqual(ledger.used, before, 'a refused extra database leaks no deduction')
+
+    def test_every_map_constructor_resolves_to_a_definition_in_its_pinned_source(self):
+        for family, databases in self.source_map['families'].items():
+            for entry in databases:
+                for obj in entry['objects']:
+                    self.assertIn(obj['source_path'], self.source_map['sources'])
+                    text = (ROOT / obj['source_path']).read_text()
+                    self.assertTrue(physical.constructor_defined(obj['source_path'], obj['constructor'], obj['name'], text),
+                                    '%s/%s: %s' % (entry['database_role'], obj['name'], obj['constructor']))
+
+    def test_constructor_resolution_rejects_removed_or_renamed_definitions(self):
+        provenance = 'validation/async_refinement_provenance.py'
+        text = (ROOT / provenance).read_text()
+        self.assertTrue(physical.constructor_defined(provenance, 'PartPlan.__init__', 'members', text))
+        self.assertFalse(physical.constructor_defined(provenance, 'restore_catalog', 'chunks', text))  # removed by the capacity series
+        self.assertFalse(physical.constructor_defined(provenance, 'PartPlan.restore_catalog', 'chunks', text))
+        self.assertFalse(physical.constructor_defined(provenance, 'NoSuchClass.__init__', 'chunks', text))
+        sql = 'verification/async-driver-refinement/paged-catalog.sql'
+        self.assertFalse(physical.constructor_defined(sql, 'source SQL', 'not_a_table', (ROOT / sql).read_text()))
+        rust = 'crates/plurx-core/src/store/async_driver_catalog/sqlite.rs'
+        self.assertTrue(physical.constructor_defined(rust, 'SqliteStorage::open_inner', 'x', (ROOT / rust).read_text()))
+        self.assertFalse(physical.constructor_defined(rust, 'SqliteStorage::removed_function', 'x', (ROOT / rust).read_text()))
+
+    def test_a_phantom_database_role_cannot_load_or_calibrate(self):
+        self.assertEqual(self.source_map['families']['catalog_or_verifier_restore_scratch'], [])
+        phantom = copy.deepcopy(self.source_map)
+        template = next(d for d in phantom['families']['catalog_export_scratch'])
+        ghost = copy.deepcopy(template)
+        ghost['database_role'] = 'snapshot_restore'
+        for obj in ghost['objects']:
+            obj['source_path'], obj['constructor'] = 'validation/async_refinement_provenance.py', 'restore_catalog'
+        phantom['families']['catalog_or_verifier_restore_scratch'] = [ghost]
+        phantom['sources'] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in phantom['sources']}
+        path = self.root / 'phantom-map.json'
+        path.write_bytes(json.dumps(phantom).encode())
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'constructor does not resolve'):
+            physical.load_source_map(path)
+        # And a measurement of a role the family does not declare is refused as unknown.
+        geometry = {f: [self.role_connection(d['database_role'])[1] for d in dbs] for f, dbs in self.source_map['families'].items()}
+        geometry['catalog_or_verifier_restore_scratch'] = [geometry['catalog_export_scratch'][0]]
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'unknown/duplicate measured database role'):
+            physical.calibrate_physical_policy(self.policy, geometry, {'source_workspace_bytes': 0, 'existing_unpooled_bytes': 0},
+                {'total_retained_artifact_bytes': MIB, 'maximum_units': 1, 'total_session_disk_bytes': 1 << 40}, source_map=self.source_map)
+
+    def test_the_role_lifetime_declaration_is_closed(self):
+        for mutate in (lambda role: role.pop('role_lifetime'), lambda role: role['role_lifetime'].update(simultaneous=0),
+                       lambda role: role['role_lifetime'].update(simultaneous=True), lambda role: role['role_lifetime'].update(extra=1),
+                       lambda role: role['role_lifetime'].update(holders='')):
+            value = copy.deepcopy(self.source_map)
+            mutate(value['families']['catalog_main'][0])
+            value['sources'] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in value['sources']}
+            path = self.root / 'lifetime-map.json'
+            path.write_bytes(json.dumps(value).encode())
+            with self.assertRaises(physical.PhysicalPolicyError):
+                physical.load_source_map(path)
+
+
+class ParentIdentityTests(PhysicalBase):
+    """F12: parent identity has an exact implementation on macOS as well as Linux (no /proc dependence)."""
+    @staticmethod
+    def kinfo(seconds, micros, pid):
+        image = bytearray(648)
+        struct.pack_into('=q', image, 0, seconds)
+        struct.pack_into('=i', image, 8, micros)
+        struct.pack_into('=i', image, 40, pid)
+        return bytes(image)
+
+    def test_darwin_kinfo_start_is_the_exact_microsecond_identity_of_that_pid(self):
+        image = self.kinfo(1_790_000_000, 123_456, 4242)
+        self.assertEqual(physical.parse_darwin_kinfo_start(image, 4242), 1_790_000_000_123_456)
+        self.assertNotEqual(physical.parse_darwin_kinfo_start(self.kinfo(1_790_000_001, 123_456, 4242), 4242), 1_790_000_000_123_456)
+        for bad in (self.kinfo(1_790_000_000, 123_456, 4243), self.kinfo(0, 0, 4242), self.kinfo(1, 1_000_000, 4242),
+                    self.kinfo(1, -1, 4242), image[:43], b''):
+            with self.assertRaisesRegex(physical.PhysicalPolicyError, 'parent process identity is unavailable'):
+                physical.parse_darwin_kinfo_start(bad, 4242)
+
+    def test_darwin_dispatch_reads_the_sysctl_image_and_never_proc(self):
+        image = self.kinfo(1_790_000_000, 7, 4242)
+        with mock.patch.object(sys, 'platform', 'darwin'), mock.patch.object(physical, '_darwin_kinfo', return_value=image) as sysctl, \
+                mock.patch.object(Path, 'read_text', side_effect=AssertionError('the macOS path must not read /proc')):
+            self.assertEqual(physical.process_start_ticks(4242), 1_790_000_000_000_007)
+        sysctl.assert_called_once_with(4242)
+        for bad in (0, -1, 2 ** 31, '4242', True):
+            with self.assertRaises(physical.PhysicalPolicyError):
+                physical.process_start_ticks(bad)
+
+    @unittest.skipUnless(sys.platform == 'linux', 'reads the Linux /proc identity')
+    def test_linux_identity_is_the_proc_start_time(self):
+        raw = Path('/proc/self/stat').read_text()
+        self.assertEqual(physical.process_start_ticks(os.getpid()), int(raw[raw.rindex(')') + 2:].split()[19]))
+
+    def test_the_live_identity_is_stable_and_an_absent_process_is_refused(self):
+        me = os.getpid()
+        self.assertEqual(physical.process_start_ticks(me), physical.process_start_ticks(me))
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'parent process identity is unavailable'):
+            physical.process_start_ticks(2 ** 31 - 1)
+
+    def test_a_grant_verifies_through_the_macos_identity_and_a_recycled_pid_is_refused(self):
+        starts = {'value': 1_790_000_000}
+        with mock.patch.object(sys, 'platform', 'darwin'), \
+                mock.patch.object(physical, '_darwin_kinfo', side_effect=lambda pid: self.kinfo(starts['value'], 5, pid)):
+            handle = self.issue(database_allocations())
+            child = self.load(handle)
+            self.assertEqual(child.parent_identity, (os.getpid(), 1_790_000_000_000_005))
+            starts['value'] += 1  # the same pid, started later: a different process
+            with self.assertRaisesRegex(physical.PhysicalPolicyError, 'not the live identity'):
+                self.load(handle)
+            # Owned-root and lease identity stay exact device/inode comparisons on every platform.
+            starts['value'] -= 1
+            with self.assertRaisesRegex(physical.PhysicalPolicyError, 'owned root device/inode differs'):
+                self.load_forged(handle, lambda v: v['owned_root'].update(inode=v['owned_root']['inode'] + 1))
+            with self.assertRaisesRegex(physical.PhysicalPolicyError, 'lease device/inode/path differs'):
+                self.load_forged(handle, lambda v: v['lease'].update(inode=v['lease']['inode'] + 1))
+
+
+class LexicalOwnershipTests(PhysicalBase):
+    def test_a_lexical_path_outside_the_root_is_refused_not_walked_forever(self):
+        sibling = self.root.parent / ('lexical-sibling-' + uuid.uuid4().hex)
+        sibling.mkdir()
+        self.addCleanup(sibling.rmdir)
+        lexical = sibling / '..' / self.root.name / 'out' / 'x.sqlite'  # resolves inside the root, never walks to it
+
+        def hung(*_):
+            raise AssertionError('physical._owned never terminated')
+        previous = signal.signal(signal.SIGALRM, hung)
+        signal.alarm(10)
+        try:
+            with self.assertRaisesRegex(physical.PhysicalPolicyError, 'not lexically under the owned root'):
+                physical._owned(lexical, self.root)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+    def test_issuing_a_grant_has_no_duplicated_initialisation(self):
+        import ast
+        tree = ast.parse(Path(physical.__file__).read_text())
+        function = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_issue_child_grant')
+        assigns = [ast.dump(statement) for statement in function.body if isinstance(statement, ast.Assign)]
+        self.assertEqual(len(assigns), len(set(assigns)), 'a top-level initialisation statement is repeated')
+
+
+class RestoredDatabaseCeilingTests(PhysicalBase):
+    """F11: a restored database is checked against its effective page ceiling before its first open."""
+    def restored(self, blob, name='stage/restored.sqlite'):
+        path = self.root / name
+        image = sqlite3.connect(path)
+        image.execute('CREATE TABLE t(x BLOB)')
+        image.execute('INSERT INTO t VALUES(zeroblob(%d))' % blob)
+        image.commit()
+        image.close()
+        held = self.ledger.reserve('snapshot_restore', 'restore_staging_bytes', 'bytes', path.stat().st_size + PAGE)
+        held.track(path)
+        attachment = alloc('restore_staging_bytes', 'bytes', held.bytes, name, reservation_id=held.reservation_id, access='read_only')
+        return path, attachment
+
+    def budget(self, handle):
+        budget = codec.Budget.__new__(codec.Budget)
+        budget.physical_policy = self.policy
+        budget.grant = self.load(handle)
+        return budget
+
+    def test_the_attached_restore_is_checked_before_open_and_an_oversize_database_is_incomplete(self):
+        ceiling = self.policy['families']['verifier_main']['database_bytes']
+        path, attachment = self.restored(blob=ceiling + 2 * PAGE)
+        budget = self.budget(self.issue([], [attachment]))
+        before = path.read_bytes()
+        with mock.patch.object(sqlite3, 'connect', side_effect=AssertionError('the restored database must not be opened first')):
+            with self.assertRaisesRegex(codec.Incomplete, 'effective page ceiling'):
+                budget.restored_database('verifier_main', path)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_an_attached_restore_within_the_ceiling_reserves_no_second_main_file(self):
+        path, attachment = self.restored(blob=3 * PAGE)
+        budget = self.budget(self.issue([], [attachment]))
+        used = dict(self.ledger.used)
+        readonly = budget.restored_database('verifier_main', path)
+        self.assertEqual(readonly.page_count, path.stat().st_size // PAGE)
+        self.assertEqual(self.ledger.used, used)
+
+    def test_a_restore_without_exactly_one_attached_reservation_is_incomplete(self):
+        path, attachment = self.restored(blob=3 * PAGE)
+        other = self.root / 'stage' / 'unattached.sqlite'
+        other.write_bytes(path.read_bytes())
+        budget = self.budget(self.issue([], [attachment]))
+        with self.assertRaisesRegex(codec.Incomplete, 'no single held restore reservation'):
+            budget.restored_database('verifier_main', other)
+        with self.assertRaises(codec.Invalid):
+            budget.restored_database('verifier_main', self.root.parent / 'outside.sqlite')
+
+    def test_the_writers_own_database_is_checked_against_its_granted_ceiling_without_an_attachment(self):
+        ceiling = 3 * PAGE
+        path = self.root / 'out' / 'verifier.sqlite'
+        image = sqlite3.connect(path)
+        image.execute('CREATE TABLE t(x BLOB)')
+        image.execute('INSERT INTO t VALUES(zeroblob(%d))' % (ceiling + 2 * PAGE))
+        image.commit()
+        image.close()
+        budget = self.budget(self.issue(database_allocations('out/verifier.sqlite', 'verifier_main', ceiling)))
+        with self.assertRaisesRegex(codec.Incomplete, 'effective physical page ceiling'):
+            budget.restored_database('verifier_main', path, attached=False)
+        small = self.root / 'out' / 'small.sqlite'
+        image = sqlite3.connect(small)
+        image.execute('CREATE TABLE t(x)')
+        image.commit()
+        image.close()
+        self.assertIsNone(budget.restored_database('verifier_main', small, attached=False))
+
+    def test_both_private_restore_validators_check_the_ceiling_before_opening(self):
+        import ast
+        tree = ast.parse((ROOT / 'verification' / 'async-driver-refinement' / 'paged_checker.py').read_text())
+        functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+        def lines(function, matches):
+            return sorted(n.lineno for n in ast.walk(function) if isinstance(n, ast.Call) and matches(n))
+        ceiling = lambda call: getattr(call.func, 'attr', '') == 'restored_database'
+        opening = lambda call: getattr(call.func, 'attr', '') == 'connect'
+        for name in ('validate_restore', 'validate_restored_verifier'):
+            checks, opens = lines(functions[name], ceiling), lines(functions[name], opening)
+            self.assertTrue(checks, name + ' never checks the restored database ceiling')
+            if name == 'validate_restore':  # the catalog is opened by sqlite3.connect after the check
+                self.assertLess(checks[0], opens[0], name + ' opens the restored database before checking its ceiling')
+        # The verifier validator runs the check as the precheck of the first open, before any read.
+        view = functions['private_input_view']
+        self.assertLess(lines(view, lambda c: getattr(c.func, 'id', '') == 'precheck')[0],
+                        lines(view, lambda c: getattr(c.func, 'attr', '') == 'readonly_view')[0])
+        # The unit preparation of the writer's own verifier database is not an attached restore.
+        keywords = [k for n in ast.walk(functions['prepare_unit']) if isinstance(n, ast.Call)
+                    and getattr(n.func, 'id', '') == 'validate_restored_verifier' for k in n.keywords]
+        self.assertEqual([(k.arg, getattr(k.value, 'value', None)) for k in keywords], [('attached', False)])
 
 
 class DatabaseCapTests(PhysicalBase):
@@ -863,9 +1144,11 @@ class VerifierBudgetCapTests(unittest.TestCase):
         self.addCleanup(db.close)
         db.execute('CREATE TABLE t(x BLOB)')
         db.execute('INSERT INTO t VALUES(zeroblob(40000))')
+        # SQLite's compile-time default differs by version (1073741823 before 3.33, 4294967294 after).
+        default = db.execute('PRAGMA max_page_count').fetchone()[0]
         with self.assertRaises(codec.Incomplete):
             self.budget(database=3 * PAGE).enforce_database_cap(db)
-        self.assertEqual(db.execute('PRAGMA max_page_count').fetchone()[0], 1073741823)
+        self.assertEqual(db.execute('PRAGMA max_page_count').fetchone()[0], default)
 
     def test_journal_and_temp_reservations_must_cover_the_ceiling(self):
         for kwargs in ({'journal': 2 * 3 * PAGE + MIB - 1}, {'temp': 2 * 3 * PAGE - 1}):

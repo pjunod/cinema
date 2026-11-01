@@ -1642,6 +1642,9 @@ def validate_restore(request):
             checkpoint['resource_plan_sha256'] == budget.plan['plan_sha256'], 'restore snapshot identity')
     path = Path(request['catalog_path'])
     require(path.is_absolute() and path.is_file() and not path.is_symlink(), 'staged catalog path')
+    # The parent's held restore reservation is attached, not re-reserved; the restored catalog's
+    # size and page count are checked against the catalog_main effective page ceiling before any open.
+    budget.restored_database('catalog_main', path)
     resolver = sqlite3.connect(Path(request['dependency_index']).as_uri() + '?mode=ro&immutable=1', uri=True)
     catalog = sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True)
     try:
@@ -1960,9 +1963,10 @@ def prepare_catalog_input(index,request):
     finally:catalog.close()
 
 
-def private_input_view(request):
+def private_input_view(request,*,precheck=None):
     unit=request['work_unit'];output=Path(request['output_dir'])
     budget=Budget(request['resource_plan']['record'],output,seconds=request['deadline_monotonic']-time.monotonic())
+    if precheck is not None:precheck(budget)
     index=RecordIndex.readonly_view(Path(request['verifier_work_db']),source=unit['source'],
         session_id=unit['session_id'],budget=budget,resolver_path=request['dependency_index'])
     index.request=request
@@ -1971,16 +1975,20 @@ def private_input_view(request):
     return index
 
 
-def validate_restored_verifier(request):
+def validate_restored_verifier(request,*,attached=True):
+    """`attached`: a restore validator attaches the parent's held restore reservation (a separate
+    job). The unit preparation check of the writer's own verifier database is not attached; it is
+    held by a writable allocation and only its effective page ceiling applies."""
     validate_private_request(request,'validate_restore',private_restore=True)
     output=Path(request['output_dir'])
     require(output.is_absolute() and not output.is_symlink(),'owned private restore output')
     output.mkdir(parents=True,exist_ok=True)
-    # Rebuild all excluded paths/input indexes separately. The staged private
-    # database remains byte-identical from hash verification through install.
-    index=private_input_view(request)
     path=Path(request['verifier_work_db'])
     require(path.is_absolute() and path.is_file() and not path.is_symlink(),'staged verifier backup path')
+    # Rebuild all excluded paths/input indexes separately. The staged private
+    # database remains byte-identical from hash verification through install. Its effective
+    # page ceiling is checked before the first open, not when the next writer finds it too large.
+    index=private_input_view(request,precheck=lambda budget:budget.restored_database('verifier_main',path,attached=attached))
     before_sha,before_bytes=file_sha(path),path.stat().st_size
     backup_raw=Path(request['verifier_backup_root']).read_bytes()
     backup=strict_json(backup_raw)
@@ -2236,7 +2244,7 @@ def prepare_unit(request):
             cp=auth.execute("SELECT path FROM objects WHERE kind='Checkpoint' AND CAST(key AS TEXT)=?",(canonical(backup['checkpoint_sha256']),)).fetchone()
             require(cp is not None,'latest verifier authoritative checkpoint missing')
             restore={**request,'operation':'validate_restore','verifier_checkpoint':strict_json(Path(cp[0]).read_bytes()),'verifier_backup_root':row[0]}
-            validate_restored_verifier(restore)
+            validate_restored_verifier(restore,attached=False)
         finally:
             auth.close()
     else:

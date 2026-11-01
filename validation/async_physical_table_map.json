@@ -15,6 +15,10 @@
     "catalog_main": [
       {
         "database_role": "rust_catalog",
+        "role_lifetime": {
+          "simultaneous": 2,
+          "holders": "active input generation plus pending output generation: activation reserves the destination main file while the prior accepted generation stays charged until its actual files are removed and fsynced"
+        },
         "objects": [
           {
             "type": "table",
@@ -442,6 +446,10 @@
     "verifier_main": [
       {
         "database_role": "independent_verifier",
+        "role_lifetime": {
+          "simultaneous": 2,
+          "holders": "active input generation plus pending output generation: activation reserves the destination main file while the prior accepted generation stays charged until its actual files are removed and fsynced"
+        },
         "objects": [
           {
             "type": "table",
@@ -1449,6 +1457,10 @@
     "catalog_export_scratch": [
       {
         "database_role": "catalog_manifest_closure",
+        "role_lifetime": {
+          "simultaneous": 1,
+          "holders": "one manifest-closure export database per child job, removed with the job scratch"
+        },
         "objects": [
           {
             "type": "table",
@@ -1486,6 +1498,10 @@
     "verifier_continuation_scratch": [
       {
         "database_role": "verifier_continuation",
+        "role_lifetime": {
+          "simultaneous": 1,
+          "holders": "one continuation/evidence reconciliation scratch per validator or unit child job, removed with the job scratch"
+        },
         "objects": [
           {
             "type": "table",
@@ -1550,46 +1566,14 @@
         ]
       }
     ],
-    "catalog_or_verifier_restore_scratch": [
-      {
-        "database_role": "snapshot_restore",
-        "objects": [
-          {
-            "type": "table",
-            "name": "chunks",
-            "table": "chunks",
-            "ddl": "CREATE TABLE chunks(ordinal INTEGER PRIMARY KEY,descriptor BLOB)",
-            "source_path": "validation/async_refinement_provenance.py",
-            "constructor": "restore_catalog",
-            "relation": "transport reconstruction exact ordinal-to-chunk descriptor relation",
-            "lifetime": "current native packing or whole snapshot restore invocation; explicit file lifetime must be reconciled with v2 publication protocol"
-          },
-          {
-            "type": "table",
-            "name": "todo",
-            "table": "todo",
-            "ddl": "CREATE TABLE todo(ordinal INTEGER PRIMARY KEY AUTOINCREMENT,descriptor BLOB)",
-            "source_path": "validation/async_refinement_provenance.py",
-            "constructor": "restore_catalog",
-            "relation": "current disk-backed transport index traversal descriptor queue",
-            "lifetime": "current native packing or whole snapshot restore invocation; explicit file lifetime must be reconciled with v2 publication protocol"
-          },
-          {
-            "type": "table",
-            "name": "used",
-            "table": "used",
-            "ddl": "CREATE TABLE used(path TEXT PRIMARY KEY,part INTEGER,kind TEXT)",
-            "source_path": "validation/async_refinement_provenance.py",
-            "constructor": "restore_catalog",
-            "relation": "transport root restoration exact member/path-to-part/kind set",
-            "lifetime": "current native packing or whole snapshot restore invocation; explicit file lifetime must be reconciled with v2 publication protocol"
-          }
-        ]
-      }
-    ],
+    "catalog_or_verifier_restore_scratch": [],
     "publication_pack_scratch": [
       {
         "database_role": "native_part_plan",
+        "role_lifetime": {
+          "simultaneous": 1,
+          "holders": "the PartPlan of one plan_transfer, live together with that job publication store databases"
+        },
         "objects": [
           {
             "type": "table",
@@ -1615,6 +1599,10 @@
       },
       {
         "database_role": "snapshot_content_inventory",
+        "role_lifetime": {
+          "simultaneous": 1,
+          "holders": "the content inventory of the one publication store open in a pack or publish job"
+        },
         "objects": [
           {
             "type": "table",
@@ -1660,6 +1648,10 @@
       },
       {
         "database_role": "snapshot_evidence_inventory",
+        "role_lifetime": {
+          "simultaneous": 1,
+          "holders": "the evidence inventory of the one publication store open in a pack or publish job"
+        },
         "objects": [
           {
             "type": "table",
@@ -1677,6 +1669,10 @@
     "authentication_index": [
       {
         "database_role": "authenticated_dependencies",
+        "role_lifetime": {
+          "simultaneous": 3,
+          "holders": "the working dependency index copy, the conformance case index copy and the controller persistent index, all open in one rehearsal or restore job"
+        },
         "objects": [
           {
             "type": "table",
@@ -1754,6 +1750,10 @@
     "publication_pending_scratch": [
       {
         "database_role": "pending_publication",
+        "role_lifetime": {
+          "simultaneous": 3,
+          "holders": "the publication store ledger, the receiver replay ledger over the pending ledger and the conformance pending ledger open in one rehearsal or restore job"
+        },
         "objects": [
           {
             "type": "table",

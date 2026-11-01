@@ -39,10 +39,9 @@ def physical():
 
 
 def fixture_policy(source_map):
-    """A closed PhysicalPolicy3 whose journal/temp reservations cover the ceiling exactly."""
+    """A closed PhysicalPolicy3 whose reservations cover every declared simultaneous database lifetime."""
     ceiling = FIXTURE_DATABASE_BYTES
-    families = {name: {'owner': owner, 'database_bytes': ceiling, 'main_bytes': 2 * ceiling,
-                       'journal_bytes': 2 * ceiling + MIB, 'temp_bytes': 2 * ceiling}
+    families = {name: {'owner': owner, **physical().minimum_family_policy(source_map, name, ceiling)}
                 for name, owner in physical().FAMILY_OWNERS.items()}
     pools = {name: 64 * MIB for name in physical().POOL_OWNERS}
     return {'schema_version': 3, 'kind': 'physical_policy', 'table_map_sha256': physical().digest(source_map),
