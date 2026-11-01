@@ -1386,6 +1386,7 @@ class ChildPlanTests(ChildPlanBase):
         aux = self.root / 'out-aux'
         handle = self.issue(request, self.out)
         catalog, backup = self.root / 'catalog.sqlite', aux / 'verifier-backup.sqlite'
+        aux.mkdir(mode=0o700, exist_ok=True)  # the child's environment creates the sibling auxiliary directory
         catalog.write_bytes(b'c' * 1000)
         backup.write_bytes(b'v' * 1000)
         (self.out / 'page.json').write_bytes(b'p' * 1000)
@@ -1481,6 +1482,7 @@ class ChildPlanTests(ChildPlanBase):
         tree.mkdir(mode=0o700)
         first = self.issue(request, tree)
         catalog, backup = self.root / 'catalog.sqlite', self.root / 'writer-aux' / 'verifier-backup.sqlite'
+        backup.parent.mkdir(mode=0o700, exist_ok=True)  # the child's environment creates the sibling auxiliary directory
         catalog.write_bytes(b'c' * 1000)
         backup.write_bytes(b'v' * 1000)
         (tree / 'page.json').write_bytes(b'p' * 1000)
@@ -2023,8 +2025,10 @@ class RestoreMainLimitReachabilityTests(unittest.TestCase):
         start = re.search(r'^(?: *)%s %s\b' % (kind, name), text, re.M)
         assert start is not None, name
         indent = len(start.group(0)) - len(start.group(0).lstrip())
-        end = re.search(r'^ {0,%d}\S' % indent, text[start.end():], re.M)
-        return text[start.start():start.end() + (end.start() if end else len(text))]
+        # Scan from the next line: the remainder of the header line is never a boundary (it would end the body at once).
+        header_end = text.find('\n', start.end()) + 1
+        end = re.search(r'^ {0,%d}\S' % indent, text[header_end:], re.M)
+        return text[start.start():header_end + (end.start() if end else len(text))]
 
     def test_restore_validators_and_their_read_only_views_never_look_up_a_main_limit(self):
         checker, codec_text = self.CHECKER.read_text(), self.CODEC.read_text()
