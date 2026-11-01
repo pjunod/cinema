@@ -3864,7 +3864,6 @@
             },
             "catalog_or_verifier_restore_scratch": {
               "type": "array",
-              "minItems": 1,
               "items": {
                 "$ref": "#/$defs/Geometry"
               }
