@@ -44,7 +44,10 @@ open/non-draft state and base ref `main`. Both recorded and live base SHAs must
 be well formed; a live main advance does not replace the authenticated event
 baseline or require the tips to stay equal. Initial and final run/event/head
 checks remain strict. Effort/manual qualification still binds its expected
-head and base tips separately; this ordinary-lane rule does not alter it.
+head and base tips separately; this ordinary-lane rule does not alter it. The
+async qualification session is different again: it binds the PR's merge base
+with Main (`event_base`), not either tip (see Deviation 4 of the paged
+contract).
 
 Async invocation provenance explicitly includes the shared adoption module.
 Historical event authentication is separate from current live authority, and

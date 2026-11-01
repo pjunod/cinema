@@ -780,7 +780,9 @@ def rust_identity():
 
 def affected(args):
     if args.base:
-        proc,_ = run(['git','diff','--name-only',args.base,'--'],timeout=30)
+        # Merge-base (three-dot) semantics: only what the PR changed since it left Main. A two-dot diff
+        # against a Main that moved on would list Main's own changes as the PR's.
+        proc,_ = run(['git','diff','--name-only',args.base+'...HEAD','--'],timeout=30)
         c.require(proc.returncode == 0,'affected-base did not resolve')
         changed = proc.stdout.splitlines()
         hit = any(p in FILES or any(p.startswith(q) for q in governed_prefixes()) for p in changed)

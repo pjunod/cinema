@@ -3698,6 +3698,13 @@ def require_completion(root, output):
         if payload.get('inputs', {}).get('mode') != 'complete':
             continue
         control = p.decode(payload['inputs']['control'].encode())
+        raw = control.get('registration') if type(control) is dict else None
+        if type(raw) is dict and raw.get('event_base') != event_merge_base(root, event):
+            # A completed session for this head against another merge base (Main merged a sibling branch,
+            # the operator re-registered) is not this session. Skipping grants nothing; the loop still
+            # refuses unless a matching complete root is found, and it is judged before the registration
+            # is validated so a stale one (for example an expired one) cannot mask the current one.
+            continue
         reg = registration(control['registration'], root)
         p.require(reg['pr'] == scope['pr'] and reg['repository'] == scope['repository']
                   and reg['event_base'] == event_merge_base(root, event), 'completion current event scope differs')
@@ -3829,8 +3836,7 @@ def main(argv=None):
     controller.add_argument('--maximum-dispatches', type=int, default=1)
     landing = sub.add_parser('landing-check')
     landing.add_argument('--control', type=Path, required=True)
-    landing.add_argument('--main-tip', required=True)
-    landing.add_argument('--output', type=Path)
+    landing.add_argument('--output', type=Path, required=True)
     args = parser.parse_args(argv)
     # Every owned spool, database, grant descriptor and restored image is private.
     os.umask(0o077)
@@ -3842,9 +3848,9 @@ def main(argv=None):
     elif args.command == 'require-completion':
         require_completion(root, args.output)
     elif args.command == 'landing-check':
-        receipt = landing_check(p.read(args.control)['registration'], args.main_tip, root)
-        if args.output:
-            p.write(args.output, receipt)
+        receipt = landing_check(p.read(args.control)['registration'],
+                                api_environment(args.output.parent / 'landing-api'), root)
+        p.write(args.output, receipt)
         print(p.canonical(receipt).decode())
     elif args.command == 'probe':
         dispatch_probe(p.read(args.control),root,args.output)
@@ -4451,13 +4457,54 @@ ACCOUNTING_METHOD_FILES=('validation/async_refinement_provenance.py','validation
     'validation/async_physical_table_map.json')
 
 
-def proof_closure(root, commit):
-    """Every repository path the registered proof is bound to, from the code's own lists.
+CATALOG_COMPILED_SOURCES = ('crates/plurx-core/src/store/async_driver_catalog.rs',
+    'crates/plurx-core/src/store/async_driver_catalog/records.rs',
+    'crates/plurx-core/src/store/async_driver_catalog/sqlite.rs',
+    'crates/plurx-core/src/store/async_driver_catalog/memory.rs',
+    'crates/plurx-core/src/store/async_driver_catalog/grant.rs',
+    'verification/async-driver-refinement/paged-proof.schema.json',
+    'verification/async-driver-refinement/paged-catalog.sql')
+# The TLC models and configurations `paged_checker` executes, bound beside the checker's own source closure.
+PROOF_MODEL_FILES = tuple(PROOF_DIRECTORY + name for name in (
+    'AsyncDriverRefinement.tla', 'PagedOneStep.tla', 'PagedComponent.tla', 'PropertyMonitors.tla',
+    'BoundaryControls.tla', 'paged-one-step.cfg', 'paged-component.cfg'))
+# Registration and Main-condition inputs outside the proof directory: the stage registry and runner route,
+# the Main workflow whose conditions the completion aggregates, and the selector that decides which Main
+# jobs were required (`source_scope` runs `validation.ci_scope`, which loads `runner` and `points.toml`).
+REGISTRATION_BOUND_FILES = (PROOF_DIRECTORY + 'store-tests.json', '.github/workflows/main-fast-lane.yml',
+    ROUTE_FILE, 'validation/ci_scope.py', 'validation/runner.py', 'validation/points.toml')
 
-    The proof-contract inputs (`PROOF_CONTRACT_NAMES`, the set `registration` digests into
-    `proof_contract_sha256`), the source-bound formula source inputs (and the record schemas and
-    source paths its rules bind), the finite-inventory source bindings, the async workflow, the table
-    map and `ACCOUNTING_METHOD_FILES`. The two JSON lists are read at the registered `commit`.
+
+def governed_inputs(root):
+    """The (exact files, prefixes) `scripts/check-async-driver-refinement` governs: its `FILES` and
+    `governed_prefixes()` (declared prefixes, workspace crate scopes, patch path overrides and `vendor/`),
+    read from the script in `root`, the same module `affected` and `source_identity` use."""
+    import importlib.machinery
+    try:
+        module = importlib.machinery.SourceFileLoader(
+            'paged_landing_governance', str(Path(root) / 'scripts/check-async-driver-refinement')).load_module()
+        # `source_identity(False)` also hashes the resume invocation paths, which are outside `FILES`.
+        invocation = tuple(getattr(getattr(module, 'async_resume', None), 'INVOCATION_PATHS', ()))
+        files, prefixes = tuple(module.FILES) + invocation, tuple(module.governed_prefixes(Path(root)))
+    except Exception:
+        raise receipts.ReceiptError('Async session: governed proof inputs are unreadable') from None
+    p.require(files and prefixes and all(type(v) is str and v for v in files + prefixes)
+              and all(v.endswith('/') for v in prefixes), 'governed proof inputs are malformed')
+    return files, prefixes
+
+
+def proof_closure(root, commit):
+    """Every repository path the registered proof is bound to, as exact files and path prefixes.
+
+    Derived, never hand-listed: the union of (a) what `scripts/check-async-driver-refinement` governs
+    (`governed_inputs`: its `FILES` and resume invocation paths, declared prefixes, crate scopes, patch
+    overrides and `vendor/`),
+    (b) everything `registration` and the qualification bind: the proof-contract inputs, the TLC
+    models and configurations, the compiled catalog sources, the stage registry, both workflows, the
+    runner route, the capability action, the scope selector, the accounting-method files and table map,
+    and (c) the source-bound formula source inputs, record schemas and rule paths and the
+    finite-inventory bindings read at the registered `commit`. A path is in the closure when it equals
+    a file or lies under a prefix (`in_closure`), so a file added under a governed prefix is covered.
     """
     def blob(path):
         try:
@@ -4466,7 +4513,13 @@ def proof_closure(root, commit):
             return json.loads(raw)
         except (subprocess.SubprocessError, OSError, ValueError):
             raise receipts.ReceiptError('Async session: proof closure list unreadable at ' + path) from None
-    closure = {PROOF_DIRECTORY + name for name in PROOF_CONTRACT_NAMES}
+    governed_files, prefixes = governed_inputs(root)
+    closure = set(governed_files)
+    closure.update(PROOF_DIRECTORY + name for name in PROOF_CONTRACT_NAMES)
+    closure.update(PROOF_MODEL_FILES)
+    closure.update(CATALOG_COMPILED_SOURCES)
+    closure.update(REGISTRATION_BOUND_FILES)
+    closure.update(CAPABILITY_ACTION_FILES)
     closure.add('.github/workflows/' + p.WORKFLOW)
     closure.add(ACCOUNTING_METHOD['table_map'])
     closure.update(ACCOUNTING_METHOD_FILES)
@@ -4480,23 +4533,55 @@ def proof_closure(root, commit):
         closure.update(row[key] for row in rows)
     for binding in inventory['source_bindings'].values():
         closure.add(binding['path'] if type(binding) is dict else binding)
-    return sorted(p.safe_source_path(path) for path in closure)
+    return {'files': sorted(p.safe_source_path(path) for path in closure), 'prefixes': sorted(prefixes)}
 
 
-def landing_check(reg, main_tip, root):
+def in_closure(closure, path):
+    """Whether `path` is a closure file or lies under a closure prefix."""
+    return path in closure['files'] or any(path.startswith(prefix) for prefix in closure['prefixes'])
+
+
+def main_tip_from_api(api, root):
+    """The current tip of Main, read from the trusted Forgejo API and verified with git.
+
+    The tip is never caller-chosen: it is the `main` branch commit the same trusted `api_environment`
+    reports, and it must be a commit object present in the checkout.
+    """
+    branch = api.get('/branches/main')
+    tip = branch.get('commit', {}).get('id') if type(branch) is dict and type(branch.get('commit')) is dict else None
+    p.require(type(branch) is dict and branch.get('name') == 'main' and isinstance(tip, str)
+              and p.COMMIT.fullmatch(tip), 'Forgejo did not report a well-formed Main tip')
+    try:
+        found = subprocess.check_output(['git', 'rev-parse', '--verify', '--quiet', tip + '^{commit}'], cwd=root,
+                                        text=True, timeout=30, stderr=subprocess.DEVNULL).strip()
+    except (subprocess.SubprocessError, OSError):
+        found = None
+    p.require(found == tip, 'Main tip is not a commit in this checkout; fetch Main first')
+    return tip
+
+
+def landing_check(reg, api, root):
     """License landing qualified evidence onto a Main that has moved since the session registered.
 
     Main cannot be frozen for a multi-hour session, so the session qualifies against `event_base`, the
-    merge base of the registered head and Main. The evidence is valid on a later Main tip exactly when
-    Main changed nothing the proof is bound to: this refuses if any file changed on Main between
-    `event_base` and `main_tip` is in the registered proof closure (`proof_closure`), otherwise returns
-    a receipt. This check, not the live Main tip, is what authorises the landing.
+    merge base of the registered head and Main. The check reads the PR (open, ready, at the registered
+    head, merge base `event_base`) and the current Main tip from the trusted API, never from the caller,
+    and verifies with git that the checkout is the registered head and the tip descends from
+    `event_base`. It refuses if any file changed on Main between `event_base` and the tip is in the
+    registered proof closure (`proof_closure`: exact files and prefixes), otherwise returns a receipt
+    binding the PR head and the Main tip it checked. The evidence is valid on that tip only when Main
+    changed nothing in the registered proof closure; the merge must then be made onto exactly that tip.
     """
     p.closed(reg, REGISTRATION_KEYS)
-    commit = reg['source']['commit']
-    p.require(all(isinstance(v, str) and p.COMMIT.fullmatch(v) for v in (reg['event_base'], commit, main_tip)),
+    source = reg['source']
+    commit = source.get('commit') if type(source) is dict else None
+    p.require(all(isinstance(v, str) and p.COMMIT.fullmatch(v) for v in (reg['event_base'], commit)),
               'landing check needs full commit identities')
+    live_pr(api, reg)
+    main_tip = main_tip_from_api(api, root)
     try:
+        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True, timeout=30,
+                                       stderr=subprocess.DEVNULL).strip()
         ancestor = subprocess.run(['git', 'merge-base', '--is-ancestor', reg['event_base'], main_tip], cwd=root,
                                   timeout=60, stderr=subprocess.DEVNULL).returncode
         changed = subprocess.check_output(['git', 'diff', '--name-only', '-z', '--no-renames',
@@ -4504,17 +4589,19 @@ def landing_check(reg, main_tip, root):
                                           stderr=subprocess.DEVNULL).split(b'\0')
     except (subprocess.SubprocessError, OSError):
         raise receipts.ReceiptError('Async session: Main history from event_base to the tip is unavailable') from None
+    p.require(head == commit, 'landing check must run from a checkout of the registered head')
     p.require(ancestor == 0, 'Main tip does not descend from the registered event_base')
     changed = sorted({name.decode('utf-8', 'surrogateescape') for name in changed if name})
     closure = proof_closure(root, commit)
-    touched = sorted(set(changed) & set(closure))
+    touched = [name for name in changed if in_closure(closure, name)]
     p.require(not touched, 'Main changed the registered proof closure since event_base: ' + ', '.join(touched[:8])
               + (' ...' if len(touched) > 8 else ''))
-    return {'schema_version': 1, 'kind': 'landing_compatibility', 'repository': reg['repository'],
-            'pr': reg['pr'], 'source': reg['source'], 'event_base': reg['event_base'], 'main_tip': main_tip,
-            'main_changed_files': len(changed), 'main_changed_sha256': p.digest(p.canonical(changed)),
-            'closure_files': len(closure), 'closure_sha256': p.digest(p.canonical(closure)),
-            'compatible': True}
+    return {'schema_version': 2, 'kind': 'landing_compatibility', 'repository': reg['repository'],
+            'pr': reg['pr'], 'source': source, 'head_commit_id': commit, 'event_base': reg['event_base'],
+            'main_tip': main_tip, 'main_changed_files': len(changed),
+            'main_changed_sha256': p.digest(p.canonical(changed)),
+            'closure_files': len(closure['files']), 'closure_prefixes': len(closure['prefixes']),
+            'closure_sha256': p.digest(p.canonical(closure)), 'compatible': True}
 
 
 def accounting_method_digest(files):
@@ -5427,13 +5514,7 @@ def validate_catalog_calibration(execution,directory,reg,root):
               and value['source_sha256']==reg['source_files'][value['source_path']]
               and p.file_sha(Path(directory)/'catalog-calibration.json')==execution['geometry_sha256'],
               'actual Rust SQLite/DDL calibration binding differs')
-    compiled=('crates/plurx-core/src/store/async_driver_catalog.rs',
-        'crates/plurx-core/src/store/async_driver_catalog/records.rs',
-        'crates/plurx-core/src/store/async_driver_catalog/sqlite.rs',
-        'crates/plurx-core/src/store/async_driver_catalog/memory.rs',
-        'crates/plurx-core/src/store/async_driver_catalog/grant.rs',
-        'verification/async-driver-refinement/paged-proof.schema.json',
-        'verification/async-driver-refinement/paged-catalog.sql')
+    compiled=CATALOG_COMPILED_SOURCES
     p.require(type(value['compiled_sources']) is dict
               and value['compiled_sources']=={path:reg['source_files'][path] for path in compiled},
               'calibration compiled source closure differs')

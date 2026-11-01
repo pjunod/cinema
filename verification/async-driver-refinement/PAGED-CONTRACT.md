@@ -518,7 +518,7 @@ commit or manual Main bypass is allowed. The schema's current constant names the
 proposed target, not an authenticated installed-service capability.
 
 The trusted controller validates repository, PR/open/ready state as applicable,
-raw event base (the merge base of the registered head and Main, see Deviation 4), exact head/tree/source closure, workflow digest, runner/toolchain,
+the PR's merge base with Main (`event_base`, see Deviation 4), exact head/tree/source closure, workflow digest, runner/toolchain,
 session/plan, ordered predecessor checkpoint, stage/cases and fresh actual
 run/job/task attempt1. Source and Oracle never receive API credentials. Existing
 ordinary positive/current gates keep strict attempt1 authority; no compatibility
@@ -1191,21 +1191,62 @@ it, and each can be reverted to the ABI wording without touching the others.
    is checked on `git merge-base` of its head and base sha in the job's
    full-history checkout. Merging Main into the head moves the merge base and
    refuses. Every other condition (head equals the registered commit,
-   `base.ref` is `main`, repositories, open, not draft) is unchanged, and
-   `source_scope` already diffs `base...HEAD`, which has merge-base semantics.
+   `base.ref` is `main`, repositories, open, not draft) is unchanged. Three
+   selectors compare against the merge base rather than the live Main tip:
+   `source_scope` (`ci_scope`, `base...HEAD`), `worker_affected`
+   (`base...head`) and, since this decision, the Main `async_refinement`
+   trigger, `scripts/check-async-driver-refinement affected --base`, which
+   diffs `base...HEAD`; a Main-only change to a governed path therefore does
+   not fire it. A completed run for the same head that names another
+   `event_base` (Main merged a sibling branch and the operator re-registered)
+   is not this session: `require-completion` skips it, before validating its
+   registration, and still refuses unless a matching complete root exists.
    The live base sha is recorded as `postcheck.current_base` for audit only and
    is never compared; the fresh-head receipt, which is compared with later live
-   reads, carries `merge_base` and no moving base. *Landing rule:* evidence
-   qualified against `event_base` may be landed on a Main that has moved only
-   after `async_refinement_session landing-check` (`--control`, `--main-tip`)
-   finds that no file changed on Main between `event_base` and the tip is in the
-   registered proof closure (the proof-contract inputs, the source-bound formula
-   source inputs, the finite-inventory source bindings, the async workflow, the
-   table map and the accounting-method files) and prints its receipt; a touched
-   closure file refuses, and the session must be re-qualified on a Main that
-   includes it. *Reason:* an active Main cannot be frozen for a multi-hour
-   session. A control carrier written before this change lacks
-   `postcheck.merge_base` and is refused by the closed carrier schema.
+   reads, carries `merge_base` and no moving base. Forgejo's `merge_base` field
+   is recomputed asynchronously and may briefly lag a Main push; only the
+   per-dispatch gates read it, and the two consumption gates
+   (`authenticate_main`, `require_completion`) use `git merge-base`.
+
+   *Landing rule.* Evidence qualified against `event_base` may be landed on a
+   Main that has moved only after `python3 -m validation.async_refinement_session
+   landing-check --control <control> --output <receipt>`, run from a checkout of
+   the registered head with the Forgejo API environment the session uses
+   (`api_environment`: `GITHUB_API_URL`, `GITHUB_REPOSITORY`, `GITHUB_TOKEN`).
+   The check takes no tip argument. It reads the PR from the API and requires it
+   open, ready, at the registered head and at merge base `event_base`; reads the
+   current Main tip from the API (`/branches/main`); and verifies with git that
+   the tip is a commit in the checkout, that the checkout is the registered
+   head and that the tip descends from `event_base`. It then refuses if any
+   file changed on Main between `event_base` and that tip is in the proof
+   closure. The closure is derived, not listed: exact files and path prefixes
+   from the union of (a) what `scripts/check-async-driver-refinement` governs
+   (`FILES`, the resume invocation paths, `governed_prefixes()` with the
+   declared prefixes, the workspace crate scopes, patch path overrides and
+   `vendor/`) and (b) everything the registration and qualification bind (the
+   proof-contract inputs, the TLC models and configurations, the compiled
+   catalog sources, `store-tests.json`, `main-fast-lane.yml`, the async
+   workflow, `runner-fleet.toml`, the capability action, `ci_scope.py` with
+   `runner.py` and `points.toml`, the source-bound formula source inputs,
+   record schemas and rule paths, the finite-inventory bindings, the table map
+   and the accounting-method files). A path is in the closure when it equals a
+   file or lies under a prefix, so a file Main adds under a governed prefix
+   refuses; a touched closure file means the session must be re-qualified on a
+   Main that includes it. On success it writes a receipt binding the PR head
+   (`head_commit_id`, equal to `source.commit`) and the Main tip it checked
+   (`main_tip`).
+
+   *Merge procedure.* The landing is made only with that receipt: immediately
+   before merging, re-read the Main tip; if it differs from `receipt.main_tip`,
+   run `landing-check` again. Merge with `head_commit_id` set to the receipt's
+   `head_commit_id` so Forgejo refuses a PR whose head moved, and treat
+   `receipt.main_tip` as the merge's expected base: a merge whose resulting
+   first parent is not that tip is not licensed. The check is operator-run;
+   GitHub cannot enforce merge policy on the current plan (see `AGENTS.md`), so
+   nothing in the repository refuses a landing made without it. *Reason:* an
+   active Main cannot be frozen for a multi-hour session. A control carrier
+   written before this change lacks `postcheck.merge_base` and is refused by
+   the closed carrier schema.
 
 ### Post-upload session control
 
