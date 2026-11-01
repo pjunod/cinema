@@ -2902,6 +2902,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::async_yields_async,
+        reason = "The create scope returns the original worker handle so the test joins that SAME task."
+    )]
     async fn owned_create_worker_keeps_original_prepare_cutoff_after_ingress_scope() {
         let budget = CreateStartupBudget::new(1_000);
         let original = budget.deadline - CREATE_ACTIVATION_ALLOWANCE;

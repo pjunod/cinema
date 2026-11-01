@@ -457,6 +457,10 @@ pub(super) async fn build(
 
 /// An adaptive attempt retains a separate precharged application owner until
 /// its original worker entry and future have actually been destroyed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The adaptive attempt builder carries the original application bytes and remote cutoff beside the fixed recipe inputs."
+)]
 pub(super) async fn build_attempt(
     shared: &Arc<Shared>,
     key: &str,

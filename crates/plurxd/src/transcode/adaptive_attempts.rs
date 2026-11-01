@@ -116,7 +116,7 @@ impl RemoteRegistration {
     }
 }
 
-struct RemoteGrantWait {
+pub(super) struct RemoteGrantWait {
     reply: tokio::sync::oneshot::Sender<
         Result<crate::media_sessions::AdaptiveAttemptRegisteredV2, String>,
     >,
@@ -1026,6 +1026,10 @@ impl super::TranscodeManager {
     /// negative checks. The admitted P collector supplies the sole fresh
     /// source/probe observation; no daemon pathname open or legacy FFprobe
     /// may precede it on this selected path.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The original worker recipe factory keeps envelope, claim, entry, frame, deadline and the original remote grant in one admitted frame."
+    )]
     pub(super) async fn prepare_adaptive_worker_recipe(
         &self,
         _state: &crate::state::AppState,
