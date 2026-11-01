@@ -49,21 +49,24 @@ class IntegrationBase(ChildPlanBase):
 # ---------------------------------------------------------------------------
 class CalibrationAdmissionTests(IntegrationBase):
     def calibrated(self, runtime_pool=512 * MIB, plan_changes=None, rust_geometry=None):
+        plan = {'unit_byte_allowance': 64 * MIB, 'unit_record_allowance': 1000, 'maximum_units': 4,
+                'total_session_disk_bytes': 4096 * MIB, 'total_retained_artifact_bytes': MIB,
+                'resident_bytes': MIB, 'resident_rss_bytes': 2 * MIB, 'unit_predecessor_allowance': 8,
+                **(plan_changes or {})}
         policy = {'schema_version': 3, 'kind': 'physical_policy', 'table_map_sha256': physical.digest(self.source_map),
                   'families': {name: {'owner': owner, **physical.minimum_family_policy(self.source_map, name, 4 * MIB)}
                                for name, owner in physical.FAMILY_OWNERS.items()},
                   'pools': {name: 8 * MIB for name in physical.POOL_OWNERS}}
         policy['pools']['source_runtime_scratch_bytes'] = runtime_pool
+        # The restore pool is sized by the calibration inequality itself (twice the retained history, two staged
+        # databases at the larger main ceiling, and the unit allowance), not by hand.
+        policy['pools']['restore_staging_bytes'] = physical.restore_staging_requirement(policy, plan)
         context = self.make_context(policy)
         connection = sqlite3.connect(':memory:')
         self.addCleanup(connection.close)
         rust = {'geometry': (physical.install_empty_role(connection, 'rust_catalog', self.source_map)
                              if rust_geometry is None else rust_geometry)}
         geometry = session.calibration_geometry(context, self.source_map, self.out, rust)
-        plan = {'unit_byte_allowance': 64 * MIB, 'unit_record_allowance': 1000, 'maximum_units': 4,
-                'total_session_disk_bytes': 4096 * MIB, 'total_retained_artifact_bytes': MIB,
-                'resident_bytes': MIB, 'resident_rss_bytes': 2 * MIB, 'unit_predecessor_allowance': 8,
-                **(plan_changes or {})}
         allowances = {'kind_a': 7}
         plan['source_bounds_utf8'] = json.dumps({'physical_policy': policy, 'record_allowances': allowances,
                                                  'source_receipt': {'receipt': 1}})
