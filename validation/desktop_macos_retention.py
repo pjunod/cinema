@@ -35,7 +35,9 @@ ORIGIN_PR, ORIGIN_REPOSITORY = 1263, 1
 ORIGIN_ZIP_SHA = '9618566a1b9ec370eca2db5718f0142dfbcf66f98e7ca428b32d238150a3edcc'
 ORIGIN_JOB_SHA = 'be0760040911104d265cf4c07e2d4624306bf968ebafb514736f3ccdc9709602'
 JOB = 'Apple compile and native TV navigation'
-LABELS = ['self-hosted','macOS','ARM64','lab','apple','xcode-27.1']
+# Producer identity: run 5943 / job 57583 executed on Xcode 27.1 runners. Its pinned job log (ORIGIN_JOB_SHA)
+# contains exactly these toolchain lines, so they authenticate that historical evidence and nothing live.
+PRODUCER_LABELS = ['self-hosted','macOS','ARM64','lab','apple','xcode-27.1']
 ROOTS = ('clients/server-tray/macos','Makefile','Cargo.toml','LICENSE','brand/export')
 # Whole recipes are pinned: a new helper/dependency cannot escape ROOTS.
 RECIPE_VERSION = 4
@@ -130,7 +132,7 @@ MAX_FILES, MAX_BLOB, MAX_SOURCE = 128, 256 * 1024, 2 * 1024 * 1024
 MAX_ZIP, MAX_LOG, MAX_HISTORY = 16 * 1024, 64 * 1024, 100
 MAX_V1_ZIP, MAX_V1_JSON, MAX_V1_TOTAL = 128 * 1024, 128 * 1024, 512 * 1024
 MEMBER = 'desktop-macos-check.log'
-TOOLCHAIN = ['Xcode 27.1','Build version 27A9275']
+PRODUCER_TOOLCHAIN = ['Xcode 27.1','Build version 27A9275']
 SWIFT = '/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift'
 OUTPUT = 'target/validation/desktop-macos-retention'
 COMMAND = ['make','desktop-macos-check']
@@ -540,6 +542,14 @@ TOOLCHAIN_SUCCESSOR_LINES = ((b'          grep -Fxq "Xcode 27.1" <<< "$xcode_ver
     b'          grep -Fxq "Xcode 27.2" <<< "$xcode_version"\n'),
     (b'          grep -Fxq "Build version 27A9275" <<< "$xcode_version"\n',
     b'          grep -Fxq "Build version 27B52" <<< "$xcode_version"\n'))
+# Current execution contract: what every live Apple runner and every fresh execution must show. It is the
+# reviewed successor text above (workflow_scope requires the current workflow to carry exactly these bytes),
+# never a second hand-written copy. There are no Xcode 27.1 runners any more, so no live check accepts the
+# producer values.
+CURRENT_LABELS = [label.strip() for label in
+    TOOLCHAIN_SUCCESSOR_HEADER[1].decode().split('[',1)[1].rsplit(']',1)[0].split(',')]
+CURRENT_TOOLCHAIN = [re.fullmatch(r'\s*grep -Fxq "([^"]+)" <<< "\$xcode_version"\n',new.decode())[1]
+    for _, new in TOOLCHAIN_SUCCESSOR_LINES]
 
 
 def successor_toolchain(header, roles):
@@ -710,17 +720,17 @@ def download_log(api, job_id):
     return raw
 
 
-def check_job(job, scope, run_id, *, successful=False):
+def check_job(job, scope, run_id, *, labels, successful=False):
     require(job.get('name') == JOB and type(job.get('repo_id')) is int and job.get('repo_id') == scope['repository']
         and type(job.get('run_id')) is int and job.get('run_id') == run_id and type(job.get('id')) is int and job['id'] > 0
         and type(job.get('attempt')) is int and job['attempt'] == 1
-        and job.get('runs_on') == LABELS, 'Native job identity/attempt/runner contract differs')
+        and job.get('runs_on') == labels, 'Native job identity/attempt/runner contract differs')
     if successful:
         require(job.get('status') == 'success' and type(job.get('task_id')) is int
             and job['task_id'] > 0, 'Native job did not succeed')
 
 
-def checkout_evidence(raw, commit, scope, job, *, complete=False):
+def checkout_evidence(raw, commit, scope, job, *, toolchain, complete=False):
     lines = main_receipts.log_lines(raw)
     deletion = [re.fullmatch(r"Deleting the contents of '([^']+)'",line) for line in lines]
     deletion = [m for m in deletion if m]
@@ -730,7 +740,7 @@ def checkout_evidence(raw, commit, scope, job, *, complete=False):
     required = [f'[command]/usr/bin/git init {workspace}',
         f'[command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +{commit}:refs/remotes/pull/{scope["pr"]}/head',
         f'[command]/usr/bin/git checkout --progress --force refs/remotes/pull/{scope["pr"]}/head',
-        '[command]/usr/bin/git log -1 --format=%H',commit,*TOOLCHAIN,SWIFT]
+        '[command]/usr/bin/git log -1 --format=%H',commit,*toolchain,SWIFT]
     positions = []
     for line in required:
         require(lines.count(line) == 1, 'Native checkout/toolchain log evidence missing/duplicated')
@@ -753,8 +763,8 @@ def applicability_inputs(entries):
 
 def execution_key(entries, expected):
     return digest(canonical({'inputs':applicability_inputs(entries),'test_ids':sorted(expected),'command':COMMAND,
-        'desktop_scope':True,'toolchain':TOOLCHAIN,'developer_dir':'/Applications/Xcode.app/Contents/Developer',
-        'runner_labels':LABELS,'release_architectures':['arm64','x86_64']}))
+        'desktop_scope':True,'toolchain':CURRENT_TOOLCHAIN,'developer_dir':'/Applications/Xcode.app/Contents/Developer',
+        'runner_labels':CURRENT_LABELS,'release_architectures':['arm64','x86_64']}))
 
 
 def legacy_result(api, scope, workspace, current, run_id):
@@ -769,7 +779,7 @@ def legacy_result(api, scope, workspace, current, run_id):
     jobs = api.pages('/actions/runs/'+str(ORIGIN_RUN)+'/jobs')
     selected = [j for j in jobs if j.get('name') == JOB]
     require(len(selected) == 1 and selected[0].get('id') == ORIGIN_JOB, 'Known native job missing/duplicated')
-    job = selected[0]; check_job(job,scope,ORIGIN_RUN,successful=True)
+    job = selected[0]; check_job(job,scope,ORIGIN_RUN,labels=PRODUCER_LABELS,successful=True)
     name = 'desktop-macos-check-5943-1'
     candidates = api.pages('/actions/artifacts',{'name':name})
     require(len(candidates) == 1, 'Known native artifact missing/ambiguous')
@@ -780,7 +790,7 @@ def legacy_result(api, scope, workspace, current, run_id):
         'Known native artifact metadata differs')
     log = download_log(api,ORIGIN_JOB)
     require(len(log) == 14852 and digest(log) == ORIGIN_JOB_SHA, 'Known native job log hash differs')
-    lines, old_workspace = checkout_evidence(log,PRODUCER,scope,job,complete=True)
+    lines, old_workspace = checkout_evidence(log,PRODUCER,scope,job,toolchain=PRODUCER_TOOLCHAIN,complete=True)
     upload = f'Artifact {name} has been successfully uploaded! Final size is 3930 bytes. Artifact ID is 4225'
     require(lines.count(upload) == 1 and lines.count('SHA256 hash of uploaded artifact zip is '+ORIGIN_ZIP_SHA) == 1
         and lines.count('Native macOS server tray build and unit checks passed.') == 1,
@@ -800,6 +810,15 @@ def legacy_result(api, scope, workspace, current, run_id):
     return {'run':prior,'job':job,'artifact':artifact,'archive':data,'job_log':log,'tree':PRODUCER_TREE,
         'native_log':native,'manifest':entries,'expected':expected,'observed':observed,
         'checkout_path':old_workspace,'key':execution_key(entries,expected)}
+
+
+def prior_contract(workspace, commit, invocation):
+    """Runner labels/toolchain a prior run's own (already scoped) workflow declared: historical, never live."""
+    if invocation['kind'] == 'legacy': return PRODUCER_LABELS, PRODUCER_TOOLCHAIN
+    apple = workflow_parts(git(workspace,'show',commit+':'+WORKFLOW,limit=MAX_WORKFLOW_BYTES))[1]['apple_compile']
+    old, new = TOOLCHAIN_SUCCESSOR_HEADER
+    require(apple.count(old)+apple.count(new) == 1, 'Prior native Apple runner label is ambiguous')
+    return (CURRENT_LABELS, CURRENT_TOOLCHAIN) if apple.count(new) else (PRODUCER_LABELS, PRODUCER_TOOLCHAIN)
 
 
 def history_before_fresh(api, scope, workspace, current, current_run, current_key, legacy):
@@ -837,9 +856,10 @@ def history_before_fresh(api, scope, workspace, current, current_run, current_ke
                 'Native attempt missing: absence is not nonexecution')
             attempts.append({'run':rid,'classification':'positively_not_started','basis':'recognized draft scope condition false'})
             continue
+        labels, toolchain = prior_contract(workspace,commit,invocation)
         seen = set()
         for job in selected:
-            check_job(job,scope,rid)
+            check_job(job,scope,rid,labels=labels)
             require(job['attempt'] not in seen, 'Duplicate native job attempt'); seen.add(job['attempt'])
             if job.get('status') == 'skipped' and job.get('task_id') == 0:
                 classification = 'positively_not_started'
@@ -850,13 +870,13 @@ def history_before_fresh(api, scope, workspace, current, current_run, current_ke
                 # missing/truncated old logs cannot manufacture a different key.
                 raw = download_log(api,job['id'])
                 if invocation['kind'] == 'legacy':
-                    lines, _ = checkout_evidence(raw,commit,scope,job)
+                    lines, _ = checkout_evidence(raw,commit,scope,job,toolchain=toolchain)
                 else:
                     require(git(workspace,'show',commit+':validation/desktop_macos_retention.py') ==
                         git(workspace,'show',current+':validation/desktop_macos_retention.py'), 'Prior native adapter compatibility unknown')
                     lines = main_receipts.log_lines(raw)
                     tree = git(workspace,'rev-parse',commit+'^{tree}').decode().strip()
-                    checked_attestation(lines,commit,tree,rid,job,entries,key)
+                    checked_attestation(lines,commit,tree,rid,job,entries,key,toolchain=toolchain)
                 require(lines and lines[-1] in ('🏁  Job succeeded','🏁  Job failed','🏁  Job cancelled'), 'Incomplete native history log')
                 require(key != current_key, 'Matching complete/started/partial native history requires retention, never rerun')
                 classification = 'different_native_key'
@@ -869,7 +889,7 @@ def history_before_fresh(api, scope, workspace, current, current_run, current_ke
 def current_job(api, scope, run_id):
     jobs = [j for j in api.pages('/actions/runs/'+str(run_id)+'/jobs') if j.get('name') == JOB]
     require(len(jobs) == 1, 'Current native job missing/ambiguous')
-    check_job(jobs[0],scope,run_id)
+    check_job(jobs[0],scope,run_id,labels=CURRENT_LABELS)
     require(jobs[0].get('status') == 'running' and jobs[0].get('task_id',0) > 0,
         'Current native job is not the active task')
     return jobs[0]
@@ -880,7 +900,7 @@ def verify_toolchain():
         'Native current platform/toolchain environment differs')
     version = subprocess.check_output(['xcodebuild','-version'],text=True,env=child_environment()).splitlines()
     swift = subprocess.check_output(['xcrun','--find','swift'],text=True,env=child_environment()).strip()
-    require(version == TOOLCHAIN and swift == SWIFT, 'Current native Xcode toolchain contract differs')
+    require(version == CURRENT_TOOLCHAIN and swift == SWIFT, 'Current native Xcode toolchain contract differs')
     return {'xcode_output':version,'swift_path':swift,'host_os_release':None,
         'compiler_binary_sha256':None,'sdk_inventory':None,
         'unrecorded_reason':'These values were not present in the original native evidence.'}
@@ -1124,7 +1144,7 @@ def v1_envelope(api,scope,workspace,run_id,job_id,current,legacy):
         git(workspace,'show',current+':validation/desktop_macos_retention.py'), 'Native v1 adapter source compatibility differs')
     jobs = [j for j in api.pages('/actions/runs/'+str(run_id)+'/jobs') if j.get('name') == JOB]
     require(len(jobs) == 1 and (job_id is None or jobs[0].get('id') == job_id), 'Native v1 job missing/ambiguous')
-    job = jobs[0];check_job(job,scope,run_id,successful=True)
+    job = jobs[0];check_job(job,scope,run_id,labels=CURRENT_LABELS,successful=True)
     name = 'desktop-macos-check-'+str(run_id)+'-'+str(job['attempt'])
     artifacts = api.pages('/actions/artifacts',{'name':name})
     require(len(artifacts) == 1, 'Native v1 artifact missing/ambiguous')
@@ -1142,8 +1162,8 @@ def v1_envelope(api,scope,workspace,run_id,job_id,current,legacy):
     heads = [i for i,line in enumerate(lines) if line == '[command]/usr/bin/git log -1 --format=%H']
     require(len(heads) == 1 and heads[0]+1 < len(lines) and lines[heads[0]+1] == commit,
         'Native v1 pinned checkout final HEAD record differs')
-    require(all(lines.count(line) == 1 for line in TOOLCHAIN+[SWIFT])
-        and heads[0]+1 < lines.index(TOOLCHAIN[0]) < lines.index(TOOLCHAIN[1]) < lines.index(SWIFT)
+    require(all(lines.count(line) == 1 for line in CURRENT_TOOLCHAIN+[SWIFT])
+        and heads[0]+1 < lines.index(CURRENT_TOOLCHAIN[0]) < lines.index(CURRENT_TOOLCHAIN[1]) < lines.index(SWIFT)
         < next(i for i,line in enumerate(lines) if line.startswith('Artifact '+name+' has been successfully uploaded!'))
         < lines.index('🏁  Job succeeded'), 'Native v1 toolchain/action/upload order differs')
     require(any(re.fullmatch(r'Runner [0-9a-f-]+ \(version:[^)]*\) received task '+str(job['task_id'])+
@@ -1151,7 +1171,7 @@ def v1_envelope(api,scope,workspace,run_id,job_id,current,legacy):
     return {'run':prior,'job':job,'artifact':artifact,'archive':data,'job_log':raw,'lines':lines,'workflow':invocation}
 
 
-def checked_attestation(lines,commit,tree,run_id,job,entries,key):
+def checked_attestation(lines,commit,tree,run_id,job,entries,key,*,toolchain):
     records = [line.removeprefix('DESKTOP-NATIVE-CHECKOUT ') for line in lines if line.startswith('DESKTOP-NATIVE-CHECKOUT ')]
     require(len(records) == 1, 'Native v1 clean checkout marker missing/duplicated')
     value = receipts.bounded_json(records[0].encode())
@@ -1163,8 +1183,8 @@ def checked_attestation(lines,commit,tree,run_id,job,entries,key):
         'Native v1 checkout identity differs')
     head = '[command]/usr/bin/git log -1 --format=%H'
     require(lines.count(head) == 1 and lines.index(head)+1 < len(lines) and lines[lines.index(head)+1] == commit
-        and all(lines.count(line) == 1 for line in TOOLCHAIN+[SWIFT])
-        and lines.index(head)+1 < lines.index(TOOLCHAIN[0]) < lines.index(TOOLCHAIN[1]) < lines.index(SWIFT)
+        and all(lines.count(line) == 1 for line in toolchain+[SWIFT])
+        and lines.index(head)+1 < lines.index(toolchain[0]) < lines.index(toolchain[1]) < lines.index(SWIFT)
         < lines.index('DESKTOP-NATIVE-CHECKOUT '+canonical(value).decode()), 'Native v1 action/toolchain/attestation order differs')
     return value
 
@@ -1194,14 +1214,14 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
         and receipt.get('recipe_compatibility') == RECIPE_COMPATIBILITY
         and receipt.get('build_product_digests') is None
         and isinstance(receipt.get('toolchain_contract'),dict)
-        and receipt['toolchain_contract'].get('xcode_output') == TOOLCHAIN
+        and receipt['toolchain_contract'].get('xcode_output') == CURRENT_TOOLCHAIN
         and receipt['toolchain_contract'].get('swift_path') == SWIFT,
         'Native v1 source/receipt/policy identity differs')
     tools = receipt['toolchain_contract']
     require(set(tools) == {'xcode_output','swift_path','host_os_release','compiler_binary_sha256','sdk_inventory','unrecorded_reason'}
         and all(tools[key] is None for key in ('host_os_release','compiler_binary_sha256','sdk_inventory'))
         and isinstance(tools['unrecorded_reason'],str), 'Native v1 invented/untyped environment identity')
-    attestation = checked_attestation(result['lines'],commit,tree,run_id,job,entries,key)
+    attestation = checked_attestation(result['lines'],commit,tree,run_id,job,entries,key,toolchain=CURRENT_TOOLCHAIN)
     require(receipt.get('checkout_attestation') == attestation, 'Native v1 receipt/checkout marker differs')
     native = payload[MEMBER];observed = None
     result.update(native_log=native,manifest=entries,expected=expected,observed=observed,

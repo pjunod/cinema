@@ -116,7 +116,7 @@ def job_log(commit=native.PRODUCER, job_id=native.ORIGIN_JOB, task=12, ending='ð
         "Deleting the contents of '"+WORK+"'",'[command]/usr/bin/git init '+WORK,
         '[command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +'+commit+':refs/remotes/pull/1263/head',
         '[command]/usr/bin/git checkout --progress --force refs/remotes/pull/1263/head',
-        '[command]/usr/bin/git log -1 --format=%H',commit,*native.TOOLCHAIN,native.SWIFT,
+        '[command]/usr/bin/git log -1 --format=%H',commit,*native.PRODUCER_TOOLCHAIN,native.SWIFT,
         'Native macOS server tray build and unit checks passed.',
         'SHA256 hash of uploaded artifact zip is '+archive_sha,
         'Artifact desktop-macos-check-5943-1 has been successfully uploaded! Final size is 3930 bytes. Artifact ID is 4225']
@@ -133,8 +133,8 @@ class FakeAPI:
         self.requests = 0; self.root = 'https://ci.example/api/v1/repos/example/project'; self.token = 'secret-not-for-children'
         self.runs = {5943:run_record(5943,native.PRODUCER),RUN:run_record(RUN,CURRENT)}
         self.jobs = {5943:[{'id':57583,'run_id':5943,'attempt':1,'repo_id':1,'name':native.JOB,
-            'runs_on':native.LABELS,'task_id':12,'status':'success'}],RUN:[{'id':60001,'run_id':RUN,
-            'attempt':1,'repo_id':1,'name':native.JOB,'runs_on':native.LABELS,'task_id':13,'status':'running'}]}
+            'runs_on':native.PRODUCER_LABELS,'task_id':12,'status':'success'}],RUN:[{'id':60001,'run_id':RUN,
+            'attempt':1,'repo_id':1,'name':native.JOB,'runs_on':native.CURRENT_LABELS,'task_id':13,'status':'running'}]}
         self.artifacts = [{'id':4225,'run_id':5943,'name':'desktop-macos-check-5943-1','size_in_bytes':3930,'expired':False}]
         self.raw = raw
     def get(self,path,query=None):
@@ -238,7 +238,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
                 native.workflow_identity(ROOT,CURRENT,legacy)
         env = {'DEVELOPER_DIR':'/Applications/Xcode.app/Contents/Developer','GITHUB_TOKEN':'never-child','PATH':'/tools'}
         with mock.patch.dict(native.os.environ,env,clear=True),mock.patch.object(native.sys,'platform','darwin'):
-            with mock.patch.object(native.subprocess,'check_output',side_effect=['Xcode 27.1\nBuild version 27A9275\n',native.SWIFT+'\n']) as tool:
+            with mock.patch.object(native.subprocess,'check_output',side_effect=['Xcode 27.2\nBuild version 27B52\n',native.SWIFT+'\n']) as tool:
                 native.verify_toolchain()
                 self.assertTrue(all('GITHUB_TOKEN' not in call.kwargs['env'] for call in tool.call_args_list))
             with mock.patch.object(native.subprocess,'check_output',side_effect=['Xcode 27.0\nBuild version old\n',native.SWIFT]):
@@ -479,7 +479,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             current_run=rid,current_job=jid,current_attempt=1,scope=SCOPE,native_execution_key=key,
             current_source_manifest=self.entries,expected_case_ids=sorted(self.expected),
             source_manifest_kind='reconstructed_from_authenticated_checkout',
-            toolchain_contract={'xcode_output':native.TOOLCHAIN,'swift_path':native.SWIFT,'host_os_release':None,
+            toolchain_contract={'xcode_output':native.CURRENT_TOOLCHAIN,'swift_path':native.SWIFT,'host_os_release':None,
                 'compiler_binary_sha256':None,'sdk_inventory':None,'unrecorded_reason':'not recorded'},
             adapter_environment={'python':[3,12,15],'platform':'darwin'},producer_workflow_sha256=native.PRODUCER_WORKFLOW,
             consumer_workflow_sha256=native.digest(native.transformed_workflow(legacy)),
@@ -496,13 +496,13 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED) as archive:
                 for name,raw in values.items():archive.writestr(name,raw)
             return out.getvalue()
-        api = FakeAPI();api.runs[rid] = run_record(rid,commit);api.jobs[rid] = [{**api.jobs[5943][0],
+        api = FakeAPI();api.runs[rid] = run_record(rid,commit);api.jobs[rid] = [{**api.jobs[5943][0],'runs_on':native.CURRENT_LABELS,
             'id':jid,'run_id':rid,'task_id':22}]
         envelope = {'run':api.runs[rid],'job':api.jobs[rid][0],
             'workflow':{'sha256':receipt['consumer_workflow_sha256'],'kind':'adapted'},
             'artifact':{'id':5100,'run_id':rid,'name':'desktop-macos-check-6100-1','size_in_bytes':1,'expired':False},
             'archive':packed(payload),'job_log':b'authenticated-v1-job',
-            'lines':['[command]/usr/bin/git log -1 --format=%H',commit,*native.TOOLCHAIN,native.SWIFT,
+            'lines':['[command]/usr/bin/git log -1 --format=%H',commit,*native.CURRENT_TOOLCHAIN,native.SWIFT,
                 'DESKTOP-NATIVE-CHECKOUT '+native.canonical(attest).decode(),
                 'DESKTOP-NATIVE-START '+native.canonical(start).decode(),
                 'DESKTOP-NATIVE-FINISH '+native.canonical(finish).decode()]}
@@ -542,7 +542,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             'origin-job.log':original['job_log'],'origin-metadata.json':meta_raw,native.MEMBER:self.native}
         wrapper = {**envelope,'run':{**envelope['run'],'id':6200},
             'job':{**envelope['job'],'id':62001,'run_id':6200},'archive':packed(values),
-            'lines':['[command]/usr/bin/git log -1 --format=%H','c'*40,*native.TOOLCHAIN,native.SWIFT,
+            'lines':['[command]/usr/bin/git log -1 --format=%H','c'*40,*native.CURRENT_TOOLCHAIN,native.SWIFT,
                 'DESKTOP-NATIVE-CHECKOUT '+native.canonical(retained['checkout_attestation']).decode()]}
         real_v1 = native.v1_result
         with mock.patch.object(native,'v1_envelope',return_value=wrapper), \
@@ -971,7 +971,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             'origin-job.log':fresh_envelope['job_log'],'origin-metadata.json':metadata,native.MEMBER:self.native}
         wrapper={**fresh_envelope,'run':{**fresh_envelope['run'],'id':6200},
             'job':{**fresh_envelope['job'],'id':62001,'run_id':6200},'archive':packed(values),
-            'lines':['[command]/usr/bin/git log -1 --format=%H',commit,*native.TOOLCHAIN,native.SWIFT,
+            'lines':['[command]/usr/bin/git log -1 --format=%H',commit,*native.CURRENT_TOOLCHAIN,native.SWIFT,
                 'DESKTOP-NATIVE-CHECKOUT '+native.canonical(retained['checkout_attestation']).decode()]}
         api.runs[6200]=wrapper['run'];api.runs[RUN]=copy.deepcopy(fresh_envelope['run'])
         def objects(workspace,*args,**kwargs):
@@ -1072,3 +1072,119 @@ class PreflightSuccessorScope(unittest.TestCase):
                 except native.receipts.ReceiptError:
                     continue
                 self.assertNotEqual(native.digest(successor), native.WORKFLOW_SCOPE_PINS['preflight_successor'])
+
+
+class NativeToolchainContract(unittest.TestCase):
+    """Historical producer identity versus the current execution contract.
+
+    Nothing here reads git history (the archive tree lacks the producer objects),
+    so these run everywhere.
+    """
+    LIVE_27_2 = 'Xcode 27.2\nBuild version 27B52\n'
+    LIVE_27_1 = 'Xcode 27.1\nBuild version 27A9275\n'
+    ENV = {'DEVELOPER_DIR':'/Applications/Xcode.app/Contents/Developer','PATH':'/tools'}
+
+    def live(self, xcodebuild):
+        with mock.patch.dict(native.os.environ,self.ENV,clear=True),mock.patch.object(native.sys,'platform','darwin'), \
+             mock.patch.object(native.subprocess,'check_output',side_effect=[xcodebuild,native.SWIFT+'\n']):
+            return native.verify_toolchain()
+
+    def test_current_contract_is_the_27_2_successor_and_producer_stays_27_1(self):
+        self.assertEqual(native.CURRENT_LABELS,['self-hosted','macOS','ARM64','lab','apple','xcode-27.2'])
+        self.assertEqual(native.CURRENT_TOOLCHAIN,['Xcode 27.2','Build version 27B52'])
+        self.assertEqual(native.PRODUCER_LABELS,['self-hosted','macOS','ARM64','lab','apple','xcode-27.1'])
+        self.assertEqual(native.PRODUCER_TOOLCHAIN,['Xcode 27.1','Build version 27A9275'])
+        workflow = (ROOT/native.WORKFLOW).read_bytes()
+        self.assertEqual(workflow.count(native.TOOLCHAIN_SUCCESSOR_HEADER[1]),1)
+        for _, line in native.TOOLCHAIN_SUCCESSOR_LINES: self.assertEqual(workflow.count(line),1)
+
+    def test_live_27_2_runner_passes_verify_toolchain(self):
+        self.assertEqual(self.live(self.LIVE_27_2)['xcode_output'],['Xcode 27.2','Build version 27B52'])
+
+    def test_live_27_1_runner_refuses_verify_toolchain(self):
+        with self.assertRaisesRegex(native.receipts.ReceiptError,'Current native Xcode toolchain contract differs'):
+            self.live(self.LIVE_27_1)
+
+    def test_current_job_requires_the_27_2_label(self):
+        api = FakeAPI()
+        self.assertEqual(native.current_job(api,SCOPE,RUN)['id'],60001)
+        api.jobs[RUN][0]['runs_on'] = native.PRODUCER_LABELS
+        with self.assertRaisesRegex(native.receipts.ReceiptError,'runner contract differs'):
+            native.current_job(api,SCOPE,RUN)
+
+    def test_historical_27_1_evidence_authenticates_through_the_producer_constants(self):
+        job = {'name':native.JOB,'repo_id':1,'run_id':native.ORIGIN_RUN,'id':native.ORIGIN_JOB,'attempt':1,
+            'runs_on':native.PRODUCER_LABELS,'task_id':12,'status':'success'}
+        native.check_job(job,SCOPE,native.ORIGIN_RUN,labels=native.PRODUCER_LABELS,successful=True)
+        with self.assertRaises(native.receipts.ReceiptError):
+            native.check_job(job,SCOPE,native.ORIGIN_RUN,labels=native.CURRENT_LABELS,successful=True)
+        log = job_log()
+        lines,_ = native.checkout_evidence(log,native.PRODUCER,SCOPE,job,toolchain=native.PRODUCER_TOOLCHAIN,complete=True)
+        self.assertIn('Xcode 27.1',lines)
+        with self.assertRaises(native.receipts.ReceiptError):
+            native.checkout_evidence(log,native.PRODUCER,SCOPE,job,toolchain=native.CURRENT_TOOLCHAIN,complete=True)
+
+    def test_prior_runs_are_judged_by_the_labels_their_own_workflow_declared(self):
+        current = (ROOT/native.WORKFLOW).read_bytes()
+        old, new = native.TOOLCHAIN_SUCCESSOR_HEADER
+        producer_era = current.replace(new,old,1)
+        self.assertNotEqual(current,producer_era)
+        for raw,expected in ((current,native.CURRENT_LABELS),(producer_era,native.PRODUCER_LABELS)):
+            with mock.patch.object(native,'git',return_value=raw):
+                self.assertEqual(native.prior_contract(ROOT,CURRENT,{'kind':'adapted'})[0],expected)
+        self.assertEqual(native.prior_contract(ROOT,CURRENT,{'kind':'legacy'}),
+            (native.PRODUCER_LABELS,native.PRODUCER_TOOLCHAIN))
+        with mock.patch.object(native,'git',return_value=current.replace(new,old+new,1)), \
+             self.assertRaisesRegex(native.receipts.ReceiptError,'label is ambiguous'):
+            native.prior_contract(ROOT,CURRENT,{'kind':'adapted'})
+
+    def test_checkout_attestation_log_order_binds_the_toolchain_it_is_given(self):
+        commit,tree,rid,jid = 'c'*40,'d'*40,6100,61001
+        entries = [{'path':'native-source','mode':'100644','blob':'1'*40,'sha256':'2'*64}]
+        value = {'commit':commit,'tree':tree,'run':rid,'job':jid,'attempt':1,'native_execution_key':'k'*64,
+            'source_manifest_sha256':native.digest(native.canonical(entries)),'tracked_clean':True,'workspace':WORK}
+        def lines(toolchain):
+            return ['[command]/usr/bin/git log -1 --format=%H',commit,*toolchain,native.SWIFT,
+                'DESKTOP-NATIVE-CHECKOUT '+native.canonical(value).decode()]
+        job = {'id':jid}
+        args = (commit,tree,rid,job,entries,'k'*64)
+        self.assertEqual(native.checked_attestation(lines(native.CURRENT_TOOLCHAIN),*args,toolchain=native.CURRENT_TOOLCHAIN),value)
+        self.assertEqual(native.checked_attestation(lines(native.PRODUCER_TOOLCHAIN),*args,toolchain=native.PRODUCER_TOOLCHAIN),value)
+        for log,wanted in ((lines(native.PRODUCER_TOOLCHAIN),native.CURRENT_TOOLCHAIN),
+                           (lines(native.CURRENT_TOOLCHAIN),native.PRODUCER_TOOLCHAIN)):
+            with self.assertRaises(native.receipts.ReceiptError):
+                native.checked_attestation(log,*args,toolchain=wanted)
+
+    def test_fresh_run_receipt_records_27_2_and_keys_on_the_current_contract(self):
+        contents = source_cases()
+        changed = [{'path':'native-source','mode':'100644','blob':'1'*40,'sha256':'3'*64}]
+        origin = [{'path':'native-source','mode':'100644','blob':'1'*40,'sha256':'2'*64}]
+        def sources(workspace,commit): return native.NativeManifest(origin if commit == native.PRODUCER else changed,b'make'),contents
+        def git_value(workspace,*args,**kwargs):
+            if args[0] == 'rev-parse': return b'd'*40
+            return b'legacy' if args[-1] == native.PRODUCER+':'+native.WORKFLOW else b'adapter'
+        def make(argv,**kwargs):
+            kwargs['stdout'].write(b'native log\n');return SimpleNamespace(returncode=0)
+        api = FakeAPI()
+        env = {**self.ENV,'GITHUB_JOB':'apple_compile'}
+        with tempfile.TemporaryDirectory() as directory,mock.patch.dict(native.os.environ,env,clear=True), \
+             mock.patch.object(native.sys,'platform','darwin'), \
+             mock.patch.object(native.subprocess,'check_output',side_effect=[self.LIVE_27_2,native.SWIFT+'\n']), \
+             mock.patch.object(native,'PRODUCER_WORKFLOW',native.digest(b'legacy')), \
+             mock.patch.object(native,'git',side_effect=git_value), \
+             mock.patch.object(native,'workflow_scope',return_value={'sha256':'e'*64,'kind':'adapted'}), \
+             mock.patch.object(native,'manifest',side_effect=sources),mock.patch.object(native,'validated_make_row'), \
+             mock.patch.object(native,'matching_v1',return_value=None),mock.patch.object(native,'recheck'), \
+             mock.patch.object(native,'live_recipe_selectors'),mock.patch.object(native,'parse_native',return_value={'passed_once':[]}), \
+             mock.patch.object(native,'history_before_fresh',return_value={'pagination_complete':True,'attempts':[]}), \
+             mock.patch.object(native.subprocess,'run',side_effect=make),mock.patch('sys.stdout',new_callable=io.StringIO):
+            out = Path(directory)
+            receipt = native.run_gate(api,SCOPE,Path(WORK),CURRENT,RUN,out,native.verify_toolchain(),True)
+            self.assertEqual(receipt['decision'],'fresh_execution')
+            self.assertEqual(json.loads((out/'receipt.json').read_text())['toolchain_contract']['xcode_output'],
+                ['Xcode 27.2','Build version 27B52'])
+            entries,expected = sources(None,CURRENT)[0],native.case_inventory(contents)
+            self.assertEqual(receipt['native_execution_key'],native.execution_key(entries,expected))
+            with mock.patch.object(native,'CURRENT_LABELS',native.PRODUCER_LABELS), \
+                 mock.patch.object(native,'CURRENT_TOOLCHAIN',native.PRODUCER_TOOLCHAIN):
+                self.assertNotEqual(receipt['native_execution_key'],native.execution_key(entries,expected))
