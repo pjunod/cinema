@@ -534,3 +534,100 @@ async fn a_held_read_runs_after_recovery_while_creates_and_control_fail_fast() {
     assert_ne!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     recovery.await.expect("recovery");
 }
+
+/// M2: the first run of a buffered rolling publication passes the first-media
+/// handoff and the actor's authorization, then loses authority before it
+/// commits: the handoff is applied and no bytes are committed. The second run
+/// starts from the top as a second request would, commits under the
+/// generation that came back, and the actor records first media and the
+/// delivery frontier exactly once.
+#[tokio::test]
+async fn abandoning_after_the_first_media_handoff_then_reauthorizing_publishes_once() {
+    let dir = crate::test_tempdir().expect("handoff dir");
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let fixture = HlsDeliveryFixture::publish_actor_managed(dir.path(), &session_id).await;
+    let _loop = tokio::spawn(
+        std::sync::Arc::clone(&fixture.state.transcode)
+            .serving_fence_loop(fixture.state.serving.subscribe()),
+    );
+    fixture.state.transcode.outage_owner_started().await;
+    fixture.mark_started().await;
+    tokio::fs::write(dir.path().join("seg00000.m4s"), b"first-media")
+        .await
+        .expect("first media object");
+    let before = fixture.actor_snapshot().await;
+    assert!(
+        !before.producer_control.producer_media_published,
+        "nothing has been published yet"
+    );
+    let crate::transcode::SegmentPublication::Ready(file) = fixture
+        .state
+        .transcode
+        .segment_for_publication(&session_id, "seg00000.m4s")
+        .await
+        .expect("resolve first media")
+    else {
+        panic!("the first media object resolves before publication");
+    };
+    let owner = file.response_owner();
+
+    let state = &fixture.state;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let runs = std::sync::atomic::AtomicUsize::new(0);
+    let handoff_seen = std::sync::atomic::AtomicBool::new(false);
+    with_authority_recovery(state, &session_id, deadline, || async {
+        let run = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let authorization = state
+            .transcode
+            .authorize_response_publication(
+                &session_id,
+                &owner,
+                crate::transcode::MediaResponsePublication::attempt_media(
+                    "media-segment",
+                    Some("seg00000.m4s"),
+                ),
+                deadline,
+            )
+            .await
+            .map_err(RawPublicationError::Rejected)?;
+        if run == 0 {
+            // Past the handoff and the actor's authorization, before any
+            // byte is committed: lose authority here.
+            handoff_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            state.serving.validation_set_ready(false).await;
+            recover_after(state, Duration::from_millis(100));
+        }
+        state
+            .transcode
+            .commit_authorized_media(authorization, true, deadline)
+            .await
+            .map_err(RawPublicationError::Rejected)
+    })
+    .await
+    .expect("the second authorization, from the top, commits");
+    assert!(handoff_seen.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        runs.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "abandoned once, authorized again once"
+    );
+
+    let delivery = fixture
+        .wait_for_delivery_projection("media-segment", Some(0))
+        .await;
+    assert_eq!(
+        delivery.fetched_segment,
+        Some(0),
+        "the delivery frontier moved to the one object, once"
+    );
+    assert_eq!(delivery.pending_fetched_segment, None);
+    let after = fixture.actor_snapshot().await;
+    assert!(
+        after.producer_control.producer_media_published,
+        "the actor recorded first media"
+    );
+    assert_eq!(
+        after.delivery.producer_attempt, before.delivery.producer_attempt,
+        "the same attempt, not a replacement"
+    );
+}
