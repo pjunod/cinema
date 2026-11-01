@@ -118,15 +118,25 @@ pub struct SqliteStorage {
     reading: bool,
     read_limit: u64,
     reservation: Option<super::ResourceLimits>,
+    /// Child/parent view of the limits for a read-only restored attachment.
+    attached: Option<super::ResourceLimits>,
 }
 impl SqliteStorage {
     pub fn open(path: &Path, resident_bytes: u64) -> CatalogResult<Self> {
         Self::open_inner(path, resident_bytes, None)
     }
-    pub fn open_reserved(path: &Path, resident_bytes: u64, limits: &super::ResourceLimits) -> CatalogResult<Self> {
+    pub fn open_reserved(
+        path: &Path,
+        resident_bytes: u64,
+        limits: &super::ResourceLimits,
+    ) -> CatalogResult<Self> {
         Self::open_inner(path, resident_bytes, Some(limits))
     }
-    fn open_inner(path: &Path, resident_bytes: u64, limits: Option<&super::ResourceLimits>) -> CatalogResult<Self> {
+    fn open_inner(
+        path: &Path,
+        resident_bytes: u64,
+        limits: Option<&super::ResourceLimits>,
+    ) -> CatalogResult<Self> {
         if path
             .symlink_metadata()
             .is_ok_and(|m| m.file_type().is_symlink())
@@ -138,9 +148,13 @@ impl SqliteStorage {
                 "catalog page cache allowance".into(),
             ));
         }
-        if let Some(limits) = limits { Self::prospective_family(limits)?; }
+        if let Some(limits) = limits {
+            Self::prospective_family(limits)?;
+        }
         let connection = Connection::open(path)?;
-        if let Some(limits) = limits { Self::enforce_page_cap(&connection, limits.family("catalog_main")?.database_bytes)?; }
+        if let Some(limits) = limits {
+            Self::enforce_page_cap(&connection, limits.family("catalog_main")?.database_bytes)?;
+        }
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE;",
@@ -189,14 +203,38 @@ impl SqliteStorage {
             reading: false,
             read_limit: resident_bytes / 4,
             reservation: limits.cloned(),
+            attached: None,
         })
     }
-    pub fn open_readonly(path: &Path, resident_bytes: u64) -> CatalogResult<Self> {
+    /// Attach an already-restored catalog read-only. `attached_bytes` is the
+    /// size of the reservation the parent already holds for this file (None for
+    /// the parent/fixture view): no second main allocation is created, the
+    /// effective page ceiling is checked and no pragma that mutates is run.
+    pub fn open_readonly(
+        path: &Path,
+        resident_bytes: u64,
+        limits: super::ResourceLimits,
+        attached_bytes: Option<u64>,
+    ) -> CatalogResult<Self> {
         let metadata = path.symlink_metadata()?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(CatalogError::Io(
                 "restore catalog is not a regular file".into(),
             ));
+        }
+        if attached_bytes.is_some_and(|held| metadata.len() > held) {
+            return Err(CatalogError::ResourceIncomplete(
+                "restored catalog exceeds its attached reservation".into(),
+            ));
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(suffix);
+            if Path::new(&name).symlink_metadata().is_ok() {
+                return Err(CatalogError::ResourceIncomplete(
+                    "restored catalog has unaccounted companion files".into(),
+                ));
+            }
         }
         let connection = Connection::open_with_flags(
             path,
@@ -213,6 +251,7 @@ impl SqliteStorage {
             reading: false,
             read_limit: resident_bytes / 4,
             reservation: None,
+            attached: Some(limits),
         })
     }
     /// Manual operational measurement, never a behavioral/proof result.
@@ -255,13 +294,31 @@ impl SqliteStorage {
         let mut table_names = Vec::new();
         let mut index_names = Vec::new();
         let mut schema=self.connection.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE type IN ('table','index') ORDER BY type,name,tbl_name")?;
-        for row in schema.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?)))? {
-            let (kind,name,table,sql)=row?;
-            if kind=="table" { table_names.push(name.clone()); } else { index_names.push(name.clone()); }
-            let normalized=sql.map(|sql|sql.replace("IF NOT EXISTS ","").split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches(';').to_owned());
-            objects.push(json!([kind,name,table,normalized]));
+        for row in schema.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })? {
+            let (kind, name, table, sql) = row?;
+            if kind == "table" {
+                table_names.push(name.clone());
+            } else {
+                index_names.push(name.clone());
+            }
+            let normalized = sql.map(|sql| {
+                sql.replace("IF NOT EXISTS ", "")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .trim_end_matches(';')
+                    .to_owned()
+            });
+            objects.push(json!([kind, name, table, normalized]));
         }
-        let geometry=json!({"database_role":"rust_catalog","sqlite_source_id":self.connection.query_row("SELECT sqlite_source_id()",[],|row|row.get::<_,String>(0))?,
+        let geometry = json!({"database_role":"rust_catalog","sqlite_source_id":self.connection.query_row("SELECT sqlite_source_id()",[],|row|row.get::<_,String>(0))?,
             "schema_sha256":digest(canonical(&json!(objects)).as_bytes()),"page_size":scalar("PRAGMA page_size")?,"page_count":scalar("PRAGMA page_count")?,"tables":table_names,"indexes":index_names});
         Ok(
             json!({"schema_version":1,"engine":"rust_rusqlite","source_path":"verification/async-driver-refinement/paged-catalog.sql","acceptance":false,
@@ -273,10 +330,17 @@ impl SqliteStorage {
     }
     fn prospective_family(limits: &super::ResourceLimits) -> CatalogResult<()> {
         let family = limits.family("catalog_main")?;
-        let journal = family.database_bytes.checked_mul(2).and_then(|v|v.checked_add(1024*1024));
+        let journal = family
+            .database_bytes
+            .checked_mul(2)
+            .and_then(|v| v.checked_add(1024 * 1024));
         let temp = family.database_bytes.checked_mul(2);
-        if journal.is_none_or(|bytes|bytes>family.journal_bytes) || temp.is_none_or(|bytes|bytes>family.temp_bytes) {
-            return Err(CatalogError::ResourceIncomplete("catalog prospective journal/temp reservation exhausted".into()));
+        if journal.is_none_or(|bytes| bytes > family.journal_bytes)
+            || temp.is_none_or(|bytes| bytes > family.temp_bytes)
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "catalog prospective journal/temp reservation exhausted".into(),
+            ));
         }
         Ok(())
     }
@@ -285,20 +349,34 @@ impl SqliteStorage {
         let pages = maximum / page_size;
         let current = connection.query_row("PRAGMA page_count", [], |row| row_uint(row, 0))?;
         if pages == 0 || pages > i64::MAX as u64 || current > pages {
-            return Err(CatalogError::ResourceIncomplete("catalog effective page ceiling below existing database".into()));
+            return Err(CatalogError::ResourceIncomplete(
+                "catalog effective page ceiling below existing database".into(),
+            ));
         }
-        let effective = connection.query_row(&format!("PRAGMA max_page_count={pages}"), [], |row|row_uint(row,0))?;
+        let effective =
+            connection.query_row(&format!("PRAGMA max_page_count={pages}"), [], |row| {
+                row_uint(row, 0)
+            })?;
         if effective != pages {
-            return Err(CatalogError::ResourceIncomplete("ineffective catalog max_page_count".into()));
+            return Err(CatalogError::ResourceIncomplete(
+                "ineffective catalog max_page_count".into(),
+            ));
         }
         Ok(())
     }
     fn check_readonly_cap(&self, limits: &super::ResourceLimits) -> CatalogResult<()> {
-        Self::prospective_family(limits)?;
-        let size=self.connection.query_row("PRAGMA page_size",[],|row|row_uint(row,0))?;
-        let pages=self.connection.query_row("PRAGMA page_count",[],|row|row_uint(row,0))?;
-        if pages>limits.family("catalog_main")?.database_bytes/size {
-            return Err(CatalogError::ResourceIncomplete("immutable restored catalog exceeds effective main cap".into()));
+        // Size and page ceiling only: an immutable attachment writes no journal
+        // and owns no second main file; ancillary work needs its own grant.
+        let size = self
+            .connection
+            .query_row("PRAGMA page_size", [], |row| row_uint(row, 0))?;
+        let pages = self
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row_uint(row, 0))?;
+        if pages > limits.family("catalog_main")?.database_bytes / size {
+            return Err(CatalogError::ResourceIncomplete(
+                "immutable restored catalog exceeds effective main cap".into(),
+            ));
         }
         Ok(())
     }
@@ -307,7 +385,10 @@ impl SqliteStorage {
         limits: &super::ResourceLimits,
     ) -> CatalogResult<()> {
         Self::prospective_family(limits)?;
-        Self::enforce_page_cap(&self.connection, limits.family("catalog_main")?.database_bytes)?;
+        Self::enforce_page_cap(
+            &self.connection,
+            limits.family("catalog_main")?.database_bytes,
+        )?;
         self.reservation = Some(limits.clone());
         self.check_storage()
     }
@@ -323,9 +404,13 @@ impl SqliteStorage {
         let size = self
             .connection
             .query_row("PRAGMA page_size", [], |row| row_uint(row, 0))?;
-        let effective=self.connection.query_row("PRAGMA max_page_count",[],|row|row_uint(row,0))?;
-        if effective != maximum/size {
-            return Err(CatalogError::ResourceIncomplete("catalog max_page_count changed".into()));
+        let effective = self
+            .connection
+            .query_row("PRAGMA max_page_count", [], |row| row_uint(row, 0))?;
+        if effective != maximum / size {
+            return Err(CatalogError::ResourceIncomplete(
+                "catalog max_page_count changed".into(),
+            ));
         }
         if pages.checked_mul(size).is_none_or(|bytes| bytes > maximum) {
             return Err(CatalogError::ResourceIncomplete(
@@ -1428,7 +1513,12 @@ impl Storage for SqliteStorage {
             .get_control("binding")?
             .ok_or_else(|| CatalogError::SourceMismatch("restore binding absent".into()))?;
         let plan: Record = serde_json::from_value(binding["resource_plan"].clone())?;
-        let limits = super::ResourceLimits::from_plan(&plan)?;
+        // A read-only attachment spends the child's narrowed view, never the
+        // plan's whole policy; the parent/fixture view derives it from the plan.
+        let limits = match &self.attached {
+            Some(view) => view.clone(),
+            None => super::ResourceLimits::from_plan(&plan)?,
+        };
         self.check_readonly_cap(&limits)?;
         let meta:(Vec<u8>,String,String)=self.connection.query_row("SELECT source_json,session_id,resource_plan_sha256 FROM catalog_meta WHERE singleton=1",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
         if meta.0 != canonical(&binding["source"]).as_bytes()
@@ -1734,8 +1824,15 @@ impl Storage for SqliteStorage {
         }
         self.check_storage()?;
         let maximum = if let Some(policy) = &self.reservation {
-            limits.max_bytes.min(policy.family("catalog_main")?.database_bytes).min(policy.pools["snapshot_spool_bytes"])
-        } else { return Err(CatalogError::ResourceIncomplete("backup lacks physical reservation".into())); };
+            limits
+                .max_bytes
+                .min(policy.family("catalog_main")?.database_bytes)
+                .min(policy.pool("snapshot_spool_bytes")?)
+        } else {
+            return Err(CatalogError::ResourceIncomplete(
+                "backup lacks physical reservation".into(),
+            ));
+        };
         backup_connection(&self.connection, path, maximum, limits.deadline)
     }
 }
@@ -1798,4 +1895,207 @@ pub fn backup_connection(
         ));
     }
     Ok(())
+}
+
+/// Physical-cap mutations: the named catalog_main database ceiling, journal/temp
+/// reservations and read-only restored attachment. Logical record quotas are
+/// deliberately left untouched in every case.
+#[cfg(test)]
+mod physical_cap_tests {
+    use super::*;
+    use crate::store::async_driver_catalog::{
+        fixture_configuration_shaped, FamilyLimits, ResourceLimits,
+    };
+
+    const PAGE: u64 = 4096;
+
+    fn shaped(
+        path: &Path,
+        database_bytes: u64,
+        journal_extra: i64,
+        temp_extra: i64,
+    ) -> ResourceLimits {
+        let journal = (2 * database_bytes + 1024 * 1024)
+            .checked_add_signed(journal_extra)
+            .expect("journal");
+        let temp = (2 * database_bytes)
+            .checked_add_signed(temp_extra)
+            .expect("temp");
+        let config = fixture_configuration_shaped(
+            path.to_path_buf(),
+            FamilyLimits {
+                database_bytes,
+                main_bytes: database_bytes.max(1024 * 1024),
+                journal_bytes: journal,
+                temp_bytes: temp,
+            },
+        );
+        ResourceLimits::from_plan(&config.resource_plan).expect("fixture physical limits")
+    }
+    fn pragma(storage: &SqliteStorage, name: &str) -> u64 {
+        storage
+            .connection
+            .query_row(&format!("PRAGMA {name}"), [], |row| row_uint(row, 0))
+            .expect("pragma")
+    }
+
+    #[test]
+    fn database_ceiling_rounds_down_to_the_measured_page_size_and_is_effective() {
+        let directory = tempfile::tempdir().expect("owned scratch");
+        let path = directory.path().join("catalog.sqlite");
+        let limits = shaped(&path, 400 * PAGE + 17, 0, 0);
+        let storage =
+            SqliteStorage::open_reserved(&path, 4 * 1024 * 1024, &limits).expect("capped open");
+        assert_eq!(pragma(&storage, "page_size"), PAGE);
+        assert_eq!(
+            pragma(&storage, "max_page_count"),
+            400,
+            "floor(capacity / measured page size), not a logical record estimate"
+        );
+        storage
+            .check_storage()
+            .expect("empty schema fits and the pragma is intact");
+        storage
+            .connection
+            .execute_batch("PRAGMA max_page_count=999999")
+            .expect("tamper");
+        assert!(
+            storage.check_storage().is_err(),
+            "a changed physical cap is detected"
+        );
+    }
+
+    #[test]
+    fn restored_database_beyond_the_effective_ceiling_is_refused_unopened() {
+        let directory = tempfile::tempdir().expect("owned scratch");
+        let path = directory.path().join("catalog.sqlite");
+        let big = Connection::open(&path).expect("restored image");
+        big.execute_batch("CREATE TABLE t(x BLOB); INSERT INTO t VALUES(zeroblob(400000));")
+            .expect("fill");
+        drop(big);
+        let limits = shaped(&path, 3 * PAGE, 0, 0);
+        assert!(
+            matches!(
+                SqliteStorage::open_reserved(&path, 4 * 1024 * 1024, &limits),
+                Err(CatalogError::ResourceIncomplete(_))
+            ),
+            "an existing database already beyond max_page_count must not open"
+        );
+    }
+
+    #[test]
+    fn journal_and_temp_reservations_must_cover_the_ceiling_exactly() {
+        let directory = tempfile::tempdir().expect("owned scratch");
+        let ok = shaped(&directory.path().join("a.sqlite"), 400 * PAGE, 0, 0);
+        SqliteStorage::open_reserved(&directory.path().join("a.sqlite"), 4 * 1024 * 1024, &ok)
+            .expect("equal reservations proceed");
+        let journal = shaped(&directory.path().join("b.sqlite"), 400 * PAGE, -1, 0);
+        assert!(
+            matches!(
+                SqliteStorage::open_reserved(
+                    &directory.path().join("b.sqlite"),
+                    4 * 1024 * 1024,
+                    &journal
+                ),
+                Err(CatalogError::ResourceIncomplete(_))
+            ),
+            "journal one byte short"
+        );
+        let temp = shaped(&directory.path().join("c.sqlite"), 400 * PAGE, 0, -1);
+        assert!(
+            matches!(
+                SqliteStorage::open_reserved(
+                    &directory.path().join("c.sqlite"),
+                    4 * 1024 * 1024,
+                    &temp
+                ),
+                Err(CatalogError::ResourceIncomplete(_))
+            ),
+            "FILE temp one byte short"
+        );
+    }
+
+    #[test]
+    fn exhausting_the_page_cap_is_an_incomplete_disposition_and_rolls_back() {
+        let directory = tempfile::tempdir().expect("owned scratch");
+        let path = directory.path().join("catalog.sqlite");
+        let limits = shaped(&path, 400 * PAGE, 0, 0);
+        let storage =
+            SqliteStorage::open_reserved(&path, 4 * 1024 * 1024, &limits).expect("capped open");
+        storage
+            .connection
+            .execute_batch("CREATE TABLE scratch(x BLOB)")
+            .expect("scratch table");
+        let error = storage
+            .connection
+            .execute("INSERT INTO scratch VALUES(zeroblob(4000000))", [])
+            .expect_err("the enforced cap must stop the write");
+        assert!(matches!(
+            CatalogError::from(error),
+            CatalogError::ResourceIncomplete(_)
+        ));
+        let rows: u64 = storage
+            .connection
+            .query_row("SELECT count(*) FROM scratch", [], |row| row_uint(row, 0))
+            .expect("count");
+        assert_eq!(rows, 0, "the failed statement published nothing");
+        storage
+            .check_storage()
+            .expect("cap and prior state intact after rollback");
+    }
+
+    #[test]
+    fn readonly_attachment_checks_the_held_reservation_without_mutating_anything() {
+        let directory = tempfile::tempdir().expect("owned scratch");
+        let path = directory.path().join("restored.sqlite");
+        let image = Connection::open(&path).expect("restored image");
+        image
+            .execute_batch("CREATE TABLE t(x BLOB); INSERT INTO t VALUES(zeroblob(40000));")
+            .expect("fill");
+        drop(image);
+        let bytes = std::fs::metadata(&path).expect("size").len();
+        let limits = shaped(&path, 400 * PAGE, 0, 0);
+        let before = std::fs::read(&path).expect("bytes before");
+        let held =
+            SqliteStorage::open_readonly(&path, 4 * 1024 * 1024, limits.clone(), Some(bytes))
+                .expect("attached to its held reservation");
+        held.check_readonly_cap(&limits)
+            .expect("within the effective ceiling");
+        assert!(
+            held.reservation.is_none(),
+            "an attachment is never a second writable main allocation"
+        );
+        drop(held);
+        assert!(
+            matches!(
+                SqliteStorage::open_readonly(
+                    &path,
+                    4 * 1024 * 1024,
+                    limits.clone(),
+                    Some(bytes - 1)
+                ),
+                Err(CatalogError::ResourceIncomplete(_))
+            ),
+            "attached file larger than the reservation held for it"
+        );
+        let tight = shaped(&path, 3 * PAGE, 0, 0);
+        let over = SqliteStorage::open_readonly(&path, 4 * 1024 * 1024, tight.clone(), Some(bytes))
+            .expect("opens read-only");
+        assert!(
+            over.check_readonly_cap(&tight).is_err(),
+            "restored database beyond the effective page ceiling"
+        );
+        drop(over);
+        std::fs::write(directory.path().join("restored.sqlite-journal"), b"x")
+            .expect("stray companion");
+        assert!(
+            SqliteStorage::open_readonly(&path, 4 * 1024 * 1024, limits, Some(bytes)).is_err(),
+            "unaccounted companion file"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("bytes after"),
+            before,
+            "validation never writes the attached bytes"
+        );
+    }
 }

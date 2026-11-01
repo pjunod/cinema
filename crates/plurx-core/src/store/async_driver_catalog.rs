@@ -1,6 +1,7 @@
 //! Test-only persistent exact proof catalog; distinct from the production Store.
 //! The data path never decides production transitions. It stores checked values
 //! and complete atomic predecessor expansions, with full-byte identity checks.
+pub mod grant;
 pub mod memory;
 pub mod records;
 pub mod sqlite;
@@ -131,6 +132,9 @@ pub struct CatalogConfig {
     pub source: SourceIdentity,
     pub session_id: uuid::Uuid,
     pub resource_plan: Record,
+    /// The inherited child grant. An allocation-capable child spends only this
+    /// view; `None` is the parent/fixture view of the whole admitted policy.
+    pub grant: Option<std::sync::Arc<grant::ChildGrant>>,
 }
 impl CatalogConfig {
     pub fn validate(&self) -> CatalogResult<()> {
@@ -152,6 +156,14 @@ impl CatalogConfig {
     fn binding(&self) -> Value {
         json!({"source":self.source,"session_id":self.session_id,"resource_plan":self.resource_plan})
     }
+    /// The plan's limits, narrowed to the child grant when one was inherited.
+    pub fn limits(&self) -> CatalogResult<ResourceLimits> {
+        let limits = ResourceLimits::from_plan(&self.resource_plan)?;
+        match &self.grant {
+            Some(grant) => limits.granted(grant),
+            None => Ok(limits),
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct RecordAllowance {
@@ -168,6 +180,8 @@ pub struct FamilyLimits {
 #[derive(Clone, Debug)]
 pub struct ResourceLimits {
     pub record_allowances: BTreeMap<String, RecordAllowance>,
+    /// The plan's closed PhysicalPolicy3, retained so a child can bind its grant to it.
+    pub physical_policy: Value,
     pub families: BTreeMap<String, FamilyLimits>,
     pub pools: BTreeMap<String, u64>,
     pub resident_bytes: u64,
@@ -184,94 +198,277 @@ impl ResourceLimits {
         let text = string(body, "source_bounds_utf8")?;
         let wrapper = strict_json(text.as_bytes())?;
         if canonical(&wrapper) != text {
-            return Err(CatalogError::CorruptRecord("noncanonical operational wrapper".into()));
+            return Err(CatalogError::CorruptRecord(
+                "noncanonical operational wrapper".into(),
+            ));
         }
-        closed_fields(&wrapper, &["schema_version", "accounting_rule", "source_receipt",
-            "record_allowances", "physical_policy", "calibration", "accounting_method_sha256", "measurement_sha256"])?;
-        if wrapper["schema_version"] != 3 || wrapper["accounting_rule"] != "typed_physical_caps_v1"
-            || !wrapper["source_receipt"].is_object() {
-            return Err(CatalogError::SourceMismatch("unsupported operational accounting rule".into()));
+        closed_fields(
+            &wrapper,
+            &[
+                "schema_version",
+                "accounting_rule",
+                "source_receipt",
+                "record_allowances",
+                "physical_policy",
+                "calibration",
+                "accounting_method_sha256",
+                "measurement_sha256",
+            ],
+        )?;
+        if wrapper["schema_version"] != 3
+            || wrapper["accounting_rule"] != "typed_physical_caps_v1"
+            || !wrapper["source_receipt"].is_object()
+        {
+            return Err(CatalogError::SourceMismatch(
+                "unsupported operational accounting rule".into(),
+            ));
         }
         for field in ["accounting_method_sha256", "measurement_sha256"] {
             validate_definition("Sha256", &wrapper[field])?;
         }
         let policy = &wrapper["physical_policy"];
-        closed_fields(policy, &["schema_version", "kind", "table_map_sha256", "families", "pools"])?;
-        let source_map = strict_json(include_bytes!("../../../../validation/async_physical_table_map.json"))?;
-        if policy["schema_version"] != 3 || policy["kind"] != "physical_policy"
-            || policy["table_map_sha256"] != digest(canonical(&source_map).as_bytes()) {
-            return Err(CatalogError::SourceMismatch("physical policy/source-map identity".into()));
+        closed_fields(
+            policy,
+            &[
+                "schema_version",
+                "kind",
+                "table_map_sha256",
+                "families",
+                "pools",
+            ],
+        )?;
+        let source_map = strict_json(include_bytes!(
+            "../../../../validation/async_physical_table_map.json"
+        ))?;
+        if policy["schema_version"] != 3
+            || policy["kind"] != "physical_policy"
+            || policy["table_map_sha256"] != digest(canonical(&source_map).as_bytes())
+        {
+            return Err(CatalogError::SourceMismatch(
+                "physical policy/source-map identity".into(),
+            ));
         }
-        let family_owners = [("catalog_main", "catalog"), ("verifier_main", "verifier"),
-            ("catalog_export_scratch", "catalog_export"), ("verifier_continuation_scratch", "verifier_continuation"),
-            ("catalog_or_verifier_restore_scratch", "snapshot_restore"), ("publication_pack_scratch", "snapshot_transport"),
-            ("authentication_index", "provenance"), ("publication_pending_scratch", "session_controller")];
-        closed_fields(&policy["families"], &family_owners.map(|(family, _)| family))?;
+        let family_owners = [
+            ("catalog_main", "catalog"),
+            ("verifier_main", "verifier"),
+            ("catalog_export_scratch", "catalog_export"),
+            ("verifier_continuation_scratch", "verifier_continuation"),
+            ("catalog_or_verifier_restore_scratch", "snapshot_restore"),
+            ("publication_pack_scratch", "snapshot_transport"),
+            ("authentication_index", "provenance"),
+            ("publication_pending_scratch", "session_controller"),
+        ];
+        closed_fields(
+            &policy["families"],
+            &family_owners.map(|(family, _)| family),
+        )?;
         let mut families = BTreeMap::new();
         let mut peak = 0u64;
-        let add = |total: u64, value: u64| total.checked_add(value).ok_or_else(|| CatalogError::ResourceIncomplete("physical reservation overflow".into()));
+        let add = |total: u64, value: u64| {
+            total.checked_add(value).ok_or_else(|| {
+                CatalogError::ResourceIncomplete("physical reservation overflow".into())
+            })
+        };
         for (family, owner) in family_owners {
             let entry = &policy["families"][family];
-            closed_fields(entry, &["owner", "database_bytes", "main_bytes", "journal_bytes", "temp_bytes"])?;
-            let limits = FamilyLimits { database_bytes: number(entry,"database_bytes")?, main_bytes: number(entry,"main_bytes")?,
-                journal_bytes: number(entry,"journal_bytes")?, temp_bytes: number(entry,"temp_bytes")? };
-            if entry["owner"] != owner || limits.database_bytes == 0 || limits.main_bytes < limits.database_bytes
-                || limits.journal_bytes == 0 || limits.temp_bytes == 0 {
-                return Err(CatalogError::ResourceIncomplete("invalid physical family policy".into()));
+            closed_fields(
+                entry,
+                &[
+                    "owner",
+                    "database_bytes",
+                    "main_bytes",
+                    "journal_bytes",
+                    "temp_bytes",
+                ],
+            )?;
+            let limits = FamilyLimits {
+                database_bytes: number(entry, "database_bytes")?,
+                main_bytes: number(entry, "main_bytes")?,
+                journal_bytes: number(entry, "journal_bytes")?,
+                temp_bytes: number(entry, "temp_bytes")?,
+            };
+            if entry["owner"] != owner
+                || limits.database_bytes == 0
+                || limits.main_bytes < limits.database_bytes
+                || limits.journal_bytes == 0
+                || limits.temp_bytes == 0
+            {
+                return Err(CatalogError::ResourceIncomplete(
+                    "invalid physical family policy".into(),
+                ));
             }
-            for bytes in [limits.main_bytes, limits.journal_bytes, limits.temp_bytes] { peak = add(peak, bytes)?; }
+            for bytes in [limits.main_bytes, limits.journal_bytes, limits.temp_bytes] {
+                peak = add(peak, bytes)?;
+            }
             families.insert(family.to_owned(), limits);
         }
-        let pool_names = ["snapshot_spool_bytes", "restore_staging_bytes", "transfer_staging_bytes", "cas_bytes", "source_runtime_scratch_bytes", "control_bytes"];
+        let pool_names = [
+            "snapshot_spool_bytes",
+            "restore_staging_bytes",
+            "transfer_staging_bytes",
+            "cas_bytes",
+            "source_runtime_scratch_bytes",
+            "control_bytes",
+        ];
         closed_fields(&policy["pools"], &pool_names)?;
         let mut pools = BTreeMap::new();
         for name in pool_names {
             let bytes = number(&policy["pools"], name)?;
-            if bytes == 0 { return Err(CatalogError::ResourceIncomplete("zero physical pool".into())); }
+            if bytes == 0 {
+                return Err(CatalogError::ResourceIncomplete(
+                    "zero physical pool".into(),
+                ));
+            }
             peak = add(peak, bytes)?;
             pools.insert(name.to_owned(), bytes);
         }
         let calibration = &wrapper["calibration"];
-        closed_fields(calibration, &["schema_version", "kind", "policy_sha256", "table_map_sha256", "geometry", "baseline", "peak_bytes"])?;
-        if calibration["schema_version"] != 1 || calibration["kind"] != "physical_calibration"
-            || calibration["policy_sha256"] != digest(canonical(policy).as_bytes()) || calibration["table_map_sha256"] != policy["table_map_sha256"] {
-            return Err(CatalogError::SourceMismatch("physical calibration policy binding".into()));
+        closed_fields(
+            calibration,
+            &[
+                "schema_version",
+                "kind",
+                "policy_sha256",
+                "table_map_sha256",
+                "geometry",
+                "baseline",
+                "peak_bytes",
+            ],
+        )?;
+        if calibration["schema_version"] != 1
+            || calibration["kind"] != "physical_calibration"
+            || calibration["policy_sha256"] != digest(canonical(policy).as_bytes())
+            || calibration["table_map_sha256"] != policy["table_map_sha256"]
+        {
+            return Err(CatalogError::SourceMismatch(
+                "physical calibration policy binding".into(),
+            ));
         }
-        closed_fields(&calibration["baseline"], &["source_workspace_bytes", "existing_unpooled_bytes"])?;
-        if number(&calibration["baseline"], "source_workspace_bytes")? > pools["source_runtime_scratch_bytes"] {
-            return Err(CatalogError::ResourceIncomplete("source/runtime baseline exceeds pool".into()));
+        closed_fields(
+            &calibration["baseline"],
+            &["source_workspace_bytes", "existing_unpooled_bytes"],
+        )?;
+        if number(&calibration["baseline"], "source_workspace_bytes")?
+            > pools["source_runtime_scratch_bytes"]
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "source/runtime baseline exceeds pool".into(),
+            ));
         }
-        peak = add(peak, number(&calibration["baseline"], "existing_unpooled_bytes")?)?;
-        peak = add(peak, number(body,"total_retained_artifact_bytes")?.checked_mul(6).ok_or_else(|| CatalogError::ResourceIncomplete("retention reservation overflow".into()))?)?;
-        peak = add(peak, number(body,"maximum_units")?.checked_add(3).and_then(|n|n.checked_mul(32*1024*1024)).ok_or_else(|| CatalogError::ResourceIncomplete("dispatch reservation overflow".into()))?)?;
-        let total_disk_bytes = number(body,"total_session_disk_bytes")?;
-        if peak != number(calibration,"peak_bytes")? || peak > total_disk_bytes {
-            return Err(CatalogError::ResourceIncomplete("physical peak differs/exceeds total disk".into()));
+        peak = add(
+            peak,
+            number(&calibration["baseline"], "existing_unpooled_bytes")?,
+        )?;
+        peak = add(
+            peak,
+            number(body, "total_retained_artifact_bytes")?
+                .checked_mul(6)
+                .ok_or_else(|| {
+                    CatalogError::ResourceIncomplete("retention reservation overflow".into())
+                })?,
+        )?;
+        peak = add(
+            peak,
+            number(body, "maximum_units")?
+                .checked_add(3)
+                .and_then(|n| n.checked_mul(32 * 1024 * 1024))
+                .ok_or_else(|| {
+                    CatalogError::ResourceIncomplete("dispatch reservation overflow".into())
+                })?,
+        )?;
+        let total_disk_bytes = number(body, "total_session_disk_bytes")?;
+        if peak != number(calibration, "peak_bytes")? || peak > total_disk_bytes {
+            return Err(CatalogError::ResourceIncomplete(
+                "physical peak differs/exceeds total disk".into(),
+            ));
         }
-        let entries = wrapper["record_allowances"].as_object().ok_or_else(|| CatalogError::CorruptRecord("allowance inventory".into()))?;
+        let entries = wrapper["record_allowances"]
+            .as_object()
+            .ok_or_else(|| CatalogError::CorruptRecord("allowance inventory".into()))?;
         let mut allowances = BTreeMap::new();
         for (kind, value) in entries {
             closed_fields(value, &["records", "max_encoded_bytes"])?;
-            let records = number(value,"records")?;
-            let max_encoded_bytes = number(value,"max_encoded_bytes")?;
+            let records = number(value, "records")?;
+            let max_encoded_bytes = number(value, "max_encoded_bytes")?;
             if max_encoded_bytes == 0 || max_encoded_bytes > PAGE_BYTES {
-                return Err(CatalogError::ResourceIncomplete("invalid full encoded record allowance".into()));
+                return Err(CatalogError::ResourceIncomplete(
+                    "invalid full encoded record allowance".into(),
+                ));
             }
-            allowances.insert(kind.clone(), RecordAllowance { records, max_encoded_bytes });
+            allowances.insert(
+                kind.clone(),
+                RecordAllowance {
+                    records,
+                    max_encoded_bytes,
+                },
+            );
         }
         for kind in record_kinds() {
-            if !allowances.contains_key(*kind) { return Err(CatalogError::ResourceIncomplete(format!("missing operational kind {kind}"))); }
+            if !allowances.contains_key(*kind) {
+                return Err(CatalogError::ResourceIncomplete(format!(
+                    "missing operational kind {kind}"
+                )));
+            }
         }
-        Ok(Self { record_allowances: allowances, families, pools,
-            resident_bytes: number(body,"resident_bytes")?, rss_bytes: number(body,"resident_rss_bytes")?, total_disk_bytes,
-            unit_records: number(body,"unit_record_allowance")?, unit_bytes: number(body,"unit_byte_allowance")?,
-            unit_predecessors: number(body,"unit_predecessor_allowance")? })
+        Ok(Self {
+            record_allowances: allowances,
+            physical_policy: policy.clone(),
+            families,
+            pools,
+            resident_bytes: number(body, "resident_bytes")?,
+            rss_bytes: number(body, "resident_rss_bytes")?,
+            total_disk_bytes,
+            unit_records: number(body, "unit_record_allowance")?,
+            unit_bytes: number(body, "unit_byte_allowance")?,
+            unit_predecessors: number(body, "unit_predecessor_allowance")?,
+        })
+    }
+    /// This child's view: only what the parent deducted and handed down. A
+    /// family or pool the grant never named is absent, not defaulted to policy.
+    pub fn granted(&self, grant: &grant::ChildGrant) -> CatalogResult<Self> {
+        let mut view = self.clone();
+        view.families.clear();
+        view.pools.clear();
+        for (name, policy) in &self.families {
+            if let Some(main) = grant.limit(name, "main") {
+                view.families.insert(
+                    name.clone(),
+                    FamilyLimits {
+                        database_bytes: policy.database_bytes.min(main),
+                        main_bytes: main.min(policy.main_bytes),
+                        journal_bytes: grant
+                            .limit(name, "journal")
+                            .unwrap_or(0)
+                            .min(policy.journal_bytes),
+                        temp_bytes: grant
+                            .limit(name, "temp")
+                            .unwrap_or(0)
+                            .min(policy.temp_bytes),
+                    },
+                );
+            }
+        }
+        for name in self.pools.keys() {
+            if let Some(bytes) = grant.limit(name, "bytes") {
+                view.pools.insert(name.clone(), bytes);
+            }
+        }
+        Ok(view)
+    }
+    pub fn pool(&self, name: &str) -> CatalogResult<u64> {
+        self.pools.get(name).copied().ok_or_else(|| {
+            CatalogError::ResourceIncomplete(format!("unregistered physical pool {name}"))
+        })
     }
     pub fn family(&self, name: &str) -> CatalogResult<&FamilyLimits> {
-        self.families.get(name).ok_or_else(|| CatalogError::ResourceIncomplete(format!("unregistered physical family {name}")))
+        self.families.get(name).ok_or_else(|| {
+            CatalogError::ResourceIncomplete(format!("unregistered physical family {name}"))
+        })
     }
     pub fn allowance(&self, kind: &str) -> CatalogResult<&RecordAllowance> {
-        self.record_allowances.get(kind).ok_or_else(|| CatalogError::ResourceIncomplete(format!("unregistered accounting kind {kind}")))
+        self.record_allowances.get(kind).ok_or_else(|| {
+            CatalogError::ResourceIncomplete(format!("unregistered accounting kind {kind}"))
+        })
     }
 }
 pub fn closed_fields(value: &Value, fields: &[&str]) -> CatalogResult<()> {
@@ -317,12 +514,21 @@ pub struct Catalog {
 impl Catalog {
     pub fn disk(config: CatalogConfig) -> CatalogResult<Self> {
         config.validate()?;
+        let limits = config.limits()?;
+        if let Some(grant) = &config.grant {
+            // The writable catalog file must lie inside its granted main allocation.
+            if !grant.allocation_covers("catalog_main", "main", &config.path) {
+                return Err(CatalogError::ResourceIncomplete(
+                    "catalog path is outside its granted main allocation".into(),
+                ));
+            }
+        }
         let mut backend = sqlite::SqliteStorage::open_reserved(
             &config.path,
             number(&config.resource_plan.record, "resident_bytes")?,
-            &ResourceLimits::from_plan(&config.resource_plan)?,
+            &limits,
         )?;
-        backend.reserve_operational_storage(&ResourceLimits::from_plan(&config.resource_plan)?)?;
+        backend.reserve_operational_storage(&limits)?;
         Self::with_storage(config, Box::new(backend))
     }
     pub fn memory(
@@ -346,7 +552,7 @@ impl Catalog {
                 "committed catalog lacks binding".into(),
             ));
         }
-        let limits = ResourceLimits::from_plan(&config.resource_plan)?;
+        let limits = config.limits()?;
         Ok(Self {
             inner: Rc::new(Inner {
                 storage: RefCell::new(storage),
@@ -1158,9 +1364,40 @@ impl Catalog {
     }
     pub fn validation(config: CatalogConfig) -> CatalogResult<Self> {
         config.validate()?;
+        let mut limits = config.limits()?;
+        let attachment = match &config.grant {
+            // A restored image attaches the reservation the parent already holds;
+            // it never receives a second main allocation of its own. Its ceiling
+            // is the policy's main database cap bounded by that held reservation.
+            Some(grant) => {
+                let held = grant
+                    .attachment_for(&config.path)
+                    .ok_or_else(|| {
+                        CatalogError::ResourceIncomplete(
+                            "restored catalog lacks a read-only attachment grant".into(),
+                        )
+                    })?
+                    .bytes;
+                let policy = ResourceLimits::from_plan(&config.resource_plan)?;
+                let family = policy.family("catalog_main")?;
+                limits.families.insert(
+                    "catalog_main".to_owned(),
+                    FamilyLimits {
+                        database_bytes: family.database_bytes.min(held),
+                        main_bytes: held,
+                        journal_bytes: grant.limit("catalog_main", "journal").unwrap_or(0),
+                        temp_bytes: grant.limit("catalog_main", "temp").unwrap_or(0),
+                    },
+                );
+                Some(held)
+            }
+            None => None,
+        };
         let storage = sqlite::SqliteStorage::open_readonly(
             &config.path,
             number(&config.resource_plan.record, "resident_bytes")?,
+            limits,
+            attachment,
         )?;
         Self::with_storage(config, Box::new(storage))
     }
@@ -1852,10 +2089,14 @@ impl ExportBuilder<'_> {
         let size: u64 = self
             .work
             .query_row("PRAGMA page_size", [], |row| sqlite::row_uint(row, 0))?;
-        if pages
-            .checked_mul(size)
-            .is_none_or(|bytes| bytes > self.snapshot.catalog.inner.limits.families["catalog_export_scratch"].database_bytes)
-        {
+        let ceiling = self
+            .snapshot
+            .catalog
+            .inner
+            .limits
+            .family("catalog_export_scratch")?
+            .database_bytes;
+        if pages.checked_mul(size).is_none_or(|bytes| bytes > ceiling) {
             return Err(CatalogError::ResourceIncomplete(
                 "export closure scratch allowance".into(),
             ));
@@ -2229,14 +2470,31 @@ impl ReadSnapshot {
         )?;
         let page_size: u64 =
             work.query_row("PRAGMA page_size", [], |row| sqlite::row_uint(row, 0))?;
-        let family=resource.family("catalog_export_scratch")?;
-        let pages=family.database_bytes/page_size;
-        if pages==0 || family.database_bytes.checked_mul(2).and_then(|n|n.checked_add(1024*1024)).is_none_or(|n|n>family.journal_bytes)
-            || family.database_bytes.checked_mul(2).is_none_or(|n|n>family.temp_bytes) {
-            return Err(CatalogError::ResourceIncomplete("export prospective database/journal/temp reservation".into()));
+        let family = resource.family("catalog_export_scratch")?;
+        let pages = family.database_bytes / page_size;
+        if pages == 0
+            || family
+                .database_bytes
+                .checked_mul(2)
+                .and_then(|n| n.checked_add(1024 * 1024))
+                .is_none_or(|n| n > family.journal_bytes)
+            || family
+                .database_bytes
+                .checked_mul(2)
+                .is_none_or(|n| n > family.temp_bytes)
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "export prospective database/journal/temp reservation".into(),
+            ));
         }
-        let effective=work.query_row(&format!("PRAGMA max_page_count={pages}"),[],|row|sqlite::row_uint(row,0))?;
-        if effective!=pages { return Err(CatalogError::ResourceIncomplete("ineffective export max_page_count".into())); }
+        let effective = work.query_row(&format!("PRAGMA max_page_count={pages}"), [], |row| {
+            sqlite::row_uint(row, 0)
+        })?;
+        if effective != pages {
+            return Err(CatalogError::ResourceIncomplete(
+                "ineffective export max_page_count".into(),
+            ));
+        }
         work.execute_batch("CREATE TABLE exports(kind TEXT NOT NULL,key TEXT NOT NULL,path TEXT NOT NULL,level INTEGER,PRIMARY KEY(kind,key)); CREATE TABLE closure(kind TEXT NOT NULL,key TEXT NOT NULL,expected TEXT,done INTEGER NOT NULL,PRIMARY KEY(kind,key)); CREATE INDEX closure_pending ON closure(done,kind,key);")?;
         let mut builder = ExportBuilder {
             snapshot: self,
@@ -2473,11 +2731,46 @@ impl QuantumRequest {
             }
         }
         let unit = request.unit()?;
-        closed_fields(&request.execution_origin, &["repository","pr","event_base","workflow_id","event_name","mode","operation","run","job","task","attempt","dispatch_ordinal"])?;
-        for field in ["repository","pr","event_base","workflow_id","event_name","mode","run","job","task","attempt"] {
-            if request.execution_origin[field] != unit.record[field] { return Err(CatalogError::SourceMismatch("private execution origin/WorkUnit mismatch".into())); }
+        closed_fields(
+            &request.execution_origin,
+            &[
+                "repository",
+                "pr",
+                "event_base",
+                "workflow_id",
+                "event_name",
+                "mode",
+                "operation",
+                "run",
+                "job",
+                "task",
+                "attempt",
+                "dispatch_ordinal",
+            ],
+        )?;
+        for field in [
+            "repository",
+            "pr",
+            "event_base",
+            "workflow_id",
+            "event_name",
+            "mode",
+            "run",
+            "job",
+            "task",
+            "attempt",
+        ] {
+            if request.execution_origin[field] != unit.record[field] {
+                return Err(CatalogError::SourceMismatch(
+                    "private execution origin/WorkUnit mismatch".into(),
+                ));
+            }
         }
-        if request.execution_origin["operation"] != "execute" { return Err(CatalogError::SourceMismatch("proof operation lacks execute origin".into())); }
+        if request.execution_origin["operation"] != "execute" {
+            return Err(CatalogError::SourceMismatch(
+                "proof operation lacks execute origin".into(),
+            ));
+        }
         if number(&request.execution_origin, "dispatch_ordinal")?
             >= number(&request.resource_plan.record, "maximum_units")?
         {
@@ -2514,11 +2807,22 @@ impl QuantumRequest {
         Record::new("WorkUnit", self.work_unit.clone())
     }
     pub fn config(&self) -> CatalogResult<CatalogConfig> {
+        let source: SourceIdentity = serde_json::from_value(self.work_unit["source"].clone())?;
+        let session_id: uuid::Uuid = serde_json::from_value(self.work_unit["session_id"].clone())?;
+        let policy = ResourceLimits::from_plan(&self.resource_plan)?.physical_policy;
+        // Every allocation-capable child is spawned with its explicit current grant.
+        let grant = grant::ChildGrant::from_environment(&grant::GrantExpectation {
+            source: &self.work_unit["source"],
+            session_id: &session_id.to_string(),
+            resource_plan_sha256: &self.resource_plan.sha256(),
+            policy: &policy,
+        })?;
         Ok(CatalogConfig {
             path: self.catalog_path.clone(),
-            source: serde_json::from_value(self.work_unit["source"].clone())?,
-            session_id: serde_json::from_value(self.work_unit["session_id"].clone())?,
+            source,
+            session_id,
             resource_plan: self.resource_plan.clone(),
+            grant: Some(std::sync::Arc::new(grant)),
         })
     }
     pub fn deadline(&self) -> CatalogResult<std::time::Instant> {
@@ -2787,28 +3091,55 @@ impl QuantumRequest {
             || root["snapshot_boundary"] != "post_checkpoint_pre_upload"
             || root["format"] != "sqlite3"
             || root["backup_method"] != "sqlite_backup_api_v1"
-            || root["chunk_bytes_limit"] != 1024*1024
+            || root["chunk_bytes_limit"] != 1024 * 1024
             || number(&root, "catalog_bytes")? == 0
             || number(&root, "chunk_count")? == 0
-            || number(&root,"chunk_count")? != number(&root,"catalog_bytes")?.div_ceil(1024*1024)
+            || number(&root, "chunk_count")?
+                != number(&root, "catalog_bytes")?.div_ceil(1024 * 1024)
         {
             return Err(CatalogError::SourceMismatch(
                 "authenticated backup root/checkpoint binding".into(),
             ));
         }
-        closed_fields(&root["execution_origin"], &["repository","pr","event_base","workflow_id","event_name","mode","operation","run","job","task","attempt","dispatch_ordinal"])?;
-        if root["execution_origin"]["operation"]!="execute" || root["execution_origin"]["attempt"]!=1 {
-            return Err(CatalogError::SourceMismatch("snapshot execution origin differs".into()));
+        closed_fields(
+            &root["execution_origin"],
+            &[
+                "repository",
+                "pr",
+                "event_base",
+                "workflow_id",
+                "event_name",
+                "mode",
+                "operation",
+                "run",
+                "job",
+                "task",
+                "attempt",
+                "dispatch_ordinal",
+            ],
+        )?;
+        if root["execution_origin"]["operation"] != "execute"
+            || root["execution_origin"]["attempt"] != 1
+        {
+            return Err(CatalogError::SourceMismatch(
+                "snapshot execution origin differs".into(),
+            ));
         }
-        number(&root["execution_origin"],"dispatch_ordinal")?;
-        for field in ["manifest_root","predecessor_root"] {
-            let reference=&root[field];
-            if field=="predecessor_root" && reference.is_null() { continue; }
-            closed_fields(reference, &["kind","sha256","bytes"])?;
+        number(&root["execution_origin"], "dispatch_ordinal")?;
+        for field in ["manifest_root", "predecessor_root"] {
+            let reference = &root[field];
+            if field == "predecessor_root" && reference.is_null() {
+                continue;
+            }
+            closed_fields(reference, &["kind", "sha256", "bytes"])?;
             validate_definition("Sha256", &reference["sha256"])?;
-            if number(reference,"bytes")?==0 || field=="manifest_root" && reference["kind"]!="snapshot_manifest_node"
-                || field=="predecessor_root" && reference["kind"]!="catalog_backup" {
-                return Err(CatalogError::SourceMismatch("snapshot manifest/predecessor content identity".into()));
+            if number(reference, "bytes")? == 0
+                || field == "manifest_root" && reference["kind"] != "snapshot_manifest_node"
+                || field == "predecessor_root" && reference["kind"] != "catalog_backup"
+            {
+                return Err(CatalogError::SourceMismatch(
+                    "snapshot manifest/predecessor content identity".into(),
+                ));
             }
         }
         validate_definition("Sha256", &root["catalog_sha256"])?;
@@ -2951,6 +3282,21 @@ pub fn same_file_bytes(
 }
 
 pub(super) fn fixture_configuration(path: PathBuf) -> CatalogConfig {
+    fixture_configuration_shaped(
+        path,
+        FamilyLimits {
+            database_bytes: 64 * 1024 * 1024,
+            main_bytes: 128 * 1024 * 1024,
+            journal_bytes: 129 * 1024 * 1024,
+            temp_bytes: 128 * 1024 * 1024,
+        },
+    )
+}
+/// The admitted fixture plan with an explicit `catalog_main` physical policy.
+pub(super) fn fixture_configuration_shaped(
+    path: PathBuf,
+    catalog_main: FamilyLimits,
+) -> CatalogConfig {
     let source = SourceIdentity {
         commit: "0".repeat(40),
         tree: "1".repeat(40),
@@ -2999,22 +3345,49 @@ pub(super) fn fixture_configuration(path: PathBuf) -> CatalogConfig {
         })
         .collect::<serde_json::Map<_, _>>();
     p["maximum_units"] = json!(16);
-    let mut families=serde_json::Map::new();
-    for (name,owner) in [("catalog_main","catalog"),("verifier_main","verifier"),("catalog_export_scratch","catalog_export"),
-        ("verifier_continuation_scratch","verifier_continuation"),("catalog_or_verifier_restore_scratch","snapshot_restore"),
-        ("publication_pack_scratch","snapshot_transport"),("authentication_index","provenance"),("publication_pending_scratch","session_controller")] {
-        families.insert(name.into(),json!({"owner":owner,"database_bytes":64*1024*1024u64,"main_bytes":128*1024*1024u64,"journal_bytes":129*1024*1024u64,"temp_bytes":128*1024*1024u64}));
+    let mut families = serde_json::Map::new();
+    let mut family_total = 0u64;
+    for (name, owner) in [
+        ("catalog_main", "catalog"),
+        ("verifier_main", "verifier"),
+        ("catalog_export_scratch", "catalog_export"),
+        ("verifier_continuation_scratch", "verifier_continuation"),
+        ("catalog_or_verifier_restore_scratch", "snapshot_restore"),
+        ("publication_pack_scratch", "snapshot_transport"),
+        ("authentication_index", "provenance"),
+        ("publication_pending_scratch", "session_controller"),
+    ] {
+        let shape = if name == "catalog_main" {
+            catalog_main.clone()
+        } else {
+            FamilyLimits {
+                database_bytes: 64 * 1024 * 1024,
+                main_bytes: 128 * 1024 * 1024,
+                journal_bytes: 129 * 1024 * 1024,
+                temp_bytes: 128 * 1024 * 1024,
+            }
+        };
+        family_total += shape.main_bytes + shape.journal_bytes + shape.temp_bytes;
+        families.insert(name.into(),json!({"owner":owner,"database_bytes":shape.database_bytes,"main_bytes":shape.main_bytes,"journal_bytes":shape.journal_bytes,"temp_bytes":shape.temp_bytes}));
     }
-    let source_map=strict_json(include_bytes!("../../../../validation/async_physical_table_map.json")).expect("fixture source map");
-    let table_map_sha=digest(canonical(&source_map).as_bytes());
-    let policy=json!({"schema_version":3,"kind":"physical_policy","table_map_sha256":table_map_sha,"families":families,
+    let source_map = strict_json(include_bytes!(
+        "../../../../validation/async_physical_table_map.json"
+    ))
+    .expect("fixture source map");
+    let table_map_sha = digest(canonical(&source_map).as_bytes());
+    let policy = json!({"schema_version":3,"kind":"physical_policy","table_map_sha256":table_map_sha,"families":families,
         "pools":{"snapshot_spool_bytes":64*1024*1024u64,"restore_staging_bytes":64*1024*1024u64,"transfer_staging_bytes":64*1024*1024u64,
         "cas_bytes":64*1024*1024u64,"source_runtime_scratch_bytes":64*1024*1024u64,"control_bytes":64*1024*1024u64}});
-    let peak=8*385*1024*1024u64+6*64*1024*1024u64+6*number(&p,"total_retained_artifact_bytes").expect("fixture retention")+32*1024*1024u64*19;
-    let calibration=json!({"schema_version":1,"kind":"physical_calibration","policy_sha256":digest(canonical(&policy).as_bytes()),"table_map_sha256":table_map_sha,
+    let peak = family_total
+        + 6 * 64 * 1024 * 1024u64
+        + 6 * number(p, "total_retained_artifact_bytes").expect("fixture retention")
+        + 32 * 1024 * 1024u64 * 19;
+    let calibration = json!({"schema_version":1,"kind":"physical_calibration","policy_sha256":digest(canonical(&policy).as_bytes()),"table_map_sha256":table_map_sha,
         "geometry":{},"baseline":{"source_workspace_bytes":0,"existing_unpooled_bytes":0},"peak_bytes":peak});
-    p["source_bounds_utf8"]=json!(canonical(&json!({"schema_version":3,"accounting_rule":"typed_physical_caps_v1","source_receipt":{},"record_allowances":allowances,
-        "physical_policy":policy,"calibration":calibration,"accounting_method_sha256":"e".repeat(64),"measurement_sha256":"f".repeat(64)})));
+    p["source_bounds_utf8"] = json!(canonical(
+        &json!({"schema_version":3,"accounting_rule":"typed_physical_caps_v1","source_receipt":{},"record_allowances":allowances,
+        "physical_policy":policy,"calibration":calibration,"accounting_method_sha256":"e".repeat(64),"measurement_sha256":"f".repeat(64)})
+    ));
     p["plan_sha256"] = json!("0".repeat(64));
     let provisional: Record = serde_json::from_value(plan).expect("plan shape");
     let hash = provisional.sha256();
@@ -3025,6 +3398,7 @@ pub(super) fn fixture_configuration(path: PathBuf) -> CatalogConfig {
         source,
         session_id,
         resource_plan: Record::new("ResourcePlan", value).expect("fixture plan"),
+        grant: None,
     }
 }
 
@@ -3401,5 +3775,195 @@ mod tests {
             left.reference().expect("left ref"),
             right.reference().expect("right ref")
         );
+    }
+
+    #[test]
+    fn granted_limits_are_only_what_the_parent_deducted() {
+        let directory = tempfile::tempdir().expect("owned scratch");
+        let root = directory.path().canonicalize().expect("root");
+        let config = fixture_configuration(root.join("catalog.sqlite"));
+        let full = ResourceLimits::from_plan(&config.resource_plan).expect("policy limits");
+        let grant = grant::ChildGrant::for_test(
+            &root,
+            vec![
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "main",
+                    2 * 1024 * 1024,
+                    "catalog.sqlite",
+                ),
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "journal",
+                    5 * 1024 * 1024,
+                    "catalog.sqlite",
+                ),
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "temp",
+                    4 * 1024 * 1024,
+                    "catalog.sqlite",
+                ),
+                grant::GrantEntry::for_test(
+                    "snapshot_spool_bytes",
+                    "bytes",
+                    512 * 1024,
+                    "backup.sqlite",
+                ),
+            ],
+            Vec::new(),
+        );
+        let view = full.granted(&grant).expect("narrowed view");
+        let family = view.family("catalog_main").expect("granted family");
+        assert_eq!(
+            (
+                family.database_bytes,
+                family.main_bytes,
+                family.journal_bytes,
+                family.temp_bytes
+            ),
+            (
+                2 * 1024 * 1024,
+                2 * 1024 * 1024,
+                5 * 1024 * 1024,
+                4 * 1024 * 1024
+            ),
+            "the view is the grant, not the 64 MiB policy ceiling"
+        );
+        assert_eq!(
+            view.pool("snapshot_spool_bytes").expect("granted pool"),
+            512 * 1024
+        );
+        assert!(
+            view.family("verifier_main").is_err(),
+            "an ungranted family is absent, not policy-sized"
+        );
+        assert!(
+            view.pool("cas_bytes").is_err(),
+            "an ungranted pool is absent"
+        );
+        // The journal/temp reservations of the narrowed view must still cover its ceiling.
+        // The exact reservation (journal = 2*ceiling + 1 MiB, temp = 2*ceiling) opens.
+        sqlite::SqliteStorage::open_reserved(&root.join("probe.sqlite"), 4 * 1024 * 1024, &view)
+            .expect("the granted ceiling and its reservations are exactly sufficient");
+    }
+
+    #[test]
+    fn disk_catalog_must_lie_inside_its_granted_main_allocation() {
+        let directory = tempfile::tempdir().expect("owned scratch");
+        let root = directory.path().canonicalize().expect("root");
+        let mut config = fixture_configuration(root.join("catalog.sqlite"));
+        let grant = grant::ChildGrant::for_test(
+            &root,
+            vec![
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "main",
+                    4 * 1024 * 1024,
+                    "elsewhere.sqlite",
+                ),
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "journal",
+                    9 * 1024 * 1024,
+                    "elsewhere.sqlite",
+                ),
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "temp",
+                    8 * 1024 * 1024,
+                    "elsewhere.sqlite",
+                ),
+            ],
+            Vec::new(),
+        );
+        config.grant = Some(std::sync::Arc::new(grant));
+        assert!(
+            matches!(Catalog::disk(config.clone()), Err(CatalogError::ResourceIncomplete(reason)) if reason.contains("granted main")),
+            "a writable catalog outside its allocation is refused before it is created"
+        );
+        assert!(!root.join("catalog.sqlite").exists());
+        let covering = grant::ChildGrant::for_test(
+            &root,
+            vec![
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "main",
+                    4 * 1024 * 1024,
+                    "catalog.sqlite",
+                ),
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "journal",
+                    9 * 1024 * 1024,
+                    "catalog.sqlite",
+                ),
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "temp",
+                    8 * 1024 * 1024,
+                    "catalog.sqlite",
+                ),
+            ],
+            Vec::new(),
+        );
+        config.grant = Some(std::sync::Arc::new(covering));
+        Catalog::disk(config)
+            .expect("catalog inside its allocation opens against the granted ceiling");
+    }
+
+    #[test]
+    fn restored_catalog_requires_a_readonly_attachment_not_a_second_allocation() {
+        let directory = tempfile::tempdir().expect("owned scratch");
+        let root = directory.path().canonicalize().expect("root");
+        let source = fixture_configuration(root.join("live.sqlite"));
+        let live = Catalog::disk(source.clone()).expect("live catalog");
+        drop(live);
+        let restored = root.join("restored.sqlite");
+        std::fs::copy(root.join("live.sqlite"), &restored).expect("restored image");
+        let mut config = fixture_configuration(restored.clone());
+        let writable_only = grant::ChildGrant::for_test(
+            &root,
+            vec![grant::GrantEntry::for_test(
+                "catalog_main",
+                "main",
+                4 * 1024 * 1024,
+                "restored.sqlite",
+            )],
+            Vec::new(),
+        );
+        config.grant = Some(std::sync::Arc::new(writable_only));
+        assert!(
+            matches!(Catalog::validation(config.clone()), Err(CatalogError::ResourceIncomplete(reason)) if reason.contains("attachment")),
+            "a main allocation is not an attachment of the held restore reservation"
+        );
+        let mut attachment = grant::GrantEntry::for_test(
+            "restore_staging_bytes",
+            "bytes",
+            64 * 1024 * 1024,
+            "restored.sqlite",
+        );
+        attachment.reservation_id = "d".repeat(64);
+        let attached = grant::ChildGrant::for_test(
+            &root,
+            vec![
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "journal",
+                    9 * 1024 * 1024,
+                    "restored.sqlite",
+                ),
+                grant::GrantEntry::for_test(
+                    "catalog_main",
+                    "temp",
+                    8 * 1024 * 1024,
+                    "restored.sqlite",
+                ),
+            ],
+            vec![attachment],
+        );
+        config.grant = Some(std::sync::Arc::new(attached));
+        Catalog::validation(config)
+            .expect("an attached restore spends the held reservation and opens read-only");
     }
 }
