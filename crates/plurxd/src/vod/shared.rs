@@ -1183,8 +1183,16 @@ impl Shared {
         // Single-flight only this key. No Store, filesystem, process, manifest,
         // or reader await below owns the node-wide registry mutex.
         let existing = {
-            let renditions = self.renditions.lock().await;
+            let mut renditions = self.renditions.lock().await;
             match renditions.get(key).map(Arc::clone) {
+                // A carrier serves only sessions its retained S captured
+                // before build. A request that S cannot serve gets its own
+                // producer; the carrier owns no output to retire.
+                #[cfg(target_os = "linux")]
+                Some(existing) if existing.dir.borrows_retained_output() => {
+                    renditions.remove(key);
+                    None
+                }
                 Some(existing)
                     if existing.failure().is_none() && !existing.closed.load(Relaxed) =>
                 {
@@ -1803,6 +1811,11 @@ impl Shared {
         {
             return;
         }
+        // The retained registry already charges a carrier's borrowed S.
+        #[cfg(target_os = "linux")]
+        if rendition.dir.borrows_retained_output() {
+            return;
+        }
         let budgets = Budgets {
             working_set_bytes: rendition.working_set_budget,
             admission_sizing_bytes: rendition.completed_cache_budget,
@@ -1946,6 +1959,24 @@ impl Shared {
             .expect("dormant lock")
             .is_some_and(|since| since.elapsed() > ttl);
         if !dormant {
+            return;
+        }
+        // A retained carrier owns no output: the retained registry alone
+        // retires its S. Unregistering the dormant view releases only its
+        // borrowed alias, so that S can be evicted once its readers drain.
+        #[cfg(target_os = "linux")]
+        if rendition.dir.borrows_retained_output() {
+            let mut renditions = self.renditions.lock().await;
+            if renditions
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, &rendition))
+            {
+                renditions.remove(key);
+                rendition.closed.store(true, Release);
+                rendition.gen_epoch.fetch_add(1, Relaxed);
+                rendition.kick();
+                self.pool.close(key);
+            }
             return;
         }
         if !rendition.ephemeral_processing {

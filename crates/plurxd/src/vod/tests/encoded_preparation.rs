@@ -433,7 +433,7 @@ async fn automatic_encoded_canonical_carrier_survives_claim_completion_and_new_a
         serve
             .shared
             .retained_artifacts
-            .acquire_prepared_candidate(&rendition, &logical, &resolved_file, &wrong_offset)
+            .acquire_prepared_candidate(&rendition.retained_probe(), &logical, &resolved_file, &wrong_offset)
             .await
             .is_none(),
         "a different audio offset cannot borrow the settled origin"
@@ -448,7 +448,7 @@ async fn automatic_encoded_canonical_carrier_survives_claim_completion_and_new_a
         serve
             .shared
             .retained_artifacts
-            .acquire_prepared_candidate(&rendition, &logical, &resolved_file, &wrong_geometry)
+            .acquire_prepared_candidate(&rendition.retained_probe(), &logical, &resolved_file, &wrong_geometry)
             .await
             .is_none(),
         "a different candidate geometry cannot borrow the settled origin"
