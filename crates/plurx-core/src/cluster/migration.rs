@@ -5703,6 +5703,11 @@ pub mod status {
         confirmations: [QuorumConfirmationSlot; QUORUM_CONFIRMATIONS],
         confirmation_count: AtomicU64,
         confirmation_next: AtomicU64,
+        /// Times a full ring had to drop a confirmation that was still live.
+        /// The sampler's spacing makes it impossible today; it is counted
+        /// and logged, outside the write section, if a cadence change ever
+        /// makes it happen.
+        confirmations_dropped_live: AtomicU64,
         state_machine_bytes_present: AtomicBool,
         state_machine_db_bytes: AtomicU64,
         state_machine_wal_bytes: AtomicU64,
@@ -6507,13 +6512,16 @@ pub mod status {
         }
 
         /// Keep one accepted confirmation. Called inside a write section, after
-        /// the watermark fields hold its generation.
+        /// the watermark fields hold its generation. Returns whether a full
+        /// ring had to drop an entry that was still live; the caller reports
+        /// that only once the write section has ended, because nothing that
+        /// can panic or block belongs between `begin_write` and `end_write`.
         fn append_confirmation(
             &self,
             committed_index: u64,
             started_nanos: u64,
             elapsed_nanos: u64,
-        ) {
+        ) -> bool {
             let count = usize::try_from(self.inner.confirmation_count.load(Ordering::Relaxed))
                 .unwrap_or(QUORUM_CONFIRMATIONS)
                 .min(QUORUM_CONFIRMATIONS);
@@ -6523,14 +6531,11 @@ pub mod status {
             let slot = &self.inner.confirmations[next];
             // When the ring is full, `next` holds the oldest entry. The
             // sampler's spacing (see `QUORUM_CONFIRMATIONS`) means it has
-            // always expired by now; if it had not, dropping it would still
-            // only lose eligibility.
-            debug_assert!(
-                count < QUORUM_CONFIRMATIONS
-                    || elapsed_nanos.saturating_sub(slot.started_nanos.load(Ordering::Relaxed))
-                        >= duration_nanos(QUORUM_WATERMARK_LEASE),
-                "a full confirmation ring dropped an unexpired confirmation"
-            );
+            // always expired by now; if it had not, dropping it only loses
+            // eligibility (fails closed).
+            let dropped_live = count >= QUORUM_CONFIRMATIONS
+                && elapsed_nanos.saturating_sub(slot.started_nanos.load(Ordering::Relaxed))
+                    < duration_nanos(QUORUM_WATERMARK_LEASE);
             slot.committed_index
                 .store(committed_index, Ordering::Relaxed);
             slot.started_nanos.store(started_nanos, Ordering::Relaxed);
@@ -6542,6 +6547,25 @@ pub mod status {
                 u64::try_from((count + 1).min(QUORUM_CONFIRMATIONS)).unwrap_or(u64::MAX),
                 Ordering::Relaxed,
             );
+            dropped_live
+        }
+
+        /// Report a live confirmation a full ring dropped. Outside any write
+        /// section: readers are never left spinning on an odd sequence.
+        fn report_dropped_live_confirmation(&self) {
+            if self
+                .inner
+                .confirmations_dropped_live
+                .fetch_add(1, Ordering::Relaxed)
+                == 0
+            {
+                tracing::error!(
+                    capacity = QUORUM_CONFIRMATIONS,
+                    "a full quorum confirmation ring dropped a confirmation that was still \
+                     inside its lease; that confirmation no longer proves serving authority. \
+                     The sampler is confirming faster than the ring was sized for"
+                );
+            }
         }
 
         fn elapsed_nanos(&self) -> u64 {
@@ -6632,8 +6656,12 @@ pub mod status {
             self.inner
                 .watermark_published
                 .store(true, Ordering::Relaxed);
-            self.append_confirmation(source.committed_index, started_nanos, elapsed_nanos);
+            let dropped_live =
+                self.append_confirmation(source.committed_index, started_nanos, elapsed_nanos);
             self.end_write(sequence);
+            if dropped_live {
+                self.report_dropped_live_confirmation();
+            }
             true
         }
 
@@ -8088,13 +8116,11 @@ pub mod status {
         }
 
         /// C1 (d), the other side: a ring that is asked to drop a live entry
-        /// fails closed. Debug builds stop at the assertion; release builds
-        /// lose that entry's eligibility and grant nothing in its place.
+        /// fails closed. It loses that entry's eligibility, grants nothing in
+        /// its place and counts the drop, in debug and release builds alike,
+        /// and it never panics inside the write section: every reader still
+        /// answers afterwards.
         #[test]
-        #[cfg_attr(
-            debug_assertions,
-            should_panic(expected = "a full confirmation ring dropped an unexpired confirmation")
-        )]
         fn a_full_confirmation_ring_fails_closed_when_it_would_drop_a_live_entry() {
             let metrics = PassiveRaftMetrics::new(true);
             assert!(metrics.publish_at(&local_sample(7, Some(101), Some(1)), 10));
@@ -8113,6 +8139,25 @@ pub mod status {
                     .eligible_serving_proof_at(10, 10_100_000_000)
                     .is_none(),
                 "the only applied confirmation was dropped, so nothing is eligible"
+            );
+            assert_eq!(
+                metrics
+                    .inner
+                    .confirmations_dropped_live
+                    .load(Ordering::Relaxed),
+                1,
+                "the drop is counted once"
+            );
+            assert_eq!(
+                metrics.inner.sequence.load(Ordering::Acquire) & 1,
+                0,
+                "no write section is left open"
+            );
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_100_000_000, 64)
+                    .is_some(),
+                "a reader still answers"
             );
         }
 
