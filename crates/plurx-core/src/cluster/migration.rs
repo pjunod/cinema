@@ -5645,6 +5645,57 @@ pub mod status {
         watermark_started_nanos: u64,
     }
 
+    /// Every field the locally bound serving and bounded-replica rules read,
+    /// taken in one pass under `sequence` (`PassiveRaftMetrics::read_watermark_view`),
+    /// so the two rules cannot drift apart on what an eligible proof is.
+    struct WatermarkView {
+        published: bool,
+        sampled_elapsed: u64,
+        current_term: u64,
+        last_applied_present: bool,
+        applied_index: u64,
+        leader_known: bool,
+        current_leader_present: bool,
+        leader_id: u64,
+        local_observation_epoch: u64,
+        watermark_published: bool,
+        watermark_term: u64,
+        watermark_leader: u64,
+        committed_index: u64,
+        local_read_protocol_version: u64,
+        watermark_started_nanos: u64,
+        watermark_local_epoch: u64,
+        watermark_invalidated: bool,
+        confirmation_count: u64,
+        confirmation_next: u64,
+        /// `(committed_index, started_nanos)` per ring slot.
+        confirmations: [(u64, u64); QUORUM_CONFIRMATIONS],
+    }
+
+    impl WatermarkView {
+        /// The checks both rules share: a fresh local sample, a published
+        /// and uninvalidated watermark, a local observation bound to the
+        /// watermark's term, leader and epoch, and this binary's local-read
+        /// protocol. Neither the watermark's own lease nor apply lag is
+        /// judged here; each rule judges those its own way.
+        fn bound_to_current_generation(&self, elapsed_seconds: u64) -> bool {
+            let local_valid = self.published
+                && elapsed_seconds.saturating_sub(self.sampled_elapsed)
+                    <= PASSIVE_METRICS_FRESHNESS_SECS;
+            let local_binding_valid = self.last_applied_present
+                && self.leader_known
+                && self.current_leader_present
+                && self.current_term == self.watermark_term
+                && self.leader_id == self.watermark_leader
+                && self.local_observation_epoch == self.watermark_local_epoch;
+            local_valid
+                && self.watermark_published
+                && !self.watermark_invalidated
+                && local_binding_valid
+                && self.local_read_protocol_version == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION
+        }
+    }
+
     /// Process-local diagnostic evidence. It carries no serving authority.
     #[derive(Clone, Debug, Default)]
     pub struct QuorumAttemptSnapshot {
@@ -6040,14 +6091,49 @@ pub mod status {
         /// is still running, as a proof carrying that confirmation's original
         /// deadline. Every binding and freshness check
         /// `bounded_replica_state_at` applies to the current watermark is
-        /// applied to the confirmation; only the zero-lag test against the
-        /// *newest* committed index is replaced by `applied >= committed` for
-        /// this one. The bounded-replica read rules do not use this.
+        /// applied to the confirmation (both read one [`WatermarkView`] and
+        /// share [`WatermarkView::bound_to_current_generation`]); only the
+        /// zero-lag test against the *newest* committed index is replaced by
+        /// `applied >= committed` for this one. The bounded-replica read rules
+        /// do not use this.
         fn applied_confirmation_proof_at(
             &self,
             elapsed_seconds: u64,
             elapsed_nanos: u64,
         ) -> Option<ServingProof> {
+            let view = self.read_watermark_view()?;
+            if !view.bound_to_current_generation(elapsed_seconds) {
+                return None;
+            }
+            let count = usize::try_from(view.confirmation_count)
+                .unwrap_or(QUORUM_CONFIRMATIONS)
+                .min(QUORUM_CONFIRMATIONS);
+            let next = usize::try_from(view.confirmation_next).unwrap_or(0) % QUORUM_CONFIRMATIONS;
+            // Newest first: the proof is anchored on the latest confirmation
+            // that qualifies, which has the latest deadline.
+            (1..=count)
+                .map(|back| {
+                    view.confirmations[(next + QUORUM_CONFIRMATIONS - back) % QUORUM_CONFIRMATIONS]
+                })
+                .find(|(committed_index, started_nanos)| {
+                    view.applied_index >= *committed_index
+                        && elapsed_nanos.saturating_sub(*started_nanos)
+                            < duration_nanos(QUORUM_WATERMARK_LEASE)
+                })
+                .map(|(committed_index, started_nanos)| ServingProof {
+                    term: view.watermark_term,
+                    leader: view.watermark_leader,
+                    local_observation_epoch: view.watermark_local_epoch,
+                    committed_index,
+                    started_nanos,
+                })
+        }
+
+        /// One consistent read, under `sequence`, of every field the
+        /// locally bound serving and bounded-replica rules look at, ring
+        /// included. `None` when this node's metrics are not locally bound to
+        /// a watermark at all.
+        fn read_watermark_view(&self) -> Option<WatermarkView> {
             if !self.local_source
                 || !self.watermark_source
                 || !self.watermark_requires_local_binding
@@ -6060,30 +6146,6 @@ pub mod status {
                     std::hint::spin_loop();
                     continue;
                 }
-                let published = self.inner.published.load(Ordering::Relaxed);
-                let sampled_elapsed = self.inner.sampled_elapsed.load(Ordering::Relaxed);
-                let current_term = self.inner.current_term.load(Ordering::Relaxed);
-                let last_applied_present = self.inner.last_applied_present.load(Ordering::Relaxed);
-                let applied_index = self.inner.last_applied_index.load(Ordering::Relaxed);
-                let leader_known = self.inner.leader_known.load(Ordering::Relaxed);
-                let current_leader_present =
-                    self.inner.current_leader_present.load(Ordering::Relaxed);
-                let leader_id = self.inner.current_leader.load(Ordering::Relaxed);
-                let local_observation_epoch =
-                    self.inner.local_observation_epoch.load(Ordering::Relaxed);
-                let watermark_published = self.inner.watermark_published.load(Ordering::Relaxed);
-                let watermark_term = self.inner.watermark_term.load(Ordering::Relaxed);
-                let watermark_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
-                let local_read_protocol_version = self
-                    .inner
-                    .watermark_local_read_protocol_version
-                    .load(Ordering::Relaxed);
-                let watermark_local_epoch =
-                    self.inner.watermark_local_epoch.load(Ordering::Relaxed);
-                let watermark_invalidated =
-                    self.inner.watermark_invalidated.load(Ordering::Relaxed);
-                let count = self.inner.confirmation_count.load(Ordering::Relaxed);
-                let next = self.inner.confirmation_next.load(Ordering::Relaxed);
                 let mut confirmations = [(0_u64, 0_u64); QUORUM_CONFIRMATIONS];
                 for (slot, kept) in self.inner.confirmations.iter().zip(&mut confirmations) {
                     *kept = (
@@ -6091,49 +6153,44 @@ pub mod status {
                         slot.started_nanos.load(Ordering::Relaxed),
                     );
                 }
+                let view = WatermarkView {
+                    published: self.inner.published.load(Ordering::Relaxed),
+                    sampled_elapsed: self.inner.sampled_elapsed.load(Ordering::Relaxed),
+                    current_term: self.inner.current_term.load(Ordering::Relaxed),
+                    last_applied_present: self.inner.last_applied_present.load(Ordering::Relaxed),
+                    applied_index: self.inner.last_applied_index.load(Ordering::Relaxed),
+                    leader_known: self.inner.leader_known.load(Ordering::Relaxed),
+                    current_leader_present: self
+                        .inner
+                        .current_leader_present
+                        .load(Ordering::Relaxed),
+                    leader_id: self.inner.current_leader.load(Ordering::Relaxed),
+                    local_observation_epoch: self
+                        .inner
+                        .local_observation_epoch
+                        .load(Ordering::Relaxed),
+                    watermark_published: self.inner.watermark_published.load(Ordering::Relaxed),
+                    watermark_term: self.inner.watermark_term.load(Ordering::Relaxed),
+                    watermark_leader: self.inner.watermark_leader.load(Ordering::Relaxed),
+                    committed_index: self.inner.watermark_committed_index.load(Ordering::Relaxed),
+                    local_read_protocol_version: self
+                        .inner
+                        .watermark_local_read_protocol_version
+                        .load(Ordering::Relaxed),
+                    watermark_started_nanos: self
+                        .inner
+                        .watermark_started_nanos
+                        .load(Ordering::Relaxed),
+                    watermark_local_epoch: self.inner.watermark_local_epoch.load(Ordering::Relaxed),
+                    watermark_invalidated: self.inner.watermark_invalidated.load(Ordering::Relaxed),
+                    confirmation_count: self.inner.confirmation_count.load(Ordering::Relaxed),
+                    confirmation_next: self.inner.confirmation_next.load(Ordering::Relaxed),
+                    confirmations,
+                };
                 let after = self.inner.sequence.load(Ordering::Acquire);
-                if before != after {
-                    continue;
+                if before == after {
+                    return Some(view);
                 }
-                let local_valid = published
-                    && elapsed_seconds.saturating_sub(sampled_elapsed)
-                        <= PASSIVE_METRICS_FRESHNESS_SECS;
-                let local_binding_valid = last_applied_present
-                    && leader_known
-                    && current_leader_present
-                    && current_term == watermark_term
-                    && leader_id == watermark_leader
-                    && local_observation_epoch == watermark_local_epoch;
-                if !(local_valid
-                    && watermark_published
-                    && !watermark_invalidated
-                    && local_binding_valid
-                    && local_read_protocol_version == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION)
-                {
-                    return None;
-                }
-                let count = usize::try_from(count)
-                    .unwrap_or(QUORUM_CONFIRMATIONS)
-                    .min(QUORUM_CONFIRMATIONS);
-                let next = usize::try_from(next).unwrap_or(0) % QUORUM_CONFIRMATIONS;
-                // Newest first: the proof is anchored on the latest
-                // confirmation that qualifies, which has the latest deadline.
-                return (1..=count)
-                    .map(|back| {
-                        confirmations[(next + QUORUM_CONFIRMATIONS - back) % QUORUM_CONFIRMATIONS]
-                    })
-                    .find(|(committed_index, started_nanos)| {
-                        applied_index >= *committed_index
-                            && elapsed_nanos.saturating_sub(*started_nanos)
-                                < duration_nanos(QUORUM_WATERMARK_LEASE)
-                    })
-                    .map(|(committed_index, started_nanos)| ServingProof {
-                        term: watermark_term,
-                        leader: watermark_leader,
-                        local_observation_epoch: watermark_local_epoch,
-                        committed_index,
-                        started_nanos,
-                    });
             }
         }
 
@@ -6206,75 +6263,21 @@ pub mod status {
             elapsed_nanos: u64,
             max_apply_lag_entries: u64,
         ) -> Option<BoundedReplicaState> {
-            if !self.local_source
-                || !self.watermark_source
-                || !self.watermark_requires_local_binding
-            {
-                return None;
-            }
-            loop {
-                let before = self.inner.sequence.load(Ordering::Acquire);
-                if before & 1 != 0 {
-                    std::hint::spin_loop();
-                    continue;
-                }
-                let published = self.inner.published.load(Ordering::Relaxed);
-                let sampled_elapsed = self.inner.sampled_elapsed.load(Ordering::Relaxed);
-                let current_term = self.inner.current_term.load(Ordering::Relaxed);
-                let last_applied_present = self.inner.last_applied_present.load(Ordering::Relaxed);
-                let applied_index = self.inner.last_applied_index.load(Ordering::Relaxed);
-                let leader_known = self.inner.leader_known.load(Ordering::Relaxed);
-                let current_leader_present =
-                    self.inner.current_leader_present.load(Ordering::Relaxed);
-                let leader_id = self.inner.current_leader.load(Ordering::Relaxed);
-                let local_observation_epoch =
-                    self.inner.local_observation_epoch.load(Ordering::Relaxed);
-                let watermark_published = self.inner.watermark_published.load(Ordering::Relaxed);
-                let watermark_term = self.inner.watermark_term.load(Ordering::Relaxed);
-                let watermark_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
-                let committed_index = self.inner.watermark_committed_index.load(Ordering::Relaxed);
-                let local_read_protocol_version = self
-                    .inner
-                    .watermark_local_read_protocol_version
-                    .load(Ordering::Relaxed);
-                let watermark_started_nanos =
-                    self.inner.watermark_started_nanos.load(Ordering::Relaxed);
-                let watermark_local_epoch =
-                    self.inner.watermark_local_epoch.load(Ordering::Relaxed);
-                let watermark_invalidated =
-                    self.inner.watermark_invalidated.load(Ordering::Relaxed);
-                let after = self.inner.sequence.load(Ordering::Acquire);
-                if before != after {
-                    continue;
-                }
-                let local_valid = published
-                    && elapsed_seconds.saturating_sub(sampled_elapsed)
-                        <= PASSIVE_METRICS_FRESHNESS_SECS;
-                let watermark_valid = watermark_published
-                    && elapsed_nanos.saturating_sub(watermark_started_nanos)
-                        < duration_nanos(QUORUM_WATERMARK_LEASE)
-                    && !watermark_invalidated;
-                let local_binding_valid = last_applied_present
-                    && leader_known
-                    && current_leader_present
-                    && current_term == watermark_term
-                    && leader_id == watermark_leader
-                    && local_observation_epoch == watermark_local_epoch;
-                let apply_lag_entries = committed_index.saturating_sub(applied_index);
-                return (local_valid
-                    && watermark_valid
-                    && local_binding_valid
-                    && local_read_protocol_version == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION
-                    && apply_lag_entries <= max_apply_lag_entries)
-                    .then_some(BoundedReplicaState {
-                        current_term,
-                        leader_id,
-                        committed_index,
-                        applied_index,
-                        local_observation_epoch,
-                        watermark_started_nanos,
-                    });
-            }
+            let view = self.read_watermark_view()?;
+            let watermark_live = elapsed_nanos.saturating_sub(view.watermark_started_nanos)
+                < duration_nanos(QUORUM_WATERMARK_LEASE);
+            let apply_lag_entries = view.committed_index.saturating_sub(view.applied_index);
+            (view.bound_to_current_generation(elapsed_seconds)
+                && watermark_live
+                && apply_lag_entries <= max_apply_lag_entries)
+                .then_some(BoundedReplicaState {
+                    current_term: view.current_term,
+                    leader_id: view.leader_id,
+                    committed_index: view.committed_index,
+                    applied_index: view.applied_index,
+                    local_observation_epoch: view.local_observation_epoch,
+                    watermark_started_nanos: view.watermark_started_nanos,
+                })
         }
 
         #[cfg(test)]
