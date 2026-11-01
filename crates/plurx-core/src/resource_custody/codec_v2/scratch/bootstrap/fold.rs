@@ -623,6 +623,7 @@ impl BootstrapFold {
             codec::text(error_class)?;
         }
         let completed = result.outcome == NativeOutcomeV1::Completed;
+        let mut definite_failure = false;
         let mut all_held_copies = self.held_copies();
         if let Some(directory) = &self.output.state.directory {
             all_held_copies.extend(directory.held_copy_ids.iter().copied());
@@ -817,6 +818,20 @@ impl BootstrapFold {
                     self.bootstrap.possible_child = None;
                     self.possible_copy = None;
                     self.bootstrap.phase = BootstrapPhase::ParentReady;
+                } else if matches!(operation, BootstrapIoV1::CreateRenditionChild { .. })
+                    && result.child_effect == ChildEffect::Unchanged
+                    && result.inventory == InventoryCertainty::Exact
+                {
+                    // An entered mkdirat that failed with EEXIST changed no
+                    // name and acquired no descriptor; the configured parent
+                    // is still the one exactly held copy. That is the same
+                    // definite evidence as ResolvePossibleChild Unchanged, not
+                    // an unknown hold: the existing child is never adopted,
+                    // and producer cancellation closes the parent descriptor.
+                    self.bootstrap.possible_child = None;
+                    self.possible_copy = None;
+                    self.bootstrap.phase = BootstrapPhase::ParentReady;
+                    definite_failure = true;
                 }
             }
             BootstrapIoV1::CloseBootstrapHandles { .. } => {
@@ -894,7 +909,7 @@ impl BootstrapFold {
                 }
             }
         }
-        if !completed || result.inventory != InventoryCertainty::Exact {
+        if (!completed && !definite_failure) || result.inventory != InventoryCertainty::Exact {
             self.bootstrap.phase = BootstrapPhase::UnknownHeld;
         }
         Ok(())

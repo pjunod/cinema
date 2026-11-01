@@ -273,10 +273,20 @@ impl RootCell {
             && held.audit.closed_copy_ids.is_empty()
             && held.audit.child_effect == ChildEffect::None
             && held.audit.inventory == InventoryCertainty::Exact;
+        // An entered mkdirat that failed with EEXIST acquired and closed
+        // nothing: the configured parent is still the exact held original.
+        let unchanged_child = matches!(
+            held.audit.outcome,
+            v2::scratch::NativeOutcomeV1::Failed { .. }
+        ) && held.audit.acquired.is_none()
+            && held.audit.closed_copy_ids.is_empty()
+            && held.audit.child_effect == ChildEffect::Unchanged
+            && held.audit.inventory == InventoryCertainty::Exact;
         // A cancelled next-step latch reports NeverEntered but leaves the
         // preceding original directory File in this cell. Its exact copy ID
         // and native identity are checked below before any File is moved.
-        if (!last_known && !never_entered) || held.files.len() != baseline.iter().flatten().count()
+        if (!last_known && !never_entered && !unchanged_child)
+            || held.files.len() != baseline.iter().flatten().count()
         {
             return Err(OperationError::State);
         }

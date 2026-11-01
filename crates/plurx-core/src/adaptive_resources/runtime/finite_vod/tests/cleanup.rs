@@ -491,3 +491,63 @@ async fn cancelled_original_source_root_observation_resumes_before_parent_file_c
     );
     finish_same_ticket(runtime, owner, ticket).await;
 }
+
+#[tokio::test]
+async fn existing_rendition_child_fails_start_and_original_cancel_settles_the_whole_r() {
+    let root = tempfile::tempdir().expect("durable actual native fixture");
+    let (runtime, mut owner) = original_owner(root.path(), false);
+    // Another owner's directory already occupies this exact rendition name.
+    // The original mkdirat must fail with EEXIST and never adopt it.
+    let foreign = owner.directory_path.as_ref().clone();
+    std::fs::create_dir_all(&foreign).expect("foreign existing rendition child");
+    std::fs::write(foreign.join("foreign-marker"), b"not ours").expect("foreign content");
+    assert!(
+        owner.start(deadline()).await.is_err(),
+        "an existing child is never adopted as the output"
+    );
+    // The daemon's failed-start path: stop, then join the never-entered root.
+    owner.request_stop().expect("original stop request");
+    assert!(
+        owner.join_producer().await.is_err(),
+        "no producer root was ever entered"
+    );
+    let charge = runtime.accounting().expect("whole original R held").used;
+    assert_ne!(charge, ResourceVector::default());
+    let mut ticket = owner
+        .prepare_cancel(deadline())
+        .await
+        .expect("a definite failed child creation still closes the held parent and settles R");
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("native close alone does not refund app")
+            .used,
+        charge
+    );
+    drop(owner);
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("same original ticket settles after the last application alias");
+    assert_eq!(
+        runtime.accounting().expect("one final refund").used,
+        ResourceVector::default()
+    );
+    assert!(
+        runtime
+            .retained_preparations()
+            .expect("original book")
+            .is_empty(),
+        "no original preparation remains retained"
+    );
+    assert_eq!(
+        std::fs::read(foreign.join("foreign-marker")).expect("foreign child untouched"),
+        b"not ours"
+    );
+    drop(ticket);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("no original app/native selector remains")
+        .drain()
+        .expect("join original journal");
+}
