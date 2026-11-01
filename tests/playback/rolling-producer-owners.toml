@@ -469,7 +469,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # regression in `transcode/tests/chunk_05.rs`. It passes the existing budget
 # to one frozen InitialProducerPolicy and asserts the software startup
 # allowance and retained CPU reservation; it creates no new timer or owner.
-expected_occurrences = 13
+# PR1341 (quorum gaps): +1 test-only, chunk_06.rs, where an M5 init-wait
+# test names the stall budget it must finish well inside; no new stall owner.
+expected_occurrences = 14
 kind = "recovery_timer"
 replacement = "the sole actor-owned rolling producer progress budget before and after first media"
 
@@ -848,7 +850,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # releaser in `a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_one`
 # stands in for a qualification that lets go of the slot when told; the test
 # awaits its JoinHandle before asserting.
-expected_occurrences = 119
+# PR1341: +1 test-only spawn in chunk_06.rs (M5 init-wait driver); the
+# test joins it under its deadline.
+expected_occurrences = 120
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -995,7 +999,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # cancellation-aware poll holds the live capacity waiter across its bounded
 # admission deadline. The waiter is dropped on admission, cancellation or
 # timeout; the sleep neither owns inference nor starts work by itself.
-expected_occurrences = 82
+# PR1341: +4, all test-only. Three in chunk_06.rs drive the M5 init-wait
+# fixtures under a paused clock; one in publication.rs is a source-pin
+# string (`match_indices`) proving the 100 ms init poll is the only sleep in
+# both pre-object wait branches. No shipped sleep is added.
+expected_occurrences = 86
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1120,7 +1128,8 @@ pattern = "PROGRESS_STALL"
 # `advancing-progress-stall`; neither is a shipped compatibility watchdog.
 # 12 -> 13 for the same Pi startup-policy regression documented under
 # `advancing-progress-stall`; the production timer ownership is unchanged.
-expected_occurrences = 13
+# PR1341: +1 test-only (chunk_06.rs), same as advancing-progress-stall.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "legacy-watchdog-poll"
@@ -1236,7 +1245,9 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-response-completion-settlement"
 pattern = "settle_streamed_response_completion"
-expected_occurrences = 3
+# PR1341: +1 test-only (authority_recovery.rs) asserting a streamed
+# commit is settled once and never retried after an authority loss.
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-response-completion-capacity"
@@ -1346,7 +1357,9 @@ pattern = "SegmentPublication"
 # the existing request owner still resolves one typed outcome.
 # Review59: +1 NEW integrity regression asserts the actual HTTP Failed arm,
 # not the legacy probe facade's lossy Option result; no new response owner.
-expected_occurrences = 47
+# PR1341: +6. publication.rs +2: the exact attempt's terminal pre-publication
+# verdict authorizes its ProducerEnded 502 (the segment-gap fix). Tests +4.
+expected_occurrences = 53
 
 [[module_symbols]]
 id = "m4-typed-presentation-resolution"
@@ -1435,7 +1448,9 @@ pattern = "actor_managed_prepublication_process"
 # declaration that status authorization must cross the production actor path,
 # not a new process scope or a bypass around that owner.
 # S10 retained attachment initializes false: existing actor still owns response publication.
-expected_occurrences = 14
+# PR1341: +1 in rolling/session.rs: the M5 exact-attempt snapshot reads the
+# process scope through the actor; no new owner.
+expected_occurrences = 15
 
 [[module_symbols]]
 id = "m4-first-media-owner-claim-latch"
@@ -1482,7 +1497,9 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-typed-published-producer-end"
 pattern = "ProducerEnded"
-expected_occurrences = 22
+# PR1341: +6. publication.rs +2 (segment-gap 502 stamped with its attempt via
+# `for_attempt`); chunk_06.rs +4 test assertions.
+expected_occurrences = 28
 
 [[module_symbols]]
 id = "m4-bounded-terminal-command-admission"
@@ -1621,7 +1638,9 @@ pattern = "ServingAuthority"
 # real `ServingFence`, and `test_manager_with_system`'s always-ready argument
 # in its new position.
 # Measured on the merge with main at 36: 36 + (-9) = 27.
-expected_occurrences = 28
+# PR1341: +3 in serving_fence.rs: the packed ready+generation word and
+# `admit_or_outage_baseline` project the same ServingAuthority.
+expected_occurrences = 31
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1637,7 +1656,10 @@ pattern = "commit_guard_before"
 # Promotion union: the Source-specific deferred commit wrapper also checks the
 # existing serving authority. It does not mint a new producer or publication
 # proof; the opaque Source assignment and ingress permission remain required.
-expected_occurrences = 18
+# PR1341: +1 net. serving_fence.rs +2 (`commit_guard_or_refusal_before`,
+# which returns the refusal reason for publication commits only);
+# publication.rs -1 (moved onto it). Existing callers keep the old signature.
+expected_occurrences = 19
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
@@ -1650,7 +1672,9 @@ pattern = "admitted_serving_generation"
 # S10 #680: +2 in manager/create.rs::create_cluster_session_for_receiver,
 # the parameter and forwarding call for the existing admitted generation.
 # Negotiated receipt capture does not mint another serving authority.
-expected_occurrences = 31
+# PR1341: +2 in publication.rs: AuthorityLost carries the admitted
+# generation so a held request retries only after a newer recovery.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "m4-owner-bound-status-publication"
@@ -2160,7 +2184,8 @@ expected_occurrences = 10
 [[module_symbols]]
 id = "m4-release-publication-gate"
 pattern = "begin_session_publication_fence"
-expected_occurrences = 6
+# PR1341: +1 test-only (authority_recovery.rs).
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-release-terminal-store-deadlines"
@@ -3442,7 +3467,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
 # the cancellation regression, which explicitly aborts and awaits it. Both
 # are test-only and settle their handles before fixture teardown.
-expected_occurrences = 1030
+# PR1341: +14. Shipped: playback_cache.rs +1 (the ceiling settings task,
+# one per budget, restarted by the next writer only after its own drop
+# guard clears the started flag). The other 13 are test-only
+# (authority_recovery.rs +10, serving_fence.rs tests +2, chunk_06.rs +1).
+expected_occurrences = 1044
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5149,7 +5178,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 1922
+# PR1341: +23. Shipped, all deadline-bounded and owned by the request or
+# task that creates them: serving_fence.rs timeout_at on the outage watch
+# (the hold deadline) x2; response.rs timeout_at bounding the one buffered
+# retry; rolling/session.rs timeout_at bounding the M5 actor snapshot;
+# playback_cache.rs the settings task's 1 s interval, its IO_TIMEOUT Store
+# read, and the first-read wait. The rest are test-only.
+expected_occurrences = 1945
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5192,7 +5227,8 @@ pattern = "use\\s+tokio::time"
 # actual timer constructors and detached task are reviewed in their rows.
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
-expected_occurrences = 5
+# PR1341: +1 test-only `use tokio::time` in authority_recovery.rs.
+expected_occurrences = 6
 
 [[module_structures]]
 id = "process-command-construction"
@@ -6287,7 +6323,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # native_host_mode_keeps_unmanaged_hosts_out_of_container_handoff. It builds
 # the setup message and reads the clock; it starts no task, timer or process
 # and adds no child or producer owner. Existing command ownership is unchanged.
-expected_occurrences = 838
+# PR1341: +7 as the joined module scan counts it (+6 counted file by file),
+# and none launch a process: `.status(` reads of HTTP responses in fence.rs
+# (+3, one shipped log field, two in its tests) and authority_recovery.rs
+# tests (+2), and the decision reason's `.status()` in playback_control.rs.
+expected_occurrences = 845
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
