@@ -28,10 +28,20 @@ class NativeReceiptTests(unittest.TestCase):
                     ('source_sha', 'b' * 40), ('source_tree_sha256', 'wrong'),
                     ('selected_tests', []), ('required_tests', ['Other/test']),
                     ('native_suite_complete', False), ('runtime', 'other'), ('xcode', 'other'),
+                    ('xcode', 'Xcode 27.1\nBuild version 27A9275'),
                     ('test_summary', {'passedTests': 1, 'failedTests': 0, 'skippedTests': 1}),
                     ('command', ['xcodebuild', 'test'])]:
                 with self.subTest(key=key), self.assertRaises(ReceiptError):
                     native.verify_tv({**receipt, key: value}, 'a' * 40)
+
+    def test_the_retired_xcode_27_1_pin_is_neither_the_toolchain_nor_the_route(self):
+        # The standby moved to Xcode 27.2 on 2026-10-30. A receipt or a job from
+        # the 27.1 pin must not be adopted, and the receipt and routing pins
+        # must move together.
+        self.assertEqual(native.XCODE, 'Xcode 27.2\nBuild version 27B52')
+        self.assertEqual(native.RUNS_ON[-1], 'xcode-27.2')
+        self.assertNotIn('xcode-27.1', native.RUNS_ON)
+        self.assertEqual(native.RUNS_ON[:-1], ['self-hosted', 'macOS', 'ARM64', 'lab', 'apple'])
 
     def test_archive_crc_duplicates_traversal_and_expansion_rejected(self):
         def archive(names):
