@@ -552,11 +552,31 @@ def patch_tree_sources(root=ROOT):
     return result
 
 
+# The vendored crates the proof's own Rust (plurx-core, with hiqlite-contract-tests, and plurx-worker-control)
+# compiles: the Cargo.lock dependency closure of those two packages intersected with `vendor/`. gemm-common, ksni
+# and s3-simple are vendored for plurxd or are unused, so a change to them cannot change a qualified result.
+# tests/operations/test_async_driver_refinement.py derives this closure from Cargo.lock and fails if it drifts.
+PROOF_VENDOR_PREFIXES = ('vendor/bitvec_helpers/','vendor/dolby_vision/','vendor/hiqlite/',
+ 'vendor/hiqlite-wal/','vendor/rust_decimal/')
+# What a change must touch to need a qualification session, and what a landing must not race: the proof's real
+# inputs. This is a different question from `source_identity()`, which hashes everything the registered build
+# uses (the whole daemon scope and all of `vendor/`) and keeps that scope. Using the build scope as the trigger
+# made nearly every Rust PR to Main require a multi-hour session.
+PROOF_INPUT_PREFIXES = PREFIXES + PROOF_VENDOR_PREFIXES
+
+def proof_inputs(root=ROOT):
+    """(exact files, prefixes) whose change can alter the proof: `FILES`, the resume invocation paths and
+    `PROOF_INPUT_PREFIXES`. Cargo.lock, Cargo.toml and rust-toolchain.toml are in `FILES`."""
+    return (tuple(dict.fromkeys(FILES+tuple(async_resume.INVOCATION_PATHS))),set(PROOF_INPUT_PREFIXES))
+
 def governed_prefixes(root=ROOT):
+    """The build scope `source_identity()` hashes. Not the proof-input trigger: see `proof_inputs()`."""
     return (set(PREFIXES) | {crate+'/' for crates in SCOPE_CRATES.values() for crate in crates}
             | {path+'/' for path in patch_path_overrides(root)} | {'vendor/'})
 
 def source_identity(include_proof=True):
+    # Deliberately keeps the full build scope (`governed_prefixes()`): it identifies what the registered build
+    # uses, not which changes need requalification. `proof_inputs()` decides the latter.
     assert_scope_closures()
     paths = set(FILES)
     prefixes = governed_prefixes()
@@ -785,10 +805,12 @@ def affected(args):
         proc,_ = run(['git','diff','--name-only',args.base+'...HEAD','--'],timeout=30)
         c.require(proc.returncode == 0,'affected-base did not resolve')
         changed = proc.stdout.splitlines()
-        hit = any(p in FILES or any(p.startswith(q) for q in governed_prefixes()) for p in changed)
+        files,prefixes = proof_inputs()
+        hit = any(p in files or any(p.startswith(q) for q in prefixes) for p in changed)
     else:
         changed,hit = [],True
-    print(json.dumps({'affected':hit,'changed_paths':changed,'governed_paths':list(FILES)+sorted(governed_prefixes()),
+    files,prefixes = proof_inputs()
+    print(json.dumps({'affected':hit,'changed_paths':changed,'governed_paths':list(files)+sorted(prefixes),
       'reason':'changed-inputs' if args.base else 'no-base'},sort_keys=True))
 
 def rendered_command(name, out):

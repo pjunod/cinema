@@ -1413,6 +1413,43 @@ class CargoPathOverrideIdentityContracts(unittest.TestCase):
 
 
 
+class ProofInputTriggerContracts(unittest.TestCase):
+    """`proof_inputs()` is the trigger and landing scope; `source_identity()` keeps the whole build scope."""
+
+    def lock_vendor_closure(self):
+        import tomllib
+        packages = {}
+        for package in tomllib.loads((ROOT/'Cargo.lock').read_text())['package']:
+            packages.setdefault(package['name'],[]).append(package)
+        seen,todo = set(),['plurx-core','plurx-worker-control']
+        while todo:
+            name = todo.pop()
+            if name in seen: continue
+            seen.add(name)
+            for package in packages.get(name,[]):
+                todo.extend(dependency.split(' ')[0] for dependency in package.get('dependencies',[]))
+        vendored = {path.name for path in (ROOT/'vendor').iterdir() if path.is_dir()}
+        return {'vendor/'+name+'/' for name in seen & vendored}
+
+    def test_vendor_inputs_are_exactly_the_crates_the_proof_compiles(self):
+        # Derived from Cargo.lock so a new vendored dependency of plurx-core or plurx-worker-control fails here
+        # instead of silently escaping the trigger; gemm-common, ksni and s3-simple are not in that closure.
+        self.assertEqual(set(runner.PROOF_VENDOR_PREFIXES),self.lock_vendor_closure())
+        self.assertTrue(set(runner.PROOF_VENDOR_PREFIXES) < {'vendor/'+p.name+'/' for p in (ROOT/'vendor').iterdir()})
+
+    def test_proof_inputs_exclude_the_daemon_scope_that_the_build_identity_keeps(self):
+        files,prefixes = runner.proof_inputs()
+        self.assertEqual(prefixes,set(runner.PREFIXES)|set(runner.PROOF_VENDOR_PREFIXES))
+        self.assertLess(prefixes,runner.governed_prefixes())
+        for broad in ('crates/plurxd/','crates/plurx-core/','crates/plurx-pgs/','vendor/'):
+            self.assertNotIn(broad,prefixes)
+            self.assertIn(broad,runner.governed_prefixes())
+        for name in ('Cargo.lock','Cargo.toml','rust-toolchain.toml','crates/plurxd/src/library_work.rs',
+                     'validation/main_preflight_adoption.py','.github/workflows/main-fast-lane.yml'):
+            self.assertIn(name,files)
+        self.assertTrue(set(runner.async_resume.INVOCATION_PATHS) <= set(files))
+
+
 class PagedSessionSourceBoundaryContracts(unittest.TestCase):
     def test_paged_oracle_entry_uses_actual_registered_product_method_without_credentials(self):
         source=(ROOT/'scripts/check-async-driver-refinement').read_text()

@@ -33,10 +33,12 @@ INVENTORY = {'source_bindings': {'oracle': {'path': 'crates/oracle.rs', 'sha256'
                                  'temporal': {'path': 'spec/Temporal.tla', 'sha256': '0' * 64}}}
 
 
-# A stand-in for scripts/check-async-driver-refinement: the closure reads FILES and governed_prefixes() from it.
+# A stand-in for scripts/check-async-driver-refinement: the closure reads proof_inputs() from it. It names one
+# vendored crate the proof compiles (`vendor/hiqlite/`); `vendor/other/` and `crates/core/daemon/` are build
+# inputs outside the proof.
 GOVERNANCE = ("FILES = ('Cargo.lock', 'scripts/check-async-driver-refinement')\n"
-              "def governed_prefixes(root=None):\n"
-              "    return {'crates/core/store/', 'vendor/', '" + PROOF + "'}\n")
+              "def proof_inputs(root=None):\n"
+              "    return FILES, {'crates/core/store/', 'vendor/hiqlite/', '" + PROOF + "'}\n")
 
 
 class Repository:
@@ -313,6 +315,12 @@ class LandingCheckTests(MovedMainFixture):
         self.assertEqual((receipt['closure_files'], receipt['closure_prefixes']),
                          (len(closure['files']), len(closure['prefixes'])))
 
+    def test_main_changes_to_build_only_inputs_do_not_refuse_the_landing(self):
+        # source_identity() hashes the whole daemon scope and all of vendor/, but only proof inputs may refuse.
+        receipt, _ = self.land(files={'crates/core/daemon/handler.rs': 'main\n',
+                                      'vendor/other/src/lib.rs': 'main\n'})
+        self.assertTrue(receipt['compatible'])
+
     def test_every_kind_of_closure_file_refuses_when_main_touched_it(self):
         touched = {
             'formula source input': 'crates/shared.rs',
@@ -349,7 +357,7 @@ class LandingCheckTests(MovedMainFixture):
     def test_a_file_main_adds_under_a_governed_prefix_refuses(self):
         # source_identity() and the Rust build walk these prefixes, so a path no list names is still bound.
         added = {'governed crate prefix': 'crates/core/store/brand_new_module.rs',
-                 'vendor tree': 'vendor/newdep/src/lib.rs',
+                 'vendor tree the proof compiles': 'vendor/hiqlite/src/new_module.rs',
                  'proof directory': PROOF + 'NewModel.tla'}
         for kind, name in added.items():
             with self.subTest(kind=kind):
@@ -482,6 +490,29 @@ class AffectedSelectorTests(MovedMainFixture):
         self.assertFalse(result['affected'])
         self.assertEqual(result['changed_paths'], ['docs/readme.md'])
 
+    def fires(self, *paths):
+        self.repo.at(self.b, 'pr-' + str(abs(hash(paths))))
+        head = self.repo.commit('pr change', {path: 'changed\n' for path in paths})
+        return self.affected(self.b, head)['affected']
+
+    def test_a_plurxd_change_outside_the_proof_modules_does_not_fire_the_trigger(self):
+        for path in ('crates/plurxd/src/main.rs', 'crates/plurxd/src/state.rs', 'crates/plurx-core/src/lib.rs',
+                     'crates/plurx-pgs/src/lib.rs', 'vendor/gemm-common/src/lib.rs', 'vendor/ksni/src/lib.rs',
+                     'vendor/s3-simple/src/lib.rs'):
+            with self.subTest(path=path):
+                self.assertFalse(self.fires(path))
+
+    def test_proof_inputs_still_fire_the_trigger(self):
+        for path in ('crates/plurx-core/src/store/new.rs', 'crates/plurx-worker-control/src/new.rs',
+                     'crates/plurxd/src/library_work/new.rs', 'crates/plurxd/src/background_jobs/new.rs',
+                     'crates/plurx-core/tests/store_contract/new.rs', 'crates/plurx-core/tests/support/new.rs',
+                     'verification/async-driver-refinement/PagedComponent.tla', 'rust-toolchain.toml', 'Cargo.toml',
+                     'validation/main_preflight_adoption.py', '.github/workflows/main-fast-lane.yml',
+                     'vendor/hiqlite/src/new.rs', 'vendor/hiqlite-wal/src/new.rs', 'vendor/rust_decimal/src/new.rs',
+                     'vendor/dolby_vision/src/new.rs', 'vendor/bitvec_helpers/src/new.rs'):
+            with self.subTest(path=path):
+                self.assertTrue(self.fires(path))
+
     def test_a_change_the_pr_itself_makes_to_a_governed_path_still_fires_it(self):
         main, _ = self.moved()
         self.repo.at(self.b, 'pr-lock')
@@ -518,10 +549,17 @@ class RealClosureTests(unittest.TestCase):
     def test_closure_covers_everything_the_governance_and_the_checker_bind(self):
         closure = self.closure
         self.assertTrue(set(self.script.FILES) <= set(closure['files']))
-        self.assertTrue(set(self.script.governed_prefixes()) <= set(closure['prefixes']))
+        files, prefixes = self.script.proof_inputs()
+        self.assertEqual(set(prefixes), set(closure['prefixes']))
+        self.assertTrue(set(files) <= set(closure['files']))
         for include_proof in (True, False):
-            missing = [name for name in self.script.source_identity(include_proof) if not s.in_closure(closure, name)]
-            self.assertEqual(missing, [], 'source_identity() inputs missing from the landing closure')
+            identity = self.script.source_identity(include_proof)
+            # The closure is the proof's inputs, not the build scope: every identity path that is a proof input
+            # is in the closure, and the build-only remainder (the wider daemon scope, other vendor) is not.
+            proof = [n for n in identity if n in files or any(n.startswith(q) for q in prefixes)]
+            self.assertEqual([n for n in proof if not s.in_closure(closure, n)], [])
+            self.assertTrue(any(not s.in_closure(closure, n) for n in identity),
+                            'source_identity() must keep its wider build scope')
         source = (ROOT / PROOF / 'paged_checker.py').read_text()
         start = source.index("for name in ('checker.py'")
         semantic = re.findall(r"'([^']+)'", source[start:source.index('):', start)])
@@ -530,7 +568,10 @@ class RealClosureTests(unittest.TestCase):
         for name in ('crates/plurx-core/src/store/new/module.rs', 'crates/plurx-worker-control/src/new.rs'):
             self.assertTrue(s.in_closure(closure, name), name)
         self.assertTrue(s.in_closure(closure, 'crates/plurxd/src/library_work/new_module.rs'))
-        self.assertTrue(s.in_closure(closure, 'vendor/rusqlite/src/new.rs'))
+        self.assertTrue(s.in_closure(closure, 'vendor/hiqlite/src/new.rs'))
+        for name in ('crates/plurxd/src/main.rs', 'crates/plurxd/src/state.rs', 'crates/plurx-core/src/lib.rs',
+                     'vendor/gemm-common/src/lib.rs', 'vendor/ksni/src/lib.rs', 'vendor/s3-simple/src/lib.rs'):
+            self.assertFalse(s.in_closure(closure, name), name)
 
 
 if __name__ == '__main__':

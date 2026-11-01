@@ -4476,16 +4476,16 @@ REGISTRATION_BOUND_FILES = (PROOF_DIRECTORY + 'store-tests.json', '.github/workf
 
 
 def governed_inputs(root):
-    """The (exact files, prefixes) `scripts/check-async-driver-refinement` governs: its `FILES` and
-    `governed_prefixes()` (declared prefixes, workspace crate scopes, patch path overrides and `vendor/`),
-    read from the script in `root`, the same module `affected` and `source_identity` use."""
+    """The (exact files, prefixes) `scripts/check-async-driver-refinement` treats as proof inputs: its
+    `proof_inputs()` (`FILES`, the resume invocation paths, and the declared prefixes plus the vendored crates
+    the proof compiles), read from the script in `root`, the same module `affected` uses. Not the wider build
+    scope `source_identity` hashes (the whole daemon scope and all of `vendor/`)."""
     import importlib.machinery
     try:
         module = importlib.machinery.SourceFileLoader(
             'paged_landing_governance', str(Path(root) / 'scripts/check-async-driver-refinement')).load_module()
-        # `source_identity(False)` also hashes the resume invocation paths, which are outside `FILES`.
-        invocation = tuple(getattr(getattr(module, 'async_resume', None), 'INVOCATION_PATHS', ()))
-        files, prefixes = tuple(module.FILES) + invocation, tuple(module.governed_prefixes(Path(root)))
+        files, prefixes = module.proof_inputs(Path(root))
+        files, prefixes = tuple(files), tuple(prefixes)
     except Exception:
         raise receipts.ReceiptError('Async session: governed proof inputs are unreadable') from None
     p.require(files and prefixes and all(type(v) is str and v for v in files + prefixes)
@@ -4496,9 +4496,9 @@ def governed_inputs(root):
 def proof_closure(root, commit):
     """Every repository path the registered proof is bound to, as exact files and path prefixes.
 
-    Derived, never hand-listed: the union of (a) what `scripts/check-async-driver-refinement` governs
-    (`governed_inputs`: its `FILES` and resume invocation paths, declared prefixes, crate scopes, patch
-    overrides and `vendor/`),
+    Derived, never hand-listed: the union of (a) what `scripts/check-async-driver-refinement` treats as
+    proof inputs (`governed_inputs`: its `FILES`, resume invocation paths, declared prefixes and the vendored
+    crates the proof compiles; deliberately not the broader build scope `source_identity` hashes),
     (b) everything `registration` and the qualification bind: the proof-contract inputs, the TLC
     models and configurations, the compiled catalog sources, the stage registry, both workflows, the
     runner route, the capability action, the scope selector, the accounting-method files and table map,

@@ -1196,8 +1196,18 @@ it, and each can be reverted to the ABI wording without touching the others.
    `source_scope` (`ci_scope`, `base...HEAD`), `worker_affected`
    (`base...head`) and, since this decision, the Main `async_refinement`
    trigger, `scripts/check-async-driver-refinement affected --base`, which
-   diffs `base...HEAD`; a Main-only change to a governed path therefore does
-   not fire it. A completed run for the same head that names another
+   diffs `base...HEAD`; a Main-only change to a proof input therefore does
+   not fire it. The trigger fires only for a change to a *proof input*
+   (`proof_inputs()`: `FILES`, the resume invocation paths, and
+   `PROOF_INPUT_PREFIXES`, which are the declared store, worker-control,
+   `library_work/`, `background_jobs/`, verification-package and
+   `store_contract`/`support` test prefixes plus the vendored crates
+   `bitvec_helpers`, `dolby_vision`, `hiqlite`, `hiqlite-wal` and
+   `rust_decimal`, the Cargo.lock closure of `plurx-core` and
+   `plurx-worker-control`). A change elsewhere in `plurxd`, another workspace
+   crate, or another vendored crate does not fire it. `source_identity()`
+   keeps its full build scope; it identifies what the registered build uses,
+   which is a separate question from what needs requalifying. A completed run for the same head that names another
    `event_base` (Main merged a sibling branch and the operator re-registered)
    is not this session: `require-completion` skips it, before validating its
    registration, and still refuses unless a matching complete root exists.
@@ -1221,9 +1231,9 @@ it, and each can be reverted to the ABI wording without touching the others.
    file changed on Main between `event_base` and that tip is in the proof
    closure. The closure is derived, not listed: exact files and path prefixes
    from the union of (a) what `scripts/check-async-driver-refinement` governs
-   (`FILES`, the resume invocation paths, `governed_prefixes()` with the
-   declared prefixes, the workspace crate scopes, patch path overrides and
-   `vendor/`) and (b) everything the registration and qualification bind (the
+   (`proof_inputs()`: `FILES`, the resume invocation paths and
+   `PROOF_INPUT_PREFIXES`, the same set the trigger uses; not the wider build
+   scope of `source_identity()`) and (b) everything the registration and qualification bind (the
    proof-contract inputs, the TLC models and configurations, the compiled
    catalog sources, `store-tests.json`, `main-fast-lane.yml`, the async
    workflow, `runner-fleet.toml`, the capability action, `ci_scope.py` with

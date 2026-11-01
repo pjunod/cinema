@@ -14,6 +14,15 @@ job has its own 90-minute budget. Both are promotion dependencies; selected
 qualification must succeed. They use the same pinned toolchain, FFmpeg setup,
 one compilation worker and persistent cache lane. No target tree is copied.
 
+The async job runs only when a change touches a proof input, as defined by
+`proof_inputs()` in `scripts/check-async-driver-refinement`: the store,
+worker-control, `library_work/`, `background_jobs/`, verification-package and
+store-contract test prefixes, the script's `FILES` and resume invocation paths,
+and the vendored crates the proof compiles (`bitvec_helpers`, `dolby_vision`,
+`hiqlite`, `hiqlite-wal`, `rust_decimal`). A change elsewhere in `plurxd` or
+the other crates does not need a qualification session. The registered source
+identity still hashes the full build scope.
+
 Each job selects its own bounded Cargo home; the cache lane does not guarantee
 a registry handoff between containers. Immediately after proof-job cache
 selection, a separate provisioning step runs `cargo +1.97.1 fetch --locked
