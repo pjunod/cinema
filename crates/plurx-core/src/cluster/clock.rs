@@ -1602,6 +1602,13 @@ impl ContinuousDeadline {
     /// Strict, serialized revalidation, independent of the operator's advisory
     /// cluster-clock enforcement switch. Expiry only rejects new work; owners
     /// must still join/close already acquired work through their original APIs.
+    ///
+    /// Any lapse of the strict evidence closes the window: expiry, a clock
+    /// discontinuity, an admission-generation move, and also a stale peer
+    /// sample or an offset past refusal. On a cluster with enforcement off a
+    /// missed clock probe therefore closes every in-flight causal deadline.
+    /// That is why fresh remote placement stays suppressed until local-entry
+    /// revalidation is split from grant-time cluster policy.
     pub fn remaining(&self) -> Result<Duration, ClockRefusal> {
         let ticket = ClockAcquisitionTicket {
             guard: &self.capture.guard,

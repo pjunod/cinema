@@ -518,6 +518,7 @@ enum EntryFence {
     Overage,
     EpochBetweenSiblings,
     DrainAfterEntry,
+    ContinuousCutoff,
 }
 
 async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
@@ -535,6 +536,19 @@ async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
     );
     let original = plan::prepare(&runtime, request, deadline()).expect("actual charged P/M");
     let preparation = plan::original_preparation_for_test(&original);
+    let clock = std::sync::Arc::new(crate::cluster::clock::ClusterClockGuard::new(false));
+    if matches!(fence, EntryFence::ContinuousCutoff) {
+        // Attached before P inputs, as the remote grant path does. It is
+        // still open at the entry pre-check and closes before the latches.
+        let limit = clock
+            .capture_continuous()
+            .expect("actual Linux clock")
+            .deadline_after(Duration::from_secs(2))
+            .expect("original live cutoff");
+        runtime
+            .retain_planning_continuous_deadline(&preparation, limit)
+            .expect("original cutoff attached before P inputs");
+    }
     runtime
         .prepare_planning_inputs(&preparation, deadline())
         .await
@@ -542,7 +556,7 @@ async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
     let charged = runtime.accounting().expect("full original P/M charge").used;
     let both_refused = matches!(
         fence,
-        EntryFence::Epoch | EntryFence::Drain | EntryFence::Overage
+        EntryFence::Epoch | EntryFence::Drain | EntryFence::Overage | EntryFence::ContinuousCutoff
     );
     let held_parent = if both_refused {
         let bundle = preparation.state.lock().await;
@@ -606,6 +620,9 @@ async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
         }
         EntryFence::Drain | EntryFence::DrainAfterEntry => {
             runtime.begin_drain().expect("actual intervening drain");
+        }
+        EntryFence::ContinuousCutoff => {
+            tokio::time::sleep(Duration::from_millis(2500)).await;
         }
         EntryFence::Overage => runtime
             .ledger
@@ -722,7 +739,10 @@ async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
     }
     assert_eq!(held.used, expected);
     assert!(held.unknown_held > 0);
-    if matches!(fence, EntryFence::Epoch | EntryFence::Drain) {
+    if matches!(
+        fence,
+        EntryFence::Epoch | EntryFence::Drain | EntryFence::ContinuousCutoff
+    ) {
         let identities = {
             let bundle = preparation.state.lock().await;
             let tasks = bundle.roles[0].planning_tasks.as_ref().unwrap();
@@ -903,6 +923,14 @@ async fn registered_planning_latches_refuse_intervening_overage_and_join_both_or
 #[tokio::test]
 async fn released_probe_and_refused_engine_keep_both_original_outcomes_and_full_charge() {
     registered_planning_entry_respects_original_fence(EntryFence::EpochBetweenSiblings).await;
+}
+
+#[tokio::test]
+async fn registered_planning_latches_refuse_expired_original_continuous_cutoff_and_join_both_originals(
+) {
+    // An expired cutoff at the latches settles RegisteredNeverEntered with the
+    // full charge, never retained native uncertainty.
+    registered_planning_entry_respects_original_fence(EntryFence::ContinuousCutoff).await;
 }
 
 #[tokio::test]

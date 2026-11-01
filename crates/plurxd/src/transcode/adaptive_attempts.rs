@@ -958,41 +958,51 @@ impl super::TranscodeManager {
             *held = Some(planning_lease);
         }
         if let Some(wait) = remote_grant {
-            let reply = {
-                let mut held = entry
-                    .remote_registration
-                    .lock()
-                    .map_err(|_| "original registration is uncertain")?;
-                let remote = held.as_mut().ok_or("original registration is absent")?;
-                remote.ready = true;
-                crate::media_sessions::AdaptiveAttemptRegisteredV2 {
-                    version: crate::media_sessions::ADAPTIVE_CAUSAL_PREPARE_VERSION,
-                    nonce: remote.nonce,
-                    attempt_id: entry.attempt_id,
-                    worker_instance_id: entry.worker_instance_id,
-                    serving_generation: entry.serving_generation,
-                }
-            };
-            // ACK only after the SAME complete charged P/M owner and its
-            // application lease are retained. No source has been opened.
-            let _ = wait.reply.send(Ok(reply));
-            let continuous = tokio::time::timeout_at(deadline.into(), wait.grant)
-                .await
-                .map_err(|_| "original remote registration expired without grant")?
-                .map_err(|_| "original remote grant was cancelled")?;
-            continuous
-                .remaining()
-                .map_err(|error| format!("original remote clock before source entry: {error}"))?;
-            deadline = deadline.min(
-                continuous
-                    .monotonic_cutoff()
-                    .map_err(|error| error.to_string())?,
-            );
-            owner
-                .retain_continuous_entry_deadline(continuous)
-                .map_err(|error| {
-                    format!("retaining original continuous P entry condition: {error}")
+            // Every refusal here hands the same original P to its cleanup,
+            // like the sibling paths below; nothing waits for the reaper.
+            let granted = async {
+                let reply = {
+                    let mut held = entry
+                        .remote_registration
+                        .lock()
+                        .map_err(|_| "original registration is uncertain")?;
+                    let remote = held.as_mut().ok_or("original registration is absent")?;
+                    remote.ready = true;
+                    crate::media_sessions::AdaptiveAttemptRegisteredV2 {
+                        version: crate::media_sessions::ADAPTIVE_CAUSAL_PREPARE_VERSION,
+                        nonce: remote.nonce,
+                        attempt_id: entry.attempt_id,
+                        worker_instance_id: entry.worker_instance_id,
+                        serving_generation: entry.serving_generation,
+                    }
+                };
+                // ACK only after the SAME complete charged P/M owner and its
+                // application lease are retained. No source has been opened.
+                let _ = wait.reply.send(Ok(reply));
+                let continuous = tokio::time::timeout_at(deadline.into(), wait.grant)
+                    .await
+                    .map_err(|_| "original remote registration expired without grant")?
+                    .map_err(|_| "original remote grant was cancelled")?;
+                continuous.remaining().map_err(|error| {
+                    format!("original remote clock before source entry: {error}")
                 })?;
+                deadline = deadline.min(
+                    continuous
+                        .monotonic_cutoff()
+                        .map_err(|error| error.to_string())?,
+                );
+                owner
+                    .retain_continuous_entry_deadline(continuous)
+                    .map_err(|error| {
+                        format!("retaining original continuous P entry condition: {error}")
+                    })?;
+                Ok::<(), String>(())
+            }
+            .await;
+            if let Err(error) = granted {
+                handoff_planning_cleanup(&mut planning);
+                return Err(error);
+            }
         }
         if let Err(error) = owner.prepare_inputs(deadline).await {
             handoff_planning_cleanup(&mut planning);

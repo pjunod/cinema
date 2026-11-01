@@ -738,11 +738,14 @@ impl NodeResourceRuntime {
                 self.finish_transition(bundle_id, role).await?;
             }
         }
-        if Instant::now() >= deadline {
-            return Err(OperationError::Deadline);
-        }
         let binding = role.binding;
         let task = role.planning_tasks.as_mut().ok_or(OperationError::State)?;
+        // The same original continuous cutoff closes P entry here, before
+        // either latch, so a closed window settles RegisteredNeverEntered
+        // instead of reaching the tasks and becoming retained uncertainty.
+        if super::entry_window_closed(task.continuous_entry_deadline.as_ref(), deadline) {
+            return Err(OperationError::Deadline);
+        }
         if !task.entered {
             let source = role
                 .sources
@@ -800,12 +803,20 @@ impl NodeResourceRuntime {
             #[cfg(test)]
             tests::stages::before_registered_entry(task.engine_plan.member_id.uuid()).await;
             let probe_released = self
-                .release_native_entry(binding, None, probe_start)
+                .release_native_entry(
+                    binding,
+                    task.continuous_entry_deadline.as_ref(),
+                    probe_start,
+                )
                 .is_ok();
             #[cfg(test)]
             tests::stages::between_registered_entries(task.engine_plan.member_id.uuid()).await;
             let engine_released = self
-                .release_native_entry(binding, None, engine_start)
+                .release_native_entry(
+                    binding,
+                    task.continuous_entry_deadline.as_ref(),
+                    engine_start,
+                )
                 .is_ok();
             if !probe_released || !engine_released {
                 // Each failed release drops only its own unopened sender.

@@ -1247,7 +1247,9 @@ impl NodeResourceRuntime {
             self.fixture_copy_stage(copy_vod::CopyStartFixtureStage::RootArmed)
                 .await;
         }
-        if Instant::now() >= deadline {
+        // A replayed root Arm skips the fresh-Arm check, so the root seam
+        // itself also honours the same original continuous cutoff.
+        if entry_window_closed(role.continuous_entry_deadline.as_ref(), deadline) {
             if let Some(graph) = role.graph.take() {
                 role.sealed = Some(graph.seal());
             }
