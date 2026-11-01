@@ -249,7 +249,7 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "69659307442cef04ded08222e3964f612c866402d0cabbc5eb83dba1c72dc974"
+        "sha256": "e0a4e7a71fcbbf9ea7e1db3975d0d619d9dcd48ed892bf3e7fe6133b0f0af0d4"
       },
       {
         "table": "42 daemon schedule loop no token",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "1934c7bf21b8eeb1dada06f25fa4735f2286588f65bbee142777e2bbd9574f77"
+        "sha256": "ec787360a9ce9597095c600ae4af09df93c269b26615bdfad60783b967195772"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
