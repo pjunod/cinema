@@ -5149,7 +5149,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 1922
+# PR1339 sharing diagnosis: +1 tokio::time::timeout bounds the read-only
+# `tailscale status --json` netmap read awaited inline by the admin request;
+# no task, timer owner or producer is added.
+expected_occurrences = 1923
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6287,7 +6290,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # native_host_mode_keeps_unmanaged_hosts_out_of_container_handoff. It builds
 # the setup message and reads the clock; it starts no task, timer or process
 # and adds no child or producer owner. Existing command ownership is unchanged.
-expected_occurrences = 838
+# PR1339 sharing diagnosis: SharingManager::status()/SetupState::status()
+# reads of in-memory observations, not process launches or producers.
+expected_occurrences = 840
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
