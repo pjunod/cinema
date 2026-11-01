@@ -40,7 +40,7 @@ class PagedTlcComparisonFixtures(unittest.TestCase):
         return value
 
     def invoke(self,directory,module,config):
-        runtime=self.runtime()
+        runtime=self.tlc
         log=directory/(module+'.log')
         with log.open('wb') as output:
             result=subprocess.run([runtime['java'],'-Xmx4g','-cp',runtime['jar'],'tlc2.TLC',
@@ -127,6 +127,9 @@ Spec == Init /\\ [][Next]_vars /\\ Fair
         return bad
 
     def test_complete_micrographs_monolithic_and_composed_tlc_agree(self):
+        # Resolve the runtime for the whole test, before any subTest: the receipt harness accepts a skip only
+        # from the test itself, and a subtest skip would be an unknown fixture outcome.
+        self.tlc=self.runtime()
         # Every advertised enabled label has an actual nonstuttering successor.
         cases=[
             dict(nodes=[1],edges=[]),

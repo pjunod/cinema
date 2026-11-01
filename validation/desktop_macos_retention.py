@@ -556,7 +556,10 @@ def workflow_scope(workspace,commit,legacy):
     require(apple is not None, 'Unsupported native Apple job scope')
     scoped_apple = apple_without_reviewed_cache(apple, cache)
     header,old_roles,adapted_roles,combined_roles=reviewed_apple_roles(legacy_apple,adapted_apple)
-    current_header,current_roles=apple_role_blocks(scoped_apple)
+    try: current_header,current_roles=apple_role_blocks(scoped_apple)
+    except receipts.ReceiptError:
+        # An unreviewed step in the current job is an out-of-scope job, not an internal role-table failure.
+        raise receipts.ReceiptError('Unsupported native Apple job scope (unreviewed role)') from None
     require(current_header==header and current_roles in (old_roles,adapted_roles,combined_roles,successor_apple_roles(combined_roles)),
         'Unsupported native Apple job scope (ordered roles)')
     return {'sha256':digest(current),'kind':'legacy' if current_roles==old_roles else 'adapted'}
