@@ -77,7 +77,7 @@ def seed(repo):
         '.github/workflows/' + p.WORKFLOW: 'workflow: 1\n',
         'validation/async_physical_table_map.json': '{}\n',
         'scripts/check-async-driver-refinement': GOVERNANCE, 'Cargo.lock': 'lock\n',
-        'crates/a.rs': 'a\n', 'crates/unrelated.rs': 'u\n', 'docs/readme.md': 'r\n'})
+        'crates/a.rs': 'a\n', 'crates/unrelated.rs': 'u\n', 'notes/readme.md': 'r\n'})
 
 
 def registration(event_base, source_commit, **extra):
@@ -124,7 +124,7 @@ class MovedMainFixture(unittest.TestCase):
         self.repo.at(self.b, 'pr')
         self.h = self.repo.commit('pr change', {'crates/a.rs': 'a2\n'})
         self.repo.at(self.b, 'main-moved')
-        self.m1 = self.repo.commit('main moves', {'docs/readme.md': 'r2\n'})
+        self.m1 = self.repo.commit('main moves', {'notes/readme.md': 'r2\n'})
         self.repo.at(self.h, 'pr-merged')
         self.repo.run('merge', '-q', '--no-ff', '-m', 'merge main', self.m1)
         self.h2 = self.repo.run('rev-parse', 'HEAD')
@@ -305,12 +305,12 @@ class LandingCheckTests(MovedMainFixture):
         return self.check(tip), tip
 
     def test_unrelated_main_changes_license_the_landing_with_a_receipt(self):
-        receipt, tip = self.land(files={'crates/unrelated.rs': 'u2\n', 'docs/new.md': 'n\n',
+        receipt, tip = self.land(files={'crates/unrelated.rs': 'u2\n', 'notes/new.md': 'n\n',
                                         'crates/core/store_sibling/x.rs': 'not under the governed prefix\n'})
         self.assertTrue(receipt['compatible'])
         self.assertEqual((receipt['event_base'], receipt['main_tip'], receipt['head_commit_id']), (self.b, tip, self.h))
         self.assertEqual(receipt['source']['commit'], self.h)
-        self.assertEqual(receipt['main_changed_files'], 4)  # docs/readme.md since B, plus the three new ones
+        self.assertEqual(receipt['main_changed_files'], 4)  # notes/readme.md since B, plus the three new ones
         closure = s.proof_closure(self.repo.root, self.h)
         self.assertEqual((receipt['closure_files'], receipt['closure_prefixes']),
                          (len(closure['files']), len(closure['prefixes'])))
@@ -371,7 +371,7 @@ class LandingCheckTests(MovedMainFixture):
         self.repo.at(self.b, 'earlier')
         before = self.repo.commit('closure change merged into the PR', {'crates/a.rs': 'main a\n'})
         reg = registration(before, self.h)
-        tip = self.advance({'docs/readme.md': 'later\n'}, start=before, branch='later')
+        tip = self.advance({'notes/readme.md': 'later\n'}, start=before, branch='later')
         self.assertTrue(self.check(tip, reg)['compatible'])
 
     def test_deleting_or_renaming_a_closure_file_on_main_refuses(self):
@@ -394,7 +394,7 @@ class LandingCheckTests(MovedMainFixture):
     def test_the_tip_comes_from_the_api_and_a_caller_cannot_choose_it(self):
         import inspect
         self.assertEqual(list(inspect.signature(s.landing_check).parameters), ['reg', 'api', 'root'])
-        stale = self.advance({'docs/new.md': 'n\n'}, branch='tip-0')
+        stale = self.advance({'notes/new.md': 'n\n'}, branch='tip-0')
         current = self.advance({'crates/shared.rs': 'main moved a proof input\n'}, start=stale, branch='tip-1')
         # Operator checked at T0 (compatible); Main then moved to T1; the check reads T1 itself and refuses.
         self.assertEqual(self.check(stale)['main_tip'], stale)
@@ -481,14 +481,14 @@ class AffectedSelectorTests(MovedMainFixture):
         self.repo.at(self.b, 'main-lock')
         m = self.repo.commit('main bumps a governed input', {'Cargo.lock': 'bumped on main\n'})
         self.repo.at(self.b, 'pr-docs')
-        h = self.repo.commit('pr changes docs only', {'docs/readme.md': 'pr\n'})
+        h = self.repo.commit('pr changes docs only', {'notes/readme.md': 'pr\n'})
         return m, h
 
     def test_a_main_only_change_to_a_governed_path_does_not_fire_the_trigger(self):
         main, head = self.moved()
         result = self.affected(main, head)
         self.assertFalse(result['affected'])
-        self.assertEqual(result['changed_paths'], ['docs/readme.md'])
+        self.assertEqual(result['changed_paths'], ['notes/readme.md'])
 
     def fires(self, *paths):
         self.repo.at(self.b, 'pr-' + str(abs(hash(paths))))
