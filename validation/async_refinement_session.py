@@ -524,7 +524,8 @@ class PhysicalContext:
     def __init__(self, reg, plan, session_id, root, owned):
         self.reg, self.session_id, self.owned = reg, session_id, Path(owned).resolve()
         self.plan = p.envelope(plan, 'ResourcePlan', root)
-        wrapper = operational_bounds(self.plan['source_bounds_utf8'], reg, root, measurement_pending=True)
+        pending = p.decode(self.plan['source_bounds_utf8'].encode()).get('calibration') is None
+        wrapper = operational_bounds(self.plan['source_bounds_utf8'], reg, root, measurement_pending=pending)
         self.policy = wrapper['physical_policy']
         self.policy_sha256 = p.digest(p.canonical(self.policy))
         self.lease = HeldLease(reg['storage'], root)
@@ -533,6 +534,7 @@ class PhysicalContext:
         self.root_identity = {'path': str(self.owned), 'device': info.st_dev, 'inode': info.st_ino}
         # output directory -> read-only attachments of already held parent reservations
         self.attachments = {}
+        self.grants = []
 
     def binding(self):
         return {'source': self.reg['source'], 'session_id': self.session_id,
@@ -918,13 +920,19 @@ def dispatch(api, state, control, root):
     reg = state['registration']
     registration(reg, root)
     live_pr(api, reg)
-    p.require(state['phase'] not in ('resource_blocked','semantic_invalid','completion_rejected','complete'),
+    p.require(state['phase'] not in TERMINAL_PHASES,
               'terminal/incomplete resource disposition cannot dispatch another same-plan unit')
-    p.require(state['next_ordinal'] < state['resource_plan']['record']['maximum_units'], 'unit budget exhausted')
+    # Every dispatch, including a failed or unknown one, consumes the immutable allowance.
+    p.require(state['next_dispatch_ordinal'] < state['resource_plan']['record']['maximum_units'],
+              'dispatch ordinal budget exhausted')
     p.require(state.get('retry_authorized') is True,'unknown terminal failure cannot automatically dispatch a successor')
-    mode = dispatch_mode(state)
+    kind = expected_dispatch(state)
+    mode = 'complete' if kind == 'complete' else 'unit'
+    operation = 'publish' if kind in ('publish', 'conformance') else 'execute'
+    control = {**control, 'transport_conformance': (conformance_request(state, reg, control['session_id'])[0]
+                                                    if kind == 'conformance' else None)}
     reject_prior_ordinal_dispatch(api,reg,control,None)
-    inputs = {'mode': mode, 'operation': 'execute', 'registration_sha256': p.digest(p.canonical(reg)),
+    inputs = {'mode': mode, 'operation': operation, 'registration_sha256': p.digest(p.canonical(reg)),
               'control': p.canonical(control).decode()}
     payload = p.canonical({'ref': reg['ref'], 'inputs': inputs})
     p.require(len(payload) <= p.SMALL, 'dispatch payload too large')
@@ -936,8 +944,8 @@ def dispatch(api, state, control, root):
         p.require(response.status in (200, 201, 204), 'dispatch was not accepted')
     # API acceptance is not run authentication/capability; controller polls
     # separately and admits only the exact event/registration/task result.
-    return {'registration_sha256': inputs['registration_sha256'], 'mode': mode,
-            'ordinal': state['next_ordinal'], 'expected_prior_checkpoint':
+    return {'registration_sha256': inputs['registration_sha256'], 'mode': mode, 'operation': operation,
+            'kind': kind, 'control': control, 'ordinal': state['next_dispatch_ordinal'], 'expected_prior_checkpoint':
             p.digest(p.canonical(state['checkpoint'])) if state['checkpoint'] else None,
             'dispatched_at': datetime.now(timezone.utc).isoformat()}
 
@@ -1189,7 +1197,7 @@ def upload_outputs(metadata, staging):
     encoded = p.canonical(metadata)
     p.require(len(encoded) <= p.SMALL, 'bounded uploader metadata exceeded')
     p.write(Path(staging).parent/'upload-plan.json',metadata)
-    if metadata['operation']=='execute':preflight_carrier(Path(staging).parent,metadata)
+    if metadata['operation'] in ('execute','publish'):preflight_carrier(Path(staging).parent,metadata)
     print(OUTPUT_MARKER + encoded.decode(), flush=True)
     with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
         stream.write('part_count=' + str(len(metadata['parts'])) + '\n')
@@ -1345,22 +1353,41 @@ def open_database(family, path):
 
 
 class PoolBudget:
-    """Sub-accounting of one pool reservation the parent holds for its own copies."""
+    """Incremental sub-accounting of one pool reservation the parent holds for its own copies.
+
+    The reservation grows by exactly what is about to be written, so delegated child
+    grants still see the rest of the pool. Releasing a copy lowers the live count but
+    never the held deduction: that returns only after the owned file is removed.
+    """
     def __init__(self, context, pool, existing=0):
-        amount = context.ledger.remaining(pool, 'bytes')
-        self.reservation = context.ledger.reserve(physical.POOL_OWNERS[pool], pool, 'bytes', amount)
+        self.reservation = context.ledger.reserve(physical.POOL_OWNERS[pool], pool, 'bytes', 0)
         self.reservation_id = self.reservation.reservation_id
-        self.capacity, self.used, self.pool = amount, 0, pool
+        self.pool, self.used, self.high = pool, 0, 0
         self.reserve(existing)  # files that survived an earlier job remain charged
 
     def reserve(self, size):
-        if type(size) is not int or size < 0 or self.used + size > self.capacity:
-            raise physical.PhysicalIncomplete('physical pool exhausted: ' + self.pool)
-        self.used += size
+        if type(size) is not int or size < 0:
+            raise physical.PhysicalIncomplete('invalid physical pool charge: ' + self.pool)
+        updated = self.used + size
+        self.reservation.grow(max(self.high, updated))
+        self.used, self.high = updated, max(self.high, updated)
 
     def release(self, size):
         self.used -= size
         p.require(self.used >= 0, 'physical pool released below zero')
+
+
+class NullBudget:
+    """Read-only controller replay on a host without the proof storage ledger."""
+    def reserve(self, size):
+        p.require(type(size) is int and size >= 0, 'invalid replay charge')
+
+    def release(self, size):
+        p.require(type(size) is int and size >= 0, 'invalid replay release')
+
+
+def replay_budget(pool='restore_staging_bytes'):
+    return PoolBudget(_PHYSICAL[0], pool) if _PHYSICAL else NullBudget()
 
 
 def owned_directory(path, reg=None, root=None):
@@ -1378,7 +1405,7 @@ class PublicationStore:
     Spool bytes are sender-side cache only. Coverage is credited from authenticated
     native batches during replay and overwritten into this ledger before sending.
     """
-    def __init__(self, reg, root, name, *, create):
+    def __init__(self, reg, root, name, *, create, evidence=None):
         context = current_physical()
         self.reg, self.root_source = reg, root
         self.root = context.owned / name
@@ -1393,7 +1420,7 @@ class PublicationStore:
         self.ledger = snapshots.PublicationLedger(
             open_database('publication_pending_scratch', self.root / 'ledger.sqlite'))
         self.evidence = None
-        if create:
+        if create and (evidence is None or evidence):
             self.spool_budget = PoolBudget(context, 'snapshot_spool_bytes')
             self.evidence = snapshots.EvidencePlan(
                 owned_directory(self.root / 'evidence', reg, root),
@@ -1507,7 +1534,9 @@ def plan_transfer(store, state, reg, output, pending, execution_origin, publicat
 
 def write_publication_draft(output, role, state, control, unit, pending_before, batch, refs, extra=None):
     """Pre-upload facts the post-upload finalizer completes with native receipts."""
-    p.write(Path(output) / 'finalizer-state.json', {'state': state, 'control': control, 'unit': unit,
+    kept = {key: state[key] for key in ('registration', 'resource_plan', 'checkpoint', 'control_sha256',
+                                        'next_dispatch_ordinal', 'operational_usage') if key in state}
+    p.write(Path(output) / 'finalizer-state.json', {'state': kept, 'control': control, 'unit': unit,
         'role': role, 'pending_before': pending_before, 'batch': batch, 'payload': refs,
         'verified': None, 'main_records': [], **(extra or {})})
 
@@ -1660,10 +1689,18 @@ def reconstruct_evidence(intent, resolver, binding, destination, reg, root, budg
     return destination
 
 
-def accepted_transport(intent, resolver, binding, evidence_dir, carrier, control_sha, retained):
+def original_control(pend):
+    """Resolver view of the direct original execution: its WorkUnit and exact receipts only."""
+    unit = pend['unit']['record']
+    return {'session_id': unit['session_id'], 'unit_ordinal': unit['unit_ordinal'], 'work_unit': pend['unit'],
+            'artifact_receipts': pend['original_receipts'], 'completion': None}
+
+
+def accepted_transport(intent, resolver, binding, evidence_dir, pend, retained):
     """Dict consumed by the historical-member machinery (single logical evidence directory)."""
-    return {'parts': {0: evidence_dir}, 'receipts': {}, 'bytes': retained, 'control': carrier,
-            'control_sha256': control_sha, 'evidence_directory': evidence_dir,
+    control = original_control(pend)
+    return {'parts': {0: evidence_dir}, 'receipts': {}, 'bytes': retained, 'control': control,
+            'control_sha256': p.digest(p.canonical(control)), 'evidence_directory': evidence_dir,
             'logical_members': lambda: (entry['member'] for entry in snapshots.iter_keyed_manifest(
                 intent['evidence_root'], resolver, binding, 'evidence_index', 'evidence_manifest_node'))}
 
@@ -1735,6 +1772,7 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
     output = Path(output)
     generation = output / 'state.restore'
     generation.mkdir(exist_ok=False, mode=0o700)
+    request['verifier_work_db'] = str(generation / 'verifier.sqlite')
     directory = owned_directory(generation, reg, root)
     try:
         catalog_root = p.auxiliary(p.decode(resolver(catalog_ref)), root)
@@ -1838,6 +1876,55 @@ def restore_latest(state, latest, source, request, output, reg, root):
     return index_path
 
 
+def fresh_conformance_pending(anchor, ledger_path):
+    """Empty rehearsal receiver over the anchor's immutable intent; zero historical credit."""
+    replay = ReplayLedger(ledger_path)
+    try:
+        sha, count = replay.ledger.coverage()
+        intent_ref = anchor['intent']
+        replay.db.execute('INSERT OR IGNORE INTO queue VALUES(?,?,?)',
+                          (intent_ref['kind'], intent_ref['sha256'], intent_ref['bytes']))
+        replay.db.commit()
+    finally:
+        replay.close()
+    return {'pending': {'schema_version': 1, 'kind': 'pending_publication', 'intent': intent_ref,
+                        'previous_batch': None, 'coverage_sha256': sha, 'coverage_count': count,
+                        'next_batch_ordinal': 0},
+            'ledger_path': str(ledger_path), 'unit': anchor['unit'], 'execution_origin': anchor['execution_origin'],
+            'original_receipts': anchor['original_receipts'], 'bytes': 0, 'carriers': [], 'intent': intent_ref,
+            'batches': []}
+
+
+def seed_sender_queue(store, resolver, intent_ref):
+    """Sender-side closure queue from authenticated lineage bytes (reads only, no credit)."""
+    stack, seen = [intent_ref], set()
+    while stack:
+        reference = stack.pop()
+        key = (reference['kind'], reference['sha256'])
+        if key in seen:
+            continue
+        seen.add(key)
+        store.ledger.db.execute('INSERT OR IGNORE INTO queue VALUES(?,?,?)',
+                                (reference['kind'], reference['sha256'], reference['bytes']))
+        if reference['kind'] in snapshots.STRUCTURED_KINDS:
+            stack.extend(snapshots.child_refs(reference['kind'], resolver(reference)))
+    store.ledger.db.commit()
+
+
+def stage_sender_content(store, resolver, offer):
+    """Copy exactly the offered (or every uncovered) genuine bytes into the sender CAS."""
+    rows = store.ledger.db.execute(
+        'SELECT q.kind,q.sha256,q.bytes FROM queue q LEFT JOIN coverage c ON c.kind=q.kind AND c.sha256=q.sha256 '
+        'WHERE c.sha256 IS NULL ORDER BY q.kind,q.sha256').fetchall()
+    for kind, sha, size in rows:
+        if offer is not None and (kind, sha) not in offer:
+            continue
+        reference = {'kind': kind, 'sha256': sha, 'bytes': size}
+        data = resolver(reference)
+        put = store.inventory.put(kind, data)
+        p.require(put == reference, 'sender content differs from its queued identity')
+
+
 def run_publish(api, reg, state, latest, control, root, source, output, job, run_id, identity, measurement, deadline):
     """A bounded publish dispatch: one transfer batch or the separate activation.
 
@@ -1846,22 +1933,35 @@ def run_publish(api, reg, state, latest, control, root, source, output, job, run
     can only fail the batch, never credit it.
     """
     conformance = control['transport_conformance']
+    first_rehearsal = conformance is not None and state['conformance_pending'] is None
     if conformance is None:
         pend = state['pending_publication']
         p.require(pend is not None, 'no pending publication to publish')
         spool = 'publication-' + str(pend['execution_origin']['dispatch_ordinal'])
     else:
+        case = snapshots.conformance_case_sha256(p.digest(p.canonical(reg)), control['session_id'],
+                                                 conformance['anchor_intent_sha256'])
+        p.require(state['anchor'] is not None and state['anchor']['sha256'] == conformance['anchor_intent_sha256'],
+                  'rehearsal anchor is not the first authenticated snapshot pair')
+        spool = 'conformance-' + case[:32]
         pend = state['conformance_pending']
-        p.require(pend is not None, 'rehearsal has no authenticated first batch to continue')
-        spool = 'conformance-' + conformance['case_sha256'][:32]
+        if first_rehearsal:
+            pend = fresh_conformance_pending(state['anchor'], Path(output) / ('conformance-' + case[:32] + '.sqlite'))
     index_path = Path(output) / 'dependencies.sqlite'
-    shutil.copyfile(state['conformance_index_path'] if conformance else state['index_path'], index_path)
+    shutil.copyfile(state['index_path'], index_path)
     index = p.DependencyIndex(index_path)
+    case_index = None
     store = None
     try:
-        parts_root = Path(state['conformance_parts_root'] if conformance else state['parts_root'])
-        resolver = snapshots.AuthenticatedResolver(index.db, parts_root)
-        store = PublicationStore(reg, root, spool, create=False)
+        parts_root = Path(state['parts_root'])
+        resolver = snapshots.AuthenticatedResolver(index.db, parts_root)  # sender reads lineage bytes
+        restore_resolver = resolver
+        if conformance is not None and not first_rehearsal:
+            case_path = Path(output) / 'case-dependencies.sqlite'
+            shutil.copyfile(state['conformance_index_path'], case_path)
+            case_index = p.DependencyIndex(case_path)
+            restore_resolver = snapshots.AuthenticatedResolver(case_index.db, Path(state['conformance_parts_root']))
+        store = PublicationStore(reg, root, spool, create=first_rehearsal or False, evidence=False)
         receiver = ReplayLedger(pend['ledger_path'])
         try:
             store.ledger.db.execute('DELETE FROM coverage')
@@ -1873,26 +1973,34 @@ def run_publish(api, reg, state, latest, control, root, source, output, job, run
                                                     'resource_plan_sha256', 'initial_image_sha256')}
             origin = current_origin(state, reg, run_id, job, 'publish')
             complete = snapshots.closure_complete(receiver.ledger)
+            extra = None
+            offer = None
             if not complete:
-                offer = None
                 if conformance is not None:
+                    if first_rehearsal:
+                        seed_sender_queue(store, resolver, pend['pending']['intent'])
                     chunks = snapshots.conformance_chunks(p.decode(resolver(intent['catalog_root'])),
                         p.decode(resolver(intent['verifier_root'])), resolver)
                     offer = snapshots.conformance_offer(pend['pending']['next_batch_ordinal'], chunks)
+                    stage_sender_content(store, resolver, offer)
                 batch, plan, refs = plan_transfer(store, state, reg, output, pend['pending'],
                     pend['execution_origin'], origin, binding, purpose='transfer', offer=offer)
-                extra = None
+                payload = refs
             else:
-                batch, plan, refs, extra = prepare_activation(store, state, reg, root, source, output, pend, intent,
-                                                              binding, origin, index, index_path, resolver,
-                                                              conformance)
+                batch, plan, payload, extra = prepare_activation(store, state, reg, root, source, output, pend, intent,
+                                                                 binding, origin, index, index_path, restore_resolver,
+                                                                 conformance)
         finally:
             receiver.close()
-        role = 'transport_conformance' if conformance is not None else (
-            'unit_checkpoint' if extra is not None else 'publication_batch')
-        unit = pend['unit']
-        write_publication_draft(output, role, state, control, unit, pend['pending'], batch, refs,
-                                {'activation': extra, 'conformance': conformance})
+        role = ('transport_conformance' if conformance is not None else
+                'unit_checkpoint' if extra is not None else 'publication_batch')
+        write_publication_draft(output, role, state, control, pend['unit'], pend['pending'], batch, payload, {
+            'activation': extra if conformance is None else None,
+            'conformance': None if conformance is None else {
+                'case_id': snapshots.CONFORMANCE_CASE, 'case_sha256': case,
+                'anchor_intent_sha256': conformance['anchor_intent_sha256'], 'result': extra},
+            'candidate_checkpoint_sha256': intent['candidate_checkpoint']['sha256'],
+            'candidate_checkpoint': intent['candidate_checkpoint']})
         try:
             upload_outputs(output_metadata(reg, control['session_id'], binding['unit_ordinal'], plan,
                                            'transfer/node-0.json', 'publish'), Path(output) / 'upload')
@@ -1900,6 +2008,8 @@ def run_publish(api, reg, state, latest, control, root, source, output, job, run
             plan.close()
     finally:
         index.close()
+        if case_index is not None:
+            case_index.close()
         if store is not None:
             store.close()
     p.require(time.monotonic() <= deadline, 'publication dispatch exceeded admitted time')
@@ -1909,13 +2019,16 @@ def run_publish(api, reg, state, latest, control, root, source, output, job, run
 
 def prepare_activation(store, state, reg, root, source, output, pend, intent, binding, origin, index, index_path,
                        resolver, conformance):
-    """Separate activation dispatch: restore, validate, then upload bounded evidence."""
+    """Separate activation dispatch: restore, validate, then upload bounded evidence.
+
+    Activation restores from the authenticated bytes of the publication's own native
+    uploads (a rehearsal: this case's own uploads only), never from sender spool.
+    """
     planned = p.decode(resolver(intent['execution_result']))
     accepted = snapshots.accepted_result(planned, pend['execution_origin'], pend['original_receipts'], p.ref)
-    context = current_physical()
-    budget = PoolBudget(context, 'restore_staging_bytes')
+    budget = replay_budget()
     evidence_dir = reconstruct_evidence(intent, resolver, binding, Path(output) / 'evidence', reg, root, budget)
-    transport = accepted_transport(intent, resolver, binding, evidence_dir, pend['unit'], pend['carriers'][-1], 0)
+    transport = accepted_transport(intent, resolver, binding, evidence_dir, pend, 0)
     authenticated_roots(transport['parts'], index, root)
     add_authenticated_members(index, accepted, transport, root)
     request = {'schema_version': 6, 'operation': 'validate_restore', 'work_unit': accepted['work_unit'],
@@ -1923,6 +2036,9 @@ def prepare_activation(store, state, reg, root, source, output, pend, intent, bi
                'prior_checkpoint': state['checkpoint'], 'checkpoint': accepted['checkpoint'],
                'source_files': reg['source_files'], 'runtime': reg['runtime'],
                'deadline_monotonic': time.monotonic() + 1800, 'dependency_index': str(index_path),
+               'driver_graph': str(Path(evidence_dir) / 'driver-graph.json'),
+               'previous_verifier_progress_sha256': state.get('verifier_progress_sha256'),
+               'previous_verifier_backup_sha256': state.get('verifier_backup_sha256'),
                'tlc': {'java': reg['runtime']['java']['path'], 'jar': reg['runtime']['tlc']['path'],
                        'java_sha256': reg['runtime']['java']['sha256'], 'jar_sha256': reg['runtime']['tlc']['sha256']}}
     restored = restore_snapshots(state, source, request, Path(output) / 'activation', reg, root, index_path,
@@ -1939,15 +2055,221 @@ def prepare_activation(store, state, reg, root, source, output, pend, intent, bi
     refs['final_input'] = refs['catalog_semantic'] if accepted['work_unit']['stage'] == 'complete' else None
     batch, plan, payload = plan_transfer(store, state, reg, output, pend['pending'], pend['execution_origin'],
                                          origin, binding, purpose='activate', extra=extra)
+    if conformance is not None:
+        catalog = p.decode(resolver(intent['catalog_root']))
+        verifier = p.decode(resolver(intent['verifier_root']))
+        case = snapshots.conformance_case_sha256(p.digest(p.canonical(reg)), binding['session_id'],
+                                                 conformance['anchor_intent_sha256'])
+        result = {'schema_version': 1, 'kind': 'native_transport_conformance',
+                  'case_id': snapshots.CONFORMANCE_CASE, 'case_sha256': case,
+                  'registration_sha256': p.digest(p.canonical(reg)), 'source': binding['source'],
+                  'session_id': binding['session_id'], 'resource_plan_sha256': binding['resource_plan_sha256'],
+                  'initial_image_sha256': binding['initial_image_sha256'],
+                  'anchor_intent_sha256': conformance['anchor_intent_sha256'],
+                  'execution_origin': pend['execution_origin'], 'restoration_origin': origin,
+                  'catalog_root': intent['catalog_root'], 'verifier_root': intent['verifier_root'],
+                  'final_batch': pend['pending']['previous_batch'],
+                  'nonempty_transfer_batches': pend['pending']['next_batch_ordinal'],
+                  'catalog_sha256': catalog['catalog_sha256'], 'verifier_sha256': verifier['work_db_sha256'],
+                  'validations': refs, 'complete': True, 'acceptance': False, 'proof_checkpoint_advanced': False}
+        return batch, plan, payload, result
     activation = {**binding, 'schema_version': 1, 'kind': 'publication_activation',
                   'intent_sha256': pend['pending']['intent']['sha256'],
-                  'execution_origin': pend['execution_origin'], 'activation_origin': origin, 'final_batch': None,
+                  'execution_origin': pend['execution_origin'], 'activation_origin': origin,
+                  'final_batch': pend['pending']['previous_batch'],
                   'previous_checkpoint': intent['previous_checkpoint'],
                   'candidate_checkpoint': intent['candidate_checkpoint'], 'catalog_root': intent['catalog_root'],
                   'verifier_root': intent['verifier_root'], 'execution_result': intent['execution_result'],
                   'validations': refs, 'stage': accepted['work_unit']['stage'],
                   'stage_complete': accepted['stage_complete'], 'activated': True, 'acceptance': False}
     return batch, plan, payload, activation
+
+
+TERMINAL_PHASES = ('resource_blocked', 'semantic_invalid', 'completion_rejected', 'complete')
+
+
+def item_kind(item):
+    if item['operation'] == 'publish':
+        return 'conformance' if item['conformance'] is not None else 'publish'
+    return 'complete' if item['mode'] == 'complete' else 'execute'
+
+
+def expected_dispatch(state):
+    """The one legal next dispatch kind, derived only from replay-authenticated state."""
+    if state['pending_publication'] is not None:
+        return 'publish'
+    if state['conformance_pending'] is not None or (state['anchor'] is not None and state['conformance_result'] is None):
+        return 'conformance'
+    return 'complete' if dispatch_mode(state) == 'complete' else 'execute'
+
+
+def conformance_request(state, reg, session_id):
+    anchor = state['anchor']
+    case = snapshots.conformance_case_sha256(p.digest(p.canonical(reg)), session_id, anchor['sha256'])
+    return {'case_id': snapshots.CONFORMANCE_CASE, 'anchor_intent_sha256': anchor['sha256']}, case
+
+
+def chain_carrier(state, auth, root):
+    """Linear control chain over every successful publisher carrier."""
+    carrier = auth['carrier']
+    p.require(carrier['previous_control_sha256'] == state.get('control_sha256'),
+              'carrier skips or reorders the authenticated control chain')
+    state['control_sha256'] = auth['control_sha256']
+    state['retained_bytes'] += carrier['transfer_batch']['retained_artifact_bytes']
+    state['operational_usage'] = enforce_control_caps(state, {'parts': {}, 'control': carrier}, root)
+
+
+def replay_batch(state, auth, index, pend, *, activation):
+    """Credit one authenticated batch into its pending publication and return the new pending."""
+    carrier, batch = auth['carrier'], auth['carrier']['transfer_batch']
+    p.require(carrier['work_unit'] == pend['unit'] and batch['execution_origin'] == pend['execution_origin']
+              and batch['publication_origin'] == carrier['origin']
+              and (batch['purpose'] == 'activate') == activation, 'batch is not the next link of its pending publication')
+    receiver = ReplayLedger(pend['ledger_path'])
+    try:
+        after = credit_rows(index, receiver.ledger, auth['resolver'], carrier['unit_ordinal'], pend['pending'], batch,
+                            auth['rows'])
+        if not activation:
+            p.require(after == carrier['pending_publication'], 'carrier pending publication differs from replay')
+    finally:
+        receiver.close()
+    return after
+
+
+def accept_activation(state, reg, root, work, auth, index):
+    """Activation: closure + restored validations, then one accepted result and one advance."""
+    carrier, activation = auth['carrier'], auth['carrier']['activation']
+    pend = state['pending_publication']
+    p.require(carrier['role'] == 'unit_checkpoint' and carrier['pending_publication'] is None
+              and activation['activation_origin'] == carrier['origin'] == carrier['transfer_batch']['publication_origin']
+              and carrier['transport_conformance'] is None, 'activation carrier shape differs')
+    unit = auth['unit']
+    intent, resolver = auth['intent'], auth['resolver']
+    binding = {key: intent[key] for key in ('source', 'session_id', 'unit_ordinal', 'resource_plan_sha256',
+                                           'initial_image_sha256')}
+    after = replay_batch(state, auth, index, pend, activation=True)
+    receiver = ReplayLedger(pend['ledger_path'])
+    try:
+        p.require(snapshots.closure_complete(receiver.ledger), 'activation before publication closure is complete')
+        planned = p.decode(resolver(intent['execution_result']))
+        provisional = snapshots.accepted_result(planned, pend['execution_origin'], pend['original_receipts'], p.ref)
+        budget = replay_budget()
+        evidence_dir = reconstruct_evidence(intent, resolver, binding, Path(work) / ('evidence-' + str(intent['unit_ordinal'])),
+                                            reg, root, budget)
+        transport = accepted_transport(intent, resolver, binding, evidence_dir, pend, pend['bytes'])
+        authenticated_roots(transport['parts'], index, root)
+        add_authenticated_members(index, provisional, transport, root)
+
+        def validate_prefix(result, validations):
+            check_activation_validations(result, intent, validations, resolver, receiver.ledger, state['index_path'])
+        result = snapshots.finish_publication(receiver.ledger, intent, pend['pending'], activation, planned,
+                                              pend['original_receipts'], p.ref, validate_prefix)
+    finally:
+        receiver.close()
+    p.require(p.digest(p.canonical(result['checkpoint'])) == intent['candidate_checkpoint']['sha256'],
+              'accepted checkpoint is not the frozen candidate')
+    return result, transport, after
+
+
+def replay_activation(state, reg, root, work, auth, index, plan):
+    result, transport, _ = accept_activation(state, reg, root, work, auth, index)
+    prior = state
+    usage = enforce_control_caps(state, {'parts': transport['parts'], 'control': auth['carrier']}, root)
+    new = advance(state, result, root)  # exactly once per accepted publication
+    new['operational_usage'] = usage
+    new = authenticate_verifier_progress(prior, new, result, transport, root)
+    validate_backend_progress(prior, new, result, transport, root)
+    intent = auth['intent']
+    new.update(control_sha256=auth['control_sha256'], pending_publication=None,
+               catalog_root_ref=intent['catalog_root'], verifier_root_ref=intent['verifier_root'],
+               retained_bytes=prior['retained_bytes'] + auth['carrier']['transfer_batch']['retained_artifact_bytes'])
+    p.require(new['retained_bytes'] <= plan['total_retained_artifact_bytes'], 'retained artifact allowance exhausted')
+    if new['anchor'] is None and intent['verifier_root'] is not None:
+        # First normally authenticated catalog+verifier pair; never manufactured.
+        held = prior['pending_publication']
+        new['anchor'] = {'intent': held['pending']['intent'], 'sha256': held['pending']['intent']['sha256'],
+                         'unit': held['unit'], 'execution_origin': held['execution_origin'],
+                         'original_receipts': held['original_receipts']}
+    return new, result, transport
+
+
+def replay_conformance(state, reg, root, work, auth, index, case):
+    """One rehearsal dispatch: same namespace, separate index, zero historical credit."""
+    carrier = auth['carrier']
+    conformance = carrier['transport_conformance']
+    anchor = state['anchor']
+    p.require(anchor is not None and conformance['case_sha256'] == case
+              and conformance['anchor_intent_sha256'] == anchor['sha256']
+              and carrier['work_unit'] == anchor['unit']
+              and carrier['checkpoint'] == p.ref(state['checkpoint'], p.digest(p.canonical(state['checkpoint'])))
+              and carrier['activation'] is None and carrier['completion'] is None,
+              'conformance carrier is not the fixed case over the unchanged accepted checkpoint')
+    conf_index = p.DependencyIndex(Path(state['conformance_index_path']))
+    try:
+        pend = state['conformance_pending']
+        if pend is None:
+            pend = fresh_conformance_pending(anchor, Path(work) / ('conformance-' + case[:32] + '.sqlite'))
+        resolver = snapshots.AuthenticatedResolver(conf_index.db, Path(state['conformance_parts_root']))
+        auth = {**auth, 'resolver': resolver}
+        final = carrier['transport_conformance']['result'] is not None
+        batch = carrier['transfer_batch']
+        p.require(batch['execution_origin'] == anchor['execution_origin'] and batch['batch_ordinal'] == pend['pending']['next_batch_ordinal']
+                  and (batch['purpose'] == 'activate') == final, 'conformance batch chain differs')
+        receiver = ReplayLedger(pend['ledger_path'])
+        try:
+            after = credit_rows(conf_index, receiver.ledger, resolver, carrier['unit_ordinal'], pend['pending'], batch,
+                                auth['rows'])
+            payload = [(row[0]['kind'], row[0]['sha256']) for row in auth['rows']]
+            p.require(carrier['pending_publication'] == after, 'conformance pending publication differs from replay')
+            if not final:
+                p.require(payload, 'conformance transfer batch carries no new payload')
+                pend = {**pend, 'pending': after, 'batches': [*pend['batches'], payload],
+                        'bytes': pend['bytes'] + batch['retained_artifact_bytes'],
+                        'carriers': [*pend['carriers'], auth['control_sha256']]}
+                state['conformance_pending'] = pend
+            else:
+                check_conformance_final(state, reg, root, carrier, pend, payload, receiver.ledger, resolver, conf_index, case)
+                state['conformance_result'] = conformance['result']
+                state['conformance_pending'] = None
+        finally:
+            receiver.close()
+    finally:
+        conf_index.close()
+    chain_carrier(state, auth, root)
+
+
+def check_conformance_final(state, reg, root, carrier, pend, payload, ledger, resolver, conf_index, case):
+    """Independently recompute shape, closure and restored validations; a result flag is not authority."""
+    result = carrier['transport_conformance']['result']
+    intent = p.decode(resolver(pend['intent']))
+    batches = [*pend['batches']]
+    p.require(snapshots.closure_complete(ledger), 'rehearsal closure incomplete at restore')
+    catalog = p.decode(resolver(intent['catalog_root']))
+    verifier = p.decode(resolver(intent['verifier_root']))
+    chunks = snapshots.conformance_chunks(catalog, verifier, resolver)
+    snapshots.check_conformance_payloads(chunks, batches)
+    expected_checkpoint = p.digest(p.canonical(state['checkpoint']))
+    p.require(intent['candidate_checkpoint']['sha256'] == expected_checkpoint, 'rehearsal anchor is not the unchanged checkpoint')
+    check_activation_validations({'checkpoint': state['checkpoint']}, intent, result['validations'], resolver, ledger,
+                                 state['index_path'])
+    p.require(result['kind'] == 'native_transport_conformance' and result['case_sha256'] == case
+              and result['case_id'] == snapshots.CONFORMANCE_CASE and result['complete'] is True
+              and result['acceptance'] is False and result['proof_checkpoint_advanced'] is False
+              and result['registration_sha256'] == p.digest(p.canonical(reg))
+              and result['source'] == reg['source'] and result['anchor_intent_sha256'] == intent_sha(pend)
+              and result['execution_origin'] == pend['execution_origin']
+              and result['restoration_origin'] == carrier['origin']
+              and result['catalog_root'] == intent['catalog_root'] and result['verifier_root'] == intent['verifier_root']
+              and result['final_batch'] == pend['pending']['previous_batch']
+              and result['nonempty_transfer_batches'] == len(batches)
+              and result['catalog_sha256'] == catalog['catalog_sha256']
+              and result['verifier_sha256'] == verifier['work_db_sha256']
+              and result['resource_plan_sha256'] == intent['resource_plan_sha256']
+              and result['initial_image_sha256'] == intent['initial_image_sha256'], 'conformance result differs from recomputation')
+
+
+def intent_sha(pend):
+    return pend['intent']['sha256']
 
 
 def replay_control(api,control,root,work):
@@ -1960,17 +2282,23 @@ def replay_control(api,control,root,work):
               'attempt/root run IDs must be positive integers')
     reg=registration(control['registration'],root)
     plan=p.envelope(control['resource_plan'],'ResourcePlan',root)
-    p.require(len(control['attempt_runs'])<=plan['maximum_units'],'attempts exceed immutable unit allowance')
+    p.require(len(control['attempt_runs'])<=plan['maximum_units'],'attempts exceed immutable dispatch allowance')
     api.maximum_session_requests=max(api.maximum_session_requests,400+(len(control['attempt_runs'])+3)*(32+3*p.UPLOAD_SLOTS))
     api.bind_storage(control['resource_plan'],reg,control['session_id']);live_pr(api,reg)
     inventory=attempt_inventory(api,reg,control,getattr(api,'current_run',None))
     p.closed(control['probe_run'],('success_run','failure_run','post_failure_run'))
-    probe,measurement,_=authenticate_output(api,reg,control['probe_run']['success_run'],'unit',Path(work)/'probe',root)
+    work=Path(work);work.mkdir(parents=True,exist_ok=True)
+    probe,measurement,_=authenticate_output(api,reg,control['probe_run']['success_run'],'unit',work/'probe',root)
     probe['finalizer_capability']=authenticate_probe_pair(api,reg,control['probe_run'])
     admitted_at=utc(inventory[0]['run']['created']) if inventory else time.time()
     state=admit(reg,control['resource_plan'],probe,measurement,root,admitted_at)
     controller_memory_limit(state['resource_plan'])
     p.require(control['session_id']==plan['session_id'],'control session UUID differs')
+    parts_root=str(Path(api.scratch).parent/'authenticated-parts')
+    state.update(pending_publication=None,conformance_pending=None,conformance_result=None,anchor=None,
+                 index_path=str(work/'dependencies.sqlite'),conformance_index_path=str(work/'conformance.sqlite'),
+                 parts_root=parts_root,conformance_parts_root=parts_root,catalog_root_ref=None,verifier_root_ref=None,
+                 next_dispatch_ordinal=0,control_sha256=None,retained_bytes=state.get('retained_bytes',0))
     decisions={}
     for decision in control['resume_decisions']:
         ordinal=decision['failed_ordinal']
@@ -1978,41 +2306,67 @@ def replay_control(api,control,root,work):
         decisions[ordinal]=decision
     p.require([d['failed_ordinal'] for d in control['resume_decisions']]==sorted(decisions),'unordered resume decisions')
     latest=None;history=[];successes=[]
-    for ordinal,item in enumerate(inventory):
-        state['next_ordinal']=ordinal
-        before=item['control']
-        p.require(before['unit_runs']==successes and before['attempt_runs']==control['attempt_runs'][:ordinal]
-                  and before['resume_decisions']==[d for d in control['resume_decisions'] if d['failed_ordinal']<ordinal],
-                  'attempt event omitted/changed its authenticated predecessor inventory or decision')
-        expected_mode=dispatch_mode(state)
-        p.require(item['mode']==expected_mode and state['phase'] not in ('resource_blocked','semantic_invalid','completion_rejected','complete'),
-                  'attempt bypasses source phase or terminal disposition')
-        if ordinal and inventory[ordinal-1]['job']['status']!='success':
-            validate_resume_decision(api,decisions.get(ordinal-1),inventory[ordinal-1],state,reg)
-        if item['job']['status']!='success':
-            p.require(state['initial_image'] is not None,'failed initial attempt has no authenticated Init; new session required')
-            if ordinal in decisions:validate_resume_decision(api,decisions[ordinal],item,state,reg)
-        else:
-            p.require(item['mode']=='unit','a final completion run cannot be adopted as an ordinary predecessor')
-            result,transport,_=authenticate_output(api,reg,item['run']['id'],'unit',Path(work)/('unit-'+str(ordinal)),root)
-            p.require(result['work_unit']['unit_ordinal']==ordinal
-                      and transport['control']['previous_control_sha256']==state.get('control_sha256'),
-                      'attempt ordinal or previous successful control differs')
-            prior=state;usage=enforce_control_caps(state,transport,root)
-            state=advance(state,result,root);state['operational_usage']=usage
-            state=authenticate_verifier_progress(prior,state,result,transport,root)
-            validate_backend_progress(prior,state,result,transport,root)
-            state['control_sha256']=transport['control_sha256'];state['retained_bytes']+=transport['bytes']
-            p.require(state['retained_bytes']<=plan['total_retained_artifact_bytes'],'retained artifact allowance exhausted')
-            successes.append(item['run']['id']);history.append((result,transport))
-            latest=(result,{**transport,'history':list(history)})
-        state['attempts'].append({'ordinal':ordinal,'run':item['run']['id'],'job':item['job']['id'],
-             'task':item['job']['task_id'],'attempt':1,'status':item['job']['status']})
+    index=p.DependencyIndex(Path(state['index_path']))
+    try:
+        for ordinal,item in enumerate(inventory):
+            state['next_dispatch_ordinal']=ordinal
+            state['next_ordinal']=len(state['units'])
+            before=item['control']
+            p.require(before['unit_runs']==successes and before['attempt_runs']==control['attempt_runs'][:ordinal]
+                      and before['resume_decisions']==[d for d in control['resume_decisions'] if d['failed_ordinal']<ordinal],
+                      'attempt event omitted/changed its authenticated predecessor inventory or decision')
+            kind=item_kind(item)
+            p.require(state['phase'] not in TERMINAL_PHASES and kind==expected_dispatch(state)
+                      and item['mode']==('complete' if kind=='complete' else 'unit'),
+                      'dispatch bypasses source phase, publication chain or terminal disposition')
+            if kind=='conformance':
+                request,case=conformance_request(state,reg,control['session_id'])
+                p.require(before['transport_conformance']==request,'conformance request differs from the fixed anchor case')
+            else:
+                case=None
+                p.require(before['transport_conformance'] is None,'ordinary dispatch carries a conformance request')
+            if ordinal and inventory[ordinal-1]['job']['status']!='success':
+                validate_resume_decision(api,decisions.get(ordinal-1),inventory[ordinal-1],state,reg)
+            if item['job']['status']!='success':
+                p.require(state['initial_image'] is not None,'failed initial attempt has no authenticated Init; new session required')
+                if ordinal in decisions:validate_resume_decision(api,decisions[ordinal],item,state,reg)
+            else:
+                p.require(kind!='complete','a final completion run cannot be adopted as an ordinary predecessor')
+                unit_work=work/('dispatch-'+str(ordinal))
+                if kind=='conformance':
+                    auth=authenticate_publication(api,reg,item['run']['id'],root,unit_work,state,index,case_sha256=case)
+                    replay_conformance(state,reg,root,unit_work,auth,index,case)
+                elif kind=='execute':
+                    auth=authenticate_publication(api,reg,item['run']['id'],root,unit_work,state,index)
+                    p.require(auth['carrier']['role']=='publication_batch','execution does not seal a publication')
+                    pend=begin_pending(state,reg,root,unit_work,auth,index,item)
+                    state['pending_publication']=pend
+                    chain_carrier(state,auth,root)
+                else:
+                    auth=authenticate_publication(api,reg,item['run']['id'],root,unit_work,state,index)
+                    pend=state['pending_publication']
+                    if auth['carrier']['role']=='unit_checkpoint':
+                        prior=state
+                        state,result,transport=replay_activation(state,reg,root,unit_work,auth,index,plan)
+                        history.append((result,transport))
+                        latest=(result,{**transport,'history':list(history)})
+                    else:
+                        p.require(auth['carrier']['role']=='publication_batch','publish carrier role differs')
+                        after=replay_batch(state,auth,index,pend,activation=False)
+                        state['pending_publication']={**pend,'pending':after,'carriers':[*pend['carriers'],auth['control_sha256']]}
+                        chain_carrier(state,auth,root)
+                successes.append(item['run']['id'])
+            state['attempts'].append({'ordinal':ordinal,'run':item['run']['id'],'job':item['job']['id'],
+                 'task':item['job']['task_id'],'attempt':1,'status':item['job']['status']})
+    finally:
+        index.close()
     p.require(successes==control['unit_runs'] and set(decisions)<=set(range(len(inventory))),
               'successful roots/decisions do not match actual attempted inventory')
-    state['next_ordinal']=len(inventory)
+    state['next_dispatch_ordinal']=len(inventory)
+    state['next_ordinal']=len(state['units'])
     state['retry_authorized']=not inventory or inventory[-1]['job']['status']=='success' or len(inventory)-1 in decisions
     return state,latest
+
 
 
 def authenticated_roots(parts, index, root):
@@ -2097,72 +2451,26 @@ def source_commands(root, stage):
     return [sys.executable, str(Path(root) / 'scripts/check-async-driver-refinement'), 'paged-unit', '--request']
 
 
-def restore_latest(state, latest, source, request, output, reg):
-    result, transport = latest
-    root = transport['parts'][0] / 'catalog-backup/root.json'
-    p.require(root.is_file(), 'fixed catalog backup root absent')
-    generation=Path(output)/'state.restore'
-    generation.mkdir(exist_ok=False)
-    request['catalog_path']=str(generation/'catalog.sqlite')
-    request['verifier_work_db']=str(generation/'verifier.sqlite')
-    staged = generation / 'catalog.staged.sqlite'
-    p.restore_catalog(p.read(root), transport['parts'], transport['receipts'], state['checkpoint'], staged, source,
-                      transport_unit=result['work_unit'])
-    p.write(Path(output)/'restored-catalog-root.json',p.read(root))
-    index_path = Path(output) / 'dependencies.sqlite'
-    index = p.DependencyIndex(index_path)
-    try:
-        for old_result,old_transport in transport.get('history',[(result,transport)]):
-            authenticated_roots(old_transport['parts'],index,source)
-            add_authenticated_members(index,old_result,old_transport,source)
-    finally:
-        index.close()
-    # Restore authenticated private input state before any root correspondence
-    # check; its safe prefix may still be preparing the current input scope.
-    request['catalog_path']=str(staged)
-    restore_verifier(state,latest,source,request,output,reg,index_path)
-    restore = {**request, 'operation': 'validate_restore', 'catalog_path': str(staged),
-               'checkpoint': state['checkpoint'], 'dependency_index': str(index_path)}
-    restore['output_dir'] = str(Path(output) / 'restore-validation')
-    Path(restore['output_dir']).mkdir()
-    path = Path(output) / 'restore-request.json'; p.write(path, restore)
-    for argv in ([sys.executable, str(Path(source) / 'scripts/check-async-driver-refinement'), 'paged-unit', '--request', str(path)],
-                 [sys.executable, str(Path(source) / 'verification/async-driver-refinement/paged_checker.py'), 'validate-restore', '--request', str(path)]):
-        run_quantum(path, reg, source, Path(restore['output_dir']), argv)
-    private = p.read(Path(restore['output_dir']) / 'restore-validation.json')
-    semantic = p.read(Path(restore['output_dir']) / 'restore-semantic.json')
-    input_preparation=semantic.get('complete') is False and semantic.get('scope')=='input_preparation'
-    p.atomic_install(staged, generation/'catalog.sqlite', private, semantic, state['checkpoint'],
-                     backup_root=p.read(root),input_preparation=input_preparation)
-    p.write(Path(output)/'restored-input-readiness.json',{'semantic_ready':not input_preparation})
-    active=Path(output)/'state'
-    p.require(not active.exists() and not active.is_symlink(),'refuse replace an active catalog/verifier generation')
-    fd=os.open(generation,os.O_RDONLY)
-    try:os.fsync(fd)
-    finally:os.close(fd)
-    os.replace(generation,active)
-    fd=os.open(active.parent,os.O_RDONLY)
-    try:os.fsync(fd)
-    finally:os.close(fd)
-    request['catalog_path']=str(active/'catalog.sqlite')
-    request['verifier_work_db']=str(active/'verifier.sqlite')
-    return index_path
-
-
 def runner_body(control, root, output, mode, operation):
-    """Trusted CI entry: authenticate first, isolate source, run, package, upload."""
-    deadline = time.monotonic() + 1800
+    """Trusted CI entry: the one physical context spans authenticate, run, package and upload."""
     root = Path(root).resolve(); output = Path(output).resolve()
     reg=registration(control['registration'],root)
     owned=validate_storage(reg['storage'],root)
     p.require(owned in output.parents,'session output escapes persistent owned storage')
+    context=PhysicalContext(reg,control['resource_plan'],control['session_id'],root,owned/control['session_id'])
+    with physical_session(context):
+        return _runner_body(control, root, output, mode, operation, reg, owned)
+
+
+def _runner_body(control, root, output, mode, operation, reg, owned):
+    deadline = time.monotonic() + 1800
     api=api_environment(owned/control['session_id']/'controller-api'/str(os.environ['GITHUB_RUN_ID']))
     api.bind_storage(control['resource_plan'],reg,control['session_id'])
     api.current_run=receipts.positive(int(os.environ['GITHUB_RUN_ID']))
     api.maximum_session_requests=400+(len(control['attempt_runs'])+3)*(32+3*p.UPLOAD_SLOTS)
     reject_prior_ordinal_dispatch(api,reg,control,api.current_run)
     output.mkdir(parents=True, exist_ok=False)
-    if operation=='execute':
+    if operation in ('execute','publish'):
         guard=owned/control['session_id']/('ordinal-'+str(len(control['attempt_runs']))+'.json')
         p.require(not guard.exists(),'executed ordinal already attempted; preserve failed state and start a new admitted session')
         with guard.open('xb') as stream:
@@ -2184,7 +2492,7 @@ def runner_body(control, root, output, mode, operation):
     p.require(event == local and event['inputs']['operation'] == operation
               and p.decode(event['inputs']['control'].encode()) == control, 'current event/control differs')
     live_pr(api, reg)
-    if operation=='execute':reject_prior_ordinal_dispatch(api,reg,control,run_id)
+    if operation in ('execute','publish'):reject_prior_ordinal_dispatch(api,reg,control,run_id)
     source=materialize_session_source(root,reg,control['session_id'])
     identity = runtime_identity(source, reg)
     measurement = measured_resources(output, identity)
@@ -2209,10 +2517,19 @@ def runner_body(control, root, output, mode, operation):
         finally:
             plan.close()
         return
-    p.require(operation == 'execute', 'unregistered operation')
+    p.require(operation in ('execute', 'publish'), 'unregistered operation')
     state, latest = replay_control(api, control, root, output / 'history')
     live_resources(state['resource_plan']['record'], reg, measurement)
     controller_memory_limit(state['resource_plan'])
+    expected = expected_dispatch(state)
+    p.require(state['phase'] not in TERMINAL_PHASES and (
+        (operation == 'publish') == (expected in ('publish', 'conformance'))
+        and (control['transport_conformance'] is not None) == (expected == 'conformance')
+        and (operation == 'execute') == (expected in ('execute', 'complete'))),
+        'producer operation differs from authenticated publication-chain routing')
+    if operation == 'publish':
+        return run_publish(api, reg, state, latest, control, root, source, output, job, run_id, identity,
+                           measurement, deadline)
     unit = unit_request(state, run_id, job, root)
     request = {'schema_version': 6, 'deadline_monotonic': deadline, 'operation': 'expand', 'work_unit': unit['record'],
                'resource_plan': state['resource_plan'], 'initial_image': state['initial_image'],
@@ -2238,7 +2555,7 @@ def runner_body(control, root, output, mode, operation):
                 if path.is_file():
                     target = output / name; target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(path, target)
-        restore_latest(state, latest, source, request, output, reg)
+        restore_latest(state, latest, source, request, output, reg, root)
     p.require(mode==dispatch_mode(state),'producer mode differs from authenticated replay routing')
     if mode == 'complete':
         p.require(state['stage'] == 'complete' and state['phase'] == 'qualified', 'completion premature')
@@ -2247,20 +2564,23 @@ def runner_body(control, root, output, mode, operation):
         p.require(final_input_receipt(ready,state['checkpoint'],backup['catalog_sha256']),
                   'actual completion lost exact final input readiness; no preparation fallback')
         return finish_runner(api, reg, state, control, root, source, request, output, job)
-    result,inventory=execute_and_package(state,reg,request,source,root,output,deadline)
-    p.write(output/'finalizer-state.json',{'state':advance(state,result,root),'control':control,'unit':
-            {'schema_version':6,'kind':'WorkUnit','record':result['work_unit']},
-            'verified':None,'main_records':[]})
+    result,inventory,store,sealed=execute_and_package(state,reg,request,source,root,output,deadline)
     try:
+        write_publication_draft(output,'publication_batch',state,control,
+            {'schema_version':6,'kind':'WorkUnit','record':result['work_unit']},sealed['pending'],sealed['batch'],
+            sealed['refs'],{'activation':None,'conformance':None,
+                            'candidate_checkpoint_sha256':sealed['candidate_checkpoint_sha256'],
+                            'candidate_checkpoint':None})
         resource = state['resource_plan']['record']
         actual = sum(r[0] for r in inventory.db.execute('SELECT bytes FROM members'))
         p.require(actual <= resource['unit_byte_allowance']
                   and actual + state['retained_bytes'] <= resource['total_retained_artifact_bytes'],
                   'actual upload bytes exceed immutable admission')
         upload_outputs(output_metadata(reg, control['session_id'], unit['record']['unit_ordinal'], inventory,
-                                       'unit-result.json', 'execute'), output / 'upload')
+                                       'transfer/node-0.json', 'execute'), output / 'upload')
     finally:
         inventory.close()
+        store.close()
     p.require(time.monotonic() <= deadline, 'unit upload preflight exceeded admitted time')
     live_pr(api, reg)
     p.producer(api, run_id, reg, mode, ('running', 'in_progress'))
@@ -2291,8 +2611,8 @@ def finish_runner(api, reg, state, control, root, source, request, output, job):
     request['operation'] = 'completion_verify'
     request['output_dir'] = str(output / 'completion-check')
     Path(request['output_dir']).mkdir()
-    runtime_paths=('runtime/'+str(len(control['attempt_runs']))+'.json','resources.json',
-                   'predecessors/'+str(len(control['attempt_runs']))+'.json','runtime-external-roots.ndjson')
+    runtime_paths=('runtime/'+str(state['next_ordinal'])+'.json','resources.json',
+                   'predecessors/'+str(state['next_ordinal'])+'.json','runtime-external-roots.ndjson')
     for name in runtime_paths:
         target=Path(request['output_dir'])/name;target.parent.mkdir(parents=True,exist_ok=True)
         shutil.copyfile(output/'quantum'/name,target)
@@ -2425,9 +2745,10 @@ def coordinate(control, root, output, maximum_dispatches=1):
             p.write(output/'completion.json',result);return
         p.write(output/'control.json',control)
         state, _ = replay_control(api, control, root, output / ('replay-' + str(iteration)))
-        p.require(state['next_ordinal'] + maximum_dispatches - iteration <=
-                  state['resource_plan']['record']['maximum_units'], 'controller exceeds immutable unit limit')
+        p.require(state['next_dispatch_ordinal'] + maximum_dispatches - iteration <=
+                  state['resource_plan']['record']['maximum_units'], 'controller exceeds immutable dispatch limit')
         expected = dispatch(api, state, {**control}, root)
+        control = expected['control']
         p.write(output / ('dispatch-' + str(iteration) + '.json'), expected)
         # No guessed next run ID. Match the actual immutable dispatch input.
         deadline = time.monotonic() + 1800
@@ -2441,7 +2762,7 @@ def coordinate(control, root, output, maximum_dispatches=1):
                 event = p.decode(run.get('event_payload', '').encode())
                 inputs = event.get('inputs', {})
                 if (inputs.get('registration_sha256') == expected['registration_sha256']
-                    and inputs.get('mode') == expected['mode'] and inputs.get('operation') == 'execute'
+                    and inputs.get('mode') == expected['mode'] and inputs.get('operation') == expected['operation']
                     and p.decode(inputs.get('control', '{}').encode()) == control
                     and utc(run['created']) >= utc(expected['dispatched_at']) - 1):
                     matches.append(run)
@@ -2600,7 +2921,8 @@ def reserve_verifier(prepare, state, unit, final_checkpoint, source, output, pla
         p.require(name not in names and (allowed_receipt or row['role'] in ('result','evidence_index','progress','temporal_publication')),
                   'future metadata path/role not closed')
         names.add(name)
-        plan.reserve(name,row['maximum_bytes'],row['role'])
+        if name!='unit-result.json':  # the PlannedResult is intent content, not an evidence member
+            plan.reserve(name,row['maximum_bytes'],row['role'])
         reservations.append(row)
     for row in published_members:
         p.require(row['path'] not in names,'published member aliases prepared metadata')
@@ -2763,11 +3085,10 @@ def publication_request(request,phase,output):
 
 
 def transport_reservations(plan,verifier):
-    names=['catalog-backup/root.json','catalog-backup/index/0-0.json']
-    if verifier:names+=['verifier-backup/root.json','verifier-backup/index/0-0.json']
+    names=['catalog-backup/root.json']
+    if verifier:names+=['verifier-backup/root.json']
     for name in names:
-        part=plan.reserve(name,p.SMALL,'transport')
-        p.require(part==0,'fixed transport metadata does not fit part0')
+        plan.reserve(name,p.SMALL,'transport')
 
 
 def final_input_execution(unit,checkpoint,catalog_sha256,backup_sha256,progress_sha256,receipt_sha256,log,reg):
@@ -2839,6 +3160,11 @@ def authenticate_final_input(state,result,transport,progress,backup,root):
 
 
 def execute_and_package(state,reg,request,source,root,output,deadline):
+    """Run one unit, then seal (never upload) its publication and plan batch zero.
+
+    Logical evidence lives in the granted evidence spool, not in native parts. No
+    whole-backup packing happens; only the chunk-tree publication is sealed here.
+    """
     stage=state['stage'];quantum=Path(request['output_dir'])
     request['operation']='expand' if stage=='expand' else 'unit'
     path=Path(output)/'request.json';p.write(path,request)
@@ -2858,7 +3184,7 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
             produced={'schema_version':6,**phase,'checkpoint':state['checkpoint'],
                       'initial_image':state['initial_image'],'session':state['session'],'artifacts':[]}
             # The restored catalog is byte-identical to its authenticated prior
-            # backup. Retransport that frozen snapshot without invoking M1.
+            # snapshot; it is re-snapshotted into the same content-addressed chunks.
             saved=p.read(Path(output)/'restored-catalog-root.json')
             backup=Path(request['catalog_path'])
             p.require(backup.stat().st_size==saved['catalog_bytes'] and p.file_sha(backup)==saved['catalog_sha256'],
@@ -2874,9 +3200,10 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
             request=publication_request(request,phase,quantum);p.write(path,request)
             produced=run_quantum(path,reg,source,quantum,
                        [sys.executable,str(Path(source)/'scripts/check-async-driver-refinement'),'paged-unit','--request',str(path)])
-    plan=p.PartPlan(Path(output)/'upload',limits={'owned_root':str(output),
-          'disk_bytes':state['resource_plan']['record']['total_session_disk_bytes'],
-          'unit_bytes':state['resource_plan']['record']['unit_byte_allowance'],'deadline_monotonic':deadline})
+    origin=request['execution_origin']
+    store=PublicationStore(reg,root,'publication-'+str(origin['dispatch_ordinal']),create=True)
+    plan=store.evidence
+    batch_plan=None
     try:
         transport_reservations(plan,checked)
         runtime_name='runtime/'+str(request['work_unit']['unit_ordinal'])+'.json'
@@ -2885,25 +3212,20 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
             plan.add_file(name,quantum/name)
         published=[]
         for name,file in member_stream(quantum,produced):
-            if name=='unit-result.json':continue  # written only after final export
+            if name=='unit-result.json':
+                continue  # the frozen PlannedResult is intent content, never an evidence member
             if checked and name in {r['path'] for r in prepare['staged_members']}:
                 continue
             if name.startswith(('catalog-backup/','verifier-backup/')) or name in ('catalog-backup.sqlite','backup-descriptor.json'):
                 continue
-            part=plan.add_file(name,file)
+            plan.add_file(name,file)
             value=p.read(file,p.MAX_MEMBER) if file.suffix=='.json' else None
             if type(value) is dict and value.get('schema_version')==6 and value.get('kind') in ('Page','ManifestNode','Checkpoint'):
                 role='catalog_page' if value['kind']=='Page' else 'catalog_manifest'
-                published.append({'path':name,'part_ordinal':part,'bytes':file.stat().st_size,'sha256':p.file_sha(file),'role':role})
-        backup_first=1
+                published.append({'path':name,'bytes':file.stat().st_size,'sha256':p.file_sha(file),'role':role})
         if checked:
-            # Reserve the controller result too; it is not included in any
-            # self-referencing checker result/output inventory.
-            if not any(r['path']=='unit-result.json' for r in prepare['metadata_reservations']):
-                plan.reserve('unit-result.json',p.SMALL,'phase_result')
             if stage=='complete':
-                p.require(preparation_only and request['work_unit']['mode']=='unit',
-                          'final unit may only authenticate frozen inputs')
+                p.require(preparation_only and request['work_unit']['mode']=='unit','final unit may only authenticate frozen inputs')
                 p.require(any(r['path']=='restore-semantic.json' and r['role']=='receipt'
                               for r in prepare['metadata_reservations']), 'final preparation receipt not reserved')
                 plan.reserve(FINAL_INPUT_EXECUTION,p.SMALL,'source_receipt')
@@ -2912,10 +3234,9 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
                                          source,quantum,plan,published)
             if stage=='complete':
                 for name in (FINAL_INPUT_EXECUTION,FINAL_INPUT_LOG):
-                    row=plan.db.execute('SELECT part,bytes FROM members WHERE path=?',(name,)).fetchone()
+                    row=plan.db.execute('SELECT bytes FROM members WHERE path=?',(name,)).fetchone()
                     p.require(row is not None,'controller final-input metadata reservation disappeared')
-                    reservation['metadata_reservations'].append({'path':name,'part_ordinal':row[0],
-                        'maximum_bytes':row[1],'role':'source_receipt'})
+                    reservation['metadata_reservations'].append({'path':name,'maximum_bytes':row[0],'role':'source_receipt'})
             p.write(request['reservation_path'],reservation)
             published_result=produced
             request['checkpoint']=produced['checkpoint']
@@ -2937,7 +3258,6 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
                 seal_final_input(request,produced,reg,source,quantum,path)
             for row in reservation['metadata_reservations']:
                 if row['path']!='unit-result.json':plan.fulfill(row['path'],quantum/row['path'])
-            backup_first=reservation['backup_first_part']
         # Always retain exact raw source graph and separate concrete Init image.
         driver=Path(request['driver_graph'])
         if driver.is_file():plan.add_file('driver-graph.json',driver)
@@ -2962,24 +3282,23 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
             roots=quantum/'backend-external-roots.ndjson'
             if roots.is_file():plan.add_file(roots.name,roots)
         produced['artifacts']=[name for name, in plan.db.execute("SELECT path FROM members WHERE digest NOT LIKE 'reserved:%' ORDER BY path")
-            if not name.startswith(('catalog-backup/','verifier-backup/')) and name!='unit-result.json']
+            if not name.startswith(('catalog-backup/','verifier-backup/'))]
         p.write(Path(output)/'unit-finalizer-result.json',produced)
-        transport_result={k:v for k,v in produced.items() if k!='work_unit'}
-        transport_result['planned_work_unit']=produced['work_unit']
-        p.write(quantum/'unit-result.json',transport_result)
-        if checked:plan.fulfill('unit-result.json',quantum/'unit-result.json')
-        else:plan.add_file('unit-result.json',quantum/'unit-result.json')
-        advance(state,produced,root)
-        descriptor=p.read(quantum/'backup-descriptor.json')
-        _,plan=p.pack_catalog(quantum/'catalog-backup.sqlite',descriptor,produced['checkpoint'],Path(output)/'upload',root,
-                             plan=plan,backup_first_part=backup_first,deferred=checked,transport_unit=produced['work_unit'])
-        if checked:
-            p.pack_verifier(plan,quantum/'verifier-backup.sqlite',p.read(quantum/'verifier-backup-descriptor.json'),
-                            produced['checkpoint'],root,backup_first_part=backup_first,transport_unit=produced['work_unit'])
+        advance(state,produced,root)  # dry run on the planned form; the single real advance follows closure
         plan.preflight()
-        return produced,plan
+        index=p.DependencyIndex(Path(request['dependency_index']))
+        try:
+            built=build_publication(store,state,reg,root,index,quantum,produced,checked,origin)
+        finally:
+            index.close()
+        batch,batch_plan,refs=plan_transfer(store,state,reg,output,built['pending'],origin,origin,
+                                            built['binding'],purpose='transfer')
+        draft={'pending':built['pending'],'batch':batch,'refs':refs,
+               'candidate_checkpoint_sha256':built['intent']['candidate_checkpoint']['sha256']}
+        return produced,batch_plan,store,draft
     except BaseException:
-        plan.close();raise
+        if batch_plan is not None:batch_plan.close()
+        store.close();raise
 
 
 def authenticate_verifier_progress(previous,state,result,transport,root):
@@ -3157,79 +3476,57 @@ def verifier_chain_digest(index_path,through):
     finally:db.close()
 
 
-def restore_verifier(state,latest,source,request,output,reg,index_path):
-    selected=None
-    for result,transport in latest[1].get('history',[]):
-        roots=[d/'verifier-backup/root.json' for d in transport['parts'].values()
-               if (d/'verifier-backup/root.json').is_file()]
-        if roots:
-            p.require(len(roots)==1,'multiple verifier roots in one authenticated unit')
-            selected=(result,transport,roots[0])
-    if selected is None:
-        p.require(state.get('verifier_progress') is None,'authenticated verifier state disappeared')
-        return
-    result,transport,root_path=selected;backup=p.verifier_auxiliary(p.read(root_path),source)
-    staged=Path(request['verifier_work_db']).with_name('verifier.staged.sqlite')
-    p.restore_catalog(backup,transport['parts'],transport['receipts'],result['checkpoint'],staged,source,verifier=True,transport_unit=result['work_unit'])
-    restore={**request,'operation':'validate_restore','verifier_work_db':str(staged),
-             'verifier_checkpoint':result['checkpoint'],'verifier_backup_root':str(root_path),
-             'output_dir':str(Path(output)/'verifier-restore-validation'),'dependency_index':str(index_path)}
-    Path(restore['output_dir']).mkdir();path=Path(output)/'verifier-restore-request.json';p.write(path,restore)
-    run_quantum(path,reg,source,Path(restore['output_dir']),
-                [sys.executable,str(Path(source)/'verification/async-driver-refinement/paged_checker.py'),
-                 'validate-restored-verifier','--request',str(path)])
-    receipt=p.read(Path(restore['output_dir'])/'verifier-restore-validation.json')
-    expected={'schema_version':1,'operation':'validate_restored_verifier','source':backup['source'],
-              'session_id':backup['session_id'],'unit_ordinal':backup['unit_ordinal'],
-              'checkpoint_sha256':backup['checkpoint_sha256'],'resource_plan_sha256':backup['resource_plan_sha256'],
-              'initial_image_sha256':backup['initial_image_sha256'],'verifier_schema_sha256':backup['verifier_schema_sha256'],
-              'verifier_commit':backup['verifier_commit'],'verifier_logical_digest':backup['verifier_logical_digest'],
-              'work_db_sha256':backup['work_db_sha256'],'work_db_bytes':backup['work_db_bytes'],
-              'progress_sha256':backup['progress_sha256'],
-              'result_chain_root_sha256':verifier_chain_digest(index_path,backup['unit_ordinal']),
-              'complete':True,'acceptance':False}
-    p.require(receipt==expected and p.file_sha(staged)==expected['work_db_sha256']
-              and staged.stat().st_size==expected['work_db_bytes'],'verifier staged/result-chain validation differs')
-    target=Path(request['verifier_work_db'])
-    p.require(target.parent==staged.parent and not target.exists(),'verifier atomic install target not fresh/owned')
-    # No checker/writer remains: run_quantum waited for its process group.
-    os.replace(staged,target)
-    fd=os.open(target.parent,os.O_RDONLY)
-    try:os.fsync(fd)
-    finally:os.close(fd)
-
-
-
-
 def validate_control_identity(value,reg,metadata,run_id,job,root):
     schema=p.read(Path(root)/p.CONTROL_SCHEMA)
     frozen=p.read(Path(root)/p.SCHEMA_PATH)
+    transport_schema=p.read(Path(root)/'verification/async-driver-refinement/paged-catalog-transport.schema.json')
     def local(node):
         if isinstance(node,dict):
-            if node.get('$ref','').startswith('paged-proof.schema.json#/$defs/'):
-                return {'$ref':'#/$defs/'+node['$ref'].split('/')[-1]}
+            reference=node.get('$ref','')
+            if reference.startswith('paged-proof.schema.json#/$defs/'):
+                return {'$ref':'#/$defs/'+reference.split('/')[-1]}
+            if reference.startswith('paged-catalog-transport.schema.json#/$defs/'):
+                return {'$ref':'#/$defs/'+reference.split('/')[-1]}
             return {k:local(v) for k,v in node.items()}
         if isinstance(node,list):return [local(v) for v in node]
         return node
-    schema=local(schema);schema['$defs']=frozen['$defs']
+    definitions={**{k:local(v) for k,v in frozen['$defs'].items()},**{k:local(v) for k,v in transport_schema['$defs'].items()}}
+    schema=local(schema);schema['$defs']=definitions
     p.validate(value,{k:v for k,v in schema.items() if k not in ('$schema','$id','$defs')},schema)
     unit=p.envelope(value['work_unit'],'WorkUnit',root)
-    origin={k:unit[k] for k in ('repository','pr','event_base','workflow_id','event_name','mode','run','job','task','attempt')}
-    origin['operation']='execute'
-    p.require(value['registration_sha256']==p.digest(p.canonical(reg))
+    role=value['role'];origin=value['origin']
+    p.require(all(origin[k]==reg[k] for k in ('repository','pr','event_base'))
+              and origin['workflow_id']==p.WORKFLOW and origin['event_name']=='workflow_dispatch'
+              and (origin['run'],origin['job'],origin['task'],origin['attempt'])==(run_id,job['id'],job['task_id'],1)
+              and value['registration_sha256']==p.digest(p.canonical(reg))
               and value['source_archive_sha256']==reg['source_archive_sha256']
-              and value['source']==unit['source']==reg['source'] and value['origin']==origin
-              and (unit['run'],unit['job'],unit['task'],unit['attempt'])==(run_id,job['id'],job['task_id'],1)
+              and value['source']==unit['source']==reg['source']
               and value['session_id']==unit['session_id']==metadata['session_id']
               and value['unit_ordinal']==unit['unit_ordinal']==metadata['unit_ordinal']
               and value['expected_prior_checkpoint']==unit['expected_prior_checkpoint']
               and len(value['artifact_receipts'])==len(metadata['parts']), 'carrier producer/plan identity differs')
-    if value['role']=='unit_checkpoint':
-        p.require(unit['status'] in ('checkpointed_incomplete','closed_unqualified') and value['completion'] is None,
-                  'unit carrier is not a safe nonqualifying checkpoint')
-    else:
-        p.require(unit['status']=='complete' and p.envelope(value['completion'],'Completion',root)['accepted'] is True,
+    if role=='completion':
+        p.require(origin['operation']=='execute' and origin['mode']=='complete'
+                  and (unit['run'],unit['job'],unit['task'],unit['attempt'])==(run_id,job['id'],job['task_id'],1)
+                  and unit['status']=='complete' and p.envelope(value['completion'],'Completion',root)['accepted'] is True
+                  and value['transfer_batch'] is None and value['activation'] is None,
                   'completion carrier shape is not complete')
+    else:
+        batch=value['transfer_batch'];execution=batch['execution_origin']
+        p.require(origin['mode']=='unit' and batch['publication_origin']==origin
+                  and (unit['run'],unit['job'],unit['task'],unit['attempt'])==
+                      (execution['run'],execution['job'],execution['task'],1)
+                  and unit['status'] in ('checkpointed_incomplete','closed_unqualified')
+                  and value['completion'] is None and metadata['operation']==origin['operation'],
+                  'publication carrier does not name the original execution WorkUnit and actual publisher')
+        # The original execution is always `execute`; any later publisher is `publish`.
+        p.require(origin['operation']==('execute' if batch['batch_ordinal']==0 and origin==execution else 'publish')
+                  and execution['operation']=='execute', 'publication operation/origin ordinal differs')
+        if role=='unit_checkpoint':
+            p.require(batch['purpose']=='activate' and value['activation']['execution_origin']==execution,
+                      'activation carrier shape differs')
+        else:
+            p.require(batch['purpose']=='transfer' and value['activation'] is None, 'transfer carrier shape differs')
     utc(value['postcheck']['checked_at'])
     p.require(value['postcheck']['source_commit']==reg['source']['commit']
               and value['postcheck']['current_base']==reg['event_base'], 'carrier live source/base differs')
@@ -3241,6 +3538,8 @@ def finalize_uploads(output,root):
     if inputs['operation']=='probe':
         return capability_finalizer(output,root)
     draft=p.read(Path(output)/'finalizer-state.json');state=draft['state'];reg=state['registration']
+    if draft.get('role') in ('publication_batch','unit_checkpoint','transport_conformance'):
+        return finalize_publication(output,root,draft,inputs)
     controller_memory_limit(state['resource_plan'])
     metadata=p.read(Path(output)/'upload-plan.json')
     api=api_environment(Path(output)/'finalizer-api')
@@ -3248,16 +3547,17 @@ def finalize_uploads(output,root):
     run_id=int(os.environ['GITHUB_RUN_ID'])
     _,job,payload=p.producer(api,run_id,reg,inputs['mode'],('running','in_progress'))
     unit=draft['unit'];record=p.envelope(unit,'WorkUnit',root)
-    role='completion' if inputs['mode']=='complete' else 'unit_checkpoint'
+    role='completion'
     origin={k:record[k] for k in ('repository','pr','event_base','workflow_id','event_name','mode','run','job','task','attempt')}
-    origin['operation']='execute'
-    carrier={'schema_version':1,'kind':'async_session_control','role':role,
+    origin['operation']='execute';origin['dispatch_ordinal']=state['next_dispatch_ordinal']
+    carrier={'schema_version':2,'kind':'async_session_control','role':role,
         'registration_sha256':p.digest(p.canonical(reg)),'source_archive_sha256':reg['source_archive_sha256'],
         'source':reg['source'],'session_id':record['session_id'],'unit_ordinal':record['unit_ordinal'],
         'origin':origin,'previous_control_sha256':state.get('control_sha256'),
         'expected_prior_checkpoint':record['expected_prior_checkpoint'],
         'checkpoint':p.ref(state['checkpoint'],p.digest(p.canonical(state['checkpoint']))),
-        'work_unit':unit,'artifact_receipts':[],'completion':None,'postcheck':None}
+        'work_unit':unit,'artifact_receipts':[],'completion':None,'postcheck':None,'pending_publication':None,
+        'transfer_batch':None,'activation':None,'transport_conformance':None}
     binding=p.control_binding(carrier)
     print('ASYNC-PROOF-FINALIZER-BEGIN 1 '+binding,flush=True)
     _,lines=p.producer_log(api,run_id,job,'complete' if role=='completion' else 'unit')
@@ -3322,6 +3622,92 @@ def finalize_uploads(output,root):
     print('ASYNC-PROOF-FINALIZER-DONE 1 '+binding+' '+p.digest(raw),flush=True)
 
 
+
+
+def finalize_publication(output,root,draft,inputs):
+    """Post-upload publisher finalizer for one transfer/activate/rehearsal batch.
+
+    Native receipts exist only after upload, so the batch receipt, the pending
+    publication after it and the carrier are completed here without any hash cycle.
+    A published byte is never credited by this step; replay recomputes coverage.
+    """
+    state=draft['state'];reg=state['registration'];role=draft['role']
+    controller_memory_limit(state['resource_plan'])
+    metadata=p.read(Path(output)/'upload-plan.json')
+    api=api_environment(Path(output)/'finalizer-api')
+    api.bind_storage(state['resource_plan'],reg,draft['control']['session_id'])
+    run_id=int(os.environ['GITHUB_RUN_ID'])
+    _,job,payload=p.producer(api,run_id,reg,'unit',('running','in_progress'))
+    unit=draft['unit'];record=p.envelope(unit,'WorkUnit',root)
+    operation=inputs['operation']
+    origin=current_origin(state,reg,run_id,job,operation)
+    batch=draft['batch']
+    candidate=draft['candidate_checkpoint_sha256']
+    accepted=state['checkpoint']
+    checkpoint=(draft['candidate_checkpoint'] if role=='unit_checkpoint' else
+                None if accepted is None else p.ref(accepted,p.digest(p.canonical(accepted))))
+    carrier={'schema_version':2,'kind':'async_session_control','role':role,
+        'registration_sha256':p.digest(p.canonical(reg)),'source_archive_sha256':reg['source_archive_sha256'],
+        'source':reg['source'],'session_id':record['session_id'],'unit_ordinal':record['unit_ordinal'],
+        'origin':origin,'previous_control_sha256':state.get('control_sha256'),
+        'expected_prior_checkpoint':record['expected_prior_checkpoint'],'checkpoint':checkpoint,
+        'work_unit':unit,'artifact_receipts':[],'completion':None,'postcheck':None,'pending_publication':None,
+        'transfer_batch':None,'activation':None,'transport_conformance':None}
+    binding=p.control_binding(carrier)
+    print('ASYNC-PROOF-FINALIZER-BEGIN 1 '+binding,flush=True)
+    _,lines=p.producer_log(api,run_id,job,'unit')
+    listed=api.pages('/actions/runs/'+str(run_id)+'/artifacts',field='artifacts')
+    selected=[];found=[]
+    for part in metadata['parts']:
+        matches=[a for a in listed if a.get('name')==part['name']]
+        p.require(len(matches)==1,'postupload artifact absent/ambiguous')
+        artifact=matches[0];selected.append(artifact)
+        archive=p.artifact_bytes(api,artifact)
+        try:
+            slice_sha,zip_sha,_,_=p.upload_slice(lines,artifact['name'],artifact['id'],artifact['size_in_bytes'])
+            p.require(p.file_sha(archive)==zip_sha,'postupload actual ZIP differs')
+            p.unpack(archive,Path(output)/'finalizer-parts'/str(part['ordinal']),part['members'],storage_guard=api.guard_storage)
+            receipt={'schema_version':6,'kind':'ArtifactReceipt','record':{
+                'artifact_id':artifact['id'],'session_id':record['session_id'],'unit_ordinal':record['unit_ordinal'],
+                'run':run_id,'job':job['id'],'task':job['task_id'],'attempt':1,'source':reg['source'],
+                'name':artifact['name'],'expired':False,'zip_sha256':zip_sha,'zip_bytes':archive.stat().st_size,
+                'extracted_bytes':sum(m['bytes'] for m in part['members']),'member_count':len(part['members']),
+                'members':part['members'],'upload_log_sha256':slice_sha,'event_payload_sha256':p.digest(p.canonical(payload)),
+                'expected_prior_checkpoint':record['expected_prior_checkpoint'],'produced_checkpoint':candidate}}
+            p.envelope(receipt,'ArtifactReceipt',root);found.append(receipt)
+        finally:archive.unlink(missing_ok=True)
+    p.validate_upload_order(lines,selected,len(lines))
+    carrier['artifact_receipts']=found
+    if batch['batch_ordinal']==0 and operation=='execute':
+        # Only the direct original execution's receipts become WorkUnit authority.
+        record['artifact_roots']=[p.ref(v,v['record']['artifact_id']) for v in found]
+    batch={**batch,'artifact_receipts':found,'retained_artifact_bytes':sum(r['record']['zip_bytes'] for r in found)}
+    carrier['transfer_batch']=batch
+    pending_after={**draft['pending_before'],
+        'previous_batch':snapshots.content_ref('transfer_batch_receipt',p.canonical(batch)),
+        'coverage_sha256':batch['coverage_after_sha256'],'coverage_count':batch['coverage_count'],
+        'next_batch_ordinal':draft['pending_before']['next_batch_ordinal']+1}
+    if role=='unit_checkpoint':
+        carrier['activation']=draft['activation']
+    else:
+        carrier['pending_publication']=pending_after
+    if role=='transport_conformance':
+        carrier['transport_conformance']=draft['conformance']
+    live=live_pr(api,reg)
+    carrier['postcheck']={'checked_at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
+        'source_commit':reg['source']['commit'],'current_base':live['base']['sha'],'pr_state':live['state'],
+        'draft':live['draft'],'archived_fresh_head':None,'main_receipts':[],'main_conditions_sha256':None,
+        'semantic_verification':None}
+    local_parts={n:Path(output)/'finalizer-parts'/str(n) for n in range(len(metadata['parts']))}
+    enforce_control_caps(state,{'parts':{},'control':carrier},root)
+    validate_control_identity(carrier,reg,metadata,run_id,job,root)
+    raw=p.canonical(carrier)
+    allowance=operational_bounds(state['resource_plan']['record']['source_bounds_utf8'],reg,root)['record_allowances']['async_session_control']
+    reserved=p.read(Path(output)/'control-reservation.json')
+    p.require(len(raw)<=min(allowance['max_encoded_bytes'],reserved['maximum_control_bytes']),
+              'actual whole carrier exceeds pre-upload immutable reservation')
+    for line in p.control_frame(carrier):print(line,flush=True)
+    print('ASYNC-PROOF-FINALIZER-DONE 1 '+binding+' '+p.digest(raw),flush=True)
 
 
 def validate_storage(storage,source_root):
@@ -3446,8 +3832,59 @@ def controller_memory_limit(plan):
 
 
 
+def preflight_publication(output,metadata,draft):
+    """Worst-case whole carrier of one publisher batch, reserved before any upload."""
+    state=draft['state'];reg=state['registration'];role=draft['role']
+    unit=copy.deepcopy(draft['unit']);record=unit['record'];maximum=(1<<63)-1
+    receipts=[]
+    for part in metadata['parts']:
+        receipts.append({'schema_version':6,'kind':'ArtifactReceipt','record':{
+            'artifact_id':maximum-part['ordinal'],'session_id':record['session_id'],'unit_ordinal':record['unit_ordinal'],
+            'run':maximum,'job':maximum,'task':maximum,'attempt':1,'source':reg['source'],
+            'name':part['name'],'expired':False,'zip_sha256':'f'*64,'zip_bytes':p.MAX_ARTIFACT,
+            'extracted_bytes':sum(m['bytes'] for m in part['members']),'member_count':len(part['members']),
+            'members':part['members'],'upload_log_sha256':'f'*64,'event_payload_sha256':'f'*64,
+            'expected_prior_checkpoint':record['expected_prior_checkpoint'],
+            'produced_checkpoint':draft['candidate_checkpoint_sha256']}})
+    record['artifact_roots']=[p.ref(v,v['record']['artifact_id']) for v in receipts]
+    worst_ref={'kind':'transfer_batch_receipt','sha256':'f'*64,'bytes':maximum}
+    batch={**draft['batch'],'artifact_receipts':receipts,'retained_artifact_bytes':maximum,
+           'coverage_after_sha256':'f'*64,'coverage_count':maximum}
+    origin={'repository':reg['repository'],'pr':reg['pr'],'event_base':reg['event_base'],'workflow_id':p.WORKFLOW,
+            'event_name':'workflow_dispatch','mode':'unit','operation':'publish','run':maximum,'job':maximum,
+            'task':maximum,'attempt':1,'dispatch_ordinal':state['next_dispatch_ordinal']}
+    batch['publication_origin']=origin
+    pending={**draft['pending_before'],'previous_batch':worst_ref,'coverage_sha256':'f'*64,'coverage_count':maximum,
+             'next_batch_ordinal':maximum}
+    accepted=state['checkpoint']
+    checkpoint=(draft['candidate_checkpoint'] if role=='unit_checkpoint' else
+                None if accepted is None else p.ref(accepted,p.digest(p.canonical(accepted))))
+    post={'checked_at':'9999-12-31T23:59:59Z','source_commit':reg['source']['commit'],
+        'current_base':reg['event_base'],'pr_state':'open','draft':False,
+        'archived_fresh_head':None,'main_receipts':[],'main_conditions_sha256':None,'semantic_verification':None}
+    carrier={'schema_version':2,'kind':'async_session_control','role':role,
+        'registration_sha256':p.digest(p.canonical(reg)),'source_archive_sha256':reg['source_archive_sha256'],
+        'source':reg['source'],'session_id':record['session_id'],'unit_ordinal':record['unit_ordinal'],
+        'origin':origin,'previous_control_sha256':state.get('control_sha256') or 'f'*64,
+        'expected_prior_checkpoint':record['expected_prior_checkpoint'],'checkpoint':checkpoint,
+        'work_unit':unit,'artifact_receipts':receipts,'completion':None,'postcheck':post,
+        'pending_publication':None if role=='unit_checkpoint' else pending,'transfer_batch':batch,
+        'activation':draft['activation'] if role=='unit_checkpoint' else None,
+        'transport_conformance':draft['conformance'] if role=='transport_conformance' else None}
+    limit=len(p.canonical(carrier));plan=state['resource_plan']['record']
+    wrapper=p.decode(plan['source_bounds_utf8'].encode())
+    p.require(limit<=min(p.SMALL,wrapper['record_allowances']['async_session_control']['max_encoded_bytes']),
+              'anticipated whole control cannot fit admitted carrier cap')
+    frame_bytes=4*((limit+2)//3)+512+(4*((limit+2)//3)//2048+1)*96
+    p.require(frame_bytes+len(p.canonical(metadata))+32*64*1024<=32*p.MIB,
+              'anticipated control/planning/native sections cannot fit raw task log reservation')
+    p.write(output/'control-reservation.json',{'maximum_control_bytes':limit,'maximum_frame_bytes':frame_bytes})
+
+
 def preflight_carrier(output,metadata):
     draft=p.read(output/'finalizer-state.json');state=draft['state'];reg=state['registration']
+    if draft.get('role') in ('publication_batch','unit_checkpoint','transport_conformance'):
+        return preflight_publication(output,metadata,draft)
     unit=copy.deepcopy(draft['unit']);record=unit['record'];maximum=(1<<63)-1
     receipts=[]
     for part in metadata['parts']:
@@ -3460,9 +3897,9 @@ def preflight_carrier(output,metadata):
             'expected_prior_checkpoint':record['expected_prior_checkpoint'],
             'produced_checkpoint':p.digest(p.canonical(state['checkpoint']))}})
     record['artifact_roots']=[p.ref(v,v['record']['artifact_id']) for v in receipts]
-    role='completion' if record['mode']=='complete' else 'unit_checkpoint'
+    role='completion'
     origin={k:record[k] for k in ('repository','pr','event_base','workflow_id','event_name','mode','run','job','task','attempt')}
-    origin['operation']='execute'
+    origin['operation']='execute';origin['dispatch_ordinal']=state['next_dispatch_ordinal']
     completion_value=p.read(output/'completion-draft.json') if role=='completion' else None
     post={'checked_at':'9999-12-31T23:59:59Z','source_commit':reg['source']['commit'],
         'current_base':reg['event_base'],'pr_state':'open','draft':False,
@@ -3471,13 +3908,14 @@ def preflight_carrier(output,metadata):
         post.update(archived_fresh_head=completion_value['record']['current_head_recheck'],
             main_receipts=completion_value['record']['applicable_main_receipts'],main_conditions_sha256='f'*64,
             semantic_verification={'part_ordinal':31,'member_path':'complete-verification.json','bytes':p.MAX_MEMBER,'sha256':'f'*64})
-    carrier={'schema_version':1,'kind':'async_session_control','role':role,
+    carrier={'schema_version':2,'kind':'async_session_control','role':role,
         'registration_sha256':p.digest(p.canonical(reg)),'source_archive_sha256':reg['source_archive_sha256'],
         'source':reg['source'],'session_id':record['session_id'],'unit_ordinal':record['unit_ordinal'],
         'origin':origin,'previous_control_sha256':state.get('control_sha256'),
         'expected_prior_checkpoint':record['expected_prior_checkpoint'],
         'checkpoint':p.ref(state['checkpoint'],p.digest(p.canonical(state['checkpoint']))),
-        'work_unit':unit,'artifact_receipts':receipts,'completion':completion_value,'postcheck':post}
+        'work_unit':unit,'artifact_receipts':receipts,'completion':completion_value,'postcheck':post,
+        'pending_publication':None,'transfer_batch':None,'activation':None,'transport_conformance':None}
     limit=len(p.canonical(carrier));plan=state['resource_plan']['record']
     wrapper=p.decode(plan['source_bounds_utf8'].encode())
     p.require(limit<=min(p.SMALL,wrapper['record_allowances']['async_session_control']['max_encoded_bytes']),
@@ -3660,7 +4098,7 @@ def attempt_inventory(api,reg,control,current_run=None,*,require_declared=True):
     for run in api.pages('/actions/runs',{'workflow_id':p.WORKFLOW},field='workflow_runs'):
         if run.get('id')==current_run or run.get('workflow_id')!=p.WORKFLOW or run.get('event')!='workflow_dispatch':continue
         event=p.decode(run.get('event_payload','').encode());inputs=event.get('inputs',{})
-        if inputs.get('operation')!='execute':continue
+        if inputs.get('operation') not in ('execute','publish'):continue
         prior=p.decode(inputs.get('control','{}').encode())
         if prior.get('session_id')!=control['session_id']:continue
         p.closed(prior,CONTROL_KEYS)
@@ -3674,7 +4112,8 @@ def attempt_inventory(api,reg,control,current_run=None,*,require_declared=True):
         ordinal=len(prior['attempt_runs'])
         p.require(ordinal not in found,'duplicate/reused actual attempted ordinal')
         actual,job,_=p.producer(api,run['id'],reg,inputs['mode'],('success','failure','cancelled'))
-        found[ordinal]={'run':actual,'job':job,'control':prior,'mode':inputs['mode']}
+        found[ordinal]={'run':actual,'job':job,'control':prior,'mode':inputs['mode'],
+                        'operation':inputs['operation'],'conformance':prior['transport_conformance']}
     p.require(sorted(found)==list(range(len(found))),'unexplained attempted-ordinal gap')
     items=[found[i] for i in range(len(found))]
     if require_declared:
