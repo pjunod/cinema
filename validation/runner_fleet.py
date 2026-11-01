@@ -1,12 +1,12 @@
 """The runner roster and the label sets workflows request, parsed once.
 
 `tests/operations/test_contracts.py` checks that every self-hosted `runs-on`
-is satisfiable by `validation/runner-fleet.toml`; `tools/ci-fleet` compares the
-same two things against the live fleet. Both read them through this module so
-the contract test and the console cannot disagree about what a pool is.
+is satisfiable by `validation/runner-fleet.toml`. ci-fleet (its own repository,
+noirr/ci-fleet) compares the same two things against the live fleet with a copy
+of this module, `cifleet/runner_fleet.py`: when one changes, change the other,
+so the contract test and the console cannot disagree about what a pool is.
 
-Standard library only (Python 3.11+ for `tomllib`): the ci-fleet collector
-imports this module on a host that has no repository virtualenv.
+Standard library only (Python 3.11+ for `tomllib`).
 """
 
 from __future__ import annotations

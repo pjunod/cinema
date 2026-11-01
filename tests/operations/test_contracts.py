@@ -122,7 +122,7 @@ def rostered_runners() -> tuple[tuple[str, frozenset[str]], ...]:
 
     `self-hosted` and the operating-system and architecture labels are added by
     the forge, never by the ansible inventory; `validation.runner_fleet`
-    derives them so ci-fleet and this test share one definition.
+    derives them (ci-fleet carries a copy of the same module).
     """
     return runner_fleet_module.rostered_runners(runner_fleet())
 

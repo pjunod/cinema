@@ -90,7 +90,7 @@ before a new backup daemon starts.
 ```
 
 An operator can take the backup out of the pool from
-[ci-fleet](CI-FLEET.md) (Drain): that writes the configuration's `pause_marker`,
+[ci-fleet](http://forge.lan:3000/noirr/ci-fleet) (Drain): that writes the configuration's `pause_marker`,
 and while it exists the controller drains the backup the same way and offers no
 slot, even during an outage. Resume removes it.
 
