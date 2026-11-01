@@ -231,7 +231,8 @@ class VoterSliceAndComposeTests(unittest.TestCase):
     def test_compose_places_plurxd_in_its_slice_with_its_own_memory_low(self):
         compose = (ROOT / "deploy" / "docker-compose.yml").read_text()
         service = compose.split("\n  plurxd:\n", 1)[1].split("\n  plurx-discovery:\n", 1)[0]
-        self.assertIn("    cgroup_parent: ${PLURX_CGROUP_PARENT:-plurx.slice}\n", service)
+        # `-`, not `:-`: an explicitly empty override means no slice.
+        self.assertIn("    cgroup_parent: ${PLURX_CGROUP_PARENT-plurx.slice}\n", service)
         self.assertIn("    mem_reservation: ${PLURX_MEM_RESERVATION:-3g}\n", service)
 
 
