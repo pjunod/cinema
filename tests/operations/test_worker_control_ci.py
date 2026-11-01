@@ -93,8 +93,18 @@ class WorkerControlCiTests(unittest.TestCase):
     def test_promotion_gate_requires_worker_proof_success(self) -> None:
         self.assertIn("- worker_control_proof", self.gate)
         self.assertIn("WORKER_CONTROL_RESULT: ${{ needs.worker_control_proof.result }}", self.gate)
-        self.assertIn('if [ "$WORKER_CONTROL_RESULT" != success ]; then', self.gate)
-        self.assertIn('echo "The required production worker controller proof ended with:', self.gate)
+        # The gate runs the one predicate the ordinary and completion producers
+        # share; pin that it is the step's command and that the predicate itself
+        # refuses every non-success worker proof result.
+        self.assertIn("python3 -m validation.async_refinement_session main-aggregate", self.gate)
+        from validation import async_refinement_session as session
+        from validation import python_unit_receipts as receipts
+        green = {key: "success" for key in session.MAIN_ENV}
+        self.assertTrue(session.main_conditions(green, True))
+        for result in ("failure", "cancelled", "skipped", None):
+            rows = dict(green, worker_control_proof=result)
+            with self.assertRaisesRegex(receipts.ReceiptError, "worker proof failed", msg=str(result)):
+                session.main_conditions(rows, False)
 
 
 class WorkerControlResumeFixtures(unittest.TestCase):
