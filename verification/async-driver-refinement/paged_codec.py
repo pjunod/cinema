@@ -48,6 +48,22 @@ def require(ok, message):
         raise Invalid(message)
 
 
+# The writer's named single-file claims (backups, continuation scratch) live in a per-output
+# sibling directory so the output directory is one recursive granted subtree with no nested
+# claims. The controller (async_refinement_session.AUXILIARY_SUFFIX) and the Rust catalog
+# (async_driver_catalog::AUXILIARY_SUFFIX) derive the same name; test_paged_request_fixtures pins all three.
+AUXILIARY_SUFFIX = '-aux'
+
+
+def auxiliary_directory(output_dir, *, create=False):
+    path = Path(output_dir)
+    require(path.is_absolute() and path.name, 'auxiliary directory needs a named absolute output directory')
+    auxiliary = path.with_name(path.name + AUXILIARY_SUFFIX)
+    if create:
+        auxiliary.mkdir(mode=0o700, exist_ok=True)
+    return auxiliary
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
 

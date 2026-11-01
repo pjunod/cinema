@@ -41,6 +41,7 @@ def build_policy(source_map, *, database=10 * PAGE, **pools):
     families = {name: {'owner': owner, **physical.minimum_family_policy(source_map, name, database)}
                 for name, owner in physical.FAMILY_OWNERS.items()}
     pool_bytes = {name: 8 * MIB for name in physical.POOL_OWNERS}
+    pool_bytes['source_runtime_scratch_bytes'] = 512 * MIB  # covers the output directories of a MIB-sized unit plan
     pool_bytes.update(pools)
     return {'schema_version': 3, 'kind': 'physical_policy', 'table_map_sha256': physical.digest(source_map),
             'families': families, 'pools': pool_bytes}
@@ -120,7 +121,7 @@ class CalibrationHelpers:
         geometry = {}
         for family, databases in self.source_map['families'].items():
             geometry[family] = [self.role_connection(d['database_role'])[1] for d in databases]
-        plan = plan or {'total_retained_artifact_bytes': MIB, 'maximum_units': 2, 'total_session_disk_bytes': 1 << 40}
+        plan = plan or {'unit_byte_allowance': MIB, 'total_retained_artifact_bytes': MIB, 'maximum_units': 2, 'total_session_disk_bytes': 1 << 40}
         return physical.calibrate_physical_policy(policy, geometry, {'source_workspace_bytes': 0, 'existing_unpooled_bytes': 0},
                                                   plan, source_map=self.source_map)
 
@@ -201,9 +202,9 @@ class PolicyAndCalibrationTests(CalibrationHelpers, PhysicalBase):
         geometry['publication_pack_scratch'].pop()
         with self.assertRaisesRegex(physical.PhysicalPolicyError, 'unmeasured source-declared physical database role'):
             physical.calibrate_physical_policy(self.policy, geometry, {'source_workspace_bytes': 0, 'existing_unpooled_bytes': 0},
-                {'total_retained_artifact_bytes': MIB, 'maximum_units': 1, 'total_session_disk_bytes': 1 << 40}, source_map=self.source_map)
+                {'unit_byte_allowance': MIB, 'total_retained_artifact_bytes': MIB, 'maximum_units': 1, 'total_session_disk_bytes': 1 << 40}, source_map=self.source_map)
         with self.assertRaisesRegex(physical.PhysicalPolicyError, 'peak exceeds immutable session disk ceiling'):
-            self.calibrate(self.policy, {'total_retained_artifact_bytes': MIB, 'maximum_units': 1, 'total_session_disk_bytes': 1024})
+            self.calibrate(self.policy, {'unit_byte_allowance': MIB, 'total_retained_artifact_bytes': MIB, 'maximum_units': 1, 'total_session_disk_bytes': 1024})
 
 
 class SimultaneousLifetimeTests(CalibrationHelpers, PhysicalBase):
@@ -294,7 +295,7 @@ class SimultaneousLifetimeTests(CalibrationHelpers, PhysicalBase):
         geometry['catalog_or_verifier_restore_scratch'] = [geometry['catalog_export_scratch'][0]]
         with self.assertRaisesRegex(physical.PhysicalPolicyError, 'unknown/duplicate measured database role'):
             physical.calibrate_physical_policy(self.policy, geometry, {'source_workspace_bytes': 0, 'existing_unpooled_bytes': 0},
-                {'total_retained_artifact_bytes': MIB, 'maximum_units': 1, 'total_session_disk_bytes': 1 << 40}, source_map=self.source_map)
+                {'unit_byte_allowance': MIB, 'total_retained_artifact_bytes': MIB, 'maximum_units': 1, 'total_session_disk_bytes': 1 << 40}, source_map=self.source_map)
 
     def test_the_role_lifetime_declaration_is_closed(self):
         for mutate in (lambda role: role.pop('role_lifetime'), lambda role: role['role_lifetime'].update(simultaneous=0),

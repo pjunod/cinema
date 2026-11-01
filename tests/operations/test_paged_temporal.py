@@ -44,6 +44,8 @@ def fixture_policy(source_map):
     families = {name: {'owner': owner, **physical().minimum_family_policy(source_map, name, ceiling)}
                 for name, owner in physical().FAMILY_OWNERS.items()}
     pools = {name: 64 * MIB for name in physical().POOL_OWNERS}
+    # The source/runtime pool covers every output directory of a unit_byte_allowance plan (calibration requires it).
+    pools['source_runtime_scratch_bytes'] = physical().runtime_pool_demand(UNIT_BYTE_ALLOWANCE) + MIB
     return {'schema_version': 3, 'kind': 'physical_policy', 'table_map_sha256': physical().digest(source_map),
             'families': families, 'pools': pools}
 
@@ -66,7 +68,7 @@ def source_bounds():
     calibration = module.calibrate_physical_policy(
         policy, geometry, {'source_workspace_bytes': 0, 'existing_unpooled_bytes': 0},
         {'total_retained_artifact_bytes': TOTAL_RETAINED, 'maximum_units': MAXIMUM_UNITS,
-         'total_session_disk_bytes': TOTAL_DISK}, source_map=source_map)
+         'total_session_disk_bytes': TOTAL_DISK, 'unit_byte_allowance': UNIT_BYTE_ALLOWANCE}, source_map=source_map)
     schema = codec.strict_json((PACKAGE / 'paged-proof.schema.json').read_bytes())
     kinds = [item['properties']['kind']['const'] for item in schema['oneOf']]
     return codec.canonical({'schema_version': 3, 'accounting_rule': 'typed_physical_caps_v1',
@@ -97,6 +99,7 @@ def fixture_source_receipt():
 
 TOTAL_DISK = 2**34
 TOTAL_RETAINED = 2**30
+UNIT_BYTE_ALLOWANCE = 2**30
 MAXIMUM_UNITS = 100
 _LIVE_PARENTS = []
 
@@ -174,7 +177,7 @@ def admitted(directory):
                 resident_bytes=512 * 1024 * 1024, resident_rss_bytes=2**40,
                 total_session_disk_bytes=TOTAL_DISK, total_retained_artifact_bytes=TOTAL_RETAINED,
                 maximum_units=MAXIMUM_UNITS, unit_predecessor_allowance=100000,
-                unit_record_allowance=1000000, unit_byte_allowance=2**30,
+                unit_record_allowance=1000000, unit_byte_allowance=UNIT_BYTE_ALLOWANCE,
                 available_disk_receipt={'kind': 'runtime_receipt', 'id': 'disk.json', 'sha256': '3' * 64})
     plan['source_bounds_utf8'] = source_bounds()
     plan['plan_sha256'] = codec.digest(codec.envelope('ResourcePlan', plan))

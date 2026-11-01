@@ -1175,12 +1175,15 @@ class MainUmaskTests(unittest.TestCase):
 # PhysicalContext.child_plan: against B's real ReservationLedger and grant issuer.
 # ---------------------------------------------------------------------------
 import uuid
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 
 from validation import async_physical_policy as physical
 
 PAGE = 4096
 MIB = 1024 * 1024
+UNIT_BYTES = 96 * MIB  # the admitted unit_byte_allowance of the child-plan fixtures (larger than a control share)
+RUNTIME_POOL = 512 * MIB  # source_runtime_scratch_bytes: the unit output share, a control share and scratch fit
 
 
 def child_policy(source_map, **pools):
@@ -1190,6 +1193,7 @@ def child_policy(source_map, **pools):
     families['verifier_main'].update(database_bytes=20 * PAGE, main_bytes=40 * PAGE,
                                      journal_bytes=40 * PAGE + MIB, temp_bytes=40 * PAGE)
     pool_bytes = {name: 8 * MIB for name in physical.POOL_OWNERS}
+    pool_bytes['source_runtime_scratch_bytes'] = RUNTIME_POOL
     pool_bytes.update(pools)
     return {'schema_version': 3, 'kind': 'physical_policy', 'table_map_sha256': physical.digest(source_map),
             'families': families, 'pools': pool_bytes}
@@ -1219,7 +1223,7 @@ class ChildPlanBase(unittest.TestCase):
         context.reg = {'source': {'commit': '0' * 40}}
         context.session_id = str(uuid.UUID(int=1))
         context.owned = self.root
-        context.plan = {'plan_sha256': '1' * 64}
+        context.plan = {'plan_sha256': '1' * 64, 'unit_byte_allowance': UNIT_BYTES}
         context.policy = policy
         context.policy_sha256 = physical.digest(policy)
         context.lease = SimpleNamespace(fd=self.lease_fd, relative_path='lease')
@@ -1282,11 +1286,12 @@ class ChildPlanTests(ChildPlanBase):
             self.assertLessEqual(total, context.ledger.remaining(*key), key)
         families = context.policy['families']
         spool = {e['relative_path']: e['bytes'] for e in allocations if e['resource'] == 'snapshot_spool_bytes'}
-        self.assertEqual(spool, {'out/catalog-backup.sqlite': families['catalog_main']['database_bytes'],
-                                 'out/verifier-backup.sqlite': families['verifier_main']['database_bytes']})
+        self.assertEqual(spool, {'out-aux/catalog-backup.sqlite': families['catalog_main']['database_bytes'],
+                                 'out-aux/verifier-backup.sqlite': families['verifier_main']['database_bytes']})
+        share = physical.unit_output_bytes(UNIT_BYTES)
         runtime = [e for e in allocations if e['resource'] == 'source_runtime_scratch_bytes']
         self.assertEqual([(e['relative_path'], e['recursive'], e['bytes']) for e in runtime],
-                         [('out/child-scratch', True, context.ledger.remaining('source_runtime_scratch_bytes', 'bytes'))])
+                         [('out', True, share), ('out-aux/child-scratch', True, RUNTIME_POOL - share)])
         keyed = [(e['resource'], e['component']) for e in allocations if e['resource'] in physical.FAMILY_OWNERS]
         self.assertEqual(len(keyed), len(set(keyed)))
         self.issue(request, self.out)  # B's issuer deducts every share; the old double listing exhausts here
@@ -1316,7 +1321,7 @@ class ChildPlanTests(ChildPlanBase):
         allocations, _ = context.child_plan(request, self.out)
         continuation = {e['component']: e for e in allocations if e['resource'] == 'verifier_continuation_scratch'}
         self.assertEqual(set(continuation), {'main', 'journal', 'temp'})
-        self.assertEqual({e['relative_path'] for e in continuation.values()}, {'out/continuation-validation.sqlite'})
+        self.assertEqual({e['relative_path'] for e in continuation.values()}, {'out-aux/continuation-validation.sqlite'})
         database = min(context.policy['families']['verifier_continuation_scratch']['database_bytes'],
                        continuation['main']['bytes'])
         self.assertGreaterEqual(continuation['journal']['bytes'], 2 * database + MIB)  # what the child asserts
@@ -1363,23 +1368,32 @@ class ChildPlanTests(ChildPlanBase):
         with self.assertRaises(receipts.ReceiptError):
             self.context.attach_restore(str(self.root / 'x'), [(budget, self.out / 'state.restore' / 'never-tracked')])
 
+    def writer_request(self):
+        """A unit writer's request: the main databases sit beside, never inside, the output tree."""
+        return {'operation': 'unit', 'catalog_path': str(self.root / 'catalog.sqlite'),
+                'verifier_work_db': str(self.root / 'verifier.sqlite')}
+
     def test_scratch_is_discarded_after_reap_and_sealed_outputs_stay_attachable(self):
-        context, request = self.context, {'operation': 'unit'}
+        context, request = self.context, self.writer_request()
+        aux = self.root / 'out-aux'
         handle = self.issue(request, self.out)
-        catalog, backup = self.out / 'catalog.sqlite', self.out / 'verifier-backup.sqlite'
+        catalog, backup = self.root / 'catalog.sqlite', aux / 'verifier-backup.sqlite'
         catalog.write_bytes(b'c' * 1000)
         backup.write_bytes(b'v' * 1000)
-        (self.out / 'continuation-validation.sqlite').write_bytes(b'x' * 500)
-        (self.out / 'continuation-validation.sqlite-journal').write_bytes(b'x' * 500)
-        (self.out / 'child-scratch' / 'home').mkdir(parents=True)
-        (self.out / 'child-scratch' / 'home' / 'cache').write_bytes(b'x' * 500)
+        (self.out / 'page.json').write_bytes(b'p' * 1000)
+        (aux / 'continuation-validation.sqlite').write_bytes(b'x' * 500)
+        (aux / 'continuation-validation.sqlite-journal').write_bytes(b'x' * 500)
+        (aux / 'child-scratch' / 'home').mkdir(parents=True)
+        (aux / 'child-scratch' / 'home' / 'cache').write_bytes(b'x' * 500)
         context.finish(handle)
-        self.assertFalse((self.out / 'child-scratch').exists())
-        self.assertFalse((self.out / 'continuation-validation.sqlite').exists())
-        self.assertFalse((self.out / 'continuation-validation.sqlite-journal').exists())
+        self.assertFalse((aux / 'child-scratch').exists())
+        self.assertFalse((aux / 'continuation-validation.sqlite').exists())
+        self.assertFalse((aux / 'continuation-validation.sqlite-journal').exists())
         self.assertTrue(catalog.exists() and backup.exists())
-        # The scratch pool and family are free again; the sealed outputs remain charged.
-        self.assertEqual(context.ledger.remaining('source_runtime_scratch_bytes', 'bytes'), 8 * MIB)
+        self.assertEqual((self.out / 'page.json').read_bytes(), b'p' * 1000)  # the output share is not scratch
+        # The scratch family is free again; the sealed outputs and the output directory's share remain charged.
+        self.assertEqual(context.ledger.remaining('source_runtime_scratch_bytes', 'bytes'),
+                         RUNTIME_POOL - physical.unit_output_bytes(UNIT_BYTES))
         self.assertEqual(context.ledger.remaining('verifier_continuation_scratch', 'main'),
                          context.policy['families']['verifier_continuation_scratch']['main_bytes'])
         self.assertEqual(context.ledger.remaining('catalog_main', 'main'), 0)
@@ -1388,8 +1402,8 @@ class ChildPlanTests(ChildPlanBase):
         context.attach_retained(str(validation), (catalog, backup))
         attached = context.attachments[str(validation)]
         self.assertEqual([(a['resource'], a['relative_path'], a['recursive'], a['access']) for a in attached],
-                         [('catalog_main', 'out/catalog.sqlite', False, 'read_only'),
-                          ('snapshot_spool_bytes', 'out/verifier-backup.sqlite', False, 'read_only')])
+                         [('catalog_main', 'catalog.sqlite', False, 'read_only'),
+                          ('snapshot_spool_bytes', 'out-aux/verifier-backup.sqlite', False, 'read_only')])
         self.issue({'operation': 'validate_restore'}, validation)  # the issuer checks them against the held reservations
         with self.assertRaises(receipts.ReceiptError):
             context.attach_retained(str(validation), (self.out / 'unheld.sqlite',))
@@ -1397,13 +1411,78 @@ class ChildPlanTests(ChildPlanBase):
     def test_an_overage_keeps_the_child_scratch_for_reconciliation(self):
         context = self.context
         handle = self.issue({'operation': 'unit'}, self.out)
-        scratch = self.out / 'child-scratch'
-        scratch.mkdir()
-        (scratch / 'huge').write_bytes(b'x' * (8 * MIB + 1))
+        scratch = self.root / 'out-aux' / 'child-scratch'
+        scratch.mkdir(parents=True)
+        with (scratch / 'huge').open('wb') as stream:
+            stream.truncate(RUNTIME_POOL - physical.unit_output_bytes(UNIT_BYTES) + 1)
         with self.assertRaises(physical.PhysicalIncomplete):
             context.finish(handle)
         self.assertTrue((scratch / 'huge').exists())  # evidence is not deleted before the overage is raised
 
+    def test_the_output_directory_is_one_charged_subtree_and_the_named_files_sit_beside_it(self):
+        context = self.context
+        allocations, _ = context.child_plan(self.writer_request(), self.out)
+        share = physical.unit_output_bytes(UNIT_BYTES)
+        output = [e for e in allocations if e['relative_path'] == 'out']
+        self.assertEqual([(e['resource'], e['component'], e['recursive'], e['bytes']) for e in output],
+                         [('source_runtime_scratch_bytes', 'bytes', True, share)])
+        self.assertGreater(share, UNIT_BYTES)  # sized from unit_byte_allowance, plus the controller captures
+        # Nothing is claimed inside the subtree, and every named file keeps its one claim beside it.
+        for entry in allocations:
+            if entry is not output[0]:
+                self.assertNotIn(PurePosixPath('out'), PurePosixPath(entry['relative_path']).parents, entry)
+        claims = [(e['resource'], e['component'], e['relative_path']) for e in allocations]
+        self.assertEqual(len(claims), len(set(claims)))
+        named = {e['relative_path'] for e in allocations
+                 if e['resource'] in ('catalog_export_scratch', 'verifier_continuation_scratch', 'snapshot_spool_bytes')}
+        self.assertEqual(named, {'out-aux/manifest-closure.sqlite', 'out-aux/continuation-validation.sqlite',
+                                 'out-aux/catalog-backup.sqlite', 'out-aux/verifier-backup.sqlite'})
+
+    def test_a_file_left_in_the_output_directory_beyond_its_share_is_an_overage(self):
+        context = self.context
+        handle = self.issue(self.writer_request(), self.out)
+        (self.out / 'pages').mkdir()
+        with (self.out / 'pages' / 'page.json').open('wb') as stream:  # sparse: only the size is charged
+            stream.truncate(physical.unit_output_bytes(UNIT_BYTES) + 1)
+        with self.assertRaises(physical.PhysicalIncomplete):
+            context.finish(handle)
+        self.assertTrue((self.out / 'pages' / 'page.json').exists())
+
+    def test_output_files_within_the_share_stay_charged_and_a_second_invocation_reuses_the_share(self):
+        context, request = self.context, self.writer_request()
+        first = self.issue(request, self.out)
+        (self.out / 'page.json').write_bytes(b'p' * 1000)
+        context.finish(first)
+        share = physical.unit_output_bytes(UNIT_BYTES)
+        self.assertEqual(context.ledger.remaining('source_runtime_scratch_bytes', 'bytes'), RUNTIME_POOL - share)
+        held = [r for r in context.ledger.reservations if not r.released and r.subtrees]
+        self.assertEqual(len(held), 1)
+        again = self.issue(request, self.out)  # the held share is delegated by id, never charged twice
+        output = [e for e in again.descriptor['allocations'] if e['relative_path'] == 'out']
+        self.assertEqual([e['reservation_id'] for e in output], [held[0].reservation_id])
+        self.assertEqual(context.ledger.remaining('source_runtime_scratch_bytes', 'bytes'), 0)
+
+    def test_a_control_operation_output_is_a_small_share_and_a_unit_share_is_never_shrunk(self):
+        context = self.context
+        _staged, _budget, validation = self.held_restore()
+        allocations, _ = context.child_plan({'operation': 'validate_restore'}, validation)
+        output = [e for e in allocations if e['relative_path'] == 'restore-validation']
+        self.assertEqual([(e['recursive'], e['bytes']) for e in output], [(True, physical.CONTROL_OUTPUT_BYTES)])
+        # The tree a writer filled later hosts the read-only seal validation: it keeps the larger unit share.
+        request, tree = self.writer_request(), self.root / 'writer'
+        tree.mkdir(mode=0o700)
+        first = self.issue(request, tree)
+        catalog, backup = self.root / 'catalog.sqlite', self.root / 'writer-aux' / 'verifier-backup.sqlite'
+        catalog.write_bytes(b'c' * 1000)
+        backup.write_bytes(b'v' * 1000)
+        (tree / 'page.json').write_bytes(b'p' * 1000)
+        context.finish(first)
+        context.attach_retained(str(tree), (catalog, backup))
+        share = physical.unit_output_bytes(UNIT_BYTES)
+        self.assertGreater(share, physical.CONTROL_OUTPUT_BYTES)
+        seal, _ = context.child_plan({'operation': 'validate_restore'}, tree)
+        self.assertEqual([e['bytes'] for e in seal if e['relative_path'] == 'writer'], [share])
+        self.issue({'operation': 'validate_restore'}, tree)  # the issuer refuses any shrunken delegation
 
 
 class ActivationTransferTests(ChildPlanBase):
@@ -1498,7 +1577,7 @@ class ActivationTransferTests(ChildPlanBase):
         restored, request = self.restored(), {'operation': 'unit'}
         sizes = {e['family']: e['path'].stat().st_size for e in restored['staged']}
         session.activate_generation(restored, self.out, request)
-        handle = self.issue(request, self.out)  # the held main reservations are delegated by id, never released
+        handle = self.issue(request, self.out / 'quantum')  # the held main reservations are delegated by id, never released
         families = self.context.policy['families']
         for family in ('catalog_main', 'verifier_main'):
             self.assertEqual(self.used()[(family, 'main')], families[family]['main_bytes'])  # granted once, in full
@@ -1515,7 +1594,7 @@ class ActivationTransferTests(ChildPlanBase):
         self.assertLess(1, families['catalog_main']['database_bytes'])
         self.context.ledger.limits[('snapshot_spool_bytes', 'bytes')] = 1
         with self.assertRaises(physical.PhysicalIncomplete):
-            self.context.issue(request, self.out)
+            self.context.issue(request, self.out / 'quantum')
         self.assertEqual(self.used(), before)
         for name in ('catalog.sqlite', 'verifier.sqlite'):
             self.assertEqual(len(self.owners(self.out / 'state' / name)), 1)
@@ -1532,7 +1611,7 @@ class ActivationTransferTests(ChildPlanBase):
             raise AssertionError('a held main reservation was released/unclaimed while being handed on')
         with mock.patch.object(physical.Reservation, 'release_after_removal', forbidden), \
                 mock.patch.object(physical.ReservationLedger, '_unclaim', forbidden):
-            handle = self.issue(request, self.out)
+            handle = self.issue(request, self.out / 'quantum')
         ids = {a['reservation_id'] for a in handle.descriptor['allocations']}
         for name, reservation in held.items():
             self.assertEqual(self.owners(active / name), [reservation])  # the very same reservation, still the one owner
@@ -1547,14 +1626,14 @@ class ActivationTransferTests(ChildPlanBase):
         session.activate_generation(restored, self.out, request)
         active = self.out / 'state'
         held = self.owners(active / 'catalog.sqlite')[0]
-        handle = self.issue(request, self.out)
+        handle = self.issue(request, self.out / 'quantum')
         report = handle.reconcile_after_reap(0)
         self.assertIn(held.reservation_id, report['retained'])
         self.assertFalse(held.delegated or held.released)
         self.assertEqual(self.owners(active / 'catalog.sqlite'), [held])
         self.assertGreaterEqual(self.used()[('catalog_main', 'main')], held.bytes)
         # The next writer inherits the same reservation again; nothing was re-reserved in between.
-        again = self.issue(request, self.out)
+        again = self.issue(request, self.out / 'quantum')
         self.assertIn(held.reservation_id, {a['reservation_id'] for a in again.descriptor['allocations']})
 
 

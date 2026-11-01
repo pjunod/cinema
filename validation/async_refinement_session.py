@@ -530,8 +530,31 @@ CHILD_SCRATCH = 'child-scratch'
 EXPORT_SCRATCH = 'manifest-closure.sqlite'
 CONTINUATION_SCRATCH = 'continuation-validation.sqlite'
 RESTORE_SCRATCH = 'restore-scratch.sqlite'
+CATALOG_BACKUP = 'catalog-backup.sqlite'
+VERIFIER_BACKUP = 'verifier-backup.sqlite'
 SCRATCH_RESOURCES = ('catalog_export_scratch', 'verifier_continuation_scratch',
-                     'catalog_or_verifier_restore_scratch', 'source_runtime_scratch_bytes')
+                     'catalog_or_verifier_restore_scratch')
+# Operations whose output directory holds only small receipts (not a unit's pages and evidence).
+CONTROL_OPERATIONS = ('validate_restore', 'completion_verify', 'catalog_calibration')
+# The writer's named single-file claims and the runtime HOME/TMPDIR live in the sibling
+# "<output>-aux" directory, so every output directory is exactly one recursive granted subtree
+# with no nested claims. The Rust catalog (async_driver_catalog::AUXILIARY_SUFFIX) and the
+# checker (paged_codec.AUXILIARY_SUFFIX) derive the same name;
+# tests/operations/test_paged_request_fixtures.py pins all three.
+AUXILIARY_SUFFIX = '-aux'
+# The job output directory of one producer run: the single constructor used both to place a job's
+# output (event_output) and to find the earlier jobs' outputs to discard.
+JOB_OUTPUT_PREFIX = 'run-'
+
+
+def auxiliary_directory(output):
+    output = Path(output)
+    p.require(output.name != '', 'auxiliary directory needs a named output directory')
+    return output.with_name(output.name + AUXILIARY_SUFFIX)
+
+
+def job_output_directory(session_directory, run_id):
+    return Path(session_directory) / (JOB_OUTPUT_PREFIX + str(receipts.positive(int(run_id))))
 
 
 class GrantPlan:
@@ -542,9 +565,14 @@ class GrantPlan:
     delegated twice (a second delegation would deduct the pool a second time).
     """
     def __init__(self, context):
-        self.context, self.entries, self.delegated = context, [], {}
+        self.context, self.entries, self.delegated, self.credits = context, [], {}, {}
 
-    def add(self, resource, component, path, amount, recursive=False, whole=False):
+    def uncommitted(self, resource, component):
+        """What the parent can still give after this plan's shares (held claims are already deducted)."""
+        key = resource, component
+        return self.context.ledger.remaining(*key) - (self.delegated.get(key, 0) - self.credits.get(key, 0))
+
+    def add(self, resource, component, path, amount, recursive=False, whole=False, keep_held=False):
         """Delegate `amount` (or, with `whole`, everything the family component can still give).
 
         When the ledger already holds exactly this claim (an activated main file, or a surviving
@@ -566,12 +594,17 @@ class GrantPlan:
         remaining = self.context.ledger.remaining(resource, component)
         if whole:
             amount = entry['bytes'] = remaining + held_bytes
+        elif keep_held and held is not None:
+            # A claim the ledger already holds is never shrunk by a later invocation on the same tree.
+            amount = entry['bytes'] = max(amount, held_bytes)
         total = self.delegated.get(key, 0) + amount
-        if amount <= 0 or total - held_bytes > remaining:
+        credit = self.credits.get(key, 0) + held_bytes
+        if amount <= 0 or total - credit > remaining:
             raise physical.PhysicalIncomplete('physical capacity exhausted before child startup: ' + '/'.join(key))
         if held is not None:
             entry['reservation_id'] = held.reservation_id
         self.delegated[key] = total
+        self.credits[key] = credit
         self.entries.append(entry)
 
     def family(self, resource, component, path):
@@ -582,8 +615,8 @@ class GrantPlan:
         for component in ('main', 'journal', 'temp'):
             self.family(resource, component, path)
 
-    def pool(self, resource, path, amount, recursive=False):
-        self.add(resource, 'bytes', path, amount, recursive)
+    def pool(self, resource, path, amount, recursive=False, keep_held=False):
+        self.add(resource, 'bytes', path, amount, recursive, keep_held=keep_held)
 
 
 class PhysicalContext:
@@ -640,14 +673,28 @@ class PhysicalContext:
                                 'access': 'read_only'})
         self.attachments[str(output_dir)] = attachments
 
+    def output_allowance(self, request):
+        """The one recursive share of an output directory: a unit writer's pages, manifests, verifier
+        evidence, TLC logs and initial image are bounded by the immutable unit_byte_allowance (plus the
+        controller-written captures); a control operation writes only small receipts."""
+        if request.get('operation') in CONTROL_OPERATIONS:
+            return physical.CONTROL_OUTPUT_BYTES
+        return physical.unit_output_bytes(self.plan.get('unit_byte_allowance'))
+
     def child_plan(self, request, output):
         """Disjoint, explicitly sized allocations for exactly the files this child may write.
 
         Every family component is delegated once; a shared pool is split into named shares
         whose sum never exceeds what the parent still holds. A restore validator receives the
         read-only attachment instead of any main-file allocation.
+
+        The output directory is ONE recursive share of source_runtime_scratch_bytes, so every
+        file a child leaves there (pages, manifests, evidence, logs, the initial image) is charged.
+        Nothing nested inside it is claimed: the named single-file claims and the runtime
+        HOME/TMPDIR sit in the sibling auxiliary directory.
         """
         out = Path(output)
+        aux = auxiliary_directory(out)
         attached = list(self.attachments.get(str(out), []))
         restoring = request.get('operation') == 'validate_restore'
         p.require(restoring == bool(attached),
@@ -656,25 +703,26 @@ class PhysicalContext:
         if restoring:
             # Journal/temp for ancillary writes only; the restored main file is never re-reserved.
             for component in ('journal', 'temp'):
-                plan.family('catalog_or_verifier_restore_scratch', component, out / RESTORE_SCRATCH)
+                plan.family('catalog_or_verifier_restore_scratch', component, aux / RESTORE_SCRATCH)
         else:
-            for family, path in self.writer_databases(request, out):
+            for family, path in self.writer_databases(request, aux):
                 plan.database(family, path)
-            plan.database('catalog_export_scratch', out / EXPORT_SCRATCH)
+            plan.database('catalog_export_scratch', aux / EXPORT_SCRATCH)
             families = self.policy['families']
             # A standalone backup is at most its database's ceiling: one named share each.
-            plan.pool('snapshot_spool_bytes', out / 'catalog-backup.sqlite', families['catalog_main']['database_bytes'])
-            plan.pool('snapshot_spool_bytes', out / 'verifier-backup.sqlite', families['verifier_main']['database_bytes'])
-        plan.database('verifier_continuation_scratch', out / CONTINUATION_SCRATCH)
-        # HOME and TMPDIR share one subtree allocation, so the pool is delegated exactly once.
-        plan.pool('source_runtime_scratch_bytes', out / CHILD_SCRATCH,
-                  self.ledger.remaining('source_runtime_scratch_bytes', 'bytes'), recursive=True)
+            plan.pool('snapshot_spool_bytes', aux / CATALOG_BACKUP, families['catalog_main']['database_bytes'])
+            plan.pool('snapshot_spool_bytes', aux / VERIFIER_BACKUP, families['verifier_main']['database_bytes'])
+        plan.database('verifier_continuation_scratch', aux / CONTINUATION_SCRATCH)
+        plan.pool('source_runtime_scratch_bytes', out, self.output_allowance(request), recursive=True, keep_held=True)
+        # HOME and TMPDIR share one subtree allocation, so the rest of the pool is delegated exactly once.
+        plan.pool('source_runtime_scratch_bytes', aux / CHILD_SCRATCH,
+                  plan.uncommitted('source_runtime_scratch_bytes', 'bytes'), recursive=True)
         return plan.entries, attached
 
     @staticmethod
-    def writer_databases(request, out):
-        return [('catalog_main', Path(request.get('catalog_path', out / 'catalog.sqlite'))),
-                ('verifier_main', Path(request.get('verifier_work_db', out / 'verifier.sqlite')))]
+    def writer_databases(request, default_directory):
+        return [('catalog_main', Path(request.get('catalog_path', default_directory / 'catalog.sqlite'))),
+                ('verifier_main', Path(request.get('verifier_work_db', default_directory / 'verifier.sqlite')))]
 
     def issue(self, request, output):
         """Seal the child's grant. A main/journal claim the ledger already holds (an activated
@@ -693,7 +741,8 @@ class PhysicalContext:
         Scratch (runtime HOME/TMPDIR, export, continuation and restore scratch) has no value
         after exit and would otherwise keep its whole allocation charged and its path claimed.
         It is removed only when the child stayed within its grant, so an overage is still
-        observed by reconciliation. Sealed outputs (databases, backups) stay charged.
+        observed by reconciliation. Sealed outputs (databases, backups) and the output
+        directory's own recursive share stay charged until the next job discards them.
         """
         try:
             try:
@@ -706,9 +755,16 @@ class PhysicalContext:
         finally:
             handle.close()
 
+    @staticmethod
+    def is_scratch(entry):
+        """Runtime HOME/TMPDIR and the scratch databases; never the output directory's own share."""
+        if entry['resource'] == 'source_runtime_scratch_bytes':
+            return Path(entry['relative_path']).name == CHILD_SCRATCH
+        return entry['resource'] in SCRATCH_RESOURCES
+
     def discard_scratch(self, handle):
         for entry in handle.descriptor['allocations']:
-            if entry['resource'] not in SCRATCH_RESOURCES:
+            if not self.is_scratch(entry):
                 continue
             target = self.owned / entry['relative_path']
             if entry['recursive']:
@@ -779,23 +835,34 @@ class PhysicalContext:
             fsync_directory(descriptor_path.parent)
             control.release_after_removal()
 
-    PERSISTENT_NAMES = ('publication-', 'conformance-', 'controller-api', 'physical-', 'ordinal-', 'execution.lock')
+    def prior_job_outputs(self):
+        """Every job output directory of this session, found with the constructor that places them.
+
+        The set is exactly the session-directory entries equal to job_output_directory(owned, n) for
+        some run number n, so the discard can never silently stop matching the job's own output.
+        """
+        found = []
+        for entry in sorted(self.owned.iterdir()):
+            number = entry.name[len(JOB_OUTPUT_PREFIX):]
+            if (entry.name.startswith(JOB_OUTPUT_PREFIX) and number.isascii() and number.isdigit()
+                    and entry == job_output_directory(self.owned, int(number))):
+                found.append(entry)
+        return found
 
     def discard_prior_outputs(self, output):
         """Earlier jobs' output trees have no value: everything is re-authenticated from the API.
 
-        Left in place they would occupy owned storage no pool ever charged. Only siblings of this
-        job's output under the session directory are removed; the persistent spools, the API cache,
-        the ledger directories and the ordinal guards are never touched here.
+        Left in place they would occupy owned storage no pool ever charged. `output` must be this
+        session's own job output directory (job_output_directory), and only the other job outputs are
+        removed; the persistent spools, the API cache, the ledger directories and the ordinal guards
+        are not job outputs and are never touched here.
         """
         output = Path(output).resolve()
-        if output.parent != self.owned:
-            return
-        for entry in sorted(self.owned.iterdir()):
-            if (entry == output or entry.name.startswith(self.PERSISTENT_NAMES)
-                    or entry.is_symlink() or not entry.is_dir()):
-                continue
-            shutil.rmtree(entry)
+        outputs = self.prior_job_outputs()
+        p.require(output in outputs, 'job output is not an existing session job output directory')
+        for entry in outputs:
+            if entry != output and not entry.is_symlink() and entry.is_dir():
+                shutil.rmtree(entry)
 
     def discard_dead_spools(self, live):
         """Remove the publication/rehearsal spools no authenticated pending chain still needs."""
@@ -835,7 +902,7 @@ def current_physical():
 def child_environment(reg, request, source, output, grant=None):
     # Never copy os.environ: API tokens, checkout credentials and CI payloads
     # stay in the trusted controller. HOME is a fresh private child directory.
-    scratch = Path(output) / CHILD_SCRATCH  # the one granted runtime-scratch subtree
+    scratch = auxiliary_directory(output) / CHILD_SCRATCH  # the one granted runtime-scratch subtree
     home = scratch / 'home'
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = scratch / 'temp'
@@ -1776,11 +1843,12 @@ def build_publication(store, state, reg, root, index, quantum, produced, checked
     cp = produced['checkpoint']
     binding = publication_binding(reg, produced['work_unit'], cp['record']['initial_image_id'])
     quantum = Path(quantum)
-    qdir = owned_directory(quantum, reg, root)
+    # The sealed standalone backups sit beside the output tree, not in it (see auxiliary_directory).
+    qdir = owned_directory(auxiliary_directory(quantum), reg, root)
     try:
         catalog, catalog_ref = snapshots.snapshot_root(
             store.inventory, binding, origin, cp, p.read(quantum / 'backup-descriptor.json'), qdir,
-            'catalog-backup.sqlite', predecessor_root=state.get('catalog_root_ref'))
+            CATALOG_BACKUP, predecessor_root=state.get('catalog_root_ref'))
         p.auxiliary(catalog, root)
         p.write(quantum / 'catalog-backup/root.json', catalog)
         store.evidence.fulfill('catalog-backup/root.json', quantum / 'catalog-backup/root.json')
@@ -1788,7 +1856,7 @@ def build_publication(store, state, reg, root, index, quantum, produced, checked
         if checked:
             verifier, verifier_ref = snapshots.snapshot_root(
                 store.inventory, binding, origin, cp, p.read(quantum / 'verifier-backup-descriptor.json'), qdir,
-                'verifier-backup.sqlite', predecessor_root=state.get('verifier_root_ref'), verifier=True)
+                VERIFIER_BACKUP, predecessor_root=state.get('verifier_root_ref'), verifier=True)
             p.verifier_auxiliary(verifier, root)
             p.write(quantum / 'verifier-backup/root.json', verifier)
             store.evidence.fulfill('verifier-backup/root.json', quantum / 'verifier-backup/root.json')
@@ -2100,6 +2168,31 @@ def check_root_origin(record, origin):
     p.require(record['execution_origin'] == origin, 'snapshot root execution origin differs from its publication')
 
 
+def restore_generation(output):
+    """The directory holding one restore's staged files (the generation activate_generation moves)."""
+    return Path(output) / 'state.restore'
+
+
+def catalog_restore_request(request, staged, checkpoint, index_path, output):
+    """The closed request the catalog restore validators read (Rust QuantumRequest.validate_restore and
+    the checker): `request` is restore_request_base, which lacks the three per-restore paths added here.
+
+    tests/operations/test_paged_request_fixtures.py pins this builder to the checked-in fixture that the
+    Rust catalog parses with QuantumRequest::read_shape.
+    """
+    return {**request, 'operation': 'validate_restore', 'catalog_path': str(staged),
+            'verifier_work_db': str(restore_generation(output) / 'verifier.sqlite'),
+            'checkpoint': checkpoint, 'dependency_index': str(index_path),
+            'output_dir': str(Path(output) / 'restore-validation')}
+
+
+def verifier_restore_request(request, verifier_staged, checkpoint, index_path, output):
+    """The closed request of the restored-verifier validator (the checker only; never Rust)."""
+    return {**request, 'operation': 'validate_restore', 'verifier_work_db': str(verifier_staged),
+            'verifier_checkpoint': checkpoint, 'verifier_backup_root': str(Path(output) / 'restored-verifier-root.json'),
+            'output_dir': str(Path(output) / 'verifier-restore-validation'), 'dependency_index': str(index_path)}
+
+
 def restore_snapshots(state, source, request, output, reg, root, index_path, resolver, catalog_ref,
                       verifier_ref, checkpoint, origin):
     """Reconstruct both complete files from authenticated content and validate them.
@@ -2111,7 +2204,7 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
     """
     context = current_physical()
     output = Path(output)
-    generation = output / 'state.restore'
+    generation = restore_generation(output)
     generation.mkdir(exist_ok=False, mode=0o700)
     request['verifier_work_db'] = str(generation / 'verifier.sqlite')
     directory = owned_directory(generation, reg, root)
@@ -2134,9 +2227,7 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
     finally:
         directory.close()
     request['catalog_path'] = str(staged)
-    restore = {**request, 'operation': 'validate_restore', 'catalog_path': str(staged),
-               'checkpoint': checkpoint, 'dependency_index': str(index_path)}
-    restore['output_dir'] = str(output / 'restore-validation')
+    restore = catalog_restore_request(request, staged, checkpoint, index_path, output)
     Path(restore['output_dir']).mkdir(mode=0o700)
     context.attach_restore(restore['output_dir'], [(catalog_budget, staged)])
     path = output / 'restore-request.json'
@@ -2149,9 +2240,7 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
     input_preparation = semantic.get('complete') is False and semantic.get('scope') == 'input_preparation'
     verifier_receipt = None
     if verifier_staged is not None:
-        vrequest = {**request, 'operation': 'validate_restore', 'verifier_work_db': str(verifier_staged),
-                    'verifier_checkpoint': checkpoint, 'verifier_backup_root': str(output / 'restored-verifier-root.json'),
-                    'output_dir': str(output / 'verifier-restore-validation'), 'dependency_index': str(index_path)}
+        vrequest = verifier_restore_request(request, verifier_staged, checkpoint, index_path, output)
         p.write(output / 'restored-verifier-root.json', verifier_root)
         Path(vrequest['output_dir']).mkdir(mode=0o700)
         context.attach_restore(vrequest['output_dir'], [(verifier_budget, verifier_staged)])
@@ -2889,6 +2978,30 @@ def runner_body(control, root, output, mode, operation):
         return _runner_body(control, root, output, mode, operation, reg, owned)
 
 
+def unit_execute_request(state, unit, reg, output, deadline, operation):
+    """The closed private request of one unit-executing quantum (Rust QuantumRequest, checker request).
+
+    tests/operations/test_paged_request_fixtures.py pins this builder to the checked-in fixture that the
+    Rust catalog parses with QuantumRequest::read_shape.
+    """
+    output = Path(output)
+    return {'schema_version': 6, 'deadline_monotonic': deadline, 'operation': 'expand', 'work_unit': unit['record'],
+            'resource_plan': state['resource_plan'], 'initial_image': state['initial_image'],
+            'prior_checkpoint': state['checkpoint'], 'checkpoint': state['checkpoint'],
+            'catalog_path': str(output / 'catalog.sqlite'), 'output_dir': str(output / 'quantum'),
+            'dependency_index': str(output / 'dependencies.sqlite'),
+            'execution_origin': execution_origin(state, unit['record'], operation),
+            'source_files': reg['source_files'], 'runtime': reg['runtime'],
+            'driver_graph': str(output / 'driver-graph.json'),
+            'verifier_work_db': str(output / 'verifier.sqlite'),
+            'prepare_path': str(output / 'quantum/prepare-unit.json'),
+            'reservation_path': str(output / 'reservation.json'),
+            'previous_verifier_progress_sha256': state.get('verifier_progress_sha256'),
+            'previous_verifier_backup_sha256': state.get('verifier_backup_sha256'),
+            'tlc': {'java': reg['runtime']['java']['path'], 'jar': reg['runtime']['tlc']['path'],
+                    'java_sha256': reg['runtime']['java']['sha256'], 'jar_sha256': reg['runtime']['tlc']['sha256']}}
+
+
 def _runner_body(control, root, output, mode, operation, reg, owned):
     deadline = time.monotonic() + 1800
     api=api_environment(owned/control['session_id']/'controller-api'/str(os.environ['GITHUB_RUN_ID']))
@@ -2960,21 +3073,7 @@ def _runner_body(control, root, output, mode, operation, reg, owned):
         return run_publish(api, reg, state, latest, control, root, source, output, job, run_id, identity,
                            measurement, deadline)
     unit = unit_request(state, run_id, job, root)
-    request = {'schema_version': 6, 'deadline_monotonic': deadline, 'operation': 'expand', 'work_unit': unit['record'],
-               'resource_plan': state['resource_plan'], 'initial_image': state['initial_image'],
-               'prior_checkpoint': state['checkpoint'], 'checkpoint': state['checkpoint'],
-               'catalog_path': str(output / 'catalog.sqlite'), 'output_dir': str(output / 'quantum'),
-               'dependency_index': str(output / 'dependencies.sqlite'),
-               'execution_origin':execution_origin(state,unit['record'],operation),
-               'source_files':reg['source_files'],'runtime':reg['runtime'],
-               'driver_graph': str(output / 'driver-graph.json'),
-               'verifier_work_db':str(output/'verifier.sqlite'),
-               'prepare_path':str(output/'quantum/prepare-unit.json'),
-               'reservation_path':str(output/'reservation.json'),
-               'previous_verifier_progress_sha256':state.get('verifier_progress_sha256'),
-               'previous_verifier_backup_sha256':state.get('verifier_backup_sha256'),
-               'tlc': {'java': reg['runtime']['java']['path'], 'jar': reg['runtime']['tlc']['path'],
-                       'java_sha256': reg['runtime']['java']['sha256'], 'jar_sha256': reg['runtime']['tlc']['sha256']}}
+    request = unit_execute_request(state, unit, reg, output, deadline, operation)
     quantum = Path(request['output_dir']); quantum.mkdir()
     emit_runtime_receipts(state,unit,identity,quantum)
     if latest:
@@ -3557,7 +3656,7 @@ def final_input_execution(unit,checkpoint,catalog_sha256,backup_sha256,progress_
 
 def seal_final_input(request,produced,reg,source,output,request_path):
     """The future receipt authenticates the exact already sealed private bytes."""
-    backup=Path(output)/'verifier-backup.sqlite';catalog=Path(request['catalog_path'])
+    backup=auxiliary_directory(output)/VERIFIER_BACKUP;catalog=Path(request['catalog_path'])
     backup_sha=p.file_sha(backup);catalog_sha=p.file_sha(catalog)
     before_logs=set(Path(output).glob('quantum-*.log'))
     validate={**request,'operation':'validate_restore','verifier_work_db':str(backup),
@@ -3643,7 +3742,7 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
             backup=Path(request['catalog_path'])
             p.require(backup.stat().st_size==saved['catalog_bytes'] and p.file_sha(backup)==saved['catalog_sha256'],
                       'preparation changed the read-only catalog snapshot')
-            shutil.copyfile(backup,quantum/'catalog-backup.sqlite')
+            shutil.copyfile(backup,auxiliary_directory(quantum)/CATALOG_BACKUP)
             descriptor={k:saved[k] for k in ('source','session_id','checkpoint_sha256',
                 'resource_plan_sha256','initial_image_sha256','catalog_commit','catalog_logical_digest',
                 'semantic_manifest_root','snapshot_boundary','format','backup_method','catalog_bytes','catalog_sha256')}
@@ -3670,7 +3769,7 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
                 continue  # the frozen PlannedResult is intent content, never an evidence member
             if checked and name in {r['path'] for r in prepare['staged_members']}:
                 continue
-            if name.startswith(('catalog-backup/','verifier-backup/')) or name in ('catalog-backup.sqlite','backup-descriptor.json'):
+            if name.startswith(('catalog-backup/','verifier-backup/')) or name == 'backup-descriptor.json':
                 continue
             plan.add_file(name,file)
             value=p.read(file,p.MAX_MEMBER) if file.suffix=='.json' else None
@@ -4197,7 +4296,7 @@ def event_output(root):
     plan=p.envelope(control['resource_plan'],'ResourcePlan',root)
     p.require(control['session_id']==plan['session_id'],'event storage session UUID differs')
     owned=validate_storage(reg['storage'],root)
-    return owned/control['session_id']/('run-'+str(receipts.positive(int(os.environ['GITHUB_RUN_ID']))))
+    return job_output_directory(owned/control['session_id'], os.environ['GITHUB_RUN_ID'])
 
 
 def validate_workflow_protocol(root):

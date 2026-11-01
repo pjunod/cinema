@@ -40,6 +40,26 @@ POOL_OWNERS = {
 }
 SOURCE_MAP_PATH = Path(__file__).with_name('async_physical_table_map.json')
 
+# Every child output directory is ONE recursive subtree share of source_runtime_scratch_bytes
+# (PhysicalContext.child_plan); the writer's named single-file claims and the runtime HOME/TMPDIR live
+# in the sibling "<output>-aux" directory. A unit writer's share is unit_byte_allowance plus the
+# controller-written captures of its (at most four) invocations, each bounded by the 8 MiB log
+# allowance; the four control directories (restore validation, verifier restore validation,
+# completion check, native calibration) are bounded at CONTROL_OUTPUT_BYTES each.
+UNIT_LOG_RESERVE = 4 * 8 * MIB
+CONTROL_OUTPUT_BYTES = 64 * MIB
+CONTROL_OUTPUT_DIRECTORIES = 4
+
+
+def unit_output_bytes(unit_byte_allowance):
+    """The recursive output-directory share of a unit-writing child."""
+    return integer(unit_byte_allowance, positive=True) + UNIT_LOG_RESERVE
+
+
+def runtime_pool_demand(unit_byte_allowance):
+    """What the source/runtime pool must hold for output directories, before any HOME/TMPDIR scratch."""
+    return unit_output_bytes(unit_byte_allowance) + CONTROL_OUTPUT_DIRECTORIES * CONTROL_OUTPUT_BYTES
+
 
 class PhysicalPolicyError(ValueError):
     """A policy, source map, or restored identity is invalid."""
@@ -271,6 +291,9 @@ def calibrate_physical_policy(policy, observed_geometry, observed_baseline, plan
     for value in observed_baseline.values():
         integer(value)
     require(observed_baseline['source_workspace_bytes'] <= policy['pools']['source_runtime_scratch_bytes'], 'source/runtime pool does not fit measured source baseline')
+    require(observed_baseline['source_workspace_bytes'] + runtime_pool_demand(plan.get('unit_byte_allowance'))
+            < policy['pools']['source_runtime_scratch_bytes'],
+            'source/runtime pool does not cover the source baseline, every output directory and runtime scratch')
     for family, observations in observed_geometry.items():
         declared = {x['database_role'] for x in source_map['families'][family]}
         require(type(observations) is list and (observations or not declared), 'missing actual physical family geometry')

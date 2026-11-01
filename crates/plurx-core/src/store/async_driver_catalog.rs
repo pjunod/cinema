@@ -16,6 +16,25 @@ use serde_json::{json, Value};
 pub use records::*;
 
 pub const PAGE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Suffix of the per-output sibling directory that holds the writer's named
+/// single-file claims (`catalog-backup.sqlite`, `verifier-backup.sqlite`, the export
+/// and continuation scratch databases and `child-scratch/`). The output directory
+/// itself is then one recursive granted subtree with no nested claims. The Python
+/// controller (`validation/async_refinement_session.py`) and checker
+/// (`verification/async-driver-refinement/paged_codec.py`) derive the same name;
+/// `tests/operations/test_paged_request_fixtures.py` pins all three.
+pub const AUXILIARY_SUFFIX: &str = "-aux";
+
+/// The sibling of `output_dir` named `<name>-aux`.
+pub fn auxiliary_directory(output_dir: &Path) -> CatalogResult<PathBuf> {
+    let name = output_dir
+        .file_name()
+        .ok_or_else(|| CatalogError::Io("output directory has no name".into()))?;
+    let mut sibling = name.to_os_string();
+    sibling.push(AUXILIARY_SUFFIX);
+    Ok(output_dir.with_file_name(sibling))
+}
 pub const ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 pub const CONTEXTS: [&str; 7] = [
     "base",
@@ -2457,7 +2476,8 @@ impl ReadSnapshot {
         // the file must lie in the granted allocation and the journal/temp
         // reservations must cover the database ceiling.
         let family = resource.family("catalog_export_scratch")?;
-        let scratch = output.join("manifest-closure.sqlite");
+        let auxiliary = auxiliary_directory(output)?;
+        let scratch = auxiliary.join("manifest-closure.sqlite");
         let granted = self
             .catalog
             .inner
@@ -2483,6 +2503,7 @@ impl ReadSnapshot {
             ));
         }
         std::fs::create_dir_all(output)?;
+        std::fs::create_dir_all(&auxiliary)?;
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -2663,7 +2684,13 @@ pub struct QuantumRequest {
     pub temporal_import: Option<PathBuf>,
 }
 impl QuantumRequest {
-    pub fn read(path: &Path) -> CatalogResult<Self> {
+    /// Parse a private request into its closed shape: the exact field set for the
+    /// operation, the typed fields, the operation/deadline and the absolute,
+    /// non-symlink paths. This is every check that needs neither the nested
+    /// WorkUnit/ResourcePlan contents nor an inherited physical grant, so the
+    /// controller's request builders can be pinned against it without running a
+    /// quantum (`request_fixtures` below).
+    pub fn read_shape(path: &Path) -> CatalogResult<Self> {
         const CONTROL_BYTES: u64 = 8 * 1024 * 1024;
         if !path.is_absolute()
             || path.symlink_metadata()?.file_type().is_symlink()
@@ -2747,6 +2774,10 @@ impl QuantumRequest {
                 return Err(CatalogError::Io("unsafe temporal import path".into()));
             }
         }
+        Ok(request)
+    }
+    pub fn read(path: &Path) -> CatalogResult<Self> {
+        let request = Self::read_shape(path)?;
         let unit = request.unit()?;
         closed_fields(
             &request.execution_origin,
@@ -3986,5 +4017,79 @@ mod tests {
         config.grant = Some(std::sync::Arc::new(attached));
         Catalog::validation(config)
             .expect("an attached restore spends the held reservation and opens read-only");
+    }
+
+    fn request_fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/operations/fixtures/paged-requests")
+            .join(name)
+            .canonicalize()
+            .expect("checked-in controller request fixture")
+    }
+
+    /// The controller's request builders (`unit_execute_request`,
+    /// `catalog_restore_request`) are pinned byte for byte to these fixtures by
+    /// `tests/operations/test_paged_request_fixtures.py`; this is the other half:
+    /// the real Rust request parser accepts exactly that closed shape and nothing
+    /// looser, without running a quantum.
+    #[test]
+    fn controller_request_fixtures_parse_with_the_closed_request_shape() {
+        for (name, operation) in [
+            ("execute-request.json", "expand"),
+            ("restore-request.json", "validate_restore"),
+        ] {
+            let request = QuantumRequest::read_shape(&request_fixture(name)).expect(name);
+            assert_eq!(request.operation, operation, "{name}");
+            assert!(request.output_dir.is_absolute(), "{name}");
+            assert_eq!(
+                auxiliary_directory(&request.output_dir)
+                    .expect(name)
+                    .parent(),
+                request.output_dir.parent(),
+                "the auxiliary directory is the output directory's sibling: {name}"
+            );
+        }
+        let original: Value = serde_json::from_slice(
+            &std::fs::read(request_fixture("execute-request.json")).expect("fixture bytes"),
+        )
+        .expect("fixture json");
+        let directory = tempfile::tempdir().expect("scratch");
+        let refused = |mutate: &dyn Fn(&mut Value)| {
+            let mut value = original.clone();
+            mutate(&mut value);
+            let path = directory.path().join("request.json");
+            std::fs::write(&path, serde_json::to_vec(&value).expect("json bytes"))
+                .expect("write request");
+            QuantumRequest::read_shape(&path).is_err()
+        };
+        assert!(refused(&|v| v["unexpected_field"] = json!(1)));
+        assert!(refused(&|v| {
+            v.as_object_mut().expect("object").remove("output_dir");
+        }));
+        assert!(refused(&|v| v["output_dir"] = json!("relative/quantum")));
+        assert!(refused(&|v| v["operation"] = json!("publish")));
+        assert!(refused(&|v| v["deadline_monotonic"] = json!(0)));
+    }
+
+    #[test]
+    fn auxiliary_directories_match_the_controller_fixture() {
+        let pairs: Value = serde_json::from_slice(
+            &std::fs::read(request_fixture("auxiliary-directories.json")).expect("fixture bytes"),
+        )
+        .expect("fixture json");
+        let pairs = pairs.as_array().expect("fixture pairs");
+        assert!(!pairs.is_empty());
+        for pair in pairs {
+            let output = PathBuf::from(pair["output_dir"].as_str().expect("output_dir"));
+            assert_eq!(
+                auxiliary_directory(&output).expect("auxiliary directory"),
+                PathBuf::from(
+                    pair["auxiliary_directory"]
+                        .as_str()
+                        .expect("auxiliary_directory")
+                )
+            );
+        }
+        assert!(auxiliary_directory(Path::new("/")).is_err());
     }
 }

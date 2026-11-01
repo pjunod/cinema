@@ -45,11 +45,12 @@ class IntegrationBase(ChildPlanBase):
 # is exact equality with it. There is no record-times-table overhead anywhere.
 # ---------------------------------------------------------------------------
 class CalibrationAdmissionTests(IntegrationBase):
-    def calibrated(self):
+    def calibrated(self, runtime_pool=512 * MIB):
         policy = {'schema_version': 3, 'kind': 'physical_policy', 'table_map_sha256': physical.digest(self.source_map),
                   'families': {name: {'owner': owner, **physical.minimum_family_policy(self.source_map, name, 4 * MIB)}
                                for name, owner in physical.FAMILY_OWNERS.items()},
                   'pools': {name: 8 * MIB for name in physical.POOL_OWNERS}}
+        policy['pools']['source_runtime_scratch_bytes'] = runtime_pool
         context = self.make_context(policy)
         connection = sqlite3.connect(':memory:')
         self.addCleanup(connection.close)
@@ -90,6 +91,14 @@ class CalibrationAdmissionTests(IntegrationBase):
         expected, calibration = self.admission()
         self.assertEqual(expected, calibration)
         self.assertEqual(expected['kind'], 'physical_calibration')
+
+    def test_a_runtime_pool_that_cannot_hold_the_output_directories_is_not_calibrated(self):
+        # The pool must exceed the measured source baseline (1 MiB here), the unit output share and
+        # every control output directory, with at least a byte left for runtime scratch.
+        demand = physical.runtime_pool_demand(64 * MIB)
+        with self.assertRaisesRegex(physical.PhysicalPolicyError, 'every output directory'):
+            self.calibrated(runtime_pool=demand + MIB)
+        self.calibrated(runtime_pool=demand + MIB + 1)
 
     def test_the_retired_record_times_table_overheads_cannot_authorize_a_plan(self):
         with self.assertRaises(receipts.ReceiptError):
@@ -355,14 +364,59 @@ class CrashReconciliationTests(IntegrationBase):
         self.assertTrue(path.exists())
 
     def test_dead_spools_and_prior_outputs_are_removed_and_live_ones_kept(self):
-        for name in ('publication-0', 'publication-1', 'conformance-abc', 'controller-api', 'earlier-job'):
+        for name in ('publication-0', 'publication-1', 'conformance-abc', 'controller-api'):
             (self.root / name).mkdir()
-        self.context.discard_prior_outputs(self.out)
-        self.assertFalse((self.root / 'earlier-job').exists())
-        self.assertTrue(self.out.exists() and (self.root / 'controller-api').exists())
+        earlier = [session.job_output_directory(self.root, n) for n in (3, 5)]
+        current = session.job_output_directory(self.root, 7)
+        for directory in [*earlier, current]:
+            directory.mkdir()
+        (earlier[0] / 'quantum').mkdir()
+        (earlier[0] / 'quantum' / 'page.json').write_bytes(b'x' * 100)
+        self.context.discard_prior_outputs(current)
+        self.assertFalse(any(directory.exists() for directory in earlier))
+        self.assertTrue(current.exists() and self.out.exists() and (self.root / 'controller-api').exists())
         self.context.discard_dead_spools({'publication-1'})
         self.assertFalse((self.root / 'publication-0').exists() or (self.root / 'conformance-abc').exists())
         self.assertTrue((self.root / 'publication-1').exists())
+
+    def test_the_prior_output_set_comes_from_the_constructor_the_job_output_uses(self):
+        made = {session.job_output_directory(self.root, n) for n in (1, 2, 12)}
+        for directory in made:
+            directory.mkdir()
+        # Names the constructor never produces are not job outputs, whatever they look like.
+        for name in ('run-', 'run-x', 'run-007', 'run--1', 'runs-1', 'run-1.bak', 'earlier-job'):
+            (self.root / name).mkdir()
+        self.assertEqual(set(self.context.prior_job_outputs()), made)
+        self.context.discard_prior_outputs(session.job_output_directory(self.root, 2))
+        self.assertEqual(set(self.context.prior_job_outputs()), {session.job_output_directory(self.root, 2)})
+        self.assertTrue((self.root / 'run-007').exists() and (self.root / 'earlier-job').exists())
+
+    def test_discarding_prior_outputs_refuses_an_output_the_job_constructor_would_not_place(self):
+        earlier = session.job_output_directory(self.root, 1)
+        earlier.mkdir()
+        for stranger in (self.out, self.root / 'run-007', self.root / 'elsewhere' / 'run-9'):
+            stranger.mkdir(parents=True, exist_ok=True)
+            with self.assertRaises(receipts.ReceiptError):  # never a silent no-op that reclaims nothing
+                self.context.discard_prior_outputs(stranger)
+        self.assertTrue(earlier.exists())
+
+    def test_the_job_output_path_and_the_discard_path_cannot_diverge(self):
+        source = Path(session.__file__)
+        tree = ast.parse(source.read_text())
+        # One literal spelling of the job output name exists in the whole module: the constructor's prefix.
+        spellings = [node for node in ast.walk(tree) if isinstance(node, ast.Constant) and node.value == 'run-']
+        self.assertEqual(len(spellings), 1)
+        event_output = function_node(source, 'event_output')
+        called = {node.func.id for node in ast.walk(event_output) if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Name)}
+        self.assertIn('job_output_directory', called)  # the job places its output with the constructor ...
+        discard = function_node(source, 'prior_job_outputs')
+        called = {node.func.id for node in ast.walk(discard) if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Name)}
+        self.assertIn('job_output_directory', called)  # ... and the discard finds earlier outputs with it
+        body = function_node(source, '_runner_body')
+        self.assertIn('discard_prior_outputs', {node.func.attr for node in ast.walk(body)
+                                                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)})
 
     def test_only_spools_an_authenticated_chain_can_still_use_are_live(self):
         reg = {'source': {'commit': '0' * 40}}

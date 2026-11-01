@@ -3325,10 +3325,12 @@ fn publish_paged_checkpoint(
         &session,
         paged::PAGE_BYTES,
     )?;
+    let auxiliary = catalog_result(paged::auxiliary_directory(&request.output_dir))?;
+    std::fs::create_dir_all(&auxiliary).map_err(|error| error.to_string())?;
     let mut backup = catalog_result(
         catalog.backup_checkpoint_catalog(
             &checkpoint,
-            &request.output_dir.join("catalog-backup.sqlite"),
+            &auxiliary.join("catalog-backup.sqlite"),
             &paged::BackupLimits {
                 max_bytes: catalog_result(limits.pool("snapshot_spool_bytes"))?
                     .min(catalog_result(limits.family("catalog_main"))?.database_bytes),

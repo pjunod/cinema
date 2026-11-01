@@ -16,7 +16,7 @@ import sys
 import time
 
 import checker as legacy
-from paged_codec import (BLOBS, COUNT_KINDS, BoundedList, Budget, ContinuationResolver, ExecutionState, Incomplete, Invalid, RecordIndex, bounded_json, canonical,
+from paged_codec import (BLOBS, auxiliary_directory, COUNT_KINDS, BoundedList, Budget, ContinuationResolver, ExecutionState, Incomplete, Invalid, RecordIndex, bounded_json, canonical,
                          digest, encoded, envelope, inner, ref, require, sha_bytes,
                          strict_json, canonical_json_footprint, decoded_json_allocation, decoded_stream_reservation)
 
@@ -1261,7 +1261,7 @@ def run_temporal_tlc(index, output, tlc, tag, module, directory, config, *, comp
         row=index.db.execute("SELECT r.record FROM credit_links c JOIN check_results r ON r.sequence=c.result_sequence WHERE c.table_name='tlc_invocation' AND c.row_key=?",(encoded(key),)).fetchone()
         require(row is not None and row[0] is not None,'TLC reuse lacks an authenticated finalized result')
         result=strict_json(row[0])
-        resolver=ContinuationResolver(index.request['dependency_index'],output,source=index.source,session_id=index.session_id,budget=index.budget)
+        resolver=ContinuationResolver(index.request['dependency_index'],auxiliary_directory(output,create=True),source=index.source,session_id=index.session_id,budget=index.budget)
         try:
             reparse_retained_tlc(result,None,resolver,index.execution)
         finally:
@@ -1992,7 +1992,7 @@ def validate_restored_verifier(request,*,attached=True):
     before_sha,before_bytes=file_sha(path),path.stat().st_size
     backup_raw=Path(request['verifier_backup_root']).read_bytes()
     backup=strict_json(backup_raw)
-    resolver=ContinuationResolver(request['dependency_index'],output,source=index.source,session_id=index.session_id,budget=index.budget)
+    resolver=ContinuationResolver(request['dependency_index'],auxiliary_directory(output,create=True),source=index.source,session_id=index.session_id,budget=index.budget)
     resolver.schema.check(backup)
     require(encoded(backup)==backup_raw and backup['kind']=='verifier_backup' and backup['source']==index.source and backup['session_id']==index.session_id,'private backup identity')
     checkpoint=request['verifier_checkpoint']
@@ -2049,7 +2049,7 @@ def complete_verification(request):
     require(scope is not None and scope[:3]==('ready',current['page_root'],current['committed_transaction']) and
             strict_json(scope[3])['record']['counts']==current['counts'] and strict_json(scope[3])['record']['contexts']==current['contexts'],
             'completion before exact final manifest/highwater/count/context input certificate')
-    resolver=ContinuationResolver(request['dependency_index'],output,source=index.source,session_id=index.session_id,budget=index.budget)
+    resolver=ContinuationResolver(request['dependency_index'],auxiliary_directory(output,create=True),source=index.source,session_id=index.session_id,budget=index.budget)
     state=ExecutionState.__new__(ExecutionState)
     state.index,state.budget,state.active=index,index.budget,False
     state.sql_path=Path(__file__).resolve().parent/'paged-verifier-state.sql'
@@ -2629,7 +2629,7 @@ def finalize_unit(request):
         except BaseException:
             state_db.rollback();raise
         state.budget.check()
-        backup_path=output/'verifier-backup.sqlite'
+        backup_path=auxiliary_directory(output,create=True)/'verifier-backup.sqlite'
         if backup_path.exists():raise Invalid('refuse overwrite existing finalized verifier backup')
         descriptor=state.backup(backup_path)
         descriptor.update(source=index.source,session_id=index.session_id,unit_ordinal=ordinal,checkpoint_sha256=digest(request['checkpoint']),

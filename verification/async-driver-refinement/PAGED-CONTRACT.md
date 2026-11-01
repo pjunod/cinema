@@ -915,10 +915,20 @@ independent grant; there is no unnamed shared pool or unaccounted fallback.
 Downloaded artifact ZIPs and their extractions are charged to
 `restore_staging_bytes` with their extraction subtree tracked, and the
 dependency indexes and receiver ledgers are opened through their declared
-families. The unit quantum's own output directory (pages, manifests, verifier
-evidence, TLC logs, the initial image) is the one tree not yet delegated as a
-named subtree sized from `unit_byte_allowance`; it is bounded only by the
-runtime aggregate session-disk check until the grant ABI can claim it.
+families. Every child's output directory is one recursive subtree share of
+`source_runtime_scratch_bytes`: a unit writer's directory (pages, manifests,
+verifier evidence, TLC logs, the initial image) is sized `unit_byte_allowance`
+plus four 8 MiB controller-written captures, and each of the four control
+directories (restore validation, verifier restore validation, completion check,
+native calibration) at 64 MiB. Nothing inside an output directory is claimed
+separately: the writer's named single-file claims (`catalog-backup.sqlite`,
+`verifier-backup.sqlite`, the export, continuation and restore scratch
+databases) and the runtime `child-scratch/` HOME and TMPDIR live in the
+sibling `<output>-aux` directory that the controller, the checker and the Rust
+catalog derive identically. Calibration therefore requires the pool to exceed
+the measured source baseline plus those output shares; the remainder is the
+runtime scratch. The next job removes the earlier job outputs, found with the
+same `run-<n>` constructor that places a job's own output.
 `database_bytes` values are operator capacity ceilings rounded down to the
 measured SQLite page size, neither observed consumption nor a promise of
 sufficiency, and no B-tree fill factor, average row width or one-page-per-row
