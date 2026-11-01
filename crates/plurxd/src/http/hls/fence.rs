@@ -196,26 +196,69 @@ mod tests {
 
     /// Every route registered under `/hls/{session}` is in the table, so a
     /// new one cannot silently inherit either behaviour.
+    ///
+    /// Axum exposes no route listing, so this reads every product source
+    /// under `http/` (sub-routers such as the shared-receiver ones are merged
+    /// from other files) and collects the template of each `.route(` call.
     #[test]
     fn every_hls_session_route_is_classified() {
-        let router = include_str!("../mod.rs");
+        fn sources(dir: &std::path::Path, into: &mut Vec<(std::path::PathBuf, String)>) {
+            for entry in std::fs::read_dir(dir).expect("read http/") {
+                let path = entry.expect("dir entry").path();
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                if path.is_dir() {
+                    if name != "tests" {
+                        sources(&path, into);
+                    }
+                } else if name.ends_with(".rs")
+                    && !name.ends_with("tests.rs")
+                    && !name.contains("fixture")
+                {
+                    let text = std::fs::read_to_string(&path).expect("read source");
+                    into.push((path, text));
+                }
+            }
+        }
+        let http = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http");
+        let mut files = Vec::new();
+        sources(&http, &mut files);
+        assert!(
+            files.len() > 20,
+            "the scan must read the http/ tree, found {} files",
+            files.len()
+        );
         let mut registered = Vec::new();
-        for (index, _) in router.match_indices("\"/hls/{session}") {
-            let rest = &router[index + 1..];
-            let template = &rest[..rest.find('"').expect("closing quote")];
-            registered.push(template);
+        let mut routes_seen = 0usize;
+        for (path, text) in &files {
+            for (index, _) in text.match_indices(".route(") {
+                let rest = text[index + ".route(".len()..].trim_start();
+                let Some(literal) = rest.strip_prefix('"') else {
+                    continue;
+                };
+                let template = &literal[..literal.find('"').expect("closing quote")];
+                routes_seen += 1;
+                let template = template.strip_prefix("/api/v1").unwrap_or(template);
+                if template.starts_with("/hls/{session}") {
+                    registered.push((path.clone(), template.to_owned()));
+                }
+            }
         }
         assert!(
-            registered.len() >= 10,
-            "the scan must actually find the hls session routes: {registered:?}"
+            routes_seen > 100 && registered.len() >= 14,
+            "the scan must actually find the routes: {routes_seen} routes, \
+             hls session routes {registered:?}"
         );
-        for template in registered {
+        for (path, template) in registered {
             assert!(
                 HLS_SESSION_ROUTES
                     .iter()
                     .any(|(_, route, _)| *route == template),
-                "{template} is registered under /hls/{{session}} but not classified in \
-                 HLS_SESSION_ROUTES"
+                "{template} is registered under /hls/{{session}} in {} but not classified in \
+                 HLS_SESSION_ROUTES",
+                path.display()
             );
         }
     }
