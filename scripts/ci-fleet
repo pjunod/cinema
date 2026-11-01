@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Ask ci-fleet what the CI fleet is doing — in a few lines, for agent sessions.
+
+    scripts/ci-fleet status              # counts, alerts, every waiting job and why
+    scripts/ci-fleet why --pr 1340       # running / waiting / blocked jobs of one PR
+    scripts/ci-fleet why --task 25052
+    scripts/ci-fleet drift [--check]     # roster vs live fleet; --check exits 1 on blocking drift
+    scripts/ci-fleet snapshot            # the full JSON snapshot
+
+It asks the collector (`collector` in scripts/ci-fleet.fleet.json, or
+$CI_FLEET_URL). With `--direct`, or when no collector answers, it builds the
+same snapshot itself from the forge API and this checkout's workflows and
+roster (`forge_url`, `repo`, `token_file` in the same file, or $FORGEJO_TOKEN).
+See docs/ci/CI-FLEET.md.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "tools/ci-fleet")]
+
+from cifleet import explain, fleet  # noqa: E402
+from cifleet.forgejo import Forgejo  # noqa: E402
+from validation.runner_fleet import load_roster, parse_workflows  # noqa: E402
+
+CONFIG = ROOT / "scripts" / "ci-fleet.fleet.json"
+
+
+def load_config() -> dict:
+    config = json.loads(CONFIG.read_text()) if CONFIG.is_file() else {}
+    if os.environ.get("CI_FLEET_URL"):
+        config["collector"] = os.environ["CI_FLEET_URL"]
+    return config
+
+
+def from_collector(url: str, path: str) -> str:
+    with urllib.request.urlopen(url.rstrip("/") + path, timeout=15) as response:
+        return response.read().decode()
+
+
+def direct_snapshot(config: dict) -> dict:
+    token = os.environ.get("FORGEJO_TOKEN") or Path(os.path.expanduser(config["token_file"])).read_text().strip()
+    forge = Forgejo(config["forge_url"], config.get("repo", "noirr/plurx"), token)
+    runners = forge.runners()
+    queue = forge.queue()
+    runs = {run["id"]: run for status in ("running", "waiting") for run in forge.runs(status, pages=1)}
+    for job in queue:
+        runs.setdefault(job["run_id"], forge.run(job["run_id"]))
+    run_jobs = {run_id: forge.run_jobs(run_id) for run_id in runs}
+    uuids = {runner["uuid"]: runner["name"] for runner in runners}
+    placements = {}
+    for job in queue:
+        if job["status"] == "running" and job.get("task_id"):
+            placed = forge.job_runner(job["id"])
+            if placed:
+                placements[job["task_id"]] = {"runner": uuids.get(placed[0])}
+    workflows = parse_workflows({p.name: p.read_text() for p in (ROOT / ".github/workflows").glob("*.yml")})
+    roster = load_roster(ROOT / "validation/runner-fleet.toml")
+    return fleet.build(fleet.Inputs(
+        now=int(time.time()), runners=runners, queue=queue, runs=runs, run_jobs=run_jobs, workflows=workflows,
+        roster=roster, hosts=config.get("hosts", {}), placements=placements,
+        forge={"ok": True, "direct": True, "api_calls": forge.calls}))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("command", choices=("status", "why", "drift", "snapshot"))
+    parser.add_argument("--pr")
+    parser.add_argument("--run", type=int)
+    parser.add_argument("--task", type=int)
+    parser.add_argument("--check", action="store_true", help="drift: exit 1 when a finding is blocking")
+    parser.add_argument("--direct", action="store_true", help="build the snapshot here instead of asking the collector")
+    args = parser.parse_args()
+    config = load_config()
+    snapshot = None
+    if config.get("collector") and not args.direct:
+        try:
+            snapshot = json.loads(from_collector(config["collector"], "/api/snapshot"))
+        except (OSError, urllib.error.URLError, ValueError) as error:
+            print(f"ci-fleet: collector unavailable ({error}); asking the forge directly", file=sys.stderr)
+    if snapshot is None:
+        if not (config.get("forge_url") and (config.get("token_file") or os.environ.get("FORGEJO_TOKEN"))):
+            sys.exit(f"ci-fleet: create {CONFIG.relative_to(ROOT)} from the .example.json beside it")
+        snapshot = direct_snapshot(config)
+    if args.command == "snapshot":
+        print(json.dumps(snapshot, indent=2))
+    elif args.command == "status":
+        print(explain.status(snapshot))
+    elif args.command == "why":
+        print(explain.why(snapshot, pr=args.pr, run=args.run, task=args.task))
+    else:
+        print(explain.drift(snapshot))
+        if args.check and any(finding["severity"] == "blocking" for finding in snapshot["drift"]):
+            return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

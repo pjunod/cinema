@@ -1,0 +1,567 @@
+"""ci-fleet-agent: report a runner host's resources; carry out its controls.
+
+Runs on every runner host (Linux or macOS) and inside every Incus runner
+guest. It never decides placement — the forge records that — it measures what
+the placed work costs: per-runner and per-task cgroup CPU, memory, swap, pids
+and OOM kills against their caps, the host's load by owner (CI, plurx
+production, everything else), disks, and the janitor and watchdog receipts.
+
+Controls are executed by the tool that already owns the resource:
+  * an Incus runner VM: the runner watchdog (pause marker, `--vm`), which keeps
+    its memory-headroom check and restart backoff;
+  * a host-mode systemd runner: `systemctl stop --no-block` (one SIGTERM: the
+    runner stops polling and finishes its job) plus a pause marker;
+  * a launchd runner: `launchctl disable` + SIGTERM, which the Apple janitor
+    already honours;
+  * the standby (backup) Apple runner: the standby controller's pause marker.
+
+Python 3.9 compatible: macOS runner hosts have only the system python3.
+"""
+
+from __future__ import annotations
+
+import argparse
+import http.client
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import socket
+import subprocess
+import threading
+import time
+import urllib.request
+
+VERSION = "1"
+INTERVAL = 5
+DU_SECONDS = 600
+INCUS_SECONDS = 30
+TASK_CONTAINER = re.compile(r"ACTIONS-TASK-(\d+)")
+CGROUP = Path("/sys/fs/cgroup")
+
+
+def run(*args, timeout=20) -> str:
+    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError(f"{args[0]} failed ({result.returncode}): {result.stderr.strip()[:200]}")
+    return result.stdout
+
+
+# -- parsers (pure, tested) ----------------------------------------------------
+def parse_proc_stat(text: str) -> tuple[int, int]:
+    """(busy, total) jiffies from the aggregate cpu line."""
+    fields = [int(value) for value in text.splitlines()[0].split()[1:]]
+    idle = fields[3] + (fields[4] if len(fields) > 4 else 0)
+    total = sum(fields[:8])
+    return total - idle, total
+
+
+def parse_meminfo(text: str) -> dict:
+    values = {}
+    for line in text.splitlines():
+        name, _, rest = line.partition(":")
+        parts = rest.split()
+        if parts:
+            values[name] = int(parts[0]) * 1024
+    return values
+
+
+def parse_flat_keyed(text: str) -> dict:
+    out = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+            out[parts[0]] = int(parts[1])
+    return out
+
+
+def parse_cpu_max(text: str) -> float | None:
+    quota, _, period = text.strip().partition(" ")
+    if quota == "max" or not period:
+        return None
+    return int(quota) / int(period)
+
+
+def parse_vm_stat(text: str) -> tuple[int, dict]:
+    size = int(re.search(r"page size of (\d+) bytes", text).group(1))
+    pages = {}
+    for line in text.splitlines()[1:]:
+        name, _, value = line.partition(":")
+        value = value.strip().rstrip(".")
+        if value.isdigit():
+            pages[name.strip()] = int(value)
+    return size, pages
+
+
+def parse_swapusage(text: str) -> tuple[int, int]:
+    def bytes_of(label):
+        match = re.search(label + r" = ([\d.]+)([KMG])", text)
+        if not match:
+            return 0
+        return int(float(match.group(1)) * {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30}[match.group(2)])
+    return bytes_of("total"), bytes_of("used")
+
+
+def task_id_of(container_names) -> int | None:
+    for name in container_names:
+        match = TASK_CONTAINER.search(name)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+# -- Linux cgroups -------------------------------------------------------------
+class CgroupReader:
+    """Delta-based CPU per cgroup; static reads for memory, pids and caps."""
+
+    def __init__(self, root: Path = CGROUP, clock=time.monotonic):
+        self.root = root
+        self.clock = clock
+        self.previous = {}
+
+    def read(self, path: Path) -> dict | None:
+        if not path.is_dir():
+            return None
+
+        def text(name):
+            try:
+                return (path / name).read_text()
+            except OSError:
+                return ""
+
+        stat = parse_flat_keyed(text("cpu.stat"))
+        now = self.clock()
+        usage = stat.get("usage_usec", 0)
+        periods, throttled = stat.get("nr_periods", 0), stat.get("nr_throttled", 0)
+        before = self.previous.get(path)
+        self.previous[path] = (now, usage, periods, throttled)
+        cores = throttled_pct = None
+        if before and now > before[0]:
+            cores = round((usage - before[1]) / 1e6 / (now - before[0]), 3)
+            dperiods = periods - before[2]
+            throttled_pct = round(100 * (throttled - before[3]) / dperiods, 1) if dperiods > 0 else 0.0
+
+        def number(name):
+            value = text(name).strip()
+            return int(value) if value.isdigit() else None
+
+        events = parse_flat_keyed(text("memory.events"))
+        return {
+            "cpu": cores,
+            "cpu_cap": parse_cpu_max(text("cpu.max")),
+            "throttled_pct": throttled_pct,
+            "rss": number("memory.current"),
+            "mem_cap": number("memory.max"),
+            "swap": number("memory.swap.current"),
+            "pids": number("pids.current"),
+            "pids_cap": number("pids.max"),
+            "oom_kills": events.get("oom_kill", 0),
+        }
+
+
+def docker_containers() -> list[dict]:
+    """Running containers via the Docker socket (no docker CLI needed)."""
+    sock = "/var/run/docker.sock"
+    if not os.path.exists(sock):
+        return []
+
+    class Conn(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(5)
+            self.sock.connect(sock)
+
+    conn = Conn("docker")
+    try:
+        conn.request("GET", "/containers/json")
+        return json.loads(conn.getresponse().read())
+    except (OSError, ValueError):
+        return []
+    finally:
+        conn.close()
+
+
+def container_cgroup(root: Path, container_id: str) -> Path:
+    for candidate in (root / "system.slice" / f"docker-{container_id}.scope", root / "docker" / container_id):
+        if candidate.is_dir():
+            return candidate
+    return root / "system.slice" / f"docker-{container_id}.scope"
+
+
+# -- the agent -----------------------------------------------------------------
+class Agent:
+    def __init__(self, config: dict, *, execute=run, root: Path = CGROUP):
+        self.config = config
+        self.execute = execute
+        self.root = root
+        self.cgroups = CgroupReader(root)
+        self.cpu_before = None
+        self.results = []
+        self.sizes = {}
+        self.incus = {"at": 0, "vms": []}
+        self.is_mac = platform.system() == "Darwin"
+        self.paused_dir = Path(config.get("paused_dir", "/var/lib/ci-fleet/paused"))
+        self.watchdog_paused = Path(config.get("watchdog_paused_dir", "/var/lib/plurx-runner-watchdog/paused"))
+
+    # -- collection ----------------------------------------------------------
+    def report(self) -> dict:
+        body = {"agent": self.config["agent"], "host": self.config.get("host", self.config["agent"]),
+                "role": self.config.get("role", "host"), "version": VERSION, "ts": int(time.time()),
+                "results": self.results}
+        self.results = []
+        try:
+            if self.is_mac:
+                body["host_metrics"] = self.mac_metrics()
+            else:
+                body["host_metrics"], body["tasks"] = self.linux_metrics()
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            body["error"] = str(error)[:300]
+        body["runners"] = [self.runner_report(runner) for runner in self.config.get("runners", [])]
+        if self.config.get("incus_project"):
+            body["vms"] = self.incus_vms()
+        state = self._json(self.config.get("watchdog_state", "/var/lib/plurx-runner-watchdog/state.json"))
+        if state:
+            body["watchdog"] = state.get("last_run")
+        return body
+
+    def _json(self, path):
+        try:
+            return json.loads(Path(path).read_text())
+        except (OSError, ValueError):
+            return None
+
+    def linux_metrics(self):
+        busy, total = parse_proc_stat(Path("/proc/stat").read_text())
+        cores = os.cpu_count() or 1
+        host_cores = None
+        if self.cpu_before and total > self.cpu_before[1]:
+            host_cores = round(cores * (busy - self.cpu_before[0]) / (total - self.cpu_before[1]), 3)
+        self.cpu_before = (busy, total)
+        mem = parse_meminfo(Path("/proc/meminfo").read_text())
+        ci_cpu = ci_mem = plurx_cpu = plurx_mem = 0.0
+        tasks = []
+        plurx_prefixes = tuple(self.config.get("plurx_containers", ["plurxd", "plurx-"]))
+        for container in docker_containers():
+            names = [name.lstrip("/") for name in container.get("Names", [])]
+            usage = self.cgroups.read(container_cgroup(self.root, container["Id"])) or {}
+            task_id = task_id_of(names)
+            if task_id:
+                tasks.append({"task_id": task_id, "container": names[0] if names else "", "usage": usage})
+                ci_cpu += usage.get("cpu") or 0
+                ci_mem += usage.get("rss") or 0
+            elif any(name.startswith(plurx_prefixes) for name in names):
+                plurx_cpu += usage.get("cpu") or 0
+                plurx_mem += usage.get("rss") or 0
+        for runner in self.config.get("runners", []):
+            if runner.get("kind") == "systemd":
+                usage = self.cgroups.read(self.root / "system.slice" / runner["unit"]) or {}
+                ci_cpu += usage.get("cpu") or 0
+                ci_mem += usage.get("rss") or 0
+        for vm in self.incus["vms"]:
+            ci_mem += vm.get("memory_bytes") or 0
+            usage = self.cgroups.read(self.root / f"lxc.payload.{vm['name']}") or {}
+            ci_cpu += usage.get("cpu") or 0
+        used_mem = mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)
+        metrics = {
+            "cpu_cores": cores,
+            "cpu_busy": host_cores,
+            "cpu_used": {"ci": round(ci_cpu, 3), "plurx": round(plurx_cpu, 3),
+                         "other": round(max(0.0, (host_cores or 0) - ci_cpu - plurx_cpu), 3)},
+            "mem_total": mem.get("MemTotal", 0),
+            "mem_used": {"ci": int(ci_mem), "plurx": int(plurx_mem),
+                         "other": int(max(0, used_mem - ci_mem - plurx_mem))},
+            "swap_total": mem.get("SwapTotal", 0),
+            "swap_used": mem.get("SwapTotal", 0) - mem.get("SwapFree", 0),
+            "disks": self.disks(),
+            "gpus": self.gpus(),
+        }
+        return metrics, tasks
+
+    def mac_metrics(self) -> dict:
+        cores = int(self.execute("sysctl", "-n", "hw.ncpu").strip())
+        total = int(self.execute("sysctl", "-n", "hw.memsize").strip())
+        size, pages = parse_vm_stat(self.execute("vm_stat"))
+        free = sum(pages.get(name, 0) for name in ("Pages free", "Pages inactive", "Pages speculative")) * size
+        swap_total, swap_used = parse_swapusage(self.execute("sysctl", "-n", "vm.swapusage"))
+        ci_cpu = ci_mem = plurx_cpu = plurx_mem = all_cpu = 0.0
+        for runner, procs in self._mac_trees().items():
+            for _, cpu, rss in procs:
+                ci_cpu += cpu
+                ci_mem += rss
+        for line in self.execute("ps", "-A", "-o", "%cpu=,rss=,comm=").splitlines():
+            parts = line.split(None, 2)
+            if len(parts) == 3:
+                all_cpu += float(parts[0]) / 100
+                if "plurxd" in parts[2]:
+                    plurx_cpu += float(parts[0]) / 100
+                    plurx_mem += int(parts[1]) * 1024
+        used = total - free
+        return {
+            "cpu_cores": cores, "cpu_busy": round(all_cpu, 3),
+            "cpu_used": {"ci": round(ci_cpu, 3), "plurx": round(plurx_cpu, 3),
+                         "other": round(max(0.0, all_cpu - ci_cpu - plurx_cpu), 3)},
+            "mem_total": total,
+            "mem_used": {"ci": int(ci_mem), "plurx": int(plurx_mem), "other": int(max(0, used - ci_mem - plurx_mem))},
+            "swap_total": swap_total, "swap_used": swap_used, "disks": self.disks(), "gpus": [],
+        }
+
+    def _mac_trees(self) -> dict:
+        """Each launchd/standby runner's process tree: [(pid, cores, rss bytes)]."""
+        rows = []
+        for line in self.execute("ps", "-A", "-o", "pid=,ppid=,%cpu=,rss=,command=").splitlines():
+            parts = line.split(None, 4)
+            if len(parts) == 5:
+                rows.append((int(parts[0]), int(parts[1]), float(parts[2]) / 100, int(parts[3]) * 1024, parts[4]))
+        children = {}
+        for pid, ppid, *_ in rows:
+            children.setdefault(ppid, []).append(pid)
+        by_pid = {row[0]: row for row in rows}
+        trees = {}
+        for runner in self.config.get("runners", []):
+            match = runner.get("match")
+            if runner.get("kind") not in ("launchd", "standby") or not match:
+                continue
+            roots = [row[0] for row in rows if match in row[4]]
+            seen, stack = set(), list(roots)
+            while stack:
+                pid = stack.pop()
+                if pid not in seen:
+                    seen.add(pid)
+                    stack.extend(children.get(pid, []))
+            trees[runner["name"]] = [(pid, by_pid[pid][2], by_pid[pid][3]) for pid in seen if pid in by_pid]
+        return trees
+
+    def disks(self) -> list[dict]:
+        out = []
+        fraction = float(self.config.get("reserve_fraction", 0.2))
+        for path in self.config.get("disks", ["/"]):
+            try:
+                usage = shutil.disk_usage(path)
+            except OSError:
+                continue
+            reserve = min(max(int(usage.total * fraction), 10 << 30), usage.total // 4)
+            out.append({"path": path, "total": usage.total, "used": usage.used, "free": usage.free,
+                        "reserve": int(self.config.get("reserve_bytes", reserve))})
+        return out
+
+    def gpus(self) -> list[dict]:
+        if not shutil.which("nvidia-smi"):
+            return []
+        try:
+            text = self.execute("nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+                                "--format=csv,noheader,nounits", timeout=5)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            return []
+        gpus = []
+        for line in text.splitlines():
+            name, util, used, total = (part.strip() for part in line.split(","))
+            gpus.append({"name": name, "util": int(util), "mem_used": int(used) << 20, "mem_total": int(total) << 20})
+        return gpus
+
+    def incus_vms(self) -> list[dict]:
+        if time.time() - self.incus["at"] < INCUS_SECONDS:
+            return self.incus["vms"]
+        project = self.config["incus_project"]
+        managed = {r["vm"]: r for r in self.config.get("runners", []) if r.get("kind") == "incus"}
+        vms = []
+        try:
+            listing = json.loads(self.execute("incus", "list", "--project", project, "--format", "json"))
+        except (RuntimeError, ValueError, subprocess.TimeoutExpired):
+            listing = []
+        for instance in listing:
+            if instance["name"] not in managed:
+                continue
+            state = instance.get("state") or {}
+            paused = (self.watchdog_paused / instance["name"]).exists()
+            controls = ["start_vm"] if instance["status"] == "Stopped" and not paused else []
+            vms.append({"name": instance["name"], "status": instance["status"],
+                        "memory_limit": instance.get("expanded_config", {}).get("limits.memory"),
+                        "memory_bytes": (state.get("memory") or {}).get("usage"),
+                        "autostart": instance.get("expanded_config", {}).get("boot.autostart") != "false",
+                        "paused": paused, "controls": controls})
+        self.incus = {"at": time.time(), "vms": vms}
+        return vms
+
+    def runner_report(self, runner: dict) -> dict:
+        kind = runner.get("kind", "systemd")
+        report = {"name": runner["name"], "kind": kind, "capacity": runner.get("capacity", 1), "controls": []}
+        if kind == "systemd":
+            try:
+                state = self.execute("systemctl", "show", runner["unit"], "-p", "ActiveState", "--value").strip()
+            except (RuntimeError, subprocess.TimeoutExpired):
+                state = "unknown"
+            paused = (self.paused_dir / runner["name"]).exists()
+            report.update(state=state, paused=paused,
+                          usage=self.cgroups.read(self.root / "system.slice" / runner["unit"]))
+            report["controls"] = ["resume"] if paused else ["drain"]
+            if state != "active" and not paused:
+                report["offline_reason"] = f"unit {state}"
+        elif kind == "incus":
+            vm = next((v for v in self.incus["vms"] if v["name"] == runner["vm"]), None)
+            paused = (self.watchdog_paused / runner["vm"]).exists()
+            report["paused"] = paused
+            if vm is None:
+                report["offline_reason"] = "VM not found"
+            elif vm["status"] != "Running":
+                report["offline_reason"] = f"VM {vm['status'].lower()}" + self._deferred(runner["vm"])
+            report["controls"] = ["resume"] if paused else (["drain"] if vm and vm["status"] == "Running" else [])
+        elif kind == "launchd":
+            disabled = self._launchd_disabled(runner)
+            report["paused"] = disabled
+            report["controls"] = ["resume"] if disabled else ["drain"]
+        elif kind == "standby":
+            paused = Path(runner["pause_marker"]).exists()
+            report["paused"] = paused
+            report["controls"] = ["resume"] if paused else ["drain"]
+        elif kind == "lima":
+            try:
+                rows = [json.loads(line) for line in self.execute("limactl", "list", "--json").splitlines() if line.strip()]
+            except (RuntimeError, ValueError, subprocess.TimeoutExpired, FileNotFoundError):
+                rows = []
+            vm = next((row for row in rows if row.get("name") == runner["vm"]), None)
+            if not vm or vm.get("status") != "Running":
+                report["offline_reason"] = f"Lima VM {(vm or {}).get('status', 'missing').lower()}"
+        if self.is_mac and kind in ("launchd", "standby"):
+            procs = self._mac_trees().get(runner["name"], [])
+            report["usage"] = {"cpu": round(sum(p[1] for p in procs), 3), "rss": sum(p[2] for p in procs),
+                               "pids": len(procs)}
+        report["hygiene"] = self.hygiene(runner)
+        return report
+
+    def _deferred(self, vm: str) -> str:
+        state = self._json(self.config.get("watchdog_state", "/var/lib/plurx-runner-watchdog/state.json")) or {}
+        for entry in (state.get("last_run") or {}).get("deferred", []):
+            if entry.startswith(vm + ":"):
+                return " — watchdog: " + entry.split(":", 1)[1].strip()
+        return ""
+
+    def _launchd_disabled(self, runner) -> bool:
+        domain = runner.get("domain", "system")
+        try:
+            text = self.execute("launchctl", "print-disabled", domain)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            return False
+        return re.search(r'"%s" => (true|disabled)' % re.escape(runner["label"]), text) is not None
+
+    def hygiene(self, runner: dict) -> dict:
+        out = {}
+        for key in ("work", "cache"):
+            path = runner.get(key)
+            if path:
+                out[key + "_bytes"] = self.sizes.get(path)
+        janitor = self._json(self.config.get("janitor_state", "/var/lib/plurx-ci-janitor/last-run.json"))
+        if janitor:
+            out["janitor"] = janitor
+        return out
+
+    def measure_sizes(self) -> None:
+        """`du` the runners' work and cache directories, off the report loop."""
+        while True:
+            for runner in self.config.get("runners", []):
+                for key in ("work", "cache"):
+                    path = runner.get(key)
+                    if not path:
+                        continue
+                    try:
+                        self.sizes[path] = int(self.execute("du", "-sk", path, timeout=300).split()[0]) * 1024
+                    except (RuntimeError, ValueError, IndexError, subprocess.TimeoutExpired):
+                        self.sizes[path] = None
+            time.sleep(DU_SECONDS)
+
+    # -- controls --------------------------------------------------------------
+    def perform(self, command: dict) -> dict:
+        action, target = command.get("action"), command.get("target")
+        runner = next((r for r in self.config.get("runners", []) if r["name"] == target or r.get("vm") == target), None)
+        result = {"id": command.get("id"), "action": action, "target": target,
+                  "actor": command.get("actor"), "reason": command.get("reason")}
+        try:
+            if runner is None:
+                raise ValueError("not managed by this agent")
+            result["result"] = self._perform(action, runner, command)
+        except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+            result["result"] = f"failed: {error}"[:300]
+        return result
+
+    def _marker(self, path: Path, command: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"actor": command.get("actor"), "reason": command.get("reason"),
+                                    "at": int(time.time())}) + "\n")
+
+    def _perform(self, action: str, runner: dict, command: dict) -> str:
+        kind = runner.get("kind", "systemd")
+        watchdog = self.config.get("watchdog", "/usr/local/sbin/plurx-runner-watchdog")
+        if kind == "systemd" and action == "drain":
+            self._marker(self.paused_dir / runner["name"], command)
+            self.execute("systemctl", "stop", "--no-block", runner["unit"])
+            return "draining: SIGTERM sent; the runner finishes its job, then stays stopped"
+        if kind == "systemd" and action == "resume":
+            (self.paused_dir / runner["name"]).unlink(missing_ok=True)
+            self.execute("systemctl", "start", "--no-block", runner["unit"])
+            return "resumed"
+        if kind == "incus" and action == "drain":
+            self._marker(self.watchdog_paused / runner["vm"], command)
+            self.execute("incus", "exec", "--project", self.config["incus_project"], runner["vm"], "--",
+                         "systemctl", "stop", "--no-block", runner["unit"])
+            return "draining: watchdog paused for this VM; SIGTERM sent"
+        if kind == "incus" and action == "resume":
+            (self.watchdog_paused / runner["vm"]).unlink(missing_ok=True)
+            return "resumed: " + self.execute(watchdog, "--vm", runner["vm"], timeout=180).strip()[-200:]
+        if kind == "incus" and action == "start_vm":
+            return self.execute(watchdog, "--vm", runner["vm"], timeout=180).strip()[-300:]
+        if kind == "launchd" and action in ("drain", "resume"):
+            service = f"{runner.get('domain', 'system')}/{runner['label']}"
+            if action == "drain":
+                self.execute("launchctl", "disable", service)
+                self.execute("launchctl", "kill", "SIGTERM", service)
+                return "draining: disabled in launchd; SIGTERM sent"
+            self.execute("launchctl", "enable", service)
+            self.execute("launchctl", "kickstart", service)
+            return "resumed"
+        if kind == "standby" and action == "drain":
+            self._marker(Path(runner["pause_marker"]), command)
+            return "draining: the standby controller drains the backup and stops offering it"
+        if kind == "standby" and action == "resume":
+            Path(runner["pause_marker"]).unlink(missing_ok=True)
+            return "resumed: the standby controller offers the backup again during an outage"
+        raise ValueError(f"{action} is not available for a {kind} runner")
+
+    # -- loop --------------------------------------------------------------------
+    def push(self, body: dict) -> dict:
+        token = self.config.get("token") or Path(self.config["token_file"]).read_text().strip()
+        request = urllib.request.Request(self.config["collector"].rstrip("/") + "/api/agent",
+                                         data=json.dumps(body).encode(), method="POST")
+        request.add_header("Authorization", "Bearer " + token)
+        request.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read() or b"{}")
+
+    def loop(self) -> None:
+        threading.Thread(target=self.measure_sizes, daemon=True).start()
+        while True:
+            started = time.time()
+            try:
+                if self.config.get("incus_project"):
+                    self.incus_vms()
+                reply = self.push(self.report())
+                for command in reply.get("commands", []):
+                    self.results.append(self.perform(command))
+            except (OSError, ValueError, RuntimeError) as error:
+                print(f"ci-fleet-agent: {error}", flush=True)
+            time.sleep(max(1.0, INTERVAL - (time.time() - started)))
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="ci-fleet host agent")
+    parser.add_argument("--config", default=os.environ.get("CI_FLEET_AGENT_CONFIG", "/etc/ci-fleet/agent.json"))
+    parser.add_argument("--once", action="store_true", help="print one report and exit")
+    args = parser.parse_args(argv)
+    agent = Agent(json.loads(Path(args.config).read_text()))
+    if args.once:
+        agent.report()
+        time.sleep(1)
+        print(json.dumps(agent.report(), indent=2))
+        return 0
+    agent.loop()
+    return 0

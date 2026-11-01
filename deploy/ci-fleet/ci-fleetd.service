@@ -1,0 +1,27 @@
+[Unit]
+Description=ci-fleet collector: CI placement and capacity console
+Documentation=https://forge.lan:3000/noirr/plurx/src/branch/main/docs/ci/CI-FLEET.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/ci-fleet/ci-fleetd
+DynamicUser=yes
+# Root-owned config and tokens reach the unprivileged collector as credentials.
+LoadCredential=collector.json:/etc/ci-fleet/collector.json
+LoadCredential=forge.token:/etc/ci-fleet/forge.token
+LoadCredential=agent.token:/etc/ci-fleet/agent.token
+StateDirectory=ci-fleet
+Restart=on-failure
+RestartSec=10
+# The collector sits on a plurx voter beside the forge: a stated budget, enforced.
+CPUQuota=20%
+MemoryMax=300M
+Nice=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
