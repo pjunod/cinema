@@ -60,12 +60,17 @@ class RequestFixtureTests(unittest.TestCase):
     def test_the_catalog_restore_builder_generates_exactly_the_fixture_the_rust_parser_reads(self):
         origin = session.execution_origin(STATE, UNIT, 'execute')
         staged = session.restore_generation(ACTIVATION) / 'catalog.staged.sqlite'
+        verifier_staged = session.restore_generation(ACTIVATION) / 'verifier.staged.sqlite'
         with mock.patch.object(session.time, 'monotonic', return_value=100.25):
             base = session.restore_request_base(STATE, REGISTRATION, UNIT, origin, IMAGE, ACCEPTED,
                                                 OUTPUT / 'dependencies.sqlite',
                                                 OUTPUT / 'evidence' / 'driver-graph.json', ACTIVATION)
-        request = session.catalog_restore_request(base, staged, ACCEPTED, OUTPUT / 'dependencies.sqlite', ACTIVATION)
+        request = session.catalog_restore_request(base, staged, verifier_staged, ACCEPTED,
+                                                  OUTPUT / 'dependencies.sqlite', ACTIVATION)
         self.assertEqual(provenance.canonical(request), fixture('restore-request.json'))
+        # The catalog validator reads the verifier the same restore staged, never a not-yet-activated name.
+        self.assertEqual(request['verifier_work_db'], str(verifier_staged))
+        self.assertNotEqual(Path(request['verifier_work_db']).name, 'verifier.sqlite')
 
     def test_the_auxiliary_directory_is_derived_identically_by_the_controller_and_the_checker(self):
         pairs = json.loads(fixture('auxiliary-directories.json'))

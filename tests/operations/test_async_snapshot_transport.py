@@ -738,7 +738,11 @@ class PublicationChainCase(unittest.TestCase):
     def activate(self, pend):
         """The separate activation batch carrying one genuine validation receipt."""
         before = pend['pending']
-        receipt_ref = self.inventory.put('validation_receipt', transport.canonical({'ok': True}))
+        # A genuine closed ValidationReceipt record (N2b), exactly the bytes prepare_activation transports.
+        from tests.operations.test_async_refinement_validation_receipts import catalog_receipts
+        _envelope, _root, private, _semantic = catalog_receipts()
+        receipt_ref = self.inventory.put(
+            'validation_receipt', transport.canonical(session.validation_receipt('catalog_private', private, ROOT)))
         self.sender.db.execute('INSERT OR IGNORE INTO queue VALUES(?,?,?)',
                                (receipt_ref['kind'], receipt_ref['sha256'], receipt_ref['bytes']))
         self.sender.db.commit()
@@ -1175,7 +1179,9 @@ class MainUmaskTests(unittest.TestCase):
 # PhysicalContext.child_plan: against B's real ReservationLedger and grant issuer.
 # ---------------------------------------------------------------------------
 import ast
+import sys
 import uuid
+import zipfile
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 
@@ -1184,6 +1190,7 @@ from validation import async_physical_policy as physical
 PAGE = 4096
 MIB = 1024 * 1024
 UNIT_BYTES = 96 * MIB  # the admitted unit_byte_allowance of the child-plan fixtures (larger than a control share)
+PACKAGE = ROOT / 'verification' / 'async-driver-refinement'
 RUNTIME_POOL = 512 * MIB  # source_runtime_scratch_bytes: the unit output share, a control share and scratch fit
 
 
@@ -1678,14 +1685,331 @@ class PreparationCopyChargeTests(ChildPlanBase):
         self.assertEqual(self.holders(target), [held])
 
     def test_the_preparation_unit_has_no_uncharged_copy_left_in_it(self):
-        tree = ast.parse(Path(session.__file__).read_text())
-        package = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'execute_and_package')
-        calls = [n for n in ast.walk(package) if isinstance(n, ast.Call)]
-        self.assertTrue(any(isinstance(c.func, ast.Name) and c.func.id == 'copy_restored_catalog' for c in calls))
-        for call in calls:
-            if isinstance(call.func, ast.Attribute) and call.func.attr == 'copyfile':
-                self.assertNotIn('CATALOG_BACKUP', ast.dump(call))
-                self.assertNotIn('catalog-backup', ast.dump(call))
+        """execute_and_package for an input-preparation unit, with only the quantum child, the verifier reservation
+        and the publication builder stubbed: every file it copies lands on a claimed, charged name."""
+        output = self.root / 'output'
+        output.mkdir()
+        image_bytes = b'{}'
+        (output / 'initial-image.json').write_bytes(image_bytes)
+        sha = hashlib.sha256(self.backup.read_bytes()).hexdigest()
+        saved = {key: 'f' * 64 for key in ('checkpoint_sha256', 'resource_plan_sha256', 'initial_image_sha256',
+                                           'catalog_logical_digest', 'semantic_manifest_root', 'catalog_sha256')}
+        saved.update(source={}, session_id='s', catalog_commit=1, snapshot_boundary='post_checkpoint_pre_upload',
+                     format='sqlite3', backup_method='sqlite_backup_api_v1', catalog_bytes=5000)
+        saved['catalog_sha256'] = sha
+        provenance.write(output / 'restored-catalog-root.json', saved)
+        provenance.write(self.quantum / 'phase-result.json', {'work_unit': {'unit_ordinal': 1}, 'stage_complete': False})
+        provenance.write(self.quantum / 'verifier-progress' / 'unit.json', {})
+        checkpoint = {'kind': 'Checkpoint'}
+        image = {'record': {'member_path': 'initial-image.json', 'image_bytes': len(image_bytes),
+                            'image_sha256': hashlib.sha256(image_bytes).hexdigest()}}
+        state = {'stage': 'semantic_verify', 'checkpoint': checkpoint, 'initial_image': image, 'session': {}}
+        request = {'output_dir': str(self.quantum), 'catalog_path': str(self.backup),
+                   'work_unit': {'unit_ordinal': 1, 'mode': 'unit', 'expected_prior_checkpoint': 'e' * 64},
+                   'execution_origin': {'dispatch_ordinal': 0}, 'driver_graph': str(output / 'none.json'),
+                   'dependency_index': str(output / 'index.sqlite'), 'reservation_path': str(output / 'reservation.json')}
+        prepare = {'before_cursor': {'operation': 'load_input'}, 'staged_members': [], 'metadata_reservations': []}
+        finalized = {'schema_version': 6, 'work_unit': {'unit_ordinal': 1}, 'checkpoint': checkpoint, 'artifacts': [],
+                     'stage_complete': False}
+        plan = mock.MagicMock()
+        plan.db.execute.return_value.fetchone.return_value = None
+        built = {'pending': {}, 'binding': {}, 'intent': {'candidate_checkpoint': {'sha256': 'b' * 64}}}
+        copies = []
+        real = shutil.copyfile
+
+        def recording(source, destination, *args, **kwargs):
+            copies.append(Path(destination))
+            return real(source, destination, *args, **kwargs)
+        with mock.patch.object(session, 'run_quantum', side_effect=[prepare, finalized]), \
+                mock.patch.object(session, 'source_commands', return_value=[]), \
+                mock.patch.object(session, 'PublicationStore', return_value=mock.MagicMock(evidence=plan)), \
+                mock.patch.object(session, 'transport_reservations'), \
+                mock.patch.object(session, 'member_stream', return_value=[]), \
+                mock.patch.object(session, 'reserve_verifier', return_value={'metadata_reservations': []}), \
+                mock.patch.object(provenance, 'verifier_auxiliary',
+                                  return_value={'committed_quantum_count': 1, 'result_count': 1}), \
+                mock.patch.object(session, 'advance'), \
+                mock.patch.object(session, 'open_index'), \
+                mock.patch.object(session, 'build_publication', return_value=built), \
+                mock.patch.object(session, 'plan_transfer', return_value=({}, mock.MagicMock(), [])), \
+                mock.patch.object(session.shutil, 'copyfile', recording):
+            session.execute_and_package(state, {}, request, ROOT, ROOT, output, 10 ** 9)
+        self.assertEqual(copies, [self.root / 'quantum-aux' / 'catalog-backup.sqlite'])
+        for target in copies:
+            self.assertEqual([(h.owner, h.key) for h in self.holders(target)],
+                             [('snapshot_transport', ('snapshot_spool_bytes', 'bytes'))])
+
+
+class CatalogRestoreRequestTests(ChildPlanBase):
+    """N1: the catalog restore validator names the STAGED verifier and gets BOTH held reservations attached."""
+    def staged_pair(self):
+        generation = self.out / 'state.restore'
+        catalog, catalog_budget = self.stage_file(generation, 'catalog.staged.sqlite', blobs=2)
+        verifier, verifier_budget = self.stage_file(generation, 'verifier.staged.sqlite', blobs=3)
+        return catalog, catalog_budget, verifier, verifier_budget
+
+    def restore(self, catalog, verifier):
+        base = {'operation': 'validate_restore', 'schema_version': 6}
+        request = session.catalog_restore_request(base, catalog, verifier, {'kind': 'Checkpoint'},
+                                                  self.root / 'dependencies.sqlite', self.out)
+        Path(request['output_dir']).mkdir(mode=0o700)
+        return request
+
+    def budget(self, handle):
+        sys.path.insert(0, str(PACKAGE))
+        self.addCleanup(sys.path.remove, str(PACKAGE))
+        import paged_codec as codec
+        budget = codec.Budget.__new__(codec.Budget)
+        budget.physical_policy = self.context.policy
+        budget.grant = self.load(handle)
+        return budget, codec
+
+    def test_both_staged_files_are_attached_read_only_each_by_its_own_reservation(self):
+        catalog, catalog_budget, verifier, verifier_budget = self.staged_pair()
+        request = self.restore(catalog, verifier)
+        self.assertEqual(request['verifier_work_db'], str(verifier))  # the staged file, not a name nothing created yet
+        self.context.attach_restore(request['output_dir'], [(catalog_budget, catalog), (verifier_budget, verifier)])
+        _allocations, attachments = self.context.child_plan(request, Path(request['output_dir']))
+        self.assertEqual({a['relative_path']: a['reservation_id'] for a in attachments},
+                         {'out/state.restore/catalog.staged.sqlite': catalog_budget.reservation_id,
+                          'out/state.restore/verifier.staged.sqlite': verifier_budget.reservation_id})
+        self.assertEqual({a['access'] for a in attachments}, {'read_only'})
+        self.assertEqual({a['bytes'] for a in attachments}, {catalog.stat().st_size, verifier.stat().st_size})
+
+    def test_the_checkers_ceiling_checks_resolve_the_catalog_and_the_verifier_the_request_names(self):
+        catalog, catalog_budget, verifier, verifier_budget = self.staged_pair()
+        request = self.restore(catalog, verifier)
+        self.context.attach_restore(request['output_dir'], [(catalog_budget, catalog), (verifier_budget, verifier)])
+        budget, codec = self.budget(self.issue(request, Path(request['output_dir'])))
+        # exactly the two checks paged_checker.validate_restore makes before it opens either file
+        budget.restored_database('catalog_main', Path(request['catalog_path']))
+        budget.restored_database('verifier_main', Path(request['verifier_work_db']), attached=True)
+
+    def test_a_verifier_name_the_restore_did_not_stage_has_no_attached_reservation(self):
+        catalog, catalog_budget, verifier, verifier_budget = self.staged_pair()
+        unstaged = self.out / 'state.restore' / 'verifier.sqlite'  # what the request used to name
+        shutil.copyfile(verifier, unstaged)
+        request = self.restore(catalog, unstaged)
+        self.context.attach_restore(request['output_dir'], [(catalog_budget, catalog), (verifier_budget, verifier)])
+        budget, codec = self.budget(self.issue(request, Path(request['output_dir'])))
+        with self.assertRaisesRegex(codec.Incomplete, 'no single held restore reservation'):
+            budget.restored_database('verifier_main', Path(request['verifier_work_db']), attached=True)
+
+    def test_a_restore_without_a_staged_verifier_names_the_generation_file_and_attaches_only_the_catalog(self):
+        generation = self.out / 'state.restore'
+        catalog, catalog_budget = self.stage_file(generation, 'catalog.staged.sqlite', blobs=2)
+        request = self.restore(catalog, None)
+        self.assertEqual(request['verifier_work_db'], str(generation / 'verifier.sqlite'))
+        self.assertFalse(Path(request['verifier_work_db']).exists())
+        self.context.attach_restore(request['output_dir'], [(catalog_budget, catalog)])
+        _allocations, attachments = self.context.child_plan(request, Path(request['output_dir']))
+        self.assertEqual([a['relative_path'] for a in attachments], ['out/state.restore/catalog.staged.sqlite'])
+
+
+class DownloadChargeTests(ChildPlanBase):
+    """N4: a download is charged to restore_staging_bytes BEFORE its first byte is written, each artifact once."""
+    POOL = 'restore_staging_bytes'
+
+    def setUp(self):
+        super().setUp()
+        self.install(self.context)
+        self.observed = []
+
+    def install(self, context):
+        for patcher in (mock.patch.object(session, '_PHYSICAL', [context]),
+                        mock.patch.object(session, '_DOWNLOADS', {}),
+                        mock.patch.object(session, '_ARCHIVES', [])):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def used(self):
+        return self.context.ledger.used[(self.POOL, 'bytes')]
+
+    def artifact(self, identity, size):
+        """A real ZIP of one member, its API descriptor and the directory it extracts to."""
+        data = bytes((identity + i) % 251 for i in range(size))
+        archive = self.root / 'zips' / ('%d.zip' % identity)
+        archive.parent.mkdir(exist_ok=True)
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('member.bin', data)
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        member = {'path': 'member.bin', 'bytes': size, 'sha256': hashlib.sha256(data).hexdigest()}
+        artifact = {'id': identity, 'name': 'part-%d' % identity, 'size_in_bytes': archive.stat().st_size}
+        directory = self.root / 'authenticated-parts' / str(identity)
+        return artifact, {'members': [member]}, directory, archive, digest
+
+    def fetch(self, artifact, descriptor, directory, archive, digest):
+        def download(_api, requested):
+            self.observed.append(self.used())  # what is already charged when the first byte is about to be written
+            target = self.root / 'download' / ('%d.zip' % requested['id'])
+            target.parent.mkdir(exist_ok=True)
+            shutil.copyfile(archive, target)
+            return target
+        api = SimpleNamespace(guard_storage=lambda _size: None)
+        with mock.patch.object(provenance, 'artifact_bytes', side_effect=download), \
+                mock.patch.object(session, 'transport_hash', return_value=digest):
+            return session.fetch_part(api, artifact, descriptor, directory, [])
+
+    def test_the_zip_is_charged_before_artifact_bytes_writes_it(self):
+        artifact, descriptor, directory, archive, digest = self.artifact(5, 60000)
+        self.fetch(artifact, descriptor, directory, archive, digest)
+        self.assertEqual(self.observed, [60000 + artifact['size_in_bytes']])  # members plus the ZIP, already held
+        self.assertEqual((directory / 'member.bin').stat().st_size, 60000)
+        self.assertFalse((self.root / 'download' / '5.zip').exists())  # the transient ZIP is removed
+
+    def test_a_pool_that_cannot_hold_the_zip_refuses_before_a_byte_is_downloaded(self):
+        artifact, descriptor, directory, archive, digest = self.artifact(5, 60000)
+        pool = 60000 + artifact['size_in_bytes'] - 1
+        self.context = self.make_context(child_policy(self.source_map, restore_staging_bytes=pool))
+        self.install(self.context)
+        with self.assertRaises(physical.PhysicalIncomplete):
+            self.fetch(artifact, descriptor, directory, archive, digest)
+        self.assertEqual(self.observed, [])  # artifact_bytes was never reached
+        self.assertFalse(directory.exists())
+
+    def test_the_members_are_charged_once_per_artifact_and_zips_are_never_cumulative(self):
+        artifacts = [self.artifact(identity, size) for identity, size in ((5, 50000), (6, 30000), (7, 40000))]
+        for artifact, descriptor, directory, archive, digest in artifacts:
+            self.fetch(artifact, descriptor, directory, archive, digest)
+        members = sum(row[1]['members'][0]['bytes'] for row in artifacts)
+        biggest = max(row[0]['size_in_bytes'] for row in artifacts)
+        self.assertEqual(self.used(), members + biggest)  # high water: all members + the largest ZIP, not their sum
+        self.assertEqual(self.observed[-1], members + biggest)
+        self.assertLess(self.used(), members + sum(row[0]['size_in_bytes'] for row in artifacts))
+
+    def test_a_cached_artifact_directory_is_charged_as_it_is_and_its_zip_is_charged_again(self):
+        artifact, descriptor, directory, archive, digest = self.artifact(5, 60000)
+        directory.parent.mkdir(exist_ok=True)
+        with zipfile.ZipFile(archive) as z:
+            z.extractall(directory)  # left by an earlier job: nothing charged it in this process
+        cached = session.directory_bytes(directory)
+        pool = cached + artifact['size_in_bytes']
+        self.context = self.make_context(child_policy(self.source_map, restore_staging_bytes=pool - 1))
+        self.install(self.context)
+        with self.assertRaises(physical.PhysicalIncomplete):  # the cached copy is re-downloaded: its ZIP needs room
+            self.fetch(artifact, descriptor, directory, archive, digest)
+        self.assertEqual(self.observed, [])
+        self.context = self.make_context(child_policy(self.source_map, restore_staging_bytes=pool))
+        self.install(self.context)
+        self.fetch(artifact, descriptor, directory, archive, digest)
+        self.assertEqual(self.observed, [pool])
+        self.assertEqual(self.used(), pool)
+
+    def test_a_cached_artifact_is_not_charged_a_second_time_in_the_same_job(self):
+        artifact, descriptor, directory, archive, digest = self.artifact(5, 60000)
+        self.fetch(artifact, descriptor, directory, archive, digest)
+        first = self.used()
+        self.fetch(artifact, descriptor, directory, archive, digest)  # a later stage re-verifies the cache
+        self.assertEqual(self.used(), first)
+        self.assertEqual(self.observed, [first, first])
+
+
+class RecordedOwnerReconciliationTests(ChildPlanBase):
+    """N7: a crashed parent's transfer record is charged to the pool it was moving FROM, and removed outputs are released."""
+    def setUp(self):
+        super().setUp()
+        self.context.survivors = []
+
+    def crashed(self, move):
+        """A parent prepared a transfer of a spool-held file and died; a NEW ledger over the same directory restarts."""
+        source = self.out / 'moving.bin'
+        source.write_bytes(b'x' * 6000)
+        source.chmod(0o600)
+        held = self.context.ledger.reserve('snapshot_transport', 'snapshot_spool_bytes', 'bytes', 6000)
+        held.track(source)
+        (self.out / 'state').mkdir()
+        destination = self.out / 'state' / 'catalog.sqlite'
+        self.context.ledger.prepare_transfer(held.reservation_id, 'catalog', 'catalog_main', 'main', destination)
+        if move:
+            os.replace(source, destination)  # the crash came after the rename
+        restarted = self.make_context(child_policy(self.source_map))
+        restarted.survivors = []
+        return restarted, source, destination
+
+    def test_a_file_still_at_its_source_is_charged_to_the_pool_the_record_names(self):
+        restarted, source, _destination = self.crashed(move=False)
+        restarted.reconcile_crash()
+        used = restarted.ledger.used
+        self.assertEqual(used[('snapshot_spool_bytes', 'bytes')], 6000)  # not restore_staging_bytes
+        self.assertEqual(used[('restore_staging_bytes', 'bytes')], 0)
+        self.assertEqual([(r.owner, r.key, r.bytes) for r in restarted.survivors],
+                         [('snapshot_transport', ('snapshot_spool_bytes', 'bytes'), 6000)])
+        self.assertEqual(restarted.survivors[0].paths, {source})
+        self.assertEqual(list((self.root / physical.TRANSFER_DIRECTORY).glob('*.json')), [])
+
+    def test_a_file_already_at_its_destination_is_charged_to_the_destination_family(self):
+        restarted, _source, destination = self.crashed(move=True)
+        restarted.reconcile_crash()
+        used = restarted.ledger.used
+        self.assertEqual(used[('catalog_main', 'main')], 6000)
+        self.assertEqual(used[('snapshot_spool_bytes', 'bytes')], 0)
+        self.assertEqual(restarted.survivors[0].paths, {destination})
+
+    def test_a_transfer_record_that_does_not_name_its_owners_is_refused(self):
+        restarted, _source, _destination = self.crashed(move=False)
+        (record_path,) = (self.root / physical.TRANSFER_DIRECTORY).glob('*.json')
+        record = json.loads(record_path.read_bytes())
+        del record['source']['owner']
+        record_path.write_bytes(physical.canonical(record))
+        with self.assertRaises(receipts.ReceiptError):
+            restarted.reconcile_crash()
+
+    def test_run_zero_is_not_a_job_output_and_does_not_break_the_discard(self):
+        for name in ('run-0', 'run-1', 'run-2'):
+            (self.root / name).mkdir()
+        outputs = self.context.prior_job_outputs()
+        self.assertEqual(outputs, [session.job_output_directory(self.root, 1), session.job_output_directory(self.root, 2)])
+        self.context.discard_prior_outputs(session.job_output_directory(self.root, 2))
+        self.assertTrue((self.root / 'run-0').exists())  # never matched, never removed
+        self.assertFalse((self.root / 'run-1').exists())
+
+    def test_a_survivor_inside_a_discarded_job_output_is_released_with_its_files(self):
+        earlier = session.job_output_directory(self.root, 1)
+        current = session.job_output_directory(self.root, 2)
+        earlier.mkdir()
+        current.mkdir()
+        leftover = earlier / 'moving.bin'
+        leftover.write_bytes(b'x' * 6000)
+        leftover.chmod(0o600)
+        held = self.context.ledger.reserve('snapshot_restore', 'restore_staging_bytes', 'bytes', 6000)
+        held.track(leftover)
+        self.context.survivors.append(held)
+        kept = current / 'kept.bin'
+        kept.write_bytes(b'y' * 4000)
+        kept.chmod(0o600)
+        keep = self.context.ledger.reserve('snapshot_restore', 'restore_staging_bytes', 'bytes', 4000)
+        keep.track(kept)
+        self.context.survivors.append(keep)
+        self.context.discard_prior_outputs(current)
+        self.assertTrue(held.released)  # the file is gone, so its charge is gone with it
+        self.assertFalse(keep.released)
+        self.assertEqual(self.context.ledger.used[('restore_staging_bytes', 'bytes')], 4000)
+        self.assertEqual(self.context.survivors, [keep])
+
+
+class GrantPlanScratchTests(ChildPlanBase):
+    """N7: the runtime pool must exceed the output share; the child's scratch is never granted empty."""
+    def share(self):
+        return physical.unit_output_bytes(UNIT_BYTES)
+
+    def scratch(self, pool):
+        context = self.make_context(child_policy(self.source_map, source_runtime_scratch_bytes=pool))
+        allocations, _attachments = context.child_plan({'operation': 'unit'}, self.out)
+        return {e['relative_path']: e['bytes'] for e in allocations if e['resource'] == 'source_runtime_scratch_bytes'}
+
+    def test_a_pool_exactly_equal_to_the_output_share_leaves_no_scratch_and_is_refused(self):
+        context = self.make_context(child_policy(self.source_map, source_runtime_scratch_bytes=self.share()))
+        with self.assertRaises(physical.PhysicalIncomplete):
+            context.child_plan({'operation': 'unit'}, self.out)
+
+    def test_one_byte_more_than_the_output_share_delegates_exactly_that_byte(self):
+        shares = self.scratch(self.share() + 1)
+        self.assertEqual(shares, {'out': self.share(), 'out-aux/child-scratch': 1})
+
+    def test_a_pool_below_the_output_share_is_refused(self):
+        context = self.make_context(child_policy(self.source_map, source_runtime_scratch_bytes=self.share() - 1))
+        with self.assertRaises(physical.PhysicalIncomplete):
+            context.child_plan({'operation': 'unit'}, self.out)
 
 
 class RestoreMainLimitReachabilityTests(unittest.TestCase):

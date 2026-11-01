@@ -390,15 +390,180 @@ class DedicatedRouteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=scratch) as directory, \
              patch.object(s,'registration',return_value=reg),patch.object(s,'live_pr'), \
              patch.object(s,'reject_prior_ordinal_dispatch'), \
+             patch.object(s,'expected_dispatch',side_effect=lambda value:'complete' if value['stage']=='complete' else 'execute'), \
              patch.object(s,'authenticate_runner_route',side_effect=receipts.ReceiptError('unavailable')) as check:
             for stage in ('expand','complete'):
                 state={'registration':reg,'stage':stage,'checkpoint':{},'phase':'running','retry_authorized':True,
-                    'next_ordinal':0,'resource_plan':{'record':{'maximum_units':3}}}
+                    'next_ordinal':0,'next_dispatch_ordinal':0,'attempt_control_sha256':[],'resource_plan':{'record':{'maximum_units':3}}}
                 if stage=='complete':state['final_input_checkpoint_sha256']=p.digest(p.canonical({}))
-                with self.assertRaises(receipts.ReceiptError):s.dispatch(api,state,{},ROOT)
+                reservations=s.DispatchReservations(Path(directory)/('reservations-'+stage))
+                with self.assertRaises(receipts.ReceiptError):s.dispatch(api,state,{'session_id':'00000000-0000-4000-8000-000000000001'},ROOT,reservations)
             control={key:None for key in s.CONTROL_KEYS}
             control.update(registration=reg,unit_runs=[],attempt_runs=[],resume_decisions=[],
                 probe_case='success',probe_nonce='a'*64)
             with patch.object(s,'api_environment',return_value=api),self.assertRaises(receipts.ReceiptError):
                 s.dispatch_probe(control,ROOT,directory)
             self.assertEqual(check.call_count,3);api.opener.open.assert_not_called()
+
+
+class DispatchReservationTests(unittest.TestCase):
+    """N6: the dispatch ordinal is reserved durably BEFORE the API call and reconciled on restart."""
+    SESSION = '00000000-0000-4000-8000-000000000001'
+
+    def setUp(self):
+        import tempfile
+        scratch = ROOT / '.agent-proof-fixtures/dispatch-reservations'
+        scratch.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=scratch)
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name) / 'dispatch-reservations'
+        self.reservations = s.DispatchReservations(self.directory)
+
+    def control(self, marker='a'):
+        return {'session_id': self.SESSION, 'marker': marker}
+
+    def expected(self, **changes):
+        return {'registration_sha256': 'b' * 64, 'mode': 'unit', 'operation': 'execute', **changes}
+
+    def record(self, ordinal, marker='a'):
+        return s.dispatch_record(ordinal, self.SESSION, self.expected(), self.control(marker))
+
+    def restarted(self):
+        """A new controller process: nothing but the directory survives."""
+        return s.DispatchReservations(self.directory)
+
+    def test_a_reservation_is_durable_exclusive_and_never_a_partial_record(self):
+        record = self.record(0)
+        self.reservations.reserve(record)
+        self.assertEqual(self.restarted().read(0), record)
+        self.assertEqual(self.restarted().ordinals(), [0])
+        self.assertEqual(list(self.directory.glob('*.partial')), [])
+        with self.assertRaises(FileExistsError):
+            self.reservations.reserve(self.record(0, 'other'))
+        self.assertEqual(self.restarted().read(0), record)
+
+    def test_the_ordinal_is_reserved_before_anything_is_sent(self):
+        action, held = s.claim_dispatch(self.reservations, self.record(0), lambda _r: [], [])
+        self.assertEqual(action, 'post')
+        self.assertEqual(self.restarted().state(0), 'reserved')  # on disk before the caller can POST
+
+    def test_a_crash_before_the_post_resends_the_same_ordinal_and_payload_exactly_once(self):
+        first = self.record(0)
+        s.claim_dispatch(self.reservations, first, lambda _r: [], [])
+        # restart: the controller rebuilds an equal dispatch (later wall clock) and recovers the reservation
+        later = {**self.record(0), 'reserved_at': '2999-01-01T00:00:00+00:00'}
+        action, held = s.claim_dispatch(self.restarted(), later, lambda _r: [], [])
+        self.assertEqual((action, held), ('post', first))  # same ordinal, same payload, the ORIGINAL timestamp
+        self.assertEqual(self.restarted().ordinals(), [0])  # nothing new was reserved or skipped
+        # a different dispatch can never take that ordinal
+        with self.assertRaises(receipts.ReceiptError):
+            s.claim_dispatch(self.restarted(), self.record(0, 'different control'), lambda _r: [], [])
+        with self.assertRaises(receipts.ReceiptError):
+            s.claim_dispatch(self.restarted(), s.dispatch_record(0, self.SESSION, self.expected(operation='publish'),
+                                                                 self.control()), lambda _r: [], [])
+
+    def test_a_crash_after_the_post_before_the_run_is_visible_neither_resends_nor_skips(self):
+        s.claim_dispatch(self.reservations, self.record(0), lambda _r: [], [])
+        self.reservations.mark_sent(0)
+        restarted = self.restarted()
+        with self.assertRaisesRegex(receipts.ReceiptError, 'not visible yet'):
+            s.claim_dispatch(restarted, self.record(0), lambda _r: [], [])
+        # the ordinal stays consumed: the next ordinal cannot be claimed over it
+        with self.assertRaises(receipts.ReceiptError):
+            s.claim_dispatch(restarted, self.record(1), lambda _r: [], [])
+        # once the run appears it is adopted, and nothing is sent
+        run = {'id': 7}
+        self.assertEqual(s.claim_dispatch(restarted, self.record(0), lambda _r: [run], []), ('adopt', run))
+        with self.assertRaises(receipts.ReceiptError):
+            s.claim_dispatch(restarted, self.record(0), lambda _r: [run, {'id': 8}], [])
+
+    def test_a_visible_run_is_adopted_even_when_the_sent_marker_was_never_written(self):
+        s.claim_dispatch(self.reservations, self.record(0), lambda _r: [], [])
+        action, run = s.claim_dispatch(self.restarted(), self.record(0), lambda _r: [{'id': 3}], [])
+        self.assertEqual((action, run), ('adopt', {'id': 3}))
+        self.assertEqual(self.restarted().state(0), 'sent')
+
+    def test_reservations_are_reconciled_with_the_authenticated_attempt_inventory(self):
+        digest = lambda marker: __import__('hashlib').sha256(p.canonical(self.control(marker))).hexdigest()
+        for ordinal, marker in enumerate('abc'):
+            self.reservations.reserve(self.record(ordinal, marker))
+        ran = [digest('a'), digest('b')]
+        self.assertEqual(s.settle_dispatch(self.reservations, ran), 2)  # the reservation at the next ordinal
+        with self.assertRaisesRegex(receipts.ReceiptError, 'never skipped'):
+            s.settle_dispatch(self.reservations, ran[:1])  # a reservation beyond the next ordinal
+        with self.assertRaisesRegex(receipts.ReceiptError, 'other than the one'):
+            s.settle_dispatch(self.reservations, [digest('a'), digest('x')])
+        self.assertIsNone(s.settle_dispatch(self.reservations, ran + [digest('c')]))
+
+    def test_a_dispatch_not_at_the_next_authenticated_ordinal_is_refused(self):
+        with self.assertRaises(receipts.ReceiptError):
+            s.claim_dispatch(self.reservations, self.record(2), lambda _r: [], [])
+        self.assertEqual(self.reservations.ordinals(), [])
+
+    def api(self, observed, status=204, error=None):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        def open_(request, timeout):
+            observed.append((self.restarted().state(0), request.data))
+            if error is not None:
+                raise error
+            response = MagicMock()
+            response.__enter__.return_value = SimpleNamespace(status=status)
+            return response
+        return SimpleNamespace(root='https://forge.invalid/api/v1/repos/example/repo', token='fixture',
+                               opener=SimpleNamespace(open=open_))
+
+    def plan(self):
+        return {**self.expected(), 'kind': 'execute', 'control': self.control(), 'ordinal': 0, 'payload': b'{"ref":"x"}',
+                'reg': {}, 'expected_prior_checkpoint': None}
+
+    def test_the_sent_marker_is_durable_before_the_post_begins(self):
+        observed = []
+        s.claim_dispatch(self.reservations, self.record(0), lambda _r: [], [])
+        with patch.object(s, 'authenticate_runner_route'):
+            s.post_dispatch(self.api(observed), self.plan(), ROOT, self.reservations)
+        self.assertEqual(observed, [('sent', b'{"ref":"x"}')])
+
+    def test_a_definitive_refusal_makes_the_reserved_ordinal_sendable_again_but_a_server_error_does_not(self):
+        import urllib.error
+        s.claim_dispatch(self.reservations, self.record(0), lambda _r: [], [])
+        with patch.object(s, 'authenticate_runner_route'):
+            with self.assertRaises(urllib.error.HTTPError):
+                s.post_dispatch(self.api([], error=urllib.error.HTTPError('u', 422, 'bad', {}, None)),
+                                self.plan(), ROOT, self.reservations)
+            self.assertEqual(self.restarted().state(0), 'reserved')
+            with self.assertRaises(urllib.error.HTTPError):
+                s.post_dispatch(self.api([], error=urllib.error.HTTPError('u', 502, 'gateway', {}, None)),
+                                self.plan(), ROOT, self.reservations)
+        self.assertEqual(self.restarted().state(0), 'sent')  # it may have reached the server: uncertain
+
+    def test_no_post_is_made_when_the_route_check_fails_and_the_reservation_waits_unsent(self):
+        observed = []
+        s.claim_dispatch(self.reservations, self.record(0), lambda _r: [], [])
+        with patch.object(s, 'authenticate_runner_route', side_effect=receipts.ReceiptError('unavailable')):
+            with self.assertRaises(receipts.ReceiptError):
+                s.post_dispatch(self.api(observed), self.plan(), ROOT, self.reservations)
+        self.assertEqual(observed, [])
+        self.assertEqual(self.restarted().state(0), 'reserved')
+
+    def test_dispatch_adopts_a_run_without_posting_and_otherwise_posts_once(self):
+        state = {'attempt_control_sha256': []}
+        plan = self.plan()
+        posts = []
+        with patch.object(s, 'plan_dispatch', return_value=plan), \
+                patch.object(s, 'post_dispatch', side_effect=lambda api, planned, root, res: posts.append(planned['ordinal'])), \
+                patch.object(s, 'matching_runs', return_value=[]):
+            expected, adopted = s.dispatch(None, state, self.control(), ROOT, self.reservations)
+            self.assertIsNone(adopted)
+            self.assertEqual(posts, [0])
+            self.assertEqual(expected['ordinal'], 0)
+            self.assertEqual(expected['dispatched_at'], self.reservations.read(0)['reserved_at'])
+        # the controller crashed after the POST: the restarted dispatch finds the run and sends nothing
+        with patch.object(s, 'plan_dispatch', return_value=plan), \
+                patch.object(s, 'post_dispatch', side_effect=lambda *a: posts.append('again')), \
+                patch.object(s, 'matching_runs', return_value=[{'id': 9}]):
+            self.reservations.mark_sent(0)
+            expected, adopted = s.dispatch(None, state, self.control(), ROOT, self.restarted())
+        self.assertEqual(adopted, {'id': 9})
+        self.assertEqual(posts, [0])
