@@ -23,7 +23,7 @@ async fn fenced_manager() -> (
         .with_serving_authority(fence.authority()),
     );
     let owner = tokio::spawn(std::sync::Arc::clone(&manager).serving_fence_loop(fence.subscribe()));
-    settle().await;
+    manager.outage_owner_started().await;
     (fence, manager, owner, base)
 }
 
@@ -142,7 +142,7 @@ async fn vod_recovery_fixture(
         std::sync::Arc::clone(&fixture.state.transcode)
             .serving_fence_loop(fixture.state.serving.subscribe()),
     );
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    fixture.state.transcode.outage_owner_started().await;
     (fixture, owner, loop_task)
 }
 
@@ -297,13 +297,14 @@ fn a_streamed_commit_is_not_retried() {
 /// Router edge: a read of an existing session that arrives while the node
 /// is fenced is held and, once the manager reports recovery, runs as a fresh
 /// arrival; a session create and a control post fail fast as before.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_held_read_runs_after_recovery_while_creates_and_control_fail_fast() {
+    use tokio::time::Instant;
     let (app, state) = crate::http::tests::test_app_with_state();
     let _loop = tokio::spawn(
         std::sync::Arc::clone(&state.transcode).serving_fence_loop(state.serving.subscribe()),
     );
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    state.transcode.outage_owner_started().await;
     state.serving.validation_set_ready(false).await;
 
     for (method, path) in [
@@ -323,10 +324,7 @@ async fn a_held_read_runs_after_recovery_while_creates_and_control_fail_fast() {
         .await
         .expect("response");
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "{path} must not be held"
-        );
+        assert_eq!(started.elapsed(), Duration::ZERO, "{path} must not be held");
     }
 
     let recovery = recover_after(&state, Duration::from_millis(200));
@@ -340,7 +338,11 @@ async fn a_held_read_runs_after_recovery_while_creates_and_control_fail_fast() {
     )
     .await
     .expect("response");
-    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert_eq!(
+        started.elapsed(),
+        Duration::from_millis(200),
+        "held exactly until the recovery"
+    );
     assert_ne!(
         response.extensions().get::<crate::http::error::ApiErrorCode>(),
         Some(&crate::http::error::ApiErrorCode("serving_fenced")),

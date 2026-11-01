@@ -1625,6 +1625,7 @@ impl TranscodeManager {
                 self.serving_loss_generation
                     .store(state.loss_generation, Release);
                 let outcome = grace.resolve_loss_from(&mut serving, lost_at).await;
+                self.hooks.get().after_outage_loss_resolved().await;
                 let resolved_generation = serving.borrow().loss_generation;
                 match outcome {
                     crate::serving_fence::LossOutcome::Recovered {
@@ -1699,6 +1700,24 @@ impl TranscodeManager {
             tokio::time::Instant::from_std(deadline),
         )
         .await
+    }
+
+    /// Test seams for the outage owner loop.
+    #[cfg(test)]
+    pub(crate) async fn outage_owner_started(&self) {
+        while !self.outage_owner_active.load(Acquire) {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outage_resolution_now(&self) -> crate::serving_fence::OutageResolution {
+        *self.outage_resolution.borrow()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn hold_sessions_for_test(&self) -> impl Sized + '_ {
+        self.sessions.lock().await
     }
 
     /// Abort a remote start only when this process can prove it owns the
