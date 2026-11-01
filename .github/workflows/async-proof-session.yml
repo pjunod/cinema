@@ -359,6 +359,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           python3 -m validation.async_refinement_session finalize-uploads
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   complete:
     name: Main promotion gate
@@ -692,3 +697,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           python3 -m validation.async_refinement_session finalize-uploads
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"

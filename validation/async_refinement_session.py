@@ -4980,7 +4980,18 @@ def validate_workflow_protocol(root):
         run: >-
           python3 -m validation.async_refinement_session finalize-uploads
 '''
-        p.require(last.strip()==expected_finalizer.strip(),
+        # The finalizer is the last step that can decide the job's result. The only step allowed after
+        # it is the fleet-wide ownership repair every root-container job carries (test_contracts); it runs
+        # under always() but cannot mask a failed finalizer, because a job fails when any step fails and
+        # no step here may continue-on-error.
+        expected_restore = """
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+"""
+        p.require(last.strip()==(expected_finalizer.rstrip('\n')+expected_restore).strip(),
                   'required finalizer is not the exact synchronous exit-propagating command')
     action=(Path(root)/CAPABILITY_ACTION_FILES[0]).read_text()
     p.require(action=='''name: Async proof capability post-action fixture
