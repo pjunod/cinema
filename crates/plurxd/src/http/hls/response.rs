@@ -234,7 +234,9 @@ pub(super) enum RawPublicationError {
 /// after the first was abandoned. The wait never spends or resets the outage
 /// budget, which `TranscodeManager::serving_fence_loop` owns; it ends at
 /// `deadline` or the outage's own expiry, whichever is first. At most one
-/// retry: a second loss, an expired outage or a passed deadline answers
+/// retry, and only once authority is actually held: a recovery that a new
+/// loss has already superseded is waited past rather than spent. A loss
+/// during the retry, an expired outage or a passed deadline answers
 /// `serving_fenced`. Every other refusal is mapped exactly as before.
 ///
 /// Only buffered responses come here. A streamed body is already on the wire
@@ -261,17 +263,27 @@ where
                 if retried {
                     return Err(serving_fenced_error());
                 }
-                match state
-                    .transcode
-                    .wait_for_outage_resolution(admitted_generation, deadline)
-                    .await
-                {
-                    crate::serving_fence::OutageWait::Recovered => retried = true,
-                    crate::serving_fence::OutageWait::Expired
-                    | crate::serving_fence::OutageWait::TimedOut => {
-                        return Err(serving_fenced_error())
+                // Wait for the outage after `admitted_generation`, then for
+                // any that followed before this request got to run again: a
+                // recovery already superseded by a new loss is not one the
+                // retry may be spent on, since `.admit()` would refuse it.
+                let mut baseline = Some(admitted_generation);
+                while let Some(after) = baseline {
+                    match state
+                        .transcode
+                        .wait_for_outage_resolution(after, deadline)
+                        .await
+                    {
+                        crate::serving_fence::OutageWait::Recovered => {
+                            baseline = state.serving.authority().outage_baseline();
+                        }
+                        crate::serving_fence::OutageWait::Expired
+                        | crate::serving_fence::OutageWait::TimedOut => {
+                            return Err(serving_fenced_error())
+                        }
                     }
                 }
+                retried = true;
             }
             Err(RawPublicationError::Rejected(rejection)) => {
                 return Err(response_publication_rejection_before(

@@ -331,6 +331,79 @@ async fn a_loss_between_authorization_and_commit_recovers_with_a_fresh_authoriza
     assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
+/// A recovery that a new loss has already superseded by the time the
+/// waiting request wakes is not one its single retry may be spent on: the
+/// request waits past the new loss and commits once authority is actually
+/// held, instead of re-running into a refusal and answering `serving_fenced`.
+#[tokio::test(start_paused = true)]
+async fn a_recovery_already_superseded_by_a_new_loss_does_not_spend_the_retry() {
+    let dir = crate::test_tempdir().expect("recovery dir");
+    let (fixture, owner, _loop) = vod_recovery_fixture(dir.path(), "vod-superseded").await;
+    let state = fixture.state.clone();
+    state.serving.validation_set_ready(false).await;
+    let request = tokio::spawn({
+        let state = state.clone();
+        async move {
+            authorize_and_commit_buffered(
+                &state,
+                "vod-superseded",
+                &owner,
+                crate::transcode::MediaResponsePublication::attempt_media(
+                    "playlist",
+                    Some("index.m3u8"),
+                ),
+                true,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+        }
+    });
+    // On a paused clock this returns only once every task is idle: the
+    // request is parked on the outage.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(!request.is_finished(), "fenced: the request waits");
+
+    // Authority returns, and is lost again before the owner publishes the
+    // recovery. The owner then stops (on the session lock) right after
+    // publishing it, so the request wakes to a `Recovered` that a new loss
+    // has already superseded.
+    let pause = state
+        .transcode
+        .test_hooks()
+        .outage_loss_resolved
+        .arm("outage loss resolved");
+    let sessions = state.transcode.hold_sessions_for_test().await;
+    state.serving.validation_set_ready(true).await;
+    let hold = pause.reached().await;
+    state.serving.validation_set_ready(false).await;
+    drop(hold);
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(
+        state.transcode.outage_resolution_now().state,
+        crate::serving_fence::OutageState::Recovered
+    );
+    assert!(
+        !request.is_finished(),
+        "the retry is not spent on a recovery that is already over"
+    );
+    drop(sessions);
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(
+        matches!(
+            state.transcode.outage_resolution_now().state,
+            crate::serving_fence::OutageState::Pending { .. }
+        ),
+        "the new loss is pending"
+    );
+    assert!(!request.is_finished());
+
+    state.serving.validation_set_ready(true).await;
+    request
+        .await
+        .expect("request task")
+        .expect("commits once authority is actually held");
+}
+
 /// A loss that is not won back inside the wait answers the router's own
 /// `serving_fenced`, never `response_state_changed`.
 #[tokio::test]
