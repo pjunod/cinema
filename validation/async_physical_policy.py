@@ -6,11 +6,14 @@ operational grants; exhausting one is an incomplete disposition, never proof.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import secrets
 import sqlite3
+import stat
 
 MAXIMUM = (1 << 63) - 1
 MIB = 1024 * 1024
@@ -202,6 +205,29 @@ def calibrate_physical_policy(policy, observed_geometry, observed_baseline, plan
             'baseline': observed_baseline, 'peak_bytes': peak}
 
 
+HEX64 = re.compile('[0-9a-f]{64}')
+UUID_TEXT = re.compile('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+SAFE_SEGMENT = re.compile('[A-Za-z0-9_][A-Za-z0-9._-]{0,127}')
+DB_COMPANIONS = ('-wal', '-shm', '-journal')
+FAMILY_COMPONENTS = ('main', 'journal', 'temp')
+GRANT_DIRECTORY = 'physical-grants'
+TRANSFER_DIRECTORY = 'physical-transfers'
+
+
+def safe_relative(value):
+    """Owned-root-relative SafePath: no absolute, empty, dot, or dot-dot segment."""
+    require(type(value) is str and 0 < len(value) <= 1024 and '\\' not in value and '\x00' not in value,
+            'invalid physical SafePath')
+    parts = value.split('/')
+    require(len(parts) <= 32 and all(SAFE_SEGMENT.fullmatch(x) for x in parts), 'unsafe physical relative path')
+    return PurePosixPath(value)
+
+
+def _related(a, a_tree, b, b_tree):
+    """Do two owned-root-relative claims alias one another (equal or nested subtree)?"""
+    return (a == b or (a_tree and a in b.parents) or (b_tree and b in a.parents))
+
+
 def _owned(path, root):
     path = Path(path)
     require(path.is_absolute() and path.resolve().is_relative_to(root) and not path.is_symlink(), 'unsafe physical reservation path')
@@ -220,76 +246,95 @@ def _fsync_directory(path):
         os.close(fd)
 
 
-class ReservationLedger:
-    """One deducted owner/family ledger; children spend parent-held grants."""
-    def __init__(self, policy, directory, *, source_map=None, _parent=None, _limits=None):
-        self.source_map = load_source_map() if source_map is None else source_map
-        self.policy = validate_physical_policy(policy, self.source_map)
-        self.directory = Path(directory).resolve()
-        require(self.directory.is_dir() and not Path(directory).is_symlink(), 'owned physical ledger root missing')
-        self.parent = _parent
-        self.limits = ({(f, k): v[k + '_bytes'] for f, v in policy['families'].items() for k in ('main', 'journal', 'temp')}
-                       | {(p, 'bytes'): n for p, n in policy['pools'].items()}) if _limits is None else dict(_limits)
-        self.used = {key: 0 for key in self.limits}
-        self.reservations = []
-        self.paths = {}
-        self.parent_grants = []
+def _fsync_existing_ancestor(path, root):
+    current = Path(path).parent
+    while not current.exists() and current != root:
+        current = current.parent
+    _fsync_directory(current)
 
-    def reserve(self, owner, family_or_pool, component, bytes):
-        integer(bytes)
-        expected = FAMILY_OWNERS.get(family_or_pool, POOL_OWNERS.get(family_or_pool))
-        require(owner == expected, 'physical reservation owner mismatch')
-        key = family_or_pool, component
-        require(key in self.limits, 'unknown physical reservation component')
-        if self.used[key] + bytes > self.limits[key]:
-            raise PhysicalIncomplete('physical reservation exhausted: ' + '/'.join(key))
-        self.used[key] += bytes
-        grant = Reservation(self, owner, key, bytes)
-        self.reservations.append(grant)
-        return grant
 
-    def child(self, owner, allocations):
-        """Deduct all child budgets before startup; never reconstruct full caps."""
-        require(type(allocations) is dict and allocations, 'empty child physical grants')
-        grants = []
-        try:
-            for (family, component), amount in allocations.items():
-                grants.append(self.reserve(owner, family, component, amount))
-        except BaseException:
-            for grant in grants:
-                grant.release_after_removal()
-            raise
-        child = ReservationLedger(self.policy, self.directory, source_map=self.source_map, _parent=self,
-                                  _limits={g.key: g.bytes for g in grants})
-        child.parent_grants = grants
-        return child
+def process_start_ticks(pid):
+    """Linux process start identity (field 22 of /proc/<pid>/stat), fail-closed."""
+    require(type(pid) is int and pid > 0, 'invalid physical grant parent pid')
+    try:
+        raw = Path('/proc/%d/stat' % pid).read_text()
+        tail = raw[raw.rindex(')') + 2:].split()
+        return int(tail[19])
+    except (OSError, ValueError, IndexError) as error:
+        raise PhysicalPolicyError('parent process identity is unavailable/not live') from error
 
-    def check(self):
-        for grant in self.reservations:
-            grant.check()
-        if self.parent is not None:
-            for grant in self.parent_grants:
-                require(not grant.released, 'parent physical grant released while child active')
+
+def component_key(family_or_pool, component):
+    return family_or_pool, component
+
+
+def expected_owner(family_or_pool):
+    owner = FAMILY_OWNERS.get(family_or_pool, POOL_OWNERS.get(family_or_pool))
+    require(owner is not None, 'unknown physical owner resource: ' + str(family_or_pool))
+    return owner
+
+
+class HeldLease:
+    """The already-held owned-slot lease: an open descriptor and its owned-root-relative name.
+
+    The ledger never opens a lease by filename. It only proves that the held
+    descriptor and that name denote the same non-symlink regular file.
+    """
+    def __init__(self, fd, relative_path):
+        require(type(fd) is int and fd >= 0, 'invalid held lease descriptor')
+        self.fd, self.relative_path = fd, safe_relative(relative_path)
 
 
 class Reservation:
-    def __init__(self, ledger, owner, key, amount):
+    def __init__(self, ledger, owner, key, amount, reservation_id=None):
         self.ledger, self.owner, self.key, self.bytes = ledger, owner, key, amount
+        self.reservation_id = secrets.token_hex(32) if reservation_id is None else reservation_id
         self.paths = set()
+        self.subtrees = set()
         self.released = False
+        self.delegated = False
+        self.transfer = None
+        self.allocation = None
+
+    def _claim(self, path, recursive):
+        require(not self.released, 'released physical reservation')
+        require(not self.delegated and self.transfer is None, 'physical reservation is delegated/in transfer')
+        path = self.ledger._claim(self, path, recursive)
+        (self.subtrees if recursive else self.paths).add(path)
+        return self
 
     def track(self, path):
-        require(not self.released, 'released physical reservation')
-        path = _owned(path, self.ledger.directory)
-        existing = self.ledger.paths.get(str(path))
-        require(existing is None or existing is self, 'physical file has multiple owners')
-        self.ledger.paths[str(path)] = self
-        self.paths.add(path)
-        if self.ledger.parent is not None:
-            parents = [g for g in self.ledger.parent_grants if g.key == self.key]
-            require(len(parents) == 1, 'missing deducted parent reservation')
-            parents[0].track(path)
-        return self
+        return self._claim(path, False)
+
+    def track_subtree(self, path):
+        return self._claim(path, True)
+
+    def scope(self):
+        """Exact claims as sorted (relative_path, recursive) pairs."""
+        root = self.ledger.directory
+        return sorted([(str(p.relative_to(root)), False) for p in self.paths]
+                      + [(str(p.relative_to(root)), True) for p in self.subtrees])
+
+    def surviving_files(self):
+        found = []
+        for path in sorted(self.paths):
+            if path.is_symlink() or path.exists():
+                found.append(path)
+        for root in sorted(self.subtrees):
+            if root.is_symlink():
+                found.append(root)
+            elif root.exists():
+                for directory, directories, names in os.walk(root, followlinks=False):
+                    found.extend(Path(directory) / n for n in names)
+                    found.extend(Path(directory) / n for n in directories if (Path(directory) / n).is_symlink())
+        return found
+
+    def actual_bytes(self):
+        actual = 0
+        for path in self.surviving_files():
+            require(not path.is_symlink() and path.is_file(), 'nonregular owned physical file')
+            actual += path.stat().st_size
+        return actual
 
     def grow(self, bytes):
         integer(bytes)
@@ -297,28 +342,127 @@ class Reservation:
         increase = bytes - self.bytes
         if self.ledger.used[self.key] + increase > self.ledger.limits[self.key]:
             raise PhysicalIncomplete('prospective physical grant growth exhausted')
+        if self.allocation is not None and self.allocation.spent + increase > self.allocation.bytes:
+            raise PhysicalIncomplete('physical growth exceeds child grant allocation')
         self.ledger.used[self.key] += increase
+        if self.allocation is not None:
+            self.allocation.spent += increase
         self.bytes = bytes
 
     def check(self):
         if self.released:
             return
-        actual = 0
-        for path in self.paths:
-            if path.exists():
-                require(not path.is_symlink() and path.is_file(), 'nonregular owned physical file')
-                actual += path.stat().st_size
-        if actual > self.bytes:
+        if self.actual_bytes() > self.bytes:
             raise PhysicalIncomplete('owned files exceed prospective physical grant')
 
     def release_after_removal(self):
         require(not self.released, 'physical reservation released twice')
-        for path in self.paths:
-            require(not path.exists() and not path.is_symlink(), 'surviving physical file retains its reservation')
-        for parent in {p.parent for p in self.paths}:
-            _fsync_directory(parent)
+        require(not self.delegated and self.transfer is None, 'delegated/in-transfer physical reservation cannot be released')
+        require(not self.surviving_files(), 'surviving physical file retains its reservation')
+        _fsync_after_removal(self)
+        self.ledger._unclaim(self)
         self.ledger.used[self.key] -= self.bytes
+        if self.allocation is not None:
+            self.allocation.spent -= self.bytes
         self.released = True
+
+
+def _fsync_after_removal(reservation):
+    root = reservation.ledger.directory
+    for path in reservation.paths | reservation.subtrees:
+        _fsync_existing_ancestor(path, root)
+
+
+class ReservationLedger:
+    """One deducted owner/family ledger.
+
+    Children never receive this object or the full policy; the parent deducts
+    their allocations here before spawn and passes only a LocalPhysicalGrant1
+    descriptor (see issue_child_grant/load_child_grant).
+    """
+    def __init__(self, policy, directory, *, source_map=None):
+        self.source_map = load_source_map() if source_map is None else source_map
+        self.policy = validate_physical_policy(policy, self.source_map)
+        self._init_state(directory, ({(f, k): v[k + '_bytes'] for f, v in policy['families'].items() for k in FAMILY_COMPONENTS}
+                                     | {(p, 'bytes'): n for p, n in policy['pools'].items()}))
+
+    def _init_state(self, directory, limits):
+        self.directory = Path(directory).resolve()
+        require(self.directory.is_dir() and not Path(directory).is_symlink(), 'owned physical ledger root missing')
+        self.limits = dict(limits)
+        self.used = {key: 0 for key in self.limits}
+        self.reservations = []
+        self.by_id = {}
+        self.claims = {}
+        self.protected = {}
+        self.grants = {}
+        self.transfers = {}
+
+    def reserve(self, owner, family_or_pool, component, bytes, *, reservation_id=None):
+        integer(bytes)
+        require(owner == FAMILY_OWNERS.get(family_or_pool, POOL_OWNERS.get(family_or_pool)), 'physical reservation owner mismatch')
+        key = family_or_pool, component
+        require(key in self.limits, 'unknown physical reservation component')
+        require(reservation_id is None or (type(reservation_id) is str and HEX64.fullmatch(reservation_id)), 'invalid physical reservation id')
+        require(reservation_id is None or reservation_id not in self.by_id, 'duplicate physical reservation id')
+        self._authority()
+        if self.used[key] + bytes > self.limits[key]:
+            raise PhysicalIncomplete('physical reservation exhausted: ' + '/'.join(key))
+        self.used[key] += bytes
+        grant = Reservation(self, owner, key, bytes, reservation_id)
+        while grant.reservation_id in self.by_id:  # 2**-256: never alias an id
+            grant.reservation_id = secrets.token_hex(32)
+        self.by_id[grant.reservation_id] = grant
+        self.reservations.append(grant)
+        return grant
+
+    def _authority(self):
+        """Root ledgers hold the process-local policy; nothing to re-verify."""
+
+    def _conflicts(self, relative, recursive, owner=None):
+        for text, (reservation, other_tree) in self.claims.items():
+            if reservation is not owner and _related(relative, recursive, PurePosixPath(text), other_tree):
+                return reservation
+        for text in self.protected:
+            if _related(relative, recursive, PurePosixPath(text), False):
+                return self.protected[text]
+        return None
+
+    def _claim(self, reservation, path, recursive):
+        path = _owned(path, self.directory)
+        require(type(recursive) is bool, 'invalid physical claim recursion')
+        relative = path.relative_to(self.directory)
+        require(self._conflicts(relative, recursive, reservation) is None, 'physical file has multiple owners')
+        self._attribute(reservation, relative, recursive)
+        self.claims[str(relative)] = reservation, recursive
+        return path
+
+    def _attribute(self, reservation, relative, recursive):
+        """Root: no sub-grant scope. ChildLedger binds the claim to one allocation."""
+
+    def _unclaim(self, reservation):
+        for text in [t for t, (r, _) in self.claims.items() if r is reservation]:
+            del self.claims[text]
+
+    def issue_child_grant(self, allocations, attachments, binding, held_lease):
+        """Parent deducts every delegated allocation here BEFORE spawn; returns the sealed GrantHandle."""
+        return _issue_child_grant(self, allocations, attachments, binding, held_lease)
+
+    def prepare_transfer(self, reservation_id, destination_owner, resource, component, new_path):
+        return _prepare_transfer(self, reservation_id, destination_owner, resource, component, new_path)
+
+    def commit_transfer_after_rename_fsync(self, handle, observed_device_inode):
+        return _commit_transfer(self, handle, observed_device_inode)
+
+    def abort_transfer(self, handle):
+        return _abort_transfer(self, handle)
+
+    def check(self):
+        self._authority()
+        for grant in self.reservations:
+            grant.check()
+        for handle in self.grants.values():
+            handle.check()
 
 
 class DatabaseGrant:
@@ -328,13 +472,19 @@ class DatabaseGrant:
         self.path = _owned(path, ledger.directory)
         self.ceiling = integer(ceiling, positive=True)
         self.readonly = readonly
-        require(type(readonly) is bool and self.ceiling <= ledger.policy['families'][family]['database_bytes'], 'database ceiling exceeds immutable policy')
+        require(type(readonly) is bool, 'invalid read-only database flag')
+        maximum = (ledger.policy['families'][family]['database_bytes'] if ledger.policy is not None
+                   else ledger.limits.get((family, 'main'), 0))
+        require(self.ceiling <= maximum, 'database ceiling exceeds immutable policy')
         self.connection = None
         self.grants = []
         owner = FAMILY_OWNERS[family]
         try:
-            self.main = ledger.reserve(owner, family, 'main', self.ceiling).track(self.path)
+            # Register each deduction before it can fail to claim its files so a
+            # refusal can never leak charged capacity.
+            self.main = ledger.reserve(owner, family, 'main', self.ceiling)
             self.grants.append(self.main)
+            self.main.track(self.path)
             # Full worst-ceiling rollback/WAL overlap plus framing, independent
             # of row geometry. FILE work is a separate prospective reservation.
             self.journal = ledger.reserve(owner, family, 'journal', 2 * self.ceiling + MIB)
@@ -346,7 +496,7 @@ class DatabaseGrant:
         except BaseException:
             for grant in self.grants:
                 # Existing files stay charged even on admission failure.
-                if not any(p.exists() or p.is_symlink() for p in grant.paths):
+                if not grant.surviving_files():
                     grant.release_after_removal()
             raise
 
@@ -406,6 +556,601 @@ class DatabaseGrant:
 
 def reserve_database(ledger, family, path, requested_ceiling, readonly=False):
     return DatabaseGrant(ledger, family, path, requested_ceiling, readonly)
+
+
+# ---------------------------------------------------------------------------
+# LocalPhysicalGrant1: the parent/child seam (RESULT-GRANT ABI). The descriptor
+# is local, transient, never an uploaded receipt, a ResourcePlan field or a
+# WCTS request field. It confers capacity only; it never grants proof credit.
+# ---------------------------------------------------------------------------
+ENV_GRANT_FD = 'PLURX_ASYNC_PHYSICAL_GRANT_FD'
+ENV_GRANT_SHA256 = 'PLURX_ASYNC_PHYSICAL_GRANT_SHA256'
+ENV_LEASE_FD = 'PLURX_ASYNC_PHYSICAL_LEASE_FD'
+GRANT_ENVIRONMENT = (ENV_GRANT_FD, ENV_GRANT_SHA256, ENV_LEASE_FD)
+MAXIMUM_GRANT_BYTES = 4 * MIB
+GRANT_FIELDS = ('schema_version', 'kind', 'grant_id', 'source', 'session_id', 'resource_plan_sha256', 'physical_policy_sha256',
+                'owned_root', 'lease', 'parent', 'allocations', 'attachments')
+ALLOCATION_FIELDS = ('reservation_id', 'owner', 'resource', 'component', 'bytes', 'relative_path', 'recursive')
+BINDING_FIELDS = ('source', 'session_id', 'resource_plan_sha256', 'physical_policy_sha256')
+
+
+def _strict_json(raw):
+    def pairs(items):
+        keys = [k for k, _ in items]
+        require(len(keys) == len(set(keys)), 'duplicate key in physical grant descriptor')
+        return dict(items)
+
+    def refuse(_):
+        raise PhysicalPolicyError('non-integer number in physical grant descriptor')
+    try:
+        return json.loads(raw.decode('utf-8'), object_pairs_hook=pairs, parse_float=refuse, parse_constant=refuse)
+    except (UnicodeDecodeError, ValueError) as error:
+        raise PhysicalPolicyError('physical grant descriptor is not strict JSON') from error
+
+
+def _component_rules(resource, component):
+    """(is_family, recursive_required) for one valid resource/component pair."""
+    if resource in FAMILY_OWNERS:
+        require(component in FAMILY_COMPONENTS, 'unknown physical family component')
+        return True, (True if component == 'temp' else False)
+    require(resource in POOL_OWNERS and component == 'bytes', 'unknown physical pool/component')
+    return False, None
+
+
+def _scope_claims(entry):
+    """Resolved claims of one allocation/attachment: [(PurePosixPath, recursive)].
+
+    The ownership rules resolve permitted DB companions inside their family:
+    a journal grant names the main file and covers exactly the fixed
+    -wal/-shm/-journal companion names; temp is the FILE-work subtree.
+    """
+    base = safe_relative(entry['relative_path'])
+    is_family, _ = _component_rules(entry['resource'], entry['component'])
+    if is_family and entry['component'] == 'journal':
+        return [(base.with_name(base.name + suffix), False) for suffix in DB_COMPANIONS]
+    return [(base, entry['recursive'])]
+
+
+def validate_allocation(entry, *, attachment=False, policy=None):
+    """Closed Allocation/Attachment entry; returns it unchanged."""
+    closed(entry, ALLOCATION_FIELDS + (('access',) if attachment else ()), 'physical attachment' if attachment else 'physical allocation')
+    require(type(entry['reservation_id']) is str and HEX64.fullmatch(entry['reservation_id']), 'invalid physical reservation id')
+    require(entry['owner'] == expected_owner(entry['resource']), 'unknown/mismatched physical owner')
+    is_family, recursive_required = _component_rules(entry['resource'], entry['component'])
+    integer(entry['bytes'], positive=True)
+    require(type(entry['recursive']) is bool, 'invalid physical recursion flag')
+    require(not is_family or entry['recursive'] is recursive_required, 'physical family component scope differs from ownership map')
+    safe_relative(entry['relative_path'])
+    if attachment:
+        require(entry['access'] == 'read_only', 'attachments are read-only')
+    if policy is not None:
+        limit = (policy['families'][entry['resource']][entry['component'] + '_bytes'] if is_family
+                 else policy['pools'][entry['resource']])
+        require(entry['bytes'] <= limit, 'physical grant limit exceeds immutable policy')
+    return entry
+
+
+def _claims_overlap(left, right):
+    return any(_related(a, at, b, bt) for a, at in left for b, bt in right)
+
+
+def validate_grant_lists(allocations, attachments, *, policy=None):
+    """Duplicate IDs, aliases and overlaps inside one grant are refused."""
+    require(type(allocations) is list and type(attachments) is list and (allocations or attachments), 'empty physical grant')
+    identifiers = set()
+    for entry in allocations:
+        validate_allocation(entry, policy=policy)
+    for entry in attachments:
+        validate_allocation(entry, attachment=True, policy=policy)
+    for entry in allocations + attachments:
+        require(entry['reservation_id'] not in identifiers, 'duplicate physical grant reservation id')
+        identifiers.add(entry['reservation_id'])
+    spans = [_scope_claims(entry) for entry in allocations]
+    for i, left in enumerate(spans):
+        for right in spans[i + 1:]:
+            require(not _claims_overlap(left, right), 'overlapping physical grant allocations')
+    for entry in attachments:
+        # A writable allocation and a read-only attachment may not alias one object.
+        require(not any(_claims_overlap(_scope_claims(entry), span) for span in spans), 'physical attachment aliases a writable allocation')
+
+
+def _identity(stat_result):
+    return {'device': stat_result.st_dev, 'inode': stat_result.st_ino}
+
+
+def _regular_private(stat_result, description):
+    require(stat.S_ISREG(stat_result.st_mode) and stat_result.st_nlink == 1
+            and stat_result.st_uid == os.geteuid() and stat_result.st_mode & 0o077 == 0, description + ' is not a private regular file')
+
+
+def _read_all(fd, limit):
+    chunks, offset = [], 0
+    while True:
+        chunk = os.pread(fd, 1 << 20, offset)
+        if not chunk:
+            return b''.join(chunks)
+        offset += len(chunk)
+        require(offset <= limit, 'physical grant descriptor exceeds its bound')
+        chunks.append(chunk)
+
+
+def _private_directory(path):
+    path.mkdir(mode=0o700, exist_ok=True)
+    info = os.lstat(path)
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
+            'physical control directory is not private')
+    return path
+
+
+def _write_private(path, raw):
+    """Create-exclusive nofollow private file, fsynced, then directory fsynced."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        view = memoryview(raw)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    _fsync_directory(path.parent)
+
+
+def _binding(value, *, policy=None):
+    closed(value, BINDING_FIELDS, 'physical grant binding')
+    require(type(value['source']) is dict and value['source'], 'invalid physical grant source')
+    require(type(value['session_id']) is str and UUID_TEXT.fullmatch(value['session_id']), 'invalid physical grant session')
+    sha(value['resource_plan_sha256'])
+    sha(value['physical_policy_sha256'])
+    if policy is not None:
+        require(value['physical_policy_sha256'] == digest(policy), 'physical grant policy digest differs')
+    return value
+
+
+def _lease_identity(root, relative, fd):
+    """The held descriptor and the owned-root name denote the same non-symlink file."""
+    held = os.fstat(fd)
+    require(stat.S_ISREG(held.st_mode), 'held lease is not a regular file')
+    named = os.lstat(root / relative)
+    require(stat.S_ISREG(named.st_mode) and (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino),
+            'held lease descriptor does not name the owned-root lease path')
+    return _identity(held)
+
+
+class GrantHandle:
+    """Parent-side handle for one issued child grant (never given to the child)."""
+    def __init__(self, ledger, grant_id, raw, path, descriptor_fd, lease, reservations, control):
+        self._ledger, self.grant_id, self._raw, self._path = ledger, grant_id, raw, path
+        self._fd, self._lease, self.reservations, self._control = descriptor_fd, lease, reservations, control
+        self.closed = False
+
+    @property
+    def descriptor_fd(self):
+        require(not self.closed, 'physical grant already reconciled')
+        return self._fd
+
+    @property
+    def sha256(self):
+        return hashlib.sha256(self._raw).hexdigest()
+
+    @property
+    def descriptor(self):
+        return json.loads(self._raw)
+
+    def environment(self):
+        """Exactly the three source-owned environment names (decimal FDs, canonical hash)."""
+        require(not self.closed, 'physical grant already reconciled')
+        return {ENV_GRANT_FD: str(self._fd), ENV_GRANT_SHA256: self.sha256, ENV_LEASE_FD: str(self._lease.fd)}
+
+    def pass_fds(self):
+        return self._fd, self._lease.fd
+
+    def check(self):
+        if not self.closed:
+            for reservation in self.reservations:
+                reservation.check()
+
+    def reconcile_after_reap(self, returncode):
+        """After the child is reaped: keep every surviving file charged, release the rest.
+
+        Charges for surviving files are retained regardless of the child's exit
+        status or reported output; only fully removed (and directory-fsynced)
+        allocations are released. Exhaustion is raised after reconciliation.
+        """
+        require(not self.closed, 'physical grant already reconciled')
+        require(type(returncode) is int, 'child must be reaped before physical grant reconciliation')
+        retained, released, overage = [], [], []
+        for reservation in self.reservations:
+            reservation.delegated = False
+            if reservation.surviving_files():
+                retained.append(reservation.reservation_id)
+                if reservation.actual_bytes() > reservation.bytes:
+                    overage.append(reservation.reservation_id)
+            else:
+                reservation.release_after_removal()
+                released.append(reservation.reservation_id)
+        os.close(self._fd)
+        self._path.unlink()
+        _fsync_directory(self._path.parent)
+        self._control.release_after_removal()
+        self.closed = True
+        del self._ledger.grants[self.grant_id]
+        if overage:
+            raise PhysicalIncomplete('child exceeded its physical grant: ' + ','.join(overage))
+        return {'released': released, 'retained': retained}
+
+
+def _issue_child_grant(self, allocations, attachments, binding, held_lease):
+    """Deduct every delegated allocation in this one ledger BEFORE spawn, then seal the descriptor."""
+    self._authority()
+    policy = self.policy
+    require(policy is not None, 'this ledger holds no policy to delegate from')
+    _binding(binding, policy=policy)
+    require(isinstance(held_lease, HeldLease), 'the already-held lease is required')
+    lease = _lease_identity(self.directory, held_lease.relative_path, held_lease.fd)
+    root = os.lstat(self.directory)
+    require(stat.S_ISDIR(root.st_mode), 'owned root is not a directory')
+    require(type(allocations) is list and all(type(x) is dict for x in allocations), 'physical allocations must be a list of objects')
+    require(type(attachments) is list and all(type(x) is dict for x in attachments), 'physical attachments must be a list of objects')
+    prepared, ids = [], set()
+    for entry in allocations:
+        item = dict(entry)
+        if 'reservation_id' not in item:
+            item['reservation_id'] = secrets.token_hex(32)
+        prepared.append(item)
+    attached = [dict(x) for x in attachments]
+    validate_grant_lists(prepared, attached, policy=policy)
+    for item in prepared:
+        require(item['reservation_id'] not in self.by_id, 'physical grant reservation id already in use')
+        ids.add(item['reservation_id'])
+    # Attachments reference an existing held parent reservation and confer no authority.
+    for item in attached:
+        source = self.by_id.get(item['reservation_id'])
+        require(source is not None and not source.released and not source.delegated and source.transfer is None,
+                'attachment names no live parent reservation')
+        require((source.owner, source.key[0], source.key[1], source.bytes) == (item['owner'], item['resource'], item['component'], item['bytes'])
+                and (item['relative_path'], item['recursive']) in source.scope(), 'attachment differs from its held reservation')
+    # Conflicts against every claim this ledger already holds (other grants, DB files, lease).
+    lease_relative = held_lease.relative_path
+    self.protected[str(lease_relative)] = 'owned-slot lease'
+    for item in prepared:
+        for relative, recursive in _scope_claims(item):
+            require(self._conflicts(relative, recursive) is None, 'physical grant aliases an owned file or another grant')
+    deducted = []
+    control = path = None
+    try:
+        for item in prepared:
+            reservation = self.reserve(item['owner'], item['resource'], item['component'], item['bytes'],
+                                       reservation_id=item['reservation_id'])
+            deducted.append(reservation)
+        for item, reservation in zip(prepared, deducted):
+            for relative, recursive in _scope_claims(item):
+                reservation._claim(self.directory / relative, recursive)
+            reservation.delegated = True
+        grant_id = secrets.token_hex(32)
+        while grant_id in self.by_id or grant_id in self.grants or grant_id in ids:
+            grant_id = secrets.token_hex(32)
+        descriptor = {'schema_version': 1, 'kind': 'local_physical_grant', 'grant_id': grant_id, 'source': binding['source'],
+                      'session_id': binding['session_id'], 'resource_plan_sha256': binding['resource_plan_sha256'],
+                      'physical_policy_sha256': binding['physical_policy_sha256'],
+                      'owned_root': {'path': str(self.directory), **_identity(root)},
+                      'lease': {'relative_path': str(lease_relative), **lease},
+                      'parent': {'pid': os.getpid(), 'start_ticks': process_start_ticks(os.getpid())},
+                      'allocations': prepared, 'attachments': attached}
+        raw = canonical(descriptor)
+        require(len(raw) <= MAXIMUM_GRANT_BYTES, 'physical grant descriptor exceeds its bound')
+        control = self.reserve('session_controller', 'control_bytes', 'bytes', len(raw))
+        directory = _private_directory(self.directory / GRANT_DIRECTORY)
+        path = directory / (grant_id + '.json')
+        control.track(path)
+        _write_private(path, raw)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            _regular_private(os.fstat(fd), 'physical grant descriptor')
+            require(_read_all(fd, MAXIMUM_GRANT_BYTES) == raw, 'physical grant descriptor read-back differs')
+        except BaseException:
+            os.close(fd)
+            raise
+    except BaseException:
+        for reservation in reversed(deducted):
+            reservation.delegated = False
+            if not reservation.surviving_files():
+                reservation.release_after_removal()
+        if control is not None:
+            if path is not None and os.path.lexists(path):
+                path.unlink()
+            if not control.surviving_files():
+                control.release_after_removal()
+        raise
+    handle = GrantHandle(self, grant_id, raw, path, fd, held_lease, deducted, control)
+    self.grants[grant_id] = handle
+    return handle
+
+
+
+
+class _GrantedAllocation:
+    def __init__(self, entry):
+        self.entry = entry
+        self.key = entry['resource'], entry['component']
+        self.bytes = entry['bytes']
+        self.spent = 0
+        self.claims = _scope_claims(entry)
+
+    def covers(self, relative, recursive):
+        for base, tree in self.claims:
+            if relative == base and (tree or not recursive) or tree and base in relative.parents:
+                return True
+        return False
+
+
+class ChildLedger(ReservationLedger):
+    """Child view built ONLY from a verified grant; it never instantiates policy capacity.
+
+    The child may suballocate inside its deducted allocations and cannot grow
+    beyond them. Authority (live parent, owned root, lease) is re-checked on use.
+    """
+    def __init__(self, descriptor, raw_sha256, lease_fd, policy=None):
+        directory = Path(descriptor['owned_root']['path'])
+        limits = {}
+        self.allocations = {}
+        for entry in descriptor['allocations']:
+            allocation = _GrantedAllocation(entry)
+            self.allocations[entry['reservation_id']] = allocation
+            limits[allocation.key] = limits.get(allocation.key, 0) + entry['bytes']
+        self.attachments = {entry['reservation_id']: entry for entry in descriptor['attachments']}
+        self.grant_id, self.grant_sha256, self.descriptor = descriptor['grant_id'], raw_sha256, descriptor
+        self.lease_fd = lease_fd
+        self.held_lease = HeldLease(lease_fd, descriptor['lease']['relative_path'])
+        self.parent_identity = descriptor['parent']['pid'], descriptor['parent']['start_ticks']
+        self.policy = policy
+        self.source_map = None
+        self._init_state(directory, limits)
+
+    def _authority(self):
+        pid, ticks = self.parent_identity
+        require(process_start_ticks(pid) == ticks, 'physical grant outlived its parent')
+        root = os.lstat(self.directory)
+        require(stat.S_ISDIR(root.st_mode) and (root.st_dev, root.st_ino) == (self.descriptor['owned_root']['device'], self.descriptor['owned_root']['inode']),
+                'owned root identity changed')
+        require(_lease_identity(self.directory, self.held_lease.relative_path, self.lease_fd)
+                == {'device': self.descriptor['lease']['device'], 'inode': self.descriptor['lease']['inode']}, 'lease identity changed')
+
+    def _attribute(self, reservation, relative, recursive):
+        if reservation.allocation is None:
+            candidates = [a for a in self.allocations.values() if a.key == reservation.key and a.covers(relative, recursive)]
+            require(candidates, 'physical path is outside the granted allocation scope')
+            chosen = next((a for a in candidates if a.spent + reservation.bytes <= a.bytes), None)
+            if chosen is None:
+                raise PhysicalIncomplete('child grant allocation exhausted')
+            chosen.spent += reservation.bytes
+            reservation.allocation = chosen
+        else:
+            require(reservation.allocation.covers(relative, recursive), 'physical path is outside the granted allocation scope')
+
+    def attachment(self, attachment_id):
+        require(type(attachment_id) is str and attachment_id in self.attachments, 'unknown physical attachment')
+        return self.attachments[attachment_id]
+
+
+def load_child_grant(grant_fd, expected_sha256, lease_fd, expected_binding):
+    """Verify every ABI check; the result is the only capacity the child owns.
+
+    expected_binding is closed {source, session_id, resource_plan_sha256,
+    physical_policy_sha256} and may additionally carry `owned_root` (absolute
+    path) and `physical_policy` (the plan's policy, cross-checked against the
+    digest so allocations beyond policy are refused).
+    """
+    require(type(expected_binding) is dict, 'physical grant binding is required')
+    extras = {k: expected_binding[k] for k in ('owned_root', 'physical_policy') if k in expected_binding}
+    base = {k: v for k, v in expected_binding.items() if k not in extras}
+    policy = extras.get('physical_policy')
+    _binding(base, policy=policy)
+    require(type(grant_fd) is int and type(lease_fd) is int and grant_fd >= 0 and lease_fd >= 0 and grant_fd != lease_fd,
+            'invalid inherited physical descriptors')
+    sha(expected_sha256)
+    info = os.fstat(grant_fd)
+    _regular_private(info, 'inherited physical grant descriptor')
+    require(fcntl.fcntl(grant_fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY, 'physical grant descriptor is writable')
+    raw = _read_all(grant_fd, MAXIMUM_GRANT_BYTES)
+    require(hashlib.sha256(raw).hexdigest() == expected_sha256, 'physical grant descriptor hash differs')
+    descriptor = _strict_json(raw)
+    require(type(descriptor) is dict and canonical(descriptor) == raw, 'physical grant descriptor is not canonical')
+    closed(descriptor, GRANT_FIELDS, 'physical grant descriptor')
+    require(descriptor['schema_version'] == 1 and descriptor['kind'] == 'local_physical_grant', 'physical grant version/kind')
+    require(type(descriptor['grant_id']) is str and HEX64.fullmatch(descriptor['grant_id']), 'invalid physical grant id')
+    for key in BINDING_FIELDS:
+        require(descriptor[key] == base[key], 'physical grant binding differs: ' + key)
+    validate_grant_lists(descriptor['allocations'], descriptor['attachments'], policy=policy)
+    root, lease, parent = descriptor['owned_root'], descriptor['lease'], descriptor['parent']
+    closed(root, ('path', 'device', 'inode'), 'physical owned root')
+    closed(lease, ('relative_path', 'device', 'inode'), 'physical lease')
+    closed(parent, ('pid', 'start_ticks'), 'physical parent identity')
+    for value in (root['device'], root['inode'], lease['device'], lease['inode'], parent['start_ticks']):
+        integer(value)
+    integer(parent['pid'], positive=True)
+    safe_relative(lease['relative_path'])
+    require(type(root['path']) is str and Path(root['path']).is_absolute() and ('owned_root' not in extras or extras['owned_root'] == root['path']),
+            'physical grant owned root differs')
+    require(process_start_ticks(parent['pid']) == parent['start_ticks'], 'physical grant parent is not the live identity')
+    named = os.lstat(root['path'])
+    require(stat.S_ISDIR(named.st_mode) and (named.st_dev, named.st_ino) == (root['device'], root['inode']), 'owned root device/inode differs')
+    require(_lease_identity(Path(root['path']), lease['relative_path'], lease_fd) == {'device': lease['device'], 'inode': lease['inode']},
+            'inherited lease device/inode/path differs')
+    for entry in descriptor['allocations'] + descriptor['attachments']:
+        for relative, _ in _scope_claims(entry):
+            require(relative != PurePosixPath(lease['relative_path']), 'physical grant aliases the lease')
+    return ChildLedger(descriptor, expected_sha256, lease_fd, policy)
+
+
+class ReadonlyDatabaseGrant:
+    """An already-held restored database, checked without touching bytes or pragmas."""
+    def __init__(self, ledger, family, path, attachment, page_size, page_count, ceiling):
+        self.ledger, self.family, self.path, self.attachment = ledger, family, path, attachment
+        self.page_size, self.page_count, self.ceiling_bytes = page_size, page_count, ceiling
+        self.effective_pages = ceiling // page_size
+
+    def reserve_ancillary(self, component, bytes):
+        """Journal/temp work needs a SEPARATE allocation; a second main copy never exists."""
+        require(component in ('journal', 'temp'), 'a read-only attachment never receives another main allocation')
+        return self.ledger.reserve(FAMILY_OWNERS[self.family], self.family, component, bytes)
+
+    def connect(self):
+        self.ledger._authority()
+        return sqlite3.connect(self.path.as_uri() + '?mode=ro&immutable=1', uri=True)
+
+
+def validate_readonly_database(child_ledger, family, path, attachment_id):
+    """Attach the already-held reservation; size/page ceilings only, no pragmas or writes."""
+    require(isinstance(child_ledger, ChildLedger), 'a child grant ledger is required')
+    child_ledger._authority()
+    require(family in FAMILY_OWNERS and child_ledger.policy is not None, 'database family/policy unavailable to the child')
+    entry = child_ledger.attachment(attachment_id)
+    path = _owned(path, child_ledger.directory)
+    relative = path.relative_to(child_ledger.directory)
+    base = safe_relative(entry['relative_path'])
+    require(relative == base or (entry['recursive'] and base in relative.parents), 'database is outside its attached reservation')
+    # No second main allocation may alias an attached file.
+    for allocation in child_ledger.allocations.values():
+        require(not (allocation.key[1] == 'main' and any(_related(relative, False, b, t) for b, t in allocation.claims)),
+                'attached database also has a writable main allocation')
+    info = os.lstat(path)
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, 'attached database is not one regular file')
+    require(info.st_size <= entry['bytes'], 'attached database exceeds its held reservation')
+    for suffix in DB_COMPANIONS:
+        require(not os.path.lexists(str(path) + suffix), 'attached database has unaccounted companion files')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        header = os.pread(fd, 100, 0)
+    finally:
+        os.close(fd)
+    require(len(header) == 100 and header[:16] == b'SQLite format 3\x00', 'attached file is not a SQLite database')
+    page_size = int.from_bytes(header[16:18], 'big')
+    page_size = 65536 if page_size == 1 else page_size
+    require(page_size in (512, 1024, 2048, 4096, 8192, 16384, 32768, 65536) and info.st_size > 0 and info.st_size % page_size == 0,
+            'attached database page geometry is invalid')
+    pages = info.st_size // page_size
+    declared = int.from_bytes(header[28:32], 'big')
+    require(declared == 0 or header[24:28] != header[92:96] or declared == pages, 'attached database page count differs from file size')
+    ceiling = min(child_ledger.policy['families'][family]['database_bytes'], entry['bytes'])
+    effective = ceiling // page_size
+    if effective == 0 or pages > effective:
+        raise PhysicalIncomplete('restored database exceeds its effective page ceiling')
+    return ReadonlyDatabaseGrant(child_ledger, family, path, entry, page_size, pages, ceiling)
+
+
+class TransferHandle:
+    def __init__(self, ledger, transfer_id, source, destination, source_path, destination_path, identity, record):
+        self.ledger, self.transfer_id, self.source, self.destination = ledger, transfer_id, source, destination
+        self.source_path, self.destination_path, self.identity, self.record = source_path, destination_path, identity, record
+        self.state = 'prepared'
+
+
+def _prepare_transfer(self, reservation_id, destination_owner, resource, component, new_path):
+    """Reserve the destination while the source stays charged; durably record both identities."""
+    self._authority()
+    source = self.by_id.get(reservation_id)
+    require(source is not None and not source.released and not source.delegated and source.transfer is None,
+            'transfer names no live undelegated reservation')
+    require(destination_owner == expected_owner(resource), 'unknown/mismatched transfer destination owner')
+    _component_rules(resource, component)
+    require((resource, component) in self.limits, 'unknown transfer destination component')
+    require(not source.subtrees and len(source.paths) == 1, 'a transfer moves exactly one physical file')
+    (source_path,) = source.paths
+    info = os.lstat(source_path)
+    _regular_nonalias(info, 'transfer source')
+    destination_path = _owned(new_path, self.directory)
+    require(not os.path.lexists(destination_path), 'transfer destination already exists')
+    require(destination_path.parent.is_dir() and os.stat(destination_path.parent).st_dev == info.st_dev,
+            'transfer destination is not on the source filesystem')
+    destination = self.reserve(destination_owner, resource, component, source.bytes)  # refusal leaves the prior root authoritative
+    control = record_path = None
+    try:
+        destination.track(destination_path)
+        transfer_id = secrets.token_hex(32)
+        record = {'schema_version': 1, 'kind': 'physical_transfer', 'transfer_id': transfer_id, 'bytes': source.bytes,
+                  'source': {'reservation_id': source.reservation_id, 'relative_path': str(source_path.relative_to(self.directory)), **_identity(info)},
+                  'destination': {'reservation_id': destination.reservation_id, 'owner': destination_owner, 'resource': resource,
+                                  'component': component, 'relative_path': str(destination_path.relative_to(self.directory))}}
+        raw = canonical(record)
+        control = self.reserve('session_controller', 'control_bytes', 'bytes', len(raw))
+        record_path = _private_directory(self.directory / TRANSFER_DIRECTORY) / (transfer_id + '.json')
+        control.track(record_path)
+        _write_private(record_path, raw)
+    except BaseException:
+        if record_path is not None and os.path.lexists(record_path):
+            record_path.unlink()
+        if control is not None and not control.surviving_files():
+            control.release_after_removal()
+        destination.release_after_removal()
+        raise
+    source.transfer = destination.transfer = True
+    handle = TransferHandle(self, transfer_id, source, destination, source_path, destination_path, (info.st_dev, info.st_ino),
+                            (record_path, control))
+    self.transfers[transfer_id] = handle
+    return handle
+
+
+def _regular_nonalias(info, description):
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, description + ' is not one regular unaliased file')
+
+
+def _commit_transfer(self, handle, observed_device_inode):
+    """One ownership after rename + directory fsync; never an unowned interval."""
+    require(self.transfers.get(handle.transfer_id) is handle and handle.state == 'prepared', 'transfer is not prepared')
+    require(type(observed_device_inode) is tuple and len(observed_device_inode) == 2
+            and all(type(x) is int for x in observed_device_inode), 'invalid observed file identity')
+    require(observed_device_inode == handle.identity, 'observed file identity differs from the prepared object')
+    require(not os.path.lexists(handle.source_path), 'transfer source name still exists: aliases never create quota')
+    info = os.lstat(handle.destination_path)
+    _regular_nonalias(info, 'transfer destination')
+    require((info.st_dev, info.st_ino) == handle.identity, 'transfer destination is not the prepared object')
+    _fsync_directory(handle.destination_path.parent)
+    _fsync_existing_ancestor(handle.source_path, self.directory)
+    source, destination = handle.source, handle.destination
+    source.transfer = destination.transfer = None
+    source.paths.clear()  # the single object is now claimed by the destination alone
+    source.release_after_removal()
+    record_path, control = handle.record
+    record_path.unlink()
+    _fsync_directory(record_path.parent)
+    control.release_after_removal()
+    handle.state = 'committed'
+    del self.transfers[handle.transfer_id]
+    return destination
+
+
+def _abort_transfer(self, handle):
+    """Failure path: destination claim released, source remains charged and authoritative."""
+    require(self.transfers.get(handle.transfer_id) is handle and handle.state == 'prepared', 'transfer is not prepared')
+    require(not os.path.lexists(handle.destination_path), 'cannot abort after the destination name exists')
+    handle.source.transfer = handle.destination.transfer = None
+    handle.destination.release_after_removal()
+    record_path, control = handle.record
+    record_path.unlink()
+    _fsync_directory(record_path.parent)
+    control.release_after_removal()
+    handle.state = 'aborted'
+    del self.transfers[handle.transfer_id]
+
+
+def locate_transfer(directory, record_path):
+    """Crash reconciliation: where is the one object? Ambiguity keeps both charges (raises)."""
+    directory = Path(directory).resolve()
+    record = _strict_json(Path(record_path).read_bytes())
+    closed(record, ('schema_version', 'kind', 'transfer_id', 'bytes', 'source', 'destination'), 'physical transfer record')
+    source, destination = directory / record['source']['relative_path'], directory / record['destination']['relative_path']
+    identity = record['source']['device'], record['source']['inode']
+    found = []
+    for name, path in (('source', source), ('destination', destination)):
+        if os.path.lexists(path):
+            info = os.lstat(path)
+            _regular_nonalias(info, 'transfer ' + name)
+            require((info.st_dev, info.st_ino) == identity, 'transfer ' + name + ' is not the recorded object')
+            found.append(name)
+    require(len(found) == 1, 'transfer location is ambiguous/lost; both reservations remain charged')
+    return found[0]
+
+
 
 
 def install_empty_role(connection, database_role, source_map=None):
