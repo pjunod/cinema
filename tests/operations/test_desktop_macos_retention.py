@@ -998,3 +998,28 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
                         with self.assertRaises(native.receipts.ReceiptError):
                             native.authenticate_current_result(api,ROOT,commit,rid,jid,1,SCOPE['pr'])
                         fresh_envelope['archive']=packed(payload);wrapper['archive']=packed(values)
+
+
+class PreflightSuccessorScope(unittest.TestCase):
+    """Main's reviewed 15 -> 30 minute preflight budget is the only accepted difference from the producer job."""
+    def current(self):
+        return native.workflow_parts((ROOT/native.WORKFLOW).read_bytes())[1]['preflight']
+
+    def test_only_the_reviewed_budget_differs_from_the_producer_preflight(self):
+        current = self.current()
+        legacy = current.replace(native.PREFLIGHT_SUCCESSOR_BUDGET, native.PREFLIGHT_LEGACY_BUDGET, 1)
+        self.assertNotEqual(legacy, current)
+        self.assertEqual(native.digest(legacy), native.WORKFLOW_SCOPE_PINS['preflight'])
+        self.assertEqual(native.successor_preflight(legacy), current)
+        self.assertEqual(native.digest(current), native.WORKFLOW_SCOPE_PINS['preflight_successor'])
+
+    def test_any_other_preflight_byte_or_budget_is_not_the_successor(self):
+        legacy = self.current().replace(native.PREFLIGHT_SUCCESSOR_BUDGET, native.PREFLIGHT_LEGACY_BUDGET, 1)
+        for changed in (legacy.replace(b'timeout-minutes: 15', b'timeout-minutes: 16', 1),
+                        legacy.replace(b'    steps:\n', b'    steps:\n      - run: echo extra\n', 1)):
+            with self.subTest(changed=changed[:40]):
+                try:
+                    successor = native.successor_preflight(changed)
+                except native.receipts.ReceiptError:
+                    continue
+                self.assertNotEqual(native.digest(successor), native.WORKFLOW_SCOPE_PINS['preflight_successor'])

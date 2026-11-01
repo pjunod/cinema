@@ -101,6 +101,7 @@ WORKFLOW_SCOPE_PINS = {
     'paperwork':'56d0a2b952493c4f167a13941b3aebac1a20b44862cbcf3f5809e633701d0a31',
     'scope':'2ee2d0586a98a440b0e44800c44ba35286baad0e5c01d49808e62b7fdba3199d',
     'preflight':'054ad52683b711f4b286557d88f5f4999de0cfa20f3645043f484f2c9629c27c',
+    'preflight_successor':'e0e71b3e6542a3ef423e2f12da1ff9e4ce450b79d292ddaea13b96e38f28bbab',
     'legacy_apple':'c6bd7e2361ac9055999c183f2f53b36b4a40fdf72b7cf1167a5990d271639e19',
     'adapted_apple':'519df6d3b88a2ba381cd1633379b1a040ea04ce962471c7783f124d8fd887194',
 }
@@ -108,6 +109,18 @@ APPLE_CACHE_START = b'      - name: Cache DerivedData\n'
 APPLE_COMPILE_STEP = b'      - name: Compile iOS and tvOS without running simulator tests\n'
 APPLE_CACHE_SHA256 = '9fdac9fa65689d8b5e09cc2ecf0f739c1ba0ba7d5b94b99673c2d26a42870961'
 PROTECTED_DEPENDENCIES = ('paperwork','scope','preflight')
+# Main raised the preflight job budget (15 -> 30 minutes, the cold full-unit fallback) after the producer
+# workflow. That budget is the only reviewed difference; every other preflight byte must equal the producer's.
+PREFLIGHT_LEGACY_BUDGET = (b'    # Allows the 5-minute worker witness smoke, other package smokes, toolchain\n'
+    b'    # provisioning and preflight validation to finish with headroom.\n    timeout-minutes: 15\n')
+PREFLIGHT_SUCCESSOR_BUDGET = (b'    # A cold continuation can run the full unit set when older receipts cannot\n'
+    b'    # authenticate. History alone took seven minutes in run 6234; allow the\n'
+    b'    # remaining contracts and receipt publication to finish on a busy runner.\n    timeout-minutes: 30\n')
+
+
+def successor_preflight(preflight):
+    require(preflight.count(PREFLIGHT_LEGACY_BUDGET) == 1, 'Reviewed preflight budget is ambiguous')
+    return preflight.replace(PREFLIGHT_LEGACY_BUDGET, PREFLIGHT_SUCCESSOR_BUDGET, 1)
 RECIPE_PINS = {
     'Cargo.toml':('100644','72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f'),
     'clients/server-tray/macos/build':('100755','b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0'),
@@ -534,8 +547,11 @@ def workflow_scope(workspace,commit,legacy):
     adapted_apple = apple_without_reviewed_cache(adapted['apple_compile'], cache)
     current = git(workspace,'show',commit+':'+WORKFLOW,limit=MAX_WORKFLOW_BYTES)
     current_preamble,blocks = workflow_parts(current)
-    require(current_preamble == preamble and all(name in blocks and blocks[name] == baseline[name]
-        for name in PROTECTED_DEPENDENCIES),'Unsupported native workflow preamble/dependency scope')
+    successor = successor_preflight(baseline['preflight'])
+    require(digest(successor) == WORKFLOW_SCOPE_PINS['preflight_successor'], 'Reviewed preflight successor differs')
+    require(current_preamble == preamble and all(name in blocks and blocks[name] in (baseline[name],)
+        + ((successor,) if name == 'preflight' else ()) for name in PROTECTED_DEPENDENCIES),
+        'Unsupported native workflow preamble/dependency scope')
     apple = blocks.get('apple_compile')
     require(apple is not None, 'Unsupported native Apple job scope')
     scoped_apple = apple_without_reviewed_cache(apple, cache)
