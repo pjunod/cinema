@@ -1547,7 +1547,8 @@ pattern = "ServingAuthority"
 # Adaptive source audit e1d42fb2: New occurrences carry the existing ServingAuthority through
 # media-pool quality contexts, adaptive adoption, and VOD Store-adopt attachment. One is a
 # control.rs ownership comment; none grants a native witness.
-expected_occurrences = 37
+# M4 follow-on: The genuine refused-Adopt fixture passes the original ServingAuthority; no new production grant.
+expected_occurrences = 38
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1836,7 +1837,8 @@ pattern = "publication_ready_at_ms"
 # Adaptive source audit e1d42fb2: Three actual publication_ready_at_ms checks bind adaptive
 # claim/adopt/origin readiness to MEDIA_SESSION_PUBLICATION_BLOCKED; one terminal_memory.rs
 # destructuring occurrence sizes the actual retained route.
-expected_occurrences = 153
+# M4 follow-on: The genuine refused-Adopt fixture constructs the same blocked original activation DTO before actual Store refusal.
+expected_occurrences = 154
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -1906,7 +1908,8 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # blocked activation before its existing Confirm settlement; no shipped write.
 # Adaptive source audit e1d42fb2: The three new MEDIA_SESSION_PUBLICATION_BLOCKED references
 # are the same origin/adoption/claim readiness guards; they add no publication authority.
-expected_occurrences = 60
+# M4 follow-on: The actual refused-Adopt input preserves the original prepublication-blocked sentinel; no publication or close proof.
+expected_occurrences = 61
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -5123,7 +5126,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Main 6c8c98c79 composition: 2002 + (1901 - 1899) = 2004; source equality remains required.
 # Compose task and current-main owner sites: 2065; exact source census still required.
 # Compose M4 fixture and current-main owner sites: 2017; source equality still enforced.
-expected_occurrences = 2078
+# M4 follow-on: The genuine refused-Adopt fixture positively joins its SAME registered control under the original deadline; no new native watchdog or allowance.
+expected_occurrences = 2079
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
