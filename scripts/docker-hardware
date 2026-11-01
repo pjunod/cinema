@@ -172,6 +172,13 @@ def gpu_overlay(service: dict, *, dri: Path, nvidia: bool) -> dict:
                 }
             }
         }
+        # Compose compares these aliases once a reservations block exists,
+        # even when the new block only requests GPU devices. Retain the host's
+        # memory reservation so automatic NVIDIA setup stays mergeable.
+        if service.get("mem_reservation") is not None:
+            additions["deploy"]["resources"]["reservations"]["memory"] = service[
+                "mem_reservation"
+            ]
         nvidia_requested = True
     if nvidia_requested:
         capabilities = (service.get("environment") or {}).get(

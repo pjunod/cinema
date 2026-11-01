@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -44,6 +46,84 @@ class DockerHardwareTests(unittest.TestCase):
             set(value["environment"]["NVIDIA_DRIVER_CAPABILITIES"].split(",")),
             {"compute", "video", "utility", "graphics"},
         )
+
+    def test_auto_nvidia_copies_memory_alias_only_when_present(self):
+        for memory in ("256m", 268435456, 0, None):
+            with self.subTest(memory=memory):
+                service = {} if memory is None else {"mem_reservation": memory}
+                value = self.overlay(service, nvidia=True)
+                reservation = value["deploy"]["resources"]["reservations"]
+                if memory is None:
+                    self.assertNotIn("memory", reservation)
+                else:
+                    self.assertEqual(reservation["memory"], memory)
+                    self.assertEqual(service, {"mem_reservation": memory})
+
+    @unittest.skipUnless(shutil.which("docker"), "Docker Compose CLI is unavailable")
+    def test_real_compose_auto_nvidia_preserves_host_memory_reservation(self):
+        base = self.root / "compose.json"
+        output = self.root / "generated.json"
+        environment = dict(
+            os.environ,
+            COMPOSE_FILE=str(base),
+            COMPOSE_PATH_SEPARATOR=os.pathsep,
+            PLURX_DOCKER_GPU="auto",
+        )
+        for memory, expected in (("256m", 268435456), (268435456, 268435456), (0, 0)):
+            with self.subTest(memory=memory):
+                base.write_text(json.dumps({"services": {"plurxd": {
+                    "image": "plurx/test",
+                    "mem_reservation": memory,
+                    "mem_limit": "512m",
+                }}}))
+                with mock.patch("pathlib.Path.cwd", return_value=self.root), mock.patch.dict(
+                    os.environ, environment, clear=True
+                ), mock.patch.dict(
+                    GLOBALS,
+                    local_linux_engine=lambda: True,
+                    nvidia_available=lambda: True,
+                ), mock.patch("shutil.which", return_value="/usr/bin/nvidia-container-runtime-hook"):
+                    files = HELPER["prepare"](output)
+                config = subprocess.run(
+                    ["docker", "compose", "config", "--format", "json"],
+                    cwd=self.root,
+                    env=dict(environment, COMPOSE_FILE=files),
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(config.returncode, 0, config.stderr)
+                service = json.loads(config.stdout)["services"]["plurxd"]
+                reservation = service["deploy"]["resources"]["reservations"]
+                self.assertEqual(int(service.get("mem_reservation", 0)), expected)
+                self.assertEqual(int(reservation.get("memory", 0)), expected)
+                self.assertEqual(int(service["mem_limit"]), 536870912)
+                self.assertEqual(reservation["devices"], [
+                    {"driver": "nvidia", "count": -1, "capabilities": ["gpu"]}
+                ])
+
+    @unittest.skipUnless(shutil.which("docker"), "Docker Compose CLI is unavailable")
+    def test_real_compose_tracked_memory_reservation_accepts_host_nvidia_override(self):
+        override = self.root / "host.json"
+        devices = [{"driver": "nvidia", "count": 1, "capabilities": ["gpu"]}]
+        override.write_text(json.dumps({"services": {"plurxd": {
+            "deploy": {"resources": {"reservations": {"devices": devices}}}
+        }}}))
+        for memory, expected in ((None, 3221225472), ("512m", 536870912)):
+            with self.subTest(memory=memory):
+                environment = dict(os.environ)
+                environment.pop("PLURX_MEM_RESERVATION", None)
+                if memory is not None:
+                    environment["PLURX_MEM_RESERVATION"] = memory
+                config = subprocess.run(
+                    ["docker", "compose", "-f", str(ROOT / "deploy/docker-compose.yml"),
+                     "-f", str(override), "config", "--format", "json"],
+                    cwd=self.root, env=environment, capture_output=True, text=True,
+                )
+                self.assertEqual(config.returncode, 0, config.stderr)
+                service = json.loads(config.stdout)["services"]["plurxd"]
+                reservation = service["deploy"]["resources"]["reservations"]
+                self.assertEqual(int(service["mem_reservation"]), expected)
+                self.assertEqual(int(reservation["memory"]), expected)
+                self.assertEqual(reservation["devices"], devices)
 
     def test_cpu_only_and_empty_dri_do_not_require_devices(self):
         self.assertEqual(self.overlay(), {})
