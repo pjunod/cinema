@@ -51,9 +51,9 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
             'contexts': self.contexts, 'page_root': '7' * 64, 'catalog_logical_digest': '8' * 64})
         self.auth = self.root / 'authenticated.sqlite'
         with sqlite3.connect(self.auth) as db:
-            db.execute('CREATE TABLE authenticated_members(unit_ordinal INTEGER,part_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(unit_ordinal,part_ordinal,member_path))')
-            db.execute('CREATE TABLE verifier_chain(unit_ordinal INTEGER PRIMARY KEY,progress_path TEXT,backup_root_path TEXT,work_unit_json BLOB)')
-        self.previous_progress = self.previous_backup = None
+            db.execute('CREATE TABLE authenticated_members(unit_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(unit_ordinal,member_path))')
+            db.execute('CREATE TABLE verifier_chain(unit_ordinal INTEGER PRIMARY KEY,progress_path TEXT,backup_root_path TEXT,work_unit_json BLOB,execution_origin_json BLOB)')
+        self.previous_progress = self.previous_backup = self.previous_manifest = None
         self.before = self.state.sequence()[0], self.state.logical_digest(), self.state.cursor()
         self.first = 1
         self.calls = []
@@ -130,6 +130,11 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
             'resource_plan_sha256': self.plan['plan_sha256'], 'runner_identity_utf8': '{}',
             'status': 'checkpointed_incomplete', 'artifact_roots': [], 'stage': 'temporal_components',
             'registered_cases': [], 'progress': self.state.cursor()['position']}
+        # The authenticated Origin of the execution that produced this unit: the WorkUnit's identity plus the
+        # operation and dispatch ordinal the controller reserved for it (the WorkUnit no longer carries them).
+        self.origin = {**{key: self.work_unit[key] for key in ('repository', 'pr', 'event_base', 'workflow_id', 'event_name',
+                                                                'mode', 'run', 'job', 'task', 'attempt')},
+                       'operation': 'execute', 'dispatch_ordinal': self.unit - 1}
         runtime = {'schema_version': 1, 'source': self.source, 'session_id': fixture.SESSION,
             'unit_ordinal': self.unit, 'origin': {k: self.work_unit[k] for k in ('run', 'job', 'task', 'attempt')},
             'resource_plan_sha256': self.plan['plan_sha256'], 'runtime': self.runtime, 'runner': {}}
@@ -203,18 +208,18 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         if value is not None:
             checker.write_json(path, value)
         data = path.read_bytes()
-        member = {'unit_ordinal': self.unit, 'part_ordinal': 0, 'member_path': relative,
+        member = {'unit_ordinal': self.unit, 'member_path': relative,
                   'bytes': len(data), 'sha256': codec.sha_bytes(data)}
         with sqlite3.connect(self.auth) as db:
-            db.execute('INSERT OR REPLACE INTO authenticated_members VALUES(?,?,?,?,?,?)',
-                (self.unit, 0, relative, len(data), member['sha256'], str(path)))
+            db.execute('INSERT OR REPLACE INTO authenticated_members VALUES(?,?,?,?,?)',
+                (self.unit, relative, len(data), member['sha256'], str(path)))
         return member
 
     def evidence(self, entries, purpose, name, common):
         if not entries:
             return None
         self.assertLessEqual(len(entries), 256)
-        value = {'schema_version': 1, 'kind': 'verifier_evidence_index', **common, 'purpose': purpose,
+        value = {'schema_version': 2, 'kind': 'verifier_evidence_index', **common, 'purpose': purpose,
             'level': 0, 'first_ordinal': 0, 'item_count': len(entries), 'entries': entries}
         codec.Schema(fixture.PACKAGE / 'paged-verifier-continuation.schema.json').check(value)
         member = self.member('verifier-evidence/' + name + '.json', value)
@@ -260,7 +265,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
             for entry in entries['inputs']:
                 raw = codec.encoded(entry); h.update(len(raw).to_bytes(8, 'big')); h.update(raw)
             unit_inputs.extend(entries['inputs'])
-            result = {'schema_version': 1, 'kind': 'verifier_check_result', **common,
+            result = {'schema_version': 2, 'kind': 'verifier_check_result', **common,
                 'result_sequence': sequence, 'resource_plan_sha256': self.plan['plan_sha256'], 'initial_image_sha256': '6' * 64,
                 'input_root': h.hexdigest(), 'before_cursor': codec.strict_json(before), 'after_cursor': codec.strict_json(after),
                 'first_quantum': first_quantum, 'quantum_count': quantum_count, 'claim': claim, 'coverage': codec.strict_json(coverage),
@@ -277,10 +282,10 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         input_root = self.evidence(unit_inputs, 'inputs', 'unit-inputs', common)
         useful = self.index.db.execute('SELECT sum(useful) FROM execution_commits WHERE sequence>?', (self.before[0],)).fetchone()[0]
         self.assertGreater(useful, 0)
-        progress = {'schema_version': 1, 'kind': 'verifier_unit_progress', **common,
+        progress = {'schema_version': 2, 'kind': 'verifier_unit_progress', **common,
             'resource_plan_sha256': self.plan['plan_sha256'], 'initial_image_sha256': '6' * 64,
             'previous_progress_sha256': self.previous_progress, 'previous_backup_manifest_sha256': self.previous_backup,
-            'origin': {key: self.work_unit[key] for key in ('repository', 'pr', 'event_base', 'workflow_id', 'event_name', 'mode', 'run', 'job', 'task', 'attempt', 'stage')},
+            'origin': self.origin,
             'input_checkpoint_sha256': common['checkpoint_sha256'], 'input_catalog_commit': 1,
             'input_catalog_logical_digest': '8' * 64, 'input_manifest_root': '7' * 64,
             'input_inline_counts_sha256': codec.digest(self.checkpoint['record']['counts']),
@@ -297,23 +302,25 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         backup_path = self.output / 'work-backup.sqlite'
         descriptor = self.state.backup(backup_path)
         self.assertEqual(checker.file_sha(backup_path), descriptor['work_db_sha256'])
-        # The transport root's fields are checked here; full stream/chunk
-        # transport is covered by the existing catalog transport fixtures.
-        root = {'member_path': 'verifier-backup/index.json', 'sha256': descriptor['work_db_sha256'],
-            'part_ordinal': 0, 'level': 0, 'first_chunk': 0, 'chunk_count': 1, 'offset': 0, 'bytes': descriptor['work_db_bytes']}
-        backup = {'schema_version': 1, 'kind': 'verifier_backup', **common,
+        # The backup root's own fields and its chain binding are checked here; the content-addressed chunk
+        # manifest it names is covered by the snapshot transport fixtures, so the manifest reference is synthetic.
+        manifest_root = {'kind': 'snapshot_manifest_node', 'sha256': codec.sha_bytes(b'fixture manifest ' + str(self.unit).encode()),
+                         'bytes': 1}
+        chunk_limit = 1048576
+        backup = {'schema_version': 2, 'kind': 'verifier_backup', **common,
             'previous_checkpoint_sha256': None, 'resource_plan_sha256': self.plan['plan_sha256'],
             'initial_image_sha256': '6' * 64, 'catalog_commit': 1, 'catalog_logical_digest': '8' * 64,
             'semantic_manifest_root': '7' * 64, **{key: value for key, value in descriptor.items() if key != 'path'},
             'previous_verifier_progress_sha256': self.previous_progress, 'progress_sha256': progress_member['sha256'],
             'snapshot_boundary': 'post_verifier_commit_pre_upload', 'format': 'sqlite3', 'backup_method': 'sqlite_backup_api_v1',
-            'chunk_bytes_limit': 268435456, 'chunk_count': 1, 'artifact_part_count': 1, 'index_root': root}
+            'chunk_bytes_limit': chunk_limit, 'chunk_count': max(1, -(-descriptor['work_db_bytes'] // chunk_limit)),
+            'execution_origin': self.origin, 'predecessor_root': self.previous_manifest, 'manifest_root': manifest_root}
         codec.Schema(fixture.PACKAGE / 'paged-verifier-continuation.schema.json').check(backup)
         backup_member = self.member('verifier-backup/root.json', backup)
         with sqlite3.connect(self.auth) as db:
-            db.execute('INSERT INTO verifier_chain VALUES(?,?,?,?)', (self.unit,
+            db.execute('INSERT INTO verifier_chain VALUES(?,?,?,?,?)', (self.unit,
                 str(self.output / 'verifier-progress/unit.json'), str(self.output / 'verifier-backup/root.json'),
-                codec.encoded(codec.envelope('WorkUnit', self.work_unit))))
+                codec.encoded(codec.envelope('WorkUnit', self.work_unit)), codec.encoded(self.origin)))
         self.index.close()
         restored = self.root / ('restored-' + str(self.unit) + '.sqlite')
         shutil.copyfile(backup_path, restored)
@@ -322,7 +329,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
             budget=fixture.granted_budget(self.plan, self.output))
         self.state = codec.ExecutionState(self.index, '6' * 64)
         self.index.execution = self.state
-        resolver = codec.ContinuationResolver(self.auth, self.output, source=self.source,
+        resolver = codec.ContinuationResolver(self.auth, codec.auxiliary_directory(self.output, create=True), source=self.source,
             session_id=fixture.SESSION, budget=self.index.budget)
         try:
             resolver.reconcile_chain(self.state, latest_progress_sha256=progress_member['sha256'],
@@ -330,6 +337,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         finally:
             resolver.close()
         self.previous_progress, self.previous_backup = progress_member['sha256'], backup_member['sha256']
+        self.previous_manifest = manifest_root
         self.before = self.state.sequence()[0], self.state.logical_digest(), self.state.cursor()
         self.first = self.state.sequence()[1] + 1
         self.restores += 1

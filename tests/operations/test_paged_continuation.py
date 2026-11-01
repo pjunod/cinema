@@ -74,8 +74,8 @@ class PagedContinuationFixtures(unittest.TestCase):
             self.index.db.execute("INSERT INTO operation_state VALUES('forged_checked',?,?)",(codec.encoded(None),codec.encoded(True)))
         auth=self.root/'authenticated.sqlite'
         with sqlite3.connect(auth) as db:
-            db.execute('CREATE TABLE verifier_chain(unit_ordinal INTEGER PRIMARY KEY,progress_path TEXT,backup_root_path TEXT,work_unit_json BLOB)')
-            db.execute('CREATE TABLE authenticated_members(unit_ordinal INTEGER,part_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,local_path TEXT)')
+            db.execute('CREATE TABLE verifier_chain(unit_ordinal INTEGER PRIMARY KEY,progress_path TEXT,backup_root_path TEXT,work_unit_json BLOB,execution_origin_json BLOB)')
+            db.execute('CREATE TABLE authenticated_members(unit_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(unit_ordinal,member_path))')
         resolver=codec.ContinuationResolver(auth,self.root,source=fixture.SOURCE,session_id=fixture.SESSION,budget=self.index.budget)
         try:
             with self.assertRaisesRegex(codec.Invalid,'missing/latest'):

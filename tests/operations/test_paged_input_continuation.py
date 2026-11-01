@@ -31,8 +31,8 @@ class PagedInputContinuationFixtures(unittest.TestCase):
         with sqlite3.connect(self.auth) as db:
             db.execute('CREATE TABLE objects(kind TEXT,key BLOB,digest TEXT,path TEXT,PRIMARY KEY(kind,key))')
             db.execute('CREATE TABLE roots(kind TEXT,key BLOB,digest TEXT,PRIMARY KEY(kind,key))')
-            db.execute('CREATE TABLE authenticated_members(unit_ordinal INTEGER,part_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(unit_ordinal,part_ordinal,member_path))')
-            db.execute('CREATE TABLE verifier_chain(unit_ordinal INTEGER PRIMARY KEY,progress_path TEXT,backup_root_path TEXT,work_unit_json BLOB)')
+            db.execute('CREATE TABLE authenticated_members(unit_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(unit_ordinal,member_path))')
+            db.execute('CREATE TABLE verifier_chain(unit_ordinal INTEGER PRIMARY KEY,progress_path TEXT,backup_root_path TEXT,work_unit_json BLOB,execution_origin_json BLOB)')
         self.index.resolver_path=self.auth
 
     def tearDown(self):
@@ -43,7 +43,7 @@ class PagedInputContinuationFixtures(unittest.TestCase):
         reference=codec.ref(value)
         with sqlite3.connect(self.auth) as db:
             db.execute('INSERT INTO objects VALUES(?,?,?,?)',(reference['kind'],codec.encoded(reference['id']),reference['sha256'],str(path)))
-            db.execute('INSERT INTO authenticated_members VALUES(0,0,?,?,?,?)',(name,len(data),codec.sha_bytes(data),str(path)))
+            db.execute('INSERT INTO authenticated_members VALUES(0,?,?,?,?)',(name,len(data),codec.sha_bytes(data),str(path)))
         return reference
 
     def request(self,pages=8,rows_per_page=1):
@@ -198,9 +198,9 @@ class PagedInputContinuationFixtures(unittest.TestCase):
 
     def test_missing_lazy_blob_file_confers_no_path_authority(self):
         path=self.root/'source.txt';path.write_bytes(b'exact source')
-        member={'unit_ordinal':0,'part_ordinal':0,'member_path':path.name,'bytes':path.stat().st_size,'sha256':codec.sha_bytes(path.read_bytes())}
+        member={'unit_ordinal':0,'member_path':path.name,'bytes':path.stat().st_size,'sha256':codec.sha_bytes(path.read_bytes())}
         with sqlite3.connect(self.auth) as db:
-            db.execute('INSERT INTO authenticated_members VALUES(0,0,?,?,?,?)',(path.name,member['bytes'],member['sha256'],str(path)))
+            db.execute('INSERT INTO authenticated_members VALUES(0,?,?,?,?)',(path.name,member['bytes'],member['sha256'],str(path)))
         self.index.db.execute('INSERT INTO blob_descriptors VALUES(?,?,?,?,?)',('source_file',codec.canonical(path.name),member['sha256'],member['bytes'],codec.encoded(member)))
         self.index.db.commit();path.unlink()
         with self.assertRaisesRegex(codec.Invalid,'missing lazy'):self.index.blob('source_file',path.name)
