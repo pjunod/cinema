@@ -121,6 +121,12 @@ pub struct SqliteStorage {
 }
 impl SqliteStorage {
     pub fn open(path: &Path, resident_bytes: u64) -> CatalogResult<Self> {
+        Self::open_inner(path, resident_bytes, None)
+    }
+    pub fn open_reserved(path: &Path, resident_bytes: u64, limits: &super::ResourceLimits) -> CatalogResult<Self> {
+        Self::open_inner(path, resident_bytes, Some(limits))
+    }
+    fn open_inner(path: &Path, resident_bytes: u64, limits: Option<&super::ResourceLimits>) -> CatalogResult<Self> {
         if path
             .symlink_metadata()
             .is_ok_and(|m| m.file_type().is_symlink())
@@ -132,10 +138,12 @@ impl SqliteStorage {
                 "catalog page cache allowance".into(),
             ));
         }
+        if let Some(limits) = limits { Self::prospective_family(limits)?; }
         let connection = Connection::open(path)?;
+        if let Some(limits) = limits { Self::enforce_page_cap(&connection, limits.family("catalog_main")?.database_bytes)?; }
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
-            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE;",
         )?;
         let cache_kib = (resident_bytes / 4 / 1024).clamp(1, i32::MAX as u64);
         connection.pragma_update(None, "cache_size", -(cache_kib as i64))?;
@@ -180,7 +188,7 @@ impl SqliteStorage {
             pending_sequence: None,
             reading: false,
             read_limit: resident_bytes / 4,
-            reservation: None,
+            reservation: limits.cloned(),
         })
     }
     pub fn open_readonly(path: &Path, resident_bytes: u64) -> CatalogResult<Self> {
@@ -243,45 +251,63 @@ impl SqliteStorage {
         let scalar = |sql: &str| -> CatalogResult<u64> {
             Ok(self.connection.query_row(sql, [], |row| row_uint(row, 0))?)
         };
+        let mut objects = Vec::new();
+        let mut table_names = Vec::new();
+        let mut index_names = Vec::new();
+        let mut schema=self.connection.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE type IN ('table','index') ORDER BY type,name,tbl_name")?;
+        for row in schema.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?)))? {
+            let (kind,name,table,sql)=row?;
+            if kind=="table" { table_names.push(name.clone()); } else { index_names.push(name.clone()); }
+            let normalized=sql.map(|sql|sql.replace("IF NOT EXISTS ","").split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches(';').to_owned());
+            objects.push(json!([kind,name,table,normalized]));
+        }
+        let geometry=json!({"database_role":"rust_catalog","sqlite_source_id":self.connection.query_row("SELECT sqlite_source_id()",[],|row|row.get::<_,String>(0))?,
+            "schema_sha256":digest(canonical(&json!(objects)).as_bytes()),"page_size":scalar("PRAGMA page_size")?,"page_count":scalar("PRAGMA page_count")?,"tables":table_names,"indexes":index_names});
         Ok(
             json!({"schema_version":1,"engine":"rust_rusqlite","source_path":"verification/async-driver-refinement/paged-catalog.sql","acceptance":false,
             "sqlite_version":rusqlite::version(),"sqlite_source_id":self.connection.query_row("SELECT sqlite_source_id()",[],|row|row.get::<_,String>(0))?,
             "ddl_sha256":digest(&preimage),"source_sha256":digest(normative.as_bytes()),"auxiliary_ddl_sha256":digest(AUX_SCHEMA.as_bytes()),
-            "compiled_sources":super::compiled_catalog_sources(),"page_size":scalar("PRAGMA page_size")?,"page_count":scalar("PRAGMA page_count")?,"freelist_count":scalar("PRAGMA freelist_count")?,
+            "compiled_sources":super::compiled_catalog_sources(),"geometry":geometry,"page_size":scalar("PRAGMA page_size")?,"page_count":scalar("PRAGMA page_count")?,"freelist_count":scalar("PRAGMA freelist_count")?,
             "tables":scalar("SELECT count(*) FROM sqlite_schema WHERE type='table'")?,"indexes":scalar("SELECT count(*) FROM sqlite_schema WHERE type='index'")?,"empty_table_rows":rows}),
         )
+    }
+    fn prospective_family(limits: &super::ResourceLimits) -> CatalogResult<()> {
+        let family = limits.family("catalog_main")?;
+        let journal = family.database_bytes.checked_mul(2).and_then(|v|v.checked_add(1024*1024));
+        let temp = family.database_bytes.checked_mul(2);
+        if journal.is_none_or(|bytes|bytes>family.journal_bytes) || temp.is_none_or(|bytes|bytes>family.temp_bytes) {
+            return Err(CatalogError::ResourceIncomplete("catalog prospective journal/temp reservation exhausted".into()));
+        }
+        Ok(())
+    }
+    fn enforce_page_cap(connection: &Connection, maximum: u64) -> CatalogResult<()> {
+        let page_size = connection.query_row("PRAGMA page_size", [], |row| row_uint(row, 0))?;
+        let pages = maximum / page_size;
+        let current = connection.query_row("PRAGMA page_count", [], |row| row_uint(row, 0))?;
+        if pages == 0 || pages > i64::MAX as u64 || current > pages {
+            return Err(CatalogError::ResourceIncomplete("catalog effective page ceiling below existing database".into()));
+        }
+        let effective = connection.query_row(&format!("PRAGMA max_page_count={pages}"), [], |row|row_uint(row,0))?;
+        if effective != pages {
+            return Err(CatalogError::ResourceIncomplete("ineffective catalog max_page_count".into()));
+        }
+        Ok(())
+    }
+    fn check_readonly_cap(&self, limits: &super::ResourceLimits) -> CatalogResult<()> {
+        Self::prospective_family(limits)?;
+        let size=self.connection.query_row("PRAGMA page_size",[],|row|row_uint(row,0))?;
+        let pages=self.connection.query_row("PRAGMA page_count",[],|row|row_uint(row,0))?;
+        if pages>limits.family("catalog_main")?.database_bytes/size {
+            return Err(CatalogError::ResourceIncomplete("immutable restored catalog exceeds effective main cap".into()));
+        }
+        Ok(())
     }
     pub fn reserve_operational_storage(
         &mut self,
         limits: &super::ResourceLimits,
     ) -> CatalogResult<()> {
-        let maximum = limits.record_allowances.values().try_fold(
-            limits.index_bytes,
-            |total, allowance| {
-                allowance
-                    .records
-                    .checked_mul(allowance.max_encoded_bytes)
-                    .and_then(|bytes| total.checked_add(bytes))
-                    .ok_or_else(|| {
-                        CatalogError::ResourceIncomplete(
-                            "catalog encoded/index reservation overflow".into(),
-                        )
-                    })
-            },
-        )?;
-        let page_size = self
-            .connection
-            .query_row("PRAGMA page_size", [], |row| row_uint(row, 0))?;
-        if maximum / page_size == 0 {
-            return Err(CatalogError::ResourceIncomplete(
-                "catalog page reservation".into(),
-            ));
-        }
-        self.connection.pragma_update(
-            None,
-            "max_page_count",
-            (maximum / page_size).min(i64::MAX as u64) as i64,
-        )?;
+        Self::prospective_family(limits)?;
+        Self::enforce_page_cap(&self.connection, limits.family("catalog_main")?.database_bytes)?;
         self.reservation = Some(limits.clone());
         self.check_storage()
     }
@@ -289,33 +315,25 @@ impl SqliteStorage {
         let Some(limits) = &self.reservation else {
             return Ok(());
         };
-        let maximum = limits.record_allowances.values().try_fold(
-            limits.index_bytes,
-            |total, allowance| {
-                allowance
-                    .records
-                    .checked_mul(allowance.max_encoded_bytes)
-                    .and_then(|bytes| total.checked_add(bytes))
-                    .ok_or_else(|| {
-                        CatalogError::ResourceIncomplete(
-                            "catalog storage reservation overflow".into(),
-                        )
-                    })
-            },
-        )?;
+        Self::prospective_family(limits)?;
+        let maximum = limits.family("catalog_main")?.database_bytes;
         let pages = self
             .connection
             .query_row("PRAGMA page_count", [], |row| row_uint(row, 0))?;
         let size = self
             .connection
             .query_row("PRAGMA page_size", [], |row| row_uint(row, 0))?;
+        let effective=self.connection.query_row("PRAGMA max_page_count",[],|row|row_uint(row,0))?;
+        if effective != maximum/size {
+            return Err(CatalogError::ResourceIncomplete("catalog max_page_count changed".into()));
+        }
         if pages.checked_mul(size).is_none_or(|bytes| bytes > maximum) {
             return Err(CatalogError::ResourceIncomplete(
                 "catalog data/index pages exceed immutable reservation".into(),
             ));
         }
         let mut wal = 0u64;
-        for suffix in ["-wal", "-shm"] {
+        for suffix in ["-wal", "-shm", "-journal"] {
             let mut name = self.path.as_os_str().to_os_string();
             name.push(suffix);
             match Path::new(&name).symlink_metadata() {
@@ -331,7 +349,7 @@ impl SqliteStorage {
                 Err(error) => return Err(error.into()),
             }
         }
-        if wal > limits.wal_bytes {
+        if wal > limits.family("catalog_main")?.journal_bytes {
             return Err(CatalogError::ResourceIncomplete(
                 "catalog WAL/shared-memory exceeds immutable reservation".into(),
             ));
@@ -813,6 +831,7 @@ impl Storage for SqliteStorage {
                 "catalog transaction active".into(),
             ));
         }
+        self.check_storage()?;
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             let next = self
@@ -1229,6 +1248,7 @@ impl Storage for SqliteStorage {
                 "checkpoint high-water".into(),
             ));
         }
+        self.check_storage()?;
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             self.connection.execute("INSERT INTO work_units(ordinal,expected_prior_checkpoint,stage,progress,registered_cases,source_json,status) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![number(w,"unit_ordinal")?,w["expected_prior_checkpoint"].as_str(),string(w,"stage")?,canonical(&w["progress"]).as_bytes(),canonical(&w["registered_cases"]).as_bytes(),canonical(&w["source"]).as_bytes(),string(w,"status")?])?;
@@ -1294,6 +1314,7 @@ impl Storage for SqliteStorage {
             }
             return Ok(());
         }
+        self.check_storage()?;
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             self.connection.execute(
@@ -1408,6 +1429,7 @@ impl Storage for SqliteStorage {
             .ok_or_else(|| CatalogError::SourceMismatch("restore binding absent".into()))?;
         let plan: Record = serde_json::from_value(binding["resource_plan"].clone())?;
         let limits = super::ResourceLimits::from_plan(&plan)?;
+        self.check_readonly_cap(&limits)?;
         let meta:(Vec<u8>,String,String)=self.connection.query_row("SELECT source_json,session_id,resource_plan_sha256 FROM catalog_meta WHERE singleton=1",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
         if meta.0 != canonical(&binding["source"]).as_bytes()
             || meta.1 != string(&binding, "session_id")?
@@ -1710,7 +1732,11 @@ impl Storage for SqliteStorage {
                 "backup lacks pinned snapshot".into(),
             ));
         }
-        backup_connection(&self.connection, path, limits.max_bytes, limits.deadline)
+        self.check_storage()?;
+        let maximum = if let Some(policy) = &self.reservation {
+            limits.max_bytes.min(policy.family("catalog_main")?.database_bytes).min(policy.pools["snapshot_spool_bytes"])
+        } else { return Err(CatalogError::ResourceIncomplete("backup lacks physical reservation".into())); };
+        backup_connection(&self.connection, path, maximum, limits.deadline)
     }
 }
 

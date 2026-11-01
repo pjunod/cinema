@@ -1766,7 +1766,7 @@ def reparse_retained_tlc(result, progress, resolver, state):
 
 PRIVATE_REQUEST_KEYS={'schema_version','operation','deadline_monotonic','work_unit','resource_plan','initial_image',
     'prior_checkpoint','checkpoint','catalog_path','output_dir','dependency_index','source_files','driver_graph','tlc','runtime',
-    'verifier_work_db','prepare_path','reservation_path','previous_verifier_progress_sha256','previous_verifier_backup_sha256'}
+    'verifier_work_db','prepare_path','reservation_path','previous_verifier_progress_sha256','previous_verifier_backup_sha256','execution_origin'}
 PRIVATE_ROLES={'source_tables','module','config','log','receipt','local_id_map','witness','temporal_import',
     'temporal_publication','result','evidence_index','progress','catalog_page','catalog_manifest','initial_image','source_receipt','phase_result'}
 
@@ -1778,6 +1778,11 @@ def validate_private_request(request,operation,*,private_restore=False):
     runtime=request['runtime']
     require(type(runtime) is dict and set(runtime)=={'rustc','cargo','java','python','tlc','action_node'} and
             sha_bytes(encoded(runtime))==request['work_unit']['source']['toolchain_sha256'],'private runtime/source binding differs')
+    origin=request['execution_origin']
+    require(type(origin) is dict and set(origin)=={'repository','pr','event_base','workflow_id','event_name','mode','operation','run','job','task','attempt','dispatch_ordinal'} and
+            origin['operation']=='execute' and type(origin['dispatch_ordinal']) is int and origin['dispatch_ordinal']>=0 and
+            all(origin[k]==request['work_unit'][k] for k in ('repository','pr','event_base','workflow_id','event_name','mode','run','job','task','attempt')),
+            'private exact execution origin differs')
     for name in ('rustc','cargo','java','python','action_node'):
         tool=runtime[name]
         require(type(tool) is dict and set(tool)=={'path','sha256','argv','version'} and
@@ -1802,7 +1807,7 @@ def begin_private_unit(index,request):
     maximum=db.execute('SELECT max(unit) FROM unit_work').fetchone()[0]
     require(maximum is None or unit['unit_ordinal']>maximum,'verifier attempted-unit ordinal reused or moved backwards')
     require(unit['unit_ordinal']>request['checkpoint']['record']['unit_ordinal'],'verifier actual attempt does not follow its authenticated input checkpoint')
-    origin={k:unit[k] for k in ('repository','pr','event_base','workflow_id','event_name','mode','run','job','task','attempt','stage')}
+    origin=request['execution_origin']
     before=index.execution.sequence()[0],index.execution.logical_digest(),index.execution.cursor()
     first=index.execution.sequence()[1]+1
     op=before[2]['operation']
@@ -2363,7 +2368,7 @@ def metadata_write(output, path, value, reservation):
     destination=Path(output)/path
     require(destination.resolve().is_relative_to(Path(output).resolve()) and not destination.is_symlink(),'unsafe metadata publication path')
     write_json(destination,value)
-    return {'unit_ordinal':value['unit_ordinal'],'part_ordinal':r['part_ordinal'],'member_path':path,
+    return {'unit_ordinal':value['unit_ordinal'],'member_path':path,
             'bytes':len(data),'sha256':sha_bytes(data)}
 
 
@@ -2373,7 +2378,7 @@ def build_evidence(entries,purpose,prefix,common,output,reservations,db):
     ordinal=first=node=0
     def emit(group,level,first,count,node):
         path=f'verifier-evidence/{prefix}-{level}-{node}.json'
-        value={'schema_version':1,'kind':'verifier_evidence_index',**common,'purpose':purpose,
+        value={'schema_version':2,'kind':'verifier_evidence_index',**common,'purpose':purpose,
             'level':level,'first_ordinal':first,'item_count':count,'entries':group}
         member=metadata_write(output,path,value,reservations)
         item={'member':member,'level':level,'first_ordinal':first,'item_count':count}
@@ -2422,12 +2427,8 @@ def finalize_unit(request):
     reservation_raw=Path(request['reservation_path']).read_bytes()
     reservation=strict_json(reservation_raw)
     require(encoded(reservation)==reservation_raw and set(reservation)=={'protocol','prepare_sha256','source','session_id','unit_ordinal','resource_plan_sha256',
-        'initial_image_sha256','input_checkpoint_sha256','final_checkpoint','members','metadata_reservations','fixed_prefix_part_count',
-        'backup_first_part','upload_slot_count','maximum_backup_parts'} and reservation['protocol']=='verifier_reservation_v1','closed late reservation differs')
-    require(reservation['prepare_sha256']==sha_bytes(raw) and reservation['upload_slot_count']==32 and
-            reservation['fixed_prefix_part_count']<=reservation['backup_first_part'] and
-            1<=reservation['backup_first_part']<32 and reservation['backup_first_part']+reservation['maximum_backup_parts']<=32,
-            'late reservation token/slot boundary differs')
+        'initial_image_sha256','input_checkpoint_sha256','final_checkpoint','members','metadata_reservations'} and reservation['protocol']=='verifier_reservation_v1','closed late reservation differs')
+    require(reservation['prepare_sha256']==sha_bytes(raw),'late reservation token differs')
     for key in ('source','session_id','unit_ordinal','resource_plan_sha256','initial_image_sha256','input_checkpoint_sha256'):
         require(prepare[key]==reservation[key],'late reservation binding differs: '+key)
     require(reservation['final_checkpoint']==request['checkpoint'],'finalize authoritative checkpoint differs')
@@ -2444,8 +2445,8 @@ def finalize_unit(request):
                 'final checkpoint is not registered append-only successor')
     member_map={}
     for m in reservation['members']:
-        require(set(m)=={'path','part_ordinal','bytes','sha256','role'} and m['role'] in PRIVATE_ROLES and
-                type(m['part_ordinal']) is int and 0<=m['part_ordinal']<reservation['fixed_prefix_part_count'] and m['path'] not in member_map,'invalid/duplicate fixed-prefix member reservation')
+        require(set(m)=={'path','bytes','sha256','role'} and m['role'] in PRIVATE_ROLES and
+                m['path'] not in member_map,'invalid/duplicate fixed-prefix member reservation')
         path=output/m['path']
         from paged_codec import safe_path
         safe_path(output,m['path'])
@@ -2455,8 +2456,8 @@ def finalize_unit(request):
         require(m['path'] in member_map and {k:member_map[m['path']][k] for k in ('path','bytes','sha256','role')}==m,'prepared member changed/renumbered at late reservation')
     metadata={}
     for m in reservation['metadata_reservations']:
-        require(set(m)=={'path','part_ordinal','maximum_bytes','role'} and (m['role'] in ('result','evidence_index','progress') or m['role']=='receipt' and m['path']=='restore-semantic.json' and request['work_unit']['stage']=='complete' and request['work_unit']['mode']=='unit' or m['role']=='source_receipt' and m['path'] in ('restore-semantic-execution.json','restore-semantic.log') and request['work_unit']['stage']=='complete' and request['work_unit']['mode']=='unit') and
-                m['path'] not in metadata and 0<=m['part_ordinal']<reservation['fixed_prefix_part_count'] and 0<m['maximum_bytes']<=8*1024*1024,'invalid bounded future metadata reservation')
+        require(set(m)=={'path','maximum_bytes','role'} and (m['role'] in ('result','evidence_index','progress') or m['role']=='receipt' and m['path']=='restore-semantic.json' and request['work_unit']['stage']=='complete' and request['work_unit']['mode']=='unit' or m['role']=='source_receipt' and m['path'] in ('restore-semantic-execution.json','restore-semantic.log') and request['work_unit']['stage']=='complete' and request['work_unit']['mode']=='unit') and
+                m['path'] not in metadata and 0<m['maximum_bytes']<=8*1024*1024,'invalid bounded future metadata reservation')
         metadata[m['path']]=m
     for m in prepare['metadata_reservations']:
         require(m['path'] in metadata and all(metadata[m['path']][k]==m[k] for k in ('path','maximum_bytes','role')),'future metadata reservation changed')
@@ -2540,7 +2541,7 @@ def finalize_unit(request):
             for i,entry in enumerate(publication):state_db.execute('INSERT INTO inventory_entries VALUES(?,?,?,?)',(final_sequence,'inputs',i,encoded(entry)))
             for i,prepared in enumerate(prepare['staged_members']):
                 m=member_map[prepared['path']]
-                member={'unit_ordinal':ordinal,'part_ordinal':m['part_ordinal'],'member_path':m['path'],'bytes':m['bytes'],'sha256':m['sha256']}
+                member={'unit_ordinal':ordinal,'member_path':m['path'],'bytes':m['bytes'],'sha256':m['sha256']}
                 state_db.execute('INSERT INTO inventory_entries VALUES(?,?,?,?)',(final_sequence,'outputs',i,encoded({'entry_kind':'member','member':member})))
             for sequence in range(row[3],final_sequence+1):
                 local=state_db.execute('SELECT claim,coverage,before_cursor,after_cursor,first_quantum,quantum_count FROM check_results WHERE sequence=?',(sequence,)).fetchone()
@@ -2555,14 +2556,14 @@ def finalize_unit(request):
                     receipt=strict_json(retained[0]);directory=str(Path(retained[1]).parent)
                     for path,m in sorted(member_map.items()):
                         if str(Path(path).parent)==directory and (path.endswith(('.tla','.cfg')) or Path(path).name=='id-map.json'):
-                            member={'unit_ordinal':ordinal,'part_ordinal':m['part_ordinal'],'member_path':path,'bytes':m['bytes'],'sha256':m['sha256']}
+                            member={'unit_ordinal':ordinal,'member_path':path,'bytes':m['bytes'],'sha256':m['sha256']}
                             entry=encoded({'entry_kind':'member','member':member})
                             n=state_db.execute("SELECT count(*) FROM inventory_entries WHERE result_sequence=? AND purpose='inputs'",(sequence,)).fetchone()[0]
                             state_db.execute('INSERT INTO inventory_entries VALUES(?,?,?,?)',(sequence,'inputs',n,entry))
                     def bound_member(path):
                         require(path in member_map,'TLC retained member was not reserved')
                         m=member_map[path]
-                        return {'unit_ordinal':ordinal,'part_ordinal':m['part_ordinal'],'member_path':path,'bytes':m['bytes'],'sha256':m['sha256']}
+                        return {'unit_ordinal':ordinal,'member_path':path,'bytes':m['bytes'],'sha256':m['sha256']}
                     runtime_member=bound_member('runtime/'+str(ordinal)+'.json')
                     n=state_db.execute("SELECT count(*) FROM inventory_entries WHERE result_sequence=? AND purpose='inputs'",(sequence,)).fetchone()[0]
                     state_db.execute('INSERT INTO inventory_entries VALUES(?,?,?,?)',(sequence,'inputs',n,encoded({'entry_kind':'member','member':runtime_member})))
@@ -2580,7 +2581,7 @@ def finalize_unit(request):
                             if purpose=='inputs':h.update(len(data).to_bytes(8,'big'));h.update(data)
                             yield strict_json(data)
                     roots[purpose]=build_evidence(entries(),purpose,str(sequence)+'-'+purpose,common,output,metadata,state_db)
-                result={'schema_version':1,'kind':'verifier_check_result',**common,'result_sequence':sequence,
+                result={'schema_version':2,'kind':'verifier_check_result',**common,'result_sequence':sequence,
                     'resource_plan_sha256':prepare['resource_plan_sha256'],'initial_image_sha256':prepare['initial_image_sha256'],
                     'input_root':h.hexdigest(),'before_cursor':strict_json(local[2]),'after_cursor':strict_json(local[3]),
                     'first_quantum':local[4],'quantum_count':local[5],'claim':local[0],'coverage':strict_json(local[1]),
@@ -2600,7 +2601,7 @@ def finalize_unit(request):
                 'results','unit-results',common,output,metadata,state_db)
             useful=state_db.execute('SELECT coalesce(sum(useful),0) FROM execution_commits WHERE sequence>? AND sequence<=?',(row[0],private_commit)).fetchone()[0]
             if useful==0:raise Incomplete('resource_blocked: no useful committed verifier quantum; refuse zero-progress publication')
-            progress={'schema_version':1,'kind':'verifier_unit_progress',**common,
+            progress={'schema_version':2,'kind':'verifier_unit_progress',**common,
                 'resource_plan_sha256':prepare['resource_plan_sha256'],'initial_image_sha256':prepare['initial_image_sha256'],
                 'previous_progress_sha256':request['previous_verifier_progress_sha256'],'previous_backup_manifest_sha256':request['previous_verifier_backup_sha256'],
                 'origin':strict_json(row[5]),'input_checkpoint_sha256':prepare['input_checkpoint_sha256'],'input_catalog_commit':prepare['input_catalog_commit'],
@@ -2627,7 +2628,7 @@ def finalize_unit(request):
             catalog_commit=cp['committed_transaction'],catalog_logical_digest=cp['catalog_logical_digest'],semantic_manifest_root=cp['page_root'],
             previous_verifier_progress_sha256=request['previous_verifier_progress_sha256'],progress_sha256=progress_member['sha256'],
             snapshot_boundary='post_verifier_commit_pre_upload',format='sqlite3',backup_method='sqlite_backup_api_v1',
-            backup_first_part=reservation['backup_first_part'],maximum_backup_parts=reservation['maximum_backup_parts'])
+            execution_origin=request['execution_origin'])
         write_json(output/'verifier-backup-descriptor.json',descriptor)
         unit['progress']=state.cursor()['position'];unit['status']=progress['disposition']
         result={'schema_version':6,'work_unit':unit,'checkpoint':request['checkpoint'],

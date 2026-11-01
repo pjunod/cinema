@@ -3325,14 +3325,15 @@ fn publish_paged_checkpoint(
         &session,
         paged::PAGE_BYTES,
     )?;
-    let backup = catalog_result(catalog.backup_checkpoint_catalog(
+    let mut backup = catalog_result(catalog.backup_checkpoint_catalog(
         &checkpoint,
         &request.output_dir.join("catalog-backup.sqlite"),
         &paged::BackupLimits {
-            max_bytes: limits.duplicate_backup_bytes.min(limits.total_disk_bytes),
+            max_bytes: limits.pools["snapshot_spool_bytes"].min(limits.families["catalog_main"].database_bytes),
             deadline,
         },
     ))?;
+    backup["execution_origin"] = request.execution_origin.clone();
     write_paged_json(
         &request.output_dir,
         "backup-descriptor.json",
@@ -3426,7 +3427,7 @@ async fn run_paged_quantum(
             .capture_initial_image(
                 &request.output_dir.join("initial-image.sqlite"),
                 &paged::BackupLimits {
-                    max_bytes: paged::PAGE_BYTES.min(catalog.limits().duplicate_backup_bytes),
+                    max_bytes: paged::PAGE_BYTES.min(catalog.limits().pools["snapshot_spool_bytes"]),
                     deadline,
                 },
             )

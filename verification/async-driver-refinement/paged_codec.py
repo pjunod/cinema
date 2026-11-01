@@ -643,8 +643,8 @@ class RecordIndex:
         require(self.resolver_path is not None, 'authenticated input resolver unavailable')
         auth = sqlite3.connect(Path(self.resolver_path).as_uri() + '?mode=ro&immutable=1', uri=True)
         try:
-            row = auth.execute('SELECT bytes,sha256,local_path FROM authenticated_members WHERE unit_ordinal=? AND part_ordinal=? AND member_path=?',
-                (member['unit_ordinal'], member['part_ordinal'], member['member_path'])).fetchone()
+            row = auth.execute('SELECT bytes,sha256,local_path FROM authenticated_members WHERE unit_ordinal=? AND member_path=?',
+                (member['unit_ordinal'], member['member_path'])).fetchone()
             require(row is not None and row[:2] == (member['bytes'], member['sha256']), 'missing/conflicting authenticated input member')
             path = Path(row[2])
             require(path.is_absolute() and path.is_file() and not path.is_symlink(), 'missing lazy authenticated input file')
@@ -946,9 +946,9 @@ class RecordIndex:
                 for kind,key,d,path in auth.execute('SELECT kind,key,digest,path FROM objects WHERE (kind,CAST(key AS TEXT))>(?,?) ORDER BY kind,CAST(key AS TEXT)',tuple(after)):
                     if kind in ('WorkUnit','ArtifactReceipt','Completion'):continue
                     key=canonical(strict_json(key))
-                    row=auth.execute('SELECT unit_ordinal,part_ordinal,member_path,bytes,sha256 FROM authenticated_members WHERE local_path=? ORDER BY unit_ordinal,part_ordinal,member_path LIMIT 1',(path,)).fetchone()
+                    row=auth.execute('SELECT unit_ordinal,member_path,bytes,sha256 FROM authenticated_members WHERE local_path=? ORDER BY unit_ordinal,member_path LIMIT 1',(path,)).fetchone()
                     require(row is not None,'candidate missing authenticated member provenance')
-                    member=dict(zip(('unit_ordinal','part_ordinal','member_path','bytes','sha256'),row))
+                    member=dict(zip(('unit_ordinal','member_path','bytes','sha256'),row))
                     reference={'kind':kind,'id':strict_json(key),'sha256':d}
                     prior=self.db.execute("SELECT member_ref,owner_result FROM input_members WHERE kind=? AND key=? AND reference=? AND status='done' ORDER BY owner_result LIMIT 1",(kind,key,encoded(reference))).fetchone()
                     with self.input_quantum('load_input',inputs=({'entry_kind':'member','member':member},)) as q:
@@ -1427,7 +1427,7 @@ class ContinuationResolver:
         self.db = sqlite3.connect(Path(directory) / 'continuation-validation.sqlite')
         self.db.execute('PRAGMA temp_store=FILE')
         self.db.execute('PRAGMA cache_size=-2048')
-        self.db.executescript('''CREATE TABLE IF NOT EXISTS evidence_work(root TEXT,unit INTEGER,part INTEGER,path TEXT,digest TEXT,level INTEGER,first_ordinal INTEGER,item_count INTEGER,PRIMARY KEY(root,unit,part,path));
+        self.db.executescript('''CREATE TABLE IF NOT EXISTS evidence_work(root TEXT,unit INTEGER,path TEXT,digest TEXT,level INTEGER,first_ordinal INTEGER,item_count INTEGER,PRIMARY KEY(root,unit,path));
             CREATE TABLE IF NOT EXISTS evidence_entries(root TEXT,ordinal INTEGER,entry BLOB,PRIMARY KEY(root,ordinal));
             CREATE TABLE IF NOT EXISTS chain_results(sequence INTEGER PRIMARY KEY,unit INTEGER,payload BLOB,digest TEXT);
             CREATE TABLE IF NOT EXISTS chain_progress(unit INTEGER PRIMARY KEY,payload BLOB,sha256 TEXT,backup_sha256 TEXT);''')
@@ -1439,9 +1439,9 @@ class ContinuationResolver:
         self.auth.close()
 
     def member_path(self, member):
-        require(type(member) is dict and set(member) == {'unit_ordinal','part_ordinal','member_path','bytes','sha256'}, 'closed continuation MemberRef')
-        row = self.auth.execute('SELECT bytes,sha256,local_path FROM authenticated_members WHERE unit_ordinal=? AND part_ordinal=? AND member_path=?',
-            (member['unit_ordinal'],member['part_ordinal'],member['member_path'])).fetchone()
+        require(type(member) is dict and set(member) == {'unit_ordinal','member_path','bytes','sha256'}, 'closed continuation MemberRef')
+        row = self.auth.execute('SELECT bytes,sha256,local_path FROM authenticated_members WHERE unit_ordinal=? AND member_path=?',
+            (member['unit_ordinal'],member['member_path'])).fetchone()
         require(row is not None and (row[0],row[1]) == (member['bytes'],member['sha256']), 'unauthenticated/wrong continuation member')
         path = Path(row[2])
         require(path.is_absolute() and path.is_file() and not path.is_symlink(), 'unsafe authenticated member location')
@@ -1480,8 +1480,8 @@ class ContinuationResolver:
             node=pending.pop()
             m=node['member']
             try:
-                self.db.execute('INSERT INTO evidence_work VALUES(?,?,?,?,?,?,?,?)',
-                    (token,m['unit_ordinal'],m['part_ordinal'],m['member_path'],m['sha256'],node['level'],node['first_ordinal'],node['item_count']))
+                self.db.execute('INSERT INTO evidence_work VALUES(?,?,?,?,?,?,?)',
+                    (token,m['unit_ordinal'],m['member_path'],m['sha256'],node['level'],node['first_ordinal'],node['item_count']))
             except sqlite3.IntegrityError as error:
                 raise Invalid('duplicate/cyclic evidence index member') from error
             value=self.metadata(m,'verifier_evidence_index')
@@ -1597,7 +1597,7 @@ class ContinuationResolver:
         next_sequence=1
         latest=None
         initial_cursor,initial_digest=state.deterministic_initial()
-        for unit,progress_path,backup_path,work_unit_json in self.auth.execute('SELECT unit_ordinal,progress_path,backup_root_path,work_unit_json FROM verifier_chain ORDER BY unit_ordinal'):
+        for unit,progress_path,backup_path,work_unit_json,execution_origin_json in self.auth.execute('SELECT unit_ordinal,progress_path,backup_root_path,work_unit_json,execution_origin_json FROM verifier_chain ORDER BY unit_ordinal'):
             work_unit=strict_json(work_unit_json)
             work_unit=work_unit['record'] if work_unit.get('kind')=='WorkUnit' else work_unit
             raw=Path(progress_path).read_bytes()
@@ -1605,7 +1605,8 @@ class ContinuationResolver:
             progress=strict_json(raw)
             self.schema.check(progress)
             require(encoded(progress)==raw and progress['kind']=='verifier_unit_progress' and progress['source']==self.source and progress['session_id']==self.session and progress['unit_ordinal']==unit,'verifier progress binding')
-            origin={k:work_unit[k] for k in ('repository','pr','event_base','workflow_id','event_name','mode','run','job','task','attempt','stage')}
+            origin=strict_json(execution_origin_json)
+            require(all(origin[k]==work_unit[k] for k in ('repository','pr','event_base','workflow_id','event_name','mode','run','job','task','attempt')) and origin['operation']=='execute','authenticated execution origin differs from WorkUnit')
             require(progress['origin']==origin and origin['attempt']==1,'verifier authenticated origin mismatch')
             identity=state.db.execute('SELECT algorithm,source_json,session,plan,initial_image FROM verifier_meta WHERE singleton=1').fetchone()
             require(identity==(1,encoded(self.source),self.session,progress['resource_plan_sha256'],progress['initial_image_sha256']),'restored private identity differs from authenticated result chain')

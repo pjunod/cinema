@@ -1926,7 +1926,8 @@
           ]
         },
         "source_bounds_utf8": {
-          "$ref": "#/$defs/CanonicalUtf8"
+          "$ref": "#/$defs/CanonicalUtf8",
+          "description": "Canonical OperationalBounds3 encoding; physical policy appears only inside this string. Logical quotas never estimate database pages."
         },
         "available_disk_receipt": {
           "anyOf": [
@@ -3349,6 +3350,661 @@
         "node",
         "job",
         "claim_id"
+      ],
+      "additionalProperties": false
+    },
+    "PhysicalFamily": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "enum": [
+            "catalog",
+            "verifier",
+            "catalog_export",
+            "verifier_continuation",
+            "snapshot_restore",
+            "snapshot_transport",
+            "provenance",
+            "session_controller"
+          ]
+        },
+        "database_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "main_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "journal_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "temp_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        }
+      },
+      "required": [
+        "owner",
+        "database_bytes",
+        "main_bytes",
+        "journal_bytes",
+        "temp_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "PhysicalPolicy": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "kind": {
+          "const": "physical_policy"
+        },
+        "table_map_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "families": {
+          "type": "object",
+          "properties": {
+            "catalog_main": {
+              "type": "object",
+              "properties": {
+                "owner": {
+                  "const": "catalog"
+                },
+                "database_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "main_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "journal_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "temp_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              },
+              "required": [
+                "owner",
+                "database_bytes",
+                "main_bytes",
+                "journal_bytes",
+                "temp_bytes"
+              ],
+              "additionalProperties": false
+            },
+            "verifier_main": {
+              "type": "object",
+              "properties": {
+                "owner": {
+                  "const": "verifier"
+                },
+                "database_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "main_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "journal_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "temp_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              },
+              "required": [
+                "owner",
+                "database_bytes",
+                "main_bytes",
+                "journal_bytes",
+                "temp_bytes"
+              ],
+              "additionalProperties": false
+            },
+            "catalog_export_scratch": {
+              "type": "object",
+              "properties": {
+                "owner": {
+                  "const": "catalog_export"
+                },
+                "database_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "main_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "journal_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "temp_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              },
+              "required": [
+                "owner",
+                "database_bytes",
+                "main_bytes",
+                "journal_bytes",
+                "temp_bytes"
+              ],
+              "additionalProperties": false
+            },
+            "verifier_continuation_scratch": {
+              "type": "object",
+              "properties": {
+                "owner": {
+                  "const": "verifier_continuation"
+                },
+                "database_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "main_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "journal_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "temp_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              },
+              "required": [
+                "owner",
+                "database_bytes",
+                "main_bytes",
+                "journal_bytes",
+                "temp_bytes"
+              ],
+              "additionalProperties": false
+            },
+            "catalog_or_verifier_restore_scratch": {
+              "type": "object",
+              "properties": {
+                "owner": {
+                  "const": "snapshot_restore"
+                },
+                "database_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "main_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "journal_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "temp_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              },
+              "required": [
+                "owner",
+                "database_bytes",
+                "main_bytes",
+                "journal_bytes",
+                "temp_bytes"
+              ],
+              "additionalProperties": false
+            },
+            "publication_pack_scratch": {
+              "type": "object",
+              "properties": {
+                "owner": {
+                  "const": "snapshot_transport"
+                },
+                "database_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "main_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "journal_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "temp_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              },
+              "required": [
+                "owner",
+                "database_bytes",
+                "main_bytes",
+                "journal_bytes",
+                "temp_bytes"
+              ],
+              "additionalProperties": false
+            },
+            "authentication_index": {
+              "type": "object",
+              "properties": {
+                "owner": {
+                  "const": "provenance"
+                },
+                "database_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "main_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "journal_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "temp_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              },
+              "required": [
+                "owner",
+                "database_bytes",
+                "main_bytes",
+                "journal_bytes",
+                "temp_bytes"
+              ],
+              "additionalProperties": false
+            },
+            "publication_pending_scratch": {
+              "type": "object",
+              "properties": {
+                "owner": {
+                  "const": "session_controller"
+                },
+                "database_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "main_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "journal_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                },
+                "temp_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              },
+              "required": [
+                "owner",
+                "database_bytes",
+                "main_bytes",
+                "journal_bytes",
+                "temp_bytes"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "catalog_main",
+            "verifier_main",
+            "catalog_export_scratch",
+            "verifier_continuation_scratch",
+            "catalog_or_verifier_restore_scratch",
+            "publication_pack_scratch",
+            "authentication_index",
+            "publication_pending_scratch"
+          ],
+          "additionalProperties": false
+        },
+        "pools": {
+          "type": "object",
+          "properties": {
+            "snapshot_spool_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            "restore_staging_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            "transfer_staging_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            "cas_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            "source_runtime_scratch_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            "control_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            }
+          },
+          "required": [
+            "snapshot_spool_bytes",
+            "restore_staging_bytes",
+            "transfer_staging_bytes",
+            "cas_bytes",
+            "source_runtime_scratch_bytes",
+            "control_bytes"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "table_map_sha256",
+        "families",
+        "pools"
+      ],
+      "additionalProperties": false
+    },
+    "PhysicalGeometry": {
+      "type": "object",
+      "properties": {
+        "database_role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sqlite_source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "page_count": {
+          "$ref": "#/$defs/Nat"
+        },
+        "tables": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "indexes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "database_role",
+        "sqlite_source_id",
+        "schema_sha256",
+        "page_size",
+        "page_count",
+        "tables",
+        "indexes"
+      ],
+      "additionalProperties": false
+    },
+    "PhysicalCalibration": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "physical_calibration"
+        },
+        "policy_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "table_map_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "geometry": {
+          "type": "object",
+          "properties": {
+            "catalog_main": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/PhysicalGeometry"
+              }
+            },
+            "verifier_main": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/PhysicalGeometry"
+              }
+            },
+            "catalog_export_scratch": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/PhysicalGeometry"
+              }
+            },
+            "verifier_continuation_scratch": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/PhysicalGeometry"
+              }
+            },
+            "catalog_or_verifier_restore_scratch": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/PhysicalGeometry"
+              }
+            },
+            "publication_pack_scratch": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/PhysicalGeometry"
+              }
+            },
+            "authentication_index": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/PhysicalGeometry"
+              }
+            },
+            "publication_pending_scratch": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/PhysicalGeometry"
+              }
+            }
+          },
+          "required": [
+            "catalog_main",
+            "verifier_main",
+            "catalog_export_scratch",
+            "verifier_continuation_scratch",
+            "catalog_or_verifier_restore_scratch",
+            "publication_pack_scratch",
+            "authentication_index",
+            "publication_pending_scratch"
+          ],
+          "additionalProperties": false
+        },
+        "baseline": {
+          "type": "object",
+          "properties": {
+            "source_workspace_bytes": {
+              "$ref": "#/$defs/Nat"
+            },
+            "existing_unpooled_bytes": {
+              "$ref": "#/$defs/Nat"
+            }
+          },
+          "required": [
+            "source_workspace_bytes",
+            "existing_unpooled_bytes"
+          ],
+          "additionalProperties": false
+        },
+        "peak_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "policy_sha256",
+        "table_map_sha256",
+        "geometry",
+        "baseline",
+        "peak_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "OperationalBounds3": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "accounting_rule": {
+          "const": "typed_physical_caps_v1"
+        },
+        "source_receipt": {
+          "$ref": "source-bound-receipt.schema.json"
+        },
+        "record_allowances": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "records": {
+                "$ref": "#/$defs/Nat"
+              },
+              "max_encoded_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9223372036854775807
+              }
+            },
+            "required": [
+              "records",
+              "max_encoded_bytes"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "physical_policy": {
+          "$ref": "#/$defs/PhysicalPolicy"
+        },
+        "calibration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhysicalCalibration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "accounting_method_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "measurement_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "accounting_rule",
+        "source_receipt",
+        "record_allowances",
+        "physical_policy",
+        "calibration",
+        "accounting_method_sha256",
+        "measurement_sha256"
       ],
       "additionalProperties": false
     }

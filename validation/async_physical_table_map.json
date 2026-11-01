@@ -1,0 +1,1802 @@
+{
+  "schema_version": 1,
+  "kind": "physical_table_map",
+  "sources": {
+    "verification/async-driver-refinement/paged-catalog.sql": "8095448d489d7a5b6488dcad1d08481967585ac654f71732d6cd2b5b5dd1c6bc",
+    "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs": "2d2bb5741daef0ba92f075eed78a18dd0150f312ba26c88c713a72be94e55009",
+    "crates/plurx-core/src/store/async_driver_catalog.rs": "af675d28865584d93ecabd02f1267b4f5409b9eeb0f1fbce84a6ea744e68116c",
+    "verification/async-driver-refinement/paged-verifier-state.sql": "598c28c51b90ce12fa81f9826c88cdcd496e691079f924b0c39fc61fe76530a6",
+    "verification/async-driver-refinement/paged_codec.py": "317f20c1e623a6097b5a3c05dfb1694ad75c6f49ff1f6c20bc872062222f16c8",
+    "verification/async-driver-refinement/paged_checker.py": "197490f1c05dccaeb066897dc1ba9109fa15731af59c3cec6ef0e223c15a5dde",
+    "validation/async_refinement_provenance.py": "2dc182e536fe59d13dd0b4156f9421c856047a2c5d040d8f90f95f3aa705814d",
+    "validation/async_snapshot_transport.py": "1459146c644ea88b94cf751205a71b98b932a88104c684252c910a49c58611bf"
+  },
+  "families": {
+    "catalog_main": [
+      {
+        "database_role": "rust_catalog",
+        "objects": [
+          {
+            "type": "table",
+            "name": "boundaries",
+            "table": "boundaries",
+            "ddl": "CREATE TABLE boundaries (id INTEGER PRIMARY KEY AUTOINCREMENT, physical_id INTEGER NOT NULL REFERENCES physical_rows(id), episode_id INTEGER NOT NULL REFERENCES episodes(id), phase TEXT NOT NULL CHECK(phase IN ('initial','pre_apply','post_apply','post_rollback')), canonical BLOB NOT NULL, omitted BLOB NOT NULL, witness BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "BoundaryObservation descriptors by identity",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "candidates",
+            "table": "candidates",
+            "ddl": "CREATE TABLE candidates (id INTEGER PRIMARY KEY AUTOINCREMENT, expansion_id INTEGER NOT NULL REFERENCES expansions(id) DEFERRABLE INITIALLY DEFERRED, ordinal INTEGER NOT NULL CHECK(ordinal>=0), descriptor BLOB NOT NULL, classification TEXT NOT NULL CHECK(classification IN ('eligible','excluded_domain','excluded_sample')), reason TEXT, UNIQUE(expansion_id,ordinal), CHECK((classification='eligible')=(reason IS NULL)))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "candidate descriptors per expansion and source ordinal; multiplicity is that source relation",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "catalog_allocators",
+            "table": "catalog_allocators",
+            "ddl": "CREATE TABLE IF NOT EXISTS catalog_allocators(kind TEXT PRIMARY KEY,last_id INTEGER NOT NULL CHECK(last_id>=1))",
+            "source_path": "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs",
+            "constructor": "SqliteStorage::open_inner",
+            "relation": "append-stable last-ID cursor per kind",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "catalog_commits",
+            "table": "catalog_commits",
+            "ddl": "CREATE TABLE catalog_commits (sequence INTEGER PRIMARY KEY CHECK(sequence>=1), phase TEXT NOT NULL CHECK(phase IN ('initial','source','temporal')), unit_ordinal INTEGER NOT NULL CHECK(unit_ordinal>=0))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "atomic semantic commit sequence, phase, unit and predecessor progress; not an ID allocator per table",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "catalog_control",
+            "table": "catalog_control",
+            "ddl": "CREATE TABLE IF NOT EXISTS catalog_control(key TEXT PRIMARY KEY,payload BLOB NOT NULL)",
+            "source_path": "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs",
+            "constructor": "SqliteStorage::open_inner",
+            "relation": "named controller binding/checkpoint bookkeeping payloads",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "catalog_identities",
+            "table": "catalog_identities",
+            "ddl": "CREATE TABLE IF NOT EXISTS catalog_identities (\n kind TEXT NOT NULL,digest BLOB NOT NULL CHECK(length(digest)=32),canonical BLOB NOT NULL,\n id INTEGER NOT NULL,PRIMARY KEY(kind,canonical),UNIQUE(kind,id))",
+            "source_path": "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs",
+            "constructor": "SqliteStorage::open_inner",
+            "relation": "identity interning keyed by kind and complete canonical bytes, stable ID uniqueness per kind",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "catalog_meta",
+            "table": "catalog_meta",
+            "ddl": "CREATE TABLE catalog_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), current_commit INTEGER NOT NULL REFERENCES catalog_commits(sequence), schema_version INTEGER NOT NULL CHECK(schema_version=6), source_json BLOB NOT NULL, session_id TEXT NOT NULL UNIQUE, resource_plan_sha256 TEXT NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "singleton catalog schema/source/session/plan/high-water identity",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "catalog_record_counts",
+            "table": "catalog_record_counts",
+            "ddl": "CREATE TABLE IF NOT EXISTS catalog_record_counts(kind TEXT PRIMARY KEY,record_count INTEGER NOT NULL CHECK(record_count>=0))",
+            "source_path": "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs",
+            "constructor": "SqliteStorage::open_inner",
+            "relation": "maintained count per semantic kind",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "catalog_records",
+            "table": "catalog_records",
+            "ddl": "CREATE TABLE IF NOT EXISTS catalog_records (\n kind TEXT NOT NULL,key_type INTEGER NOT NULL CHECK(key_type IN (0,1)),\n key_integer INTEGER,key_text TEXT,key_json BLOB NOT NULL,payload BLOB NOT NULL,\n digest BLOB NOT NULL CHECK(length(digest)=32),created_commit INTEGER NOT NULL REFERENCES catalog_commits(sequence),\n PRIMARY KEY(kind,key_json))",
+            "source_path": "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs",
+            "constructor": "SqliteStorage::open_inner",
+            "relation": "complete source-kind record envelopes keyed by kind and exact key JSON; auxiliary mirror, not every table receiving every kind",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "checkpoints",
+            "table": "checkpoints",
+            "ddl": "CREATE TABLE checkpoints (sequence INTEGER PRIMARY KEY CHECK(sequence>=0), digest TEXT NOT NULL UNIQUE, unit_ordinal INTEGER NOT NULL REFERENCES work_units(ordinal), descriptor BLOB NOT NULL, previous_digest TEXT, page_root TEXT NOT NULL, transaction_high_water INTEGER NOT NULL, oldest_pending_ticket INTEGER, counts BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "checkpoint chain descriptors by sequence/digest and unit FK",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "component_members",
+            "table": "component_members",
+            "ddl": "CREATE TABLE component_members (view_key BLOB NOT NULL, monitor_id INTEGER NOT NULL REFERENCES monitor_nodes(id), component_id INTEGER NOT NULL, PRIMARY KEY(view_key,monitor_id), FOREIGN KEY(component_id,view_key) REFERENCES components(id,view_key))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "membership per full view and monitor ID; the same monitor may occur in multiple obligation views",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "components",
+            "table": "components",
+            "ddl": "CREATE TABLE components (id INTEGER PRIMARY KEY AUTOINCREMENT, context TEXT NOT NULL REFERENCES contexts(name), property TEXT NOT NULL CHECK(property IN ('seen_goal_false','pending_true','capacity_ok_pending_true')), obligation BLOB NOT NULL, view_key BLOB NOT NULL, rank INTEGER NOT NULL CHECK(rank>=0), root INTEGER NOT NULL REFERENCES monitor_nodes(id), certificate BLOB NOT NULL, UNIQUE(id,view_key))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "SCC certificates per context/property/full obligation view; complete certificate stored",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "contexts",
+            "table": "contexts",
+            "ddl": "CREATE TABLE contexts (name TEXT PRIMARY KEY CHECK(name IN ('base','stable','weak_admission','no_claim_win','withheld_join','old_poll_policy','drop_before_join')), initial_product INTEGER REFERENCES products(id) DEFERRABLE INITIALLY DEFERRED, descriptor BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "the seven named contexts and their initial Product roots",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "demand_dependencies",
+            "table": "demand_dependencies",
+            "ddl": "CREATE TABLE demand_dependencies (demand_id INTEGER NOT NULL REFERENCES demands(id), depends_on INTEGER NOT NULL REFERENCES demands(id), PRIMARY KEY(demand_id,depends_on))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "directed demand dependency pairs; potentially multiple dependencies per demand; no 1:1 bound claimed",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "demands",
+            "table": "demands",
+            "ddl": "CREATE TABLE demands (id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER NOT NULL REFERENCES candidates(id), ordinal INTEGER NOT NULL CHECK(ordinal>=0), from_store INTEGER NOT NULL REFERENCES stores(id), role TEXT NOT NULL CHECK(role IN ('apply','capacity','dependent_resolve','dependent_read','dependent_cancel')), descriptor BLOB NOT NULL, classification TEXT NOT NULL CHECK(classification IN ('eligible','excluded_domain','excluded_sample')), outcome_id INTEGER REFERENCES oracle_edges(id), reason TEXT, UNIQUE(candidate_id,ordinal), CHECK((classification='eligible' AND outcome_id IS NOT NULL AND reason IS NULL) OR (classification!='eligible' AND outcome_id IS NULL AND reason IS NOT NULL)))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "demand descriptors per candidate and demand ordinal; each has role, source Store and optional oracle outcome",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "enabledness",
+            "table": "enabledness",
+            "ddl": "CREATE TABLE enabledness (product_id INTEGER PRIMARY KEY REFERENCES products(id), full_graph_labels BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "full-graph enabled labels keyed by Product ID",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "episodes",
+            "table": "episodes",
+            "ddl": "CREATE TABLE episodes (id INTEGER PRIMARY KEY AUTOINCREMENT, digest BLOB NOT NULL CHECK(length(digest)=32), canonical BLOB NOT NULL UNIQUE, utf8_bytes INTEGER NOT NULL CHECK(utf8_bytes>=0))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "Episode factor states by append-stable identity",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "expansions",
+            "table": "expansions",
+            "ddl": "CREATE TABLE expansions (id INTEGER PRIMARY KEY AUTOINCREMENT, predecessor INTEGER NOT NULL UNIQUE REFERENCES products(id), fifo_ticket INTEGER NOT NULL UNIQUE REFERENCES frontier(ticket), unit_ordinal INTEGER NOT NULL CHECK(unit_ordinal>=0), descriptor BLOB NOT NULL, complete INTEGER NOT NULL CHECK(complete=1))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "complete expansion descriptors; predecessor Product and FIFO ticket are independently unique",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "fair_labels",
+            "table": "fair_labels",
+            "ddl": "CREATE TABLE fair_labels (context TEXT NOT NULL, from_product INTEGER NOT NULL, to_product INTEGER NOT NULL, label TEXT NOT NULL, PRIMARY KEY(context,from_product,to_product,label), FOREIGN KEY(context,from_product,to_product) REFERENCES fair_pairs(context,from_product,to_product))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "individual fair labels per context/Product pair; multiple labels per pair",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "fair_pairs",
+            "table": "fair_pairs",
+            "ddl": "CREATE TABLE fair_pairs (context TEXT NOT NULL REFERENCES contexts(name), from_product INTEGER NOT NULL REFERENCES products(id), to_product INTEGER NOT NULL REFERENCES products(id), nonstuttering INTEGER NOT NULL CHECK(nonstuttering IN (0,1)), PRIMARY KEY(context,from_product,to_product))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "union relation keyed by context and Product endpoint pair",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "final_records",
+            "table": "final_records",
+            "ddl": "CREATE TABLE final_records (kind TEXT NOT NULL CHECK(kind IN ('Counts','ContextRoot','Outcome')), record_key BLOB NOT NULL, payload BLOB NOT NULL, sealed_commit INTEGER NOT NULL REFERENCES catalog_commits(sequence), PRIMARY KEY(kind,record_key))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "frozen Counts/ContextRoot/Outcome encodings by complete semantic key",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "frontier",
+            "table": "frontier",
+            "ddl": "CREATE TABLE frontier (ticket INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL UNIQUE REFERENCES products(id), status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','expanded')))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "FIFO tickets whose Product FK is unique; discovered Product subset with pending/expanded status",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "monitor_edges",
+            "table": "monitor_edges",
+            "ddl": "CREATE TABLE monitor_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, from_monitor INTEGER NOT NULL REFERENCES monitor_nodes(id), to_monitor INTEGER NOT NULL REFERENCES monitor_nodes(id), product_edge INTEGER NOT NULL REFERENCES product_edges(id), UNIQUE(from_monitor,to_monitor,product_edge))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "monitor endpoint/ProductEdge triples; no one-edge-per-Product assumption",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "monitor_nodes",
+            "table": "monitor_nodes",
+            "ddl": "CREATE TABLE monitor_nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL REFERENCES products(id), monitor BLOB NOT NULL, UNIQUE(product_id,monitor))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "monitor state relation keyed by Product plus complete monitor bytes; multiple histories may project to one Product",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "oracle_edges",
+            "table": "oracle_edges",
+            "ddl": "CREATE TABLE oracle_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, from_store INTEGER NOT NULL REFERENCES stores(id), to_store INTEGER NOT NULL REFERENCES stores(id), input BLOB NOT NULL, applied BLOB NOT NULL, production_witness BLOB NOT NULL, before_boundary INTEGER NOT NULL REFERENCES boundaries(id), after_boundary INTEGER NOT NULL REFERENCES boundaries(id), rollback_boundary INTEGER NOT NULL REFERENCES boundaries(id), UNIQUE(from_store,input))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "actual checked production oracle outcomes by stable edge ID and source/action tuple",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "page_dependencies",
+            "table": "page_dependencies",
+            "ddl": "CREATE TABLE page_dependencies (page_id TEXT NOT NULL REFERENCES pages(id), target_kind TEXT NOT NULL, target_id TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(page_id,target_kind,target_id))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "page-to-target-reference relation; many dependencies may belong to a page",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "pages",
+            "table": "pages",
+            "ddl": "CREATE TABLE pages (id TEXT PRIMARY KEY, kind TEXT NOT NULL, first_key BLOB NOT NULL, last_key BLOB NOT NULL, record_count INTEGER NOT NULL CHECK(record_count>=0), bytes INTEGER NOT NULL CHECK(bytes>=0 AND bytes<=268435456), descriptor BLOB NOT NULL, previous_checkpoint TEXT, transaction_high_water INTEGER NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "semantic page descriptors by content identity; contains ranges and record counts",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "physical_rows",
+            "table": "physical_rows",
+            "ddl": "CREATE TABLE physical_rows (id INTEGER PRIMARY KEY AUTOINCREMENT, digest BLOB NOT NULL CHECK(length(digest)=32), canonical BLOB NOT NULL UNIQUE, utf8_bytes INTEGER NOT NULL CHECK(utf8_bytes>=0))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "PhysicalRows factor states by append-stable identity",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "product_edges",
+            "table": "product_edges",
+            "ddl": "CREATE TABLE product_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, expansion_id INTEGER NOT NULL REFERENCES expansions(id) DEFERRABLE INITIALLY DEFERRED, candidate_id INTEGER NOT NULL REFERENCES candidates(id), from_product INTEGER NOT NULL REFERENCES products(id), to_product INTEGER NOT NULL REFERENCES products(id), descriptor BLOB NOT NULL, primary_edge INTEGER REFERENCES oracle_edges(id), resolution_edge INTEGER REFERENCES oracle_edges(id), read_edge INTEGER REFERENCES oracle_edges(id), cleanup_edge INTEGER REFERENCES oracle_edges(id))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "eligible successor relations with candidate/expansion/Product endpoints and optional oracle edges; no 1:1 bound claimed",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "products",
+            "table": "products",
+            "ddl": "CREATE TABLE products (id INTEGER PRIMARY KEY AUTOINCREMENT, context TEXT NOT NULL REFERENCES contexts(name), store_id INTEGER NOT NULL REFERENCES stores(id), digest BLOB NOT NULL CHECK(length(digest)=32), canonical BLOB NOT NULL, predecessor_edge INTEGER REFERENCES product_edges(id) DEFERRABLE INITIALLY DEFERRED, expanded INTEGER NOT NULL DEFAULT 0 CHECK(expanded IN (0,1)), UNIQUE(context,canonical))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "Product states by context plus exact canonical state; discovery predecessor is a separate edge relation",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "resource_plans",
+            "table": "resource_plans",
+            "ddl": "CREATE TABLE resource_plans (digest TEXT PRIMARY KEY, descriptor BLOB NOT NULL, admission TEXT NOT NULL CHECK(admission='admitted'))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "exact admitted ResourcePlan envelope by digest",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "sessions",
+            "table": "sessions",
+            "ddl": "CREATE TABLE sessions (id TEXT PRIMARY KEY, source_json BLOB NOT NULL, initial_image_sha256 TEXT NOT NULL, resource_plan_sha256 TEXT NOT NULL REFERENCES resource_plans(digest), phase TEXT NOT NULL CHECK(phase IN ('admitted','running','checkpointed_incomplete','resource_blocked','semantic_invalid','closed_unqualified','qualified','completion_rejected','complete')), checkpoint_digest TEXT, next_unit INTEGER NOT NULL CHECK(next_unit>=0), descriptor BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "registered session identity and frozen source/Init",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "stores",
+            "table": "stores",
+            "ddl": "CREATE TABLE stores (id INTEGER PRIMARY KEY AUTOINCREMENT, physical_id INTEGER NOT NULL REFERENCES physical_rows(id), episode_id INTEGER NOT NULL REFERENCES episodes(id), digest BLOB NOT NULL CHECK(length(digest)=32), canonical BLOB NOT NULL UNIQUE, initial_image_sha256 TEXT NOT NULL, sqlite_schema_sha256 TEXT NOT NULL, boundary_id INTEGER NOT NULL REFERENCES boundaries(id), replay_parent_edge INTEGER REFERENCES oracle_edges(id) DEFERRABLE INITIALLY DEFERRED, certification TEXT NOT NULL CHECK(certification IN ('actual_init_checked','novel_actual_state_checked')), UNIQUE(physical_id,episode_id))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "actual raw Store states; identity uses complete canonical bytes, with optional creating oracle edge",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "table",
+            "name": "work_units",
+            "table": "work_units",
+            "ddl": "CREATE TABLE work_units (ordinal INTEGER PRIMARY KEY CHECK(ordinal>=0), expected_prior_checkpoint TEXT, stage TEXT NOT NULL CHECK(stage IN ('expand','semantic_verify','monitor_scc_verify','temporal_components','backend_qualification','complete')), progress BLOB NOT NULL, registered_cases BLOB NOT NULL, source_json BLOB NOT NULL, auth_receipt BLOB, status TEXT NOT NULL CHECK(status IN ('dispatched','running','checkpointed_incomplete','failed_incomplete','closed_unqualified','qualified','complete')))",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "controller WorkUnit descriptors and statuses by proof unit ordinal",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "index",
+            "name": "catalog_identity_digest",
+            "table": "catalog_identities",
+            "ddl": "CREATE INDEX IF NOT EXISTS catalog_identity_digest ON catalog_identities(kind,digest)",
+            "source_path": "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs",
+            "constructor": "SqliteStorage::open_inner",
+            "relation": "Index of catalog_identities exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "index",
+            "name": "catalog_records_order",
+            "table": "catalog_records",
+            "ddl": "CREATE INDEX IF NOT EXISTS catalog_records_order ON catalog_records(kind,key_type,key_integer,key_text)",
+            "source_path": "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs",
+            "constructor": "SqliteStorage::open_inner",
+            "relation": "Index of catalog_records exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "index",
+            "name": "components_view",
+            "table": "components",
+            "ddl": "CREATE INDEX components_view ON components(view_key)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "Index of components exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "index",
+            "name": "episodes_digest",
+            "table": "episodes",
+            "ddl": "CREATE INDEX episodes_digest ON episodes(digest)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "Index of episodes exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "index",
+            "name": "frontier_fifo",
+            "table": "frontier",
+            "ddl": "CREATE INDEX frontier_fifo ON frontier(status,ticket)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "Index of frontier exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "index",
+            "name": "physical_rows_digest",
+            "table": "physical_rows",
+            "ddl": "CREATE INDEX physical_rows_digest ON physical_rows(digest)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "Index of physical_rows exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "index",
+            "name": "products_digest",
+            "table": "products",
+            "ddl": "CREATE INDEX products_digest ON products(context,digest)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "Index of products exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          },
+          {
+            "type": "index",
+            "name": "stores_digest",
+            "table": "stores",
+            "ddl": "CREATE INDEX stores_digest ON stores(digest)",
+            "source_path": "verification/async-driver-refinement/paged-catalog.sql",
+            "constructor": "source SQL",
+            "relation": "Index of stores exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "session-retained append-stable semantic/catalog relation; mutable bookkeeping rows only as source permits"
+          }
+        ]
+      }
+    ],
+    "verifier_main": [
+      {
+        "database_role": "independent_verifier",
+        "objects": [
+          {
+            "type": "table",
+            "name": "authenticated_units",
+            "table": "authenticated_units",
+            "ddl": "CREATE TABLE IF NOT EXISTS authenticated_units(unit INTEGER PRIMARY KEY,origin BLOB NOT NULL,input_checkpoint TEXT NOT NULL,produced_checkpoint TEXT NOT NULL,progress_sha256 TEXT NOT NULL,backup_sha256 TEXT NOT NULL,result_root BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "authenticated prior work-unit input/output/progress/backup/result roots; path bookkeeping excluded from semantic digest",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "authoritative",
+            "table": "authoritative",
+            "ddl": "CREATE TABLE IF NOT EXISTS authoritative(scope TEXT NOT NULL,kind TEXT,key TEXT,PRIMARY KEY(scope,kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "authoritative record keys per authenticated input scope",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "blob_descriptors",
+            "table": "blob_descriptors",
+            "ddl": "CREATE TABLE IF NOT EXISTS blob_descriptors(kind TEXT,key TEXT,digest TEXT NOT NULL,bytes INTEGER NOT NULL,member_ref BLOB NOT NULL,PRIMARY KEY(kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "opaque exact blob identity/byte size/member provenance per kind/key",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "blobs",
+            "table": "blobs",
+            "ddl": "CREATE TABLE IF NOT EXISTS blobs(kind TEXT,key TEXT,digest TEXT,path TEXT,bytes INTEGER,PRIMARY KEY(kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "relocatable authenticated blob paths by kind/key",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "boundary_owner",
+            "table": "boundary_owner",
+            "ddl": "CREATE TABLE IF NOT EXISTS boundary_owner(id INTEGER PRIMARY KEY,evidence INTEGER NOT NULL,phase TEXT NOT NULL,UNIQUE(evidence,phase))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "BoundaryObservation to evidence/phase relationship, with distinct phase uniqueness",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "boundary_used",
+            "table": "boundary_used",
+            "ddl": "CREATE TABLE IF NOT EXISTS boundary_used(id INTEGER PRIMARY KEY)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "used BoundaryObservation IDs",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "cache_bindings",
+            "table": "cache_bindings",
+            "ddl": "CREATE TABLE IF NOT EXISTS cache_bindings(path TEXT PRIMARY KEY,member BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "relocatable cache path to exact member binding",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "canonical_values",
+            "table": "canonical_values",
+            "ddl": "CREATE TABLE IF NOT EXISTS canonical_values(kind TEXT,canonical BLOB,key TEXT,PRIMARY KEY(kind,canonical),UNIQUE(kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "full canonical identity interned by kind; uniqueness also enforced on kind/key",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "certificate_tree",
+            "table": "certificate_tree",
+            "ddl": "CREATE TABLE IF NOT EXISTS certificate_tree(src INTEGER,dst INTEGER PRIMARY KEY,edge INTEGER UNIQUE)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current spanning-tree/certificate traversal state keyed by scope/node/destination; edge uniqueness as declared",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "check_results",
+            "table": "check_results",
+            "ddl": "CREATE TABLE IF NOT EXISTS check_results(sequence INTEGER PRIMARY KEY,claim TEXT NOT NULL,coverage BLOB NOT NULL,input_root TEXT NOT NULL,before_cursor BLOB NOT NULL,after_cursor BLOB NOT NULL,first_quantum INTEGER NOT NULL,quantum_count INTEGER NOT NULL CHECK(quantum_count>0),record BLOB,published_unit INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "source-owned check result sequence with claim, coverage and input root; never transport credit",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "checked_monitor_edges",
+            "table": "checked_monitor_edges",
+            "ddl": "CREATE TABLE IF NOT EXISTS checked_monitor_edges(id INTEGER PRIMARY KEY,src INTEGER,dst INTEGER,pe INTEGER,UNIQUE(src,pe))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "monitor endpoint/ProductEdge incidence relation; source uniqueness differs by table and must be preserved",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "checked_monitors",
+            "table": "checked_monitors",
+            "ddl": "CREATE TABLE IF NOT EXISTS checked_monitors(id INTEGER PRIMARY KEY,product INTEGER,history BLOB,context TEXT,reachable INTEGER DEFAULT 0,UNIQUE(product,history))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "monitor Product/history projection; multiple histories may share a Product; no guessed multiplier",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "completed_views",
+            "table": "completed_views",
+            "ddl": "CREATE TABLE IF NOT EXISTS completed_views(view TEXT PRIMARY KEY,last_id INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "completed/verified exact obligation view identifiers; transport cannot create this credit",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "component_rank",
+            "table": "component_rank",
+            "ddl": "CREATE TABLE IF NOT EXISTS component_rank(component INTEGER PRIMARY KEY,rank INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current selected-graph DFS/SCC partition work keyed by node/depth/ticket/component as DDL specifies",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "credit_links",
+            "table": "credit_links",
+            "ddl": "CREATE TABLE IF NOT EXISTS credit_links(table_name TEXT NOT NULL,row_key BLOB NOT NULL,result_sequence INTEGER NOT NULL REFERENCES check_results(sequence),PRIMARY KEY(table_name,row_key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "typed exact row-key-to-check-result relation; may be multiple kinds per result",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "dependency_work",
+            "table": "dependency_work",
+            "ddl": "CREATE TABLE IF NOT EXISTS dependency_work(kind TEXT,key TEXT,PRIMARY KEY(kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "pending semantic dependency typed key relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "dfs_components",
+            "table": "dfs_components",
+            "ddl": "CREATE TABLE IF NOT EXISTS dfs_components(node INTEGER PRIMARY KEY,component INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current selected-graph DFS/SCC partition work keyed by node/depth/ticket/component as DDL specifies",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "dfs_seen",
+            "table": "dfs_seen",
+            "ddl": "CREATE TABLE IF NOT EXISTS dfs_seen(node INTEGER PRIMARY KEY,finish INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current selected-graph DFS/SCC partition work keyed by node/depth/ticket/component as DDL specifies",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "dfs_stack",
+            "table": "dfs_stack",
+            "ddl": "CREATE TABLE IF NOT EXISTS dfs_stack(depth INTEGER PRIMARY KEY,node INTEGER,last_edge INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current selected-graph DFS/SCC partition work keyed by node/depth/ticket/component as DDL specifies",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "execution_commits",
+            "table": "execution_commits",
+            "ddl": "CREATE TABLE IF NOT EXISTS execution_commits(sequence INTEGER PRIMARY KEY,operation TEXT NOT NULL,before_cursor BLOB NOT NULL,after_cursor BLOB NOT NULL,input_digest TEXT NOT NULL,first_result INTEGER NOT NULL,result_count INTEGER NOT NULL CHECK(result_count>0),useful INTEGER NOT NULL CHECK(useful IN (0,1)))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "private execution commit sequence with exact cursor transition and result range",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "export_evidence",
+            "table": "export_evidence",
+            "ddl": "CREATE TABLE IF NOT EXISTS export_evidence(scope TEXT,level INTEGER,ordinal INTEGER,payload BLOB,PRIMARY KEY(scope,level,ordinal))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current export index payload per scope/level/ordinal; relocatable export bookkeeping",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "export_members",
+            "table": "export_members",
+            "ddl": "CREATE TABLE IF NOT EXISTS export_members(unit INTEGER NOT NULL,path TEXT NOT NULL,kind TEXT NOT NULL,bytes INTEGER NOT NULL,digest TEXT NOT NULL,part INTEGER,PRIMARY KEY(unit,path))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current export member descriptors per unit/path",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "export_result_members",
+            "table": "export_result_members",
+            "ddl": "CREATE TABLE IF NOT EXISTS export_result_members(unit INTEGER,sequence INTEGER,member BLOB,PRIMARY KEY(unit,sequence))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current export result member per unit/result sequence; relocatable bookkeeping",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "external_roots",
+            "table": "external_roots",
+            "ddl": "CREATE TABLE IF NOT EXISTS external_roots(scope TEXT NOT NULL,kind TEXT,key TEXT,digest TEXT,PRIMARY KEY(scope,kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "external root keys/digests per authenticated input scope",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "factor_used",
+            "table": "factor_used",
+            "ddl": "CREATE TABLE IF NOT EXISTS factor_used(kind TEXT,id INTEGER,PRIMARY KEY(kind,id))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "factor-kind/ID evidence-use relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "fair_groups",
+            "table": "fair_groups",
+            "ddl": "CREATE TABLE IF NOT EXISTS fair_groups(group_id INTEGER,node INTEGER,PRIMARY KEY(group_id,node))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current fairness subproblem/group membership and work queue; no group-to-Product constant assumed",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "fair_work",
+            "table": "fair_work",
+            "ddl": "CREATE TABLE IF NOT EXISTS fair_work(id INTEGER PRIMARY KEY AUTOINCREMENT,status INTEGER DEFAULT 0)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current fairness subproblem/group membership and work queue; no group-to-Product constant assumed",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "finite_failures",
+            "table": "finite_failures",
+            "ddl": "CREATE TABLE IF NOT EXISTS finite_failures(family TEXT PRIMARY KEY,product INTEGER,receipt BLOB)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "named finite obligation family-to-first failing Product/witness receipt",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "finite_paths",
+            "table": "finite_paths",
+            "ddl": "CREATE TABLE IF NOT EXISTS finite_paths(scope TEXT,node INTEGER,parent INTEGER,edge INTEGER,PRIMARY KEY(scope,node))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "scope/node-parent-edge witness path search relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "finite_queue",
+            "table": "finite_queue",
+            "ddl": "CREATE TABLE IF NOT EXISTS finite_queue(ticket INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,node INTEGER,UNIQUE(scope,node))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "scope/node FIFO tickets for finite witness traversal",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "graph_edges",
+            "table": "graph_edges",
+            "ddl": "CREATE TABLE IF NOT EXISTS graph_edges(edge INTEGER PRIMARY KEY,src INTEGER,dst INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current exact selected obligation-view induced graph, with full outgoing-edge obligations",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "graph_nodes",
+            "table": "graph_nodes",
+            "ddl": "CREATE TABLE IF NOT EXISTS graph_nodes(node INTEGER PRIMARY KEY)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current exact selected obligation-view induced graph, with full outgoing-edge obligations",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "graph_queue",
+            "table": "graph_queue",
+            "ddl": "CREATE TABLE IF NOT EXISTS graph_queue(ticket INTEGER PRIMARY KEY AUTOINCREMENT,node INTEGER UNIQUE)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current selected-graph DFS/SCC partition work keyed by node/depth/ticket/component as DDL specifies",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "input_members",
+            "table": "input_members",
+            "ddl": "CREATE TABLE IF NOT EXISTS input_members(scope TEXT NOT NULL,kind TEXT,key TEXT,reference BLOB NOT NULL,member_ref BLOB NOT NULL,status TEXT NOT NULL,owner_result INTEGER NOT NULL REFERENCES check_results(sequence),PRIMARY KEY(scope,kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "exact input reference/member status per scope/kind/key",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "input_scopes",
+            "table": "input_scopes",
+            "ddl": "CREATE TABLE IF NOT EXISTS input_scopes(scope TEXT PRIMARY KEY,checkpoint BLOB NOT NULL,checkpoint_sha256 TEXT NOT NULL,high_water INTEGER NOT NULL,manifest_root TEXT NOT NULL,external_inventory BLOB NOT NULL,manifest_scope TEXT,status TEXT NOT NULL,resume_cursor BLOB NOT NULL,cursor BLOB NOT NULL,owner_result INTEGER NOT NULL REFERENCES check_results(sequence))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "authenticated checkpoint/manifest input scope and resumable preparation status",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "input_work",
+            "table": "input_work",
+            "ddl": "CREATE TABLE IF NOT EXISTS input_work(scope TEXT NOT NULL,pass TEXT NOT NULL,owner_kind TEXT NOT NULL,owner_key TEXT NOT NULL,kind TEXT NOT NULL,key TEXT NOT NULL,status TEXT NOT NULL,cursor BLOB NOT NULL,owner_result INTEGER NOT NULL REFERENCES check_results(sequence),PRIMARY KEY(scope,pass,owner_kind,owner_key,kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "preparation relation per scope/pass/owner-kind/owner-key/target-kind/target-key; multiple dependencies per owner",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "inventory_entries",
+            "table": "inventory_entries",
+            "ddl": "CREATE TABLE IF NOT EXISTS inventory_entries(result_sequence INTEGER NOT NULL REFERENCES check_results(sequence),purpose TEXT NOT NULL CHECK(purpose IN ('inputs','outputs')),ordinal INTEGER NOT NULL,entry BLOB NOT NULL,PRIMARY KEY(result_sequence,purpose,ordinal))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "complete ordered input/output inventory entries per check result, purpose and ordinal",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "links",
+            "table": "links",
+            "ddl": "CREATE TABLE IF NOT EXISTS links(owner_kind TEXT,owner_key TEXT,target_kind TEXT,target_key TEXT,digest TEXT,PRIMARY KEY(owner_kind,owner_key,target_kind,target_key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "owner-to-target semantic reference relation; many target links per owner",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "loaded_members",
+            "table": "loaded_members",
+            "ddl": "CREATE TABLE IF NOT EXISTS loaded_members(path TEXT PRIMARY KEY,digest TEXT,reference BLOB)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "relocatable loaded-member path/digest/reference bookkeeping",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "manifest_children",
+            "table": "manifest_children",
+            "ddl": "CREATE TABLE IF NOT EXISTS manifest_children(parent TEXT,child_kind TEXT,child_key TEXT,PRIMARY KEY(parent,child_kind,child_key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "manifest-to-child relation keyed by child kind/key",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "manifest_tally",
+            "table": "manifest_tally",
+            "ddl": "CREATE TABLE IF NOT EXISTS manifest_tally(scope TEXT NOT NULL,tally_manifest TEXT NOT NULL,kind TEXT,key TEXT,PRIMARY KEY(scope,tally_manifest,kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "manifest descendant record keys per scope/manifest/kind/key",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "meta",
+            "table": "meta",
+            "ddl": "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "independent scratch source/session/plan identity",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "monitor_queue",
+            "table": "monitor_queue",
+            "ddl": "CREATE TABLE IF NOT EXISTS monitor_queue(ticket INTEGER PRIMARY KEY AUTOINCREMENT,node INTEGER UNIQUE)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current unique-monitor FIFO verification work queue",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "operation_state",
+            "table": "operation_state",
+            "ddl": "CREATE TABLE IF NOT EXISTS operation_state(operation TEXT PRIMARY KEY,scope BLOB NOT NULL,state BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "saved algorithm work state per operation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "page_deps",
+            "table": "page_deps",
+            "ddl": "CREATE TABLE IF NOT EXISTS page_deps(page TEXT,kind TEXT,key TEXT,digest TEXT,PRIMARY KEY(page,kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "page-to-external-root relation with exact digest",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "page_members",
+            "table": "page_members",
+            "ddl": "CREATE TABLE IF NOT EXISTS page_members(page TEXT,kind TEXT,key TEXT,PRIMARY KEY(page,kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "page-to-record membership relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "path_seen",
+            "table": "path_seen",
+            "ddl": "CREATE TABLE IF NOT EXISTS path_seen(node INTEGER PRIMARY KEY,parent INTEGER,edge INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current witness/path traversal visited-node-parent-edge relation",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "proposed_records",
+            "table": "proposed_records",
+            "ddl": "CREATE TABLE IF NOT EXISTS proposed_records(kind TEXT,key TEXT,payload BLOB NOT NULL,PRIMARY KEY(kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "proposed complete record encodings by kind/key",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "record_members",
+            "table": "record_members",
+            "ddl": "CREATE TABLE IF NOT EXISTS record_members(kind TEXT,key TEXT,member_kind TEXT,member_key TEXT,PRIMARY KEY(kind,key,member_kind,member_key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "semantic record to transported member relation; many records/members relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "records",
+            "table": "records",
+            "ddl": "CREATE TABLE IF NOT EXISTS records(kind TEXT,key TEXT,number INTEGER,text_key TEXT,digest TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "independently indexed full record encodings and digest by kind/key",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "restore_records",
+            "table": "restore_records",
+            "ddl": "CREATE TABLE IF NOT EXISTS restore_records(kind TEXT,key TEXT,PRIMARY KEY(kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "typed record keys visited during staged catalog restore validation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "rooted_products_checked",
+            "table": "rooted_products_checked",
+            "ddl": "CREATE TABLE IF NOT EXISTS rooted_products_checked(id INTEGER PRIMARY KEY)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Product IDs whose rooted reachability relation is checked",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "rooted_stores",
+            "table": "rooted_stores",
+            "ddl": "CREATE TABLE IF NOT EXISTS rooted_stores(id INTEGER PRIMARY KEY)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Store IDs rooted from original Init; subset relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "scc_check_state",
+            "table": "scc_check_state",
+            "ddl": "CREATE TABLE IF NOT EXISTS scc_check_state(id INTEGER PRIMARY KEY,state BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "independently checked SCC/view IDs or resumable check state; exact source-owned credit retained",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "selected",
+            "table": "selected",
+            "ddl": "CREATE TABLE IF NOT EXISTS selected(scope TEXT NOT NULL,kind TEXT,key TEXT,PRIMARY KEY(scope,kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "selected input record keys per authenticated scope",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "semantic_links",
+            "table": "semantic_links",
+            "ddl": "CREATE TABLE IF NOT EXISTS semantic_links(kind TEXT,key TEXT,relation TEXT,target INTEGER,PRIMARY KEY(kind,key,relation,target))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "record/relation/target incidence relation; multiplicity belongs to each relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "store_queue",
+            "table": "store_queue",
+            "ddl": "CREATE TABLE IF NOT EXISTS store_queue(ticket INTEGER PRIMARY KEY AUTOINCREMENT,store INTEGER UNIQUE)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "unique-Store FIFO tickets for current rooted Store check",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "tlc_done",
+            "table": "tlc_done",
+            "ddl": "CREATE TABLE IF NOT EXISTS tlc_done(tag TEXT PRIMARY KEY,invocation_key TEXT NOT NULL,input_tuple BLOB NOT NULL,receipt BLOB,relative_path TEXT)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "retained TLC invocation tag-to-input tuple and exact receipt/path identity",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "tm_edges",
+            "table": "tm_edges",
+            "ddl": "CREATE TABLE IF NOT EXISTS tm_edges(id INTEGER PRIMARY KEY,src INTEGER,dst INTEGER,product_edge INTEGER,UNIQUE(src,dst,product_edge))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "monitor endpoint/ProductEdge incidence relation; source uniqueness differs by table and must be preserved",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "tm_members",
+            "table": "tm_members",
+            "ddl": "CREATE TABLE IF NOT EXISTS tm_members(view TEXT,node INTEGER,component INTEGER,PRIMARY KEY(view,node))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "SCC membership per view/node/component; one node may participate in different views",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "tm_nodes",
+            "table": "tm_nodes",
+            "ddl": "CREATE TABLE IF NOT EXISTS tm_nodes(id INTEGER PRIMARY KEY,context TEXT,product INTEGER,history BLOB,discovered_by INTEGER,expanded INTEGER DEFAULT 0,UNIQUE(product,history))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "monitor Product/history projection; multiple histories may share a Product; no guessed multiplier",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "tm_roots",
+            "table": "tm_roots",
+            "ddl": "CREATE TABLE IF NOT EXISTS tm_roots(context TEXT PRIMARY KEY,node INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "context-to-monitor root relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "tm_views",
+            "table": "tm_views",
+            "ddl": "CREATE TABLE IF NOT EXISTS tm_views(view TEXT PRIMARY KEY,context TEXT,property TEXT,obligation BLOB)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "context/property/full obligation view relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "tree_certificates",
+            "table": "tree_certificates",
+            "ddl": "CREATE TABLE IF NOT EXISTS tree_certificates(scope TEXT,node INTEGER,parent_edge INTEGER,PRIMARY KEY(scope,node))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current spanning-tree/certificate traversal state keyed by scope/node/destination; edge uniqueness as declared",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "tree_seen",
+            "table": "tree_seen",
+            "ddl": "CREATE TABLE IF NOT EXISTS tree_seen(node INTEGER PRIMARY KEY,parent_edge INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current spanning-tree/certificate traversal state keyed by scope/node/destination; edge uniqueness as declared",
+            "lifetime": "current selected algorithm graph/work scope, checkpointed for interruption"
+          },
+          {
+            "type": "table",
+            "name": "tree_status",
+            "table": "tree_status",
+            "ddl": "CREATE TABLE IF NOT EXISTS tree_status(scope TEXT PRIMARY KEY,state BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "current spanning-tree/certificate traversal state keyed by scope/node/destination; edge uniqueness as declared",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "unit_work",
+            "table": "unit_work",
+            "ddl": "CREATE TABLE IF NOT EXISTS unit_work(unit INTEGER PRIMARY KEY,origin BLOB NOT NULL,input_checkpoint TEXT NOT NULL,before_commit INTEGER NOT NULL,before_digest TEXT NOT NULL,before_cursor BLOB NOT NULL,first_result INTEGER NOT NULL,input_snapshot BLOB NOT NULL,finalized INTEGER NOT NULL DEFAULT 0)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "proof unit origin, input checkpoint and before-state/result framing",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "v_discovered",
+            "table": "v_discovered",
+            "ddl": "CREATE TABLE IF NOT EXISTS v_discovered(product INTEGER PRIMARY KEY)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "discovered Product subset used to check source FIFO discipline",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "v_edges",
+            "table": "v_edges",
+            "ddl": "CREATE TABLE IF NOT EXISTS v_edges(id INTEGER PRIMARY KEY,src INTEGER,dst INTEGER,branch BLOB,context TEXT)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "independent ProductEdge projection with Product endpoints, branch and context",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "v_fifo",
+            "table": "v_fifo",
+            "ddl": "CREATE TABLE IF NOT EXISTS v_fifo(ticket INTEGER PRIMARY KEY AUTOINCREMENT,product INTEGER UNIQUE,status INTEGER DEFAULT 0)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Product FIFO reconstruction tickets/status; Product identity unique",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "v_oracle",
+            "table": "v_oracle",
+            "ddl": "CREATE TABLE IF NOT EXISTS v_oracle(id INTEGER PRIMARY KEY,src INTEGER,dst INTEGER,action TEXT,payload BLOB,used INTEGER DEFAULT 0,UNIQUE(src,action))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "independent OracleEvidence projection by ID, source Store/action uniqueness, use status",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "v_owned",
+            "table": "v_owned",
+            "ddl": "CREATE TABLE IF NOT EXISTS v_owned(kind TEXT,key TEXT,owner INTEGER,PRIMARY KEY(kind,key))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "typed semantic ownership key-to-owner relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "v_products",
+            "table": "v_products",
+            "ddl": "CREATE TABLE IF NOT EXISTS v_products(id INTEGER PRIMARY KEY,context TEXT,store INTEGER,digest TEXT,canonical TEXT UNIQUE,payload BLOB NOT NULL,goal INTEGER,capacity INTEGER,checked INTEGER DEFAULT 0,reachable INTEGER DEFAULT 0,parent INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "independent Product projection by exact canonical bytes and checked/reachable/parent facts",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "v_progress",
+            "table": "v_progress",
+            "ddl": "CREATE TABLE IF NOT EXISTS v_progress(phase TEXT PRIMARY KEY,after_id INTEGER NOT NULL,complete INTEGER DEFAULT 0)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "algorithm progress cursor/completion per semantic verification phase",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "v_queue",
+            "table": "v_queue",
+            "ddl": "CREATE TABLE IF NOT EXISTS v_queue(ticket INTEGER PRIMARY KEY AUTOINCREMENT,node INTEGER UNIQUE)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "unique-node FIFO ticket relation for current rooted reachability check",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "v_roots",
+            "table": "v_roots",
+            "ddl": "CREATE TABLE IF NOT EXISTS v_roots(context TEXT PRIMARY KEY,initial INTEGER)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "context-to-initial-Product relation",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "v_stores",
+            "table": "v_stores",
+            "ddl": "CREATE TABLE IF NOT EXISTS v_stores(id INTEGER PRIMARY KEY,canonical TEXT UNIQUE,payload BLOB NOT NULL,parent INTEGER,checked INTEGER DEFAULT 0)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "independent Store projection and checked/rooted-parent facts by raw Store ID",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "verified_scc_members",
+            "table": "verified_scc_members",
+            "ddl": "CREATE TABLE IF NOT EXISTS verified_scc_members(view TEXT,node INTEGER,component INTEGER,PRIMARY KEY(view,node))",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "SCC membership per view/node/component; one node may participate in different views",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "verified_sccs",
+            "table": "verified_sccs",
+            "ddl": "CREATE TABLE IF NOT EXISTS verified_sccs(id INTEGER PRIMARY KEY)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "independently checked SCC/view IDs or resumable check state; exact source-owned credit retained",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "verified_views",
+            "table": "verified_views",
+            "ddl": "CREATE TABLE IF NOT EXISTS verified_views(view TEXT PRIMARY KEY)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "completed/verified exact obligation view identifiers; transport cannot create this credit",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "verifier_meta",
+            "table": "verifier_meta",
+            "ddl": "CREATE TABLE IF NOT EXISTS verifier_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),algorithm INTEGER NOT NULL CHECK(algorithm=1),source_json BLOB NOT NULL,session TEXT NOT NULL,plan TEXT NOT NULL,initial_image TEXT NOT NULL,private_commit INTEGER NOT NULL CHECK(private_commit>=0),last_result INTEGER NOT NULL CHECK(last_result>=0),cursor BLOB NOT NULL,source_closure_checkpoint TEXT)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "singleton independent verifier identity, private commit/result high-water and exact cursor",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "table",
+            "name": "view_check_state",
+            "table": "view_check_state",
+            "ddl": "CREATE TABLE IF NOT EXISTS view_check_state(view TEXT PRIMARY KEY,state BLOB NOT NULL)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "independently checked SCC/view IDs or resumable check state; exact source-owned credit retained",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "certificate_tree_src",
+            "table": "certificate_tree",
+            "ddl": "CREATE INDEX IF NOT EXISTS certificate_tree_src ON certificate_tree(src,edge)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of certificate_tree exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "checked_me_src",
+            "table": "checked_monitor_edges",
+            "ddl": "CREATE INDEX IF NOT EXISTS checked_me_src ON checked_monitor_edges(src,id)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of checked_monitor_edges exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "graph_dst",
+            "table": "graph_edges",
+            "ddl": "CREATE INDEX IF NOT EXISTS graph_dst ON graph_edges(dst,edge)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of graph_edges exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "graph_src",
+            "table": "graph_edges",
+            "ddl": "CREATE INDEX IF NOT EXISTS graph_src ON graph_edges(src,edge)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of graph_edges exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "input_member_identity",
+            "table": "input_members",
+            "ddl": "CREATE INDEX IF NOT EXISTS input_member_identity ON input_members(kind,key,status,owner_result)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of input_members exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "input_pending",
+            "table": "input_work",
+            "ddl": "CREATE INDEX IF NOT EXISTS input_pending ON input_work(scope,pass,owner_key,status,kind,key)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of input_work exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "record_number",
+            "table": "records",
+            "ddl": "CREATE UNIQUE INDEX IF NOT EXISTS record_number ON records(kind,number) WHERE number IS NOT NULL",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of records exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "record_text",
+            "table": "records",
+            "ddl": "CREATE INDEX IF NOT EXISTS record_text ON records(kind,text_key)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of records exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "semantic_target",
+            "table": "semantic_links",
+            "ddl": "CREATE INDEX IF NOT EXISTS semantic_target ON semantic_links(relation,target,kind,key)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of semantic_links exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "tm_component",
+            "table": "tm_members",
+            "ddl": "CREATE INDEX IF NOT EXISTS tm_component ON tm_members(component,node)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of tm_members exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "tm_context",
+            "table": "tm_nodes",
+            "ddl": "CREATE INDEX IF NOT EXISTS tm_context ON tm_nodes(context,id)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of tm_nodes exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "tm_dst",
+            "table": "tm_edges",
+            "ddl": "CREATE INDEX IF NOT EXISTS tm_dst ON tm_edges(dst,id)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of tm_edges exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "tm_src",
+            "table": "tm_edges",
+            "ddl": "CREATE INDEX IF NOT EXISTS tm_src ON tm_edges(src,id)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of tm_edges exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "v_edge_dst",
+            "table": "v_edges",
+            "ddl": "CREATE INDEX IF NOT EXISTS v_edge_dst ON v_edges(dst,id)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of v_edges exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "v_edge_src",
+            "table": "v_edges",
+            "ddl": "CREATE INDEX IF NOT EXISTS v_edge_src ON v_edges(src,id)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of v_edges exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "v_oracle_src",
+            "table": "v_oracle",
+            "ddl": "CREATE INDEX IF NOT EXISTS v_oracle_src ON v_oracle(src,id)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of v_oracle exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "v_product_context",
+            "table": "v_products",
+            "ddl": "CREATE INDEX IF NOT EXISTS v_product_context ON v_products(context,id)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of v_products exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          },
+          {
+            "type": "index",
+            "name": "v_product_digest",
+            "table": "v_products",
+            "ddl": "CREATE INDEX IF NOT EXISTS v_product_digest ON v_products(digest,canonical)",
+            "source_path": "verification/async-driver-refinement/paged-verifier-state.sql",
+            "constructor": "source SQL",
+            "relation": "Index of v_products exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "private database retained across proof units/checkpoints; source row deletion/overwrite may narrow individual work scopes"
+          }
+        ]
+      }
+    ],
+    "catalog_export_scratch": [
+      {
+        "database_role": "catalog_manifest_closure",
+        "objects": [
+          {
+            "type": "table",
+            "name": "closure",
+            "table": "closure",
+            "ddl": "CREATE TABLE closure(kind TEXT NOT NULL,key TEXT NOT NULL,expected TEXT,done INTEGER NOT NULL,PRIMARY KEY(kind,key))",
+            "source_path": "crates/plurx-core/src/store/async_driver_catalog.rs",
+            "constructor": "ReadSnapshot::export",
+            "relation": "current export dependency traversal kind/key-to-expectation/status relation",
+            "lifetime": "current source-pinned export; closure traversal can be cleared and recomputed within export"
+          },
+          {
+            "type": "table",
+            "name": "exports",
+            "table": "exports",
+            "ddl": "CREATE TABLE exports(kind TEXT NOT NULL,key TEXT NOT NULL,path TEXT NOT NULL,level INTEGER,PRIMARY KEY(kind,key))",
+            "source_path": "crates/plurx-core/src/store/async_driver_catalog.rs",
+            "constructor": "ReadSnapshot::export",
+            "relation": "catalog export kind/key-to-file/manifest-level relation",
+            "lifetime": "current source-pinned export; closure traversal can be cleared and recomputed within export"
+          },
+          {
+            "type": "index",
+            "name": "closure_pending",
+            "table": "closure",
+            "ddl": "CREATE INDEX closure_pending ON closure(done,kind,key)",
+            "source_path": "crates/plurx-core/src/store/async_driver_catalog.rs",
+            "constructor": "ReadSnapshot::export",
+            "relation": "Index of closure exact declared key projection, including uniqueness where DDL declares it; physical allocation counted by enclosing file cap.",
+            "lifetime": "current source-pinned export; closure traversal can be cleared and recomputed within export"
+          }
+        ]
+      }
+    ],
+    "verifier_continuation_scratch": [
+      {
+        "database_role": "verifier_continuation",
+        "objects": [
+          {
+            "type": "table",
+            "name": "chain_progress",
+            "table": "chain_progress",
+            "ddl": "CREATE TABLE IF NOT EXISTS chain_progress(unit INTEGER PRIMARY KEY,payload BLOB,sha256 TEXT,backup_sha256 TEXT)",
+            "source_path": "verification/async-driver-refinement/paged_codec.py",
+            "constructor": "ContinuationResolver.__init__",
+            "relation": "reconciled unit progress payload/hash and backup identity",
+            "lifetime": "current retained-chain/evidence or Outcome reconciliation; rows cleared by root/current scope as source anchors show"
+          },
+          {
+            "type": "table",
+            "name": "chain_results",
+            "table": "chain_results",
+            "ddl": "CREATE TABLE IF NOT EXISTS chain_results(sequence INTEGER PRIMARY KEY,unit INTEGER,payload BLOB,digest TEXT)",
+            "source_path": "verification/async-driver-refinement/paged_codec.py",
+            "constructor": "ContinuationResolver.__init__",
+            "relation": "reconciled retained result sequence-to-unit/payload/digest",
+            "lifetime": "current retained-chain/evidence or Outcome reconciliation; rows cleared by root/current scope as source anchors show"
+          },
+          {
+            "type": "table",
+            "name": "completion_invocations",
+            "table": "completion_invocations",
+            "ddl": "CREATE TABLE IF NOT EXISTS completion_invocations(tag TEXT PRIMARY KEY,seen INTEGER DEFAULT 0)",
+            "source_path": "verification/async-driver-refinement/paged_checker.py",
+            "constructor": "complete_verification",
+            "relation": "currently checked Outcome expected TLC invocation tags with observed status",
+            "lifetime": "current retained-chain/evidence or Outcome reconciliation; rows cleared by root/current scope as source anchors show"
+          },
+          {
+            "type": "table",
+            "name": "evidence_entries",
+            "table": "evidence_entries",
+            "ddl": "CREATE TABLE IF NOT EXISTS evidence_entries(root TEXT,ordinal INTEGER,entry BLOB,PRIMARY KEY(root,ordinal))",
+            "source_path": "verification/async-driver-refinement/paged_codec.py",
+            "constructor": "ContinuationResolver.__init__",
+            "relation": "ordered complete evidence entries per root/ordinal",
+            "lifetime": "current retained-chain/evidence or Outcome reconciliation; rows cleared by root/current scope as source anchors show"
+          },
+          {
+            "type": "table",
+            "name": "evidence_pending",
+            "table": "evidence_pending",
+            "ddl": "CREATE TABLE IF NOT EXISTS evidence_pending(root TEXT,ordinal INTEGER,payload BLOB,PRIMARY KEY(root,ordinal))",
+            "source_path": "verification/async-driver-refinement/paged_codec.py",
+            "constructor": "ContinuationResolver.evidence",
+            "relation": "pending evidence child descriptors per root/ordinal",
+            "lifetime": "current retained-chain/evidence or Outcome reconciliation; rows cleared by root/current scope as source anchors show"
+          },
+          {
+            "type": "table",
+            "name": "evidence_work",
+            "table": "evidence_work",
+            "ddl": "CREATE TABLE IF NOT EXISTS evidence_work(root TEXT,unit INTEGER,path TEXT,digest TEXT,level INTEGER,first_ordinal INTEGER,item_count INTEGER,PRIMARY KEY(root,unit,path))",
+            "source_path": "verification/async-driver-refinement/paged_codec.py",
+            "constructor": "ContinuationResolver.__init__",
+            "relation": "current evidence tree traversal locator per root/unit/part/path, with range summary",
+            "lifetime": "current retained-chain/evidence or Outcome reconciliation; rows cleared by root/current scope as source anchors show"
+          }
+        ]
+      }
+    ],
+    "catalog_or_verifier_restore_scratch": [
+      {
+        "database_role": "snapshot_restore",
+        "objects": [
+          {
+            "type": "table",
+            "name": "chunks",
+            "table": "chunks",
+            "ddl": "CREATE TABLE chunks(ordinal INTEGER PRIMARY KEY,descriptor BLOB)",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "restore_catalog",
+            "relation": "transport reconstruction exact ordinal-to-chunk descriptor relation",
+            "lifetime": "current native packing or whole snapshot restore invocation; explicit file lifetime must be reconciled with v2 publication protocol"
+          },
+          {
+            "type": "table",
+            "name": "todo",
+            "table": "todo",
+            "ddl": "CREATE TABLE todo(ordinal INTEGER PRIMARY KEY AUTOINCREMENT,descriptor BLOB)",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "restore_catalog",
+            "relation": "current disk-backed transport index traversal descriptor queue",
+            "lifetime": "current native packing or whole snapshot restore invocation; explicit file lifetime must be reconciled with v2 publication protocol"
+          },
+          {
+            "type": "table",
+            "name": "used",
+            "table": "used",
+            "ddl": "CREATE TABLE used(path TEXT PRIMARY KEY,part INTEGER,kind TEXT)",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "restore_catalog",
+            "relation": "transport root restoration exact member/path-to-part/kind set",
+            "lifetime": "current native packing or whole snapshot restore invocation; explicit file lifetime must be reconciled with v2 publication protocol"
+          }
+        ]
+      }
+    ],
+    "publication_pack_scratch": [
+      {
+        "database_role": "native_part_plan",
+        "objects": [
+          {
+            "type": "table",
+            "name": "indexes",
+            "table": "indexes",
+            "ddl": "CREATE TABLE indexes(level INTEGER,first_chunk INTEGER,path TEXT,part INTEGER,digest TEXT,chunk_count INTEGER,offset INTEGER,bytes INTEGER,PRIMARY KEY(level,first_chunk))",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "PartPlan.__init__",
+            "relation": "catalog transport index-tree node summaries per level/first chunk",
+            "lifetime": "current native packing or whole snapshot restore invocation; explicit file lifetime must be reconciled with v2 publication protocol"
+          },
+          {
+            "type": "table",
+            "name": "members",
+            "table": "members",
+            "ddl": "CREATE TABLE members(path TEXT PRIMARY KEY,part INTEGER,bytes INTEGER,digest TEXT)",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "PartPlan.__init__",
+            "relation": "current native packing member/path-to-part/full-byte/hash allocation",
+            "lifetime": "current native packing or whole snapshot restore invocation; explicit file lifetime must be reconciled with v2 publication protocol"
+          }
+        ]
+      },
+      {
+        "database_role": "snapshot_content_inventory",
+        "objects": [
+          {
+            "type": "table",
+            "name": "content",
+            "table": "content",
+            "ddl": "CREATE TABLE IF NOT EXISTS content(\n                kind TEXT,sha256 TEXT,bytes INTEGER,path TEXT,PRIMARY KEY(kind,sha256))",
+            "source_path": "validation/async_snapshot_transport.py",
+            "constructor": "ContentInventory.__init__",
+            "relation": "Operational keyed relation only; no proof credit or per-record multiplier",
+            "lifetime": "Current authenticated publication/input scope; retained files remain physically charged"
+          },
+          {
+            "type": "table",
+            "name": "edges",
+            "table": "edges",
+            "ddl": "CREATE TABLE IF NOT EXISTS edges(\n                owner_kind TEXT,owner_sha256 TEXT,ordinal INTEGER,kind TEXT,\n                sha256 TEXT,bytes INTEGER,PRIMARY KEY(owner_kind,owner_sha256,ordinal))",
+            "source_path": "validation/async_snapshot_transport.py",
+            "constructor": "ContentInventory.__init__",
+            "relation": "authenticated object-owner-to-target dependency relation",
+            "lifetime": "current reconstruction of session-retained authenticated history; no local row alone confers provenance"
+          },
+          {
+            "type": "table",
+            "name": "levels",
+            "table": "levels",
+            "ddl": "CREATE TABLE IF NOT EXISTS levels(\n                level INTEGER,position INTEGER,reference BLOB,summary BLOB,\n                PRIMARY KEY(level,position))",
+            "source_path": "validation/async_snapshot_transport.py",
+            "constructor": "ContentInventory.__init__",
+            "relation": "Operational keyed relation only; no proof credit or per-record multiplier",
+            "lifetime": "Current authenticated publication/input scope; retained files remain physically charged"
+          },
+          {
+            "type": "table",
+            "name": "members",
+            "table": "members",
+            "ddl": "CREATE TABLE IF NOT EXISTS members(\n                unit_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,\n                kind TEXT,content_sha256 TEXT,PRIMARY KEY(unit_ordinal,member_path))",
+            "source_path": "validation/async_snapshot_transport.py",
+            "constructor": "ContentInventory.__init__",
+            "relation": "current native packing member/path-to-part/full-byte/hash allocation",
+            "lifetime": "current native packing or whole snapshot restore invocation; explicit file lifetime must be reconciled with v2 publication protocol"
+          }
+        ]
+      },
+      {
+        "database_role": "snapshot_evidence_inventory",
+        "objects": [
+          {
+            "type": "table",
+            "name": "members",
+            "table": "members",
+            "ddl": "CREATE TABLE members(path TEXT PRIMARY KEY,bytes INTEGER,digest TEXT)",
+            "source_path": "validation/async_snapshot_transport.py",
+            "constructor": "EvidencePlan.__init__",
+            "relation": "current native packing member/path-to-part/full-byte/hash allocation",
+            "lifetime": "current native packing or whole snapshot restore invocation; explicit file lifetime must be reconciled with v2 publication protocol"
+          }
+        ]
+      }
+    ],
+    "authentication_index": [
+      {
+        "database_role": "authenticated_dependencies",
+        "objects": [
+          {
+            "type": "table",
+            "name": "authenticated_members",
+            "table": "authenticated_members",
+            "ddl": "CREATE TABLE IF NOT EXISTS authenticated_members(unit_ordinal INTEGER,member_path TEXT,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(unit_ordinal,member_path))",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "DependencyIndex.__init__",
+            "relation": "fully authenticated unit/part/member bytes/hash/local path, using actual API/upload provenance",
+            "lifetime": "current reconstruction of session-retained authenticated history; no local row alone confers provenance"
+          },
+          {
+            "type": "table",
+            "name": "authenticated_snapshot_roots",
+            "table": "authenticated_snapshot_roots",
+            "ddl": "CREATE TABLE IF NOT EXISTS authenticated_snapshot_roots(kind TEXT,unit_ordinal INTEGER,bytes INTEGER,sha256 TEXT,local_path TEXT,PRIMARY KEY(kind,unit_ordinal))",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "DependencyIndex.__init__",
+            "relation": "Operational keyed relation only; no proof credit or per-record multiplier",
+            "lifetime": "Current authenticated publication/input scope; retained files remain physically charged"
+          },
+          {
+            "type": "table",
+            "name": "edges",
+            "table": "edges",
+            "ddl": "CREATE TABLE IF NOT EXISTS edges(owner_kind TEXT,owner_key BLOB,kind TEXT,key BLOB,digest TEXT,PRIMARY KEY(owner_kind,owner_key,kind,key))",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "DependencyIndex.__init__",
+            "relation": "authenticated object-owner-to-target dependency relation",
+            "lifetime": "current reconstruction of session-retained authenticated history; no local row alone confers provenance"
+          },
+          {
+            "type": "table",
+            "name": "native_locators",
+            "table": "native_locators",
+            "ddl": "CREATE TABLE IF NOT EXISTS native_locators(unit_ordinal INTEGER,member_path TEXT,batch_receipt_sha256 TEXT,publication_origin BLOB,artifact_id INTEGER,part_ordinal INTEGER,bytes INTEGER,sha256 TEXT,PRIMARY KEY(unit_ordinal,member_path,batch_receipt_sha256,artifact_id,part_ordinal))",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "DependencyIndex.__init__",
+            "relation": "Operational keyed relation only; no proof credit or per-record multiplier",
+            "lifetime": "Current authenticated publication/input scope; retained files remain physically charged"
+          },
+          {
+            "type": "table",
+            "name": "objects",
+            "table": "objects",
+            "ddl": "CREATE TABLE IF NOT EXISTS objects(kind TEXT,key BLOB,digest TEXT,payload BLOB,path TEXT,PRIMARY KEY(kind,key))",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "DependencyIndex.__init__",
+            "relation": "authenticated typed object keys, digest, complete payload or member path",
+            "lifetime": "current reconstruction of session-retained authenticated history; no local row alone confers provenance"
+          },
+          {
+            "type": "table",
+            "name": "roots",
+            "table": "roots",
+            "ddl": "CREATE TABLE IF NOT EXISTS roots(kind TEXT,key BLOB,digest TEXT,PRIMARY KEY(kind,key))",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "DependencyIndex.__init__",
+            "relation": "authenticated typed dependency root keys/digests",
+            "lifetime": "current reconstruction of session-retained authenticated history; no local row alone confers provenance"
+          },
+          {
+            "type": "table",
+            "name": "verifier_chain",
+            "table": "verifier_chain",
+            "ddl": "CREATE TABLE IF NOT EXISTS verifier_chain(unit_ordinal INTEGER PRIMARY KEY,progress_path TEXT,backup_root_path TEXT,work_unit_json BLOB,execution_origin_json BLOB)",
+            "source_path": "validation/async_refinement_provenance.py",
+            "constructor": "DependencyIndex.__init__",
+            "relation": "authenticated verifier unit-to-progress/root/member/work-unit chain",
+            "lifetime": "current reconstruction of session-retained authenticated history; no local row alone confers provenance"
+          }
+        ]
+      }
+    ],
+    "publication_pending_scratch": [
+      {
+        "database_role": "pending_publication",
+        "objects": [
+          {
+            "type": "table",
+            "name": "coverage",
+            "table": "coverage",
+            "ddl": "CREATE TABLE IF NOT EXISTS coverage(kind TEXT,sha256 TEXT,bytes INTEGER,PRIMARY KEY(kind,sha256))",
+            "source_path": "validation/async_snapshot_transport.py",
+            "constructor": "PublicationLedger.__init__",
+            "relation": "Operational keyed relation only; no proof credit or per-record multiplier",
+            "lifetime": "Current authenticated publication/input scope; retained files remain physically charged"
+          },
+          {
+            "type": "table",
+            "name": "dispatches",
+            "table": "dispatches",
+            "ddl": "CREATE TABLE IF NOT EXISTS dispatches(\n                ordinal INTEGER PRIMARY KEY,operation TEXT,intent_sha256 TEXT,run_id INTEGER,status TEXT)",
+            "source_path": "validation/async_snapshot_transport.py",
+            "constructor": "PublicationLedger.__init__",
+            "relation": "Operational keyed relation only; no proof credit or per-record multiplier",
+            "lifetime": "Current authenticated publication/input scope; retained files remain physically charged"
+          },
+          {
+            "type": "table",
+            "name": "queue",
+            "table": "queue",
+            "ddl": "CREATE TABLE IF NOT EXISTS queue(kind TEXT,sha256 TEXT,bytes INTEGER,PRIMARY KEY(kind,sha256))",
+            "source_path": "validation/async_snapshot_transport.py",
+            "constructor": "PublicationLedger.__init__",
+            "relation": "Operational keyed relation only; no proof credit or per-record multiplier",
+            "lifetime": "Current authenticated publication/input scope; retained files remain physically charged"
+          },
+          {
+            "type": "table",
+            "name": "state",
+            "table": "state",
+            "ddl": "CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value BLOB)",
+            "source_path": "validation/async_snapshot_transport.py",
+            "constructor": "PublicationLedger.__init__",
+            "relation": "Operational keyed relation only; no proof credit or per-record multiplier",
+            "lifetime": "Current authenticated publication/input scope; retained files remain physically charged"
+          }
+        ]
+      }
+    ]
+  }
+}

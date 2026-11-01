@@ -159,13 +159,17 @@ pub struct RecordAllowance {
     pub max_encoded_bytes: u64,
 }
 #[derive(Clone, Debug)]
+pub struct FamilyLimits {
+    pub database_bytes: u64,
+    pub main_bytes: u64,
+    pub journal_bytes: u64,
+    pub temp_bytes: u64,
+}
+#[derive(Clone, Debug)]
 pub struct ResourceLimits {
     pub record_allowances: BTreeMap<String, RecordAllowance>,
-    pub index_bytes: u64,
-    pub wal_bytes: u64,
-    pub scratch_bytes: u64,
-    pub retained_bytes: u64,
-    pub duplicate_backup_bytes: u64,
+    pub families: BTreeMap<String, FamilyLimits>,
+    pub pools: BTreeMap<String, u64>,
     pub resident_bytes: u64,
     pub rss_bytes: u64,
     pub total_disk_bytes: u64,
@@ -180,124 +184,94 @@ impl ResourceLimits {
         let text = string(body, "source_bounds_utf8")?;
         let wrapper = strict_json(text.as_bytes())?;
         if canonical(&wrapper) != text {
-            return Err(CatalogError::CorruptRecord(
-                "noncanonical operational wrapper".into(),
-            ));
+            return Err(CatalogError::CorruptRecord("noncanonical operational wrapper".into()));
         }
-        closed_fields(
-            &wrapper,
-            &[
-                "schema_version",
-                "accounting_rule",
-                "source_receipt",
-                "record_allowances",
-                "overhead",
-                "accounting_method_sha256",
-                "measurement_sha256",
-            ],
-        )?;
-        if wrapper["schema_version"] != 2
-            || wrapper["accounting_rule"] != "operational_encoded_caps_v1"
-            || !wrapper["source_receipt"].is_object()
-        {
-            return Err(CatalogError::SourceMismatch(
-                "unsupported operational accounting rule".into(),
-            ));
+        closed_fields(&wrapper, &["schema_version", "accounting_rule", "source_receipt",
+            "record_allowances", "physical_policy", "calibration", "accounting_method_sha256", "measurement_sha256"])?;
+        if wrapper["schema_version"] != 3 || wrapper["accounting_rule"] != "typed_physical_caps_v1"
+            || !wrapper["source_receipt"].is_object() {
+            return Err(CatalogError::SourceMismatch("unsupported operational accounting rule".into()));
         }
         for field in ["accounting_method_sha256", "measurement_sha256"] {
             validate_definition("Sha256", &wrapper[field])?;
         }
-        let total_disk_bytes = number(body, "total_session_disk_bytes")?;
-        let entries = wrapper["record_allowances"]
-            .as_object()
-            .ok_or_else(|| CatalogError::CorruptRecord("allowance inventory".into()))?;
+        let policy = &wrapper["physical_policy"];
+        closed_fields(policy, &["schema_version", "kind", "table_map_sha256", "families", "pools"])?;
+        let source_map = strict_json(include_bytes!("../../../../validation/async_physical_table_map.json"))?;
+        if policy["schema_version"] != 3 || policy["kind"] != "physical_policy"
+            || policy["table_map_sha256"] != digest(canonical(&source_map).as_bytes()) {
+            return Err(CatalogError::SourceMismatch("physical policy/source-map identity".into()));
+        }
+        let family_owners = [("catalog_main", "catalog"), ("verifier_main", "verifier"),
+            ("catalog_export_scratch", "catalog_export"), ("verifier_continuation_scratch", "verifier_continuation"),
+            ("catalog_or_verifier_restore_scratch", "snapshot_restore"), ("publication_pack_scratch", "snapshot_transport"),
+            ("authentication_index", "provenance"), ("publication_pending_scratch", "session_controller")];
+        closed_fields(&policy["families"], &family_owners.map(|(family, _)| family))?;
+        let mut families = BTreeMap::new();
+        let mut peak = 0u64;
+        let add = |total: u64, value: u64| total.checked_add(value).ok_or_else(|| CatalogError::ResourceIncomplete("physical reservation overflow".into()));
+        for (family, owner) in family_owners {
+            let entry = &policy["families"][family];
+            closed_fields(entry, &["owner", "database_bytes", "main_bytes", "journal_bytes", "temp_bytes"])?;
+            let limits = FamilyLimits { database_bytes: number(entry,"database_bytes")?, main_bytes: number(entry,"main_bytes")?,
+                journal_bytes: number(entry,"journal_bytes")?, temp_bytes: number(entry,"temp_bytes")? };
+            if entry["owner"] != owner || limits.database_bytes == 0 || limits.main_bytes < limits.database_bytes
+                || limits.journal_bytes == 0 || limits.temp_bytes == 0 {
+                return Err(CatalogError::ResourceIncomplete("invalid physical family policy".into()));
+            }
+            for bytes in [limits.main_bytes, limits.journal_bytes, limits.temp_bytes] { peak = add(peak, bytes)?; }
+            families.insert(family.to_owned(), limits);
+        }
+        let pool_names = ["snapshot_spool_bytes", "restore_staging_bytes", "transfer_staging_bytes", "cas_bytes", "source_runtime_scratch_bytes", "control_bytes"];
+        closed_fields(&policy["pools"], &pool_names)?;
+        let mut pools = BTreeMap::new();
+        for name in pool_names {
+            let bytes = number(&policy["pools"], name)?;
+            if bytes == 0 { return Err(CatalogError::ResourceIncomplete("zero physical pool".into())); }
+            peak = add(peak, bytes)?;
+            pools.insert(name.to_owned(), bytes);
+        }
+        let calibration = &wrapper["calibration"];
+        closed_fields(calibration, &["schema_version", "kind", "policy_sha256", "table_map_sha256", "geometry", "baseline", "peak_bytes"])?;
+        if calibration["schema_version"] != 1 || calibration["kind"] != "physical_calibration"
+            || calibration["policy_sha256"] != digest(canonical(policy).as_bytes()) || calibration["table_map_sha256"] != policy["table_map_sha256"] {
+            return Err(CatalogError::SourceMismatch("physical calibration policy binding".into()));
+        }
+        closed_fields(&calibration["baseline"], &["source_workspace_bytes", "existing_unpooled_bytes"])?;
+        if number(&calibration["baseline"], "source_workspace_bytes")? > pools["source_runtime_scratch_bytes"] {
+            return Err(CatalogError::ResourceIncomplete("source/runtime baseline exceeds pool".into()));
+        }
+        peak = add(peak, number(&calibration["baseline"], "existing_unpooled_bytes")?)?;
+        peak = add(peak, number(body,"total_retained_artifact_bytes")?.checked_mul(6).ok_or_else(|| CatalogError::ResourceIncomplete("retention reservation overflow".into()))?)?;
+        peak = add(peak, number(body,"maximum_units")?.checked_add(3).and_then(|n|n.checked_mul(32*1024*1024)).ok_or_else(|| CatalogError::ResourceIncomplete("dispatch reservation overflow".into()))?)?;
+        let total_disk_bytes = number(body,"total_session_disk_bytes")?;
+        if peak != number(calibration,"peak_bytes")? || peak > total_disk_bytes {
+            return Err(CatalogError::ResourceIncomplete("physical peak differs/exceeds total disk".into()));
+        }
+        let entries = wrapper["record_allowances"].as_object().ok_or_else(|| CatalogError::CorruptRecord("allowance inventory".into()))?;
         let mut allowances = BTreeMap::new();
-        let mut reserved = 0u64;
         for (kind, value) in entries {
             closed_fields(value, &["records", "max_encoded_bytes"])?;
-            let records = number(value, "records")?;
-            let bytes = number(value, "max_encoded_bytes")?;
-            if bytes == 0 {
-                return Err(CatalogError::ResourceIncomplete(
-                    "zero encoded record allowance".into(),
-                ));
+            let records = number(value,"records")?;
+            let max_encoded_bytes = number(value,"max_encoded_bytes")?;
+            if max_encoded_bytes == 0 || max_encoded_bytes > PAGE_BYTES {
+                return Err(CatalogError::ResourceIncomplete("invalid full encoded record allowance".into()));
             }
-            // Exact comparison against the admitted finite disk quota avoids
-            // overflowing even when caller-supplied operational products are huge.
-            if records > total_disk_bytes / bytes {
-                return Err(CatalogError::ResourceIncomplete(
-                    "operational record allocation exceeds total disk".into(),
-                ));
-            }
-            reserved = reserved
-                .checked_add(records * bytes)
-                .filter(|n| *n <= total_disk_bytes)
-                .ok_or_else(|| {
-                    CatalogError::ResourceIncomplete(
-                        "operational allocation sum exceeds total disk".into(),
-                    )
-                })?;
-            allowances.insert(
-                kind.clone(),
-                RecordAllowance {
-                    records,
-                    max_encoded_bytes: bytes,
-                },
-            );
+            allowances.insert(kind.clone(), RecordAllowance { records, max_encoded_bytes });
         }
         for kind in record_kinds() {
-            if !allowances.contains_key(*kind) {
-                return Err(CatalogError::ResourceIncomplete(format!(
-                    "missing operational kind {kind}"
-                )));
-            }
+            if !allowances.contains_key(*kind) { return Err(CatalogError::ResourceIncomplete(format!("missing operational kind {kind}"))); }
         }
-        let overhead = &wrapper["overhead"];
-        closed_fields(
-            overhead,
-            &[
-                "index_bytes",
-                "wal_bytes",
-                "scratch_bytes",
-                "retained_bytes",
-                "duplicate_backup_bytes",
-            ],
-        )?;
-        for field in [
-            "index_bytes",
-            "wal_bytes",
-            "scratch_bytes",
-            "retained_bytes",
-            "duplicate_backup_bytes",
-        ] {
-            reserved = reserved
-                .checked_add(number(overhead, field)?)
-                .filter(|n| *n <= total_disk_bytes)
-                .ok_or_else(|| {
-                    CatalogError::ResourceIncomplete(
-                        "operational overhead exceeds total disk".into(),
-                    )
-                })?;
-        }
-        Ok(Self {
-            record_allowances: allowances,
-            index_bytes: number(overhead, "index_bytes")?,
-            wal_bytes: number(overhead, "wal_bytes")?,
-            scratch_bytes: number(overhead, "scratch_bytes")?,
-            retained_bytes: number(overhead, "retained_bytes")?,
-            duplicate_backup_bytes: number(overhead, "duplicate_backup_bytes")?,
-            resident_bytes: number(body, "resident_bytes")?,
-            rss_bytes: number(body, "resident_rss_bytes")?,
-            total_disk_bytes,
-            unit_records: number(body, "unit_record_allowance")?,
-            unit_bytes: number(body, "unit_byte_allowance")?,
-            unit_predecessors: number(body, "unit_predecessor_allowance")?,
-        })
+        Ok(Self { record_allowances: allowances, families, pools,
+            resident_bytes: number(body,"resident_bytes")?, rss_bytes: number(body,"resident_rss_bytes")?, total_disk_bytes,
+            unit_records: number(body,"unit_record_allowance")?, unit_bytes: number(body,"unit_byte_allowance")?,
+            unit_predecessors: number(body,"unit_predecessor_allowance")? })
+    }
+    pub fn family(&self, name: &str) -> CatalogResult<&FamilyLimits> {
+        self.families.get(name).ok_or_else(|| CatalogError::ResourceIncomplete(format!("unregistered physical family {name}")))
     }
     pub fn allowance(&self, kind: &str) -> CatalogResult<&RecordAllowance> {
-        self.record_allowances.get(kind).ok_or_else(|| {
-            CatalogError::ResourceIncomplete(format!("unregistered accounting kind {kind}"))
-        })
+        self.record_allowances.get(kind).ok_or_else(|| CatalogError::ResourceIncomplete(format!("unregistered accounting kind {kind}")))
     }
 }
 pub fn closed_fields(value: &Value, fields: &[&str]) -> CatalogResult<()> {
@@ -343,9 +317,10 @@ pub struct Catalog {
 impl Catalog {
     pub fn disk(config: CatalogConfig) -> CatalogResult<Self> {
         config.validate()?;
-        let mut backend = sqlite::SqliteStorage::open(
+        let mut backend = sqlite::SqliteStorage::open_reserved(
             &config.path,
             number(&config.resource_plan.record, "resident_bytes")?,
+            &ResourceLimits::from_plan(&config.resource_plan)?,
         )?;
         backend.reserve_operational_storage(&ResourceLimits::from_plan(&config.resource_plan)?)?;
         Self::with_storage(config, Box::new(backend))
@@ -1879,7 +1854,7 @@ impl ExportBuilder<'_> {
             .query_row("PRAGMA page_size", [], |row| sqlite::row_uint(row, 0))?;
         if pages
             .checked_mul(size)
-            .is_none_or(|bytes| bytes > self.snapshot.catalog.inner.limits.scratch_bytes)
+            .is_none_or(|bytes| bytes > self.snapshot.catalog.inner.limits.families["catalog_export_scratch"].database_bytes)
         {
             return Err(CatalogError::ResourceIncomplete(
                 "export closure scratch allowance".into(),
@@ -2254,11 +2229,14 @@ impl ReadSnapshot {
         )?;
         let page_size: u64 =
             work.query_row("PRAGMA page_size", [], |row| sqlite::row_uint(row, 0))?;
-        work.pragma_update(
-            None,
-            "max_page_count",
-            (resource.scratch_bytes / page_size).min(i64::MAX as u64) as i64,
-        )?;
+        let family=resource.family("catalog_export_scratch")?;
+        let pages=family.database_bytes/page_size;
+        if pages==0 || family.database_bytes.checked_mul(2).and_then(|n|n.checked_add(1024*1024)).is_none_or(|n|n>family.journal_bytes)
+            || family.database_bytes.checked_mul(2).is_none_or(|n|n>family.temp_bytes) {
+            return Err(CatalogError::ResourceIncomplete("export prospective database/journal/temp reservation".into()));
+        }
+        let effective=work.query_row(&format!("PRAGMA max_page_count={pages}"),[],|row|sqlite::row_uint(row,0))?;
+        if effective!=pages { return Err(CatalogError::ResourceIncomplete("ineffective export max_page_count".into())); }
         work.execute_batch("CREATE TABLE exports(kind TEXT NOT NULL,key TEXT NOT NULL,path TEXT NOT NULL,level INTEGER,PRIMARY KEY(kind,key)); CREATE TABLE closure(kind TEXT NOT NULL,key TEXT NOT NULL,expected TEXT,done INTEGER NOT NULL,PRIMARY KEY(kind,key)); CREATE INDEX closure_pending ON closure(done,kind,key);")?;
         let mut builder = ExportBuilder {
             snapshot: self,
@@ -2389,6 +2367,7 @@ pub struct QuantumRequest {
     pub operation: String,
     pub deadline_monotonic: Value,
     pub work_unit: Value,
+    pub execution_origin: Value,
     pub resource_plan: Record,
     pub initial_image: Option<Record>,
     pub prior_checkpoint: Option<Record>,
@@ -2430,6 +2409,7 @@ impl QuantumRequest {
             "operation",
             "deadline_monotonic",
             "work_unit",
+            "execution_origin",
             "resource_plan",
             "initial_image",
             "prior_checkpoint",
@@ -2493,7 +2473,12 @@ impl QuantumRequest {
             }
         }
         let unit = request.unit()?;
-        if number(&unit.record, "unit_ordinal")?
+        closed_fields(&request.execution_origin, &["repository","pr","event_base","workflow_id","event_name","mode","operation","run","job","task","attempt","dispatch_ordinal"])?;
+        for field in ["repository","pr","event_base","workflow_id","event_name","mode","run","job","task","attempt"] {
+            if request.execution_origin[field] != unit.record[field] { return Err(CatalogError::SourceMismatch("private execution origin/WorkUnit mismatch".into())); }
+        }
+        if request.execution_origin["operation"] != "execute" { return Err(CatalogError::SourceMismatch("proof operation lacks execute origin".into())); }
+        if number(&request.execution_origin, "dispatch_ordinal")?
             >= number(&request.resource_plan.record, "maximum_units")?
         {
             return Err(CatalogError::ResourceIncomplete(
@@ -2733,7 +2718,7 @@ impl QuantumRequest {
             &self.dependency_index,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
-        let mut statement=connection.prepare("SELECT bytes,sha256,local_path FROM authenticated_members WHERE unit_ordinal=?1 AND part_ordinal=0 AND member_path='catalog-backup/root.json'")?;
+        let mut statement=connection.prepare("SELECT bytes,sha256,local_path FROM authenticated_snapshot_roots WHERE unit_ordinal=?1 AND kind='catalog_backup'")?;
         let mut rows = statement
             .query(rusqlite::params![
                 number(&checkpoint.record, "unit_ordinal")? as i64
@@ -2781,12 +2766,13 @@ impl QuantumRequest {
                 "catalog_sha256",
                 "chunk_bytes_limit",
                 "chunk_count",
-                "artifact_part_count",
-                "index_root",
+                "execution_origin",
+                "predecessor_root",
+                "manifest_root",
             ],
         )?;
         let c = &checkpoint.record;
-        if root["schema_version"] != 1
+        if root["schema_version"] != 2
             || root["kind"] != "catalog_backup"
             || root["source"] != c["source"]
             || root["session_id"] != c["session_id"]
@@ -2801,14 +2787,29 @@ impl QuantumRequest {
             || root["snapshot_boundary"] != "post_checkpoint_pre_upload"
             || root["format"] != "sqlite3"
             || root["backup_method"] != "sqlite_backup_api_v1"
-            || root["chunk_bytes_limit"] != PAGE_BYTES
+            || root["chunk_bytes_limit"] != 1024*1024
             || number(&root, "catalog_bytes")? == 0
             || number(&root, "chunk_count")? == 0
-            || !(1..=32).contains(&number(&root, "artifact_part_count")?)
+            || number(&root,"chunk_count")? != number(&root,"catalog_bytes")?.div_ceil(1024*1024)
         {
             return Err(CatalogError::SourceMismatch(
                 "authenticated backup root/checkpoint binding".into(),
             ));
+        }
+        closed_fields(&root["execution_origin"], &["repository","pr","event_base","workflow_id","event_name","mode","operation","run","job","task","attempt","dispatch_ordinal"])?;
+        if root["execution_origin"]["operation"]!="execute" || root["execution_origin"]["attempt"]!=1 {
+            return Err(CatalogError::SourceMismatch("snapshot execution origin differs".into()));
+        }
+        number(&root["execution_origin"],"dispatch_ordinal")?;
+        for field in ["manifest_root","predecessor_root"] {
+            let reference=&root[field];
+            if field=="predecessor_root" && reference.is_null() { continue; }
+            closed_fields(reference, &["kind","sha256","bytes"])?;
+            validate_definition("Sha256", &reference["sha256"])?;
+            if number(reference,"bytes")?==0 || field=="manifest_root" && reference["kind"]!="snapshot_manifest_node"
+                || field=="predecessor_root" && reference["kind"]!="catalog_backup" {
+                return Err(CatalogError::SourceMismatch("snapshot manifest/predecessor content identity".into()));
+            }
         }
         validate_definition("Sha256", &root["catalog_sha256"])?;
         Ok((
@@ -2997,9 +2998,23 @@ pub(super) fn fixture_configuration(path: PathBuf) -> CatalogConfig {
             )
         })
         .collect::<serde_json::Map<_, _>>();
-    p["source_bounds_utf8"] = json!(canonical(
-        &json!({"schema_version":2,"accounting_rule":"operational_encoded_caps_v1","source_receipt":{},"record_allowances":allowances,"overhead":{"index_bytes":4*1024*1024*1024u64,"wal_bytes":64*1024*1024,"scratch_bytes":128*1024*1024,"retained_bytes":128*1024*1024,"duplicate_backup_bytes":256*1024*1024},"accounting_method_sha256":"e".repeat(64),"measurement_sha256":"f".repeat(64)})
-    ));
+    p["maximum_units"] = json!(16);
+    let mut families=serde_json::Map::new();
+    for (name,owner) in [("catalog_main","catalog"),("verifier_main","verifier"),("catalog_export_scratch","catalog_export"),
+        ("verifier_continuation_scratch","verifier_continuation"),("catalog_or_verifier_restore_scratch","snapshot_restore"),
+        ("publication_pack_scratch","snapshot_transport"),("authentication_index","provenance"),("publication_pending_scratch","session_controller")] {
+        families.insert(name.into(),json!({"owner":owner,"database_bytes":64*1024*1024u64,"main_bytes":128*1024*1024u64,"journal_bytes":129*1024*1024u64,"temp_bytes":128*1024*1024u64}));
+    }
+    let source_map=strict_json(include_bytes!("../../../../validation/async_physical_table_map.json")).expect("fixture source map");
+    let table_map_sha=digest(canonical(&source_map).as_bytes());
+    let policy=json!({"schema_version":3,"kind":"physical_policy","table_map_sha256":table_map_sha,"families":families,
+        "pools":{"snapshot_spool_bytes":64*1024*1024u64,"restore_staging_bytes":64*1024*1024u64,"transfer_staging_bytes":64*1024*1024u64,
+        "cas_bytes":64*1024*1024u64,"source_runtime_scratch_bytes":64*1024*1024u64,"control_bytes":64*1024*1024u64}});
+    let peak=8*385*1024*1024u64+6*64*1024*1024u64+6*number(&p,"total_retained_artifact_bytes").expect("fixture retention")+32*1024*1024u64*19;
+    let calibration=json!({"schema_version":1,"kind":"physical_calibration","policy_sha256":digest(canonical(&policy).as_bytes()),"table_map_sha256":table_map_sha,
+        "geometry":{},"baseline":{"source_workspace_bytes":0,"existing_unpooled_bytes":0},"peak_bytes":peak});
+    p["source_bounds_utf8"]=json!(canonical(&json!({"schema_version":3,"accounting_rule":"typed_physical_caps_v1","source_receipt":{},"record_allowances":allowances,
+        "physical_policy":policy,"calibration":calibration,"accounting_method_sha256":"e".repeat(64),"measurement_sha256":"f".repeat(64)})));
     p["plan_sha256"] = json!("0".repeat(64));
     let provisional: Record = serde_json::from_value(plan).expect("plan shape");
     let hash = provisional.sha256();
