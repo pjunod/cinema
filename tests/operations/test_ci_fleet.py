@@ -443,6 +443,23 @@ class AgentCase(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertEqual(commands[-1][1:], ("--vm", runner["vm"]))
 
+    def test_incus_vm_cpu_comes_from_the_incus_counter(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = {"name": "gha-lab6-general-02", "kind": "incus", "vm": "gha-lab6-general-02", "unit": "u"}
+            agent, _ = self.agent([runner], folder)
+            usage = {"ns": 10_000_000_000}
+
+            def execute(*args, timeout=20):
+                return json.dumps([{"name": runner["vm"], "status": "Running", "expanded_config": {},
+                                    "state": {"cpu": {"usage": usage["ns"]}, "memory": {"usage": 1 << 30}}}])
+            agent.execute = execute
+            self.assertIsNone(agent.incus_vms()[0]["cpu"])
+            agent.incus["at"] -= 31  # the next listing is due
+            for vm in agent.incus["vms"]:
+                vm["at"] -= 30
+            usage["ns"] += 60_000_000_000  # 60 CPU-seconds in 30 s
+            self.assertEqual(agent.incus_vms()[0]["cpu"], 2.0)
+
     def test_standby_drain_is_the_controllers_marker(self):
         with tempfile.TemporaryDirectory() as folder:
             runner = {"name": "gha-macb-apple-01", "kind": "standby", "pause_marker": f"{folder}/paused"}

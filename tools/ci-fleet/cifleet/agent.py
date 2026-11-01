@@ -199,7 +199,7 @@ class Agent:
         self.cpu_before = None
         self.results = []
         self.sizes = {}
-        self.incus = {"at": 0, "vms": []}
+        self.incus = {"at": float("-inf"), "vms": []}
         self.is_mac = platform.system() == "Darwin"
         self.paused_dir = Path(config.get("paused_dir", "/var/lib/ci-fleet/paused"))
         self.watchdog_paused = Path(config.get("watchdog_paused_dir", "/var/lib/plurx-runner-watchdog/paused"))
@@ -259,9 +259,10 @@ class Agent:
                 ci_cpu += usage.get("cpu") or 0
                 ci_mem += usage.get("rss") or 0
         for vm in self.incus["vms"]:
+            # Every Incus VM's qemu sits in incus.service's cgroup, so a VM's
+            # CPU comes from Incus's own counter (incus_vms), not a cgroup.
             ci_mem += vm.get("memory_bytes") or 0
-            usage = self.cgroups.read(self.root / f"lxc.payload.{vm['name']}") or {}
-            ci_cpu += usage.get("cpu") or 0
+            ci_cpu += vm.get("cpu") or 0
         used_mem = mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)
         metrics = {
             "cpu_cores": cores,
@@ -360,10 +361,12 @@ class Agent:
         return gpus
 
     def incus_vms(self) -> list[dict]:
-        if time.time() - self.incus["at"] < INCUS_SECONDS:
+        if time.monotonic() - self.incus["at"] < INCUS_SECONDS:
             return self.incus["vms"]
         project = self.config["incus_project"]
         managed = {r["vm"]: r for r in self.config.get("runners", []) if r.get("kind") == "incus"}
+        previous = {vm["name"]: vm for vm in self.incus["vms"]}
+        now = time.monotonic()
         vms = []
         try:
             listing = json.loads(self.execute("incus", "list", "--project", project, "--format", "json"))
@@ -375,12 +378,18 @@ class Agent:
             state = instance.get("state") or {}
             paused = (self.watchdog_paused / instance["name"]).exists()
             controls = ["start_vm"] if instance["status"] == "Stopped" and not paused else []
-            vms.append({"name": instance["name"], "status": instance["status"],
+            cpu_ns = (state.get("cpu") or {}).get("usage")
+            before = previous.get(instance["name"], {})
+            cores = None
+            if cpu_ns is not None and before.get("cpu_ns") is not None and now > before.get("at", now):
+                cores = round(max(0, cpu_ns - before["cpu_ns"]) / 1e9 / (now - before["at"]), 3)
+            vms.append({"name": instance["name"], "status": instance["status"], "cpu_ns": cpu_ns, "at": now,
+                        "cpu": cores,
                         "memory_limit": instance.get("expanded_config", {}).get("limits.memory"),
                         "memory_bytes": (state.get("memory") or {}).get("usage"),
                         "autostart": instance.get("expanded_config", {}).get("boot.autostart") != "false",
                         "paused": paused, "controls": controls})
-        self.incus = {"at": time.time(), "vms": vms}
+        self.incus = {"at": time.monotonic(), "vms": vms}
         return vms
 
     def runner_report(self, runner: dict) -> dict:
