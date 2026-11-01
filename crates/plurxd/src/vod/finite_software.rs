@@ -387,6 +387,7 @@ pub(super) fn projected_driver_future_bytes() -> usize {
         SegmentPlan,
         &'static VodSettings,
         Option<usize>,
+        Option<plurx_core::cluster::clock::ContinuousDeadline>,
         &'static mut Option<super::shared::PreparedAttemptCleanup>,
     ) -> F;
     fn build_frame_bytes<
