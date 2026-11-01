@@ -37,10 +37,12 @@ STATS_SECONDS = 60
 MAINTAIN_SECONDS = 3600
 BACKFILL_DAYS = 90
 BACKFILL_EVERY = 3  # polls between backfill steps
-BACKFILL_RUNS = 5  # runs (or placements) per step: <= 0.4 extra forge calls/s
+BACKFILL_RUNS = 5  # runs per history step
+BACKFILL_PLACEMENTS = 3  # job-log placements per step; a step is <= 9 calls every 15 s
 AGENT_STALE = 60
 OPERATOR_CACHE = 300
 FINISHED = {"success", "failure", "cancelled", "skipped"}
+CONCLUDED_JOBS_SECONDS = 60
 UI = Path(__file__).resolve().parent.parent / "ui"
 
 
@@ -89,6 +91,7 @@ class Collector:
         self.forge_version = ""
         self.poll_seconds = 0.0
         self.passes = 0
+        self.jobs_cache: dict[int, tuple[int, list]] = {}
         self.last = {"tasks": 0, "sources": 0, "stats": 0, "maintain": 0, "minute": 0}
 
     # -- polling ---------------------------------------------------------------
@@ -108,7 +111,7 @@ class Collector:
             for job in queue:
                 if job["run_id"] not in active:
                     active[job["run_id"]] = self.runs.get(job["run_id"]) or self.forge.run(job["run_id"])
-            run_jobs = {run_id: self.forge.run_jobs(run_id) for run_id in active}
+            run_jobs = {run_id: self._jobs_of(run_id, run, now) for run_id, run in active.items()}
             running_tasks = {task["id"]: task for task in self.forge.tasks(1, status="running")}
             with self.lock:
                 self.runners, self.queue = runners, queue
@@ -139,6 +142,20 @@ class Collector:
             self.store.maintain(now)
             self.last["maintain"] = now
 
+    def _jobs_of(self, run_id: int, run: dict, now: int) -> list[dict]:
+        """A run's jobs: every poll while the run is active, every minute after.
+
+        A concluded run can still hold a waiting job (a runner would pick it up
+        only to skip it), so it stays listed, but its jobs rarely change.
+        """
+        cached = self.jobs_cache.get(run_id)
+        live = run.get("status") in ("running", "waiting", "blocked")
+        if cached and not live and now - cached[0] < CONCLUDED_JOBS_SECONDS:
+            return cached[1]
+        jobs = self.forge.run_jobs(run_id)
+        self.jobs_cache[run_id] = (now, jobs)
+        return jobs
+
     def _refresh_sources(self) -> None:
         head = self.forge.head("main")
         if head and head == self.source_head:
@@ -159,6 +176,7 @@ class Collector:
             stopped = fleet.iso_seconds(self.runs[run_id].get("stopped"))
             if run_id not in active and stopped and now - stopped > 7200:
                 del self.runs[run_id]
+                self.jobs_cache.pop(run_id, None)
 
     def _note_waits(self, now: int, run_jobs: dict) -> None:
         live = set()
@@ -254,6 +272,11 @@ class Collector:
         state = self.store.meta("backfill", {"tasks_page": 1, "runs_page": 1, "tasks_done": False, "runs_done": False})
         uuids = {runner["uuid"]: runner["name"] for runner in self.runners}
         horizon = now - BACKFILL_DAYS * 86400
+        # Newest unplaced tasks first, so recent placement never waits on history.
+        for task in self.store.unplaced(BACKFILL_PLACEMENTS):
+            placed = self.forge.job_runner(task["job_id"])
+            self.store.upsert_task({"task_id": task["task_id"], "runner_uuid": placed[0] if placed else "",
+                                    "runner": uuids.get(placed[0], placed[0]) if placed else ""})
         if not state["tasks_done"]:
             rows = self.forge.tasks(state["tasks_page"])
             for task in rows:
@@ -272,11 +295,6 @@ class Collector:
             oldest = min((fleet.iso_seconds(run.get("created")) or now for run in runs), default=0)
             state["runs_done"] = not runs or oldest < horizon
             state["runs_page"] += 1
-        else:
-            for task in self.store.unplaced(BACKFILL_RUNS):
-                placed = self.forge.job_runner(task["job_id"])
-                self.store.upsert_task({"task_id": task["task_id"], "runner_uuid": placed[0] if placed else "",
-                                        "runner": uuids.get(placed[0], placed[0]) if placed else ""})
         self.store.set_meta("backfill", state)
 
     def _task_times(self, task: dict) -> dict:

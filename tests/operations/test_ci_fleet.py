@@ -481,6 +481,16 @@ class CollectorCase(unittest.TestCase):
             if "/actions/tasks" in url or url.split("?")[0].endswith("/actions/runs"):
                 self.assertIn("page=", url)
 
+    def test_concluded_runs_jobs_are_refreshed_once_a_minute_not_every_poll(self):
+        before = sum("/actions/runs/6300/jobs" in url for _, url in self.opener.urls)
+        self.collector.poll()
+        self.assertEqual(sum("/actions/runs/6300/jobs" in url for _, url in self.opener.urls), before)
+
+    def test_waits_are_upper_bounds_until_the_needs_are_recorded(self):
+        job = next(j for j in self.collector.snapshot["jobs"]["waiting"] if j["run_index"] == 6266)
+        self.assertFalse(job["ready_exact"])
+        self.assertIn("waited ≤ ", explain.why(self.collector.snapshot, run=6266))
+
     def test_controls_need_an_allowed_address_and_a_writer_token(self):
         server = self.serve()
         base = f"http://127.0.0.1:{server.server_address[1]}"

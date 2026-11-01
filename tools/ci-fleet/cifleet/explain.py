@@ -32,7 +32,9 @@ def job_line(job: dict) -> str:
         runner = job.get("runner") or "unplaced"
         return f"RUNNING  {head} · on {runner} · {duration(job.get('elapsed'))}" + (
             f" (p50 {duration(job['p50'])})" if job.get("p50") else "")
-    words = [f"{CLASS_WORDS[job['class']]:<15} {head} · waited {duration(job.get('waited'))}", f"  why: {job['reason']}"]
+    bound = "" if job.get("ready_exact", True) else "≤ "
+    words = [f"{CLASS_WORDS[job['class']]:<15} {head} · waited {bound}{duration(job.get('waited'))}",
+             f"  why: {job['reason']}"]
     for note in job.get("notes", []):
         words.append(f"  note: {note}")
     for item in job.get("closest", []):

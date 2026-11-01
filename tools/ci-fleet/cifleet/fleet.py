@@ -223,9 +223,9 @@ def build(inputs: Inputs) -> dict:
                                 usage=usage,
                                 attributed=bool(task)))
             continue
-        ready = _ready_at(job, run, inputs, definition)
+        ready, exact = _ready_at(job, run, inputs, definition)
         verdict = classify(job, run, inputs, runners, definition, newest_run, ready, p50)
-        entry = dict(base, ready=ready, waited=(inputs.now - ready) if ready else None, **verdict)
+        entry = dict(base, ready=ready, ready_exact=exact, waited=(inputs.now - ready) if ready else None, **verdict)
         (blocked if verdict["class"] in ("blocked", "held") else waiting).append(entry)
 
     waiting.sort(key=lambda job: job.get("ready") or inputs.now)
@@ -265,11 +265,16 @@ def build(inputs: Inputs) -> dict:
     }
 
 
-def _ready_at(job: dict, run: dict, inputs: Inputs, definition) -> int | None:
-    """When the job's needs had all finished (or the run started, if none)."""
+def _ready_at(job: dict, run: dict, inputs: Inputs, definition) -> tuple[int | None, bool]:
+    """(when the job's needs had all finished, whether that is exact).
+
+    Until the needs' tasks are recorded, the run's start is the earliest the
+    job could have been ready, so the wait shown is an upper bound ("≤").
+    """
+    started = iso_seconds(run.get("started"))
     needs = job.get("needs") or []
     if not needs:
-        return iso_seconds(run.get("started")) or inputs.first_seen.get(job["id"])
+        return started or inputs.first_seen.get(job["id"]), bool(started)
     by_key = _run_jobs_by_key(job["run_id"], run, inputs, definition)
     stops = []
     for key in needs:
@@ -278,8 +283,8 @@ def _ready_at(job: dict, run: dict, inputs: Inputs, definition) -> int | None:
         if task and task.get("stopped"):
             stops.append(task["stopped"])
     if stops and len(stops) == len(needs):
-        return max(stops)
-    return inputs.first_seen.get(job["id"])
+        return max(stops), True
+    return started or inputs.first_seen.get(job["id"]), False
 
 
 def _run_jobs_by_key(run_id: int, run: dict, inputs: Inputs, definition) -> dict[str, dict]:
@@ -326,7 +331,8 @@ def classify(job: dict, run: dict, inputs: Inputs, runners: list[dict], definiti
         closest = sorted(
             ({"runner": runner["name"], "missing": sorted(requested - set(runner["labels"])),
               "has": len(requested & set(runner["labels"]))} for runner in runners),
-            key=lambda item: (-item["has"], item["runner"]))[:3]
+            key=lambda item: (-item["has"], item["runner"]))
+        closest = [item for item in closest if len(item["missing"]) <= max(1, len(closest[0]["missing"]) if closest else 1)][:3]
         absent = sorted(label for label in requested if not any(label in r["labels"] for r in runners))
         reason = f"no registered runner has all {len(requested)} labels"
         if absent:
