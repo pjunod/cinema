@@ -560,9 +560,7 @@ impl NodeResourceRuntime {
                     .ok_or(OperationError::State)?,
                 directory,
             )?;
-            self.release_native_entry(role.binding, None,
-                enter,
-            )?;
+            self.release_native_entry(role.binding, None, enter)?;
         }
         publication.join().await?;
         let publication = bootstrap

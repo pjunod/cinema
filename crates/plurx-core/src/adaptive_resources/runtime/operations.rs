@@ -565,6 +565,10 @@ impl NodeResourceRuntime {
     }
 
     // Same reservation/family/cancellation/refund owner for both codec versions.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "One private constructor seam shared by legacy and typed preparation; the original continuous cutoff joins the existing claims and deadline inputs."
+    )]
     fn prepare_plan_families<T>(
         &self,
         families: &[FamilyDemand<'_>],

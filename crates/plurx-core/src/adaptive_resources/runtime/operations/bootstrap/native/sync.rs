@@ -411,7 +411,8 @@ impl NodeResourceRuntime {
             .state();
         let sync = bootstrap.sync.as_mut().ok_or(OperationError::State)?;
         if sync.request.is_some() {
-            if Instant::now() >= deadline || bootstrap.change.is_some()
+            if Instant::now() >= deadline
+                || bootstrap.change.is_some()
                 || state
                     .asset
                     .head
@@ -432,9 +433,7 @@ impl NodeResourceRuntime {
                     .as_ref()
                     .ok_or(OperationError::State)?,
             )?;
-            self.release_native_entry(role.binding, None,
-                enter,
-            )?;
+            self.release_native_entry(role.binding, None, enter)?;
         }
         sync.join().await?;
         let result = sync.result.as_ref().ok_or(OperationError::State)?;
