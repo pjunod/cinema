@@ -222,10 +222,222 @@ pub(crate) async fn authorization(state: &AppState, value: Secret) -> Result<()>
 }
 pub(crate) async fn status(state: &AppState) -> Value {
     let jobs = jobs(state).unwrap_or_default();
+    let observation = state
+        .sharing
+        .network_observation
+        .lock()
+        .expect("network share observation")
+        .clone();
     json!({"configured":token(state).await.is_ok(),"node_id":state.node_id,
         "pending_cleanup":jobs.iter().filter(|j| j.cleanup).count(),
         "unknown_outcomes":jobs.iter().filter(|j| j.attempting.is_some()).count(),
-        "last_error":*state.sharing.network_invite_error.lock().expect("network cleanup observation")})
+        "last_error":*state.sharing.network_invite_error.lock().expect("network cleanup observation"),
+        "tailnet":observation.tailnet,
+        "observed_at_ms":observation.checked_at_ms,
+        "observation_error":observation.error,
+        "shares":observation.invites})
+}
+
+/// What the Tailscale control API says about the device shares this node
+/// issued: whether each was accepted, and by which account. Advisory only.
+#[derive(Clone, Default, Serialize)]
+pub(crate) struct NetworkObservation {
+    pub checked_at_ms: Option<i64>,
+    /// The tailnet the saved API key belongs to, derived from its devices.
+    pub tailnet: Option<String>,
+    pub error: Option<&'static str>,
+    pub invites: Vec<InviteObservation>,
+}
+#[derive(Clone, Serialize)]
+pub(crate) struct InviteObservation {
+    pub invitation_id: Uuid,
+    pub created_at_ms: i64,
+    pub shares: Vec<ShareObservation>,
+}
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ShareObservation {
+    /// The shared machine's Tailscale name.
+    pub device: String,
+    /// The provider's device ID, the stable key for carrying an observation.
+    #[serde(skip)]
+    pub device_id: String,
+    pub accepted: Option<bool>,
+    pub accepted_by: Option<String>,
+    pub error: Option<&'static str>,
+}
+const OBSERVED_INVITES: usize = 16;
+fn tailnet_of(name: &str) -> Option<String> {
+    let (_, rest) = name.split_once('.')?;
+    rest.ends_with(".ts.net").then(|| rest.to_owned())
+}
+fn accepted_login(record: &Value) -> Option<String> {
+    let login = record.get("acceptedBy")?.get("loginName")?.as_str()?.trim();
+    (!login.is_empty() && login.len() <= 256 && !login.chars().any(char::is_control))
+        .then(|| login.to_owned())
+}
+/// How often the account itself is re-read when no share awaits acceptance:
+/// enough to notice an expired key without a steady stream of API calls.
+const ACCOUNT_RECHECK_MS: i64 = 10 * 60 * 1000;
+async fn observe(state: &AppState) {
+    let token = match token(state).await {
+        Ok(token) => token,
+        Err(_) => {
+            *state
+                .sharing
+                .network_observation
+                .lock()
+                .expect("network share observation") = NetworkObservation::default();
+            return;
+        }
+    };
+    let previous = state
+        .sharing
+        .network_observation
+        .lock()
+        .expect("network share observation")
+        .clone();
+    let mut open: Vec<Job> = {
+        let _guard = state.sharing.network_invite_lock.lock().await;
+        jobs(state)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| j.completed && !j.cleanup && !j.shares.is_empty())
+            .collect()
+    };
+    open.sort_by_key(|j| std::cmp::Reverse(j.created_at_ms));
+    open.truncate(OBSERVED_INVITES);
+    // Acceptance is final: a share once seen accepted is never asked again.
+    let settled = |invitation: Uuid, device: &str| {
+        previous
+            .invites
+            .iter()
+            .find(|i| i.invitation_id == invitation)
+            .and_then(|i| i.shares.iter().find(|s| s.device_id == device))
+            .filter(|s| s.accepted == Some(true))
+            .cloned()
+    };
+    let pending = open.iter().any(|job| {
+        job.shares
+            .iter()
+            .any(|share| settled(job.invitation, &share.device).is_none())
+    });
+    let now = clock_ms();
+    let account_due = previous
+        .checked_at_ms
+        .is_none_or(|at| now.saturating_sub(at) >= ACCOUNT_RECHECK_MS)
+        || previous.error.is_some();
+    let mut current = NetworkObservation {
+        checked_at_ms: previous.checked_at_ms,
+        tailnet: previous.tailnet.clone(),
+        ..Default::default()
+    };
+    let mut names: std::collections::HashMap<String, String> = previous
+        .invites
+        .iter()
+        .flat_map(|i| i.shares.iter())
+        .map(|s| (s.device_id.clone(), s.device.clone()))
+        .collect();
+    if pending || account_due {
+        current.checked_at_ms = Some(now);
+        match devices(&token).await {
+            Ok(rows) => {
+                current.tailnet = rows
+                    .iter()
+                    .filter(|d| !d.is_external)
+                    .find_map(|d| tailnet_of(&d.name));
+                names.extend(
+                    rows.into_iter()
+                        .filter(|d| !d.is_external)
+                        .map(|d| (d.id, d.name)),
+                );
+            }
+            Err(error) => current.error = Some(error),
+        }
+    }
+    for job in open {
+        let mut shares = Vec::with_capacity(job.shares.len());
+        for share in &job.shares {
+            if let Some(done) = settled(job.invitation, &share.device) {
+                shares.push(done);
+                continue;
+            }
+            let device = names
+                .get(&share.device)
+                .cloned()
+                .unwrap_or_else(|| format!("device {}", share.device));
+            let device_id = share.device.clone();
+            shares.push(
+                match request(
+                    &token,
+                    reqwest::Method::GET,
+                    &format!("device-invites/{}", share.id),
+                    None,
+                )
+                .await
+                {
+                    Ok(record) => ShareObservation {
+                        device,
+                        device_id,
+                        accepted: record.get("accepted").and_then(Value::as_bool),
+                        accepted_by: accepted_login(&record),
+                        error: None,
+                    },
+                    Err(error) => ShareObservation {
+                        device,
+                        device_id,
+                        accepted: None,
+                        accepted_by: None,
+                        error: Some(error),
+                    },
+                },
+            );
+        }
+        current.invites.push(InviteObservation {
+            invitation_id: job.invitation,
+            created_at_ms: job.created_at_ms,
+            shares,
+        });
+    }
+    for invite in &current.invites {
+        let before = previous
+            .invites
+            .iter()
+            .find(|old| old.invitation_id == invite.invitation_id);
+        for share in &invite.shares {
+            let earlier =
+                before.and_then(|b| b.shares.iter().find(|s| s.device_id == share.device_id));
+            if earlier.map(|p| (p.accepted, &p.accepted_by))
+                == Some((share.accepted, &share.accepted_by))
+            {
+                continue;
+            }
+            match (share.accepted, share.accepted_by.as_deref()) {
+                (Some(true), by) => tracing::info!(
+                    invitation_id = %invite.invitation_id,
+                    device = %share.device,
+                    accepted_by = by.unwrap_or("unknown account"),
+                    "Tailscale device share accepted"
+                ),
+                (Some(false), _) => tracing::info!(
+                    invitation_id = %invite.invitation_id,
+                    device = %share.device,
+                    "Tailscale device share is waiting for the recipient to accept it"
+                ),
+                _ => {}
+            }
+        }
+    }
+    if current.error != previous.error {
+        match current.error {
+            Some(error) => tracing::warn!(code = error, "Tailscale account check failed"),
+            None => tracing::info!("Tailscale account check recovered"),
+        }
+    }
+    *state
+        .sharing
+        .network_observation
+        .lock()
+        .expect("network share observation") = current;
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -408,6 +620,11 @@ async fn issue_inner(state: &AppState, invite: &Invitation) -> Result<Secret> {
     .map_err(|_| "sharing_invalid_request")?;
     job.completed = true;
     save(state, &job)?;
+    tracing::info!(
+        invitation_id = %invite.id,
+        shares = job.shares.len(),
+        "invitation created with single-use Tailscale device shares"
+    );
     Ok(combined)
 }
 pub(crate) async fn cleanup(state: &AppState) -> Result<()> {
@@ -483,16 +700,41 @@ pub(crate) async fn cleanup(state: &AppState) -> Result<()> {
 pub(crate) async fn run(state: AppState, stop: CancellationToken) {
     loop {
         let result = cleanup(&state).await;
-        *state
-            .sharing
-            .network_invite_error
-            .lock()
-            .expect("network cleanup observation") = result.err();
+        let error = result.err();
+        let previous = std::mem::replace(
+            &mut *state
+                .sharing
+                .network_invite_error
+                .lock()
+                .expect("network cleanup observation"),
+            error,
+        );
+        if previous != error {
+            match error {
+                Some(code) => {
+                    tracing::warn!(code, "Tailscale share cleanup failed; retrying every 30 s")
+                }
+                None => tracing::info!(
+                    previous = previous.unwrap_or(""),
+                    "Tailscale share cleanup recovered"
+                ),
+            }
+        }
+        observe(&state).await;
         tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(30)) => {} }
     }
 }
 
 pub(crate) async fn issue(state: &AppState, invite: Invitation) -> Result<Secret> {
+    let invitation_id = invite.id;
+    let result = issue_owned(state, invite).await;
+    if let Err(code) = result {
+        tracing::warn!(%invitation_id, code, "invitation with Tailscale device shares could not be created");
+    }
+    result
+}
+
+async fn issue_owned(state: &AppState, invite: Invitation) -> Result<Secret> {
     let state = state.clone();
     let (send, receive) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
@@ -619,6 +861,26 @@ async fn retain_other_authority(state: &AppState, token: &Secret, share: &Share)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn share_acceptance_reads_the_accepting_login_and_the_keys_tailnet() {
+        let accepted = json!({"id":"1","accepted":true,"acceptedBy":{"id":42,"loginName":"owner-b@example.com"}});
+        assert_eq!(
+            accepted_login(&accepted).as_deref(),
+            Some("owner-b@example.com")
+        );
+        assert_eq!(accepted_login(&json!({"id":"1","accepted":false})), None);
+        assert_eq!(
+            accepted_login(&json!({"acceptedBy":{"loginName":"a\u{7}b"}})),
+            None,
+            "control characters never reach a page or log"
+        );
+        assert_eq!(
+            tailnet_of("cinema.tail111.ts.net").as_deref(),
+            Some("tail111.ts.net")
+        );
+        assert_eq!(tailnet_of("cinema.example.com"), None);
+        assert_eq!(tailnet_of("cinema"), None);
+    }
     #[test]
     fn provider_invite_accepts_omitted_false_flags() {
         for fields in [

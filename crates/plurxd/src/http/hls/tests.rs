@@ -6,3 +6,4 @@ include!("tests/chunk_05.rs");
 include!("tests/chunk_06.rs");
 
 include!("tests/cached_owner_delivery.rs");
+include!("tests/authority_recovery.rs");

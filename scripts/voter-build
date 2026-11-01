@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Run an agent build container on a Raft voter, capped.
+
+C0 of docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md: six uncapped clippy drivers of
+2.3-4.6 GB each filled a voter's swap, its runtime stalled for seconds and the
+cluster lost its leader again and again. Every agent build on a voter goes
+through this wrapper (AGENTS.md), which is ``docker run`` with:
+
+- ``--memory 8g --memory-swap 8g``: 8 GiB, and no swap on top of it;
+- ``--cpus 4``;
+- ``CARGO_BUILD_JOBS=4``, so cargo runs ``-j4`` inside it.
+
+It places the container nowhere special: dockerd's default parent,
+``docker-other.slice`` (deploy/voter-isolation/), bounds it further. It refuses
+the flags that would undo either: any memory, swap, CPU or cgroup-parent
+option, ``--privileged``, ``--pid``, ``--oom-score-adj`` (a negative score
+makes plurxd the kernel's first OOM victim instead of the build), any
+``--env-file``, ``--cap-add`` of ``SYS_RESOURCE``, ``SYS_ADMIN`` or ``ALL``,
+and ``CARGO_BUILD_JOBS`` in any ``-e``/``--env`` spelling (``--env=…``,
+``-e=…``, ``-eNAME=…``, a bare name that copies the caller's value, or a
+short-option cluster such as ``-ite``). The caps are also placed after the
+caller's options, so docker's last-wins rule keeps them even for a spelling
+this parser does not know.
+
+Usage: scripts/voter-build [docker run options --] IMAGE [COMMAND [ARG...]]
+       scripts/voter-build --print ...   (show the docker command, run nothing)
+
+Options for ``docker run`` go before a ``--``; everything after it (the image
+and its command) is passed through untouched. Without ``--`` the first
+argument is the image.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+CAPS = ["--memory", "8g", "--memory-swap", "8g", "--cpus", "4", "--env", "CARGO_BUILD_JOBS=4"]
+REFUSED = (
+    "--memory",
+    "-m",
+    "--memory-swap",
+    "--memory-reservation",
+    "--kernel-memory",
+    "--oom-kill-disable",
+    "--oom-score-adj",
+    "--cpus",
+    "--cpu-shares",
+    "-c",
+    "--cpu-period",
+    "--cpu-quota",
+    "--cpuset-cpus",
+    "--cgroup-parent",
+    "--cgroupns",
+    "--privileged",
+    "--pid",
+    "--env-file",
+)
+# Capabilities that let a process inside lift its own limits or OOM score.
+REFUSED_CAPABILITIES = {"SYS_RESOURCE", "CAP_SYS_RESOURCE", "SYS_ADMIN", "CAP_SYS_ADMIN", "ALL"}
+CAPPED_ENV = "CARGO_BUILD_JOBS"
+# docker run's single-letter options: those that take a value, and the
+# boolean ones that may be clustered in front of one (``-it``, ``-ite X``).
+SHORT_WITH_VALUE = set("acehlmpuvw")
+SHORT_BOOLEAN = set("diPqt")
+
+
+def _refusal(flag: str) -> SystemExit:
+    return SystemExit(
+        f"voter-build: {flag} is refused; the caps on a voter are fixed "
+        "(docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md §4.6)"
+    )
+
+
+def _check_value(flag: str, value: str | None) -> str | None:
+    """The refused flag, if ``flag`` with ``value`` would lift a cap."""
+    if flag in ("-e", "--env") and value is not None:
+        if value.split("=", 1)[0].strip() == CAPPED_ENV:
+            return f"{flag} {CAPPED_ENV}"
+    if flag == "--cap-add" and value is not None:
+        for capability in value.split(","):
+            if capability.strip().upper() in REFUSED_CAPABILITIES:
+                return f"--cap-add {capability.strip()}"
+    if flag in REFUSED:
+        return flag
+    return None
+
+
+def refused(argument: str, following: str | None = None) -> tuple[str | None, bool]:
+    """Whether ``argument`` (with the next token ``following``) lifts a cap.
+
+    Returns the refused flag, or ``None``, and whether ``following`` was
+    consumed as this option's value.
+    """
+    if argument.split("=", 1)[0].strip() == CAPPED_ENV:
+        return argument, False
+    if argument.startswith("--"):
+        flag, glued, value = argument.partition("=")
+        if glued:
+            return _check_value(flag, value), False
+        if flag in ("--env", "--cap-add"):
+            return _check_value(flag, following), True
+        return _check_value(flag, None), False
+    if argument.startswith("-") and len(argument) > 1:
+        cluster = argument[1:]
+        for position, letter in enumerate(cluster):
+            if letter in SHORT_BOOLEAN:
+                continue
+            if letter in SHORT_WITH_VALUE:
+                rest = cluster[position + 1 :]
+                flag = "-" + letter
+                if rest:
+                    return _check_value(flag, rest[1:] if rest.startswith("=") else rest), False
+                return _check_value(flag, following), True
+            return None, False
+    return None, False
+
+
+def command(argv: list[str]) -> list[str]:
+    if "--" in argv:
+        split = argv.index("--")
+        options, rest = argv[:split], argv[split + 1 :]
+    else:
+        options, rest = [], argv
+    index = 0
+    while index < len(options):
+        following = options[index + 1] if index + 1 < len(options) else None
+        flag, consumed = refused(options[index], following)
+        if flag is not None:
+            raise _refusal(flag)
+        index += 2 if consumed else 1
+    if not rest:
+        raise SystemExit(__doc__)
+    # The caps go last among the options: for every flag docker lets repeat,
+    # the last one wins, so ours do.
+    return ["docker", "run", *options, *CAPS, *rest]
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    show = bool(argv) and argv[0] == "--print"
+    if show:
+        argv = argv[1:]
+    built = command(argv)
+    if show:
+        print(" ".join(built))
+        return 0
+    os.execvp(built[0], built)
+    return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main())

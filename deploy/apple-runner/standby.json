@@ -14,5 +14,6 @@
     "/opt/homebrew/bin/forgejo-runner", "daemon", "--config",
     "/opt/homebrew/etc/forgejo-runner/config.yaml"
   ],
-  "runner_directory": "/opt/homebrew/var/lib/forgejo-runner"
+  "runner_directory": "/opt/homebrew/var/lib/forgejo-runner",
+  "pause_marker": "/opt/homebrew/var/lib/forgejo-runner/ci-fleet-paused"
 }

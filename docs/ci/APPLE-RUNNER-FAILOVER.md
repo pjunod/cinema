@@ -1,6 +1,6 @@
 # Apple runners — the M4 primary and M3 Max standby
 
-**Status:** live · **Updated:** 2026-10-26
+**Status:** live · **Updated:** 2026-11-01
 
 Companion to [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) (what Apple
 CI verifies) and [RUNNER-DISK.md](RUNNER-DISK.md) (runner disk maintenance).
@@ -10,8 +10,21 @@ This document owns Apple runner preference, outage detection and installation.
 
 | Role | Forgejo runner | Host | Account | Toolchain |
 |---|---|---|---|---|
-| Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Unverified; offline at the 2026-10-23 inspection |
-| Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `operator` | Verified 2026-10-23: Xcode 27.1, `27A9275` |
+| Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Xcode 27.0, `27A266a`; awaiting the 27.2 upgrade |
+| Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `pjunod` | Xcode 27.2, `27B52` |
+
+The toolchain pin is Xcode 27.2 (`27B52`). The standby's Xcode updated itself
+from 27.1 to 27.2 on 2026-10-30, which removed 27.1, so no runner matched the old
+pin and every Apple job failed its toolchain check. It was observed on 2026-11-01
+with the iOS 27.2 and tvOS 27.2 SDKs and the iOS 26.5 and tvOS 26.5 simulator
+runtimes (the navigation journeys use tvOS 26.5). The primary still reports
+27.0 and must match the pin before it can serve Apple jobs. A runner's
+labels live in its `server.connections` entry in
+`/opt/homebrew/etc/forgejo-runner/config.yaml`; there is no `.runner` file,
+and creating one makes the daemon refuse to start. The standby's
+`xcode-27.1:host` label became `xcode-27.2:host` there on 2026-11-01, and its
+daemon was restarted while idle. This source change installs and restarts
+nothing.
 
 Apple jobs keep DerivedData inside their own checkout and reuse it between
 that job's build, unit-test and navigation steps. Whole DerivedData is neither
@@ -43,24 +56,24 @@ while the job was active, without a terminal outcome. The former
 60-minute full-job budget left insufficient room for this measured pipeline.
 The per-test 180/240-second limits and all unit/navigation gates remain.
 
-The workflow and health-command pin is Xcode **27.1**, build **27A9275**.
-The verified backup has iphoneos SDK **27.1**, appletvos SDK **27.0**, and
+The workflow and health-command pin is Xcode **27.2**, build **27B52**.
+The verified backup has iphoneos SDK **27.2**, appletvos SDK **27.2**, and
 XcodeGen **2.46.0**. Full promotion still requires the existing iOS 26.5 /
 23F77 and tvOS 26.5 / 23L470 simulator runtimes; the SDK upgrade does not
 change that runtime contract. The primary's installation and deployment of
 the updated health command remain unverified. The backup observed on
-2026-10-23 runs a user-level controller at `~/.local/bin/plurx-apple-standby`
+2026-10-23 and 2026-11-01 runs a user-level controller at `~/.local/bin/plurx-apple-standby`
 with `~/.config/plurx/apple-standby.json`, supervised by the user LaunchAgent
 `~/Library/LaunchAgents/tv.plurx.apple-standby.plist` in that account's GUI
 domain. The system-service installation paths below were absent. Update that existing supervised deployment rather
 than starting a second controller.
 
 Apple jobs require `self-hosted`, `macOS`, `ARM64`, `lab`, `apple`, and
-`xcode-27.1`. Grant the new version label only after verifying the selected
+`xcode-27.2`. Grant the new version label only after verifying the selected
 installation and runner prerequisites. Keep the unverified primary excluded
 from that label until its toolchain and installed health command are checked.
 The primary also carries `primary`, and the backup carries `backup`.
-Apple workflows additionally require `xcode-27.1`. Only the backup currently
+Apple workflows additionally require `xcode-27.2`. Only the backup currently
 provides that label; the primary must complete its Xcode upgrade before it
 can receive the label and resume Apple jobs. Forgejo matches labels; the role
 labels do not make its scheduler prefer one runner. The
@@ -75,13 +88,13 @@ match the exact workflow version and build, and its host to reach Forgejo.
 Only after all three checks succeed does it print exactly:
 
 ```text
-Xcode 27.1
-Build version 27A9275
+Xcode 27.2
+Build version 27B52
 ```
 
 Both lines end with a newline. The controller requires exit status zero and
 stdout exactly equal to the required nonempty `probe_expected_stdout` string
-in its configuration (`Xcode 27.1\nBuild version 27A9275\n` in JSON).
+in its configuration (`Xcode 27.2\nBuild version 27B52\n` in JSON).
 It does not trim whitespace or accept exit status alone. A missing, empty or
 non-string expectation refuses configuration. An old installed health command
 that silently exits zero therefore cannot trigger backup drain. A busy
@@ -104,6 +117,11 @@ before a new backup daemon starts.
  backup daemon exits                   ──▶ standby, or restart during outage
 ```
 
+An operator can take the backup out of the pool from
+[ci-fleet](http://forge.lan:3000/noirr/ci-fleet) (Drain): that writes the configuration's `pause_marker`,
+and while it exists the controller drains the backup the same way and offers no
+slot, even during an outage. Resume removes it.
+
 **Limits:** availability is observed from the M3, not from Forgejo's runner
 database. A network partition between the two Macs can enable both runners
 even if the M4 can still reach Forgejo. A running daemon with invalid
@@ -114,8 +132,8 @@ the interrupted run still follows Forgejo's own failure/retry policy.
 
 ## Migrate eligibility and health together before restoring preference
 
-Source changes do not update either installed role. During the 27.1 migration,
-keep the primary without `xcode-27.1`; the verified backup can provide Apple
+Source changes do not update either installed role. During the 27.2 migration,
+keep the primary without `xcode-27.2`; the verified backup can provide Apple
 execution while the primary is unavailable. This is degraded backup-only
 operation until the primary installation and health deployment are verified.
 
@@ -123,7 +141,7 @@ operation until the primary installation and health deployment are verified.
    rollback outside compiler caches. Verify the backup's identity and that it
    is idle; gracefully drain any active job through its existing supervisor
    before unloading the controller. Never force-kill a job.
-2. Persist `xcode-27.1` for the verified backup through its existing runner
+2. Persist `xcode-27.2` for the verified backup through its existing runner
    registration/configuration mechanism, preserving other labels and private
    credentials. Verify eligibility survives service restart. Do not grant the
    new label to the unverified primary.
@@ -136,8 +154,8 @@ operation until the primary installation and health deployment are verified.
    an old silent primary or an SSH timeout remains unavailable. Verify one
    backup daemon starts after three failed probes and does not spuriously drain.
 4. When the primary is reachable, install the reviewed health command and
-   verify its selected Xcode 27.1/build 27A9275, required host prerequisites,
-   and exact two-line health output. Only then grant `xcode-27.1`. Two
+   verify its selected Xcode 27.2/build 27B52, required host prerequisites,
+   and exact two-line health output. Only then grant `xcode-27.2`. Two
    successful probes allow the existing graceful backup drain.
 
 Rollback must keep workflow pins, runner labels and health-output expectations

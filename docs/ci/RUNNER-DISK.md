@@ -188,6 +188,12 @@ systemctl status plurx-runner-watchdog.timer --no-pager
 cat /var/lib/plurx-runner-watchdog/state.json
 ```
 
+The watchdog leaves alone any VM with a marker in
+`/var/lib/plurx-runner-watchdog/paused/` (it reports who paused it), and
+`plurx-runner-watchdog --vm <name>` runs one VM's pass on demand.
+[ci-fleet](http://forge.lan:3000/noirr/ci-fleet)'s Drain, Resume and Start VM use exactly these two;
+a drained runner is stopped only once it is idle.
+
 The reconciliation command keeps each existing registration and config credentials,
 backs up config with mode 0600, activates persistent guest swap, applies
 capacity/build/container/service budgets,

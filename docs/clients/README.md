@@ -101,6 +101,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) | Adversarial review of the RCA at `5c605768`: §5.3's web regression refuted, the index pass proven to be one full demux (so Fix C rides on it for free), answers to all seven questions, six rulings. | done |
 | [SUBTITLE-CLUSTER-EXTRACTION-PLAN.md](SUBTITLE-CLUSTER-EXTRACTION-PLAN.md) | v2 implementation contract and M0–M5 execution log for clustered text and PGS extraction, queueing, hydration and backfill; fleet evidence pending. | built |
 | [SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md](SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md) | Seven findings and dispositions that shaped the v2 contract. | done |
+| [SUBTITLE-CUE-INDEX-RCA.md](SUBTITLE-CUE-INDEX-RCA.md) | Why text subtitles came and went (every reader demuxed the picture to find them), and the Matroska cue-index reader that reads only the subtitle blocks. | built |
 | [PARALLEL-SUBTITLE-RANGES-STATUS.md](PARALLEL-SUBTITLE-RANGES-STATUS.md) | Distributed playback text windows: bounded-seek evidence, implementation and verification status. | built |
 | [SUBTITLE-CLUSTER-EXTRACTION-STATUS.md](SUBTITLE-CLUSTER-EXTRACTION-STATUS.md) | Current K-09 milestone, review and merge qualification status; fleet evidence pending. | built |
 | [SUBTITLE-RELIABILITY-COMPLETION.md](SUBTITLE-RELIABILITY-COMPLETION.md) | Current cross-client subtitle defects, measured engine recovery, and reconciled remaining subtitle work. | built |

@@ -1,6 +1,6 @@
 # Shared libraries — operating the effort build
 
-**Status:** implemented paths with qualification open · **Updated:** 2026-10-29.
+**Status:** implemented paths with qualification open · **Updated:** 2026-11-01.
 This guide describes the effort build, not a released or fleet-qualified
 feature. See [current status](SHARED-LIBRARIES-STATUS.md) for outstanding
 cluster, topology and device work, and the
@@ -91,6 +91,30 @@ private egress and real Tailscale playback still require qualification.
 
 The recipient serves its own clients; TVs and phones do not need access to
 the Source's tailnet. Pairing and assignment administration are web-first.
+
+### Reading Connection status
+
+Settings → Sharing opens with three checks for the serving node:
+
+- **Tailscale on this node** — connected, with the signed-in account,
+  tailnet, machine name and address; otherwise the failing step in
+  Tailscale's own words. A native Mac LaunchAgent runs the Tailscale CLI
+  with `TAILSCALE_BE_CLI=1`; without it the app answers as its GUI and no
+  observation (or outbound connection) was possible.
+- **Other Cinemas can reach this server** — the private Serve forward and
+  published address. Inside Docker without the host component this stays
+  unknown; the other Cinema's connection check is the end-to-end proof.
+- **Inviting someone on another Tailscale account** — whether a Tailscale
+  API key is linked. Each recipient row, and each unused invitation, shows
+  whether its single-use Tailscale share was accepted and by which login.
+
+Each saved import shows the background check (every minute) as reachable or
+not; **Check connection** explains a failure. `not_shared` on a native
+receiver means the source is missing from its own Tailscale netmap: accept
+the invitation's Tailscale link while signed in as the account shown under
+Tailscale on this node — a browser signed in as the sender accepts nothing
+useful. The **Sharing activity log** at the bottom of the page reads
+`/api/v1/system/logs?scope=sharing`.
 
 ### When an import does not appear
 
