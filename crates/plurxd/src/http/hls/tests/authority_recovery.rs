@@ -108,6 +108,69 @@ async fn an_arrival_six_seconds_into_an_outage_fails_fast() {
     );
 }
 
+/// A new loss that lands after the owner saw authority return, but before it
+/// published the recovery, is not that recovery: `Recovered` carries the
+/// generation authority came back under, so a request that was admitted
+/// under it keeps waiting on the new loss instead of spending its retry.
+#[tokio::test(start_paused = true)]
+async fn a_loss_landing_before_the_recovery_is_published_is_not_reported_recovered() {
+    let (fence, manager, _owner, _base) = fenced_manager().await;
+    fence.validation_set_ready(false).await;
+    settle().await;
+    let first_loss = fence.authority().state().loss_generation;
+
+    let pause = manager
+        .test_hooks()
+        .outage_loss_resolved
+        .arm("outage loss resolved");
+    let sessions = manager.hold_sessions_for_test().await;
+    fence.validation_set_ready(true).await;
+    // The owner has seen the recovery and is stopped before publishing it.
+    let hold = pause.reached().await;
+    fence.validation_set_ready(false).await;
+    let second_loss = fence.authority().state().loss_generation;
+    assert_eq!(second_loss, first_loss + 1);
+    let baseline = fence.authority().outage_baseline().expect("fenced again");
+    assert_eq!(baseline, first_loss, "the generation last held");
+    let waiter = tokio::spawn({
+        let manager = std::sync::Arc::clone(&manager);
+        async move { manager.wait_for_outage_resolution(baseline, far_deadline()).await }
+    });
+    settle().await;
+
+    drop(hold);
+    settle().await;
+    // Published, and stopped again (on the session lock) before it re-arms.
+    assert_eq!(
+        manager.outage_resolution_now(),
+        crate::serving_fence::OutageResolution {
+            loss_generation: first_loss,
+            state: crate::serving_fence::OutageState::Recovered,
+        },
+        "the recovery is reported under the generation it happened in"
+    );
+    settle().await;
+    assert!(
+        !waiter.is_finished(),
+        "a waiter after the first loss's generation is still waiting on the second"
+    );
+
+    drop(sessions);
+    settle().await;
+    assert_eq!(
+        manager.outage_resolution_now().loss_generation,
+        second_loss,
+        "the second loss gets its own resolution"
+    );
+    assert!(!waiter.is_finished());
+    fence.validation_set_ready(true).await;
+    settle().await;
+    assert_eq!(
+        waiter.await.expect("waiter"),
+        crate::serving_fence::OutageWait::Recovered
+    );
+}
+
 /// Losses that follow each other inside a grace spend one budget, and
 /// requests held across them, including ones that are cancelled, neither
 /// spend nor reset it.

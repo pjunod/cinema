@@ -347,6 +347,11 @@ pub(crate) enum LossOutcome {
         outage: Duration,
         /// The outage budget spent so far, this loss included.
         budget_spent: Duration,
+        /// The loss generation current in the observation that saw authority
+        /// ready. A loss published after that observation is a new outage,
+        /// so a recovery is only ever reported under this generation, never
+        /// under whatever the watch holds by the time the owner reads it.
+        generation: u64,
     },
     /// The grace ran out first. The owner ends its work.
     Expired,
@@ -422,35 +427,39 @@ impl SessionGrace {
     ) -> LossOutcome {
         let deadline = self.deadline_for_loss(lost_at);
         self.outage_spent = self.spent_at(lost_at);
-        // `Some(true)`: authority came back inside the grace; `Some(false)`:
-        // the grace ran out; `None`: the fence is gone.
-        let recovered = if serving.borrow_and_update().ready {
-            Some(true)
+        // `Some(Some(generation))`: authority came back inside the grace,
+        // under `generation`; `Some(None)`: the grace ran out; `None`: the
+        // fence is gone.
+        let observed = *serving.borrow_and_update();
+        let recovered = if observed.ready {
+            Some(Some(observed.loss_generation))
         } else {
             tokio::time::timeout_at(deadline, async {
                 loop {
                     if serving.changed().await.is_err() {
                         return None;
                     }
-                    if serving.borrow_and_update().ready {
-                        return Some(true);
+                    let observed = *serving.borrow_and_update();
+                    if observed.ready {
+                        return Some(Some(observed.loss_generation));
                     }
                 }
             })
             .await
-            .unwrap_or(Some(false))
+            .unwrap_or(Some(None))
         };
         match recovered {
-            Some(true) => {
+            Some(Some(generation)) => {
                 let outage = lost_at.elapsed();
                 self.outage_spent = self.outage_spent.saturating_add(outage);
                 self.last_recovered_at = Some(tokio::time::Instant::now());
                 LossOutcome::Recovered {
                     outage,
                     budget_spent: self.outage_spent,
+                    generation,
                 }
             }
-            Some(false) => {
+            Some(None) => {
                 self.outage_spent = Duration::ZERO;
                 self.last_recovered_at = None;
                 LossOutcome::Expired

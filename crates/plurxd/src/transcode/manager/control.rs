@@ -1651,15 +1651,19 @@ impl TranscodeManager {
                     .store(state.loss_generation, Release);
                 let outcome = grace.resolve_loss_from(&mut serving, lost_at).await;
                 self.hooks.get().after_outage_loss_resolved().await;
-                let resolved_generation = serving.borrow().loss_generation;
                 match outcome {
                     crate::serving_fence::LossOutcome::Recovered {
                         outage,
                         budget_spent,
+                        generation,
                     } => {
+                        // The generation authority came back under, read in
+                        // the same observation that saw it ready: a loss
+                        // published since is a new outage, never this
+                        // recovery's.
                         self.outage_resolution.send_replace(
                             crate::serving_fence::OutageResolution {
-                                loss_generation: resolved_generation,
+                                loss_generation: generation,
                                 state: crate::serving_fence::OutageState::Recovered,
                             },
                         );
