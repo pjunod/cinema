@@ -622,3 +622,23 @@ the fast lane once (rerunning only failed tests), then merge. Paul deploys.
 | Fable rev. 2 low | `/hls/` substring parks Live TV paths | §4.2 (1): route template |
 | Fable re-check cond. 1 | `executor_lost`/`failure_applied` failures have no decision | §4.5 row 1 disjunction, M5 |
 | Fable re-check cond. 2 | Router hold template list was incomplete | §4.2 (1) enumerated via `MatchedPath`, M2 |
+
+## 10. Build record: where the code differed from this plan
+
+Recorded by the build agent on `effort/playback-quorum-gaps` (M0–M6).
+
+| Plan said | Code had | What was built |
+|---|---|---|
+| §4.2 (1) hold list | Two more GET reads of an existing session: `master.m3u8` and `{role}/{rendition}/index.m3u8` | Both are held. The list is `HLS_SESSION_ROUTES` in `http/hls/fence.rs`, and a source test fails on an unclassified route |
+| §4.2 (1) "request deadline" | The router has no request deadline | The hold is bounded by the grace from arrival and by the outage's `expires_at` |
+| §4.2 (2) three `.admit()` calls | Two in `publication.rs`; the third is session registration | Both publication calls raise `AuthorityLost` |
+| §4.2 (2) `commit_guard_before` has one other caller | Seven more (`create.rs`, `control.rs`) | Its `Option` signature stays; `commit_guard_or_refusal_before` says why, for publication commits only |
+| §4.5 `terminal_prepublication_failure: bool` | A bool cannot carry the reason when no decision exists | `Option<&'static str>` with the kind (`executor_lost`, `failure_applied`) |
+| §4.5 "both sleep branches" | Three sleeps | The two before any object opens. The third waits on an attempt that has published, which `published_producer_ended_before` already covers |
+| §5 `validation/regressions.d` rows | Refused past the merge-errata boundary (`validation/history.py`, phase B) | `Regression-Test:` lines in the pull request instead |
+
+Not covered: a pre-publication segment request (not `master.m3u8`) whose
+producer dies still ends `response_state_changed`, because
+`authorize_playlist_error_publication` publishes `ProducerEnded` only with the
+published-producer proof. With no running `serving_fence_loop`, a held
+request fails fast, as it did before the hold.
