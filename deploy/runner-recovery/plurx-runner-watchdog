@@ -27,7 +27,28 @@ def available_memory():
     raise RuntimeError("MemAvailable missing; refusing a blind VM start")
 
 
-def recover(config, state, *, execute=command, memory=available_memory, now=None, host=None, persist=lambda state: None):
+PAUSED_DIR = Path("/var/lib/plurx-runner-watchdog/paused")
+
+
+def paused_reason(paused_dir, name):
+    """Why an operator drained this VM's runner, or None when it is not paused.
+
+    ci-fleet's Drain writes the marker before it stops the runner, so the next
+    pass does not restart a unit someone deliberately stopped; Resume removes
+    it. The watchdog stays the only thing that starts runner VMs and daemons.
+    """
+    marker = Path(paused_dir) / name
+    if not marker.exists():
+        return None
+    try:
+        detail = json.loads(marker.read_text())
+    except (OSError, ValueError):
+        return "paused"
+    return f"paused by {detail.get('actor') or 'an operator'}" + (f": {detail['reason']}" if detail.get("reason") else "")
+
+
+def recover(config, state, *, execute=command, memory=available_memory, now=None, host=None, persist=lambda state: None,
+            paused_dir=PAUSED_DIR, only=None):
     now = int(time.time()) if now is None else now
     host = socket.gethostname().split(".")[0] if host is None else host
     project = config.get("project", "github-runners")
@@ -61,7 +82,12 @@ def recover(config, state, *, execute=command, memory=available_memory, now=None
             admission = memory() - unused
         # A later reading may be lower; never enlarge this pass's budget.
         return min(admission, memory())
-    for managed in config["runners"]:
+    managed_runners = config["runners"]
+    if only is not None:
+        managed_runners = [managed for managed in managed_runners if managed["vm"] == only]
+        if not managed_runners:
+            receipt["errors"].append(f"{only}: not managed by this host's watchdog")
+    for managed in managed_runners:
         name, unit = managed["vm"], managed["unit"]
         if not re.fullmatch(r"gha-[a-z0-9-]+", name) or not re.fullmatch(r"forgejo-runner-gha-[a-z0-9-]+\.service", unit):
             raise ValueError("invalid managed runner identity")
@@ -71,6 +97,10 @@ def recover(config, state, *, execute=command, memory=available_memory, now=None
             continue
         if instance["expanded_config"].get("boot.autostart") == "false":
             receipt["deferred"].append(f"{name}: maintenance")
+            continue
+        reason = paused_reason(paused_dir, name)
+        if reason:
+            receipt["deferred"].append(f"{name}: {reason}")
             continue
         # Inventory drift must not turn an 8 GiB admission check into a boot
         # of a larger VM. Reconcile configuration instead of guessing units.
@@ -121,12 +151,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="/etc/plurx-ci/runner-vms.json")
     parser.add_argument("--state", default="/var/lib/plurx-runner-watchdog/state.json")
+    parser.add_argument("--paused-dir", default=str(PAUSED_DIR))
+    parser.add_argument("--vm", help="recover only this managed VM (ci-fleet's Start VM and Resume)")
     args = parser.parse_args()
     path = Path(args.state)
     path.parent.mkdir(parents=True, exist_ok=True)
     # systemd serializes passes; atomic writes preserve restart history on failure.
     state = json.loads(path.read_text()) if path.exists() else {}
-    receipt = recover(json.loads(Path(args.config).read_text()), state, persist=lambda value: save_state(path, value))
+    receipt = recover(json.loads(Path(args.config).read_text()), state, persist=lambda value: save_state(path, value),
+                      paused_dir=args.paused_dir, only=args.vm)
     save_state(path, state)
     print(json.dumps(receipt), flush=True)
     return int(bool(receipt["errors"]))
