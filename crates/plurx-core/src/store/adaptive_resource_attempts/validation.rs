@@ -27,6 +27,9 @@ struct Fault<'a, B> {
 
 #[async_trait]
 impl<B: Backend> Backend for Fault<'_, B> {
+    fn attempt_outage_fence(&self) -> schema::OutageFence {
+        self.store.attempt_outage_fence()
+    }
     async fn attempt_layout(&self) -> Result<schema::Layout, StoreError> {
         self.store.attempt_layout().await
     }
@@ -88,9 +91,13 @@ pub async fn adopt_hiqlite(
 /// retained fixture history, reinstalls all guards in the SAME transaction and
 /// refuses unknown/partial shapes rather than treating them as empty.
 pub fn reset_statements(layout: schema::Layout) -> Vec<String> {
-    let mut statements = vec![schema::assertion(&schema::ready_guard(layout))];
+    reset_statements_for(layout, schema::OutageFence::Standalone)
+}
+
+pub fn reset_statements_for(layout: schema::Layout, outage: schema::OutageFence) -> Vec<String> {
+    let mut statements = vec![schema::assertion(&schema::ready_guard_for(layout, outage))];
     statements.extend(
-        schema::trigger_objects(layout)
+        schema::trigger_objects_for_fence(layout, outage)
             .into_iter()
             .map(|(name, _)| format!("DROP TRIGGER {name}")),
     );
@@ -106,10 +113,10 @@ pub fn reset_statements(layout: schema::Layout) -> Vec<String> {
             .into(),
     );
     statements.extend(
-        schema::trigger_objects(layout)
+        schema::trigger_objects_for_fence(layout, outage)
             .into_iter()
             .map(|(_, sql)| sql),
     );
-    statements.push(schema::assertion(&schema::ready_guard(layout)));
+    statements.push(schema::assertion(&schema::ready_guard_for(layout, outage)));
     statements
 }

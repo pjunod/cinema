@@ -197,16 +197,22 @@ fn legacy_columns(table: &str) -> Vec<(String, String)> {
 /// rebuild replaces, including the refresh trigger on background_job_commands.
 /// Exact SQL preserves old CHECK, UNIQUE, foreign-key and trigger semantics;
 /// additional indexes/triggers or any substituted definition refuse activation.
-fn legacy_object_guard() -> String {
+fn legacy_object_guard(outage: super::adaptive_resource_attempts::schema::OutageFence) -> String {
     use super::adaptive_resource_attempts::schema as adaptive;
     format!(
         "({}) AND (({}) OR ({}))",
         adaptive::session_shape_guard(adaptive::Layout::Legacy),
         adaptive::absent_guard(),
-        adaptive::exact_objects_guard(adaptive::Layout::Legacy)
+        adaptive::exact_objects_guard_for(adaptive::Layout::Legacy, outage)
     )
 }
 pub(crate) fn predecessor_layout_guard() -> String {
+    predecessor_layout_guard_for(super::adaptive_resource_attempts::schema::OutageFence::Standalone)
+}
+
+pub(crate) fn predecessor_layout_guard_for(
+    outage: super::adaptive_resource_attempts::schema::OutageFence,
+) -> String {
     let mut objects = vec![
         "sharing_source_schema_installation".to_owned(),
         "sharing_source_schema_transaction_guard".to_owned(),
@@ -262,7 +268,7 @@ pub(crate) fn predecessor_layout_guard() -> String {
             .join(" OR ");
         guards.push(format!("(SELECT count(*) FROM pragma_table_info('{table}'))={} AND NOT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE NOT ({expected})) AND EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='user_id' AND \"notnull\"=1) AND EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='main' AND name='{table}' AND strict=1)",columns.len()));
     }
-    guards.push(legacy_object_guard());
+    guards.push(legacy_object_guard(outage));
     guards.push(super::jellyfin_watch::session_dependency_guard());
     format!("({})", guards.join(") AND ("))
 }
@@ -276,7 +282,11 @@ pub(crate) fn predecessor_guard(now_parameter: usize) -> String {
 
 /// Present-adjunct branch; caller dispatches BEFORE preparing table reads.
 /// A live Source rebuild is not permission to erase adaptive physical debt.
-pub(crate) fn adaptive_predecessor_guard(now_parameter: usize, live: bool) -> String {
+pub(crate) fn adaptive_predecessor_guard_for(
+    now_parameter: usize,
+    live: bool,
+    outage: super::adaptive_resource_attempts::schema::OutageFence,
+) -> String {
     use super::adaptive_resource_attempts::schema as adaptive;
     assert!((1..=256).contains(&now_parameter));
     let drained = if live {
@@ -288,16 +298,25 @@ pub(crate) fn adaptive_predecessor_guard(now_parameter: usize, live: bool) -> St
     };
     format!(
         "({}) AND ({}) AND ({drained})",
-        predecessor_layout_guard(),
-        adaptive::migration_drained_guard()
+        predecessor_layout_guard_for(outage),
+        adaptive::migration_drained_guard_for(outage)
     )
 }
 
+#[cfg(test)]
 pub(crate) fn adaptive_layout_statements() -> Vec<String> {
+    adaptive_layout_statements_for(
+        super::adaptive_resource_attempts::schema::OutageFence::Standalone,
+    )
+}
+
+pub(crate) fn adaptive_layout_statements_for(
+    outage: super::adaptive_resource_attempts::schema::OutageFence,
+) -> Vec<String> {
     use super::adaptive_resource_attempts::schema as adaptive;
     let mut statements = adaptive::detach_session_triggers(adaptive::Layout::Legacy);
     statements.extend(layout_statements());
-    statements.extend(adaptive::rebind_principal_statements());
+    statements.extend(adaptive::rebind_principal_statements_for(outage));
     statements
 }
 

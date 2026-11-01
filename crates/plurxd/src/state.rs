@@ -1021,6 +1021,52 @@ impl AppState {
         })
     }
 
+    /// Real selected-Store fixtures use production state inputs without
+    /// starting build_state's unrelated detached telemetry publisher.
+    /// Directory creation and all actual background owners remain with the
+    /// calling fixture; this projection starts no daemon loop.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn from_selected_store_for_test(
+        config: &plurx_core::config::Config,
+        selected: &plurx_core::cluster::migration::SelectedStore,
+        dirs: Dirs,
+    ) -> Self {
+        Self::new_configured(
+            AppConfig {
+                sharing_network: config.sharing.clone(),
+                server_name: config.server.name.clone(),
+                node_id: selected.identity.node_id.clone(),
+                cluster_advertisement: !config.cluster.advertise_host.trim().is_empty(),
+                trusted_proxies: config.server.trusted_proxies.clone(),
+                scan_prune_percent: config.storage.scan_prune_percent,
+                credential_key: Arc::clone(&selected.credential_key),
+                replication: selected.replication_monitor(),
+                membership: selected.membership_manager(),
+                cluster_id: selected.identity.cluster_id.clone(),
+                shared_cache_dir: config.cluster.shared_cache_dir.clone(),
+                shared_cache_id: config.cluster.shared_cache_id.clone(),
+                catalogue: selected.catalogue_reader(),
+                snapshot_recovery_budgets: SnapshotRecoveryBudgets {
+                    chunk_secs: config.cluster.snapshot_chunk_timeout_secs,
+                    transfer_secs: config.cluster.snapshot_transfer_timeout_secs,
+                    install_secs: config.cluster.install_snapshot_timeout_secs,
+                },
+                data_dir: config.storage.data_dir.clone(),
+                credential_key_path: config.cluster.credential_key_path(&config.storage.data_dir),
+                backup_client: selected.local_client(),
+            },
+            Arc::clone(&selected.store),
+            dirs,
+            Default::default(),
+            Default::default(),
+            LogBuffers {
+                general: Arc::new(LogBuffer::new(32)),
+                cluster: Arc::new(LogBuffer::new(32)),
+            },
+            None,
+        )
+    }
+
     /// `node_id` is this server's stable id — the `node_id` a cache location
     /// is recorded against, so a cluster can tell whose copy is whose.
     ///

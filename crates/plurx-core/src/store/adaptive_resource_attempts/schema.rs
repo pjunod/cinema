@@ -11,6 +11,14 @@ pub enum Layout {
     Principal,
 }
 
+/// Database authority is independent of the legacy/principal session layout.
+/// Standalone SQLite has no replicated membership/outage authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutageFence {
+    Standalone,
+    Replicated,
+}
+
 impl Layout {
     pub fn tag(self) -> &'static str {
         match self {
@@ -247,6 +255,75 @@ pub fn objects(layout: Layout) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Absence of the optional replicated backend is unavailable authority, never
+/// an apparently empty replicated inventory. Ordinary standalone paths do not
+/// select this predicate and retain their original checked schema shape.
+fn membership_outage_guard() -> String {
+    #[cfg(feature = "hiqlite-store")]
+    {
+        crate::cluster::membership::adaptive_outage_schema_guard()
+    }
+    #[cfg(not(feature = "hiqlite-store"))]
+    {
+        "0".into()
+    }
+}
+
+fn outage_insert_guard() -> (String, String) {
+    (
+        "media_resource_attempt_outage_insert".into(),
+        "CREATE TRIGGER media_resource_attempt_outage_insert BEFORE INSERT ON media_resource_attempts WHEN EXISTS(SELECT 1 FROM cluster_operation_leases WHERE node_id=NEW.worker_node_id) OR EXISTS(SELECT 1 FROM cluster_node_maintenance WHERE node_id=NEW.worker_node_id) BEGIN SELECT RAISE(ABORT,'adaptive target has a durable outage fence'); END".into(),
+    )
+}
+
+pub fn trigger_objects_for_fence(layout: Layout, outage: OutageFence) -> Vec<(String, String)> {
+    let mut result = trigger_objects(layout);
+    if outage == OutageFence::Replicated {
+        result.push(outage_insert_guard());
+    }
+    result
+}
+
+pub fn objects_for(layout: Layout, outage: OutageFence) -> Vec<(String, String)> {
+    let mut result = objects(layout);
+    if outage == OutageFence::Replicated {
+        result.push(outage_insert_guard());
+    }
+    result
+}
+
+pub fn exact_objects_guard_for(layout: Layout, outage: OutageFence) -> String {
+    objects_guard(objects_for(layout, outage))
+}
+
+pub fn verify_shape_for(rows: &[(String, String)], layout: Layout, outage: OutageFence) -> bool {
+    let expected = objects_for(layout, outage);
+    rows.len() == expected.len() && expected.iter().all(|object| rows.contains(object))
+}
+
+/// Upgrade only the exact recognized close-capable adjunct. The caller may
+/// prepend its existing exact legacy-to-close upgrade in THIS transaction.
+/// No request/attempt/history/native row is rewritten. The extra trigger is
+/// inside the exact-object count, so older writers fail closed after commit.
+pub fn outage_upgrade_statements(layout: Layout) -> Vec<String> {
+    let mut sql = vec![assertion(&format!(
+        "({}) AND ({})",
+        ready_guard(layout),
+        membership_outage_guard()
+    ))];
+    sql.push(outage_insert_guard().1);
+    sql.push("UPDATE media_resource_schema SET revision=revision+1 WHERE singleton=1 AND version=1 AND mutation_claim IS NULL AND revision<9223372036854775807".into());
+    sql.push(assertion(&ready_guard_for(layout, OutageFence::Replicated)));
+    sql
+}
+
+/// Row presence, including a lease waiting for durable heartbeat expiry,
+/// blocks new work. An origin-supplied timestamp cannot bypass this gate.
+pub(crate) fn worker_unfenced_guard(worker_node_id: &str) -> String {
+    format!("NOT EXISTS(SELECT 1 FROM cluster_operation_leases WHERE node_id={}) AND NOT EXISTS(SELECT 1 FROM cluster_node_maintenance WHERE node_id={})",
+        quote(worker_node_id), quote(worker_node_id))
+}
+
 pub const CATALOG_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (name GLOB 'media_resource_*' OR tbl_name GLOB 'media_resource_*') ORDER BY name";
 
 fn objects_guard(objects: Vec<(String, String)>) -> String {
@@ -389,7 +466,16 @@ pub fn session_shape_guard(layout: Layout) -> String {
 
 /// For use INSIDE the same transaction/snapshot as the coordination read/write.
 pub fn ready_guard(layout: Layout) -> String {
-    format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_schema WHERE singleton=1 AND version=1 AND layout={} AND revision>=1 AND mutation_claim IS NULL) AND NOT EXISTS(SELECT 1 FROM media_resource_assertions)",exact_objects_guard(layout),session_shape_guard(layout),quote(layout.tag()))
+    ready_guard_for(layout, OutageFence::Standalone)
+}
+
+pub fn ready_guard_for(layout: Layout, outage: OutageFence) -> String {
+    let membership = if outage == OutageFence::Replicated {
+        membership_outage_guard()
+    } else {
+        "1".into()
+    };
+    format!("({}) AND ({}) AND ({membership}) AND EXISTS(SELECT 1 FROM media_resource_schema WHERE singleton=1 AND version=1 AND layout={} AND revision>=1 AND mutation_claim IS NULL) AND NOT EXISTS(SELECT 1 FROM media_resource_assertions)",objects_guard(objects_for(layout, outage)),session_shape_guard(layout),quote(layout.tag()))
 }
 
 pub fn absent_guard() -> &'static str {
@@ -399,9 +485,13 @@ pub fn absent_guard() -> &'static str {
 /// Evaluate only after authoritative present/absent dispatch. Even expired or
 /// ended routes cannot erase a nonclosed attempt during destructive rebuild.
 pub fn migration_drained_guard() -> String {
+    migration_drained_guard_for(OutageFence::Standalone)
+}
+
+pub fn migration_drained_guard_for(outage: OutageFence) -> String {
     format!(
         "({}) AND NOT EXISTS(SELECT 1 FROM media_resource_attempts WHERE phase!='closed')",
-        ready_guard(Layout::Legacy)
+        ready_guard_for(Layout::Legacy, outage)
     )
 }
 
@@ -415,6 +505,10 @@ pub fn detach_session_triggers(layout: Layout) -> Vec<String> {
 /// Main appends these INSIDE the already-admitted Source rebuild transaction.
 /// Lease/adjunct guards remain installed; all request/attempt/history rows stay.
 pub fn rebind_principal_statements() -> Vec<String> {
+    rebind_principal_statements_for(OutageFence::Standalone)
+}
+
+pub fn rebind_principal_statements_for(outage: OutageFence) -> Vec<String> {
     let names = session_trigger_names(Layout::Principal);
     let mut statements = trigger_objects(Layout::Principal)
         .into_iter()
@@ -422,7 +516,7 @@ pub fn rebind_principal_statements() -> Vec<String> {
         .map(|(_, sql)| sql)
         .collect::<Vec<_>>();
     statements.push("UPDATE media_resource_schema SET layout='principal-v1',revision=revision+1 WHERE singleton=1 AND layout='local-v1' AND mutation_claim IS NULL AND revision<9223372036854775807".into());
-    statements.push(assertion(&ready_guard(Layout::Principal)));
+    statements.push(assertion(&ready_guard_for(Layout::Principal, outage)));
     statements
 }
 

@@ -4383,7 +4383,7 @@ impl HiqliteAuthStore {
         ))
     }
 
-    async fn install_adaptive_attempt_schema(
+    pub(crate) async fn install_adaptive_attempt_schema(
         &self,
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
@@ -4391,6 +4391,24 @@ impl HiqliteAuthStore {
             schema, AdaptiveResourceAttemptStore, AttemptSchemaReadiness,
         };
         admit_schema_migration(admission)?;
+        // Bootstrap/import runs before the owning membership initializer.
+        // Leave this optional adjunct absent/unchanged until that owner has
+        // installed its exact outage protocol. Never transiently install the
+        // standalone shape into a replicated authority. Startup invokes this
+        // again under its original activation admission after membership.
+        let membership = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                format!(
+                    "SELECT CASE WHEN ({}) THEN 1 ELSE 0 END AS count",
+                    crate::cluster::membership::adaptive_outage_schema_guard()
+                ),
+                params!(),
+            )
+            .await?;
+        if !matches!(membership.as_slice(), [row] if row.count == 1) {
+            return Ok(());
+        }
         // Authority: dispatch before referring to optional adjunct tables.
         let versions = self
             .client()
@@ -4413,10 +4431,18 @@ impl HiqliteAuthStore {
                 .into_iter()
                 .map(|row| (row.name, row.sql))
                 .collect::<Vec<_>>();
-            // Only the exact historical v1 adjunct is admitted for the
-            // additive close upgrade. Partial/future objects stay untouched.
-            if schema::verify_legacy_shape(&actual, layout) {
-                let statements = schema::close_upgrade_statements(layout)
+            // Admit only the two exact known predecessors. Legacy-to-close
+            // and close-to-outage upgrades remain ONE serialized transaction.
+            let mut upgrade = if schema::verify_legacy_shape(&actual, layout) {
+                schema::close_upgrade_statements(layout)
+            } else if schema::verify_shape(&actual, layout) {
+                Vec::new()
+            } else {
+                return Ok(());
+            };
+            upgrade.extend(schema::outage_upgrade_statements(layout));
+            {
+                let statements = upgrade
                     .into_iter()
                     .map(|sql| (sql, params!()))
                     .collect::<Vec<_>>();
@@ -4427,21 +4453,21 @@ impl HiqliteAuthStore {
                 }
                 attempted?;
                 return Err(StoreError::Migration(
-                    "adaptive close upgrade did not settle".into(),
+                    "adaptive outage upgrade did not settle".into(),
                 ));
             }
-            return Ok(());
         }
         let mut statements = vec![(
             format!(
-                "INSERT INTO sharing_source_dispatch_guard SELECT 1,0 WHERE NOT(({}) AND ({}))",
+                "INSERT INTO sharing_source_dispatch_guard SELECT 1,0 WHERE NOT(({}) AND ({}) AND ({}))",
                 schema::absent_guard(),
-                schema::session_shape_guard(layout)
+                schema::session_shape_guard(layout),
+                crate::cluster::membership::adaptive_outage_schema_guard()
             ),
             params!(),
         )];
         statements.extend(
-            schema::objects(layout)
+            schema::objects_for(layout, schema::OutageFence::Replicated)
                 .into_iter()
                 .map(|(_, sql)| (sql, params!())),
         );
@@ -5210,7 +5236,7 @@ impl HiqliteAuthStore {
             use super::adaptive_resource_attempts::{transactions::Backend, validation};
             let layout = self.attempt_layout().await?;
             statements.extend(
-                validation::reset_statements(layout)
+                validation::reset_statements_for(layout, self.attempt_outage_fence())
                     .into_iter()
                     .map(|sql| (sql, params!())),
             );

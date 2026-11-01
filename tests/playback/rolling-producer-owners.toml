@@ -17,6 +17,20 @@
 # launcher and slot reaper. Patterns/roots/scoped rows/forbidden zeroes unchanged.
 # Source correspondence only; behavioral/native qualification remains separate.
 
+# M4 replicated outage/HTTP caller source ownership review (2026-10-29):
+# Base cc3da4a9003c plus committed M4 6d9f59faea7e and reviewed desktopV2/HTTPV5.
+# +1 namespaced task is the fixture's original selected-Store selector: registered
+# before its one-shot entry send, borrowed for bounded join, never replaced/aborted.
+# +1 method-spawn and +1 launch-shaped match are ONE joined 8 MiB fixture thread,
+# owning its Tokio runtime; failed/uncertain original owners/root/runtime persist.
+# +9 namespaced timers: one production exact-lease durable-inventory read bound;
+# eight fixture observations (setup/body, exact release, Store shutdown, and real
+# local-token/replicated-lease expiry watchdogs plus their two 25 ms observation polls).
+# Ambiguous release retains the original local fence. Timeouts fail or retain owners;
+# they supply no native closure, cached zero, replacement authority or capacity refund.
+# No task/timer is added by the cfg(test) shared SelectedStore state projection or
+# desktop telemetry-start avoidance. Patterns/roots/scoped counts/forbidden zeroes
+# are unchanged. Static source correspondence only; no new behavioral/native proof.
 # Main 6c8c98c79 sharing source correspondence (2026-10-29):
 # +3 task sites: two daemon BackgroundLoopGuard-token loops and the invitation
 # issue owner that keeps state/cleanup-file responsibility after receiver loss.
@@ -3384,7 +3398,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Both use the original runtime; Source worker stacks remain unchanged.
 # This is test-only pre-R bootstrap, not a new media producer or close proof.
 # Compose task and current-main owner sites: 1089; exact source census still required.
-expected_occurrences = 1089
+# Compose M4 fixture and current-main owner sites: 1086; source equality still enforced.
+expected_occurrences = 1090
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3634,7 +3649,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # owned 8 MiB std thread, positively joined before returning the real Store.
 # Both use the original runtime; Source worker stacks remain unchanged.
 # This is test-only pre-R bootstrap, not a new media producer or close proof.
-expected_occurrences = 85
+expected_occurrences = 86
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5107,7 +5122,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # their existing admission deadline.
 # Main 6c8c98c79 composition: 2002 + (1901 - 1899) = 2004; source equality remains required.
 # Compose task and current-main owner sites: 2065; exact source census still required.
-expected_occurrences = 2069
+# Compose M4 fixture and current-main owner sites: 2017; source equality still enforced.
+expected_occurrences = 2078
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6262,7 +6278,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Combined with main's Live TV HTTP assertion: 809 + 2 = 811 reviewed matches.
 # Main 6c8c98c79 composition: 831 + (811 - 808) = 834; source equality remains required.
 # Compose task and current-main owner sites: 845; exact source census still required.
-expected_occurrences = 845
+# Compose M4 fixture and current-main owner sites: 844; source equality still enforced.
+expected_occurrences = 846
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

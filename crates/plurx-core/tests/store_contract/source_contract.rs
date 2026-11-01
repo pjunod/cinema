@@ -202,6 +202,12 @@ impl SourceContractCluster {
                 .expect("each original running voter verifies installed Source"));
         }
     }
+    /// Return the original selected owner; never reconstruct membership from
+    /// a remote Client or synthesize activation/schema authority for a test.
+    pub(super) async fn membership_manager(&self, index: usize) -> MembershipManager {
+        self.members.lock().await[index].membership_manager()
+    }
+
     pub(super) async fn selected_member(
         &self,
         index: usize,
