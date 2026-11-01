@@ -684,3 +684,55 @@ test("configured forwarding alone never claims a live Tailscale connection",()=>
  const html=h.m.panel({...h.data,sharingStatus:attention}).split('<details class="sharing-advanced">')[0];
  assert.match(html,/Tailscale on this node: Connected/);assert.match(html,/private forwarding conflict/);
 });
+
+function diagnosis(over={}){return {connected:false,outcome:"not_shared",summary:"source.private.ts.net is not in this Cinema's Tailscale network, so this Cinema cannot reach it.",next_step:"Open the invitation's Tailscale link and accept it while signed in to the Tailscale account owner-b@example.com.",checked_at_ms:BigInt(Date.now()),elapsed_ms:5001n,attempts:[{ts_fqdn:"source.private.ts.net",address:"100.127.255.254:8443",result:"timed_out",elapsed_ms:5001n,visible:false}],...over};}
+test("connection status names this host's Tailscale account and the failing setup step",()=>{
+ const h=harness(),status=readyStatus();status.host_setup.tailscale={login_name:"owner-b@example.com",tailnet:"owner-b@example.com",dns_name:"cinema-b.tail222.ts.net",ipv4:"100.64.2.2"};
+ const html=h.m.panel({...h.data,sharingStatus:status}).split('<details class="sharing-advanced">')[0];
+ assert.match(html,/Tailscale on this node: Connected · signed in as owner-b@example.com · cinema-b.tail222.ts.net \(100.64.2.2\)/);
+ assert.match(html,/Other Cinemas can reach this server: Ready/);
+ const broken={...readyStatus(),host_setup:{state:"unavailable",message:"Private host setup could not be verified.",detail:"`tailscale status --json --peers=false` did not answer with status information. It printed: The Tailscale GUI failed to start",checked_at_ms:Date.now()}};
+ const failing=h.m.panel({...h.data,sharingStatus:broken}).split('<details class="sharing-advanced">')[0];
+ assert.match(failing,/Tailscale on this node: Could not be checked/);assert.match(failing,/The Tailscale GUI failed to start/);assert.match(failing,/sharing-check-bad/);
+});
+test("an unreachable saved import is explained once automatically and on demand",async()=>{
+ const h=harness(async(path)=>path.endsWith("/connection")?reply({import_id:id,node_id:"node-a",diagnosis:diagnosis()}):reply({}));
+ const status={...readyStatus(),imports:[{import_id:id,lifecycle_generation:large,endpoint_generation:large,checked_at_ms:BigInt(Date.now()),connection:"unavailable"}]};
+ h.m.panel({...h.data,sharingStatus:status});
+ await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(h.requests.map(r=>r.path),["/api/v1/sharing/imports/"+id+"/connection"]);assert.equal(h.requests[0].options.method,"GET");
+ assert.match(h.element.innerHTML,/Connection: Not reachable/);assert.match(h.element.innerHTML,/is not in this Cinema&#39;s Tailscale network|is not in this Cinema's Tailscale network/);assert.match(h.element.innerHTML,/owner-b@example.com/);assert.match(h.element.innerHTML,/not in this server&#39;s Tailscale network|not in this server's Tailscale network/);
+ h.m.paint();await new Promise(resolve=>setImmediate(resolve));assert.equal(h.requests.length,1,"automatic explanation runs once per page");
+ await vm.runInContext("sharingCheckImport(0)",h.c);assert.equal(h.requests.length,2);
+ const healthy=harness(),html=healthy.m.panel({...healthy.data,sharingStatus:{...readyStatus(),imports:[{import_id:id,lifecycle_generation:large,endpoint_generation:large,checked_at_ms:BigInt(Date.now()),connection:"responding"}]}});
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(healthy.requests.length,0);assert.match(html,/Connection: Reachable/);
+});
+test("recipients and unused invitations show whether their Tailscale share was accepted",()=>{
+ const h=harness(),row=exported(),status=readyStatus();
+ status.network_authorization={configured:true,node_id:"node-a",tailnet:"tail111.ts.net",shares:[{invitation_id:row.invitation_id,created_at_ms:1n,shares:[{device:"cinema-a.tail111.ts.net",accepted:true,accepted_by:"owner-b@example.com"}]},{invitation_id:"77777777-7777-4777-8777-777777777777",created_at_ms:1n,shares:[{device:"cinema-a.tail111.ts.net",accepted:false}]}]};
+ const html=h.m.panel({...h.data,sharingStatus:status});
+ assert.match(html,/Tailscale account linked \(tailnet tail111.ts.net\)/);
+ assert.match(html,/Tailscale share of cinema-a.tail111.ts.net accepted by owner-b@example.com/);
+ assert.match(html,/Invitations not yet used/);assert.match(html,/not accepted yet/);
+});
+test("the import form names the account that must accept the share and shows why it is waiting",async()=>{
+ const timers=[],h=harness(async()=>reply({name:"Owner Cinema",network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:false,connection_error:"sharing_peer_unavailable",diagnosis:diagnosis()}));
+ h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=()=>{};
+ h.m.state().status={...readyStatus(),host_setup:{...readyStatus().host_setup,tailscale:{login_name:"owner-b@example.com",dns_name:"cinema-b.tail222.ts.net",ipv4:"100.64.2.2"}}};
+ await h.m.open("import");h.m.edit("text","cinema-connect-v1:AAAA");await h.m.save();
+ assert.match(h.element.innerHTML,/while signed in to the Tailscale account owner-b@example.com/);assert.match(h.element.innerHTML,/sign out of Tailscale first or open the link in a private window/);
+ assert.match(h.element.innerHTML,/Tailscale network, so this Cinema cannot reach it/);assert.match(h.element.innerHTML,/Technical details/);
+ assert.equal(h.requests.filter(r=>r.path.endsWith("/sharing/imports")).length,0);
+});
+test("refused imports report the server's diagnosis instead of a generic failure",async()=>{
+ const h=harness(async()=>reply({code:"sharing_peer_unavailable",message:"x",diagnosis:diagnosis({outcome:"refused",summary:"source.private.ts.net is reachable over Tailscale, but nothing accepts Cinema connections on its sharing port.",next_step:"Check the other Cinema."})},502));
+ await assert.rejects(h.m.request("/sharing/imports",{method:"POST",body:{invitation:"test"}}),error=>/nothing accepts Cinema connections/.test(error.message)&&error.diagnosis.outcome==="refused");
+});
+test("the sharing activity log reads only its own bounded ring, newest first",async()=>{
+ const h=harness(async()=>reply([{ts_ms:1000n,level:"INFO",target:"plurxd::sharing_host",message:"event-alpha"},{ts_ms:2000n,level:"WARN",target:"plurxd::sharing_diagnosis",message:"event-beta"}]));
+ await vm.runInContext("sharingLoadLog()",h.c);
+ assert.deepEqual(h.requests.map(r=>r.path),["/api/v1/system/logs?scope=sharing&level=info&limit=300"]);
+ const html=h.element.innerHTML;assert.ok(html.indexOf("event-beta")>0&&html.indexOf("event-beta")<html.indexOf("event-alpha"));assert.match(html,/Refresh log/);
+ await assert.rejects(h.m.request("/system/logs?scope=general&level=trace&limit=2000"),/Invalid management route/);
+ await assert.rejects(h.m.request("/system/logs?scope=sharing&level=info&limit=300",{method:"POST",body:{}}),/Invalid management route/);
+});

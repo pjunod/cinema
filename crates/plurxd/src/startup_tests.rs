@@ -2563,6 +2563,7 @@ fn booted_state(dir: &std::path::Path) -> AppState {
         logbuf::LogBuffers {
             general: Arc::new(logbuf::LogBuffer::new(64)),
             cluster: Arc::new(logbuf::LogBuffer::new(64)),
+            sharing: Arc::new(logbuf::LogBuffer::new(64)),
         },
     )
 }
@@ -2603,6 +2604,7 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
             logs: logbuf::LogBuffers {
                 general: Arc::new(logbuf::LogBuffer::new(64)),
                 cluster: Arc::new(logbuf::LogBuffer::new(64)),
+                sharing: Arc::new(logbuf::LogBuffer::new(64)),
             },
         },
         advertiser_that_fails,
@@ -3467,6 +3469,7 @@ async fn boot_serve_and_drain_in_runtime(
             logs: logbuf::LogBuffers {
                 general: Arc::new(logbuf::LogBuffer::new(64)),
                 cluster: Arc::new(logbuf::LogBuffer::new(64)),
+                sharing: Arc::new(logbuf::LogBuffer::new(64)),
             },
         },
         advertiser_that_fails,

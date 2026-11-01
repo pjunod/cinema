@@ -3467,11 +3467,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
 # the cancellation regression, which explicitly aborts and awaits it. Both
 # are test-only and settle their handles before fixture teardown.
+# Subtitle cue index (#1340): +3 awaited spawn_blocking calls in
+# subtitles::sparse_subtitle_input (index read, subset read, temp-file write);
+# each is awaited by its caller and the subset read stops at SPARSE_DEADLINE.
 # PR1341: +14. Shipped: playback_cache.rs +1 (the ceiling settings task,
 # one per budget, restarted by the next writer only after its own drop
 # guard clears the started flag). The other 13 are test-only
 # (authority_recovery.rs +10, serving_fence.rs tests +2, chunk_06.rs +1).
-expected_occurrences = 1044
+expected_occurrences = 1047
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3712,7 +3715,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # kill_on_drop guard; no production launcher or separate reap owner is added.
 # Main contributes one HTTPS transport JoinSet.spawn; its driver is joined by
 # the listener owner. Both parent additions are present in the source union.
-expected_occurrences = 81
+# Subtitle cue index (#1340): +1 scope.spawn in mkv_sparse::parallel; the
+# reader threads are scoped and joined by std::thread::scope before it returns.
+expected_occurrences = 82
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5178,13 +5183,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
+# PR1339 sharing diagnosis: +1 tokio::time::timeout bounds the read-only
+# `tailscale status --json` netmap read awaited inline by the admin request;
+# no task, timer owner or producer is added.
+# Subtitle cue index (#1340): +1 constructor for the bounded ffprobe start probe.
 # PR1341: +23. Shipped, all deadline-bounded and owned by the request or
 # task that creates them: serving_fence.rs timeout_at on the outage watch
 # (the hold deadline) x2; response.rs timeout_at bounding the one buffered
 # retry; rolling/session.rs timeout_at bounding the M5 actor snapshot;
 # playback_cache.rs the settings task's 1 s interval, its IO_TIMEOUT Store
 # read, and the first-read wait. The rest are test-only.
-expected_occurrences = 1945
+expected_occurrences = 1947
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5667,7 +5676,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
 # is gone; the store-less physical qualification test and its ffprobe child
 # are replaced by the real title-job physical test.
-expected_occurrences = 312
+# Subtitle cue index (#1340): +3 Commands -- the subset window conversion, the
+# ffprobe start-time probe and the test presence probe; each is awaited and
+# the two production ones are kill_on_drop.
+expected_occurrences = 315
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6323,11 +6335,15 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # native_host_mode_keeps_unmanaged_hosts_out_of_container_handoff. It builds
 # the setup message and reads the clock; it starts no task, timer or process
 # and adds no child or producer owner. Existing command ownership is unchanged.
-# PR1341: +7 as the joined module scan counts it (+6 counted file by file),
-# and none launch a process: `.status(` reads of HTTP responses in fence.rs
-# (+3, one shipped log field, two in its tests) and authority_recovery.rs
-# tests (+2), and the decision reason's `.status()` in playback_control.rs.
-expected_occurrences = 845
+# PR1339 sharing diagnosis: SharingManager::status()/SetupState::status()
+# reads of in-memory observations, not process launches or producers.
+# Subtitle cue index (#1340): +3 launches for the Commands above, each owned
+# by its awaiting caller; no detached child.
+# PR1341: +6, none launch a process: `.status(` reads of HTTP responses in
+# fence.rs (+3, one shipped log field, two in its tests) and
+# authority_recovery.rs tests (+2), and the decision reason's `.status()` in
+# playback_control.rs (+1).
+expected_occurrences = 848
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6847,7 +6863,9 @@ pattern = "kill_on_drop\\s*\\("
 # `source_probe/fel_qualification.rs` (helper, consumer, decoder; one site
 # counts once). Each is also explicitly waited, or killed and waited, by its
 # owner; kill-on-drop is the backstop, not the settlement.
-expected_occurrences = 117
+# Subtitle cue index (#1340): +2 kill_on_drop guards on the subset window
+# conversion and the ffprobe start-time probe.
+expected_occurrences = 119
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
