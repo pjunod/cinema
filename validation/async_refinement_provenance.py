@@ -727,8 +727,8 @@ class PartPlan:
         self.db.close()
 
 
-def atomic_install(staged, target, private_validation, semantic_validation, checkpoint, *, backup_root=None, input_preparation=False):
-    """Both independent validators must bind exact staged bytes/checkpoint."""
+def check_restored_catalog(staged, private_validation, semantic_validation, checkpoint, *, backup_root=None, input_preparation=False):
+    """Both independent validators must bind exact staged bytes/checkpoint (no filesystem change)."""
     cp = checkpoint['record']
     shared = {'catalog_sha256': file_sha(staged), 'checkpoint_sha256': digest(canonical(checkpoint)),
               'source': cp['source'], 'session_id': cp['session_id'],
@@ -751,6 +751,12 @@ def atomic_install(staged, target, private_validation, semantic_validation, chec
             and backup_root.get('checkpoint_sha256')==shared['checkpoint_sha256']
             and backup_root.get('source')==cp['source'] and backup_root.get('session_id')==cp['session_id'],
             'post-validator actual catalog bytes differ from authenticated backup root')
+
+
+def atomic_install(staged, target, private_validation, semantic_validation, checkpoint, *, backup_root=None, input_preparation=False):
+    """Validate, then atomically rename the staged catalog beside itself."""
+    check_restored_catalog(staged, private_validation, semantic_validation, checkpoint,
+                           backup_root=backup_root, input_preparation=input_preparation)
     target = Path(target)
     require(Path(staged).parent == target.parent and not target.is_symlink(), 'atomic restore crosses owned directory')
     for suffix in ('-wal', '-shm', '-journal'):

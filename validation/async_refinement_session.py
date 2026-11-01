@@ -592,22 +592,24 @@ class PhysicalContext:
         p.require(self.owned in path.parents, 'physical allocation path escapes the exact owned root')
         return p.safe_path(path.relative_to(self.owned).as_posix())
 
-    def attach_restore(self, output_dir, budget, generation):
-        """Read-only Attachment of the held restore_staging reservation for one validator output.
+    def attach_restore(self, output_dir, held):
+        """Read-only Attachments of the held restore_staging reservations for one validator output.
 
-        The restored files already occupy that single reservation (tracked as the generation
-        subtree). The validator attaches it and gets no spending, release or ownership authority,
-        and no second main-file allocation.
+        `held` is [(PoolBudget, staged file)]: each restored file occupies its own single-file
+        reservation, so each can later transfer to main alone. The validator gets no spending,
+        release or ownership authority and no second main-file allocation.
         """
-        reservation = budget.reservation
-        relative = self.relative(generation)
-        p.require((relative, True) in reservation.scope() and reservation.bytes > 0
-                  and not reservation.released and not reservation.delegated,
-                  'restore attachment names no held tracked restore_staging reservation')
-        self.attachments[str(output_dir)] = [{
-            'reservation_id': reservation.reservation_id, 'owner': reservation.owner,
-            'resource': reservation.key[0], 'component': reservation.key[1], 'bytes': reservation.bytes,
-            'relative_path': relative, 'recursive': True, 'access': 'read_only'}]
+        attachments = []
+        for budget, path in held:
+            reservation, relative = budget.reservation, self.relative(path)
+            p.require((relative, False) in reservation.scope() and reservation.bytes > 0
+                      and not reservation.released and not reservation.delegated and reservation.transfer is None,
+                      'restore attachment names no held tracked restore_staging reservation')
+            attachments.append({'reservation_id': reservation.reservation_id, 'owner': reservation.owner,
+                                'resource': reservation.key[0], 'component': reservation.key[1],
+                                'bytes': reservation.bytes, 'relative_path': relative, 'recursive': False,
+                                'access': 'read_only'})
+        self.attachments[str(output_dir)] = attachments
 
     def child_plan(self, request, output):
         """Disjoint, explicitly sized allocations for exactly the files this child may write.
@@ -627,8 +629,8 @@ class PhysicalContext:
             for component in ('journal', 'temp'):
                 plan.family('catalog_or_verifier_restore_scratch', component, out / RESTORE_SCRATCH)
         else:
-            plan.database('catalog_main', Path(request.get('catalog_path', out / 'catalog.sqlite')))
-            plan.database('verifier_main', Path(request.get('verifier_work_db', out / 'verifier.sqlite')))
+            for family, path in self.writer_databases(request, out):
+                plan.database(family, path)
             plan.database('catalog_export_scratch', out / EXPORT_SCRATCH)
             families = self.policy['families']
             # A standalone backup is at most its database's ceiling: one named share each.
@@ -640,11 +642,43 @@ class PhysicalContext:
                   self.ledger.remaining('source_runtime_scratch_bytes', 'bytes'), recursive=True)
         return plan.entries, attached
 
+    @staticmethod
+    def writer_databases(request, out):
+        return [('catalog_main', Path(request.get('catalog_path', out / 'catalog.sqlite'))),
+                ('verifier_main', Path(request.get('verifier_work_db', out / 'verifier.sqlite')))]
+
+    def lend_held(self, request, out):
+        """Hand a main database file that a parent reservation already owns to the writer's grant.
+
+        An activated restore (or an earlier writer's surviving file) is owned by a main-family
+        reservation; a child allocation over the same path would alias it, and delegating on top
+        of it would charge the file twice. As in the transfer commit, the single object's
+        ownership moves with `paths.clear()` + release; the grant claims the path immediately
+        afterwards and a failed issue puts the parent reservation back (see issue).
+        """
+        lent = []
+        for family, path in self.writer_databases(request, out):
+            relative = self.relative(path)
+            for held in [r for r in self.ledger.reservations
+                         if not r.released and not r.delegated and r.transfer is None
+                         and r.key == (family, 'main') and (relative, False) in r.scope()]:
+                lent.append((family, path, held.bytes))
+                held.paths.clear()
+                held.release_after_removal()
+        return lent
+
     def issue(self, request, output):
-        allocations, attachments = self.child_plan(request, output)
-        # B's issuer deducts, canonicalizes, fsyncs and reopens the descriptor
-        # read-only; the pre-issue descriptor reservation is charged to control_bytes.
-        return self.ledger.issue_child_grant(allocations, attachments, self.binding(), self.lease)
+        out = Path(output)
+        lent = [] if request.get('operation') == 'validate_restore' else self.lend_held(request, out)
+        try:
+            allocations, attachments = self.child_plan(request, out)
+            # B's issuer deducts, canonicalizes, fsyncs and reopens the descriptor
+            # read-only; the pre-issue descriptor reservation is charged to control_bytes.
+            return self.ledger.issue_child_grant(allocations, attachments, self.binding(), self.lease)
+        except BaseException:
+            for family, path, size in lent:
+                self.ledger.reserve(physical.FAMILY_OWNERS[family], family, 'main', size).track(path)
+            raise
 
     def finish(self, handle):
         """After the child is reaped: drop its scratch, then reconcile every surviving owned file.
@@ -1476,9 +1510,9 @@ class PoolBudget:
         self.pool, self.used, self.high = pool, 0, 0
         self.reserve(existing)  # files that survived an earlier job remain charged
 
-    def track_subtree(self, path):
-        """Name the owned subtree these bytes live in (what a read-only attachment refers to)."""
-        self.reservation.track_subtree(path)
+    def track(self, path):
+        """Name the one physical file these bytes hold (what an attachment or a transfer refers to)."""
+        self.reservation.track(path)
 
     def reserve(self, size):
         if type(size) is not int or size < 0:
@@ -1875,32 +1909,34 @@ def check_activation_validations(result, intent, validations, resolver, ledger, 
 
 
 def restore_snapshots(state, source, request, output, reg, root, index_path, resolver, catalog_ref,
-                      verifier_ref, checkpoint, budget):
+                      verifier_ref, checkpoint):
     """Reconstruct both complete files from authenticated content and validate them.
 
-    Used by the accepted-checkpoint restore at job start and by activation. The
-    restored files already occupy the held restore_staging reservation; read-only
-    validators attach it and reserve only their own temp/journal/scratch. Returns
-    the three validation receipts (raw dicts) for activation evidence.
+    Used by the accepted-checkpoint restore at job start and by activation. Each restored file
+    occupies its own held restore_staging reservation; read-only validators attach it and reserve
+    only their own temp/journal/scratch. Nothing becomes writer-visible here: activate_generation
+    moves the validated files. Returns the validation receipts (raw dicts) for activation evidence.
     """
     context = current_physical()
     output = Path(output)
     generation = output / 'state.restore'
     generation.mkdir(exist_ok=False, mode=0o700)
-    budget.track_subtree(generation)  # restored files stay in this one held reservation
     request['verifier_work_db'] = str(generation / 'verifier.sqlite')
     directory = owned_directory(generation, reg, root)
+
+    def stage(root_record, name):
+        budget = PoolBudget(context, 'restore_staging_bytes')
+        budget.track(generation / name)  # owned before the first byte is written
+        path = snapshots.restore_image(root_record, resolver, directory, name, budget.reserve, budget.release)
+        return budget, path
     try:
         catalog_root = p.auxiliary(p.decode(resolver(catalog_ref)), root)
-        staged = snapshots.restore_image(catalog_root, resolver, directory, 'catalog.staged.sqlite',
-                                         budget.reserve, budget.release)
+        catalog_budget, staged = stage(catalog_root, 'catalog.staged.sqlite')
         p.write(output / 'restored-catalog-root.json', catalog_root)
-        verifier_root = None
-        verifier_staged = None
+        verifier_root = verifier_budget = verifier_staged = None
         if verifier_ref is not None:
             verifier_root = p.verifier_auxiliary(p.decode(resolver(verifier_ref)), root)
-            verifier_staged = snapshots.restore_image(verifier_root, resolver, directory,
-                                                      'verifier.staged.sqlite', budget.reserve, budget.release)
+            verifier_budget, verifier_staged = stage(verifier_root, 'verifier.staged.sqlite')
     finally:
         directory.close()
     request['catalog_path'] = str(staged)
@@ -1908,7 +1944,7 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
                'checkpoint': checkpoint, 'dependency_index': str(index_path)}
     restore['output_dir'] = str(output / 'restore-validation')
     Path(restore['output_dir']).mkdir(mode=0o700)
-    context.attach_restore(restore['output_dir'], budget, generation)
+    context.attach_restore(restore['output_dir'], [(catalog_budget, staged)])
     path = output / 'restore-request.json'
     p.write(path, restore)
     for argv in ([sys.executable, str(Path(source) / 'scripts/check-async-driver-refinement'), 'paged-unit', '--request', str(path)],
@@ -1924,41 +1960,73 @@ def restore_snapshots(state, source, request, output, reg, root, index_path, res
                     'output_dir': str(output / 'verifier-restore-validation'), 'dependency_index': str(index_path)}
         p.write(output / 'restored-verifier-root.json', verifier_root)
         Path(vrequest['output_dir']).mkdir(mode=0o700)
-        context.attach_restore(vrequest['output_dir'], budget, generation)
+        context.attach_restore(vrequest['output_dir'], [(verifier_budget, verifier_staged)])
         vpath = output / 'verifier-restore-request.json'
         p.write(vpath, vrequest)
         run_quantum(vpath, reg, source, Path(vrequest['output_dir']),
                     [sys.executable, str(Path(source) / 'verification/async-driver-refinement/paged_checker.py'),
                      'validate-restored-verifier', '--request', str(vpath)])
         verifier_receipt = p.read(Path(vrequest['output_dir']) / 'verifier-restore-validation.json')
-    # Both complete validations passed; only now may either file become writer-visible.
-    p.atomic_install(staged, generation / 'catalog.sqlite', private, semantic, checkpoint,
-                     backup_root=catalog_root, input_preparation=input_preparation)
+    # Both complete validations passed; only now may either file be moved by activate_generation.
+    p.check_restored_catalog(staged, private, semantic, checkpoint, backup_root=catalog_root,
+                             input_preparation=input_preparation)
+    staged_files = [{'budget': catalog_budget, 'path': staged, 'family': 'catalog_main', 'owner': 'catalog',
+                     'name': 'catalog.sqlite'}]
     if verifier_staged is not None:
         p.require(p.file_sha(verifier_staged) == verifier_root['work_db_sha256']
                   and verifier_staged.stat().st_size == verifier_root['work_db_bytes'],
                   'verifier staged bytes differ from authenticated root')
-        os.replace(verifier_staged, generation / 'verifier.sqlite')
+        staged_files.append({'budget': verifier_budget, 'path': verifier_staged, 'family': 'verifier_main',
+                             'owner': 'verifier', 'name': 'verifier.sqlite'})
     p.write(output / 'restored-input-readiness.json', {'semantic_ready': not input_preparation})
     return {'catalog_private': private, 'catalog_semantic': semantic, 'verifier': verifier_receipt,
-            'input_preparation': input_preparation, 'generation': generation}
+            'input_preparation': input_preparation, 'generation': generation, 'staged': staged_files}
 
 
-def install_generation(generation, output, request):
-    active = Path(output) / 'state'
-    p.require(not active.exists() and not active.is_symlink(), 'refuse replace an active catalog/verifier generation')
-    for target in (generation, active.parent):
-        fd = os.open(target, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    os.replace(generation, active)
-    fd = os.open(active.parent, os.O_RDONLY)
+def fsync_directory(path):
+    fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def activate_generation(restored, output, request):
+    """Move the validated staged files into the active generation, transferring each reservation.
+
+    For each file, in the RESULT-GRANT ABI order: reserve the destination main capacity while the
+    staged source stays charged (prepare_transfer), rename, fsync the directories, then commit
+    exactly one ownership. Failing to secure destination capacity, or any rename failure, leaves
+    the staged generation unactivated and the prior root authoritative: renames are undone, the
+    destination claims aborted and the empty active directory removed.
+    """
+    ledger = current_physical().ledger
+    active = Path(output) / 'state'
+    p.require(not active.exists() and not active.is_symlink(), 'refuse replace an active catalog/verifier generation')
+    active.mkdir(mode=0o700)
+    prepared, moved = [], []
+    try:
+        for entry in restored['staged']:
+            prepared.append((entry, ledger.prepare_transfer(entry['budget'].reservation_id, entry['owner'],
+                                                            entry['family'], 'main', active / entry['name'])))
+        for entry, handle in prepared:
+            os.replace(entry['path'], active / entry['name'])
+            moved.append(entry)
+        for directory in (active, restored['generation']):
+            fsync_directory(directory)
+    except BaseException:
+        for entry in reversed(moved):
+            os.replace(active / entry['name'], entry['path'])
+        if moved:
+            fsync_directory(restored['generation'])
+        for _entry, handle in reversed(prepared):
+            ledger.abort_transfer(handle)
+        active.rmdir()
+        raise
+    for _entry, handle in prepared:
+        ledger.commit_transfer_after_rename_fsync(handle, handle.identity)
+    restored['generation'].rmdir()
+    fsync_directory(active.parent)
     request['catalog_path'] = str(active / 'catalog.sqlite')
     request['verifier_work_db'] = str(active / 'verifier.sqlite')
 
@@ -1971,10 +2039,9 @@ def restore_latest(state, latest, source, request, output, reg, root):
     index = p.DependencyIndex(index_path)
     try:
         resolver = snapshots.AuthenticatedResolver(index.db, Path(state['parts_root']))
-        budget = PoolBudget(current_physical(), 'restore_staging_bytes')
         restored = restore_snapshots(state, source, request, output, reg, root, index_path, resolver,
                                      state['catalog_root_ref'], state.get('verifier_root_ref'),
-                                     state['checkpoint'], budget)
+                                     state['checkpoint'])
         verifier_digest = restored['verifier']
         if state.get('verifier_root_ref') is None:
             p.require(state.get('verifier_progress') is None, 'authenticated verifier state disappeared')
@@ -1982,7 +2049,7 @@ def restore_latest(state, latest, source, request, output, reg, root):
             p.require(verifier_digest is not None, 'verifier validation absent')
     finally:
         index.close()
-    install_generation(restored['generation'], output, request)
+    activate_generation(restored, output, request)
     return index_path
 
 
@@ -2153,7 +2220,7 @@ def prepare_activation(store, state, reg, root, source, output, pend, intent, bi
                        'java_sha256': reg['runtime']['java']['sha256'], 'jar_sha256': reg['runtime']['tlc']['sha256']}}
     restored = restore_snapshots(state, source, request, Path(output) / 'activation', reg, root, index_path,
                                  resolver, intent['catalog_root'], intent['verifier_root'],
-                                 accepted['checkpoint'], budget)
+                                 accepted['checkpoint'])
     extra = [('validation_receipt', p.canonical(restored['catalog_private'])),
              ('validation_receipt', p.canonical(restored['catalog_semantic']))]
     if restored['verifier'] is not None:
