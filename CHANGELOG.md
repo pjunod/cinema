@@ -134,6 +134,12 @@ bump may break compatibility and a **patch** bump never does.
   A dedicated sharing activity log (`/api/v1/system/logs?scope=sharing`)
   records setup changes, checks, shares and cleanup failures.
 
+- Embedded text subtitles in Matroska files are read through the file's own
+  cue index when it provably names every subtitle frame, instead of demuxing
+  the whole picture: a 4K remux's track takes a few thousand small reads
+  rather than a full-file scan, so windows land ahead of the playhead and the
+  whole track no longer times out. Other files keep the full demux.
+
 - Shared HDR10 playback builds a missing HEVC copy index instead of forcing
   video encoding and SDR on hosts without an HDR10 encoder. Unsupported EAC3
   audio converts to AAC while the HDR10 video and static metadata stay intact.

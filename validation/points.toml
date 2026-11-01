@@ -1032,6 +1032,7 @@ paths = [
   "crates/plurxd/src/subtitles/cluster_consumer_tests.rs",
   "crates/plurxd/src/subtitles/stored_source_tests.rs",
   "crates/plurxd/src/subtitles/tests.rs",
+  "crates/plurxd/src/mkv_sparse.rs",
   "crates/plurxd/fixtures/linux-dolby/**",
   "crates/plurxd/src/ffmpeg/linux_dolby.rs",
   "crates/plurx-core/src/fmp4.rs",
