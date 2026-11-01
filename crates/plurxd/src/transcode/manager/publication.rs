@@ -533,7 +533,22 @@ impl TranscodeManager {
                     matches!(actor_error, PlaylistError::ProducerEnded(actor_reason) if actor_reason == reason)
                 });
                 if !matches_actor {
-                    false
+                    // C5: no published media, so the published-producer
+                    // proof cannot exist. The exact attempt's own
+                    // pre-publication verdict, read from one coherent actor
+                    // snapshot, is the proof instead. The actor refuses every
+                    // response authorization once that verdict is terminal
+                    // (`DecisionCommitted`), so this bodyless 502 is the
+                    // verdict's own report, bound to the same attempt.
+                    let outcome = session
+                        .prepublication_attempt_outcome_before(*producer_attempt, deadline)
+                        .await;
+                    require_error_authority!();
+                    matches!(
+                        outcome,
+                        crate::playback_control::PrepublicationAttemptOutcome::Failed(actor_reason)
+                            if actor_reason == *reason
+                    )
                 } else {
                     session
                         .control
