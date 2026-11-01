@@ -1170,5 +1170,232 @@ class MainUmaskTests(unittest.TestCase):
         self.assertEqual(order, [('umask', 0o077), ('work',)])
 
 
+
+# ---------------------------------------------------------------------------
+# PhysicalContext.child_plan: against B's real ReservationLedger and grant issuer.
+# ---------------------------------------------------------------------------
+import uuid
+from types import SimpleNamespace
+
+from validation import async_physical_policy as physical
+
+PAGE = 4096
+MIB = 1024 * 1024
+
+
+def child_policy(source_map, **pools):
+    families = {name: {'owner': owner, 'database_bytes': 10 * PAGE, 'main_bytes': 20 * PAGE,
+                       'journal_bytes': 20 * PAGE + MIB, 'temp_bytes': 20 * PAGE}
+                for name, owner in physical.FAMILY_OWNERS.items()}
+    families['verifier_main'].update(database_bytes=20 * PAGE, main_bytes=40 * PAGE,
+                                     journal_bytes=40 * PAGE + MIB, temp_bytes=40 * PAGE)
+    pool_bytes = {name: 8 * MIB for name in physical.POOL_OWNERS}
+    pool_bytes.update(pools)
+    return {'schema_version': 3, 'kind': 'physical_policy', 'table_map_sha256': physical.digest(source_map),
+            'families': families, 'pools': pool_bytes}
+
+
+class ChildPlanTests(unittest.TestCase):
+    def setUp(self):
+        scratch = ROOT / '.agent-proof-fixtures' / 'child-plan'
+        scratch.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=scratch)
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.out = self.root / 'out'
+        self.out.mkdir(mode=0o700)
+        self.source_map = json.loads(physical.SOURCE_MAP_PATH.read_bytes())
+        lease = self.root / 'lease'
+        descriptor = os.open(lease, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(descriptor, b'lease')
+        os.close(descriptor)
+        self.lease_fd = os.open(lease, os.O_RDONLY)
+        self.addCleanup(os.close, self.lease_fd)
+        self.context = self.make_context(child_policy(self.source_map))
+
+    def make_context(self, policy):
+        context = session.PhysicalContext.__new__(session.PhysicalContext)
+        info = self.root.stat()
+        context.reg = {'source': {'commit': '0' * 40}}
+        context.session_id = str(uuid.UUID(int=1))
+        context.owned = self.root
+        context.plan = {'plan_sha256': '1' * 64}
+        context.policy = policy
+        context.policy_sha256 = physical.digest(policy)
+        context.lease = SimpleNamespace(fd=self.lease_fd, relative_path='lease')
+        context.ledger = physical.ReservationLedger(policy, self.root, source_map=self.source_map)
+        context.root_identity = {'path': str(self.root), 'device': info.st_dev, 'inode': info.st_ino}
+        context.attachments, context.grants = {}, []
+        return context
+
+    def expected(self):
+        context = self.context
+        return {'source': context.reg['source'], 'session_id': context.session_id,
+                'resource_plan_sha256': context.plan['plan_sha256'], 'physical_policy_sha256': context.policy_sha256,
+                'physical_policy': context.policy}
+
+    def issue(self, request, output):
+        handle = self.context.issue(request, output)
+        self.addCleanup(handle.close)
+        return handle
+
+    def load(self, handle):
+        return physical.load_child_grant(handle.descriptor_fd, handle.sha256, self.lease_fd, self.expected())
+
+    def test_no_pool_capacity_is_delegated_twice_and_the_real_issuer_accepts_the_plan(self):
+        context, request = self.context, {'operation': 'unit'}
+        allocations, attachments = context.child_plan(request, self.out)
+        self.assertEqual(attachments, [])
+        totals = {}
+        for entry in allocations:
+            key = entry['resource'], entry['component']
+            totals[key] = totals.get(key, 0) + entry['bytes']
+        for key, total in totals.items():
+            self.assertLessEqual(total, context.ledger.remaining(*key), key)
+        families = context.policy['families']
+        spool = {e['relative_path']: e['bytes'] for e in allocations if e['resource'] == 'snapshot_spool_bytes'}
+        self.assertEqual(spool, {'out/catalog-backup.sqlite': families['catalog_main']['database_bytes'],
+                                 'out/verifier-backup.sqlite': families['verifier_main']['database_bytes']})
+        runtime = [e for e in allocations if e['resource'] == 'source_runtime_scratch_bytes']
+        self.assertEqual([(e['relative_path'], e['recursive'], e['bytes']) for e in runtime],
+                         [('out/child-scratch', True, context.ledger.remaining('source_runtime_scratch_bytes', 'bytes'))])
+        keyed = [(e['resource'], e['component']) for e in allocations if e['resource'] in physical.FAMILY_OWNERS]
+        self.assertEqual(len(keyed), len(set(keyed)))
+        self.issue(request, self.out)  # B's issuer deducts every share; the old double listing exhausts here
+        self.assertEqual(context.ledger.remaining('snapshot_spool_bytes', 'bytes'), 8 * MIB - sum(spool.values()))
+        self.assertEqual(context.ledger.remaining('source_runtime_scratch_bytes', 'bytes'), 0)
+
+    def test_a_pool_that_cannot_cover_every_named_share_refuses_before_any_deduction(self):
+        families = self.context.policy['families']
+        needed = families['catalog_main']['database_bytes'] + families['verifier_main']['database_bytes']
+        context = self.make_context(child_policy(self.source_map, snapshot_spool_bytes=needed - 1))
+        with self.assertRaises(physical.PhysicalIncomplete):
+            context.child_plan({'operation': 'unit'}, self.out)
+        self.assertEqual(set(context.ledger.used.values()), {0})
+
+    def test_the_plan_builder_refuses_to_delegate_the_same_capacity_twice(self):
+        plan = session.GrantPlan(self.context)
+        whole = self.context.ledger.remaining('snapshot_spool_bytes', 'bytes')
+        plan.pool('snapshot_spool_bytes', self.out / 'a.bin', whole)
+        with self.assertRaises(physical.PhysicalIncomplete):
+            plan.pool('snapshot_spool_bytes', self.out / 'b.bin', whole)
+        plan.database('catalog_main', self.out / 'catalog.sqlite')
+        with self.assertRaises(receipts.ReceiptError):
+            plan.database('catalog_main', self.out / 'other.sqlite')
+
+    def test_verifier_continuation_scratch_is_granted_in_full_and_loads_in_the_child(self):
+        context, request = self.context, {'operation': 'unit'}
+        allocations, _ = context.child_plan(request, self.out)
+        continuation = {e['component']: e for e in allocations if e['resource'] == 'verifier_continuation_scratch'}
+        self.assertEqual(set(continuation), {'main', 'journal', 'temp'})
+        self.assertEqual({e['relative_path'] for e in continuation.values()}, {'out/continuation-validation.sqlite'})
+        database = min(context.policy['families']['verifier_continuation_scratch']['database_bytes'],
+                       continuation['main']['bytes'])
+        self.assertGreaterEqual(continuation['journal']['bytes'], 2 * database + MIB)  # what the child asserts
+        self.assertGreaterEqual(continuation['temp']['bytes'], 2 * database)
+        child = self.load(self.issue(request, self.out))
+        for component in ('main', 'journal', 'temp'):
+            self.assertIn(('verifier_continuation_scratch', component), child.limits)
+
+    def held_restore(self):
+        generation = self.out / 'state.restore'
+        generation.mkdir(mode=0o700)
+        budget = session.PoolBudget(self.context, 'restore_staging_bytes')
+        budget.track_subtree(generation)
+        staged = generation / 'catalog.staged.sqlite'
+        database = sqlite3.connect(staged)
+        database.execute('PRAGMA page_size=%d' % PAGE)
+        database.execute('CREATE TABLE t(v BLOB)')
+        database.execute('INSERT INTO t VALUES(zeroblob(8192))')
+        database.commit()
+        database.close()
+        staged.chmod(0o600)
+        budget.reserve(staged.stat().st_size)
+        validation = self.root / 'restore-validation'
+        validation.mkdir(mode=0o700)
+        self.context.attach_restore(str(validation), budget, generation)
+        return staged, budget, validation
+
+    def test_restore_attaches_the_held_reservation_read_only_and_never_gets_a_second_main(self):
+        staged, budget, validation = self.held_restore()
+        request = {'operation': 'validate_restore'}
+        allocations, attachments = self.context.child_plan(request, validation)
+        self.assertEqual(attachments, [{
+            'reservation_id': budget.reservation_id, 'owner': 'snapshot_restore', 'resource': 'restore_staging_bytes',
+            'component': 'bytes', 'bytes': staged.stat().st_size, 'relative_path': 'out/state.restore',
+            'recursive': True, 'access': 'read_only'}])
+        self.assertEqual({e['resource'] for e in allocations},
+                         {'catalog_or_verifier_restore_scratch', 'verifier_continuation_scratch',
+                          'source_runtime_scratch_bytes'})
+        scratch = {e['component'] for e in allocations if e['resource'] == 'catalog_or_verifier_restore_scratch'}
+        self.assertEqual(scratch, {'journal', 'temp'})  # ancillary writes only
+        self.assertFalse([e for e in allocations if e['component'] == 'main' and e['resource'] != 'verifier_continuation_scratch'])
+        handle = self.issue(request, validation)
+        self.assertEqual(self.context.ledger.remaining('restore_staging_bytes', 'bytes'), 8 * MIB - staged.stat().st_size)
+        child = self.load(handle)
+        readonly = physical.validate_readonly_database(child, 'catalog_or_verifier_restore_scratch', staged,
+                                                       budget.reservation_id)
+        self.assertEqual(readonly.page_count, staged.stat().st_size // PAGE)
+        readonly.reserve_ancillary('journal', PAGE)
+        with self.assertRaises(physical.PhysicalPolicyError):
+            readonly.reserve_ancillary('main', PAGE)
+
+    def test_a_restore_validator_without_the_attachment_or_an_attachment_on_other_work_is_refused(self):
+        _staged, _budget, validation = self.held_restore()
+        with self.assertRaises(receipts.ReceiptError):
+            self.context.child_plan({'operation': 'validate_restore'}, self.root / 'unattached')
+        with self.assertRaises(receipts.ReceiptError):
+            self.context.child_plan({'operation': 'unit'}, validation)
+
+    def test_an_attachment_needs_the_tracked_held_reservation(self):
+        generation = self.out / 'state.restore'
+        generation.mkdir(mode=0o700)
+        budget = session.PoolBudget(self.context, 'restore_staging_bytes')
+        budget.reserve(PAGE)
+        with self.assertRaises(receipts.ReceiptError):
+            self.context.attach_restore(str(self.root / 'x'), budget, generation)  # subtree never tracked
+
+    def test_scratch_is_discarded_after_reap_and_sealed_outputs_stay_attachable(self):
+        context, request = self.context, {'operation': 'unit'}
+        handle = self.issue(request, self.out)
+        catalog, backup = self.out / 'catalog.sqlite', self.out / 'verifier-backup.sqlite'
+        catalog.write_bytes(b'c' * 1000)
+        backup.write_bytes(b'v' * 1000)
+        (self.out / 'continuation-validation.sqlite').write_bytes(b'x' * 500)
+        (self.out / 'continuation-validation.sqlite-journal').write_bytes(b'x' * 500)
+        (self.out / 'child-scratch' / 'home').mkdir(parents=True)
+        (self.out / 'child-scratch' / 'home' / 'cache').write_bytes(b'x' * 500)
+        context.finish(handle)
+        self.assertFalse((self.out / 'child-scratch').exists())
+        self.assertFalse((self.out / 'continuation-validation.sqlite').exists())
+        self.assertFalse((self.out / 'continuation-validation.sqlite-journal').exists())
+        self.assertTrue(catalog.exists() and backup.exists())
+        # The scratch pool and family are free again; the sealed outputs remain charged.
+        self.assertEqual(context.ledger.remaining('source_runtime_scratch_bytes', 'bytes'), 8 * MIB)
+        self.assertEqual(context.ledger.remaining('verifier_continuation_scratch', 'main'),
+                         context.policy['families']['verifier_continuation_scratch']['main_bytes'])
+        self.assertEqual(context.ledger.remaining('catalog_main', 'main'), 0)
+        validation = self.root / 'seal-validation'
+        validation.mkdir(mode=0o700)
+        context.attach_retained(str(validation), (catalog, backup))
+        attached = context.attachments[str(validation)]
+        self.assertEqual([(a['resource'], a['relative_path'], a['recursive'], a['access']) for a in attached],
+                         [('catalog_main', 'out/catalog.sqlite', False, 'read_only'),
+                          ('snapshot_spool_bytes', 'out/verifier-backup.sqlite', False, 'read_only')])
+        self.issue({'operation': 'validate_restore'}, validation)  # the issuer checks them against the held reservations
+        with self.assertRaises(receipts.ReceiptError):
+            context.attach_retained(str(validation), (self.out / 'unheld.sqlite',))
+
+    def test_an_overage_keeps_the_child_scratch_for_reconciliation(self):
+        context = self.context
+        handle = self.issue({'operation': 'unit'}, self.out)
+        scratch = self.out / 'child-scratch'
+        scratch.mkdir()
+        (scratch / 'huge').write_bytes(b'x' * (8 * MIB + 1))
+        with self.assertRaises(physical.PhysicalIncomplete):
+            context.finish(handle)
+        self.assertTrue((scratch / 'huge').exists())  # evidence is not deleted before the overage is raised
+
+
 if __name__ == '__main__':
     unittest.main()
