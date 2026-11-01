@@ -1787,7 +1787,17 @@ impl super::TranscodeManager {
             {
                 return Err("adaptive loser differs from the retained original Adopt".into());
             }
-            if !matches!(attempt.phase, AttemptPhase::Losing | AttemptPhase::Cleanup) {
+            // An unresolved Adopt otherwise holds the owner until a Fence
+            // arrives. If the origin is gone, nothing else will send one, so
+            // past the immutable original deadline the retained expired Fence
+            // below applies to this SAME row. Store Fence refuses an adopted
+            // request, so a delayed committed Adopt still keeps everything.
+            let expired_unresolved =
+                matches!(attempt.phase, AttemptPhase::Prepared | AttemptPhase::Winner)
+                    && crate::media_sessions::unix_ms() >= rich.claim.binding.original_deadline_ms;
+            if !expired_unresolved
+                && !matches!(attempt.phase, AttemptPhase::Losing | AttemptPhase::Cleanup)
+            {
                 return Ok(());
             }
         }
@@ -2287,6 +2297,7 @@ impl super::TranscodeManager {
         key_capacity: usize,
         settings: crate::vodserve::VodSettings,
         refused_adopt_authority: Option<crate::serving_fence::ServingAuthority>,
+        expire_after_refusal: bool,
         make_pending: F,
     ) where
         F: FnOnce(usize) -> Fut + Send + 'static,
@@ -2514,101 +2525,142 @@ impl super::TranscodeManager {
         } else {
             None
         };
-        let receiver = self
-            .begin_adaptive_cancel(stale.clone())
-            .expect("original control task");
-        let cancellation = receiver.await.expect("same cancellation reply");
-        if refused_adopt.is_some() {
-            assert_eq!(
-                cancellation.expect_err("unresolved original Adopt remains held"),
-                "adaptive Adopt outcome must be reconciled before cancellation"
-            );
-        } else {
-            assert!(
-                cancellation.is_err(),
-                "actual Store Prepared made Fence A stale"
-            );
-        }
-        {
-            let state = entry.state().await;
-            let AttemptState::Rich(rich) = &*state else {
-                panic!("original Rich owner retained")
-            };
-            if let Some(adoption) = refused_adopt.as_ref() {
-                assert_eq!(rich.adoption.as_ref(), Some(adoption));
-                assert!(rich.fence.is_none());
-            } else {
-                assert_eq!(rich.fence.as_ref(), Some(&stale));
+        if expire_after_refusal {
+            let adoption = refused_adopt
+                .as_ref()
+                .expect("expiry follows the refused original Adopt");
+            // The origin is gone: no Cancel or foreign Fence will arrive.
+            // Only the immutable original deadline in the charged Claim lets
+            // the existing reap pass fence this SAME owner.
+            let remaining_ms =
+                claim.binding.original_deadline_ms - crate::media_sessions::unix_ms();
+            if remaining_ms >= 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    remaining_ms.unsigned_abs() + 50,
+                ))
+                .await;
             }
-        }
-        let status = self
-            .store
-            .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
-            .await
-            .expect("fresh real status")
-            .expect("same request");
-        let row = status
-            .attempts
-            .iter()
-            .find(|row| row.key == claim.key)
-            .expect("same worker row");
-        assert_eq!(row.phase, AttemptPhase::Prepared);
-        let foreign = AttemptFence {
-            context: MutationContext {
-                operation_id: Uuid::new_v4(),
-                expected_request_sequence: status.sequence,
-                expected_attempt_sequence: row.sequence,
-                now_ms: crate::media_sessions::unix_ms(),
-            },
-            binding: claim.binding.clone(),
-            key: claim.key.clone(),
-            cancel_request: false,
-        };
-        assert!(matches!(
-            self.store
-                .fence_adaptive_attempt(&foreign)
+            self.reconcile_adaptive_loser(&entry)
                 .await
-                .expect("real foreign Fence B"),
-            AttemptMutation::Applied(_)
-        ));
-        if let Some(adoption) = refused_adopt.as_ref() {
-            // Even the delayed SAME immutable Adopt cannot commit through a
-            // positively fenced loser phase; this is an actual Store refusal,
-            // never a native close witness or a replacement owner.
+                .expect("expired unresolved Adopt fences the same original owner");
+            assert!(matches!(*entry.state().await, AttemptState::Handoff(_)));
+            let fenced = self
+                .store
+                .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+                .await
+                .expect("actual post-expiry status")
+                .expect("same original request");
+            assert_ne!(fenced.disposition, RequestDisposition::Adopted);
+            let row = fenced
+                .attempts
+                .iter()
+                .find(|row| row.key == claim.key)
+                .expect("same original expired row");
+            assert_eq!(row.phase, AttemptPhase::Cleanup);
             assert!(matches!(
                 self.store
                     .adopt_adaptive_winner(adoption)
                     .await
-                    .expect("delayed same original Adopt after real Fence"),
-                AttemptAdoption::Refused(
-                    plurx_core::store::adaptive_resource_attempts::AttemptRefusal::WinnerLost
-                )
+                    .expect("delayed same original Adopt after expiry Fence"),
+                AttemptAdoption::Refused(_)
             ));
-            let still = self
+        } else {
+            let receiver = self
+                .begin_adaptive_cancel(stale.clone())
+                .expect("original control task");
+            let cancellation = receiver.await.expect("same cancellation reply");
+            if refused_adopt.is_some() {
+                assert_eq!(
+                    cancellation.expect_err("unresolved original Adopt remains held"),
+                    "adaptive Adopt outcome must be reconciled before cancellation"
+                );
+            } else {
+                assert!(
+                    cancellation.is_err(),
+                    "actual Store Prepared made Fence A stale"
+                );
+            }
+            {
+                let state = entry.state().await;
+                let AttemptState::Rich(rich) = &*state else {
+                    panic!("original Rich owner retained")
+                };
+                if let Some(adoption) = refused_adopt.as_ref() {
+                    assert_eq!(rich.adoption.as_ref(), Some(adoption));
+                    assert!(rich.fence.is_none());
+                } else {
+                    assert_eq!(rich.fence.as_ref(), Some(&stale));
+                }
+            }
+            let status = self
                 .store
                 .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
                 .await
-                .expect("actual post-race status")
-                .expect("same original request");
-            assert_eq!(still.binding, claim.binding);
-            assert_ne!(still.disposition, RequestDisposition::Adopted);
-            let row = still
+                .expect("fresh real status")
+                .expect("same request");
+            let row = status
                 .attempts
                 .iter()
                 .find(|row| row.key == claim.key)
-                .expect("same original fenced row");
-            assert_eq!(row.phase, AttemptPhase::Cleanup);
-            assert_eq!(row.last_operation_id, foreign.context.operation_id);
-            let state = entry.state().await;
-            let AttemptState::Rich(rich) = &*state else {
-                panic!("original native owner remains held before handoff")
+                .expect("same worker row");
+            assert_eq!(row.phase, AttemptPhase::Prepared);
+            let foreign = AttemptFence {
+                context: MutationContext {
+                    operation_id: Uuid::new_v4(),
+                    expected_request_sequence: status.sequence,
+                    expected_attempt_sequence: row.sequence,
+                    now_ms: crate::media_sessions::unix_ms(),
+                },
+                binding: claim.binding.clone(),
+                key: claim.key.clone(),
+                cancel_request: false,
             };
-            assert_eq!(rich.adoption.as_ref(), Some(adoption));
+            assert!(matches!(
+                self.store
+                    .fence_adaptive_attempt(&foreign)
+                    .await
+                    .expect("real foreign Fence B"),
+                AttemptMutation::Applied(_)
+            ));
+            if let Some(adoption) = refused_adopt.as_ref() {
+                // Even the delayed SAME immutable Adopt cannot commit through a
+                // positively fenced loser phase; this is an actual Store refusal,
+                // never a native close witness or a replacement owner.
+                assert!(matches!(
+                    self.store
+                        .adopt_adaptive_winner(adoption)
+                        .await
+                        .expect("delayed same original Adopt after real Fence"),
+                    AttemptAdoption::Refused(
+                        plurx_core::store::adaptive_resource_attempts::AttemptRefusal::WinnerLost
+                    )
+                ));
+                let still = self
+                    .store
+                    .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+                    .await
+                    .expect("actual post-race status")
+                    .expect("same original request");
+                assert_eq!(still.binding, claim.binding);
+                assert_ne!(still.disposition, RequestDisposition::Adopted);
+                let row = still
+                    .attempts
+                    .iter()
+                    .find(|row| row.key == claim.key)
+                    .expect("same original fenced row");
+                assert_eq!(row.phase, AttemptPhase::Cleanup);
+                assert_eq!(row.last_operation_id, foreign.context.operation_id);
+                let state = entry.state().await;
+                let AttemptState::Rich(rich) = &*state else {
+                    panic!("original native owner remains held before handoff")
+                };
+                assert_eq!(rich.adoption.as_ref(), Some(adoption));
+            }
+            self.reconcile_adaptive_loser(&entry)
+                .await
+                .expect("same original Rich enters typed cleanup under committed Fence");
+            assert!(matches!(*entry.state().await, AttemptState::Handoff(_)));
         }
-        self.reconcile_adaptive_loser(&entry)
-            .await
-            .expect("same original Rich enters typed cleanup under committed Fence");
-        assert!(matches!(*entry.state().await, AttemptState::Handoff(_)));
         tokio::time::timeout_at(deadline.into(), async {
             loop {
                 self.reconcile_adaptive_attempt_tasks().await;

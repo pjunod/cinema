@@ -1255,15 +1255,20 @@ async fn finite_operator_zero_cache_budget_refuses_before_original_r_entry() {
 #[tokio::test]
 async fn foreign_committed_fence_closes_same_finite_owner_after_stale_cancel_and_coordinator_join()
 {
-    Box::pin(foreign_finite_fence_cleanup(false)).await;
+    Box::pin(foreign_finite_fence_cleanup(false, false)).await;
 }
 
 #[tokio::test]
 async fn refused_adopt_then_committed_fence_closes_same_finite_owner_after_original_aliases() {
-    Box::pin(foreign_finite_fence_cleanup(true)).await;
+    Box::pin(foreign_finite_fence_cleanup(true, false)).await;
 }
 
-async fn foreign_finite_fence_cleanup(refused_adopt: bool) {
+#[tokio::test]
+async fn refused_adopt_past_original_deadline_fences_same_finite_owner_without_origin() {
+    Box::pin(foreign_finite_fence_cleanup(true, true)).await;
+}
+
+async fn foreign_finite_fence_cleanup(refused_adopt: bool, expire_after_refusal: bool) {
     use plurx_core::store::adaptive_resource_attempts::{
         AttemptClaim, AttemptKey, MutationContext, RequestBinding, RequestKey,
     };
@@ -1335,7 +1340,10 @@ async fn foreign_finite_fence_cleanup(refused_adopt: bool) {
         intent_digest: envelope
             .adaptive_intent_digest()
             .expect("root-scoped actual intent"),
-        original_deadline_ms: crate::media_sessions::unix_ms() + 90_000,
+        // The expiry case needs the original deadline to pass during the
+        // test; Prepared and the refused Adopt finish well inside it.
+        original_deadline_ms: crate::media_sessions::unix_ms()
+            + if expire_after_refusal { 30_000 } else { 90_000 },
         expected_predecessor_incarnation_id: None,
         expected_predecessor_owner_epoch: None,
         expected_desired_revision: None,
@@ -1418,6 +1426,7 @@ async fn foreign_finite_fence_cleanup(refused_adopt: bool) {
             key_capacity,
             fixture.settings.clone(),
             refused_adopt.then(|| serving.authority()),
+            expire_after_refusal,
             move |application_bytes| async move {
                 let pending = shared
                     .prepare_adaptive_attempt(

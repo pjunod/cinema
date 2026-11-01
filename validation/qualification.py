@@ -139,6 +139,12 @@ def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> 
                           git_object(repository, "HEAD^{commit}"), ancestry.returncode == 0)
 
 
+def _require(condition: object) -> None:
+    """An explicit check that `python -O` cannot strip, unlike `assert`."""
+    if not condition:
+        raise AssertionError
+
+
 def resolve_effort_history_binding(environment: Mapping[str, str], repository: Path) -> dict[str, object]:
     """Bind task history to the unique already-included authenticated main base."""
     from validation.python_unit_receipts import API, ReceiptError, identity
@@ -164,18 +170,18 @@ def resolve_effort_history_binding(environment: Mapping[str, str], repository: P
         pr = api_document(environment, "/pulls/" + str(scope["pr"]))
         head = pr["head"]
         base = pr["base"]
-        assert pr["number"] == scope["pr"] and pr["state"] == "open" and pr.get("merged") is False
-        assert head["repo"]["id"] == base["repo"]["id"] == scope["repository"]
-        assert head["ref"] == branch and head["sha"] == commit
-        assert base["ref"] == scope["base"] and base["ref"].startswith("effort/")
+        _require(pr["number"] == scope["pr"] and pr["state"] == "open" and pr.get("merged") is False)
+        _require(head["repo"]["id"] == base["repo"]["id"] == scope["repository"])
+        _require(head["ref"] == branch and head["sha"] == commit)
+        _require(base["ref"] == scope["base"] and base["ref"].startswith("effort/"))
         head_tip = api_document(environment, "/branches/" + urllib.parse.quote(branch, safe=""))["commit"]["id"]
         base_tip = api_document(environment, "/branches/" + urllib.parse.quote(base["ref"], safe=""))["commit"]["id"]
         main_tip = api_document(environment, "/branches/main")["commit"]["id"]
-        assert head_tip == commit and base["sha"] == base_tip
-        assert all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base_tip, main_tip))
+        _require(head_tip == commit and base["sha"] == base_tip)
+        _require(all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base_tip, main_tip)))
         check = subprocess.run(["git", "merge-base", "--is-ancestor", base_tip, "HEAD"],
                                cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
-        assert check.returncode == 0
+        _require(check.returncode == 0)
         # A task targets the current effort. Only final effort promotion must
         # integrate current main. Authenticate main to derive the unique
         # already-landed baseline; new main commits cannot waive task history
@@ -184,13 +190,13 @@ def resolve_effort_history_binding(environment: Mapping[str, str], repository: P
                                 cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, timeout=15)
         merge_bases = common.stdout.split()
-        assert common.returncode == 0 and len(merge_bases) == 1
+        _require(common.returncode == 0 and len(merge_bases) == 1)
         included_main = merge_bases[0]
-        assert re.fullmatch(r"[0-9a-f]{40}", included_main)
+        _require(re.fullmatch(r"[0-9a-f]{40}", included_main))
         for descendant in (base_tip, main_tip):
             check = subprocess.run(["git", "merge-base", "--is-ancestor", included_main, descendant],
                                    cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
-            assert check.returncode == 0
+            _require(check.returncode == 0)
     except (ReceiptError, KeyError, TypeError, AssertionError) as exc:
         raise QualificationError("effort task identity, live tips or main ancestry mismatch") from exc
     return dict(base_sha=included_main, main_sha=main_tip, effort_sha=base_tip,

@@ -890,7 +890,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # cancellation-aware poll holds the live capacity waiter across its bounded
 # admission deadline. The waiter is dropped on admission, cancellation or
 # timeout; the sleep neither owns inference nor starts work by itself.
-expected_occurrences = 94
+# Expired refused-Adopt regression sleeps once until the real original Claim deadline passes; no production wait: 94 + 1 = 95.
+expected_occurrences = 95
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -3401,7 +3402,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Both use the original runtime; Source worker stacks remain unchanged.
 # This is test-only pre-R bootstrap, not a new media producer or close proof.
 # Compose task and current-main owner sites: 1089; exact source census still required.
-# Compose M4 fixture and current-main owner sites: 1086; source equality still enforced.
+# Stack composition with M4 (effort base 1085 -> M4 1086): 1089 + 1 = 1090.
 expected_occurrences = 1090
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
@@ -5125,9 +5126,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # their existing admission deadline.
 # Main 6c8c98c79 composition: 2002 + (1901 - 1899) = 2004; source equality remains required.
 # Compose task and current-main owner sites: 2065; exact source census still required.
-# Compose M4 fixture and current-main owner sites: 2017; source equality still enforced.
+# Stack composition over effort base 2008: M2 +4 and M4 +9, so 2065 + 13 = 2078.
 # M4 follow-on: The genuine refused-Adopt fixture positively joins its SAME registered control under the original deadline; no new native watchdog or allowance.
-expected_occurrences = 2079
+# Expired refused-Adopt regression waits once for the real original Claim deadline: 2079 + 1 = 2080.
+expected_occurrences = 2080
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6282,7 +6284,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Combined with main's Live TV HTTP assertion: 809 + 2 = 811 reviewed matches.
 # Main 6c8c98c79 composition: 831 + (811 - 808) = 834; source equality remains required.
 # Compose task and current-main owner sites: 845; exact source census still required.
-# Compose M4 fixture and current-main owner sites: 844; source equality still enforced.
+# Stack composition with M4 (effort base 843 -> M4 844): 845 + 1 = 846.
 expected_occurrences = 846
 
 [[module_structures]]

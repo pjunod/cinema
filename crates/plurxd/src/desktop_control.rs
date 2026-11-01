@@ -1461,13 +1461,27 @@ mod tests {
                     let operation = context.control.operation.lock().await;
                     let original = operation.as_ref().expect("real retained preparation");
                     let lease = original.lease.as_ref().expect("real retained lease");
-                    assert!(cluster_operations::require_adaptive_outage_zero(
+                    // The token is still current, so this refusal comes from
+                    // reasserting the exactly released durable claim.
+                    let error = cluster_operations::require_adaptive_outage_zero(
                         &state,
                         lease.claim(),
                         original.token,
                     )
                     .await
-                    .is_err());
+                    .expect_err("a released claim cannot authorize zero");
+                    assert!(
+                        matches!(
+                            &error,
+                            crate::http::error::ApiError::Typed {
+                                status: StatusCode::CONFLICT,
+                                code,
+                                ..
+                            } if *code
+                                == plurx_core::cluster::membership::MembershipError::ClusterOperationPending.code()
+                        ),
+                        "released claim refusal: {error:?}"
+                    );
                 }
                 // The original prepared response and live local token cannot
                 // authorize final commitment after its exact durable release.
@@ -1516,13 +1530,24 @@ mod tests {
                 let lease = replacement.lease.as_ref().expect("real replacement lease");
                 // This token came from the actual earlier owner, not a
                 // fabricated generation. The replacement must reject it.
-                assert!(cluster_operations::require_adaptive_outage_zero(
+                let error = cluster_operations::require_adaptive_outage_zero(
                     &state,
                     lease.claim(),
                     stale_token,
                 )
                 .await
-                .is_err());
+                .expect_err("a superseded token cannot authorize zero");
+                assert!(
+                    matches!(
+                        &error,
+                        crate::http::error::ApiError::Typed {
+                            status: StatusCode::CONFLICT,
+                            code: "restart_preparation_expired",
+                            ..
+                        }
+                    ),
+                    "superseded token refusal: {error:?}"
+                );
                 assert!(
                     state
                         .serving
