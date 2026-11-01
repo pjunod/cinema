@@ -172,6 +172,13 @@ runner, class and severity only.
 - **Concurrency holds.** HELD is inferred from a blocked job whose needs all
   finished; how Forgejo 16 reports a job-level concurrency hold has not been
   observed live.
+- **Overlap with the existing runner exporter.** Runner hosts already run
+  `plurx-ci-runner-metrics` (a five-minute timer outside this repository that
+  writes runner up/down and janitor health to the lab Prometheus through a
+  textfile). ci-fleet's `ci_fleet_runner_up` and the agents' janitor receipts
+  overlap those series; the queue, why-waiting, pools, placement, drift and
+  per-job usage are new. Once ci-fleet is installed, retire the overlapping
+  series in one place or keep both deliberately — Paul's call.
 - **`scripts/ci-failures`** still reads logs over SSH on the old assumption
   that the log API is broken; on 16.0.3 it works, so that path can go.
 
