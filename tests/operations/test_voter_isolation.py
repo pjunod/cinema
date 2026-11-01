@@ -149,8 +149,9 @@ class VoterIsolationCheckTests(unittest.TestCase):
 class VoterBuildTests(unittest.TestCase):
     def test_the_caps_are_always_added_and_the_command_passes_through(self):
         argv = build.command(["--rm", "-v", "/w:/w", "--", "rust:1.97", "sh", "-c", "cargo build -m x"])
-        self.assertEqual(argv[:2], ["docker", "run"])
-        self.assertEqual(argv[2:10], ["--memory", "8g", "--memory-swap", "8g", "--cpus", "4",
+        self.assertEqual(argv[:5], ["docker", "run", "--rm", "-v", "/w:/w"])
+        # The caps come after the caller's options: docker's last one wins.
+        self.assertEqual(argv[5:13], ["--memory", "8g", "--memory-swap", "8g", "--cpus", "4",
                                       "--env", "CARGO_BUILD_JOBS=4"])
         self.assertEqual(argv[-4:], ["rust:1.97", "sh", "-c", "cargo build -m x"])
         self.assertEqual(build.command(["image"]), ["docker", "run", *build.CAPS, "image"])
@@ -158,9 +159,26 @@ class VoterBuildTests(unittest.TestCase):
     def test_options_that_would_lift_a_cap_are_refused(self):
         for option in (["--memory=32g"], ["-m", "16g"], ["-m16g"], ["--memory-swap", "-1"],
                        ["--cpus", "12"], ["--cgroup-parent", "system.slice"], ["--privileged"],
-                       ["--pid=host"], ["--env", "CARGO_BUILD_JOBS=12"]):
+                       ["--pid=host"], ["--env", "CARGO_BUILD_JOBS=12"],
+                       # Fable F6: every other spelling of the jobs override,
+                       ["--env=CARGO_BUILD_JOBS=12"], ["-e=CARGO_BUILD_JOBS=12"],
+                       ["-eCARGO_BUILD_JOBS=12"], ["-e", "CARGO_BUILD_JOBS"],
+                       ["-ite", "CARGO_BUILD_JOBS=12"], ["--env-file", "jobs.env"],
+                       ["--env-file=jobs.env"],
+                       # an OOM score that makes plurxd the kernel's first victim,
+                       ["--oom-score-adj=-1000"], ["--oom-score-adj", "-1000"],
+                       # and capabilities that let the container lift its own limits.
+                       ["--cap-add", "SYS_RESOURCE"], ["--cap-add=all"],
+                       ["--cap-add", "NET_ADMIN,sys_admin"]):
             with self.subTest(option=option), self.assertRaises(SystemExit):
                 build.command([*option, "--", "image"])
+
+    def test_ordinary_options_pass_and_their_values_are_not_misread(self):
+        options = ["-it", "-e", "RUST_LOG=info", "--env=HOME=/w", "-w", "/w", "--cap-add", "NET_ADMIN",
+                   "--name", "build-1"]
+        argv = build.command([*options, "--", "image"])
+        self.assertEqual(argv[2:2 + len(options)], options)
+        self.assertEqual(argv[-1], "image")
 
 
 class VoterSliceAndComposeTests(unittest.TestCase):
