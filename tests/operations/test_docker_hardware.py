@@ -111,7 +111,13 @@ class DockerHardwareTests(unittest.TestCase):
                  (None, "384m", False, 402653184), (None, "384m", True, 402653184))
         for memory, literal, gpu, expected in cases:
             with self.subTest(memory=memory, literal=literal, gpu=gpu):
-                host = {"environment": {"LITERAL": "$${KEEP_LITERAL}"}}
+                host = {
+                    "environment": {"LITERAL": "$${KEEP_LITERAL}"},
+                    # HTTPS inspection must stay inside the fixture even when
+                    # the runner supplies its own PLURX_DATA directory.
+                    "volumes": [{"type": "bind", "source": str(self.root),
+                                 "target": "/var/lib/plurx"}],
+                }
                 if literal is not None:
                     host["mem_reservation"] = literal
                 if gpu:
@@ -145,6 +151,9 @@ class DockerHardwareTests(unittest.TestCase):
                 service = json.loads(config.stdout)["services"]["plurxd"]
                 self.assertEqual(int(service["mem_reservation"]), expected)
                 self.assertEqual(service["environment"]["LITERAL"], "$${KEEP_LITERAL}")
+                data = next(volume for volume in service["volumes"]
+                            if volume["target"] == "/var/lib/plurx")
+                self.assertEqual(data["source"], str(self.root))
                 if gpu:
                     reservation = service["deploy"]["resources"]["reservations"]
                     self.assertEqual(int(reservation["memory"]), expected)
