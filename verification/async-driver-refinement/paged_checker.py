@@ -1636,9 +1636,20 @@ def validate_restore(request):
     checkpoint_envelope = request['checkpoint']
     checkpoint = checkpoint_envelope['record']
     budget = Budget(request['resource_plan']['record'], output,seconds=request['deadline_monotonic']-time.monotonic())
-    index = private_input_view(request)
-    index.schema.check(checkpoint_envelope)
-    require(checkpoint['source'] == index.source and checkpoint['session_id'] == index.session_id and
+    # The staged verifier (when the checkpoint has one) is a second attached restore: its effective page
+    # ceiling is checked before the first open, exactly like the catalog's. A checkpoint with no verifier
+    # snapshot yet (a catalog-only expansion unit) stages no verifier file; the scope is then not ready and
+    # the result is the incomplete `input_preparation` receipt below, never a failed open of a missing file.
+    verifier_path = Path(request['verifier_work_db'])
+    index = None
+    if verifier_path.is_file() and not verifier_path.is_symlink():
+        index = private_input_view(request, precheck=lambda b: b.restored_database('verifier_main', verifier_path, attached=True))
+    else:
+        require(not (verifier_path.is_symlink() or verifier_path.exists()), 'staged verifier path is not a regular file')
+    from paged_codec import Schema
+    source, session_id = request['work_unit']['source'], request['work_unit']['session_id']
+    Schema().check(checkpoint_envelope)
+    require(checkpoint['source'] == source and checkpoint['session_id'] == session_id and
             checkpoint['resource_plan_sha256'] == budget.plan['plan_sha256'], 'restore snapshot identity')
     path = Path(request['catalog_path'])
     require(path.is_absolute() and path.is_file() and not path.is_symlink(), 'staged catalog path')
@@ -1655,7 +1666,7 @@ def validate_restore(request):
         require(catalog.execute('PRAGMA foreign_key_check').fetchone() is None, 'restored SQLite foreign key violation')
         meta = catalog.execute('SELECT current_commit,schema_version,source_json,session_id,resource_plan_sha256 FROM catalog_meta WHERE singleton=1').fetchone()
         require(meta is not None and meta[0] == checkpoint['committed_transaction'] and meta[1] == 6 and
-                strict_json(meta[2]) == index.source and meta[3] == index.session_id and meta[4] == budget.plan['plan_sha256'], 'restored catalog exact snapshot/source/session/plan')
+                strict_json(meta[2]) == source and meta[3] == session_id and meta[4] == budget.plan['plan_sha256'], 'restored catalog exact snapshot/source/session/plan')
         plan_bytes=encoded(request['resource_plan'])
         plan_key=digest(request['resource_plan'])
         plan=catalog.execute('SELECT length(descriptor),admission FROM resource_plans WHERE digest=?',(plan_key,)).fetchone()
@@ -1663,14 +1674,14 @@ def validate_restore(request):
                 'restored separate admitted plan inventory differs')
         require(catalog.execute('SELECT descriptor FROM resource_plans WHERE digest=?',(plan_key,)).fetchone()==(plan_bytes,),
                 'restored separate ResourcePlan full envelope bytes differ')
-        binding=encoded({'source':index.source,'session_id':index.session_id,'resource_plan':request['resource_plan']})
+        binding=encoded({'source':source,'session_id':session_id,'resource_plan':request['resource_plan']})
         require(catalog.execute("SELECT length(payload) FROM catalog_control WHERE key='binding'").fetchone()==(len(binding),) and
                 catalog.execute("SELECT payload FROM catalog_control WHERE key='binding'").fetchone()==(binding,),
                 'restored private source/session/plan binding differs')
-        scope_state=index.db.execute('SELECT checkpoint_sha256,status FROM input_scopes WHERE scope=?',(index.scope,)).fetchone()
+        scope_state=None if index is None else index.db.execute('SELECT checkpoint_sha256,status FROM input_scopes WHERE scope=?',(index.scope,)).fetchone()
         if scope_state is None or scope_state!=(digest(checkpoint_envelope),'ready'):
-            receipt={'schema_version':6,'catalog_sha256':budget_file_sha(path,index.budget),'checkpoint_sha256':digest(checkpoint_envelope),
-                'source':index.source,'session_id':index.session_id,'catalog_logical_digest':checkpoint['catalog_logical_digest'],
+            receipt={'schema_version':6,'catalog_sha256':budget_file_sha(path,budget if index is None else index.budget),'checkpoint_sha256':digest(checkpoint_envelope),
+                'source':source,'session_id':session_id,'catalog_logical_digest':checkpoint['catalog_logical_digest'],
                 'catalog_commit':checkpoint['committed_transaction'],'counts':checkpoint['counts'],'contexts':checkpoint['contexts'],
                 'manifest_root':checkpoint['page_root'],'complete':False,'acceptance':False,'scope':'input_preparation'}
             write_json(output/'restore-semantic.json',receipt)
@@ -1688,7 +1699,7 @@ def validate_restore(request):
         # complete row comparisons. Rebuilding a second index or comparing the
         # entire prefix again would erase the continuation benefit.
         verify_proof_contract(index)
-        receipt={'schema_version':6,'source':index.source,'session_id':index.session_id,
+        receipt={'schema_version':6,'source':source,'session_id':session_id,
             'checkpoint_sha256':digest(checkpoint_envelope),'catalog_commit':checkpoint['committed_transaction'],
             'catalog_logical_digest':checkpoint['catalog_logical_digest'],'manifest_root':checkpoint['page_root'],
             'catalog_sha256':actual_sha,'counts':checkpoint['counts'],'contexts':checkpoint['contexts'],
@@ -1699,7 +1710,8 @@ def validate_restore(request):
     finally:
         resolver.close()
         catalog.close()
-        index.close()
+        if index is not None:
+            index.close()
 
 
 
