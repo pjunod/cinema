@@ -448,6 +448,7 @@ paths = [
   "crates/plurx-core/src/store/async_driver_refinement.rs",
   "crates/plurx-core/src/store/async_driver_product.rs",
   "crates/plurx-core/src/store/async_driver_catalog.rs",
+  "crates/plurx-core/src/store/async_driver_catalog/grant.rs",
   "crates/plurx-core/src/store/async_driver_catalog/memory.rs",
   "crates/plurx-core/src/store/async_driver_catalog/records.rs",
   "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs",
