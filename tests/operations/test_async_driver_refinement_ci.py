@@ -93,7 +93,7 @@ class AsyncDriverRefinementCiTests(unittest.TestCase):
         self.assertNotIn('node ',self.session)
         self.assertNotIn('matrix:',self.session)
         self.assertIn('options: [unit, complete]',self.session)
-        self.assertIn('options: [probe, execute]',self.session)
+        self.assertIn('options: [probe, execute, publish]',self.session)
         self.assertIn('cancel-in-progress: false',self.session)
 
 
