@@ -95,7 +95,9 @@ class PagedInputContinuationFixtures(unittest.TestCase):
 
     def test_second_unit_never_readds_committed_raw_records(self):
         request=self.request()
-        self.index.budget.plan['unit_record_allowance']=8
+        smaller=copy.deepcopy(self.plan);smaller['unit_record_allowance']=8
+        smaller['plan_sha256']=codec.digest(codec.envelope('ResourcePlan',smaller))
+        self.index.budget=self.state.budget=fixture.granted_budget(smaller,self.root)
         with self.assertRaises(codec.Incomplete):self.index.prepare_input(request)
         old=set(self.index.db.execute('SELECT kind,key FROM records'))
         original=self.index.add
@@ -172,10 +174,13 @@ class PagedInputContinuationFixtures(unittest.TestCase):
         request=self.request(pages=1);self.finish_dependencies(request)
         self.next_quantum_budget()
         self.index.propose(transport.PagedCodecFixtures().rows(999),'check_input')
+        # The finished pass already credited every earlier selected row exactly once; resume the orphan scan just
+        # after them so only the injected unpublished row is examined (a credit is never granted twice).
+        checked=list(self.index.db.execute('SELECT kind,key FROM active_selected ORDER BY kind DESC,key DESC LIMIT 1').fetchone())
         with self.index.input_quantum('check_input'):
             self.index.db.execute('INSERT INTO active_selected VALUES(?,?)',('PhysicalRows',codec.canonical(999)))
             self.index.db.execute('INSERT INTO active_authoritative VALUES(?,?)',('PhysicalRows',codec.canonical(999)))
-            self.index.save_input_cursor('orphan_check')
+            self.index.save_input_cursor('orphan_check',checked)
         with self.assertRaisesRegex(codec.Invalid,'unpublished'):
             self.index.check_input_scope()
 
