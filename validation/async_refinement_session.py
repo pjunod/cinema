@@ -2140,6 +2140,8 @@ def accept_activation(state, reg, root, work, auth, index):
     """Activation: closure + restored validations, then one accepted result and one advance."""
     carrier, activation = auth['carrier'], auth['carrier']['activation']
     pend = state['pending_publication']
+    p.require(carrier['previous_control_sha256'] == state.get('control_sha256'),
+              'activation carrier skips or reorders the authenticated control chain')
     p.require(carrier['role'] == 'unit_checkpoint' and carrier['pending_publication'] is None
               and activation['activation_origin'] == carrier['origin'] == carrier['transfer_batch']['publication_origin']
               and carrier['transport_conformance'] is None, 'activation carrier shape differs')
