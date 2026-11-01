@@ -29,7 +29,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(dir=base)
         self.root = Path(self.directory.name)
         self.runtime = {'java': {'sha256': 'a' * 64}, 'tlc': {'sha256': 'b' * 64}}
-        self.source = {**fixture.SOURCE, 'toolchain_sha256': codec.digest(self.runtime)}
+        self.source = {**fixture.SOURCE, 'toolchain_sha256': codec.sha_bytes(codec.encoded(self.runtime))}
         self.plan = copy.deepcopy(fixture.admitted(self.root).plan)
         self.plan.update(source=self.source, unit_predecessor_allowance=2, unit_record_allowance=25)
         if self._testMethodName.startswith('test_aggregate_'):
@@ -98,7 +98,7 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
         with self.state.quantum('materialize_store', stage=resume['stage'], scope=resume['scope'], position=resume['position']):
             for n, context in enumerate(self.mapping['contexts']):
                 for product in range(n * 3 + 1, n * 3 + 4):
-                    self.index.db.execute('INSERT INTO v_products(id,context) VALUES(?,?)', (product, context))
+                    self.index.db.execute('INSERT INTO v_products(id,context,payload) VALUES(?,?,?)', (product, context, codec.encoded({})))
                 self.index.db.execute('INSERT INTO v_roots VALUES(?,?)', (context, n * 3 + 1))
                 for view in ('seen_goal_false', 'capacity_ok_pending_true'):
                     identity = n * 2 + (1 if view == 'seen_goal_false' else 2)
@@ -288,8 +288,8 @@ class PagedTemporalContinuationFixtures(unittest.TestCase):
             'origin': self.origin,
             'input_checkpoint_sha256': common['checkpoint_sha256'], 'input_catalog_commit': 1,
             'input_catalog_logical_digest': '8' * 64, 'input_manifest_root': '7' * 64,
-            'input_inline_counts_sha256': codec.digest(self.checkpoint['record']['counts']),
-            'input_contexts_sha256': codec.digest(self.contexts), 'source_closure_checkpoint_sha256': None,
+            'input_inline_counts_sha256': codec.sha_bytes(codec.encoded(self.checkpoint['record']['counts'])),
+            'input_contexts_sha256': codec.sha_bytes(codec.encoded(self.contexts)), 'source_closure_checkpoint_sha256': None,
             'input_inventory_root': input_root, 'verifier_schema_sha256': self.state.schema_sha256,
             'verifier_algorithm_version': 1, 'before_verifier_commit': self.before[0],
             'after_verifier_commit': self.state.sequence()[0], 'before_logical_digest': self.before[1],
