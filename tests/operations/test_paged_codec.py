@@ -108,7 +108,12 @@ class PagedCodecFixtures(unittest.TestCase):
         with self.assertRaises(codec.Incomplete):
             self.index.add(self.rows(2))
         self.assertEqual(self.index.count('PhysicalRows'), 1)
-        self.assertEqual(self.index.get('PhysicalRows', 1)['id'], 1)
+        # The refused add charged the exhausted unit, so a budgeted read in that same unit is refused too; the
+        # prior record is still the only stored one (read directly, without a fresh charge).
+        with self.assertRaises(codec.Incomplete):
+            self.index.get('PhysicalRows', 1)
+        self.assertEqual([codec.strict_json(row[0])['record']['id'] for row in
+                          self.index.db.execute("SELECT payload FROM records WHERE kind='PhysicalRows'")], [1])
 
     def test_mixed_source_and_premature_singletons_are_rejected(self):
         node = {'id': 1, 'context': 'base', 'product': 1, 'seen_goal': False, 'capacity_ok': True, 'pending_attempts': []}
