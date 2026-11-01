@@ -86,6 +86,7 @@ mod shared_cache;
 mod sharing;
 mod sharing_client;
 mod sharing_connection_custody;
+mod sharing_diagnosis;
 mod sharing_host;
 mod sharing_network;
 #[cfg(test)]
@@ -2774,6 +2775,11 @@ where
         .with(
             logbuf::BufferLayer(Arc::clone(&logs.cluster)).with_filter(filter_fn(|metadata| {
                 logbuf::is_cluster_target(metadata.target())
+            })),
+        )
+        .with(
+            logbuf::BufferLayer(Arc::clone(&logs.sharing)).with_filter(filter_fn(|metadata| {
+                logbuf::is_sharing_target(metadata.target())
             })),
         )
 }

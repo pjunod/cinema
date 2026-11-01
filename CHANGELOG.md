@@ -121,6 +121,19 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared libraries across Tailscale accounts: a Cinema running as the macOS
+  LaunchAgent can now observe its own Tailscale, so it binds its private
+  source address and can connect to other Cinemas (the Tailscale app answered
+  launchd-started CLI calls as its GUI and every check failed silently).
+  Settings → Sharing shows a connection checklist naming the host's Tailscale
+  account, the exact failing setup step, whether each saved connection is
+  reachable and — on Check connection — why not (share not accepted by this
+  account, source offline, port refused, certificate mismatch, no private
+  source address). The import form names the account that must accept the
+  Tailscale share; senders see whether, and by whom, each share was accepted.
+  A dedicated sharing activity log (`/api/v1/system/logs?scope=sharing`)
+  records setup changes, checks, shares and cleanup failures.
+
 - Embedded text subtitles in Matroska files are read through the file's own
   cue index when it provably names every subtitle frame, instead of demuxing
   the whole picture: a 4K remux's track takes a few thousand small reads
