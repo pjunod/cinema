@@ -449,6 +449,20 @@ class DependencyIndex:
                         (reference['kind'], key, reference['sha256'], payload, str(path)))
         self.db.commit()
 
+    def add_locator(self, unit_ordinal, locator):
+        """Record an authenticated native locator; callers pass only reconstructed rows."""
+        closed(locator, ('batch_receipt_sha256', 'publication_origin', 'artifact_id', 'part_ordinal',
+                         'member_path', 'bytes', 'sha256'))
+        row = (unit_ordinal, locator['member_path'], locator['batch_receipt_sha256'],
+               canonical(locator['publication_origin']), locator['artifact_id'], locator['part_ordinal'],
+               locator['bytes'], locator['sha256'])
+        old = self.db.execute('SELECT bytes,sha256 FROM native_locators WHERE unit_ordinal=? AND member_path=? '
+                              'AND batch_receipt_sha256=? AND artifact_id=? AND part_ordinal=?',
+                              (row[0], row[1], row[2], row[4], row[5])).fetchone()
+        require(old is None or old == (row[6], row[7]), 'conflicting authenticated native locator')
+        self.db.execute('INSERT OR IGNORE INTO native_locators VALUES(?,?,?,?,?,?,?,?)', row)
+        self.db.commit()
+
     def root(self, reference):
         self.resolve(reference)
         self.db.execute('INSERT OR IGNORE INTO roots VALUES(?,?,?)',
@@ -708,218 +722,6 @@ class PartPlan:
         self.db.close()
 
 
-def pack_catalog(backup, descriptor, checkpoint_envelope, staging, root, semantic_members=(), *, plan=None, backup_first_part=1, deferred=False, transport_unit=None):
-    """Stream a full standalone backup into closed bounded index/member trees."""
-    checkpoint = envelope(checkpoint_envelope, 'Checkpoint', root)
-    expected = {'source': checkpoint['source'], 'session_id': checkpoint['session_id'],
-                'unit_ordinal': checkpoint['unit_ordinal'] if transport_unit is None else transport_unit['unit_ordinal'], 'checkpoint_sha256': digest(canonical(checkpoint_envelope)),
-                'previous_checkpoint_sha256': checkpoint['previous_checkpoint'] if transport_unit is None else transport_unit['expected_prior_checkpoint'],
-                'resource_plan_sha256': checkpoint['resource_plan_sha256'],
-                'initial_image_sha256': checkpoint['initial_image_id'],
-                'catalog_commit': checkpoint['committed_transaction'],
-                'catalog_logical_digest': checkpoint['catalog_logical_digest'],
-                'semantic_manifest_root': checkpoint['page_root'],
-                'snapshot_boundary': 'post_checkpoint_pre_upload', 'format': 'sqlite3',
-                'backup_method': 'sqlite_backup_api_v1', 'catalog_bytes': Path(backup).stat().st_size,
-                'catalog_sha256': file_sha(backup)}
-    closed(descriptor, expected)
-    require(descriptor == expected and expected['catalog_bytes'] > 0, 'backup descriptor/source boundary differs')
-    plan = PartPlan(staging) if plan is None else plan
-    try:
-        # Reserve part0 root space and keep a large backup chunk separate.
-        plan.db.execute('INSERT OR IGNORE INTO members VALUES(?,?,?,?)', ('catalog-backup/root.json', 0, SMALL, 'reserved'))
-        plan.db.commit()
-        context = {k: expected[k] for k in ('source', 'session_id', 'unit_ordinal', 'checkpoint_sha256')}
-        leaf = []
-        offset = ordinal = 0
-        def node(entries, level):
-            first, last = entries[0], entries[-1]
-            value = {'schema_version': 1, 'kind': 'catalog_chunk_index', **context,
-                     'level': level, 'first_chunk': first.get('first_chunk', first.get('ordinal')),
-                     'chunk_count': sum(v.get('chunk_count', 1) for v in entries),
-                     'offset': first['offset'], 'bytes': sum(v['bytes'] for v in entries), 'entries': entries}
-            name = 'catalog-backup/index/' + str(level) + '-' + str(value['first_chunk']) + '.json'
-            auxiliary(value, root)
-            data = canonical(value)
-            part = plan.add_bytes(name, data)
-            item = {'member_path': name, 'sha256': digest(data), 'part_ordinal': part,
-                    **{k: value[k] for k in ('level', 'first_chunk', 'chunk_count', 'offset', 'bytes')}}
-            plan.db.execute('INSERT INTO indexes VALUES(?,?,?,?,?,?,?,?)',
-                            (level, value['first_chunk'], name, part, item['sha256'],
-                             value['chunk_count'], value['offset'], value['bytes']))
-            plan.db.commit()
-            return item
-        with Path(backup).open('rb') as incoming:
-            while offset < expected['catalog_bytes']:
-                plan.guard()
-                size = min(MAX_MEMBER, expected['catalog_bytes'] - offset)
-                part = plan.allocate(size, backup_first_part)
-                name = f'catalog-backup/chunks/{ordinal:016d}.bin'
-                target = plan.directory(part) / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                h = hashlib.sha256(); remaining = size
-                with target.open('xb') as out:
-                    while remaining:
-                        block = incoming.read(min(MIB, remaining))
-                        require(block, 'backup truncated during chunking')
-                        out.write(block); h.update(block); remaining -= len(block)
-                plan.register(name, size, h.hexdigest(), part)
-                leaf.append({'ordinal': ordinal, 'offset': offset, 'bytes': size, 'sha256': h.hexdigest(),
-                             'member_path': name, 'part_ordinal': part})
-                offset += size; ordinal += 1
-                if len(leaf) == 256:
-                    node(leaf, 0); leaf = []
-            require(not incoming.read(1) and file_sha(backup) == expected['catalog_sha256'], 'backup changed while chunking')
-        if leaf:
-            node(leaf, 0)
-        level = 0
-        while plan.db.execute('SELECT count(*) FROM indexes WHERE level=?', (level,)).fetchone()[0] > 1:
-            cursor = plan.db.execute('SELECT path,part,digest,level,first_chunk,chunk_count,offset,bytes FROM indexes WHERE level=? ORDER BY first_chunk', (level,))
-            batch = []
-            for row in cursor:
-                batch.append(dict(zip(('member_path','part_ordinal','sha256','level','first_chunk','chunk_count','offset','bytes'), row)))
-                if len(batch) == 256:
-                    node(batch, level + 1); batch = []
-            if batch:
-                node(batch, level + 1)
-            level += 1
-        row = plan.db.execute('SELECT path,part,digest,level,first_chunk,chunk_count,offset,bytes FROM indexes WHERE level=?', (level,)).fetchone()
-        index_root = dict(zip(('member_path','part_ordinal','sha256','level','first_chunk','chunk_count','offset','bytes'), row))
-        # Semantic members are an iterator over a bounded-on-disk producer inventory.
-        for name, path in semantic_members:
-            require(not name.startswith('catalog-backup/'), 'semantic member aliases transport')
-            plan.add_file(name, path)
-        plan.db.execute('DELETE FROM members WHERE path=?', ('catalog-backup/root.json',)); plan.db.commit()
-        count = plan.preflight(pending=deferred)
-        value = {'schema_version': 1, 'kind': 'catalog_backup', **expected,
-                 'chunk_bytes_limit': MAX_MEMBER, 'chunk_count': ordinal,
-                 'artifact_part_count': count, 'index_root': index_root}
-        auxiliary(value, root)
-        plan.add_bytes('catalog-backup/root.json', canonical(value), 0)
-        require(plan.preflight(pending=deferred) == count, 'root changed part plan')
-        return value, plan
-    except BaseException:
-        plan.close()
-        raise
-
-
-def restore_catalog(root_manifest, parts, receipts_by_part, checkpoint_envelope, staged, root, *, verifier=False, transport_unit=None):
-    """Authenticate complete intervals then reconstruct into a new owned file.
-
-    Installation is a separate operation after M1 private and M3 independent
-    semantic validation. This function never opens a writable catalog.
-    """
-    value = verifier_auxiliary(root_manifest, root) if verifier else auxiliary(root_manifest, root)
-    prefix = 'verifier-backup/' if verifier else 'catalog-backup/'
-    file_bytes = value['work_db_bytes'] if verifier else value['catalog_bytes']
-    file_sha256 = value['work_db_sha256'] if verifier else value['catalog_sha256']
-    require(value['kind'] == ('verifier_backup' if verifier else 'catalog_backup') and set(parts) == set(receipts_by_part)
-            == set(range(value['artifact_part_count'])), 'multipart backup incomplete')
-    root_bytes = canonical(root_manifest)
-    occurrences = []
-    for ordinal, receipt_envelope in receipts_by_part.items():
-        receipt = envelope(receipt_envelope,'ArtifactReceipt',root)
-        for item in receipt['members']:
-            if item['path'] == prefix + 'root.json':
-                occurrences.append((ordinal,item))
-    require(len(occurrences) == 1 and occurrences[0][0] == 0
-            and occurrences[0][1]['bytes'] == len(root_bytes)
-            and occurrences[0][1]['sha256'] == digest(root_bytes)
-            and (Path(parts[0])/(prefix+'root.json')).read_bytes() == root_bytes,
-            'fixed backup root missing, duplicated or unauthenticated')
-    checkpoint = envelope(checkpoint_envelope, 'Checkpoint', root)
-    bindings = {'source': checkpoint['source'], 'session_id': checkpoint['session_id'],
-                'unit_ordinal': checkpoint['unit_ordinal'] if transport_unit is None else transport_unit['unit_ordinal'], 'checkpoint_sha256': digest(canonical(checkpoint_envelope)),
-                'previous_checkpoint_sha256': checkpoint['previous_checkpoint'] if transport_unit is None else transport_unit['expected_prior_checkpoint'],
-                'resource_plan_sha256': checkpoint['resource_plan_sha256'],
-                'initial_image_sha256': checkpoint['initial_image_id'],
-                'catalog_commit': checkpoint['committed_transaction'],
-                'catalog_logical_digest': checkpoint['catalog_logical_digest'],
-                'semantic_manifest_root': checkpoint['page_root']}
-    require(all(value[k] == v for k, v in bindings.items()), 'backup/checkpoint identities differ')
-    staged = Path(staged)
-    require(not staged.exists(), 'restore staging must be fresh')
-    index_path = staged.with_suffix('.transport.sqlite')
-    db = sqlite3.connect(index_path)
-    db.execute('CREATE TABLE used(path TEXT PRIMARY KEY,part INTEGER,kind TEXT)')
-    db.execute('CREATE TABLE todo(ordinal INTEGER PRIMARY KEY AUTOINCREMENT,descriptor BLOB)')
-    db.execute('INSERT INTO todo(descriptor) VALUES(?)', (canonical(value['index_root']),))
-    def member(item, metadata=False):
-        part = item['part_ordinal']; name = safe_path(item['member_path'])
-        require(part in parts, 'backup member part absent')
-        receipt = envelope(receipts_by_part[part], 'ArtifactReceipt', root)
-        require(all(receipt[k] == value[k] for k in ('source', 'session_id', 'unit_ordinal'))
-                and receipt['produced_checkpoint'] == value['checkpoint_sha256']
-                and receipt['expected_prior_checkpoint'] == value['previous_checkpoint_sha256'],
-                'backup part receipt/checkpoint mix')
-        matches = [r for r in receipt['members'] if r['path'] == name]
-        require(len(matches) == 1 and matches[0]['sha256'] == item['sha256'], 'backup member not authenticated')
-        path = Path(parts[part]) / name
-        require(path.is_file() and not path.is_symlink() and not any(x.is_symlink() for x in path.parents)
-                and file_sha(path) == item['sha256'], 'backup member local bytes differ')
-        require(path.stat().st_size == matches[0]['bytes']
-                and path.stat().st_size <= (SMALL if metadata else MAX_MEMBER), 'backup member size differs')
-        db.execute('INSERT INTO used VALUES(?,?,?)', (name, part, 'index' if metadata else 'chunk'))
-        return path
-    try:
-        # Validate indexes into a disk work queue; leaf chunks stream in order.
-        db.execute('CREATE TABLE chunks(ordinal INTEGER PRIMARY KEY,descriptor BLOB)')
-        while row := db.execute('SELECT ordinal,descriptor FROM todo ORDER BY ordinal LIMIT 1').fetchone():
-            db.execute('DELETE FROM todo WHERE ordinal=?', (row[0],))
-            descriptor = decode(row[1])
-            path = member(descriptor, True)
-            node = verifier_auxiliary(read(path), root) if verifier else auxiliary(read(path), root)
-            require(node['kind'] == ('verifier_chunk_index' if verifier else 'catalog_chunk_index')
-                    and all(node[k] == value[k] for k in ('source', 'session_id', 'unit_ordinal', 'checkpoint_sha256'))
-                    and all(node[k] == descriptor[k] for k in ('level', 'first_chunk', 'chunk_count', 'offset', 'bytes')),
-                    'index identity/interval differs')
-            ordinal, offset, count = node['first_chunk'], node['offset'], 0
-            for item in node['entries']:
-                first = item['ordinal'] if node['level'] == 0 else item['first_chunk']
-                n = 1 if node['level'] == 0 else item['chunk_count']
-                require(first == ordinal and item['offset'] == offset and item['bytes'] > 0,
-                        'index ordinal/byte gap or overlap')
-                if node['level'] == 0:
-                    db.execute('INSERT INTO chunks VALUES(?,?)', (ordinal, canonical(item)))
-                else:
-                    require(item['level'] == node['level'] - 1, 'index level cycle')
-                    db.execute('INSERT INTO todo(descriptor) VALUES(?)', (canonical(item),))
-                ordinal += n; count += n; offset += item['bytes']
-            require(count == node['chunk_count'] and offset == node['offset'] + node['bytes'],
-                    'index count/byte totals differ')
-            db.commit()
-        top = value['index_root']
-        require(top['first_chunk'] == top['offset'] == 0 and top['chunk_count'] == value['chunk_count']
-                and top['bytes'] == file_bytes, 'index root coverage differs')
-        total = ordinal = 0; h = hashlib.sha256()
-        with staged.open('xb') as out:
-            for ident, payload in db.execute('SELECT ordinal,descriptor FROM chunks ORDER BY ordinal'):
-                item = decode(payload)
-                require(ident == ordinal and item['offset'] == total and item['bytes'] ==
-                        min(MAX_MEMBER, file_bytes - total), 'chunk interval/width differs')
-                path = member(item)
-                require(path.stat().st_size == item['bytes'], 'chunk descriptor size differs')
-                with path.open('rb') as incoming:
-                    for block in iter(lambda: incoming.read(MIB), b''):
-                        out.write(block); h.update(block); total += len(block)
-                ordinal += 1
-            out.flush(); os.fsync(out.fileno())
-        require(total == file_bytes and ordinal == value['chunk_count']
-                and h.hexdigest() == file_sha256, 'reassembled catalog digest/coverage differs')
-        for part, receipt in receipts_by_part.items():
-            for item in receipt['record']['members']:
-                if item['path'].startswith(prefix) and item['path'] != prefix+'root.json':
-                    require(db.execute('SELECT part FROM used WHERE path=?', (item['path'],)).fetchone() == (part,),
-                            'unreferenced hidden backup member')
-        return staged
-    except BaseException:
-        staged.unlink(missing_ok=True)
-        raise
-    finally:
-        db.close()
-        index_path.unlink(missing_ok=True)
-
-
 def atomic_install(staged, target, private_validation, semantic_validation, checkpoint, *, backup_root=None, input_preparation=False):
     """Both independent validators must bind exact staged bytes/checkpoint."""
     cp = checkpoint['record']
@@ -957,96 +759,6 @@ def atomic_install(staged, target, private_validation, semantic_validation, chec
         finally:
             os.close(directory)
     lease.unlink()
-
-
-def pack_verifier(plan, backup, descriptor, checkpoint_envelope, root, *, backup_first_part=1, transport_unit=None):
-    """Append the second exact backup stream to the same native part set."""
-    checkpoint = envelope(checkpoint_envelope,'Checkpoint',root)
-    shared = {'source':checkpoint['source'],'session_id':checkpoint['session_id'],
-              'unit_ordinal':checkpoint['unit_ordinal'] if transport_unit is None else transport_unit['unit_ordinal'],'checkpoint_sha256':digest(canonical(checkpoint_envelope)),
-              'previous_checkpoint_sha256':checkpoint['previous_checkpoint'] if transport_unit is None else transport_unit['expected_prior_checkpoint'],
-              'resource_plan_sha256':checkpoint['resource_plan_sha256'],'initial_image_sha256':checkpoint['initial_image_id'],
-              'catalog_commit':checkpoint['committed_transaction'],
-              'catalog_logical_digest':checkpoint['catalog_logical_digest'],'semantic_manifest_root':checkpoint['page_root']}
-    fields = {*shared,'verifier_schema_sha256','verifier_algorithm_version','verifier_commit',
-              'verifier_logical_digest','previous_verifier_progress_sha256','progress_sha256',
-              'snapshot_boundary','format','backup_method','work_db_bytes','work_db_sha256'}
-    closed(descriptor,fields | {'path','backup_first_part','maximum_backup_parts'})
-    require(Path(descriptor['path']).resolve()==Path(backup).resolve()
-            and descriptor['backup_first_part']==backup_first_part
-            and type(descriptor['maximum_backup_parts']) is int
-            and 0<descriptor['maximum_backup_parts']<=UPLOAD_SLOTS-backup_first_part,
-            'verifier private backup reservation differs')
-    maximum_backup_parts=descriptor['maximum_backup_parts']
-    descriptor={k:descriptor[k] for k in fields}
-    require(all(descriptor[k] == v for k,v in shared.items())
-            and descriptor['work_db_bytes'] == Path(backup).stat().st_size
-            and descriptor['work_db_sha256'] == file_sha(backup)
-            and descriptor['verifier_schema_sha256'] == file_sha(Path(root)/'verification/async-driver-refinement/paged-verifier-state.sql'),
-            'verifier backup descriptor/source bytes differ')
-    context = {k:shared[k] for k in ('source','session_id','unit_ordinal','checkpoint_sha256')}
-    plan.db.execute('CREATE TABLE verifier_indexes(level INTEGER,first_chunk INTEGER,path TEXT,part INTEGER,digest TEXT,chunk_count INTEGER,offset INTEGER,bytes INTEGER,PRIMARY KEY(level,first_chunk))')
-    def node(entries, level):
-        first = entries[0]
-        value = {'schema_version':1,'kind':'verifier_chunk_index',**context,'level':level,
-                 'first_chunk':first.get('first_chunk',first.get('ordinal')),
-                 'chunk_count':sum(x.get('chunk_count',1) for x in entries),
-                 'offset':first['offset'],'bytes':sum(x['bytes'] for x in entries),'entries':entries}
-        verifier_auxiliary(value,root)
-        name = 'verifier-backup/index/'+str(level)+'-'+str(value['first_chunk'])+'.json'
-        data=canonical(value); part=plan.add_bytes(name,data)
-        item={'member_path':name,'sha256':digest(data),'part_ordinal':part,
-              **{k:value[k] for k in ('level','first_chunk','chunk_count','offset','bytes')}}
-        plan.db.execute('INSERT INTO verifier_indexes VALUES(?,?,?,?,?,?,?,?)',
-                        (level,value['first_chunk'],name,part,item['sha256'],value['chunk_count'],value['offset'],value['bytes']))
-        plan.db.commit();return item
-    offset=ordinal=0; leaf=[]
-    with Path(backup).open('rb') as incoming:
-        while offset < descriptor['work_db_bytes']:
-            plan.guard()
-            size=min(MAX_MEMBER,descriptor['work_db_bytes']-offset)
-            part=plan.allocate(size,backup_first_part);name=f'verifier-backup/chunks/{ordinal:016d}.bin'
-            target=plan.directory(part)/name;target.parent.mkdir(parents=True,exist_ok=True)
-            h=hashlib.sha256();remaining=size
-            with target.open('xb') as out:
-                while remaining:
-                    block=incoming.read(min(MIB,remaining));require(block,'verifier backup truncated')
-                    out.write(block);h.update(block);remaining-=len(block)
-            plan.register(name,size,h.hexdigest(),part)
-            leaf.append({'ordinal':ordinal,'offset':offset,'bytes':size,'sha256':h.hexdigest(),
-                         'member_path':name,'part_ordinal':part})
-            offset+=size;ordinal+=1
-            if len(leaf)==256:node(leaf,0);leaf=[]
-        require(not incoming.read(1) and file_sha(backup)==descriptor['work_db_sha256'],'verifier backup changed')
-    if leaf:node(leaf,0)
-    level=0
-    while plan.db.execute('SELECT count(*) FROM verifier_indexes WHERE level=?',(level,)).fetchone()[0]>1:
-        batch=[]
-        for row in plan.db.execute('SELECT path,part,digest,level,first_chunk,chunk_count,offset,bytes FROM verifier_indexes WHERE level=? ORDER BY first_chunk',(level,)):
-            batch.append(dict(zip(('member_path','part_ordinal','sha256','level','first_chunk','chunk_count','offset','bytes'),row)))
-            if len(batch)==256:node(batch,level+1);batch=[]
-        if batch:node(batch,level+1)
-        level+=1
-    row=plan.db.execute('SELECT path,part,digest,level,first_chunk,chunk_count,offset,bytes FROM verifier_indexes WHERE level=?',(level,)).fetchone()
-    require(row is not None,'empty verifier backup')
-    index=dict(zip(('member_path','part_ordinal','sha256','level','first_chunk','chunk_count','offset','bytes'),row))
-    catalog_path=plan.directory(0)/'catalog-backup/root.json'
-    catalog=read(catalog_path)
-    # Both roots are still private staging bytes. Reserve the second root
-    # before computing the one final complete current-unit artifact count.
-    plan.db.execute('INSERT OR IGNORE INTO members VALUES(?,?,?,?)',('verifier-backup/root.json',0,SMALL,'reserved'));plan.db.commit()
-    count=plan.preflight(pending=True)
-    require(count-backup_first_part<=maximum_backup_parts,'combined backup exceeds fixed reserved slots')
-    value={'schema_version':1,'kind':'verifier_backup',**descriptor,'chunk_bytes_limit':MAX_MEMBER,
-           'chunk_count':ordinal,'artifact_part_count':count,'index_root':index}
-    verifier_auxiliary(value,root)
-    plan.db.execute('DELETE FROM members WHERE path=?',('verifier-backup/root.json',));plan.db.commit()
-    plan.add_bytes('verifier-backup/root.json',canonical(value),0)
-    catalog['artifact_part_count']=count
-    data=canonical(catalog);catalog_path.write_bytes(data)
-    plan.db.execute('UPDATE members SET bytes=?,digest=? WHERE path=?',(len(data),digest(data),'catalog-backup/root.json'));plan.db.commit()
-    require(plan.preflight()==count,'combined backup root part count changed')
-    return value
 
 
 SOURCE_BOUND_SCHEMA = 'verification/async-driver-refinement/source-bound-receipt.schema.json'
@@ -1304,7 +1016,7 @@ def validate_upload_order(lines, parts, finalizer_begin):
 
 
 def authenticate_transfer_context(api, registration, carrier, metadata, parts, artifact_receipts,
-                                  root, expected_dispatch_ordinal):
+                                  root, expected_dispatch_ordinal, *, case_sha256=None):
     """Authenticate publisher locators without relaxing ordinary receipt origins.
 
     The caller has already revalidated each exact native API/upload/ZIP/member
@@ -1312,7 +1024,21 @@ def authenticate_transfer_context(api, registration, carrier, metadata, parts, a
     Returned content rows gain authority only through this batch's frozen lineage.
     """
     from validation import async_snapshot_transport as snapshots
+    # Ordinary and rehearsal batches are deliberately not interchangeable: an
+    # ordinary role refuses any conformance object, and a rehearsal role requires
+    # the exact fixed case namespace. A receipt is never relabeled across them.
+    conformance=carrier['transport_conformance']
+    if case_sha256 is None:
+        require(carrier['role']=='publication_batch' and conformance is None,
+                'ordinary batch authentication refuses a conformance producer event')
+    else:
+        require(carrier['role']=='transport_conformance' and conformance is not None
+                and conformance['case_id']=='native_snapshot_three_batch_v1'
+                and conformance['case_sha256']==case_sha256,
+                'rehearsal batch is not the exact fixed case')
     batch=auxiliary(carrier['transfer_batch'],root)
+    require(batch['retained_artifact_bytes']==sum(r['record']['zip_bytes'] for r in artifact_receipts.values()),
+            'retained bytes do not equal actual unique archived bytes')
     publication=batch['publication_origin']
     execution=batch['execution_origin']
     require(publication==carrier['origin'] and publication['dispatch_ordinal']==expected_dispatch_ordinal
@@ -1372,6 +1098,8 @@ def authenticate_transfer_context(api, registration, carrier, metadata, parts, a
     for leaf in leaves:
         name=safe_path(leaf['member_path']);reference=leaf['content']
         require(name not in selected and name in native,'transfer member duplicate/missing')
+        require(name=='content/'+reference['kind']+'/'+reference['sha256'],
+                'transfer member name is not its content identity')
         part,member=native[name]
         require(part==leaf['part_ordinal'] and member['bytes']==reference['bytes']
                 and member['sha256']==reference['sha256'],'transfer locator/member differs')
