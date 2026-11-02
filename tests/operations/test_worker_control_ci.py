@@ -44,6 +44,7 @@ class WorkerControlCiTests(unittest.TestCase):
         for path in (
             "crates/plurx-worker-control/*",
             "crates/plurxd/src/library_work.rs",
+            "crates/plurxd/src/library_work/env.rs",
             "crates/plurxd/Cargo.toml",
             "Cargo.toml",
             "Cargo.lock",

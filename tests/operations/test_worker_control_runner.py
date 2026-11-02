@@ -207,6 +207,15 @@ class WorkerControlInventoryTests(unittest.TestCase):
                 self.assertEqual(packaging["source_files"][name], runner.digest(original))
                 self.assertEqual(staged.read_bytes(), original.read_bytes())
 
+    def test_effect_interpreter_binds_the_proof_and_the_ci_selection(self) -> None:
+        # The driver in library_work.rs only dispatches; the effect interpreter
+        # that drives the shared controller lives in library_work/env.rs.
+        interpreter = "crates/plurxd/src/library_work/env.rs"
+        self.assertIn(interpreter, runner.GOVERNED)
+        self.assertIn(interpreter, runner.PROOF_INPUTS)
+        workflow = (ROOT / ".github/workflows/main-fast-lane.yml").read_text(encoding="utf-8")
+        self.assertIn(interpreter, workflow)
+
     def test_exact_six_names_and_counts_are_required(self) -> None:
         self.assertEqual(runner.parse_inventory(inventory()), list(runner.HARNESSES))
         for change in ("missing", "duplicate", "extra", "count", "contract", "version", "schema"):

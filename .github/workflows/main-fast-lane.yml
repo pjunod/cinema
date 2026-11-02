@@ -109,7 +109,8 @@ jobs:
           while IFS= read -r path; do
             case "$path" in
               crates/plurx-worker-control/*|verification/worker-control/*|\
-              crates/plurxd/src/library_work.rs|crates/plurxd/Cargo.toml|\
+              crates/plurxd/src/library_work.rs|crates/plurxd/src/library_work/env.rs|\
+              crates/plurxd/Cargo.toml|\
               Cargo.toml|Cargo.lock|rust-toolchain.toml|\
               scripts/check-worker-control|validation/worker_control_resume.py|\
               .github/workflows/main-fast-lane.yml)

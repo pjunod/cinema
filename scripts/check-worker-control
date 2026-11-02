@@ -39,7 +39,8 @@ HARNESS_NAMES = (
 HARNESSES = tuple(f"proofs::{name}" for name in HARNESS_NAMES)
 GOVERNED = (
     "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "crates/plurxd/Cargo.toml",
-    "crates/plurxd/src/library_work.rs", f"{CRATE}/Cargo.toml",
+    "crates/plurxd/src/library_work.rs", "crates/plurxd/src/library_work/env.rs",
+    f"{CRATE}/Cargo.toml",
     *(f"{CRATE}/src/{name}" for name in STAGED_RUST_SOURCES),
     "scripts/check-worker-control", "verification/worker-control/toolchain.json",
     "verification/worker-control/controls.json",
