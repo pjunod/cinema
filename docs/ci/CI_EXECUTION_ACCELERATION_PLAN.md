@@ -456,10 +456,14 @@ pool; the GitHub-hosted mode selects native `ubuntu-24.04-arm`. Neither path
 installs QEMU. The separate native shadow job was removed because it would
 repeat the same compile and smoke after native ARM became the required path.
 
-The package job and the self-hosted Apple simulator job share the repository
-concurrency group `plurx-apple-silicon-heavy`, preventing the Air's macOS and
-Linux tenants from doing heavy work together. No replicated cluster shard or
-timing-sensitive test runs on either laptop. Both VMs start on host login and
+The package job and full self-hosted Apple simulator job share the repository
+concurrency group `plurx-apple-silicon-heavy`, preventing those macOS and Linux
+tenants from doing heavy work together. On 2026-11-01, Paul approved a bounded
+exception for fast-lane Apple jobs on the dedicated 32 GiB M4: runner capacity
+two, independent checkouts and DerivedData, and isolated navigation simulator
+UUIDs. Their per-PR workflow lock and all test/promotion gates remain; the
+[Apple runner policy](APPLE-RUNNER-FAILOVER.md) records the scheduling boundary.
+No replicated cluster shard or timing-sensitive test runs on either laptop. Both VMs start on host login and
 their guest runner services start under systemd. Laptop sleep remains an
 availability limitation; the two-host pool is the accepted operational
 trade-off until dedicated always-on ARM hardware replaces it.

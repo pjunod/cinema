@@ -468,9 +468,8 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
-    concurrency:
-      group: plurx-apple-silicon-heavy
-      cancel-in-progress: false
+    # The dedicated 32 GiB M4 runner admits two independent fast-lane jobs.
+    # Each owns its checkout, DerivedData, simulator UUID and evidence paths.
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin

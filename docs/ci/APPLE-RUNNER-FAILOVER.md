@@ -33,8 +33,17 @@ contains absolute paths, while repeated Forgejo jobs have used different
 checkout roots. Path-specific keys would miss those jobs and still upload the
 cache. Existing Forgejo cache blobs, Rust caches and tool caches are unchanged.
 
+On 2026-11-01, Paul approved two concurrent fast-lane Apple jobs on the
+32 GiB M4 dedicated to CI, bounded by Forgejo runner capacity two. Fast-lane
+jobs have no repository-wide heavy-work lock: each owns its checkout,
+DerivedData, newly created simulator UUID and run/attempt evidence directory.
+The per-PR workflow lock still orders updates to the same pull request.
+Full CI and Lima ARM64 packaging retain `plurx-apple-silicon-heavy`; full Apple
+unit tests still use shared named simulator destinations. The source scheduling
+change neither updates runner services nor proves concurrent hardware execution.
+
 Generic iOS and tvOS simulator builds still cover arm64 and x86_64. Toolchain
-pins, concurrency and promotion gates are unchanged by this cache boundary. This
+pins and promotion gates are unchanged by this cache boundary. This
 cache boundary does not establish the cause of a compiler failure or qualify a new
 candidate; the existing build and native test checks remain required.
 The [workflow regression](../../tests/operations/test_apple_tv_navigation_gate.py)
