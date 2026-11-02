@@ -1240,6 +1240,7 @@ class ChildPlanBase(unittest.TestCase):
         context.session_id = str(uuid.UUID(int=1))
         context.owned = self.root
         context.plan = {'plan_sha256': '1' * 64, 'unit_byte_allowance': UNIT_BYTES}
+        context.plan_sha256 = context.plan['plan_sha256']
         context.policy = policy
         context.policy_sha256 = physical.digest(policy)
         context.lease = SimpleNamespace(fd=self.lease_fd, relative_path='lease')

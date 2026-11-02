@@ -22,6 +22,7 @@ import secrets
 import hashlib
 import sqlite3
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -550,21 +551,41 @@ def process_start_ticks(pid):
     return physical.process_start_ticks(pid)
 
 
+SESSION_LEASE = 'slot-lease.json'
+
+
 class HeldLease:
     """The validated owned-slot lease, held open for the whole parent lifetime.
 
     The descriptor, not a filename, is what an allocation-capable child inherits;
     the child never reopens a lease and claims authority from a path.
+
+    Both grant loaders (Python and Rust) bind the inherited descriptor to a name under
+    the grant's owned root, which is the session directory, while the registered slot
+    lease lives one level up in the storage root. The session directory therefore holds
+    a second name (a hard link) for the same lease inode, made when the session first
+    holds it; device/inode equality is checked here and by both loaders, so the name can
+    only ever denote the registered lease.
     """
-    def __init__(self, storage, source_root):
+    def __init__(self, storage, source_root, session_root):
         root = validate_storage(storage, source_root)
+        session_root = Path(session_root)
+        p.require(session_root.parent == root and not session_root.is_symlink() and session_root.is_dir(),
+                  'held lease session root is not a session of the registered slot')
         path = Path(storage['lease_file'])
         self.fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         info = os.fstat(self.fd)
         p.require(info.st_dev == storage['mount_device']
                   and os.path.samestat(info, path.lstat()) and p.file_sha(path) == storage['lease_sha256'],
                   'held lease descriptor is not the registered lease')
-        self.relative_path = p.safe_path(path.relative_to(root).as_posix())
+        name = session_root / SESSION_LEASE
+        if not os.path.lexists(name):
+            os.link(path, name, follow_symlinks=False)
+            fsync_directory(session_root)
+        named = name.lstat()
+        p.require(stat.S_ISREG(named.st_mode) and os.path.samestat(info, named),
+                  'session lease name does not denote the registered lease')
+        self.relative_path = SESSION_LEASE
         self.device, self.inode = info.st_dev, info.st_ino
 
     def close(self):
@@ -666,6 +687,19 @@ class GrantPlan:
         self.add(resource, 'bytes', path, amount, recursive, keep_held=keep_held)
 
 
+def plan_identity(envelope, record):
+    """The ResourcePlan identity a child grant is bound to.
+
+    An admitted plan carries its own digest (resource_plan() requires it to equal the
+    computed one). An unadmitted capability-probe plan carries plan_sha256 null; its
+    identity is computed exactly as the Rust child computes it (Record::sha256 drops
+    the self field), which is the same value admission will later record.
+    """
+    if record['plan_sha256'] is not None:
+        return record['plan_sha256']
+    return p.digest(p.transport_bytes(envelope))
+
+
 class PhysicalContext:
     """Parent-owned ledger, lease and child-grant lifetime for one controller process.
 
@@ -677,11 +711,12 @@ class PhysicalContext:
     def __init__(self, reg, plan, session_id, root, owned):
         self.reg, self.session_id, self.owned = reg, session_id, Path(owned).resolve()
         self.plan = p.envelope(plan, 'ResourcePlan', root)
+        self.plan_sha256 = plan_identity(plan, self.plan)
         pending = p.decode(self.plan['source_bounds_utf8'].encode()).get('calibration') is None
         wrapper = operational_bounds(self.plan['source_bounds_utf8'], reg, root, measurement_pending=pending)
         self.policy = wrapper['physical_policy']
         self.policy_sha256 = p.digest(p.canonical(self.policy))
-        self.lease = HeldLease(reg['storage'], root)
+        self.lease = HeldLease(reg['storage'], root, self.owned)
         info = self.owned.stat()
         self.ledger = physical.ReservationLedger(self.policy, self.owned)
         self.root_identity = {'path': str(self.owned), 'device': info.st_dev, 'inode': info.st_ino}
@@ -692,7 +727,7 @@ class PhysicalContext:
 
     def binding(self):
         return {'source': self.reg['source'], 'session_id': self.session_id,
-                'resource_plan_sha256': self.plan['plan_sha256'],
+                'resource_plan_sha256': self.plan_sha256,
                 'physical_policy_sha256': self.policy_sha256, 'owned_root': self.root_identity,
                 'parent': {'pid': os.getpid(), 'start_ticks': process_start_ticks(os.getpid())}}
 
@@ -5708,7 +5743,11 @@ if __name__ == '__main__':
     try:
         main()
     except (receipts.ReceiptError, KeyError, OSError, ValueError, subprocess.SubprocessError) as error:
-        reason=str(error)[:512] if isinstance(error,receipts.ReceiptError) else type(error).__name__
+        # Receipt and physical-policy refusals carry fixed protocol text naming the violated
+        # rule (no credential or payload); other exceptions are reported by type only.
+        reason=(str(error)[:512] if isinstance(error,receipts.ReceiptError)
+                else type(error).__name__+': '+str(error)[:512] if isinstance(error,physical.PhysicalPolicyError)
+                else type(error).__name__)
         print('Async session refused: '+reason,file=sys.stderr)
         raise SystemExit(1) from None
 

@@ -926,6 +926,7 @@ class RestoreValidatorIntegrationTests(ChildPlanBase):
         policy = codec.strict_json(self.plan['source_bounds_utf8'])['physical_policy']
         context = self.make_context(policy)
         context.reg, context.session_id, context.plan = {'source': self.source}, self.session_id, self.plan
+        context.plan_sha256 = self.plan['plan_sha256']
         self.context = context
         mapping = codec.strict_json((paged_fixture.PACKAGE / 'paged-outcomes.json').read_bytes())
         contexts = [{'context': name, 'initial_product': n * 3 + 1, 'reachable_products': 3, 'expanded_products': 3,

@@ -364,6 +364,36 @@ class ArtifactListingTests(unittest.TestCase):
             s.probe_transactions(api,7,{},[],{'parts':parts,'session_id':session,'unit_ordinal':0},{})
 
 
+class GrantBindingTests(unittest.TestCase):
+    """The parent's grant binding must name what both child loaders actually verify."""
+    def test_unadmitted_plan_identity_is_computed_like_the_rust_child(self):
+        envelope={'schema_version':6,'kind':'ResourcePlan','record':{'admission':'unadmitted','plan_sha256':None,'maximum_units':3}}
+        identity=s.plan_identity(envelope,envelope['record'])
+        stripped={'schema_version':6,'kind':'ResourcePlan','record':{'admission':'unadmitted','maximum_units':3}}
+        self.assertEqual(identity,p.digest(p.canonical(stripped)))
+        admitted=copy.deepcopy(envelope);admitted['record']['plan_sha256']=identity
+        self.assertEqual(s.plan_identity(admitted,admitted['record']),identity)
+
+    def test_session_root_names_the_held_slot_lease_for_the_grant_loaders(self):
+        import tempfile
+        from validation import async_physical_policy as physical
+        scratch=ROOT/'.agent-proof-fixtures/lease';scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as name:
+            slot=Path(name).resolve()/'owner';slot.mkdir();session=slot/'00000000-0000-4000-8000-000000000003';session.mkdir()
+            lease=slot/'lease.json';lease.write_text('{"lease":1}')
+            storage={'lease_file':str(lease),'mount_device':lease.stat().st_dev,'lease_sha256':p.file_sha(lease)}
+            with patch.object(s,'validate_storage',return_value=slot):
+                held=s.HeldLease(storage,ROOT,session)
+                try:
+                    self.assertEqual(held.relative_path,s.SESSION_LEASE)
+                    # the loaders' own check: the name under the owned (session) root is the held descriptor
+                    physical._lease_identity(session,held.relative_path,held.fd)
+                finally:held.close()
+                again=s.HeldLease(storage,ROOT,session);again.close()
+                (session/s.SESSION_LEASE).unlink();(session/s.SESSION_LEASE).write_text('{"lease":1}')
+                with self.assertRaises(receipts.ReceiptError):s.HeldLease(storage,ROOT,session)
+
+
 class ActualRunnerTests(unittest.TestCase):
     """Forgejo exports no RUNNER_NAME; the task log preamble names the runner that took the task."""
     UUID='3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b'
