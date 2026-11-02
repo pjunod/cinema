@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-28, plurx has 407 routes declared by the ordinary listener's
+As of 2026-10-28, plurx has 408 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 407 routes across the registered routers.
+plurx has 408 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -816,7 +816,10 @@ names, and `404` for any other name.
 `?level=` (default `trace`), `?limit=` (default 500, capped at 2000),
 `?scope=cluster` to read the isolated membership and Raft ring instead of the
 general one — two rings, so replication chatter cannot evict playback
-diagnostics. Entries are `{ts_ms, level, target, message}`, oldest first.
+diagnostics. `?scope=sharing` reads a copy of every shared-library event
+(host setup, connection checks, Tailscale shares, pairing), kept so playback
+chatter cannot evict a connection failure; those events also stay in the
+general ring. Entries are `{ts_ms, level, target, message}`, oldest first.
 
 ### 5.5 `POST /api/v1/client-log`
 
@@ -4119,7 +4122,7 @@ including errors, carries `Cache-Control: no-store`.
 | GET / PUT | `/api/v1/sharing/settings` | Read or save the sharing enabled choice. Saving either choice succeeds independently of readiness. |
 | GET | `/api/v1/sharing/status` | Read this serving node's timestamped listener, certificate, egress and import observations. Unobserved host Serve and node-key state are `unknown`. |
 | GET / PUT | `/api/v1/sharing/endpoints` | Read or replace approved source endpoints with `expected_revision` CAS. |
-| GET / PUT | `/api/v1/sharing/network-authorization` | Inspect node-local authorization/cleanup facts or seal a verified user-owned Tailscale API key; never returns the key. |
+| GET / PUT | `/api/v1/sharing/network-authorization` | Inspect node-local authorization/cleanup facts or seal a verified user-owned Tailscale API key; never returns the key. GET also returns the key's `tailnet` and, every 30 s, whether each recent device share was `accepted` and `accepted_by` which login (`shares`, `observed_at_ms`, `observation_error`). |
 | POST | `/api/v1/sharing/connection` | Inspect a combined invitation, return bounded Tailscale consent links, or probe pinned reachability with `probe: true`; never accepts provider permissions on behalf of the recipient. |
 | POST | `/api/v1/sharing/invitations` | Issue one expiring Cinema invitation including single-use Tailscale device shares for selected local movie/show libraries. `include_network: false` explicitly issues the legacy format for an existing private connection. |
 | DELETE | `/api/v1/sharing/invitations/{id}` | Cancel the invitation. |
@@ -4133,9 +4136,39 @@ including errors, carries `Cache-Control: no-store`.
 | GET / PUT | `/api/v1/sharing/imports/{id}/assignments` | Read the complete assignment snapshot or replace individually assigned local viewers using assignment-generation CAS. |
 | GET | `/api/v1/sharing/imports/{import}/libraries` | Read fresh Source library scope using the current administrator login and import authority, independently of viewer assignments. |
 | PUT | `/api/v1/sharing/imports/{id}/endpoints` | Update recipient-side numeric hints, retaining approved pins unless an owner explicitly confirms replacements. |
+| GET | `/api/v1/sharing/imports/{id}/connection` | Diagnose this serving node's pinned connection to the import's approved source endpoints; read-only, sends no credential. |
 | DELETE | `/api/v1/sharing/imports/{id}` | Disconnect the import and advance its lifecycle. |
 | ANY | `/sharing` | Refuse peer traffic on the ordinary listener with `404 sharing_not_found`. |
 | ANY | `/sharing/{*path}` | Refuse every peer path on the ordinary listener with the same typed 404. |
+
+`POST /api/v1/sharing/connection` returns `name`, bounded `network` consent
+links, `connected`, and `connection_error`. With `probe: true`, a failed
+pinned connection returns one fixed code: `sharing_peer_unavailable`,
+`sharing_identity_mismatch`, `sharing_protocol_unsupported`,
+`sharing_peer_auth_failed`, or `sharing_invalid_peer_response`. Consent
+links remain available when verification fails. An unchecked or successful
+probe returns a null error; unchecked `connected: false` is not evidence
+of a failed connection. This route never persists an import. Probe and
+import failures log their phase, fixed code and local correlation UUIDs,
+without invitation secrets, consent URLs or peer credentials.
+
+A probe also returns `diagnosis`, and `GET /api/v1/sharing/imports/{id}/connection`
+returns the same object for a saved import: `connected`, a fixed `outcome`
+(`connected`, `not_shared`, `no_answer`, `peer_offline`, `blocked`, `refused`,
+`certificate_mismatch`, `tls_failed`, `no_private_source`, `identity_mismatch`,
+`auth_failed`, `protocol_unsupported`, `invalid_response` or `unavailable`),
+an operator `summary` and `next_step`, `checked_at_ms`, `elapsed_ms`, the
+`source` machine name, `this_server` (this host's Tailscale login, tailnet,
+machine name and IPv4 when observable) and one `attempts` row per approved
+numeric address with its dial stage (`connected`, `timed_out`, `refused`,
+`unreachable`, `connect_failed`, `certificate_mismatch`, `tls_failed`,
+`no_private_source`, `invalid_target`), elapsed time and, on native hosts,
+whether the address is in this host's Tailscale netmap (`visible`,
+`peer_online`). `not_shared` means a native receiver's own netmap lacks the
+source: the device share has not been accepted with this host's account.
+The ordinary pinned connection decides `connected`; the diagnosis never
+relaxes a pin. An import whose identity-checked connection fails returns its
+diagnosis in the typed error body.
 
 `GET /api/v1/sharing/endpoints` returns `{ "manifest": null }` before
 initial address setup; a configured manifest contains `revision` and
@@ -4146,10 +4179,19 @@ libraries for return. Address updates remain explicit `expected_revision`
 CAS writes with pin confirmation; no invitation POST is replayed.
 
 `GET /api/v1/sharing/status` also returns node-local `host_setup` with
-`state`, `message` and `checked_at_ms`. States distinguish `pending`,
+`state`, `message` and `checked_at_ms`. When a step failed, `detail` names
+it, quoting the host tool's own words with links removed. `tailscale` carries
+the host's `login_name`, `tailnet`, `dns_name` and `ipv4` when the host's CLI
+could be observed (native hosts; absent inside a container). Optional `tailscale_online` reports the
+host's observed Tailscale control-plane connection (`true` or `false`); absent
+means unknown, including host helper reports that omit this fact. It is independent of forwarding
+readiness and does not prove reachability from another Cinema. States distinguish `pending`,
 `disabled`, `ready`, `tailscale_missing`, `sign_in_required`,
 `permission_required`, `port_conflict`, `host_helper_required`,
-`deployment_required` and `unavailable`. `ready` confirms local host
+`deployment_required`, `native_setup_required` and `unavailable`.
+`native_setup_required` describes a native installation needing its installed
+service or manual private forwarding, rather than a Docker host helper.
+`ready` confirms local host
 configuration; peer access and two-home reachability still need pairing.
 Managed host reconciliation may CAS-update this node's observed address and
 certificate in the endpoint manifest. Other hosts, custom ports and an existing

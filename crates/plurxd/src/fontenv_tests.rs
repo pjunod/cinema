@@ -694,7 +694,10 @@ async fn a_capture_whose_frozen_faces_diverge_is_refused() {
             &config,
             xml.replacen(
                 "</fontconfig>",
-                "<selectfont><rejectfont><glob>*</glob></rejectfont></selectfont></fontconfig>",
+                // Fontconfig 2.15 does not match absolute font paths with
+                // the bare `*` glob. An empty pattern matches every face,
+                // independently of the native version's path glob rules.
+                "<selectfont><rejectfont><pattern/></rejectfont></selectfont></fontconfig>",
                 1,
             ),
         )

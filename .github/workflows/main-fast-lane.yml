@@ -182,9 +182,10 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Allows the 5-minute worker witness smoke, other package smokes, toolchain
-    # provisioning and preflight validation to finish with headroom.
-    timeout-minutes: 15
+    # A cold continuation can run the full unit set when older receipts cannot
+    # authenticate. History alone took seven minutes in run 6234; allow the
+    # remaining contracts and receipt publication to finish on a busy runner.
+    timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -464,7 +465,7 @@ jobs:
     name: Apple compile and native TV navigation
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
     concurrency:
@@ -482,8 +483,8 @@ jobs:
         run: |
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$xcode_version"
-          grep -Fxq "Xcode 27.1" <<< "$xcode_version"
-          grep -Fxq "Build version 27A9275" <<< "$xcode_version"
+          grep -Fxq "Xcode 27.2" <<< "$xcode_version"
+          grep -Fxq "Build version 27B52" <<< "$xcode_version"
           xcrun --find swift
       - name: Authenticate compatible original native test receipts
         id: native_receipts

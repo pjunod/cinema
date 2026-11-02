@@ -8715,6 +8715,8 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
     // which a ride-along test in this binary may have driven either way.
     // The local-cache row depends on the host filesystem and whether its
     // classifier is implemented on this platform.
+    // The live FEL slot is reported only on Linux workers. This idle fixture
+    // owns no reconstruction, so its single slot must be available there.
     let green = seen
         .iter()
         .filter(|(_, status)| status.as_str() == "met")
@@ -8741,6 +8743,26 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             )
         })
         .collect::<Vec<_>>();
+    let live_slot = items
+        .iter()
+        .find(|item| item["id"] == "dolby_vision_fel_reencode")
+        .expect("live FEL card")["requirements"]
+        .as_array()
+        .expect("live FEL requirements")
+        .iter()
+        .find(|row| row["id"] == "dv_fel_live_slot")
+        .expect("live FEL slot requirement");
+    let slot_evidence = live_slot["evidence"].as_str().expect("slot evidence");
+    if cfg!(target_os = "linux") {
+        assert_eq!(live_slot["status"], "met");
+        assert!(
+            slot_evidence.starts_with("0 of 1 live FEL reconstruction slot"),
+            "the idle fixture has its live reconstruction slot: {slot_evidence}"
+        );
+    } else {
+        assert_eq!(live_slot["status"], "unavailable");
+        assert!(slot_evidence.contains("Linux playback workers only"));
+    }
     // Startup inventory may settle between the two readiness requests.
     // Its status must report the same snapshot as its evidence; this
     // empty fixture owns no preparation media or pending cleanup.
@@ -11439,6 +11461,93 @@ async fn home_previews_are_authenticated_fixed_and_match_library_pages() {
     );
 }
 
+#[tokio::test]
+async fn sharing_connection_probe_reports_failure_preserves_consent_and_does_not_import() {
+    use plurx_core::{
+        config::SharingNetworkConfig,
+        sharing::{ConnectionInvitation, Endpoint, Invitation, NetworkShare, SharingIdentity},
+    };
+    let (_, mut state) = test_app_with_state();
+    state.sharing = Arc::new(crate::sharing::SharingManager::new(
+        state.sharing.key.clone(),
+        crate::test_temp_path(format!("sharing-probe-{}", uuid::Uuid::new_v4())),
+        SharingNetworkConfig {
+            // Missing host custody must fail closed rather than using an
+            // ordinary network route, on every test host.
+            require_host_egress_guard: true,
+            ..Default::default()
+        },
+    ));
+    let app = router(state.clone());
+    let admin = setup_admin(&app).await;
+    let invitation = Invitation {
+        identity: SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: crate::state::clock_ms(),
+        },
+        name: "Synthetic source".into(),
+        endpoints: vec![Endpoint {
+            ipv4: "100.101.102.103"
+                .parse()
+                .expect("synthetic tailnet address"),
+            ipv6: None,
+            ts_fqdn: "source.fixture.ts.net".into(),
+            port: 32443,
+            spki_sha256: "a".repeat(64),
+        }],
+        id: uuid::Uuid::new_v4(),
+        secret: plurx_core::sharing::new_secret().expect("synthetic invitation secret"),
+        expires_at_ms: crate::state::clock_ms() + 60_000,
+    };
+    let consent = "https://login.tailscale.com/admin/invite/synthetic_consent";
+    let combined = ConnectionInvitation {
+        invitation: invitation.encode().expect("synthetic invitation"),
+        network: vec![NetworkShare {
+            ts_fqdn: "source.fixture.ts.net".into(),
+            invite_url: consent.into(),
+        }],
+    }
+    .encode()
+    .expect("synthetic combined invitation");
+    for probe in [false, true] {
+        let (status, response) = call(
+            &app,
+            post(
+                "/api/v1/sharing/connection",
+                Some(&admin),
+                json!({"invitation":combined.expose(),"probe":probe}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["name"], "Synthetic source");
+        assert_eq!(response["connected"], false);
+        assert_eq!(response["network"][0]["invite_url"], consent);
+        assert_eq!(
+            response["connection_error"],
+            if probe {
+                json!("sharing_peer_unavailable")
+            } else {
+                Value::Null
+            },
+            "an attempted connection must distinguish failure from an unchecked invitation"
+        );
+        assert!(state
+            .store
+            .sharing_imports()
+            .await
+            .expect("imports")
+            .is_empty());
+        assert!(state
+            .store
+            .sharing_exports(None)
+            .await
+            .expect("exports")
+            .is_empty());
+    }
+}
+
 /// Runs only in a disposable namespace with an assigned CGNAT fixture IP.
 /// The production endpoint validator, DNS, pinned dialer and both routers
 /// remain in the path. This proves protocol recovery, not Tailscale topology.
@@ -11499,7 +11608,8 @@ async fn sharing_pinned_transport_recovers_committed_claim_and_rotation_after_re
         post(
             "/api/v1/sharing/invitations",
             Some(&source_admin),
-            json!({"library_ids":[seeded.lib.to_string()]}),
+            // CGNAT/TLS connectivity is owned by this fixture, not a provider invitation.
+            json!({"library_ids":[seeded.lib.to_string()],"include_network":false}),
         ),
     )
     .await;
@@ -12086,6 +12196,24 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1["code"], "sharing_invalid_request");
     }
+    // Combined external invitations are the production default. This owned
+    // fixture has no provider authorization and must retain that refusal.
+    let (status, denied) = call(
+        &app,
+        post(
+            "/api/v1/sharing/invitations",
+            Some(&admin),
+            json!({"library_ids":[seeded.lib.to_string()]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        denied,
+        json!({"code":"sharing_network_authorization_required","message":"sharing network authorization required"})
+    );
+    // The claim/approval/rotation contract below owns its endpoint manifest;
+    // request the supported Cinema-only invitation without an external share.
     let (status, created) = call(
         &app,
         post(
@@ -12095,7 +12223,12 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected invitation code: {:?}",
+        created.get("code")
+    );
     let invitation = Invitation::parse(&Secret::from_cleartext(
         created["invitation"]
             .as_str()

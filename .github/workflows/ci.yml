@@ -1519,7 +1519,7 @@ jobs:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
     if: (needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true') || needs.scope.outputs.desktop_macos == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
@@ -1539,8 +1539,8 @@ jobs:
         run: |
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$xcode_version"
-          grep -Fxq "Xcode 27.1" <<< "$xcode_version"
-          grep -Fxq "Build version 27A9275" <<< "$xcode_version"
+          grep -Fxq "Xcode 27.2" <<< "$xcode_version"
+          grep -Fxq "Build version 27B52" <<< "$xcode_version"
           xcrun --find swift
       - name: Build and test native macOS server tray
         if: needs.scope.outputs.desktop_macos == 'true'
@@ -1561,8 +1561,8 @@ jobs:
       - name: Verify the pinned mobile Apple toolchain
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
-          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.1"
-          test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.0"
+          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.2"
+          test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.2"
           test "$(xcodegen --version)" = "Version: 2.46.0"
           simulator_runtimes="$(xcrun simctl list runtimes)"
           grep -Fq "iOS 26.5 (26.5 - 23F77)" <<< "$simulator_runtimes"

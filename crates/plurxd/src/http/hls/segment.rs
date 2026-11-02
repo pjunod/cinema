@@ -1312,7 +1312,9 @@ async fn segment_local_answer(
         )
             .into_response();
         let publication_deadline = response_publication_deadline_before(request_deadline);
-        let authorization = match authorize_response_publication(
+        // Buffered: nothing is on the wire yet, so a serving outage that the
+        // manager resolves in time is waited out and authorized afresh.
+        if let Err(error) = authorize_and_commit_buffered(
             state,
             session,
             &response_owner,
@@ -1320,18 +1322,10 @@ async fn segment_local_answer(
                 "segment-not-modified",
                 Some(seg),
             ),
+            true,
             publication_deadline,
         )
         .await
-        {
-            Ok(authorization) => authorization,
-            Err(error) => {
-                opened.delivery.finish_without_body();
-                return Err(error);
-            }
-        };
-        if let Err(error) =
-            commit_authorized_media(state, session, authorization, true, publication_deadline).await
         {
             opened.delivery.finish_without_body();
             return Err(error);
@@ -1474,7 +1468,9 @@ async fn segment_local_answer(
         let response = response
             .body(Body::from(body))
             .map_err(|error| ApiError::Internal(error.to_string()))?;
-        let authorization = match authorize_response_publication(
+        // The buffered initialization object: authorized and committed
+        // before any byte is sent, so a resolved outage can be waited out.
+        if let Err(error) = authorize_and_commit_buffered(
             state,
             session,
             &response_owner,
@@ -1482,20 +1478,6 @@ async fn segment_local_answer(
                 segment_publication_kind(seg, requested_range),
                 Some(seg),
             ),
-            publication_deadline,
-        )
-        .await
-        {
-            Ok(authorization) => authorization,
-            Err(error) => {
-                delivery.finish_without_body();
-                return Err(error);
-            }
-        };
-        if let Err(error) = commit_authorized_media(
-            state,
-            session,
-            authorization,
             range_covers_object(requested_range, opened.len),
             publication_deadline,
         )

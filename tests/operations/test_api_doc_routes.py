@@ -350,7 +350,7 @@ class ApiDocRoutesTest(unittest.TestCase):
         self.assertEqual(zero, state)
         self.assertEqual(state, nested)
         self.assertIn("/sharing/settings", state)
-        self.assertEqual(len(state), 18)
+        self.assertEqual(len(state), 19)
         self.assertIn("/sharing/network-authorization", state)
         self.assertIn("/sharing/connection", state)
         self.assertIn("/sharing/imports/{import}/libraries", state)

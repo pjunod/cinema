@@ -28,6 +28,17 @@ class HardwareError(ValueError):
 def run(*args: str) -> str:
     result = subprocess.run(args, capture_output=True, text=True, timeout=20)
     if result.returncode:
+        inputs = HTTPS["INPUTS"]
+        if ("--environment" in args and "--no-consistency" not in args
+                and inputs["missing_memory_alias_error"](result.stderr)):
+            # This reads interpolation inputs only. The JSON resolution below
+            # repairs the alias and validates the entire project before use.
+            return run(*args, "--no-consistency")
+        if "--format" in args and inputs["missing_memory_alias_error"](result.stderr):
+            try:
+                return inputs["resolve_missing_memory_alias"](list(args)).strip()
+            except ValueError as error:
+                raise HardwareError(str(error)) from error
         raise HardwareError(f"{' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout.strip()
 
@@ -172,6 +183,13 @@ def gpu_overlay(service: dict, *, dri: Path, nvidia: bool) -> dict:
                 }
             }
         }
+        # Compose compares these aliases once a reservations block exists,
+        # even when the new block only requests GPU devices. Retain the host's
+        # memory reservation so automatic NVIDIA setup stays mergeable.
+        if service.get("mem_reservation") is not None:
+            additions["deploy"]["resources"]["reservations"]["memory"] = service[
+                "mem_reservation"
+            ]
         nvidia_requested = True
     if nvidia_requested:
         capabilities = (service.get("environment") or {}).get(
@@ -340,6 +358,14 @@ def prepare(output: Path, prepare_pi: bool = False) -> str:
             "docker hardware: using existing configuration (manual mode or non-local/native-Linux engine)",
             file=sys.stderr,
         )
+    # Retain the missing alias repaired during input resolution, including
+    # explicit host GPU selections and manual/non-local hardware modes.
+    reservations = service.get("deploy", {}).get("resources", {}).get("reservations")
+    if service.get("mem_reservation") is not None and isinstance(reservations, dict):
+        additions = overlay["services"]["plurxd"]
+        additions.setdefault("deploy", {}).setdefault("resources", {}).setdefault(
+            "reservations", {}
+        )["memory"] = service["mem_reservation"]
     overlay["services"]["plurxd"].update(HTTPS["https_port_overlay"](document, environment))
     output.write_text(json.dumps(overlay) + "\n", encoding="utf-8")
     files.append(os.path.abspath(output))

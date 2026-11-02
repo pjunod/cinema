@@ -2162,3 +2162,7 @@ mod tests {
         assert!(worker_rows(unknown).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "api_http_tests.rs"]
+mod lifecycle_tests;

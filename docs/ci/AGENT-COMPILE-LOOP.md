@@ -100,7 +100,7 @@ trip:
   the compiler saying a design needs a consumer, precisely, rather than by
   argument.
 
-## 6. Two limits
+## 6. Three limits
 
 **Check which toolchain you actually got.** The container's default `cargo`
 may not be the pin in [`rust-toolchain.toml`](../../rust-toolchain.toml). If
@@ -112,6 +112,16 @@ only one of the two is precisely what a local gate is meant to catch.
 `target/` runs to tens of gigabytes. `df` reports the volume, so "Avail" can
 look healthy while writes fail. Delete old extractions rather than
 accumulating them.
+
+**Never compile uncapped on a Raft voter.** A build on a voter competes with
+the plurxd that has to keep answering heartbeats; an uncapped one filled a
+voter's swap on 2026-11-01 and the cluster lost its leader repeatedly
+([PLAYBACK-QUORUM-GAPS-RCA.md](../cluster/PLAYBACK-QUORUM-GAPS-RCA.md) §3.6).
+Prefer a learner or a lab host. On a voter, run the build container through
+`scripts/voter-build` (8 GiB memory with no swap on top, four CPUs, cargo
+`-j4`); it refuses any option that would lift those caps. A cargo run outside a
+container gets the same caps from `systemd-run --user --scope -p MemoryMax=…
+-p MemorySwapMax=0`, `nice` and `CARGO_BUILD_JOBS`.
 
 ## 7. Do this first, not when stuck
 

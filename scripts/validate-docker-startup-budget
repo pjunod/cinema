@@ -15,6 +15,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import tomllib
 from typing import Any
 
@@ -654,6 +655,49 @@ def validate_document(
     return budget
 
 
+def missing_memory_alias_error(detail: str) -> bool:
+    return "can't set distinct values on 'mem_reservation' and 'deploy.resources.reservations.memory'" in detail
+
+
+def resolve_missing_memory_alias(command: list[str], *, cwd: Path | None = None) -> str:
+    """Repair only an omitted memory alias, then run full Compose validation.
+
+    Compose compares a service's mem_reservation against zero when a host GPU
+    reservation exists without memory. Resolve the operator's merged value
+    before supplying the missing alias. Never replace a nonzero deploy value.
+    """
+    result = subprocess.run(
+        [*command, "--no-consistency"], cwd=cwd,
+        capture_output=True, text=True, timeout=20,
+    )
+    if result.returncode:
+        raise BudgetError(f"docker compose config failed: {result.stderr.strip()}")
+    document = json.loads(result.stdout)
+    service = plurxd_service(document)
+    reservations = service.get("deploy", {}).get("resources", {}).get("reservations")
+    memory = service.get("mem_reservation")
+    if memory is None or not isinstance(reservations, dict) or reservations.get("memory"):
+        raise BudgetError(
+            "docker compose config has conflicting explicit memory reservations; "
+            "make mem_reservation and deploy.resources.reservations.memory agree"
+        )
+    reservations["memory"] = str(memory)
+    # This is a validation-only round trip of Compose's resolved model. Paths
+    # are already absolute; avoid interpreting resolved environment dollars a
+    # second time. The actual deployment retains the original Compose files.
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as temporary:
+        json.dump(document, temporary)
+        temporary.flush()
+        checked = subprocess.run(
+            ["docker", "compose", "-f", temporary.name, "config",
+             "--no-interpolate", "--format", "json"],
+            cwd=cwd, capture_output=True, text=True, timeout=20,
+        )
+    if checked.returncode:
+        raise BudgetError(f"docker compose config failed: {checked.stderr.strip()}")
+    return checked.stdout
+
+
 def resolved_compose_document() -> dict[str, Any]:
     command = ["docker", "compose", "config", "--format", "json"]
     try:
@@ -669,9 +713,13 @@ def resolved_compose_document() -> dict[str, Any]:
         raise BudgetError(f"cannot run {' '.join(command)}: {error}") from error
     if result.returncode != 0:
         detail = result.stderr.strip() or f"exit {result.returncode}"
-        raise BudgetError(f"docker compose config failed: {detail}")
+        if not missing_memory_alias_error(detail):
+            raise BudgetError(f"docker compose config failed: {detail}")
+        resolved = resolve_missing_memory_alias(command, cwd=DEPLOY)
+    else:
+        resolved = result.stdout
     try:
-        document = json.loads(result.stdout)
+        document = json.loads(resolved)
     except json.JSONDecodeError as error:
         raise BudgetError("docker compose config did not return JSON") from error
     if not isinstance(document, dict):
@@ -717,7 +765,7 @@ def main(argv: list[str] | None = None) -> int:
             print(value)
             return 0
         budget = validate_document(document)
-    except (BudgetError, OSError, json.JSONDecodeError) as error:
+    except (BudgetError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         print(
             f"docker startup budget preflight failed; nothing was changed: {error}",
             file=sys.stderr,

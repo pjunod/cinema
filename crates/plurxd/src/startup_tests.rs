@@ -2563,6 +2563,7 @@ fn booted_state(dir: &std::path::Path) -> AppState {
         logbuf::LogBuffers {
             general: Arc::new(logbuf::LogBuffer::new(64)),
             cluster: Arc::new(logbuf::LogBuffer::new(64)),
+            sharing: Arc::new(logbuf::LogBuffer::new(64)),
         },
     )
 }
@@ -2603,6 +2604,7 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
             logs: logbuf::LogBuffers {
                 general: Arc::new(logbuf::LogBuffer::new(64)),
                 cluster: Arc::new(logbuf::LogBuffer::new(64)),
+                sharing: Arc::new(logbuf::LogBuffer::new(64)),
             },
         },
         advertiser_that_fails,
@@ -3062,9 +3064,9 @@ fn split_children_log_under_their_parent_target() {
                     let dedicated = [
                         ("plurxd::retained_reuse", "transcode/manager/create.rs"),
                         ("plurxd::retained_reuse", "vod/retained.rs"),
+                        ("plurxd::dv", "transcode/manager/create.rs"),
                         ("plurxd::auto_prepare", "http/hls/create.rs"),
                         ("plurxd::auto_prepare", "http/hls/preparation.rs"),
-                        ("plurxd::dv", "transcode/manager/create.rs"),
                     ]
                     .iter()
                     .any(|(channel, owner)| {
@@ -3467,6 +3469,7 @@ async fn boot_serve_and_drain_in_runtime(
             logs: logbuf::LogBuffers {
                 general: Arc::new(logbuf::LogBuffer::new(64)),
                 cluster: Arc::new(logbuf::LogBuffer::new(64)),
+                sharing: Arc::new(logbuf::LogBuffer::new(64)),
             },
         },
         advertiser_that_fails,
