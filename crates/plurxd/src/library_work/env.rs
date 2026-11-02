@@ -11,6 +11,28 @@ use tokio_util::sync::CancellationToken;
 type WorkResult<'a> = (PublicationStore<'a>, Result<(), StoreError>);
 type WorkFuture<'a> = Pin<Box<dyn Future<Output = WorkResult<'a>> + Send + 'a>>;
 
+/// One selection over the worker's four sources. The parameter types fix the
+/// call-site order (`work` is a future, `pressure` an interval, so swapping
+/// them does not compile), and `library_worker_select_prefers_ready_work_to_a_ready_tick`
+/// pins the order inside: loss, then work, then the pressure tick.
+pub(super) async fn select_next<W>(
+    queue_loss: &CancellationToken,
+    domain_loss: &CancellationToken,
+    work: &mut W,
+    pressure: &mut tokio::time::Interval,
+) -> Selected<W::Output>
+where
+    W: Future + Unpin,
+{
+    driver::select_work(
+        queue_loss.cancelled(),
+        domain_loss.cancelled(),
+        work,
+        pressure.tick(),
+    )
+    .await
+}
+
 pub(super) struct TokioEnvironment<'a> {
     // Rust drops fields in declaration order, so the order below IS the release
     // order when this environment is dropped without the driver finishing
@@ -110,14 +132,7 @@ impl<'a> TokioEnvironment<'a> {
         loop {
             // Shared priority: queue loss > domain loss > work > pressure tick.
             // A ready tick cannot hide a ready work result or prevent its poll.
-            match driver::select_work(
-                queue_loss.cancelled(),
-                domain_loss.cancelled(),
-                work.as_mut(),
-                pressure.tick(),
-            )
-            .await
-            {
+            match select_next(&queue_loss, &domain_loss, work, &mut pressure).await {
                 Selected::QueueLoss => {
                     #[cfg(test)]
                     crate::background_jobs::faults::worker::at(

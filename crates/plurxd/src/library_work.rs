@@ -1140,4 +1140,46 @@ mod tests {
             "unwinding still released admission"
         );
     }
+
+    /// With the clock paused the first tick of a fresh interval is ready at
+    /// its first poll, so a ready work future and a ready tick are both
+    /// available at once. Work must win;
+    /// swapping the `work` and `pressure.tick()` arguments inside `select_next`
+    /// (the only selection `TokioEnvironment::poll_work` makes) reports `Tick`.
+    #[tokio::test(start_paused = true)]
+    async fn library_worker_select_prefers_ready_work_to_a_ready_tick() {
+        use plurx_worker_control::library_driver::Selected;
+        use tokio_util::sync::CancellationToken;
+        let (queue, domain) = (CancellationToken::new(), CancellationToken::new());
+        let mut pressure = tokio::time::interval(Duration::from_millis(250));
+        let mut work = Box::pin(std::future::ready(7_u8));
+        assert_eq!(
+            env::select_next(&queue, &domain, &mut work, &mut pressure).await,
+            Selected::Work(7),
+            "ready work must be taken before a ready pressure tick"
+        );
+
+        let mut pressure = tokio::time::interval(Duration::from_millis(250));
+        let mut pending = Box::pin(std::future::pending::<u8>());
+        assert_eq!(
+            env::select_next(&queue, &domain, &mut pending, &mut pressure).await,
+            Selected::Tick,
+            "a pending scan still yields to the pressure tick"
+        );
+
+        domain.cancel();
+        let mut pressure = tokio::time::interval(Duration::from_millis(250));
+        let mut work = Box::pin(std::future::ready(7_u8));
+        assert_eq!(
+            env::select_next(&queue, &domain, &mut work, &mut pressure).await,
+            Selected::DomainLoss,
+            "loss outranks ready work"
+        );
+        queue.cancel();
+        let mut work = Box::pin(std::future::ready(7_u8));
+        assert_eq!(
+            env::select_next(&queue, &domain, &mut work, &mut pressure).await,
+            Selected::QueueLoss
+        );
+    }
 }

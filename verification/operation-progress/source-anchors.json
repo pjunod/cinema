@@ -45,25 +45,25 @@
     "table": "08 worker acquisition and cleanup",
     "source": "crates/plurxd/src/library_work.rs",
     "anchor": "pub(super) async fn work_library_queue(",
-    "sha256": "31e94a41cc4a6522888a4b6c0829bd3b4e06a304fa2f7741eda80a74041ec41a"
+    "sha256": "1f601ccf22d47ce625ed1c7939aaf23a61a1b4036030be080b7dcb27a565ff87"
   },
   {
     "table": "09 domain lease acquisition",
     "source": "crates/plurxd/src/library_work/env.rs",
     "anchor": ".acquire_job(format!(\"scan:library:{}\", self.library_id))",
-    "sha256": "0cc743dec54f641e55e22203eb7eb1588d30a0aaca04a5908c31e6aadbd2bcd5"
+    "sha256": "96d8e60ad960296faa4b604923c774d4090b3b86da9091686d0709554bedbb37"
   },
   {
     "table": "10 work iteration bound",
     "source": "crates/plurxd/src/library_work.rs",
     "anchor": "for _ in 0..8 {",
-    "sha256": "31e94a41cc4a6522888a4b6c0829bd3b4e06a304fa2f7741eda80a74041ec41a"
+    "sha256": "1f601ccf22d47ce625ed1c7939aaf23a61a1b4036030be080b7dcb27a565ff87"
   },
   {
     "table": "11 lost reply resolution",
     "source": "crates/plurxd/src/library_work.rs",
     "anchor": "// A lost completion acknowledgement must not rerun a published result.",
-    "sha256": "31e94a41cc4a6522888a4b6c0829bd3b4e06a304fa2f7741eda80a74041ec41a"
+    "sha256": "1f601ccf22d47ce625ed1c7939aaf23a61a1b4036030be080b7dcb27a565ff87"
   },
   {
     "table": "12 domain lease ttl heartbeat",
