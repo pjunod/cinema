@@ -4346,7 +4346,18 @@ async fn causal_control(
         encoded(&record).len() <= 128 * 1024,
         "CausalPrefix: marker exceeds 128KiB; incomplete",
     )?;
-    mutant.restore_root().await?;
+    // The named invariant failure is a poison-on-failure event: `apply` already
+    // rolled the actual writer back to the parent and read the whole endpoint, and
+    // the oracle refuses every further materialization, including a root restore.
+    // The mutated fixture ends here, so require that refusal instead of a restore.
+    require(
+        mutant
+            .restore_root()
+            .await
+            .err()
+            .is_some_and(|error| error.starts_with("MaterializationPoisoned:")),
+        "CausalPrefix: named violation must poison the mutated oracle",
+    )?;
     Ok(record)
 }
 #[tokio::test]
