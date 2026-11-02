@@ -759,6 +759,7 @@ struct PlayerView: View {
     #if os(tvOS)
     @FocusState private var focusedControl: PlayerControl?
     @State private var lastFocusedControl: PlayerControl = .playPause
+    @StateObject private var timelineHold = PlayerTimelineHoldRepeater()
     @State private var repeatedInput: PlayerContractInput?
     @State private var repeatCount = 0
     @State private var lastMoveAt: TimeInterval = 0
@@ -930,7 +931,8 @@ struct PlayerView: View {
         .playerRemoteAdapter(
             .root,
             state: inputState,
-            apply: applyPlayerInputOutcome
+            apply: applyPlayerInputOutcome,
+            timelineHold: timelineHold
         )
         #endif
         .task {
@@ -1444,6 +1446,7 @@ struct PlayerView: View {
     ) -> Bool {
         #if os(tvOS)
         if input != .left && input != .right {
+            timelineHold.cancel()
             repeatedInput = nil
             repeatCount = 0
         }
@@ -2730,7 +2733,8 @@ struct PlayerView: View {
         .playerRemoteAdapter(
             .timeline,
             state: inputState,
-            apply: applyPlayerInputOutcome
+            apply: applyPlayerInputOutcome,
+            timelineHold: timelineHold
         )
         .focused($focusedControl, equals: .progress)
         .remoteControl("player:timeline", label: "Playback position") {
