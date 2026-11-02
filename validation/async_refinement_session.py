@@ -3571,7 +3571,7 @@ def _runner_body(control, root, output, mode, operation, reg, owned):
     measurement['storage']=reg['storage']
     measurement['producer']={'run':run_id,'job':job['id'],'task':job['task_id'],'attempt':1}
     if operation == 'probe':
-        measurement=calibrate_overheads(source,output,control,measurement,deadline)
+        measurement=capability_measurement(source,output,control,identity,measurement,deadline)
         p.require(mode == 'unit' and not control['unit_runs'], 'capability probe cannot execute a unit')
         value = {'schema_version': 1, 'registration_sha256': p.digest(p.canonical(reg)),
                  'source_archive_sha256': reg['source_archive_sha256'], 'runner': reg['runner'],
@@ -3906,6 +3906,10 @@ def dispatch_probe(control, root, output):
     # authenticates the actual successful probe/native task and all32 parts.
 
 def main(argv=None):
+    # The registered source extraction is immutable and re-verified file by file at every
+    # job (verify_source_tree); the controller loads proof scripts from it, so it must
+    # never write bytecode caches there (the workflow runs it without -B).
+    sys.dont_write_bytecode = True
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('main-aggregate')
@@ -4094,6 +4098,17 @@ def calibration_baseline(root, output, reg):
     owned=validate_storage(reg['storage'],root)
     return {'source_workspace_bytes':workspace,
             'existing_unpooled_bytes':directory_bytes(owned,exclude=(root,archive,output))}
+
+
+def capability_measurement(source, output, control, identity, measurement, deadline):
+    """The success probe's admission measurement: calibration, then the live slot.
+
+    Admission accepts the measurement for 300 s, and the Rust catalog calibration alone
+    takes about five minutes, so free disk, RSS headroom and measured_at are taken again
+    after calibration; a measurement stamped before it would be stale before the job ends.
+    """
+    calibrated = calibrate_overheads(source, output, control, measurement, deadline)
+    return {**calibrated, **measured_resources(output, identity)}
 
 
 def calibrate_overheads(root, output, control, measurement, deadline):

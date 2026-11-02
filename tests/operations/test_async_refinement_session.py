@@ -394,6 +394,40 @@ class GrantBindingTests(unittest.TestCase):
                 with self.assertRaises(receipts.ReceiptError):s.HeldLease(storage,ROOT,session)
 
 
+class CapabilityMeasurementTests(unittest.TestCase):
+    def test_the_admission_measurement_is_taken_after_calibration(self):
+        clock=iter(range(1000,2000,300))
+        def measured(_output,_identity):
+            return {'free_disk_bytes':7,'rss_available_bytes':5,'measured_at':str(next(clock))}
+        def calibrate(_source,_output,_control,measurement,_deadline):
+            next(clock)  # the calibration takes time
+            return {**measurement,'resource_calibration':{'peak_bytes':3},'resource_method':{'id':'m'}}
+        start=measured(None,None);start['storage']='s';start['producer']={'run':1}
+        with patch.object(s,'calibrate_overheads',side_effect=calibrate),patch.object(s,'measured_resources',side_effect=measured):
+            actual=s.capability_measurement(None,None,{},{},start,0)
+        self.assertEqual(actual['measured_at'],'1600')
+        self.assertGreater(int(actual['measured_at']),int(start['measured_at']))
+        self.assertEqual((actual['storage'],actual['producer'],actual['resource_calibration']),('s',{'run':1},{'peak_bytes':3}))
+
+
+class SourceImmutabilityTests(unittest.TestCase):
+    def test_the_controller_never_writes_bytecode_into_the_registered_source(self):
+        import sys,tempfile
+        scratch=ROOT/'.agent-proof-fixtures/bytecode';scratch.mkdir(parents=True,exist_ok=True)
+        previous=sys.dont_write_bytecode;sys.dont_write_bytecode=False
+        try:
+            with self.assertRaises(SystemExit):s.main(['--help'])
+            self.assertTrue(sys.dont_write_bytecode)
+            with tempfile.TemporaryDirectory(dir=scratch) as name:
+                source=Path(name)/'scripts';source.mkdir();(source/'helper-script').write_text('VALUE=1\n')
+                import importlib.machinery
+                importlib.machinery.SourceFileLoader('bytecode_probe',str(source/'helper-script')).load_module()
+                self.assertEqual(list(Path(name).rglob('__pycache__')),[])
+        finally:
+            sys.dont_write_bytecode=previous
+            sys.modules.pop('bytecode_probe',None)
+
+
 class ActualRunnerTests(unittest.TestCase):
     """Forgejo exports no RUNNER_NAME; the task log preamble names the runner that took the task."""
     UUID='3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b'
