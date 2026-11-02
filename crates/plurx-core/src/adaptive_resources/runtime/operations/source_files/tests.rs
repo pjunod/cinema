@@ -97,6 +97,7 @@ fn source_cell(path: &Path, domain: v2::FilesystemDomain) -> SourceCell {
         source,
     };
     SourceCell {
+        continuous_entry_deadline: None,
         spec: Some(SourceOpenSpec {
             path: path.to_owned(),
             scanner_size: i64::try_from(metadata.len()).expect("fixture source size"),

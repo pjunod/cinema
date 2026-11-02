@@ -1041,9 +1041,12 @@ async fn admitted_static_probe_fixture(
     };
     let version_close = uuid::Uuid::new_v4();
     let document_close = uuid::Uuid::new_v4();
-    let image =
-        DecodeProbeIdentity::discover_admitted(probe.to_str().expect("probe path"), version_close)
-            .await?;
+    let image = DecodeProbeIdentity::discover_admitted(
+        probe.to_str().expect("probe path"),
+        version_close,
+        None,
+    )
+    .await?;
     let catalog =
         DecodeCatalogMetadata::new(None, None, crate::domain::DolbyVisionFacts::default())
             .expect("SDR catalog");

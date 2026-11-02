@@ -317,6 +317,7 @@ pub(super) fn compile(
     };
 
     let mut request = SoftwareVodRequest {
+        continuous_entry_deadline: None,
         rendition_id: key.to_owned(),
         generation_epoch: SoftwareVodRequest::INITIAL_GENERATION_EPOCH,
         recipe_source_binding: key.to_owned(),

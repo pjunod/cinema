@@ -1440,6 +1440,7 @@ async fn foreign_finite_fence_cleanup(refused_adopt: bool, expire_after_refusal:
                         duration_ms,
                         &settings,
                         application_bytes,
+                        None,
                     )
                     .await
                     .unwrap_or_else(|error| {

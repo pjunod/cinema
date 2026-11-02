@@ -33,6 +33,16 @@ const MAX_LOCAL_ATTEMPTS: usize = 64;
 /// or allocator upper bound.
 pub(super) const PLANNING_TO_R_HANDOFF_BYTES: usize = 16 * 1024 * 1024;
 
+/// Original registered reply only; never a newly launched coordinator.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the same bounded prepared acknowledgment inline during replay; no new Box allocation beside the original registered owner."
+)]
+pub(crate) enum AdaptivePrepareReplay {
+    Prepared(crate::media_sessions::AdaptiveAttemptPreparedV1),
+    Pending,
+}
+
 #[expect(
     clippy::large_enum_variant,
     reason = "Keep the original prepared acknowledgment inline in the bounded coordinator handoff; boxing introduces a new allocation beside the measured owner frame."
@@ -47,9 +57,73 @@ pub(crate) enum AdaptivePrepareStart {
     ),
 }
 
-/// The P/M factory returns exactly one local selected recipe. The original
-/// coordinator's charged fence stays in its registered entry until the
-/// actual JoinHandle has been joined and its application frame destroyed.
+/// Original remote registration disposition; the ACK contains no native or
+/// capacity authority and is sent only after original P/M is retained.
+pub(crate) enum AdaptiveRemoteRegistrationStart {
+    Registered(crate::media_sessions::AdaptiveAttemptRegisteredV2),
+    Pending,
+    Started {
+        reply: tokio::sync::oneshot::Receiver<
+            Result<crate::media_sessions::AdaptiveAttemptRegisteredV2, String>,
+        >,
+        deadline: std::time::Instant,
+    },
+}
+struct RemoteRegistration {
+    claim: AttemptClaim,
+    nonce: Uuid,
+    anchor: plurx_core::cluster::clock::ContinuousClockCapture,
+    grant: Option<tokio::sync::oneshot::Sender<plurx_core::cluster::clock::ContinuousDeadline>>,
+    ready: bool,
+    granted_ms: Option<u32>,
+    deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
+    fence: Option<plurx_core::store::adaptive_resource_attempts::AttemptFence>,
+}
+impl RemoteRegistration {
+    fn apply_original_grant(
+        &mut self,
+        claim: &AttemptClaim,
+        nonce: Uuid,
+        allowance_ms: u32,
+    ) -> Result<(), String> {
+        if nonce.is_nil() || allowance_ms == 0 || allowance_ms > 9_750 {
+            return Err("deadline_budget: invalid original grant".into());
+        }
+        if self.claim != *claim || self.nonce != nonce || !self.ready || self.fence.is_some() {
+            return Err("remote grant differs from the original live registration".into());
+        }
+        if let Some(original) = self.granted_ms {
+            if original != allowance_ms {
+                return Err("remote grant changed its original allowance".into());
+            }
+            // Exact replay preserves W0/cutoff, even after expiry. It can
+            // only replay the already owned original task/result.
+        } else {
+            let deadline = self
+                .anchor
+                .deadline_after(std::time::Duration::from_millis(u64::from(allowance_ms)))
+                .map_err(|error| {
+                    format!("deadline_budget: original remote grant expired: {error}")
+                })?;
+            let sender = self.grant.take().ok_or("original grant sender is absent")?;
+            self.granted_ms = Some(allowance_ms);
+            self.deadline = Some(deadline.clone());
+            sender
+                .send(deadline)
+                .map_err(|_| "original grant receiver already closed")?;
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct RemoteGrantWait {
+    reply: tokio::sync::oneshot::Sender<
+        Result<crate::media_sessions::AdaptiveAttemptRegisteredV2, String>,
+    >,
+    grant: tokio::sync::oneshot::Receiver<plurx_core::cluster::clock::ContinuousDeadline>,
+}
+/// The P/M factory returns exactly one local selected recipe, with its
+/// original application fence retained through actual task destruction.
 pub(crate) struct PreparedAdaptiveWorkerRecipe {
     pub(crate) prepared: crate::vodserve::PreparedAdaptiveRecipe,
     pub(crate) settings: crate::vodserve::VodSettings,
@@ -320,6 +394,9 @@ pub(super) struct AdaptiveAttemptRegistry {
 }
 
 pub(super) struct AttemptEntry {
+    remote_changed: tokio::sync::Notify,
+    remote_registration: Mutex<Option<RemoteRegistration>>,
+    coordinator_frame_bytes: std::sync::atomic::AtomicUsize,
     attempt_id: Uuid,
     request_incarnation_id: Uuid,
     worker_instance_id: Uuid,
@@ -480,6 +557,9 @@ impl AdaptiveAttemptRegistry {
             .find(|slot| slot.is_none())
             .ok_or("adaptive attempt owner registry is full")?;
         let entry = Arc::new(AttemptEntry {
+            remote_changed: tokio::sync::Notify::new(),
+            remote_registration: Mutex::new(None),
+            coordinator_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
             attempt_id,
             request_incarnation_id,
             worker_instance_id,
@@ -541,6 +621,83 @@ impl AdaptiveAttemptRegistry {
 }
 
 impl AttemptEntry {
+    fn remote_requested_bytes(&self) -> Option<usize> {
+        let held = self.remote_registration.lock().ok()?;
+        let Some(remote) = held.as_ref() else {
+            return Some(0);
+        };
+        claim_requested_heap_bytes(&remote.claim)?
+            // Replaces the local frame-channel value, not a new task/holder.
+            // Incremental value/alignment only; no Tokio header/native bound.
+            .checked_add(std::mem::size_of::<
+                Option<plurx_core::cluster::clock::ContinuousDeadline>,
+            >())?
+            .checked_add(
+                std::mem::align_of::<Option<plurx_core::cluster::clock::ContinuousDeadline>>()
+                    .checked_sub(1)?,
+            )?
+            .checked_add(crate::media_sessions::MAX_CONTROL_REQUEST_BYTES)
+    }
+    fn remote_reply(
+        &self,
+        claim: &AttemptClaim,
+    ) -> Result<Option<crate::media_sessions::AdaptiveAttemptRegisteredV2>, String> {
+        let held = self
+            .remote_registration
+            .lock()
+            .map_err(|_| "remote original registration is uncertain")?;
+        let remote = held
+            .as_ref()
+            .ok_or("original attempt has no causal registration")?;
+        if &remote.claim != claim {
+            return Err("remote registration replay changed its original Claim".into());
+        }
+        Ok(remote
+            .ready
+            .then_some(crate::media_sessions::AdaptiveAttemptRegisteredV2 {
+                version: crate::media_sessions::ADAPTIVE_CAUSAL_PREPARE_VERSION,
+                nonce: remote.nonce,
+                attempt_id: self.attempt_id,
+                worker_instance_id: self.worker_instance_id,
+                serving_generation: self.serving_generation,
+            }))
+    }
+    fn remote_deadline(
+        &self,
+    ) -> Result<Option<plurx_core::cluster::clock::ContinuousDeadline>, String> {
+        self.remote_registration
+            .lock()
+            .map(|held| held.as_ref().and_then(|remote| remote.deadline.clone()))
+            .map_err(|_| "remote original deadline is uncertain".into())
+    }
+    fn remote_failure_fence(
+        &self,
+    ) -> Option<plurx_core::store::adaptive_resource_attempts::AttemptFence> {
+        self.remote_registration.lock().ok()?.as_mut()?.fence.take()
+    }
+    // SAME original coordinator/start latch. Inline frame publication lets
+    // the existing frame-channel allocation carry the original grant instead.
+    fn spawn_remote_coordinator<F>(self: &Arc<Self>, future: F) -> Result<(), &'static str>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
+        let original = async move {
+            if start_rx.await.is_ok() {
+                future.await;
+            }
+        };
+        self.coordinator_frame_bytes.store(
+            std::mem::size_of_val(&original),
+            std::sync::atomic::Ordering::Release,
+        );
+        let task = tokio::spawn(original);
+        if self.install_coordinator(task).is_err() {
+            return Err("adaptive attempt already has an original coordinator");
+        }
+        let _ = start_tx.send(());
+        Ok(())
+    }
     async fn finish_adaptive_fixed_planning(
         &self,
         deadline: std::time::Instant,
@@ -740,7 +897,8 @@ impl super::TranscodeManager {
         claim: &AttemptClaim,
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         application_metadata_bytes: usize,
-        deadline: std::time::Instant,
+        mut deadline: std::time::Instant,
+        remote_grant: Option<RemoteGrantWait>,
     ) -> Result<
         (
             plurx_core::adaptive_resources::runtime::planning_probe::FixedProbeMetadataLease,
@@ -756,6 +914,13 @@ impl super::TranscodeManager {
             .refresh_admission_capacity(deadline)
             .await
             .map_err(|error| format!("observing adaptive planning admission: {error:?}"))?;
+        let application_metadata_bytes = application_metadata_bytes
+            .checked_add(
+                entry
+                    .remote_requested_bytes()
+                    .ok_or("remote registration requested capacity overflow")?,
+            )
+            .ok_or("adaptive planning application capacity overflow")?;
         let request = fixed_planning_request(
             self,
             snapshot,
@@ -792,6 +957,53 @@ impl super::TranscodeManager {
             }
             *held = Some(planning_lease);
         }
+        if let Some(wait) = remote_grant {
+            // Every refusal here hands the same original P to its cleanup,
+            // like the sibling paths below; nothing waits for the reaper.
+            let granted = async {
+                let reply = {
+                    let mut held = entry
+                        .remote_registration
+                        .lock()
+                        .map_err(|_| "original registration is uncertain")?;
+                    let remote = held.as_mut().ok_or("original registration is absent")?;
+                    remote.ready = true;
+                    crate::media_sessions::AdaptiveAttemptRegisteredV2 {
+                        version: crate::media_sessions::ADAPTIVE_CAUSAL_PREPARE_VERSION,
+                        nonce: remote.nonce,
+                        attempt_id: entry.attempt_id,
+                        worker_instance_id: entry.worker_instance_id,
+                        serving_generation: entry.serving_generation,
+                    }
+                };
+                // ACK only after the SAME complete charged P/M owner and its
+                // application lease are retained. No source has been opened.
+                let _ = wait.reply.send(Ok(reply));
+                let continuous = tokio::time::timeout_at(deadline.into(), wait.grant)
+                    .await
+                    .map_err(|_| "original remote registration expired without grant")?
+                    .map_err(|_| "original remote grant was cancelled")?;
+                continuous.remaining().map_err(|error| {
+                    format!("original remote clock before source entry: {error}")
+                })?;
+                deadline = deadline.min(
+                    continuous
+                        .monotonic_cutoff()
+                        .map_err(|error| error.to_string())?,
+                );
+                owner
+                    .retain_continuous_entry_deadline(continuous)
+                    .map_err(|error| {
+                        format!("retaining original continuous P entry condition: {error}")
+                    })?;
+                Ok::<(), String>(())
+            }
+            .await;
+            if let Err(error) = granted {
+                handoff_planning_cleanup(&mut planning);
+                return Err(error);
+            }
+        }
         if let Err(error) = owner.prepare_inputs(deadline).await {
             handoff_planning_cleanup(&mut planning);
             return Err(format!("acquiring adaptive fixed planning inputs: {error}"));
@@ -824,6 +1036,10 @@ impl super::TranscodeManager {
     /// negative checks. The admitted P collector supplies the sole fresh
     /// source/probe observation; no daemon pathname open or legacy FFprobe
     /// may precede it on this selected path.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The original worker recipe factory keeps envelope, claim, entry, frame, deadline and the original remote grant in one admitted frame."
+    )]
     pub(super) async fn prepare_adaptive_worker_recipe(
         &self,
         _state: &crate::state::AppState,
@@ -832,6 +1048,7 @@ impl super::TranscodeManager {
         entry: &Arc<AttemptEntry>,
         coordinator_frame_bytes: usize,
         deadline: std::time::Instant,
+        remote_grant: Option<RemoteGrantWait>,
     ) -> Result<PreparedAdaptiveWorkerRecipe, String> {
         if !envelope.is_valid()
             || envelope.principal != claim.binding.principal
@@ -890,6 +1107,7 @@ impl super::TranscodeManager {
                 &snapshot,
                 application_metadata_bytes,
                 deadline,
+                remote_grant,
             )
             .await?;
         let encoding = self
@@ -926,6 +1144,238 @@ impl super::TranscodeManager {
         })
     }
 
+    /// Replay only an already registered original. This API cannot reserve
+    /// an entry, start a coordinator, or turn a peer timestamp into permission.
+    pub(crate) async fn replay_registered_adaptive_prepare(
+        &self,
+        request: &crate::media_sessions::AdaptiveAttemptPrepareV1,
+    ) -> Result<Option<AdaptivePrepareReplay>, String> {
+        if !request.is_valid() {
+            return Err("invalid original adaptive preparation".into());
+        }
+        let attempt_id = request.claim.key.attempt_id;
+        let Some(existing) = self.adaptive_attempts.get(attempt_id) else {
+            return Ok(None);
+        };
+        if existing.worker_instance_id() != request.claim.worker_instance_id
+            || existing.serving_generation() != request.claim.serving_generation
+        {
+            return Err("adaptive replay names a different original worker".into());
+        }
+        self.verify_adaptive_claim_for_phases(
+            &request.claim,
+            &[AttemptPhase::Provisional, AttemptPhase::Prepared],
+        )
+        .await
+        .map_err(str::to_owned)?;
+        if let Some(reply) = self.replay_adaptive_prepared(attempt_id).await {
+            return reply.map(AdaptivePrepareReplay::Prepared).map(Some);
+        }
+        Ok(Some(AdaptivePrepareReplay::Pending))
+    }
+
+    pub(crate) async fn replay_remote_adaptive_registration(
+        &self,
+        request: &crate::media_sessions::AdaptiveAttemptPrepareV1,
+    ) -> Result<Option<AdaptiveRemoteRegistrationStart>, String> {
+        let Some(entry) = self.adaptive_attempts.get(request.claim.key.attempt_id) else {
+            return Ok(None);
+        };
+        self.verify_adaptive_claim_for_phases(
+            &request.claim,
+            &[AttemptPhase::Provisional, AttemptPhase::Prepared],
+        )
+        .await
+        .map_err(str::to_owned)?;
+        Ok(Some(match entry.remote_reply(&request.claim)? {
+            Some(reply) => AdaptiveRemoteRegistrationStart::Registered(reply),
+            None => AdaptiveRemoteRegistrationStart::Pending,
+        }))
+    }
+
+    pub(crate) async fn wait_remote_adaptive_prepared(
+        &self,
+        attempt_id: Uuid,
+    ) -> Result<crate::media_sessions::AdaptiveAttemptPreparedV1, String> {
+        let entry = self
+            .adaptive_attempts
+            .get(attempt_id)
+            .ok_or("original remote registration is absent")?;
+        loop {
+            // Register before inspecting the SAME original state. Cancelling
+            // this borrowed response waiter never consumes its task/owner.
+            let changed = entry.remote_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(reply) = self.replay_adaptive_prepared(attempt_id).await {
+                return reply;
+            }
+            if !matches!(*entry.state().await, AttemptState::Reserved) {
+                return Err("original remote preparation ended without Prepared".into());
+            }
+            let original = entry
+                .remote_deadline()?
+                .ok_or("original remote grant is absent")?;
+            original
+                .remaining()
+                .map_err(|error| format!("original remote response deadline: {error}"))?;
+            tokio::time::timeout_at(
+                original
+                    .monotonic_cutoff()
+                    .map_err(|error| error.to_string())?
+                    .into(),
+                changed,
+            )
+            .await
+            .map_err(|_| "original remote preparation remains pending at its cutoff")?;
+        }
+    }
+
+    pub(crate) async fn begin_remote_adaptive_registration(
+        self: &Arc<Self>,
+        state: crate::state::AppState,
+        request: crate::media_sessions::AdaptiveAttemptPrepareV1,
+        restart_admission: crate::serving_fence::RestartAdmission,
+    ) -> Result<AdaptiveRemoteRegistrationStart, String> {
+        self.verify_adaptive_claim(&request.claim)
+            .await
+            .map_err(str::to_owned)?;
+        if let Some(existing) = self.adaptive_attempts.get(request.claim.key.attempt_id) {
+            return Ok(match existing.remote_reply(&request.claim)? {
+                Some(reply) => AdaptiveRemoteRegistrationStart::Registered(reply),
+                None => AdaptiveRemoteRegistrationStart::Pending,
+            });
+        }
+        // Actual private W0 precedes original registration. This cutoff only
+        // expires inert CONTROL work; it grants no source/image/process entry.
+        let anchor = state
+            .membership
+            .clock_guard()
+            .capture_continuous()
+            .map_err(|error| format!("insufficient_evidence: original remote clock: {error}"))?;
+        let control = anchor
+            .deadline_after(std::time::Duration::from_millis(9_750))
+            .map_err(|error| format!("deadline_budget: original registration: {error}"))?;
+        let deadline = control
+            .monotonic_cutoff()
+            .map_err(|error| error.to_string())?;
+        let entry = self
+            .adaptive_attempts
+            .reserve(
+                request.claim.key.attempt_id,
+                request.claim.key.request.request_incarnation_id,
+                request.claim.worker_instance_id,
+                request.claim.serving_generation,
+            )
+            .map_err(str::to_owned)?;
+        let (grant_tx, grant_rx) = tokio::sync::oneshot::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut held = entry
+                .remote_registration
+                .lock()
+                .map_err(|_| "remote registration is uncertain")?;
+            if held.is_some() {
+                return Err(
+                    "remote registration already belongs to an original coordinator".into(),
+                );
+            }
+            *held = Some(RemoteRegistration {
+                claim: request.claim.clone(),
+                nonce: Uuid::new_v4(),
+                anchor,
+                grant: Some(grant_tx),
+                ready: false,
+                granted_ms: None,
+                deadline: None,
+                fence: None,
+            });
+        }
+        let manager = Arc::clone(self);
+        let original = Arc::clone(&entry);
+        entry
+            .spawn_remote_coordinator(async move {
+                let _restart_admission = restart_admission;
+                let frame = original
+                    .coordinator_frame_bytes
+                    .load(std::sync::atomic::Ordering::Acquire);
+                let result = manager
+                    .run_adaptive_prepare_with_frame(
+                        state,
+                        request,
+                        Arc::clone(&original),
+                        deadline,
+                        frame,
+                        Some(RemoteGrantWait {
+                            reply: reply_tx,
+                            grant: grant_rx,
+                        }),
+                    )
+                    .await;
+                if result.is_err() {
+                    let mut state = original.state().await;
+                    if matches!(*state, AttemptState::Reserved) {
+                        let mut held = original
+                            .remote_registration
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(remote) = held.as_mut() {
+                            // Common preparation has dropped its request clone;
+                            // replace that precharged Claim copy in failed state.
+                            *state =
+                                AttemptState::PlanningFailed(Box::new(PlanningFailedAttempt {
+                                    claim: remote.claim.clone(),
+                                    cleanup: None,
+                                    fence: remote.fence.take(),
+                                    close: None,
+                                }));
+                        }
+                    }
+                }
+                original.remote_changed.notify_waiters();
+            })
+            .map_err(str::to_owned)?;
+        Ok(AdaptiveRemoteRegistrationStart::Started {
+            reply: reply_rx,
+            deadline,
+        })
+    }
+
+    pub(crate) async fn grant_remote_adaptive_registration(
+        &self,
+        claim: &AttemptClaim,
+        nonce: Uuid,
+        allowance_ms: u32,
+    ) -> Result<AdaptivePrepareReplay, String> {
+        if nonce.is_nil() || allowance_ms == 0 || allowance_ms > 9_750 {
+            return Err("deadline_budget: invalid original grant".into());
+        }
+        self.verify_adaptive_claim_for_phases(
+            claim,
+            &[AttemptPhase::Provisional, AttemptPhase::Prepared],
+        )
+        .await
+        .map_err(str::to_owned)?;
+        let entry = self
+            .adaptive_attempts
+            .get(claim.key.attempt_id)
+            .ok_or("remote grant has no original registration")?;
+        {
+            let mut held = entry
+                .remote_registration
+                .lock()
+                .map_err(|_| "remote registration is uncertain")?;
+            let remote = held
+                .as_mut()
+                .ok_or("remote grant has no original time anchor")?;
+            remote.apply_original_grant(claim, nonce, allowance_ms)?;
+        }
+        if let Some(reply) = self.replay_adaptive_prepared(claim.key.attempt_id).await {
+            return reply.map(AdaptivePrepareReplay::Prepared);
+        }
+        Ok(AdaptivePrepareReplay::Pending)
+    }
+
     pub(crate) async fn begin_adaptive_prepare(
         self: &Arc<Self>,
         state: crate::state::AppState,
@@ -947,6 +1397,16 @@ impl super::TranscodeManager {
                 return reply.map(AdaptivePrepareStart::Prepared);
             }
             return Ok(AdaptivePrepareStart::Pending);
+        }
+        // Only the actual local create scope proves its remaining monotonic
+        // preparation allowance. Preserve registered replay above even after
+        // caller cancellation; refuse fresh registration without that scope.
+        let original_cutoff = crate::media_pool::create_preparation_deadline()
+            .ok_or("insufficient_evidence: original local create deadline is absent")?
+            .into_std();
+        let deadline = deadline.min(original_cutoff);
+        if std::time::Instant::now() >= deadline {
+            return Err("deadline_budget: original local preparation allowance expired".into());
         }
         let entry = self
             .adaptive_attempts
@@ -979,7 +1439,7 @@ impl super::TranscodeManager {
     async fn run_adaptive_prepare(
         &self,
         state: crate::state::AppState,
-        mut request: crate::media_sessions::AdaptiveAttemptPrepareV1,
+        request: crate::media_sessions::AdaptiveAttemptPrepareV1,
         entry: Arc<AttemptEntry>,
         deadline: std::time::Instant,
         frame_rx: tokio::sync::oneshot::Receiver<usize>,
@@ -997,6 +1457,25 @@ impl super::TranscodeManager {
                 return Err("adaptive original coordinator frame was not registered".into());
             }
         };
+        self.run_adaptive_prepare_with_frame(
+            state,
+            request,
+            entry,
+            deadline,
+            coordinator_frame_bytes,
+            None,
+        )
+        .await
+    }
+    async fn run_adaptive_prepare_with_frame(
+        &self,
+        state: crate::state::AppState,
+        mut request: crate::media_sessions::AdaptiveAttemptPrepareV1,
+        entry: Arc<AttemptEntry>,
+        mut deadline: std::time::Instant,
+        coordinator_frame_bytes: usize,
+        remote_grant: Option<RemoteGrantWait>,
+    ) -> Result<crate::media_sessions::AdaptiveAttemptPreparedV1, String> {
         if std::time::Instant::now() >= deadline
             || !state
                 .serving
@@ -1034,6 +1513,7 @@ impl super::TranscodeManager {
                 &entry,
                 coordinator_frame_bytes,
                 deadline,
+                remote_grant,
             )
             .await;
         let planned = match planned_result {
@@ -1044,13 +1524,23 @@ impl super::TranscodeManager {
                     *state = AttemptState::PlanningFailed(Box::new(PlanningFailedAttempt {
                         claim: request.claim,
                         cleanup: None,
-                        fence: None,
+                        fence: entry.remote_failure_fence(),
                         close: None,
                     }));
                 }
                 return Err(error);
             }
         };
+        if let Some(original) = entry.remote_deadline()? {
+            original
+                .remaining()
+                .map_err(|error| format!("original remote preparation expired: {error}"))?;
+            deadline = deadline.min(
+                original
+                    .monotonic_cutoff()
+                    .map_err(|error| error.to_string())?,
+            );
+        }
         let pre_r = (|| -> Result<(String, usize), String> {
             let prepared_heap = planned
                 .prepared
@@ -1095,7 +1585,7 @@ impl super::TranscodeManager {
                     *state = AttemptState::PlanningFailed(Box::new(PlanningFailedAttempt {
                         claim: request.claim,
                         cleanup: None,
-                        fence: None,
+                        fence: entry.remote_failure_fence(),
                         close: None,
                     }));
                 }
@@ -1119,9 +1609,17 @@ impl super::TranscodeManager {
             settings,
             planning_application_limit_bytes: _,
         } = planned;
+        // The SAME original remote grant P retained; a local create carries
+        // none, so its R keeps the original local monotonic deadline.
+        let continuous_entry_deadline = entry.remote_deadline()?;
         let built = self
             .vod
-            .build_adaptive_recipe(prepared, &settings, requested_application_bytes)
+            .build_adaptive_recipe(
+                prepared,
+                &settings,
+                requested_application_bytes,
+                continuous_entry_deadline,
+            )
             .await;
         let pending = match built {
             Ok(pending) => pending,
@@ -1212,6 +1710,32 @@ impl super::TranscodeManager {
             .adaptive_attempts
             .get(fence.key.attempt_id)
             .ok_or("adaptive Fence has no local original owner")?;
+        {
+            let mut held = entry
+                .remote_registration
+                .lock()
+                .map_err(|_| "original remote registration is uncertain")?;
+            if let Some(remote) = held.as_mut().filter(|remote| remote.granted_ms.is_none()) {
+                if remote.claim.binding != fence.binding
+                    || remote.claim.key != fence.key
+                    || remote
+                        .fence
+                        .as_ref()
+                        .is_some_and(|original| original != &fence)
+                {
+                    return Err("remote cancellation differs from the original registration".into());
+                }
+                remote.fence = Some(fence);
+                // Drop ONLY the original unsent grant. The SAME coordinator
+                // joins/closes P/M; this response asserts no native extinction.
+                remote.grant.take();
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                let _ = sender.send(Err(
+                    "original ungranted registration cleanup remains pending".into(),
+                ));
+                return Ok(receiver);
+            }
+        }
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let manager = Arc::clone(self);
         let original = Arc::clone(&entry);
@@ -1232,8 +1756,18 @@ impl super::TranscodeManager {
         adoption: plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
         preview_json: String,
         authority: crate::serving_fence::ServingAuthority,
-        deadline: std::time::Instant,
+        mut deadline: std::time::Instant,
     ) -> Result<crate::vodserve::VodStart, String> {
+        if let Some(original) = entry.remote_deadline()? {
+            original
+                .remaining()
+                .map_err(|error| format!("original remote activation deadline: {error}"))?;
+            deadline = deadline.min(
+                original
+                    .monotonic_cutoff()
+                    .map_err(|error| error.to_string())?,
+            );
+        }
         if !authority.is_current(entry.serving_generation())
             || std::time::Instant::now() >= deadline
         {
@@ -2135,6 +2669,16 @@ impl super::TranscodeManager {
         &self,
         claim: &AttemptClaim,
     ) -> Result<(), &'static str> {
+        self.verify_adaptive_claim_for_phases(claim, &[AttemptPhase::Provisional])
+            .await
+    }
+
+    // Prepared is allowed only by the replay-only API, never fresh native entry.
+    async fn verify_adaptive_claim_for_phases(
+        &self,
+        claim: &AttemptClaim,
+        allowed: &[AttemptPhase],
+    ) -> Result<(), &'static str> {
         claim.validate().map_err(|_| "invalid adaptive claim")?;
         let status = self
             .store
@@ -2153,7 +2697,7 @@ impl super::TranscodeManager {
             .iter()
             .find(|attempt| attempt.key == claim.key)
             .ok_or("adaptive attempt is absent")?;
-        if attempt.phase != AttemptPhase::Provisional
+        if !allowed.contains(&attempt.phase)
             || attempt.worker_instance_id != claim.worker_instance_id
             || attempt.serving_generation != claim.serving_generation
             || attempt.domains != claim.domains
@@ -2778,6 +3322,139 @@ impl super::TranscodeManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Control-state fixture only: these DTOs and channel outcomes never
+    // stand in for Store admission, real P ownership or native closure.
+    fn remote_control_fixture() -> (
+        RemoteRegistration,
+        tokio::sync::oneshot::Receiver<plurx_core::cluster::clock::ContinuousDeadline>,
+    ) {
+        use plurx_core::store::adaptive_resource_attempts::{
+            AttemptKey, RequestBinding, RequestKey,
+        };
+        let key = RequestKey {
+            request_id: Uuid::new_v4().to_string(),
+            request_incarnation_id: Uuid::new_v4(),
+        };
+        let claim = AttemptClaim {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: 0,
+                expected_attempt_sequence: 0,
+                now_ms: crate::media_sessions::unix_ms(),
+            },
+            binding: RequestBinding {
+                version: 1,
+                key: key.clone(),
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: 1,
+                },
+                request_fingerprint: "a".repeat(64),
+                playback_id: Uuid::new_v4().to_string(),
+                recovery_epoch: Uuid::new_v4(),
+                planning_generation: 1,
+                planning_source_digest: "b".repeat(64),
+                settings_digest: "c".repeat(64),
+                intent_digest: "d".repeat(64),
+                original_deadline_ms: crate::media_sessions::unix_ms() + 60_000,
+                expected_predecessor_incarnation_id: None,
+                expected_predecessor_owner_epoch: None,
+                expected_desired_revision: None,
+            },
+            key: AttemptKey {
+                request: key,
+                attempt_id: Uuid::new_v4(),
+                route_incarnation_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                worker_node_id: "fixture-node".into(),
+                owner_epoch: 1,
+                ordinal: 1,
+            },
+            worker_instance_id: Uuid::new_v4(),
+            serving_generation: 0,
+            domains: vec!["processing:fixture-node".into()],
+        };
+        claim
+            .validate()
+            .expect("well-formed control data, not native authority");
+        let guard = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(false));
+        let anchor = guard
+            .capture_continuous()
+            .expect("actual Linux continuous clock");
+        let (grant, receiver) = tokio::sync::oneshot::channel();
+        (
+            RemoteRegistration {
+                claim,
+                nonce: Uuid::new_v4(),
+                anchor,
+                grant: Some(grant),
+                ready: false,
+                granted_ms: None,
+                deadline: None,
+                fence: None,
+            },
+            receiver,
+        )
+    }
+
+    #[tokio::test]
+    async fn original_remote_grant_replay_never_renews_after_real_expiry() {
+        let (mut original, receiver) = remote_control_fixture();
+        original.ready = true; // control gate premise only, not a P ACK claim
+        let claim = original.claim.clone();
+        let nonce = original.nonce;
+        original
+            .apply_original_grant(&claim, nonce, 100)
+            .expect("one original grant");
+        let delivered = receiver.await.expect("same one-shot receiver");
+        let cutoff = delivered
+            .monotonic_cutoff()
+            .expect("original paired cutoff");
+        original
+            .apply_original_grant(&claim, nonce, 100)
+            .expect("exact duplicate replay");
+        assert!(original.apply_original_grant(&claim, nonce, 101).is_err());
+        assert!(original
+            .apply_original_grant(&claim, Uuid::new_v4(), 100)
+            .is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        original
+            .apply_original_grant(&claim, nonce, 100)
+            .expect("replay can only return original result");
+        assert!(original.grant.is_none());
+        assert_eq!(original.granted_ms, Some(100));
+        let retained = original
+            .deadline
+            .as_ref()
+            .expect("same retained original deadline");
+        assert_eq!(retained.monotonic_cutoff().expect("same cutoff"), cutoff);
+        assert!(retained.remaining().is_err());
+    }
+
+    #[tokio::test]
+    async fn actual_late_or_unready_grant_cannot_consume_original_start() {
+        let (mut original, mut receiver) = remote_control_fixture();
+        let claim = original.claim.clone();
+        let nonce = original.nonce;
+        assert!(original.apply_original_grant(&claim, nonce, 50).is_err());
+        original.ready = true; // pure gate state, never a native receipt
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(original.apply_original_grant(&claim, nonce, 50).is_err());
+        assert!(
+            original.grant.is_some()
+                && original.deadline.is_none()
+                && original.granted_ms.is_none()
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        drop(original.grant.take());
+        assert!(
+            receiver.await.is_err(),
+            "same original unsent start is dropped, never aborted"
+        );
+    }
 
     #[tokio::test]
     async fn original_adopt_task_retains_restart_admission_after_waiter_drop() {

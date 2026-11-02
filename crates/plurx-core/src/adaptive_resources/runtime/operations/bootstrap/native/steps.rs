@@ -315,7 +315,10 @@ impl NodeResourceRuntime {
                 if state.bootstrap.phase == BootstrapPhase::SinkReady {
                     return Ok(());
                 }
-                if Instant::now() >= deadline {
+                if crate::adaptive_resources::runtime::operations::entry_window_closed(
+                    role.continuous_entry_deadline.as_ref(),
+                    deadline,
+                ) {
                     return Err(OperationError::Deadline);
                 }
                 let obligation = v2::Id::new(
@@ -432,7 +435,11 @@ impl NodeResourceRuntime {
                         .expect("same original step job")
                         .id(),
                 );
-                self.release_native_entry(role.binding, enter)?;
+                self.release_native_entry(
+                    role.binding,
+                    role.continuous_entry_deadline.as_ref(),
+                    enter,
+                )?;
             }
             let audit = native.join().await?.audit.clone();
             let completed = audit.outcome == v2::scratch::NativeOutcomeV1::Completed;

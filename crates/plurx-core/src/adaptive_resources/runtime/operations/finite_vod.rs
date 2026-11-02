@@ -581,7 +581,10 @@ impl NodeResourceRuntime {
                 )?;
                 self.finish_transition(bundle_id, role).await?;
             }
-            if Instant::now() >= deadline {
+            if crate::adaptive_resources::runtime::operations::entry_window_closed(
+                role.continuous_entry_deadline.as_ref(),
+                deadline,
+            ) {
                 return Err(OperationError::Deadline);
             }
             let graph = role.graph.as_mut().ok_or(OperationError::State)?;
@@ -646,8 +649,11 @@ impl NodeResourceRuntime {
             .ok_or(OperationError::State)?
             .take_finite_vod_start(task)
             .await?;
-        self.release_native_entry(role.binding, enter)?;
+        self.release_native_entry(role.binding, role.continuous_entry_deadline.as_ref(), enter)?;
         finite.task_entered = true;
+        // The producer has entered: later output publication and sync are
+        // steady-state work that the original create cutoff must not stop.
+        role.continuous_entry_deadline = None;
         Ok(())
     }
 }

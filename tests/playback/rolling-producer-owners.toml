@@ -737,7 +737,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # one test; core-copy result owner retaining producer/output; and six
 # joined/panic/cancellation fixture tasks. Existing retirement/reader/supervisor task sites
 # were rewritten without additional launch authority.
-expected_occurrences = 135
+# M5: One same-owner remote coordinator launch site replaces local frame-channel setup; it is retained before native entry, never a nonce-only detached owner.
+expected_occurrences = 136
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -891,7 +892,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # admission deadline. The waiter is dropped on admission, cancellation or
 # timeout; the sleep neither owns inference nor starts work by itself.
 # Expired refused-Adopt regression sleeps once until the real original Claim deadline passes; no production wait: 94 + 1 = 95.
-expected_occurrences = 95
+# M5: Two control-only real-clock expiry fixtures; no production verdict polling or new cleanup retry loop.
+expected_occurrences = 97
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1342,7 +1344,8 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-session-failure-fence"
 pattern = "failure_fence"
-expected_occurrences = 16
+# M5: Three private M5 retained-cancel helper spellings match the broad fence regex; no new outage or native-close authority.
+expected_occurrences = 19
 
 [[module_symbols]]
 id = "m4-immutable-prepublication-process-scope"
@@ -3403,7 +3406,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # This is test-only pre-R bootstrap, not a new media producer or close proof.
 # Compose task and current-main owner sites: 1089; exact source census still required.
 # Stack composition with M4 (effort base 1085 -> M4 1086): 1089 + 1 = 1090.
-expected_occurrences = 1090
+# Compose M4 fixture and current-main owner sites: 1086; source equality still enforced.
+# M5: One same original registered remote coordinator, bounded by the existing fixed entry registry and actual measured P/M frame.
+expected_occurrences = 1091
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5129,7 +5134,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Stack composition over effort base 2008: M2 +4 and M4 +9, so 2065 + 13 = 2078.
 # M4 follow-on: The genuine refused-Adopt fixture positively joins its SAME registered control under the original deadline; no new native watchdog or allowance.
 # Expired refused-Adopt regression waits once for the real original Claim deadline: 2079 + 1 = 2080.
-expected_occurrences = 2080
+# M5: one original-cutoff snapshot-stage wait and its real contended-lock
+# fixture watchdog replace the removed remote fresh-worker wait: net +1.
+# These timers grant no native entry or physical-close/refund witness: 2080 + 1 = 2081.
+# These timers grant no native entry or physical-close/refund witness.
+# M5: Three original-cutoff waits plus three real clock fixture sleeps; no renewed startup window or standalone native closer.
+expected_occurrences = 2087
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

@@ -1892,6 +1892,45 @@ impl AdaptiveAttemptPrepareV1 {
     }
 }
 
+/// Private adaptive preparation extension only. It does not change the
+/// global media protocol, legacy recipes, or ordinary serving lease TTL.
+#[cfg(target_os = "linux")]
+pub(crate) const ADAPTIVE_CAUSAL_PREPARE_VERSION: u16 = 2;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Keep the bounded authenticated envelope inline; a Box would add another allocation beside the original request/coordinator payload."
+)]
+pub(crate) enum AdaptiveAttemptPrepareControlV2 {
+    Register {
+        version: u16,
+        prepare: AdaptiveAttemptPrepareV1,
+    },
+    Grant {
+        version: u16,
+        claim: plurx_core::store::adaptive_resource_attempts::AttemptClaim,
+        nonce: uuid::Uuid,
+        allowance_ms: u32,
+    },
+}
+
+/// An authenticated receipt for the SAME charged inert registration. W0 is
+/// private worker state: neither public timestamps nor this nonce authorize
+/// capacity, native work, native absence, or a ledger release.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdaptiveAttemptRegisteredV2 {
+    pub version: u16,
+    pub nonce: uuid::Uuid,
+    pub attempt_id: uuid::Uuid,
+    pub worker_instance_id: uuid::Uuid,
+    pub serving_generation: u64,
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

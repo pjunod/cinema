@@ -412,6 +412,8 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
             MemoryClaim::UnknownProducerPeak,
             MemoryClaim::PlanningMetadata,
         ]),
+        // P retains its own continuous condition after registration.
+        None,
         deadline,
         |preparation| {
             let (release, cleanup_requested, known_closed) = runtime.initialize_private_planning(

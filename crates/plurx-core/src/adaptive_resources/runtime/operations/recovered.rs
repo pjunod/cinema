@@ -86,6 +86,8 @@ impl NodeResourceRuntime {
             metadata_memory,
         )?;
         let role = OwnedRole {
+            // No original create cutoff survives a restart; local deadlines still apply.
+            continuous_entry_deadline: None,
             binding,
             durable_tag: id,
             members: Vec::new(),

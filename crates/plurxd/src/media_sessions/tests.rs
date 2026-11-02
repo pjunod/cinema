@@ -345,6 +345,89 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn remote_adaptive_replay_cannot_register_missing_original_or_mint_a_window() {
+    use plurx_core::store::adaptive_resource_attempts::{
+        AttemptClaim, AttemptKey, MutationContext, RequestBinding, RequestKey,
+    };
+    let state = crate::http::internal_media_sessions::output_capture_test_state();
+    let recipe = valid_start_request();
+    let request_key = RequestKey {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        request_incarnation_id: uuid::Uuid::new_v4(),
+    };
+    let attempt_id = uuid::Uuid::new_v4();
+    let claim = AttemptClaim {
+        context: MutationContext {
+            operation_id: uuid::Uuid::new_v4(),
+            expected_request_sequence: 0,
+            expected_attempt_sequence: 0,
+            now_ms: unix_ms(),
+        },
+        binding: RequestBinding {
+            version: 1,
+            key: request_key.clone(),
+            principal: recipe.principal.clone(),
+            request_fingerprint: "a".repeat(64),
+            playback_id: recipe.request.playback_id.clone(),
+            recovery_epoch: uuid::Uuid::new_v4(),
+            planning_generation: 1,
+            planning_source_digest: "b".repeat(64),
+            settings_digest: "c".repeat(64),
+            intent_digest: "d".repeat(64),
+            original_deadline_ms: unix_ms().saturating_add(60_000),
+            expected_predecessor_incarnation_id: None,
+            expected_predecessor_owner_epoch: None,
+            expected_desired_revision: None,
+        },
+        key: AttemptKey {
+            request: request_key,
+            attempt_id,
+            route_incarnation_id: uuid::Uuid::parse_str(&recipe.incarnation_id).expect("route"),
+            session_id: uuid::Uuid::new_v4(),
+            worker_node_id: state.node_id.clone(),
+            owner_epoch: 1,
+            ordinal: 1,
+        },
+        worker_instance_id: uuid::Uuid::new_v4(),
+        serving_generation: 0,
+        domains: vec!["processing:test-node".into()],
+    };
+    claim
+        .validate()
+        .expect("well-formed control claim; not a native permit");
+    let request = AdaptiveAttemptPrepareV1 {
+        version: ADAPTIVE_ATTEMPT_VERSION,
+        claim,
+        recipe,
+    };
+    assert!(request.is_valid());
+    for _ in 0..2 {
+        assert_eq!(
+            state
+                .transcode
+                .adaptive_attempt_local_status(attempt_id)
+                .await,
+            "not_registered"
+        );
+        assert!(state
+            .transcode
+            .replay_registered_adaptive_prepare(&request)
+            .await
+            .expect("read-only original registry lookup")
+            .is_none());
+        assert_eq!(
+            state
+                .transcode
+                .adaptive_attempt_local_status(attempt_id)
+                .await,
+            "not_registered"
+        );
+    }
+    state.shutdown.cancel();
+}
+
 #[test]
 fn sharing_forwarded_principal_preserves_local_wire_and_refuses_mixed_ownership() {
     use plurx_core::playback_principal::PlaybackPrincipal;

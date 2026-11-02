@@ -311,7 +311,7 @@ async fn original_retry_cannot_claim_or_fence_after_actual_store_winner() {
 
 #[test]
 fn explicit_prepare_auth_and_protocol_refusals_hold_instead_of_retrying_as_capacity() {
-    for status in [400, 401, 403, 404, 405, 413, 415, 422] {
+    for status in [400, 401, 403, 404, 405, 413, 415, 422, 428] {
         assert!(
             matches!(
                 prepare_http_refusal(reqwest::StatusCode::from_u16(status).expect("status")),

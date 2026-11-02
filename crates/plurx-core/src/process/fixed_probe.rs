@@ -983,8 +983,27 @@ pub struct DecodeProbeIdentity {
     admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
 }
 
+fn check_admitted_continuous_deadline(
+    custody: Option<&Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
+) -> Result<(), DecodeFactError> {
+    if let Some(custody) = custody {
+        let held = custody
+            .lock()
+            .map_err(|_| DecodeFactError::CacheInvariant)?;
+        if held
+            .continuous_entry_deadline
+            .as_ref()
+            .is_some_and(|limit| limit.remaining().is_err())
+        {
+            return Err(DecodeFactError::Deadline);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct ProbeAdmittedCustody {
+    continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     configured_image: Option<Arc<std::fs::File>>,
     sealed_snapshot: Option<Arc<ExecutableSnapshot>>,
     #[cfg_attr(
@@ -1149,6 +1168,7 @@ impl AdmittedProbeNativeFailure {
 #[cfg(target_os = "linux")]
 #[derive(Default)]
 struct ProbeOriginalOwners {
+    continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     child: Option<tokio::process::Child>,
     job: Option<crate::process::ChildJob>,
     supervisor: Option<ProbeExecutionSupervisor>,
@@ -1303,6 +1323,10 @@ fn register_probe_command_slot(
         Ok(held) => held,
         Err(poisoned) => poisoned.into_inner(),
     };
+    command
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .continuous_entry_deadline = held.continuous_entry_deadline.clone();
     let slot = held
         .original
         .iter_mut()
@@ -1910,6 +1934,7 @@ impl DecodeProbeIdentity {
     pub(crate) async fn discover_admitted(
         bin: &str,
         version_close_operation_id: uuid::Uuid,
+        continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     ) -> Result<AdmittedProbeImage, AdmittedProbeNativeFailure> {
         if version_close_operation_id.is_nil() {
             return Err(AdmittedProbeNativeFailure::before_entry(
@@ -1917,7 +1942,10 @@ impl DecodeProbeIdentity {
             ));
         }
         let root = Arc::new(std::sync::Mutex::new(None));
-        let custody = Arc::new(std::sync::Mutex::new(ProbeAdmittedCustody::default()));
+        let custody = Arc::new(std::sync::Mutex::new(ProbeAdmittedCustody {
+            continuous_entry_deadline,
+            ..ProbeAdmittedCustody::default()
+        }));
         let result = Self::discover_with_mode_recording(
             bin,
             ProbeLaunchMode::Production,
@@ -2011,6 +2039,7 @@ impl DecodeProbeIdentity {
             .acquire_owned()
             .await
             .map_err(|_| DecodeFactError::CacheInvariant)?;
+        check_admitted_continuous_deadline(admitted_custody.as_ref())?;
         let executable = resolve_executable(bin)?;
         #[cfg(target_os = "macos")]
         let executable = if launch_mode.is_production() {
@@ -2044,8 +2073,10 @@ impl DecodeProbeIdentity {
             held_probe_file_identity_within(Arc::clone(&executable_file), IDENTITY_DEADLINE, None)
                 .await?;
         let snapshot_source = Arc::clone(&executable_file);
+        let snapshot_custody = admitted_custody.clone();
         let executable_snapshot = Arc::new(
             run_bounded_identity_task(IDENTITY_DEADLINE, None, move || {
+                check_admitted_continuous_deadline(snapshot_custody.as_ref())?;
                 snapshot_executable(&snapshot_source)
             })
             .await?,
@@ -3771,6 +3802,26 @@ async fn spawn_configured_probe(
         // `configure_probe_execution` already registered the priority ahead
         // of its own exec-from-`pre_exec`; the launcher's second registration
         // lands after that closure and never runs.
+        #[cfg(target_os = "linux")]
+        if let Some(slot) = command_slot.as_ref() {
+            let deadline = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .continuous_entry_deadline
+                .clone();
+            if deadline
+                .as_ref()
+                .is_some_and(|limit| limit.remaining().is_err())
+            {
+                // configure_probe_execution may already own its supervisor.
+                // Retain that SAME owner in the original command slot; this
+                // refusal is not NeverEntered and cannot refund its charge.
+                slot.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .supervisor = Some(supervisor);
+                return Err(DecodeFactError::Deadline);
+            }
+        }
         let spawned = crate::process::spawn_job_custodied(&mut command, work);
         supervisor.parent_after_spawn();
         match spawned {
@@ -4946,6 +4997,7 @@ async fn probe_version_with_deadline_on_recording(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        check_admitted_continuous_deadline(_admitted_custody.as_ref())?;
         let supervisor = configure_probe_execution(
             &mut command,
             launch_mode,
@@ -6430,6 +6482,7 @@ async fn collect_refinement_output(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    check_admitted_continuous_deadline(probe.admitted_custody.as_ref())?;
     let supervisor = configure_probe_execution(
         &mut command,
         probe.launch_mode,
@@ -6745,6 +6798,7 @@ async fn collect(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    check_admitted_continuous_deadline(probe.admitted_custody.as_ref())?;
     let supervisor = configure_probe_execution(
         &mut command,
         probe.launch_mode,

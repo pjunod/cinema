@@ -29,7 +29,7 @@ impl From<ApiError> for AdaptivePrepareFailure {
 pub(super) fn prepare_http_refusal(status: reqwest::StatusCode) -> AdaptivePrepareFailure {
     let error = held("adaptive peer refused Prepare");
     match status.as_u16() {
-        400 | 401 | 403 | 404 | 405 | 413 | 415 | 422 => AdaptivePrepareFailure::Hold(error),
+        400 | 401 | 403 | 404 | 405 | 413 | 415 | 422 | 428 => AdaptivePrepareFailure::Hold(error),
         _ => AdaptivePrepareFailure::Retry(error),
     }
 }

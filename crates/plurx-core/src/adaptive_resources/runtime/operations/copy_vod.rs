@@ -485,7 +485,13 @@ impl NodeResourceRuntime {
         let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
-        if role.refunded || copy.source_drifted || Instant::now() >= deadline {
+        if role.refunded
+            || copy.source_drifted
+            || crate::adaptive_resources::runtime::operations::entry_window_closed(
+                role.continuous_entry_deadline.as_ref(),
+                deadline,
+            )
+        {
             return Err(OperationError::State);
         }
         let root_member = copy.root_member;
@@ -704,7 +710,10 @@ impl NodeResourceRuntime {
             #[cfg(all(test, feature = "fixtures"))]
             self.fixture_copy_stage(CopyStartFixtureStage::TaskArmed)
                 .await;
-            if Instant::now() >= deadline {
+            if crate::adaptive_resources::runtime::operations::entry_window_closed(
+                role.continuous_entry_deadline.as_ref(),
+                deadline,
+            ) {
                 return Err(OperationError::Deadline);
             }
             let graph = role.graph.as_mut().ok_or(OperationError::State)?;
@@ -779,7 +788,10 @@ impl NodeResourceRuntime {
             .ok_or(OperationError::State)?
             .take_copy_start(task)
             .await?;
-        self.release_native_entry(role.binding, start)?;
+        self.release_native_entry(role.binding, role.continuous_entry_deadline.as_ref(), start)?;
+        // The copy producer has entered; the original create cutoff closes
+        // only first entry, never its later output work.
+        role.continuous_entry_deadline = None;
         // No suspension separates successful send from its delivery record.
         // A refused send never grants replay success or a fresh sender.
         copy.start_released = true;

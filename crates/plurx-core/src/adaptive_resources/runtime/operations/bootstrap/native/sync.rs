@@ -433,7 +433,7 @@ impl NodeResourceRuntime {
                     .as_ref()
                     .ok_or(OperationError::State)?,
             )?;
-            self.release_native_entry(role.binding, enter)?;
+            self.release_native_entry(role.binding, None, enter)?;
         }
         sync.join().await?;
         let result = sync.result.as_ref().ok_or(OperationError::State)?;

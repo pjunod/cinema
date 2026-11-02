@@ -681,7 +681,10 @@ impl NodeResourceRuntime {
             }
             self.finish_transition(id, role).await?;
         }
-        if Instant::now() >= deadline {
+        if crate::adaptive_resources::runtime::operations::entry_window_closed(
+            role.continuous_entry_deadline.as_ref(),
+            deadline,
+        ) {
             return Err(OperationError::Deadline);
         }
         if role
