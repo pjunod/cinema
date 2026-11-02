@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Nightly deep validation and mutation tests use the app's shipped FFmpeg
+  package; obsolete FFmpeg 6 runner capacity and recovery entries are retired.
+
 - Web copy/remux playback keeps decision and session-creation quality identities
   consistent when selecting alternate audio tracks or applying audio offsets.
 - Weekly release readiness validates the shipped Jellyfin FFmpeg runtime in

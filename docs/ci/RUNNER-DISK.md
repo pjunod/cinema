@@ -571,11 +571,13 @@ a lane asking for more than the janitor reserves keeps a band of its own.
 **`vod_web` asks for 45 G** for Playwright browsers and an ffmpeg build.
 **Release readiness's `release-check` also asks for 45 G** for its audited
 SDK package export, candidate-built shipping media/CI image, and full browser
-suite. Both need this room on top of the workspace; nothing reclaims the
+suite. Nightly deep validation and mutation also reserve 45 G for that
+same package export and shipping runtime build. All four lanes need this
+room on top of the workspace; nothing reclaims the
 25–45 G gap on their behalf. Raising `REQUIRED_GB` to 45 would put it over
 half a 78 GB guest, so that demand would be reported and ignored. Placement
 must provide the room. `test_no_lane_asks_for_more_disk_than_the_janitor_reserves`
-names and counts both exceptions, and fails if another lane copies the bar.
+names and counts these exceptions, and fails if another lane copies the bar.
 
 ### Two side effects of raising the reserve, stated rather than discovered
 

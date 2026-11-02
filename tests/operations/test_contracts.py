@@ -4590,6 +4590,11 @@ assert.equal(context.ACT_TIMER, null);
                     expected = android
                 elif (
                     path == ".github/workflows/validation-nightly.yml"
+                    and name in {"deep-validation", "mutation"}
+                ):
+                    expected = local("Linux", "X64", "lab", "incus", "ci-store")
+                elif (
+                    path == ".github/workflows/validation-nightly.yml"
                     and name == "ffmpeg8-pacing"
                 ):
                     expected = general

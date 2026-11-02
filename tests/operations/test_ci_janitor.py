@@ -543,8 +543,8 @@ class JanitorContractCase(unittest.TestCase):
         known_larger = {
             "45": (
                 "vod_web: Playwright browsers plus an ffmpeg build; "
-                "release-check: audited SDK export, shipped-runtime CI image and full browser suite",
-                2,
+                "release-check, nightly-deep, nightly-mutation: audited SDK export and shipping runtime CI images",
+                4,
             ),
         }
 
