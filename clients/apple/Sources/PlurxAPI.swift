@@ -89,14 +89,14 @@ struct PlurxAPI {
         configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 30
-        return URLSession(configuration: configuration)
+        return ServerTrust.session(configuration: configuration)
     }()
     private static let playbackPreparationSession: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = playbackPreparationTimeout
         configuration.timeoutIntervalForResource = playbackPreparationTimeout
-        return URLSession(configuration: configuration)
+        return ServerTrust.session(configuration: configuration)
     }()
     /// Sign Out is best effort, but never unbounded: a dead server must not
     /// keep the viewer trapped in a session they are trying to leave.
@@ -105,7 +105,7 @@ struct PlurxAPI {
         configuration.waitsForConnectivity = false
         configuration.timeoutIntervalForRequest = 5
         configuration.timeoutIntervalForResource = 5
-        return URLSession(configuration: configuration)
+        return ServerTrust.session(configuration: configuration)
     }()
     private var session: URLSession {
         #if DEBUG
@@ -132,6 +132,7 @@ struct PlurxAPI {
     }()
 
     private func makeURL(_ path: String, query: [URLQueryItem] = []) -> URL? {
+        ServerTrust.allowFirstUse(origin: origin)
         guard var comps = URLComponents(string: origin + "/api/v1/" + path) else { return nil }
         if !query.isEmpty { comps.queryItems = query }
         return comps.url
@@ -255,7 +256,7 @@ struct PlurxAPI {
         let data: Data
         let resp: URLResponse
         do { (data, resp) = try await ReadAfterHTTP.shared.data(for: req, using: session ?? self.session) }
-        catch { observe(0, failure: "network"); throw Self.transportError(from: error) }
+        catch { observe(0, failure: "network"); throw Self.transportError(from: error, origin: origin) }
         observe((resp as? HTTPURLResponse)?.statusCode ?? 0)
         try Self.check(resp, data: data)
         return try Self.decoder.decode(T.self, from: data)
@@ -266,7 +267,10 @@ struct PlurxAPI {
     /// actually becoming unreachable. URLSession reports cancellation as
     /// either Swift's CancellationError or NSURLErrorCancelled depending on
     /// which layer observes it first.
-    static func transportError(from error: Error) -> Error {
+    static func transportError(from error: Error, origin: String? = nil) -> Error {
+        if let origin, let message = ServerTrust.shared.failureMessage(for: origin) {
+            return APIError.transport(message)
+        }
         if error is CancellationError { return CancellationError() }
         if let urlError = error as? URLError, urlError.code == .cancelled {
             return CancellationError()
@@ -329,6 +333,26 @@ struct PlurxAPI {
     }
 
     // MARK: - Endpoints
+
+    /// Resolve an HTTP discovery address before sending a password or saved
+    /// bearer. The public identity endpoint intentionally never redirects;
+    /// this credential-free HEAD follows the app listener's HTTPS upgrade.
+    func connectionOrigin() async throws -> String {
+        guard let selected = URL(string: origin), selected.scheme?.lowercased() == "http" else { return origin }
+        guard let url = makeURL("me") else { throw APIError.badURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        let (_, response) = try await session.data(for: request)
+        guard let actual = response.url,
+              actual.host?.lowercased() == selected.host?.lowercased(),
+              ["http", "https"].contains(actual.scheme?.lowercased() ?? ""),
+              var components = URLComponents(url: actual, resolvingAgainstBaseURL: false) else {
+            throw APIError.transport("The server redirected to a different address. Connect to that server explicitly.")
+        }
+        components.path = ""; components.query = nil; components.fragment = nil
+        guard let resolved = components.string.flatMap(Session.canonicalOrigin) else { throw APIError.badURL }
+        return resolved
+    }
 
     /// Server identity is public and is also used to verify a rediscovered
     /// endpoint. Never attach a saved bearer token while probing candidates.

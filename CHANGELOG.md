@@ -8,6 +8,14 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- Apple clients remember selected self-signed server identities and use them
+  for HTTPS sign-in, artwork and playback without a manually installed certificate.
+- Apple TV Settings enters each category at its first setting and restores the
+  category when returning with Back. Picker controls expose their names and
+  selected values to accessibility.
+
 ## [0.8.0] — 2026-10-29
 
 ### Added
