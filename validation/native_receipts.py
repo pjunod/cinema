@@ -74,8 +74,8 @@ APPLE_EXTERNAL_INPUTS = [
 ]
 BUILD_SPECS = {
     'Makefile': 'a8dfee1e29ba93b43cf58ee5233a5aef1aeddd381765a759d47b05c8126b23c2',
-    # Reviewed build 282: only CURRENT_PROJECT_VERSION changed from 281.
-    'clients/apple/project.yml': 'ae6bd093f00498b05a2db3305a57e629fd6fabedae5331effacb27e8db83c856',
+    # Reviewed build 283: only CURRENT_PROJECT_VERSION changed from 282.
+    'clients/apple/project.yml': 'cc09cbfded7f56fa04f33452d32ab4d1e968a3df9dc77364b00239e3aa0cd168',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',
@@ -430,7 +430,8 @@ TRANSITION_INVALIDATES = {
     'TVMeridianNavigationTests/testPanelOwnsNativeFocusAndBackPreservesLibraryRoute',
 }
 # Reviewed schema-2 runner; changes require another explicit producer review.
-CASE_RUNNER_SHA256 = '8c9f0687923af53d97608cf90ced64c26d75abce3dd4380cef403aacf0269c68'
+# Reviewed required-journey addition: held timeline preview and release.
+CASE_RUNNER_SHA256 = '6462c5d3d4c6bb782181144f73233074732a0fc3abea805b56a291021e687604'
 
 
 def case_input_compatibility(commit, current):
