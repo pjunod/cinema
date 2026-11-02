@@ -683,6 +683,35 @@ impl PlaybackCacheBudget {
             )
         })?;
         let _operation = self.operation().await?;
+        // A cancelled write or eviction can invalidate a scan while it runs.
+        // Reconcile again instead of turning that transient state into a fatal
+        // StorageFull. Bound the whole retry sequence, including owner work.
+        tokio::time::timeout(IO_TIMEOUT + PRESSURE_TIMEOUT, async {
+            loop {
+                if let Some(reservation) =
+                    self.try_reserve_from_inventory(&path, index, bytes).await?
+                {
+                    return Ok(reservation);
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "playback cache inventory did not stabilize before reservation deadline",
+            )
+        })?
+    }
+
+    /// None means a concurrent cancellation invalidated the inventory. The
+    /// caller keeps the operation lock across retries and its overall timeout.
+    async fn try_reserve_from_inventory(
+        self: &Arc<Self>,
+        path: &Path,
+        index: usize,
+        bytes: u64,
+    ) -> io::Result<Option<CacheReservation>> {
         self.refresh(false).await?;
         let (device, allocation_unit) = {
             let state = self.lock();
@@ -702,13 +731,13 @@ impl PlaybackCacheBudget {
         }
         let report = self.make_room(Some((device, bytes))).await?;
         let mut state = self.lock();
-        if state.dirty || state.ceiling == 0 || state.remaining(device) < bytes {
-            // The sweep report says which refusal this is: an inventory a
-            // concurrent drop or cancelled eviction left dirty, a zero
-            // ceiling, or a full cache `make_room` found nothing to evict in.
-            let cause = if state.dirty {
-                "inventory_dirty"
-            } else if state.ceiling == 0 {
+        if state.dirty {
+            // The admission and pending grant share this lock, so a drop
+            // after refresh cannot slip through as unaccounted capacity.
+            return Ok(None);
+        }
+        if state.ceiling == 0 || state.remaining(device) < bytes {
+            let cause = if state.ceiling == 0 {
                 "zero_ceiling"
             } else {
                 "no_room"
@@ -734,7 +763,7 @@ impl PlaybackCacheBudget {
         if state
             .evicting
             .values()
-            .any(|candidate| overlapping(candidate, &path))
+            .any(|candidate| overlapping(candidate, path))
         {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -750,12 +779,12 @@ impl PlaybackCacheBudget {
                 allocation_unit,
             },
         );
-        state.pins.insert(id, path);
-        Ok(CacheReservation {
+        state.pins.insert(id, path.to_path_buf());
+        Ok(Some(CacheReservation {
             budget: Arc::clone(self),
             id,
             settled: false,
-        })
+        }))
     }
 
     pub(crate) async fn available_bytes(self: &Arc<Self>, path: &Path) -> io::Result<u64> {
@@ -1821,6 +1850,174 @@ mod tests {
                 line.message
             );
         }
+    }
+
+    // Hold the inventory slot after refresh captures its generation, then
+    // cancel an already admitted writer before the census completes.
+    async fn admission_after_cancelled_scan(
+        fixture: &Fixture,
+    ) -> io::Result<Option<CacheReservation>> {
+        let partial = fixture.roots[2].join("partial.tmp");
+        let cancelled = reserve(&partial, 64 * 1024)
+            .await
+            .expect("initial grant")
+            .expect("managed");
+        let slot = Arc::clone(&fixture.budget.io_slot)
+            .acquire_owned()
+            .await
+            .expect("inventory slot");
+        fixture.budget.lock().sample.as_mut().expect("sample").at = Instant::now() - SAMPLE_AGE;
+        let next = fixture.roots[0].join("next.m4s");
+        let admission = tokio::spawn(async move { reserve(&next, 64 * 1024).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !fixture.budget.lock().dirty {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("admission started its scan");
+        std::fs::write(partial, vec![0x5a; 64 * 1024]).expect("partial write");
+        drop(cancelled);
+        drop(slot);
+        admission.await.expect("admission task")
+    }
+
+    #[tokio::test]
+    async fn cancelled_writer_during_inventory_does_not_fail_playback_with_room() {
+        let fixture = Fixture::new();
+        let baseline = fixture.used().await;
+        fixture.limit(baseline + 128 * 1024);
+        let next = admission_after_cancelled_scan(&fixture)
+            .await
+            .expect("a dirty inventory is reconciled, not reported as disk full")
+            .expect("managed");
+        let state = fixture.budget.lock();
+        assert!(!state.dirty);
+        assert_eq!(state.pending.len(), 1);
+        assert!(state.used() >= baseline + 128 * 1024);
+        drop(state);
+        next.commit(0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_writer_during_inventory_cannot_hide_partial_bytes() {
+        let fixture = Fixture::new();
+        let baseline = fixture.used().await;
+        fixture.limit(baseline + 96 * 1024);
+        let refused = admission_after_cancelled_scan(&fixture)
+            .await
+            .expect_err("partial bytes leave too little room for the next segment");
+        assert_eq!(refused.kind(), io::ErrorKind::StorageFull);
+        let state = fixture.budget.lock();
+        assert!(!state.dirty, "the refusal follows a complete rescan");
+        assert!(state.used() >= baseline + 64 * 1024);
+        assert!(state.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inventory_conflicts_during_eviction_retry_before_admission() {
+        struct CancelWriter {
+            reservation: Mutex<Option<CacheReservation>>,
+        }
+        #[async_trait::async_trait]
+        impl CacheOwner for CancelWriter {
+            async fn candidates(&self) -> io::Result<Vec<CacheCandidate>> {
+                drop(self.reservation.lock().expect("reservation").take());
+                Ok(Vec::new())
+            }
+            async fn evict(&self, _: &CacheCandidate) -> io::Result<bool> {
+                unreachable!()
+            }
+        }
+        let fixture = Fixture::new();
+        fixture.file(0, "held.m4s", 64 * 1024);
+        let baseline = fixture.used().await;
+        fixture.limit(baseline + 96 * 1024);
+        let partial = fixture.roots[2].join("partial.tmp");
+        let reservation = reserve(&partial, 64 * 1024)
+            .await
+            .expect("initial grant")
+            .expect("managed");
+        std::fs::write(partial, vec![0x5a; 16 * 1024]).expect("partial write");
+        fixture.budget.register(Arc::new(CancelWriter {
+            reservation: Mutex::new(Some(reservation)),
+        }));
+        let next = reserve(&fixture.roots[1].join("next.ts"), 64 * 1024)
+            .await
+            .expect("reconcile a cancellation after refresh, during pressure selection")
+            .expect("managed");
+        assert!(!fixture.budget.lock().dirty);
+        assert!(fixture.budget.lock().used() >= baseline + 80 * 1024);
+        next.commit(0);
+    }
+
+    #[tokio::test]
+    async fn persistent_inventory_conflicts_have_one_reservation_deadline() {
+        struct InvalidateInventory {
+            budget: Weak<PlaybackCacheBudget>,
+            calls: std::sync::atomic::AtomicUsize,
+            proceed: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl CacheOwner for InvalidateInventory {
+            async fn candidates(&self) -> io::Result<Vec<CacheCandidate>> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                let budget = self.budget.upgrade().expect("budget");
+                {
+                    let mut state = budget.lock();
+                    state.dirty = true;
+                    state.dirty_revision = state.dirty_revision.wrapping_add(1);
+                }
+                self.proceed.notified().await;
+                Ok(Vec::new())
+            }
+            async fn evict(&self, _: &CacheCandidate) -> io::Result<bool> {
+                unreachable!()
+            }
+        }
+        let fixture = Fixture::new();
+        fixture.file(0, "held.m4s", 16 * 1024);
+        let baseline = fixture.used().await;
+        fixture.limit(baseline);
+        let owner = Arc::new(InvalidateInventory {
+            budget: Arc::downgrade(&fixture.budget),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            proceed: tokio::sync::Notify::new(),
+        });
+        fixture.budget.register(owner.clone());
+        let next = fixture.roots[0].join("next.m4s");
+        let admission = tokio::spawn(async move { reserve(&next, 8192).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while owner.calls.load(Ordering::Relaxed) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first pressure callback");
+        tokio::time::pause();
+        // Keep each callback below its own ten-second timeout while the
+        // repeated conflicts consume the single forty-second deadline.
+        for expected_calls in 2..=5 {
+            tokio::time::advance(Duration::from_secs(9)).await;
+            owner.proceed.notify_one();
+            let waiting_since = Instant::now();
+            while owner.calls.load(Ordering::Relaxed) < expected_calls {
+                assert!(waiting_since.elapsed() < Duration::from_secs(2));
+                tokio::task::yield_now().await;
+            }
+        }
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let refused = admission
+            .await
+            .expect("admission task")
+            .expect_err("persistent inventory conflicts are bounded");
+        assert_eq!(refused.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            refused.to_string(),
+            "playback cache inventory did not stabilize before reservation deadline"
+        );
+        assert!(fixture.budget.lock().pending.is_empty());
+        owner.proceed.notify_one();
     }
 
     #[tokio::test]

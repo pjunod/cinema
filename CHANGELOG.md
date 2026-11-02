@@ -121,6 +121,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Playback cache admission reconciles concurrent cancelled writes instead of
+  failing a video producer as disk-full while capacity remains, preventing
+  repeated Apple TV buffering and stream retries.
+
 - Shared libraries across Tailscale accounts: a Cinema running as the macOS
   LaunchAgent can now observe its own Tailscale, so it binds its private
   source address and can connect to other Cinemas (the Tailscale app answered
