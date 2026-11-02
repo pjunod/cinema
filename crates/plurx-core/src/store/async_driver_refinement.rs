@@ -4259,9 +4259,9 @@ async fn oracle_catalog_image_resume_replays_all_applied_and_rollback() {
         deadline: Instant::now() + Duration::from_secs(300),
     };
     for statement in [
-        "UPDATE settings SET value='00000000-0000-1000-8000-000000000001' WHERE key='instance.id'",
-        "UPDATE libraries SET paths='[]' WHERE id=1",
-        "DELETE FROM background_library_requests WHERE request_id='selected-scan'",
+        "UPDATE settings SET value='00000000-0000-1000-8000-000000000001' WHERE key='instance.id' AND json_valid($1)",
+        "UPDATE libraries SET paths='[]' WHERE id=1 AND json_valid($1)",
+        "DELETE FROM background_library_requests WHERE request_id='selected-scan' AND json_valid($1)",
     ] {
         let altered = Fixture::new().await;
         check_paged_initial_class(&altered)
