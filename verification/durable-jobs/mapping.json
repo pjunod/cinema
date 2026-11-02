@@ -571,13 +571,13 @@
       },
       {
         "anchor": "pub async fn produce(",
-        "sha256": "4c5e5d5a24e6aa27c6f64534216a808b1236903091ddd2e2ddabf12acd3debf5",
+        "sha256": "26d22a4281ba5f2e34054d31af9a6ec67c6bf060dd475b0acc4a3bdf8abec49c",
         "source": "crates/plurxd/src/transcode/manager/produce.rs",
         "table": "review \u00a73 artifact producer caller"
       },
       {
         "anchor": "            true\n        } else if let Some(fence) = publication_fence {\n            PublicationStore::fenced(self.store.as_ref(), fence.clone())",
-        "sha256": "4c5e5d5a24e6aa27c6f64534216a808b1236903091ddd2e2ddabf12acd3debf5",
+        "sha256": "26d22a4281ba5f2e34054d31af9a6ec67c6bf060dd475b0acc4a3bdf8abec49c",
         "source": "crates/plurxd/src/transcode/manager/produce.rs",
         "table": "review \u00a73 citation crates/plurxd/src/transcode/manager/produce.rs:2083"
       },
