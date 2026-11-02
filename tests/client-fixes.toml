@@ -400,7 +400,7 @@ test_anchor = "testPortraitLiveGuideShowsMultipleChannelsDespiteLegacySchedulePr
 id = "apple.tv-timeline-native-select"
 commits = ["3cf3d19948eccf2efb459adbbdc9f765d6f92db2"]
 source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
-source_anchor = "Button { dispatch(.select) } label: { content }"
+source_anchor = "Button { timelineHold?.cancel(); dispatch(.select) } label: { content }"
 test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
 test_anchor = "testLocalMovieTimelineSelectCommitsForwardAndBackwardPreview"
 
