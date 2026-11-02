@@ -296,7 +296,7 @@ USER root
 # install on a persistent runner. These two tool images are pinned by index
 # digest just like the release bases; neither builds the release binaries.
 FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS ci-rust-toolchain
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS ci-node-toolchain
+FROM node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS ci-node-toolchain
 
 FROM runtime-assets AS ci
 ARG PLURX_CI_SOURCE_SHA=""
@@ -328,7 +328,7 @@ RUN ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
     && rustup toolchain install 1.97.1 --profile minimal \
         --component rustfmt --component clippy --component llvm-tools-preview \
     && rustc +1.97.1 --version | grep -F 'rustc 1.97.1' \
-    && node --version | grep -E '^v22\.' \
+    && node --version | grep -Fx 'v22.23.4' \
     && ffmpeg -version | grep -E '^ffmpeg version n?8' \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
