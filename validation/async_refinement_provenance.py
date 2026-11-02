@@ -313,6 +313,17 @@ def producer(api, run_id, registration, mode, status=('running', 'in_progress', 
     return run, job, event
 
 
+TASK_PREAMBLE = re.compile(r'Runner ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) '
+                           r'\(version:[^)]*\) received task ([1-9][0-9]*) of job ')
+
+
+def task_runner_uuid(lines, job):
+    """The runner uuid Forgejo recorded as taking this task, from the task log preamble."""
+    match = TASK_PREAMBLE.match(lines[0]) if lines else None
+    require(match is not None and match[2] == str(job['task_id']), 'producer task preamble differs')
+    return match[1]
+
+
 def producer_log(api, run_id, job, job_key):
     path='/actions/jobs/'+str(job['id'])+'/logs?attempt=1'
     request=urllib.request.Request(api.root+path,headers={'Authorization':'token '+api.token})

@@ -14,6 +14,7 @@ import fcntl
 import http.client
 import json
 import os
+import platform
 from pathlib import Path
 import resource
 import re
@@ -263,7 +264,21 @@ def live_pr(api, reg):
     return live
 
 
-def runtime_identity(root, reg):
+def actual_runner(lines, job, reg):
+    """The owned runner executing this task, from Forgejo's records rather than the environment.
+
+    Forgejo's runner exports no RUNNER_NAME (see the cache actions). Forgejo writes
+    the uuid of the runner that took the task into the task log preamble; the
+    registration binds that uuid to the runner name (authenticate_runner_route
+    checks the binding against the live inventory before every dispatch). The
+    OS/architecture are the machine's own.
+    """
+    p.require(p.task_runner_uuid(lines, job) == reg['route']['runner_uuid'], 'unregistered runner slot')
+    arch = {'x86_64': 'X64', 'amd64': 'X64', 'aarch64': 'ARM64', 'arm64': 'ARM64'}.get(platform.machine().lower())
+    return {'name': reg['runner']['name'], 'os': platform.system(), 'arch': arch}
+
+
+def runtime_identity(root, reg, runner):
     """Pinned executable hashes/versions, actual owned runner, no env assertions."""
     expected = reg['runtime']
     p.closed(expected, ('rustc', 'cargo', 'java', 'tlc', 'python','action_node'))
@@ -299,8 +314,6 @@ def runtime_identity(root, reg):
               'TLC binary differs')
     actual['tlc'] = tlc
     p.require(actual == expected, 'toolchain differs')
-    runner = {'name': os.environ.get('RUNNER_NAME'), 'os': os.environ.get('RUNNER_OS'),
-              'arch': os.environ.get('RUNNER_ARCH')}
     p.require(runner == reg['runner'] and all(isinstance(v, str) and v for v in runner.values()),
               'unregistered runner slot')
     return {'toolchain': actual, 'runner': runner}
@@ -3478,7 +3491,8 @@ def _runner_body(control, root, output, mode, operation, reg, owned):
     live_pr(api, reg)
     if operation in ('execute','publish'):reject_prior_ordinal_dispatch(api,reg,control,run_id)
     source=materialize_session_source(root,reg,control['session_id'])
-    identity = runtime_identity(source, reg)
+    _, own_lines = p.producer_log(api, run_id, job, mode)
+    identity = runtime_identity(source, reg, actual_runner(own_lines, job, reg))
     measurement = measured_resources(output, identity)
     measurement['storage']=reg['storage']
     measurement['producer']={'run':run_id,'job':job['id'],'task':job['task_id'],'attempt':1}

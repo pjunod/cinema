@@ -300,6 +300,28 @@ class CapabilityAndStorageTests(unittest.TestCase):
 if __name__ == '__main__':unittest.main()
 
 
+class ActualRunnerTests(unittest.TestCase):
+    """Forgejo exports no RUNNER_NAME; the task log preamble names the runner that took the task."""
+    UUID='3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b'
+    REG={'route':{'runner_uuid':UUID},'runner':{'name':'gha-proof-general-01','os':'Linux','arch':'X64'}}
+    JOB={'task_id':25240}
+
+    def preamble(self,uuid=UUID,task=25240):
+        return [f'Runner {uuid} (version:v13.1.0) received task {task} of job unit, triggered by event: workflow_dispatch']
+
+    def test_registered_runner_comes_from_the_task_preamble_without_runner_name(self):
+        env={k:v for k,v in os.environ.items() if not k.startswith('RUNNER_')}
+        with patch.dict(os.environ,env,clear=True),patch('platform.machine',return_value='x86_64'),\
+             patch('platform.system',return_value='Linux'):
+            self.assertEqual(s.actual_runner(self.preamble(),self.JOB,self.REG),self.REG['runner'])
+
+    def test_another_runner_or_task_preamble_refuses(self):
+        for lines in (self.preamble(uuid='00000000-0000-4000-8000-000000000000'),self.preamble(task=25241),[],
+                      ['Runner '+self.UUID+' received task 25240 of job unit']):
+            with self.subTest(lines=lines),self.assertRaises(receipts.ReceiptError):
+                s.actual_runner(lines,self.JOB,self.REG)
+
+
 class DedicatedRouteTests(unittest.TestCase):
     def registration(self):
         route=s.route_contract(ROOT)
