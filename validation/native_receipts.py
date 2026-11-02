@@ -74,8 +74,9 @@ APPLE_EXTERNAL_INPUTS = [
 ]
 BUILD_SPECS = {
     'Makefile': 'a8dfee1e29ba93b43cf58ee5233a5aef1aeddd381765a759d47b05c8126b23c2',
-    # Reviewed 0.8.0 build 284: release metadata only; resource boundary unchanged.
-    'clients/apple/project.yml': 'b5fa9dad092258bd4b757b097782012f50d21819f8f8d6ebe3007d1dc7b9e9c7',
+    # Reviewed 0.8.0 build 286: only CURRENT_PROJECT_VERSION differs from the
+    # reviewed build 284 bytes; bundled resources and build scripts are unchanged.
+    'clients/apple/project.yml': 'ea1933008d64452e14e06365afa86e83fa4995959e698464481e6fc9ca378c84',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',
