@@ -11,6 +11,80 @@ mod adversarial;
 #[path = "restart_tests.rs"]
 mod restart;
 
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "outage_contract_tests.rs"]
+mod outage;
+
+/// Adaptive replicated contracts need the actual owning membership lifecycle,
+/// not the raw application-only three-voter bootstrap used by other contracts.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn with_adaptive_cluster<F>(body: F)
+where
+    F: for<'a> FnOnce(
+            &'a source_contract::SourceContractCluster,
+        ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+        + Send
+        + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        startup_observer::run_plural_fixture("adaptive-store-three-voter", move || async move {
+            let _case = HIQLITE_CASE.lock().await;
+            // This initializer retains all three selected owners and drains
+            // them after the body. Source installation remains uncalled.
+            source_contract::with_cluster(body).await;
+        });
+    })
+    .await
+    .expect("owned adaptive replicated fixture thread");
+}
+
+async fn for_each_adaptive_backend<F, Fut>(mut contract: F)
+where
+    F: FnMut(Arc<dyn Store>, &'static str) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    for fixture in sqlite_fixtures() {
+        contract(Arc::clone(&fixture.store), fixture.name).await;
+    }
+    #[cfg(feature = "hiqlite-contract-tests")]
+    with_adaptive_cluster(move |cluster| {
+        Box::pin(async move {
+            let store = cluster.open_store().await;
+            contract(Arc::new(store), "hiqlite-3-voter").await;
+        })
+    })
+    .await;
+}
+
+async fn for_each_adaptive_strandable_backend<F, Fut>(mut contract: F)
+where
+    F: FnMut(Arc<dyn Store>, &'static str, Arc<StrandedFieldOrder>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let directory = tempfile::tempdir().expect("strandable SQLite directory");
+    let path = directory.path().join("plurx.db");
+    let store = SqliteStore::open(&path).expect("strandable SQLite store");
+    contract(
+        Arc::new(store),
+        "file",
+        Arc::new(StrandedFieldOrder::Sqlite(path)),
+    )
+    .await;
+    #[cfg(feature = "hiqlite-contract-tests")]
+    with_adaptive_cluster(move |cluster| {
+        Box::pin(async move {
+            let store = cluster.open_store().await;
+            contract(
+                Arc::new(store),
+                "hiqlite-3-voter",
+                Arc::new(StrandedFieldOrder::Hiqlite(cluster.client())),
+            )
+            .await;
+        })
+    })
+    .await;
+}
+
 struct AttemptFixture {
     claim: AttemptClaim,
 }
@@ -149,7 +223,7 @@ fn applied(result: AttemptMutation) -> RequestStatus {
 
 #[tokio::test]
 async fn provisional_route_precedes_spawn_and_is_never_serveable() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let status = applied(
             store
@@ -200,7 +274,7 @@ async fn provisional_route_precedes_spawn_and_is_never_serveable() {
 
 #[tokio::test]
 async fn duplicate_prepare_reuses_exact_worker_custody() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let status = applied(
             store
@@ -239,7 +313,7 @@ async fn duplicate_prepare_reuses_exact_worker_custody() {
 
 #[tokio::test]
 async fn two_attempts_have_one_winner_and_no_partial_activation() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let first = applied(
             store
@@ -318,7 +392,7 @@ async fn two_attempts_have_one_winner_and_no_partial_activation() {
 
 #[tokio::test]
 async fn original_deadline_and_three_worker_bound_survive_retries_and_restart() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let original = applied(
             store
@@ -363,7 +437,7 @@ async fn original_deadline_and_three_worker_bound_survive_retries_and_restart() 
 
 #[tokio::test]
 async fn drain_includes_every_unclosed_attempt() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let initial = applied(
             store
@@ -413,7 +487,7 @@ async fn drain_includes_every_unclosed_attempt() {
 
 #[tokio::test]
 async fn closed_cleanup_requires_exact_worker_and_prior_fence_then_replays() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let claimed = applied(
             store
@@ -535,7 +609,7 @@ async fn closed_cleanup_requires_exact_worker_and_prior_fence_then_replays() {
 
 #[tokio::test]
 async fn adopted_winner_does_not_block_exact_losing_worker_close() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let first = applied(
             store
@@ -714,7 +788,7 @@ fn adoption_from_won(
 
 #[tokio::test]
 async fn adopt_rechecks_winner_epoch_predecessor_and_maintenance() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let adoption = ready_adoption(store.as_ref(), &fixture).await;
         let mut wrong = adoption.clone();
@@ -780,7 +854,7 @@ async fn adopt_rechecks_winner_epoch_predecessor_and_maintenance() {
 
 #[tokio::test]
 async fn expired_preparation_stays_held_until_confirmed_reap() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let mut adoption = ready_adoption(store.as_ref(), &fixture).await;
         adoption.context.now_ms = 20_001;
@@ -830,7 +904,7 @@ async fn raw_refused(raw: &StrandedFieldOrder, sql: &str) -> bool {
 
 #[tokio::test]
 async fn legacy_writer_cannot_reacquire_or_activate_a_live_attempt() {
-    for_each_strandable_backend(|store,_,raw|async move {
+    for_each_adaptive_strandable_backend(|store,_,raw|async move {
         let fixture=AttemptFixture::new(store.as_ref()).await;
         let before=applied(store.claim_adaptive_attempt(&fixture.claim).await.expect("claim"));
         for sql in [

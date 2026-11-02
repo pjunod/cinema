@@ -10207,3 +10207,763 @@ fn lifecycle_projection_agrees() {
         "every verdict has to be reached both ways, or the agreement is vacuous"
     );
 }
+
+// These cases reuse the real singleton activation/observer pattern above.
+// They exercise Store coordination only: no R, native owner or Close is minted.
+#[cfg(feature = "hiqlite-store")]
+mod adaptive_outage_regressions {
+    use super::super::*;
+    use crate::cluster::migration::{
+        select_daemon_store_observing, SelectedStore, StartupClockObserver,
+    };
+    use crate::config::Config;
+    use crate::error::StoreError;
+    use crate::playback_principal::PlaybackPrincipal;
+    use crate::store::adaptive_resource_attempts::{self as attempts, *};
+    use crate::store::{SettingsStore, SqliteStore, UserStore};
+    use uuid::Uuid;
+
+    use futures_util::FutureExt as _;
+    use std::panic::AssertUnwindSafe;
+    use std::pin::Pin;
+
+    type FixturePanic = Box<dyn std::any::Any + Send + 'static>;
+
+    fn run_owned(case: impl Future<Output = ()> + Send + 'static) {
+        let thread = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("M4 owned Store fixture runtime");
+                if let Err(panic) =
+                    std::panic::catch_unwind(AssertUnwindSafe(|| runtime.block_on(Box::pin(case))))
+                {
+                    // A failed selector can still own work on this runtime.
+                    // Keeping only its JoinHandle while dropping the runtime
+                    // would cancel that original work behind the fixture.
+                    std::mem::forget(runtime);
+                    std::panic::resume_unwind(panic);
+                }
+            })
+            .expect("M4 owned Store fixture thread");
+        if let Err(panic) = thread.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    struct SingletonFixture {
+        root: Option<tempfile::TempDir>,
+        selector: Option<tokio::task::JoinHandle<Result<SelectedStore, StoreError>>>,
+        selected: Option<SelectedStore>,
+    }
+
+    impl SingletonFixture {
+        fn new() -> Self {
+            Self {
+                root: Some(tempfile::tempdir().expect("M4 owned singleton root")),
+                selector: None,
+                selected: None,
+            }
+        }
+
+        fn root(&self) -> &Path {
+            self.root.as_ref().expect("retained singleton root").path()
+        }
+
+        async fn start(&mut self, seed_source: bool, sharing: bool) {
+            let root = self.root().to_owned();
+            let saw_deferred = Arc::new(AtomicBool::new(false));
+            let observer = Arc::new(SingletonObserver {
+                saw_deferred: Arc::clone(&saw_deferred),
+            });
+            let (enter, entered) = tokio::sync::oneshot::channel();
+            self.selector = Some(tokio::spawn(async move {
+                entered
+                    .await
+                    .map_err(|_| StoreError::Task("fixture selector never entered".into()))?;
+                selected(&root, seed_source, sharing, observer).await
+            }));
+            // Register the original task before permitting native selection.
+            enter.send(()).expect("original selector task registered");
+            let owner = tokio::time::timeout(
+                Duration::from_secs(120),
+                self.selector.as_mut().expect("retained original selector"),
+            )
+            .await
+            .expect("bounded original selector setup")
+            .expect("original selector completed without panic")
+            .expect("actual activation and owning membership initializer");
+            // Publish custody before any setup assertion can panic.
+            self.selected = Some(owner);
+            self.selector = None;
+            assert!(saw_deferred.load(Ordering::Acquire));
+            assert_eq!(
+                self.selected
+                    .as_ref()
+                    .expect("retained selected owner")
+                    .store
+                    .adaptive_attempt_schema()
+                    .await
+                    .expect("actual adjunct readiness"),
+                AttemptSchemaReadiness::Ready
+            );
+        }
+
+        async fn run<F>(
+            &mut self,
+            seed_source: bool,
+            sharing: bool,
+            body: F,
+        ) -> (Result<(), FixturePanic>, Vec<String>)
+        where
+            F: for<'a> FnOnce(
+                &'a mut SelectedStore,
+                &'a Path,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+        {
+            let setup = AssertUnwindSafe(self.start(seed_source, sharing))
+                .catch_unwind()
+                .await;
+            let result = match setup {
+                Ok(()) => {
+                    let root = self.root.as_ref().expect("retained body root").path();
+                    let selected = self.selected.as_mut().expect("retained body owner");
+                    AssertUnwindSafe(async {
+                        tokio::time::timeout(Duration::from_secs(180), body(selected, root))
+                            .await
+                            .expect("bounded original singleton body");
+                    })
+                    .catch_unwind()
+                    .await
+                }
+                Err(panic) => Err(panic),
+            };
+            let mut failures = Vec::new();
+            if self.selector.is_some() {
+                failures.push("entered selector has not returned a positively owned Store".into());
+            }
+            if let Some(selected) = self.selected.as_ref() {
+                match AssertUnwindSafe(tokio::time::timeout(
+                    Duration::from_secs(120),
+                    selected.shutdown(),
+                ))
+                .catch_unwind()
+                .await
+                {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(error))) => {
+                        failures.push(format!("original singleton shutdown refused: {error}"))
+                    }
+                    Ok(Err(_)) => failures.push("original singleton shutdown timed out".into()),
+                    Err(_) => failures.push("original singleton shutdown panicked".into()),
+                }
+            }
+            (result, failures)
+        }
+
+        // Called only after successful setup/body and positive original Store
+        // shutdown. Default Drop always preserves failure ownership instead.
+        fn finish(mut self) {
+            assert!(
+                self.selector.is_none(),
+                "unreturned selector cannot be released"
+            );
+            drop(
+                self.selected
+                    .take()
+                    .expect("positively drained original selected owner"),
+            );
+            self.root
+                .take()
+                .expect("positively drained fixture root")
+                .close()
+                .expect("remove only the successfully drained singleton root");
+        }
+    }
+
+    impl Drop for SingletonFixture {
+        fn drop(&mut self) {
+            let root = self.root.as_ref().map(|root| root.path().to_owned());
+            // Retain custody BEFORE reporting, so even a reporting panic
+            // cannot drop the original owner/task or delete its data root.
+            std::mem::forget(self.selected.take());
+            std::mem::forget(self.selector.take());
+            std::mem::forget(self.root.take());
+            if let Some(root) = root {
+                eprintln!(
+                    "M4 singleton retains failed or uncertain storage at {}",
+                    root.display()
+                );
+            }
+        }
+    }
+
+    fn run_singleton<F>(seed_source: bool, sharing: bool, body: F)
+    where
+        F: for<'a> FnOnce(
+                &'a mut SelectedStore,
+                &'a Path,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+            + Send
+            + 'static,
+    {
+        run_owned(async move {
+            let mut fixture = SingletonFixture::new();
+            let (result, failures) = fixture.run(seed_source, sharing, body).await;
+            if let Err(panic) = result {
+                drop(fixture); // Preserve original owners before resuming.
+                std::panic::resume_unwind(panic);
+            }
+            assert!(
+                failures.is_empty(),
+                "singleton drainage is unproved: {failures:?}"
+            );
+            fixture.finish();
+        });
+    }
+
+    struct SingletonObserver {
+        saw_deferred: Arc<AtomicBool>,
+    }
+    impl StartupClockObserver for SingletonObserver {
+        fn start(
+            &self,
+            manager: MembershipManager,
+            _node: String,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>> {
+            Box::pin(async move {
+                let inner = manager
+                    .replicated_inner()
+                    .map_err(|e| StoreError::Database(e.to_string()))?;
+                let rows = inner.client.query_consistent_map::<CountRow, _>(
+                    "SELECT count(*) AS count FROM sqlite_master WHERE name GLOB 'media_resource_*' OR tbl_name GLOB 'media_resource_*'", params!()).await.map_err(|error| StoreError::Database(error.to_string()))?;
+                assert!(matches!(rows.as_slice(), [row] if row.count == 0),
+                    "bootstrap must defer instead of installing standalone authority before membership");
+                self.saw_deferred.store(true, Ordering::Release);
+                let roster = manager
+                    .clock_peers()
+                    .await
+                    .map_err(|e| StoreError::Database(e.to_string()))?;
+                let applied = roster
+                    .membership
+                    .as_ref()
+                    .expect("actual committed singleton watch");
+                assert_eq!(applied.members, BTreeSet::from([applied.local_node]));
+                assert_eq!(applied.voters, applied.members);
+                assert!(roster.peers.is_empty());
+                let guard = manager.clock_guard();
+                assert!(guard.publish(
+                    guard
+                        .roster_for_peer_directory(&roster)
+                        .expect("M4 original Store and outage fixture operation"),
+                    BTreeMap::new()
+                ));
+                Ok(())
+            })
+        }
+    }
+
+    async fn selected(
+        root: &Path,
+        seed_source: bool,
+        sharing: bool,
+        observer: Arc<SingletonObserver>,
+    ) -> Result<SelectedStore, StoreError> {
+        let held = (0..3)
+            .map(|_| {
+                std::net::TcpListener::bind("127.0.0.1:0")
+                    .expect("M4 original Store and outage fixture operation")
+            })
+            .collect::<Vec<_>>();
+        let addresses = held
+            .iter()
+            .map(|listener| {
+                listener
+                    .local_addr()
+                    .expect("M4 original Store and outage fixture operation")
+            })
+            .collect::<Vec<_>>();
+        let mut config = Config::default();
+        config.storage.data_dir = root.to_owned();
+        config.server.bind = addresses[0];
+        config.cluster.raft_bind = addresses[1];
+        config.cluster.api_bind = addresses[2];
+        config.cluster.advertise_host = "localhost".into();
+        config.cluster.join_url = format!("http://{}", addresses[0]);
+        config.cluster.artwork_url = config.cluster.join_url.clone();
+        if seed_source || sharing {
+            let sqlite = SqliteStore::open(&root.join("plurx.db"))
+                .expect("M4 original Store and outage fixture operation");
+            if seed_source {
+                sqlite
+                    .create_user("m4-retained-user", "unused-fixture-hash", false)
+                    .await
+                    .expect("M4 original Store and outage fixture operation");
+            }
+            if sharing {
+                sqlite
+                    .put_setting("sharing_enabled", "1")
+                    .await
+                    .expect("M4 original Store and outage fixture operation");
+            }
+            drop(sqlite);
+        }
+        drop(held);
+        Box::pin(select_daemon_store_observing(
+            &config,
+            Some(observer.as_ref()),
+        ))
+        .await
+    }
+
+    async fn claim_input(store: &dyn Store, worker: &str) -> AttemptClaim {
+        let id = Uuid::new_v4();
+        let now = unix_ms().expect("M4 original Store and outage fixture operation");
+        let user = store
+            .create_user(&format!("m4-{id}"), "unused-fixture-hash", false)
+            .await
+            .expect("M4 original Store and outage fixture operation");
+        let key = RequestKey {
+            request_id: format!("m4-{id}"),
+            request_incarnation_id: Uuid::new_v4(),
+        };
+        let binding = RequestBinding {
+            version: 1,
+            key: key.clone(),
+            principal: PlaybackPrincipal::LocalUser { user_id: user.id },
+            request_fingerprint: "a".repeat(64),
+            playback_id: Uuid::new_v4().to_string(),
+            recovery_epoch: Uuid::new_v4(),
+            planning_generation: 1,
+            planning_source_digest: "b".repeat(64),
+            settings_digest: "c".repeat(64),
+            intent_digest: "d".repeat(64),
+            original_deadline_ms: now + 600_000,
+            expected_predecessor_incarnation_id: None,
+            expected_predecessor_owner_epoch: None,
+            expected_desired_revision: None,
+        };
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    &binding.principal,
+                    &key.request_id,
+                    &binding.request_fingerprint,
+                    &binding.playback_id,
+                    &key.request_incarnation_id.to_string(),
+                    now,
+                    binding.original_deadline_ms
+                )
+                .await
+                .expect("M4 original Store and outage fixture operation"),
+            crate::domain::MediaSessionRequestClaim::Acquired { .. }
+        ));
+        AttemptClaim {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: 0,
+                expected_attempt_sequence: 0,
+                now_ms: now + 1,
+            },
+            binding,
+            key: AttemptKey {
+                request: key,
+                attempt_id: Uuid::new_v4(),
+                route_incarnation_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                worker_node_id: worker.to_owned(),
+                owner_epoch: 1,
+                ordinal: 1,
+            },
+            worker_instance_id: Uuid::new_v4(),
+            serving_generation: 7,
+            domains: vec![format!("processing:{id}")],
+        }
+    }
+
+    fn query(node: &str) -> AttemptInventoryQuery {
+        AttemptInventoryQuery {
+            worker_node_id: node.to_owned(),
+            after_attempt_id: None,
+            limit: 128,
+        }
+    }
+
+    #[test]
+    fn fresh_bootstrap_defers_outage_adjunct_until_owned_membership_then_installs_exact_shape() {
+        run_singleton(false, false, |selected, _root| {
+            Box::pin(async move {
+                let client = selected
+                    .local_client()
+                    .expect("M4 original Store and outage fixture operation");
+                let rows = client
+                    .query_consistent_map::<CountRow, _>(
+                        format!(
+                            "SELECT CASE WHEN ({}) THEN 1 ELSE 0 END AS count",
+                            adaptive_outage_schema_guard()
+                        ),
+                        params!(),
+                    )
+                    .await
+                    .expect("M4 original Store and outage fixture operation");
+                assert!(matches!(rows.as_slice(), [row] if row.count == 1));
+                let rows = client.query_consistent_map::<CountRow, _>(
+                "SELECT count(*) AS count FROM sqlite_master WHERE name='media_resource_attempt_outage_insert'", params!()).await.expect("M4 original Store and outage fixture operation");
+                assert!(matches!(rows.as_slice(), [row] if row.count == 1));
+            })
+        });
+    }
+
+    #[test]
+    fn sqlite_activation_preserves_source_data_and_installs_replicated_outage_authority_after_membership(
+    ) {
+        run_singleton(true, false, |selected, _root| {
+            Box::pin(async move {
+                assert!(selected
+                    .store
+                    .get_user_by_username("m4-retained-user")
+                    .await
+                    .expect("M4 original Store and outage fixture operation")
+                    .is_some());
+                assert_eq!(
+                    selected
+                        .store
+                        .adaptive_attempt_schema()
+                        .await
+                        .expect("M4 original Store and outage fixture operation"),
+                    AttemptSchemaReadiness::Ready
+                );
+            })
+        });
+    }
+
+    #[test]
+    fn replicated_outage_legacy_source_layout_migrates_to_principal_without_rejecting_its_extra_guard(
+    ) {
+        run_singleton(true, true, |selected, root| {
+            Box::pin(async move {
+                let client = selected
+                    .local_client()
+                    .expect("M4 original Store and outage fixture operation");
+                let guard = crate::store::sharing_source_schema::predecessor_layout_guard_for(
+                    attempts::schema::OutageFence::Replicated,
+                );
+                let rows = client
+                    .query_consistent_map::<CountRow, _>(
+                        format!("SELECT CASE WHEN ({guard}) THEN 1 ELSE 0 END AS count"),
+                        params!(),
+                    )
+                    .await
+                    .expect("M4 original Store and outage fixture operation");
+                assert!(matches!(rows.as_slice(), [row] if row.count == 1));
+                // A freshly opened adapter has no legacy layout hint cached from
+                // before the outage trigger was installed. Its real session
+                // dispatch must recognize the exact replicated predecessor too.
+                let fresh = crate::store::HiqliteAuthStore::open(
+                    client.clone(),
+                    &root.join("m4-fresh-legacy-telemetry.db"),
+                )
+                .await
+                .expect("fresh actual legacy adapter with owning membership present");
+                assert_eq!(
+                    fresh
+                        .adaptive_attempt_schema()
+                        .await
+                        .expect("M4 original Store and outage fixture operation"),
+                    AttemptSchemaReadiness::Ready
+                );
+                drop(fresh);
+                assert!(
+                    selected
+                        .prepare_source_schema_before_serving()
+                        .await
+                        .expect("M4 original Store and outage fixture operation"),
+                    "actual owning Source startup coordinator"
+                );
+                assert_eq!(
+                    selected
+                        .store
+                        .adaptive_attempt_schema()
+                        .await
+                        .expect("M4 original Store and outage fixture operation"),
+                    AttemptSchemaReadiness::Ready
+                );
+                let input = claim_input(selected.store.as_ref(), &selected.identity.node_id).await;
+                assert!(matches!(
+                    selected
+                        .store
+                        .claim_adaptive_attempt(&input)
+                        .await
+                        .expect("M4 original Store and outage fixture operation"),
+                    AttemptMutation::Applied(_)
+                ));
+            })
+        });
+    }
+
+    #[test]
+    fn replicated_outage_orders_new_claims_but_preserves_original_replay_and_other_targets() {
+        run_singleton(false, false, |selected, _root| {
+            Box::pin(async move {
+                let node = selected.identity.node_id.clone();
+                let before = claim_input(selected.store.as_ref(), &node).await;
+                let expected = match selected
+                    .store
+                    .claim_adaptive_attempt(&before)
+                    .await
+                    .expect("M4 original Store and outage fixture operation")
+                {
+                    AttemptMutation::Applied(status) => status,
+                    other => panic!("{other:?}"),
+                };
+                let manager = selected.membership_manager();
+                let lease = MembershipManager::prepare_restart_preparation_claim(
+                    &node,
+                    Duration::from_secs(1),
+                )
+                .expect("M4 original Store and outage fixture operation");
+                manager
+                    .commit_cluster_operation_lease(&lease)
+                    .await
+                    .expect("M4 original Store and outage fixture operation");
+                assert_eq!(
+                    selected
+                        .store
+                        .claim_adaptive_attempt(&before)
+                        .await
+                        .expect("M4 original Store and outage fixture operation"),
+                    AttemptMutation::Replay(expected)
+                );
+                let mut blocked = claim_input(selected.store.as_ref(), &node).await;
+                blocked.context.now_ms = lease.expires_at_unix_ms + 1;
+                assert!(blocked.context.now_ms < blocked.binding.original_deadline_ms);
+                assert!(
+                    selected
+                        .store
+                        .claim_adaptive_attempt(&blocked)
+                        .await
+                        .is_err(),
+                    "future origin time cannot bypass a present row"
+                );
+                let other = claim_input(selected.store.as_ref(), "independent-worker").await;
+                assert!(matches!(
+                    selected
+                        .store
+                        .claim_adaptive_attempt(&other)
+                        .await
+                        .expect("M4 original Store and outage fixture operation"),
+                    AttemptMutation::Applied(_)
+                ));
+                let inventory = selected
+                    .store
+                    .unclosed_adaptive_attempts_under_outage(&lease, &query(&node))
+                    .await
+                    .expect("M4 original Store and outage fixture operation");
+                assert_eq!(inventory.entries.len(), 1);
+                assert_eq!(inventory.entries[0].attempt.key, before.key);
+                let old_guard = attempts::schema::ready_guard(attempts::schema::Layout::Legacy);
+                let client = selected
+                    .local_client()
+                    .expect("M4 original Store and outage fixture operation");
+                let result = client
+                    .txn(vec![(attempts::schema::assertion(&old_guard), params!())])
+                    .await;
+                assert!(
+                    result.is_err()
+                        || result
+                            .expect("M4 original Store and outage fixture operation")
+                            .into_iter()
+                            .any(|row| row.is_err()),
+                    "old standalone writer cannot accept the upgraded shape"
+                );
+                assert_eq!(
+                    manager
+                        .release_cluster_operation_lease(&lease)
+                        .await
+                        .expect("M4 original Store and outage fixture operation"),
+                    ClusterOperationCleanupOutcome::Confirmed
+                );
+            })
+        });
+    }
+
+    #[test]
+    fn exact_outage_inventory_rejects_release_replacement_expiry_tampering_and_old_page_cursor() {
+        run_singleton(false, false, |selected, _root| {
+            Box::pin(async move {
+                let node = selected.identity.node_id.clone();
+                for _ in 0..3 {
+                    let input = claim_input(selected.store.as_ref(), &node).await;
+                    assert!(matches!(
+                        selected
+                            .store
+                            .claim_adaptive_attempt(&input)
+                            .await
+                            .expect("M4 original Store and outage fixture operation"),
+                        AttemptMutation::Applied(_)
+                    ));
+                }
+                let manager = selected.membership_manager();
+                let old = MembershipManager::prepare_restart_preparation_claim(
+                    &node,
+                    Duration::from_secs(60),
+                )
+                .expect("M4 original Store and outage fixture operation");
+                manager
+                    .commit_cluster_operation_lease(&old)
+                    .await
+                    .expect("M4 original Store and outage fixture operation");
+                let mut page_query = query(&node);
+                page_query.limit = 1;
+                let first = selected
+                    .store
+                    .unclosed_adaptive_attempts_under_outage(&old, &page_query)
+                    .await
+                    .expect("M4 original Store and outage fixture operation");
+                assert_eq!(first.entries.len(), 1);
+                assert!(first.next_cursor.is_some());
+                page_query.after_attempt_id = first.next_cursor;
+                assert_eq!(
+                    manager
+                        .release_cluster_operation_lease(&old)
+                        .await
+                        .expect("M4 original Store and outage fixture operation"),
+                    ClusterOperationCleanupOutcome::Confirmed
+                );
+                assert!(selected
+                    .store
+                    .unclosed_adaptive_attempts_under_outage(&old, &page_query)
+                    .await
+                    .is_err());
+                let replacement = MembershipManager::prepare_restart_preparation_claim(
+                    &node,
+                    Duration::from_secs(60),
+                )
+                .expect("M4 original Store and outage fixture operation");
+                manager
+                    .commit_cluster_operation_lease(&replacement)
+                    .await
+                    .expect("M4 original Store and outage fixture operation");
+                assert!(selected
+                    .store
+                    .unclosed_adaptive_attempts_under_outage(&old, &page_query)
+                    .await
+                    .is_err());
+                let mut wrong_expiry = replacement.clone();
+                wrong_expiry.expires_at_unix_ms += 1;
+                assert!(selected
+                    .store
+                    .unclosed_adaptive_attempts_under_outage(&wrong_expiry, &query(&node))
+                    .await
+                    .is_err());
+                let fresh = selected
+                    .store
+                    .unclosed_adaptive_attempts_under_outage(&replacement, &query(&node))
+                    .await
+                    .expect("M4 original Store and outage fixture operation");
+                assert_eq!(fresh.entries.len(), 3);
+                assert_eq!(
+                    manager
+                        .release_cluster_operation_lease(&replacement)
+                        .await
+                        .expect("M4 original Store and outage fixture operation"),
+                    ClusterOperationCleanupOutcome::Confirmed
+                );
+            })
+        });
+    }
+
+    #[test]
+    fn singleton_body_panic_drains_original_owner_and_preserves_failed_root() {
+        run_owned(async {
+            let mut fixture = SingletonFixture::new();
+            let root = fixture.root().to_owned();
+            let (result, failures) = fixture
+                .run(false, false, |selected, root| {
+                    Box::pin(async move {
+                        assert!(
+                            selected.local_client().is_some(),
+                            "actual selected voter owner"
+                        );
+                        std::fs::write(
+                            root.join("body-entered"),
+                            selected.identity.node_id.as_bytes(),
+                        )
+                        .expect("record actual body entry under the original owner");
+                        panic!("intentional singleton body failure after actual selection");
+                    })
+                })
+                .await;
+            assert!(result.is_err(), "the real fixture body must have panicked");
+            assert!(
+                failures.is_empty(),
+                "actual original shutdown must finish: {failures:?}"
+            );
+            assert!(
+                fixture.selected.is_some(),
+                "shutdown did not take original custody"
+            );
+            assert!(root.join("body-entered").is_file());
+            drop(fixture); // Exercise the same default failed-owner retention.
+            assert!(
+                root.join("body-entered").is_file(),
+                "failed roots survive fixture Drop"
+            );
+        });
+    }
+
+    #[test]
+    fn standalone_fenced_inventory_is_explicitly_unsupported_while_ordinary_claims_keep_working() {
+        run_owned(async {
+            let store = SqliteStore::open_in_memory()
+                .expect("M4 original Store and outage fixture operation");
+            assert_eq!(
+                store
+                    .adaptive_attempt_schema()
+                    .await
+                    .expect("M4 original Store and outage fixture operation"),
+                AttemptSchemaReadiness::Ready,
+                "ordinary SQLite open installs its checked standalone adjunct"
+            );
+            let input = claim_input(&store, "standalone-worker").await;
+            let expected = match store
+                .claim_adaptive_attempt(&input)
+                .await
+                .expect("M4 original Store and outage fixture operation")
+            {
+                AttemptMutation::Applied(status) => status,
+                other => panic!("{other:?}"),
+            };
+            let lease = MembershipManager::prepare_restart_preparation_claim(
+                "standalone-worker",
+                Duration::from_secs(60),
+            )
+            .expect("M4 original Store and outage fixture operation");
+            let error = store
+                .unclosed_adaptive_attempts_under_outage(&lease, &query("standalone-worker"))
+                .await
+                .expect_err("standalone SQLite must reject replicated outage authority");
+            assert!(
+                matches!(error, StoreError::Migration(ref message) if message.contains("unsupported"))
+            );
+            assert_eq!(
+                store
+                    .adaptive_request_status(&input.binding.key, &input.binding.principal)
+                    .await
+                    .expect("M4 original Store and outage fixture operation"),
+                Some(expected.clone())
+            );
+            assert_eq!(
+                store
+                    .claim_adaptive_attempt(&input)
+                    .await
+                    .expect("M4 original Store and outage fixture operation"),
+                AttemptMutation::Replay(expected)
+            );
+        });
+    }
+}

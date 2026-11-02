@@ -51,28 +51,33 @@ async fn sqlite_store_reopen_retains_attempt_worker_and_original_deadline() {
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test]
 async fn replicated_store_reconnect_retains_attempt_worker_and_original_deadline() {
-    let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    store
-        .validation_reset_contract_state()
-        .await
-        .expect("exclusive reset");
-    let fixture = AttemptFixture::new(&store).await;
-    let before = applied(
-        store
-            .claim_adaptive_attempt(&fixture.claim)
-            .await
-            .expect("real replicated commit"),
-    );
-    drop(store);
-    let reopened = open_contract_hiqlite_store(&cluster).await;
-    assert_reopened(&reopened, &fixture.claim, before).await;
+    with_adaptive_cluster(|cluster| {
+        Box::pin(async move {
+            let store = cluster.open_store().await;
+            let fixture = AttemptFixture::new(&store).await;
+            let before = applied(
+                store
+                    .claim_adaptive_attempt(&fixture.claim)
+                    .await
+                    .expect("real replicated commit"),
+            );
+            drop(store);
+            // Reconnect through production's maintenance connector to this exact
+            // retained activated voter, creating a new remote Client and adapter.
+            let mut config = Config::default();
+            config.storage.data_dir = cluster._root.path().join("node-1");
+            let reopened = connect_activated_store(&config)
+                .await
+                .expect("new authority client to the same retained three voters");
+            assert_reopened(reopened.as_ref(), &fixture.claim, before).await;
+        })
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn unclosed_inventory_keyset_pages_never_hide_expired_or_losing_debt() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let worker = Uuid::new_v4().to_string();
         let mut expected = Vec::new();
         for _ in 0..3 {
@@ -115,7 +120,7 @@ async fn unclosed_inventory_keyset_pages_never_hide_expired_or_losing_debt() {
 
 #[tokio::test]
 async fn channel_recipe_adoption_uses_frozen_original_root_binding() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let recipe = "{\"library_channel\":{\"fixture\":true}}";
         let adoption = ready_adoption_recipe(store.as_ref(), &fixture, recipe).await;
@@ -146,7 +151,7 @@ async fn channel_recipe_adoption_uses_frozen_original_root_binding() {
 
 #[tokio::test]
 async fn unsupported_sharing_principal_never_coerces_into_local_adaptive_authority() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let mut shared = fixture.claim.clone();
         shared.binding.principal = plurx_core::playback_principal::PlaybackPrincipal::sharing(

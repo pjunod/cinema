@@ -2,6 +2,35 @@
 # Three added task sites and the extra child-launch/teardown sites are fixtures.
 # Seven production timers bound the same Source cleanup/admission; fifty are fixture waits.
 # Counts reconcile the reviewed original-owner wrappers and fixtures, not native qualification.
+# M2 original producer observations ownership review (2026-10-29, parent29a238af):
+# +1 Command and +1 kill-on-drop are one test-only controllable sleep child.
+# The canonical owned launcher retains its real ChildJob; the same slot owns
+# its registered generation through actual stop/resume and bounded restart.
+# The fixture registers no output writer/pipe; its original empty application
+# boundary is settled, while the slot still owes actual child kill/wait before
+# its original registered reap receipt and joined writer barrier may complete.
+# +4 namespaced timers are the bounded cadence sleep/timeout (executed twice),
+# original child restart kill/wait bound, and original registered-reap join bound.
+# Replayed no-signal Stop/Resume preserve event time after actual >1s cadence;
+# timeout is failure, never closure or trial/entitlement/capacity evidence.
+# No extra spawn/task site is introduced; the fixture uses the existing owned
+# launcher and slot reaper. Patterns/roots/scoped rows/forbidden zeroes unchanged.
+# Source correspondence only; behavioral/native qualification remains separate.
+
+# M4 replicated outage/HTTP caller source ownership review (2026-10-29):
+# Base cc3da4a9003c plus committed M4 6d9f59faea7e and reviewed desktopV2/HTTPV5.
+# +1 namespaced task is the fixture's original selected-Store selector: registered
+# before its one-shot entry send, borrowed for bounded join, never replaced/aborted.
+# +1 method-spawn and +1 launch-shaped match are ONE joined 8 MiB fixture thread,
+# owning its Tokio runtime; failed/uncertain original owners/root/runtime persist.
+# +9 namespaced timers: one production exact-lease durable-inventory read bound;
+# eight fixture observations (setup/body, exact release, Store shutdown, and real
+# local-token/replicated-lease expiry watchdogs plus their two 25 ms observation polls).
+# Ambiguous release retains the original local fence. Timeouts fail or retain owners;
+# they supply no native closure, cached zero, replacement authority or capacity refund.
+# No task/timer is added by the cfg(test) shared SelectedStore state projection or
+# desktop telemetry-start avoidance. Patterns/roots/scoped counts/forbidden zeroes
+# are unchanged. Static source correspondence only; no new behavioral/native proof.
 # Main 6c8c98c79 sharing source correspondence (2026-10-29):
 # +3 task sites: two daemon BackgroundLoopGuard-token loops and the invitation
 # issue owner that keeps state/cleanup-file responsibility after receiver loss.
@@ -861,7 +890,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # cancellation-aware poll holds the live capacity waiter across its bounded
 # admission deadline. The waiter is dropped on admission, cancellation or
 # timeout; the sleep neither owns inference nor starts work by itself.
-expected_occurrences = 94
+# Expired refused-Adopt regression sleeps once until the real original Claim deadline passes; no production wait: 94 + 1 = 95.
+expected_occurrences = 95
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1518,7 +1548,8 @@ pattern = "ServingAuthority"
 # Adaptive source audit e1d42fb2: New occurrences carry the existing ServingAuthority through
 # media-pool quality contexts, adaptive adoption, and VOD Store-adopt attachment. One is a
 # control.rs ownership comment; none grants a native witness.
-expected_occurrences = 37
+# M4 follow-on: The genuine refused-Adopt fixture passes the original ServingAuthority; no new production grant.
+expected_occurrences = 38
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1807,7 +1838,8 @@ pattern = "publication_ready_at_ms"
 # Adaptive source audit e1d42fb2: Three actual publication_ready_at_ms checks bind adaptive
 # claim/adopt/origin readiness to MEDIA_SESSION_PUBLICATION_BLOCKED; one terminal_memory.rs
 # destructuring occurrence sizes the actual retained route.
-expected_occurrences = 153
+# M4 follow-on: The genuine refused-Adopt fixture constructs the same blocked original activation DTO before actual Store refusal.
+expected_occurrences = 154
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -1877,7 +1909,8 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # blocked activation before its existing Confirm settlement; no shipped write.
 # Adaptive source audit e1d42fb2: The three new MEDIA_SESSION_PUBLICATION_BLOCKED references
 # are the same origin/adoption/claim readiness guards; they add no publication authority.
-expected_occurrences = 60
+# M4 follow-on: The actual refused-Adopt input preserves the original prepublication-blocked sentinel; no publication or close proof.
+expected_occurrences = 61
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -3369,7 +3402,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Both use the original runtime; Source worker stacks remain unchanged.
 # This is test-only pre-R bootstrap, not a new media producer or close proof.
 # Compose task and current-main owner sites: 1089; exact source census still required.
-expected_occurrences = 1089
+# Stack composition with M4 (effort base 1085 -> M4 1086): 1089 + 1 = 1090.
+expected_occurrences = 1090
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3619,7 +3653,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # owned 8 MiB std thread, positively joined before returning the real Store.
 # Both use the original runtime; Source worker stacks remain unchanged.
 # This is test-only pre-R bootstrap, not a new media producer or close proof.
-expected_occurrences = 85
+expected_occurrences = 86
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5092,7 +5126,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # their existing admission deadline.
 # Main 6c8c98c79 composition: 2002 + (1901 - 1899) = 2004; source equality remains required.
 # Compose task and current-main owner sites: 2065; exact source census still required.
-expected_occurrences = 2065
+# Stack composition over effort base 2008: M2 +4 and M4 +9, so 2065 + 13 = 2078.
+# M4 follow-on: The genuine refused-Adopt fixture positively joins its SAME registered control under the original deadline; no new native watchdog or allowance.
+# Expired refused-Adopt regression waits once for the real original Claim deadline: 2079 + 1 = 2080.
+expected_occurrences = 2080
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5584,7 +5621,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # the original launcher command and a test self-exec. observation.rs Command is test-only.
 # Other new constructors are isolated finite/probe fixtures and the title scanner using the
 # existing bounded collector with the original keeper.
-expected_occurrences = 312
+expected_occurrences = 313
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6247,7 +6284,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Combined with main's Live TV HTTP assertion: 809 + 2 = 811 reviewed matches.
 # Main 6c8c98c79 composition: 831 + (811 - 808) = 834; source equality remains required.
 # Compose task and current-main owner sites: 845; exact source census still required.
-expected_occurrences = 845
+# Stack composition with M4 (effort base 843 -> M4 844): 845 + 1 = 846.
+expected_occurrences = 846
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6782,7 +6820,7 @@ pattern = "kill_on_drop\\s*\\("
 # decode_facts controls. Added fixed_planning_engine/observation sites are original bounded
 # launch and test child; finite restart adds a fixture guard. kill_on_drop remains a request,
 # never a confirmed native-close receipt.
-expected_occurrences = 121
+expected_occurrences = 122
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

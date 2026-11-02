@@ -23,6 +23,7 @@ use plurx_core::cluster::migration::status::{
     DbSnapshotMetricsSnapshot, SnapshotTransportPhase, SnapshotTransportStatus, WalRuntimeState,
     WalStatusSnapshot,
 };
+use plurx_core::store::adaptive_resource_attempts::AttemptInventoryQuery;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
@@ -43,6 +44,7 @@ use crate::state::AppState;
 
 pub(crate) const INTERNAL_PATH: &str = "/api/v1/internal/cluster/operations-status";
 const AGGREGATE_TIMEOUT: Duration = Duration::from_secs(2);
+const ADAPTIVE_OUTAGE_INVENTORY_TIMEOUT: Duration = Duration::from_secs(2);
 const PEER_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_DIRECTORY_TIMEOUT: Duration = Duration::from_millis(500);
 const PEER_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
@@ -1010,6 +1012,84 @@ where
     Ok(response)
 }
 
+/// Require a fresh first-page zero under this caller's original outage owner.
+/// Store authority is checked separately from the Store-free admission mutex;
+/// neither an earlier empty page nor a local registry proves durable closure.
+/// Callers retain the original lease guard and local token across this await.
+pub(crate) async fn require_adaptive_outage_zero(
+    state: &AppState,
+    lease: &ClusterOperationLease,
+    token: PlannedOutageFenceToken,
+) -> Result<(), ApiError> {
+    let expired = || {
+        ApiError::typed(
+            StatusCode::CONFLICT,
+            "restart_preparation_expired",
+            "the exact planned-outage preparation is no longer current; prepare again",
+        )
+    };
+    if !state.serving.planned_outage_is_current(token).await {
+        return Err(expired());
+    }
+    // Reassert only the original claim, including its original deadline.
+    // A release receipt prevents a cancelled or superseded claim returning.
+    state
+        .membership
+        .commit_cluster_operation_lease(lease)
+        .await
+        .map_err(api_error)?;
+    if !state.serving.planned_outage_is_current(token).await {
+        return Err(expired());
+    }
+    let page = tokio::time::timeout(
+        ADAPTIVE_OUTAGE_INVENTORY_TIMEOUT,
+        state.store.unclosed_adaptive_attempts_under_outage(
+            lease,
+            &AttemptInventoryQuery {
+                worker_node_id: state.node_id.clone(),
+                after_attempt_id: None,
+                limit: 1,
+            },
+        ),
+    )
+    .await
+    .map_err(|_| {
+        ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "adaptive_outage_inventory_unavailable",
+            "the replicated adaptive cleanup inventory timed out; prepare again",
+        )
+    })?
+    .map_err(|_| {
+        ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "adaptive_outage_inventory_unavailable",
+            "the exact replicated adaptive cleanup inventory is unavailable; prepare again",
+        )
+    })?;
+    // The Store read can outlive cancellation or expiry. Revalidate the same
+    // committed claim and timed token before this snapshot can authorize zero.
+    if !state.serving.planned_outage_is_current(token).await {
+        return Err(expired());
+    }
+    state
+        .membership
+        .commit_cluster_operation_lease(lease)
+        .await
+        .map_err(api_error)?;
+    if !state.serving.planned_outage_is_current(token).await {
+        return Err(expired());
+    }
+    if !page.entries.is_empty() || page.next_cursor.is_some() {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "adaptive_outage_cleanup_pending",
+            "adaptive attempts retain durable cleanup debt; wait for their original owners to close them",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn prepare_restart(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -1080,8 +1160,14 @@ pub(crate) async fn prepare_restart(
                 "restart preparation expired before pre-existing admissions settled; run preflight again",
             ));
         }
+        if let Err(error) = require_adaptive_outage_zero(&state, lease.claim(), local_fence).await {
+            lease.release().await;
+            return Err(error);
+        }
         let (active_sessions, owned_work, drain) = local_media_drain_snapshot(&state).await;
-        if !drain.new_admissions_blocked {
+        if !drain.new_admissions_blocked
+            || !state.serving.planned_outage_is_current(local_fence).await
+        {
             lease.release().await;
             return Err(ApiError::typed(
                 StatusCode::CONFLICT,

@@ -3872,3 +3872,196 @@ async fn continuous_family_start_preempts_background_and_cleans_up_cancelled_wai
     drop(permits);
     assert_eq!(pool.software_in_use(), 0);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn performed_encoded_driver_phases_preserve_original_frontier_and_event_time() {
+    use plurx_core::process::observation::{Metric, UnknownReason};
+    use plurx_core::resource_observation::WorkPhase;
+
+    let base = crate::test_tempdir().expect("base");
+    let serve = bare_serve(base.path());
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    let mut rendition = synthetic_rendition(base.path()).await;
+    let live = Arc::get_mut(&mut rendition).expect("unshared rendition");
+    live.recipe.file = file;
+    live.recipe.encoding = Some(Arc::clone(&encoding));
+    let generation = rendition.gen_epoch.load(Relaxed);
+    encoding.reset_active_production(generation, true);
+    // Seed this diagnostic boundary through the real accepted-segment API.
+    // The regression below exercises performed slot transitions; it supplies
+    // no native closure, admission, trial or production qualification proof.
+    encoding.note_active_segment(generation, 0, 12_000);
+    let initial = encoding
+        .resource_service_sample(Instant::now())
+        .expect("original accepted service event")
+        .0;
+    assert_eq!(
+        (initial.generation, initial.completed),
+        (generation, 12_000)
+    );
+
+    // The real empty slot refuses Stop. An unperformed transition cannot
+    // reset the window, change its phase/frontier or refresh its event time.
+    assert!(perform_driver_step(&serve.shared, &rendition, Step::Stop)
+        .await
+        .is_err());
+    let rejected = encoding
+        .resource_service_sample(Instant::now())
+        .expect("failed slot step retains the original accepted event")
+        .0;
+    assert_eq!(
+        (
+            rejected.at,
+            rejected.generation,
+            rejected.phase,
+            rejected.completed
+        ),
+        (
+            initial.at,
+            initial.generation,
+            initial.phase,
+            initial.completed
+        )
+    );
+
+    let mut command = tokio::process::Command::new("sleep");
+    command.arg("60").kill_on_drop(true);
+    let (child, job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("VOD service phase fixture"),
+    )
+    .expect("actual controllable slot child and original lifetime job");
+    let (child_generation, writers) = rendition
+        .slot
+        .attach_registered_job_owned(child, job, 0, None)
+        .await;
+    // This fixture launches no output writer or pipe reader. Its originally
+    // registered empty application boundary is complete; the slot must still
+    // positively kill/wait THIS child before issuing its generation receipt.
+    writers.settled();
+    for (step, phase) in [
+        (Step::Stop, WorkPhase::BufferPaced),
+        (Step::Resume, WorkPhase::Producing),
+    ] {
+        assert!(rendition
+            .slot
+            .try_wait_registered(&child_generation)
+            .await
+            .expect("same original live child before signal")
+            .is_none());
+        let before = Instant::now();
+        perform_driver_step(&serve.shared, &rendition, step)
+            .await
+            .expect("actual performed slot transition");
+        let after = Instant::now();
+        let (event, observation) = encoding
+            .resource_service_sample(after)
+            .expect("performed event survives legacy proof reset");
+        assert_eq!(
+            (event.generation, event.phase, event.completed),
+            (generation, phase, 12_000),
+            "same-generation transition keeps its accepted output frontier"
+        );
+        assert!(event.at >= before && event.at <= after);
+        assert_eq!(observation.interval_ms, 0);
+        assert_eq!(observation.advancing_samples, 0);
+        assert_eq!(
+            observation.units_per_second,
+            Metric::Unknown(UnknownReason::InsufficientEvidence)
+        );
+        // Cross the actual ServiceWindow cadence before replaying the same
+        // physical step. An accepted diagnostic poll must not hide the bug.
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::time::sleep(Duration::from_millis(1_100)),
+        )
+        .await
+        .expect("bounded actual observation cadence");
+        assert!(Instant::now().duration_since(event.at) >= Duration::from_secs(1));
+        assert!(rendition
+            .slot
+            .try_wait_registered(&child_generation)
+            .await
+            .expect("same original child remains alive across cadence")
+            .is_none());
+        let (ack, effect) = rendition
+            .slot
+            .perform_with_effect(step, || {
+                panic!("replayed step must not touch a signal clock")
+            })
+            .await
+            .expect("actual original slot acknowledges replay without signaling");
+        assert_eq!(ack, crate::prodrun::Performed::Done);
+        assert_eq!(effect, crate::prodrun::StepEffect::Unchanged);
+        assert_eq!(
+            perform_driver_step(&serve.shared, &rendition, step)
+                .await
+                .expect("same real driver acknowledges unperformed replay"),
+            crate::prodrun::Performed::Done,
+        );
+        let (replayed, _) = encoding
+            .resource_service_sample(Instant::now())
+            .expect("same original phase event after unperformed replay");
+        assert_eq!(
+            (
+                replayed.at,
+                replayed.generation,
+                replayed.phase,
+                replayed.completed
+            ),
+            (event.at, event.generation, event.phase, event.completed),
+            "a no-signal acknowledgment after cadence must not freshen the original event",
+        );
+        let (retained, stale) = encoding
+            .resource_service_sample(after + Duration::from_secs(30))
+            .expect("poll retains the same original event");
+        assert_eq!(retained.at, event.at);
+        assert_eq!(retained.completed, event.completed);
+        assert_eq!(retained.phase, event.phase);
+        assert_eq!(
+            stale.units_per_second,
+            Metric::Unknown(UnknownReason::Stale)
+        );
+    }
+
+    rendition.gen_epoch.fetch_add(1, Relaxed);
+    let successor = rendition.gen_epoch.load(Relaxed);
+    let before = Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        perform_driver_step(&serve.shared, &rendition, Step::Restart { at: 12 }),
+    )
+    .await
+    .expect("original live sleep child must be killed and waited before its natural exit")
+    .expect("actual original child restart termination");
+    let after = Instant::now();
+    let (event, observation) = encoding
+        .resource_service_sample(after)
+        .expect("new-generation retry event survives proof reset");
+    assert_eq!(
+        (event.generation, event.phase, event.completed),
+        (successor, WorkPhase::Retrying, 0),
+        "a successor cannot inherit the old generation's frontier"
+    );
+    assert!(event.at >= before && event.at <= after);
+    assert_eq!(observation.interval_ms, 0);
+    assert_eq!(observation.advancing_samples, 0);
+    assert_eq!(
+        observation.units_per_second,
+        Metric::Unknown(UnknownReason::InsufficientEvidence)
+    );
+    let reap = tokio::time::timeout(
+        Duration::from_secs(5),
+        child_generation.wait_confirmed_reap(),
+    )
+    .await
+    .expect("actual original child wait and writer join");
+    assert!(reap.matches(&child_generation));
+    assert_eq!(reap.writers(), crate::prodrun::WriterSettlement::Settled);
+    assert!(matches!(
+        rendition.slot.belief().await,
+        Producer::Absent { .. }
+    ));
+    assert_eq!(encoding.admissions.snapshot().reservations, 0);
+}

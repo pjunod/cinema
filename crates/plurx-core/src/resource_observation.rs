@@ -146,14 +146,25 @@ impl ServiceWindow {
     }
 
     pub fn snapshot(&self, now: Instant) -> Option<ServiceObservation> {
+        self.snapshot_with_sample(now)
+            .map(|(_, observation)| observation)
+    }
+
+    /// The original accepted producer event and its age-adjusted observation.
+    /// Polling never changes sample.at, generation, phase or frontier. The
+    /// sample's raw metrics retain their original event time; consumers must
+    /// use that timestamp for freshness, not manufacture a new WorkSample.
+    /// This pairing does not supply admission, runway or native-bound evidence.
+    pub fn snapshot_with_sample(&self, now: Instant) -> Option<(WorkSample, ServiceObservation)> {
+        let sample = self.last?;
         let mut observation = self.last_observation?;
-        let age = now.checked_duration_since(self.last?.at)?;
+        let age = now.checked_duration_since(sample.at)?;
         if age > Duration::from_secs(15) {
             observation.units_per_second = Metric::Unknown(UnknownReason::Stale);
             observation.deadline_slack_ms = Metric::Unknown(UnknownReason::Stale);
             observation.queued_bytes = Metric::Unknown(UnknownReason::Stale);
         }
-        Some(observation)
+        Some((sample, observation))
     }
 }
 
@@ -331,5 +342,138 @@ mod tests {
             .expect("bytes");
         assert_eq!(observed.unit, ServiceUnit::Bytes);
         assert_eq!(observed.units_per_second, Metric::Known(1024));
+    }
+    #[test]
+    fn timestamped_snapshot_polling_preserves_original_event_and_stale_age() {
+        let now = Instant::now();
+        let mut window = ServiceWindow::default();
+        for second in 0..3 {
+            let mut event = sample(
+                now + Duration::from_secs(second),
+                7,
+                WorkPhase::Producing,
+                second * 2_000,
+            );
+            event.deadline_slack_ms = Metric::Known(100);
+            window.observe(event).expect("actual advancing event");
+        }
+        let event_at = now + Duration::from_secs(2);
+        let (original, fresh) = window
+            .snapshot_with_sample(event_at)
+            .expect("original accepted sample");
+        assert_eq!(fresh.units_per_second, Metric::Known(2_000));
+        for poll_second in [3, 8, 18, 100] {
+            let poll = now + Duration::from_secs(poll_second);
+            let (event, observation) = window
+                .snapshot_with_sample(poll)
+                .expect("same original sample");
+            assert_eq!(event.at, event_at);
+            assert_eq!(
+                (event.generation, event.phase, event.completed),
+                (7, WorkPhase::Producing, 4_000)
+            );
+            assert_eq!(event.deadline_slack_ms, original.deadline_slack_ms);
+            assert_eq!(
+                window.snapshot(poll),
+                Some(observation),
+                "wire projection unchanged"
+            );
+            if poll_second > 17 {
+                assert_eq!(
+                    observation.units_per_second,
+                    Metric::Unknown(UnknownReason::Stale)
+                );
+                assert_eq!(
+                    observation.deadline_slack_ms,
+                    Metric::Unknown(UnknownReason::Stale)
+                );
+                assert_eq!(
+                    observation.queued_bytes,
+                    Metric::Unknown(UnknownReason::Stale)
+                );
+            }
+        }
+        assert!(
+            window
+                .snapshot_with_sample(now + Duration::from_secs(1))
+                .is_none(),
+            "future event cannot be freshened by a clock reversal"
+        );
+        assert_eq!(
+            window.snapshot_with_sample(event_at).unwrap().0.at,
+            event_at
+        );
+    }
+
+    #[test]
+    fn timestamped_snapshot_rejects_replayed_events_and_resets_on_phase_or_generation() {
+        let now = Instant::now();
+        let mut window = ServiceWindow::default();
+        for second in 0..3 {
+            window.observe(sample(
+                now + Duration::from_secs(second),
+                7,
+                WorkPhase::Producing,
+                second * 2_000,
+            ));
+        }
+        let original_at = now + Duration::from_secs(2);
+        for rejected in [
+            sample(original_at, 99, WorkPhase::Paused, 99_000),
+            sample(now + Duration::from_secs(1), 99, WorkPhase::Paused, 99_000),
+            sample(
+                original_at + Duration::from_millis(100),
+                7,
+                WorkPhase::Producing,
+                5_000,
+            ),
+        ] {
+            assert!(window.observe(rejected).is_none());
+        }
+        let (original, observation) = window
+            .snapshot_with_sample(now + Duration::from_secs(3))
+            .unwrap();
+        assert_eq!(original.at, original_at);
+        assert_eq!(
+            (original.generation, original.phase, original.completed),
+            (7, WorkPhase::Producing, 4_000)
+        );
+        assert_eq!(observation.units_per_second, Metric::Known(2_000));
+        let phase_at = original_at + Duration::from_millis(200);
+        window
+            .observe(sample(phase_at, 7, WorkPhase::BufferPaced, 4_000))
+            .unwrap();
+        let (paced, observation) = window
+            .snapshot_with_sample(now + Duration::from_secs(3))
+            .unwrap();
+        assert_eq!(paced.at, phase_at);
+        assert_eq!(paced.phase, WorkPhase::BufferPaced);
+        assert_eq!(observation.interval_ms, 0);
+        assert_eq!(
+            observation.units_per_second,
+            Metric::Unknown(UnknownReason::InsufficientEvidence)
+        );
+        let generation_at = now + Duration::from_secs(4);
+        window
+            .observe(sample(generation_at, 8, WorkPhase::Preparing, 0))
+            .unwrap();
+        let (successor, observation) = window
+            .snapshot_with_sample(now + Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(
+            (
+                successor.at,
+                successor.generation,
+                successor.phase,
+                successor.completed
+            ),
+            (generation_at, 8, WorkPhase::Preparing, 0)
+        );
+        assert_eq!(observation.interval_ms, 0);
+        assert_eq!(observation.advancing_samples, 0);
+        assert_eq!(
+            observation.units_per_second,
+            Metric::Unknown(UnknownReason::InsufficientEvidence)
+        );
     }
 }

@@ -1255,6 +1255,20 @@ async fn finite_operator_zero_cache_budget_refuses_before_original_r_entry() {
 #[tokio::test]
 async fn foreign_committed_fence_closes_same_finite_owner_after_stale_cancel_and_coordinator_join()
 {
+    Box::pin(foreign_finite_fence_cleanup(false, false)).await;
+}
+
+#[tokio::test]
+async fn refused_adopt_then_committed_fence_closes_same_finite_owner_after_original_aliases() {
+    Box::pin(foreign_finite_fence_cleanup(true, false)).await;
+}
+
+#[tokio::test]
+async fn refused_adopt_past_original_deadline_fences_same_finite_owner_without_origin() {
+    Box::pin(foreign_finite_fence_cleanup(true, true)).await;
+}
+
+async fn foreign_finite_fence_cleanup(refused_adopt: bool, expire_after_refusal: bool) {
     use plurx_core::store::adaptive_resource_attempts::{
         AttemptClaim, AttemptKey, MutationContext, RequestBinding, RequestKey,
     };
@@ -1274,6 +1288,9 @@ async fn foreign_committed_fence_closes_same_finite_owner_after_stale_cancel_and
     request.request_id = Some(root.to_string());
     request.playback_id = uuid::Uuid::new_v4().to_string();
     request.kind = SessionKind::Transcode { height: 360 };
+    // A worker envelope carries an immutable VOD request; the fixture default
+    // is the live presentation, which worker ingress refuses.
+    request.presentation = crate::transcode::Presentation::Vod;
     request.audio_index = fixture.recipe.audio_index;
     request.audio_delivery = fixture.recipe.audio_delivery.clone();
     let mut envelope = crate::media_sessions::RemoteStartRequest {
@@ -1326,7 +1343,10 @@ async fn foreign_committed_fence_closes_same_finite_owner_after_stale_cancel_and
         intent_digest: envelope
             .adaptive_intent_digest()
             .expect("root-scoped actual intent"),
-        original_deadline_ms: crate::media_sessions::unix_ms() + 90_000,
+        // The expiry case needs the original deadline to pass during the
+        // test; Prepared and the refused Adopt finish well inside it.
+        original_deadline_ms: crate::media_sessions::unix_ms()
+            + if expire_after_refusal { 30_000 } else { 90_000 },
         expected_predecessor_incarnation_id: None,
         expected_predecessor_owner_epoch: None,
         expected_desired_revision: None,
@@ -1390,12 +1410,26 @@ async fn foreign_committed_fence_closes_same_finite_owner_after_stale_cancel_and
         .identity(&recipe.file, duration_ms as f64 / 1_000.0);
     let key = rendition_key(&recipe, &identity);
     let key_capacity = key.capacity();
+    let serving = crate::serving_fence::ServingFence::new(
+        fixture
+            ._selected_store
+            .replication_monitor()
+            .metrics_handle(),
+    );
+    // Use the real serving-fence state machine to obtain generation1, which
+    // the existing original Claim already names. No native/closure fact is set.
+    serving.validation_set_ready(true).await;
+    serving.validation_set_ready(false).await;
+    serving.validation_set_ready(true).await;
+    assert_eq!(serving.authority().admit(), Some(claim.serving_generation));
     manager
         .foreign_fence_cleanup_regression(
             claim,
             selected_recipe_json,
             key_capacity,
             fixture.settings.clone(),
+            refused_adopt.then(|| serving.authority()),
+            expire_after_refusal,
             move |application_bytes| async move {
                 let pending = shared
                     .prepare_adaptive_attempt(
