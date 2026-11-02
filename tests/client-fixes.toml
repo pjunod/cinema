@@ -1,6 +1,15 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1351: tvOS settings show each name beside its selected value.
+[[fixes]]
+id = "apple.tv-settings-name-and-value"
+commits = ["969d22611974bd79616ad36cda09e27e049bcd05"]
+source = "clients/apple/Sources/SettingsView.swift"
+source_anchor = "struct SettingsPicker<Selection: Hashable, Content: View>: View"
+test = "clients/apple/UITests/TVSecondaryNavigationTests.swift"
+test_anchor = "func testSettingsPickerHelpReportAndExactReturn"
+
 # Issue #1348: one native held direction keeps previewing until it releases.
 [[fixes]]
 id = "apple.tv-held-timeline-preview"
