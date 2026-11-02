@@ -237,7 +237,13 @@ class MainAuthenticationTests(MovedMainFixture):
                  'event_payload': p.canonical({'inputs': {'mode': 'complete', 'control': p.canonical(
                      {'registration': {'event_base': event_base}}).decode()}}).decode()}
                 for index, event_base in enumerate(event_bases)]
-        api = type('A', (), {'get': lambda self, path: {}, 'pages': lambda self, *a, **k: runs})()
+        def get(path, query=None, limit=None):
+            if path != '/actions/runs':
+                return {}
+            rows = [r for r in runs if r['commit_sha'] == query['head_sha']]
+            return {'workflow_runs': rows[query['page'] - 1:query['page']]}
+        runs = [{**r, 'workflow_id': p.WORKFLOW} for r in runs]
+        api = type('A', (), {'get': staticmethod(get)})()
 
         def validate(raw, root):
             if raw['event_base'] in expired:

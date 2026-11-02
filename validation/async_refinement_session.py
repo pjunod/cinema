@@ -1244,7 +1244,7 @@ class SessionAPI(receipts.API):
         p.require(self.session_requests<=self.maximum_session_requests and time.monotonic()<self.deadline,
                   'registered session RPC/time allowance exhausted')
 
-    def bytes(self,path,query=None):
+    def bytes(self,path,query=None,limit=receipts.MAX_BYTES):
         self.reserve_request()
         p.require((path=='' or path.startswith('/')) and '..' not in path and len(path)<=1024
                   and re.fullmatch(r'[A-Za-z0-9_./-]*',path),'unsafe session API path')
@@ -1257,7 +1257,7 @@ class SessionAPI(receipts.API):
                 self.response_headers={key.lower():value for key,value in incoming.headers.items()}
                 p.require(hasattr(incoming,'read1'),'bounded session API reader unavailable')
                 while block:=incoming.read1(64*1024):
-                    p.require(time.monotonic()<self.deadline and len(data)+len(block)<=receipts.MAX_BYTES,
+                    p.require(time.monotonic()<self.deadline and len(data)+len(block)<=limit,
                               'session API response/time allowance exhausted')
                     data.extend(block)
         except urllib.error.HTTPError as error:
@@ -1265,6 +1265,10 @@ class SessionAPI(receipts.API):
         except (OSError,http.client.HTTPException) as error:
             raise receipts.ReceiptError(type(error).__name__+' at /repos/'+self.repository+path+'; evidence unavailable') from None
         return bytes(data)
+
+    def get(self,path,query=None,limit=receipts.MAX_BYTES):
+        data=self.bytes(path,query,limit)
+        return receipts.bounded_json(data) if limit<=receipts.MAX_BYTES else p.decode(data,limit)
 
 
 def api_environment(scratch):
@@ -1503,11 +1507,46 @@ class UncertainDispatch(Exception):
     """A sent dispatch was settled as uncertain: re-derive the control and retry with the next ordinal."""
 
 
+# One async-proof-session run record. Its event_payload carries the dispatch payload
+# (bounded by p.SMALL at dispatch) as a JSON string that the API escapes once more;
+# Forgejo's encoder may expand a byte up to six times (\u003c for HTML characters).
+RUN_RECORD_BYTES = 6 * p.SMALL + p.MIB
+
+
+def dispatch_runs(api, commit, created_since=None):
+    """The async-proof-session runs at `commit`, newest first, one record per request.
+
+    Every run embeds its megabyte-scale dispatch control, so a 50-run page outgrows any
+    fixed response bound after a few dispatches. Forgejo filters by workflow and head_sha
+    server-side; each record is checked against that filter. A run created during the walk
+    only shifts older records to later pages (a duplicate, skipped by id), never past it.
+    With `created_since`, the walk stops at the first older run.
+    """
+    p.require(isinstance(commit, str) and p.COMMIT.fullmatch(commit), 'run listing commit invalid')
+    runs, seen = [], set()
+    for page in range(1, 4097):
+        payload = api.get('/actions/runs', {'workflow_id': p.WORKFLOW, 'head_sha': commit, 'page': page, 'limit': 1},
+                          limit=RUN_RECORD_BYTES)
+        batch = payload.get('workflow_runs') if type(payload) is dict else None
+        p.require(type(batch) is list and len(batch) <= 1, 'run listing pagination differs')
+        if not batch:
+            return runs
+        run = batch[0]
+        p.require(type(run) is dict and type(run.get('id')) is int and run.get('commit_sha') == commit
+                  and run.get('workflow_id') == p.WORKFLOW, 'run listing filter differs')
+        if run['id'] in seen:
+            continue
+        if created_since is not None and utc(run['created']) < created_since:
+            return runs
+        seen.add(run['id']); runs.append(run)
+    raise receipts.ReceiptError('Async session: run listing exceeds its page bound')
+
+
 def matching_runs(api, expected, control, floor):
     """The workflow runs created by exactly this dispatch (same registration, inputs and control)."""
     matches = []
-    for run in api.pages('/actions/runs', {'workflow_id': p.WORKFLOW}, field='workflow_runs'):
-        if run.get('commit_sha') != control['registration']['source']['commit'] or not p.dispatched(run):
+    for run in dispatch_runs(api, control['registration']['source']['commit'], utc(floor) - 1):
+        if not p.dispatched(run):
             continue
         inputs = p.decode(run.get('event_payload', '').encode()).get('inputs', {})
         if (inputs.get('registration_sha256') == expected['registration_sha256']
@@ -1660,7 +1699,7 @@ def authenticate_main(api, reg, run_id, root, *, verified):
     selected = source_scope(root, reg['event_base'])
     required = main_required(selected)
     jobs = api.pages('/actions/runs/' + str(run_id) + '/jobs')
-    artifacts = api.pages('/actions/runs/' + str(run_id) + '/artifacts', field='artifacts')
+    artifacts = api.pages('/actions/runs/' + str(run_id) + '/artifacts')
     p.require(type(verified) is dict and verified.get('complete') is True
               and len(verified.get('contexts',[]))==7 and len(verified.get('outcomes',[]))==11,
               'Main aggregation requires actual independent complete verification')
@@ -1934,7 +1973,7 @@ def download_parts(api, reg, run_id, mode, destination, root):
               and metadata['operation'] == event['inputs']['operation']
               and 0 < len(metadata['parts']) <= p.UPLOAD_SLOTS,
               'output registration/source/part count differs')
-    listed = api.pages('/actions/runs/' + str(run_id) + '/artifacts', field='artifacts')
+    listed = api.pages('/actions/runs/' + str(run_id) + '/artifacts')
     parts = {}; artifact_receipts = {}; total = 0
     checkpoint_digest = None
     result = None
@@ -3704,9 +3743,9 @@ def require_completion(root, output):
     api = api_environment(Path(output) / 'api')
     scope = {'pr': event['number'], 'repository': event['repository']['id']}
     adoption.validate_live_pr(api.get('/pulls/' + str(scope['pr'])), event, commit)
-    candidates = api.pages('/actions/runs', {'workflow_id': p.WORKFLOW}, field='workflow_runs')
+    candidates = dispatch_runs(api, commit)
     for run in candidates:
-        if run.get('commit_sha') != commit or not p.dispatched(run) or run.get('status')!='success':
+        if not p.dispatched(run) or run.get('status')!='success':
             continue
         payload = p.decode(run.get('event_payload', '').encode())
         if payload.get('inputs', {}).get('mode') != 'complete':
@@ -4776,7 +4815,7 @@ def finalize_uploads(output,root):
     binding=p.control_binding(carrier)
     print('ASYNC-PROOF-FINALIZER-BEGIN 1 '+binding,flush=True)
     _,lines=p.producer_log(api,run_id,job,'complete' if role=='completion' else 'unit')
-    listed=api.pages('/actions/runs/'+str(run_id)+'/artifacts',field='artifacts')
+    listed=api.pages('/actions/runs/'+str(run_id)+'/artifacts')
     selected=[]
     for part in metadata['parts']:
         matches=[a for a in listed if a.get('name')==part['name']]
@@ -4873,7 +4912,7 @@ def finalize_publication(output,root,draft,inputs):
     binding=p.control_binding(carrier)
     print('ASYNC-PROOF-FINALIZER-BEGIN 1 '+binding,flush=True)
     _,lines=p.producer_log(api,run_id,job,'unit')
-    listed=api.pages('/actions/runs/'+str(run_id)+'/artifacts',field='artifacts')
+    listed=api.pages('/actions/runs/'+str(run_id)+'/artifacts')
     selected=[];found=[]
     for part in metadata['parts']:
         matches=[a for a in listed if a.get('name')==part['name']]
@@ -5156,7 +5195,7 @@ def preflight_carrier(output,metadata):
 
 
 def probe_transactions(api,run_id,job,lines,metadata,reg):
-    listed=api.pages('/actions/runs/'+str(run_id)+'/artifacts',field='artifacts');selected=[];rows=[]
+    listed=api.pages('/actions/runs/'+str(run_id)+'/artifacts');selected=[];rows=[]
     p.require(len(metadata['parts'])==32,'capability must exercise all32 native slots')
     for ordinal,part in enumerate(metadata['parts']):
         p.closed(part,('ordinal','name','members'))
@@ -5331,8 +5370,8 @@ def attempt_inventory(api,reg,control,current_run=None,*,require_declared=True):
     """
     found={}
     declared={row['ordinal']:row for row in declared_uncertain(control)}
-    for run in api.pages('/actions/runs',{'workflow_id':p.WORKFLOW},field='workflow_runs'):
-        if run.get('id')==current_run or run.get('workflow_id')!=p.WORKFLOW or not p.dispatched(run):continue
+    for run in dispatch_runs(api,reg['source']['commit']):
+        if run.get('id')==current_run or not p.dispatched(run):continue
         event=p.decode(run.get('event_payload','').encode());inputs=event.get('inputs',{})
         if inputs.get('operation') not in ('execute','publish'):continue
         prior=p.decode(inputs.get('control','{}').encode())

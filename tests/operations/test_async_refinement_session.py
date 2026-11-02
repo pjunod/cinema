@@ -14,6 +14,20 @@ from validation import python_unit_receipts as receipts
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class RunListing:
+    """Forgejo's run listing: filtered by workflow and head_sha server-side, `limit` rows per page."""
+    def __init__(self, rows, oldest_first=False):
+        self.rows, self.queries, self.oldest_first = rows, [], oldest_first
+
+    def get(self, path, query=None, limit=None):
+        assert path == '/actions/runs', path
+        self.queries.append(dict(query))
+        rows = [r for r in (reversed(self.rows) if self.oldest_first else self.rows)
+                if r.get('workflow_id') == query['workflow_id'] and r.get('commit_sha') == query['head_sha']]
+        size = query['limit']
+        return {'total_count': len(rows), 'workflow_runs': rows[(query['page'] - 1) * size:query['page'] * size]}
+
+
 class MainCompletionTests(unittest.TestCase):
     def results(self):return {key:'success' for key in s.MAIN_ENV}
 
@@ -118,12 +132,11 @@ class CapabilityAndStorageTests(unittest.TestCase):
         for ordinal,run_id in enumerate((8,9,10)):
             prior=copy.deepcopy(base);prior['attempt_runs']=[8,9,10][:ordinal]
             prior['unit_runs']=[8] if ordinal else []
-            rows.append({'id':run_id,'workflow_id':p.WORKFLOW,'event':'','trigger_event':'workflow_dispatch',
+            rows.append({'id':run_id,'workflow_id':p.WORKFLOW,'event':'','trigger_event':'workflow_dispatch','commit_sha':'a'*40,
                 'event_payload':json.dumps({'inputs':{'operation':'execute','mode':'unit',
                                                      'control':json.dumps(prior)}})})
         base['attempt_runs']=[8,9,10];base['unit_runs']=[8,10]
-        class API:
-            def pages(self,*args,**kwargs):return rows
+        API=lambda:RunListing(rows,oldest_first=True)  # Forgejo lists newest first
         def producer(api,run_id,*args):
             return {'id':run_id},{'id':run_id+100,'task_id':run_id+200,'status':'failure' if run_id==9 else 'success'},{}
         return API(),reg,base,rows,producer
@@ -298,6 +311,57 @@ class CapabilityAndStorageTests(unittest.TestCase):
             artifact.assert_not_called()
 
 if __name__ == '__main__':unittest.main()
+
+
+class RunListingTests(unittest.TestCase):
+    """Run records embed megabyte dispatch controls; list them one per page, filtered server-side."""
+    def rows(self,count,commit='b'*40):
+        return [{'id':100-n,'workflow_id':p.WORKFLOW,'commit_sha':commit,'created':f'2026-11-02T01:{59-n:02d}:00Z',
+                 'event':'','trigger_event':'workflow_dispatch'} for n in range(count)]
+
+    def test_listing_pages_one_record_at_a_time_and_stops_at_the_floor(self):
+        api=RunListing(self.rows(5)+self.rows(2,commit='c'*40))
+        self.assertEqual([r['id'] for r in s.dispatch_runs(api,'b'*40)],[100,99,98,97,96])
+        self.assertTrue(all(q['limit']==1 and q['head_sha']=='b'*40 and q['workflow_id']==p.WORKFLOW for q in api.queries))
+        api=RunListing(self.rows(5))
+        self.assertEqual([r['id'] for r in s.dispatch_runs(api,'b'*40,s.utc('2026-11-02T01:58:00Z'))],[100,99])
+        self.assertEqual(len(api.queries),3)
+
+    def test_a_run_created_during_the_walk_is_not_duplicated(self):
+        rows=self.rows(3);api=RunListing(rows);real=api.get
+        def get(path,query=None,limit=None):
+            if query['page']==2 and len(rows)==3:rows.insert(0,{**rows[0],'id':101})
+            return real(path,query,limit)
+        api.get=get
+        self.assertEqual([r['id'] for r in s.dispatch_runs(api,'b'*40)],[100,99,98])
+
+    def test_an_unfiltered_or_oversized_page_refuses(self):
+        class Unfiltered:
+            def get(self,path,query=None,limit=None):return {'workflow_runs':[{'id':1,'workflow_id':'ci.yml','commit_sha':'b'*40}]}
+        class Paged:
+            def get(self,path,query=None,limit=None):return {'workflow_runs':[{'id':1},{'id':2}]}
+        for api in (Unfiltered(),Paged()):
+            with self.subTest(api=type(api).__name__),self.assertRaises(receipts.ReceiptError):
+                s.dispatch_runs(api,'b'*40)
+
+    def test_a_run_record_larger_than_the_receipt_bound_is_readable(self):
+        self.assertGreater(s.RUN_RECORD_BYTES,6*p.SMALL)
+        self.assertGreater(s.RUN_RECORD_BYTES,receipts.MAX_BYTES)
+
+
+class ArtifactListingTests(unittest.TestCase):
+    """Forgejo returns a run's artifacts as a bare JSON list, not {'artifacts': [...]}."""
+    def test_capability_listing_reads_the_bare_artifact_list(self):
+        import json
+        session='00000000-0000-4000-8000-000000000002'
+        class API(s.SessionAPI):
+            def bytes(self,path,query=None,limit=receipts.MAX_BYTES):
+                assert path=='/actions/runs/7/artifacts',path
+                return json.dumps([{'id':5541,'name':'unrelated','size_in_bytes':1,'expired':False,'run_id':7}]).encode()
+        api=API('http://forge.invalid/api/v1','o/r','t')
+        parts=[{'ordinal':n,'name':s.artifact_name(session,0,n),'members':[]} for n in range(32)]
+        with self.assertRaisesRegex(receipts.ReceiptError,'capability native part absent/ambiguous'):
+            s.probe_transactions(api,7,{},[],{'parts':parts,'session_id':session,'unit_ordinal':0},{})
 
 
 class ActualRunnerTests(unittest.TestCase):
@@ -689,14 +753,15 @@ class DispatchReservationTests(unittest.TestCase):
         row = {'ordinal': 0, 'control_sha256': self.digest()}
 
         def event(run_id, control):
-            return {'id': run_id, 'workflow_id': p.WORKFLOW, 'event': '', 'trigger_event': 'workflow_dispatch', 'event_payload':
+            return {'id': run_id, 'workflow_id': p.WORKFLOW, 'event': '', 'trigger_event': 'workflow_dispatch',
+                    'commit_sha': 'a' * 40, 'event_payload':
                     json.dumps({'inputs': {'operation': 'execute', 'mode': 'unit', 'control': json.dumps(control)}})}
 
         def producer(_api, run_id, *_args):
             return {'id': run_id}, {'id': run_id + 100, 'task_id': run_id + 200, 'status': 'success'}, {}
 
         def inventory(rows, control):
-            api = SimpleNamespace(pages=lambda *args, **kwargs: rows)
+            api = RunListing(rows, oldest_first=True)
             with patch.object(p, 'producer', producer):
                 return s.attempt_inventory(api, reg, control)
         retry = event(8, {**base, 'uncertain_dispatches': [row]})  # ordinal 1: the retry of the uncertain ordinal 0
