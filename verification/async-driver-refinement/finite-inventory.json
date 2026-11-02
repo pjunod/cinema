@@ -6,38 +6,38 @@
   "source_bindings": {
     "oracle": {
       "path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "sha256": "54d2c3f74af9987144576785634f879350c2cfb935706e0d9b17e89e56f52e23",
+      "sha256": "cf436e2e11d25db5a072157c0e53642ecfcc890fe663ef649c6b994f2a5ef331",
       "anchors": [
         {
           "text": "pub(super) struct Episode {",
-          "line": 620,
+          "line": 624,
           "occurrences": 1
         },
         {
           "text": "async fn actions(",
-          "line": 800,
+          "line": 804,
           "occurrences": 1
         },
         {
           "text": "async fn apply_primitive(",
-          "line": 980,
+          "line": 984,
           "occurrences": 1
         },
         {
           "text": "async fn omitted_dv_state(",
-          "line": 1431,
+          "line": 1435,
           "occurrences": 1
         },
         {
           "text": "struct BoundaryObservation {",
-          "line": 1563,
+          "line": 1567,
           "occurrences": 1
         }
       ]
     },
     "product": {
       "path": "crates/plurx-core/src/store/async_driver_product.rs",
-      "sha256": "c94d1ab231f5e8558a66ba29c570be8f39f4f2bd135f5ae4e28534e9c45dd665",
+      "sha256": "b7cfc955be180ad1c38496c2ae8029f127644550feeabeb8e3a05a1b4103d811",
       "anchors": [
         {
           "text": "struct Valuation {",
