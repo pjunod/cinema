@@ -2797,6 +2797,11 @@ impl ReadSnapshot {
     }
 }
 
+/// The authenticated members holding one Init image's bytes. The columns are exactly
+/// those `DependencyIndex` creates: a member is keyed by `(unit_ordinal, member_path)`;
+/// part placement lives only in `native_locators`, not in this relation.
+const AUTHENTICATED_INIT_MEMBERS_SQL: &str = "SELECT local_path FROM authenticated_members WHERE member_path=?1 AND bytes=?2 AND sha256=?3 ORDER BY unit_ordinal";
+
 /// Private controller request. This object is not an immutable proof envelope
 /// and grants no completion authority; M4 authenticates its external origin.
 #[derive(serde::Deserialize)]
@@ -3133,7 +3138,7 @@ impl QuantumRequest {
             &self.dependency_index,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
-        let mut statement=connection.prepare("SELECT local_path FROM authenticated_members WHERE member_path=?1 AND bytes=?2 AND sha256=?3 ORDER BY unit_ordinal,part_ordinal")?;
+        let mut statement = connection.prepare(AUTHENTICATED_INIT_MEMBERS_SQL)?;
         let mut rows = statement.query(rusqlite::params![
             string(&image.record, "member_path")?,
             number(&image.record, "image_bytes")? as i64,
@@ -4158,6 +4163,52 @@ mod tests {
         config.grant = Some(std::sync::Arc::new(covering));
         Catalog::disk(config)
             .expect("catalog inside its allocation opens against the granted ceiling");
+    }
+
+    /// The resumed-Init lookup runs against the table the controller's `DependencyIndex`
+    /// really creates (its DDL is read from the checked-in physical table map, which a
+    /// Python test pins to `DependencyIndex.__init__`), never a column the controller
+    /// does not define.
+    #[test]
+    fn init_member_lookup_matches_the_dependency_index_schema() {
+        let map: Value =
+            serde_json::from_str(include_str!("../../../../validation/async_physical_table_map.json"))
+                .expect("table map");
+        let ddl = map["families"]["authentication_index"][0]["objects"]
+            .as_array()
+            .expect("objects")
+            .iter()
+            .find(|object| object["name"] == "authenticated_members")
+            .and_then(|object| object["ddl"].as_str())
+            .expect("authenticated_members ddl")
+            .to_owned();
+        let directory = tempfile::tempdir().expect("scratch");
+        let index = directory.path().join("dependencies.sqlite");
+        let connection = rusqlite::Connection::open(&index).expect("index");
+        connection.execute_batch(&ddl).expect("controller DDL");
+        let rows = [
+            (2, "init.sqlite", 9, "aa", "/later"),
+            (1, "init.sqlite", 9, "aa", "/earlier"),
+            (1, "other.sqlite", 9, "aa", "/other-member"),
+            (3, "init.sqlite", 8, "aa", "/other-bytes"),
+        ];
+        for (unit, member, bytes, sha, path) in rows {
+            connection
+                .execute(
+                    "INSERT INTO authenticated_members VALUES(?1,?2,?3,?4,?5)",
+                    rusqlite::params![unit, member, bytes, sha, path],
+                )
+                .expect("row");
+        }
+        let mut statement = connection
+            .prepare(AUTHENTICATED_INIT_MEMBERS_SQL)
+            .expect("the lookup names only columns the controller creates");
+        let found: Vec<String> = statement
+            .query_map(rusqlite::params!["init.sqlite", 9, "aa"], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(found, ["/earlier", "/later"], "matching members in unit order");
     }
 
     #[test]

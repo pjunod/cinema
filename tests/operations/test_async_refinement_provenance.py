@@ -277,4 +277,22 @@ class ControlCarrierTests(unittest.TestCase):
         with self.assertRaises(receipts.ReceiptError):
             p.validate_upload_order(lines+lines+frame,[{'name':name,'id':ident,'size_in_bytes':size}],2*len(lines))
 
+class DependencyIndexSchemaTests(unittest.TestCase):
+    """The Rust child queries this index read-only; its SQL names only columns that really exist."""
+    def test_rust_queried_tables_match_the_checked_in_table_map(self):
+        import json
+        mapped = {obj['name']: obj['ddl'] for role in json.loads((ROOT/'validation/async_physical_table_map.json').read_text())['families']['authentication_index']
+                  for obj in role['objects'] if obj['type'] == 'table'}
+        with tempfile.TemporaryDirectory() as directory:
+            index = p.DependencyIndex(Path(directory)/'dependencies.sqlite')
+            try:
+                for name in ('objects', 'authenticated_members', 'authenticated_snapshot_roots'):
+                    stored = index.db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()[0]
+                    self.assertEqual(stored, mapped[name].replace('IF NOT EXISTS ', ''), name)
+                columns = [row[1] for row in index.db.execute('PRAGMA table_info(authenticated_members)')]
+                self.assertEqual(columns, ['unit_ordinal', 'member_path', 'bytes', 'sha256', 'local_path'])
+            finally:
+                index.close()
+
+
 if __name__ == '__main__':unittest.main()
