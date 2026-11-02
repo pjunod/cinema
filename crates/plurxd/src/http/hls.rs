@@ -214,3 +214,6 @@ mod tests;
 #[path = "hls/quality_schedule.rs"]
 mod quality_schedule;
 pub(crate) use quality_schedule::*;
+
+#[path = "hls/fence.rs"]
+pub(crate) mod fence;

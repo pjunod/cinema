@@ -25,7 +25,7 @@ impl Shared {
         let outcome = match self.store.fragment_index_outcome(file_id, identity).await {
             Ok(outcome) => outcome,
             Err(error) => {
-                tracing::debug!(file_id, %error, "reading the local index outcome");
+                tracing::debug!(target: "plurxd::vodserve", file_id, %error, "reading the local index outcome");
                 None
             }
         };

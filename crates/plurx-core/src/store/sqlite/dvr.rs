@@ -705,7 +705,7 @@ impl DvrStore for SqliteStore {
                 "state <> 'deleted'"
             }
         } else {
-            "state IN (SELECT value FROM json_each(?2))"
+            "state IN (SELECT value FROM json_each(?3))"
         };
         let before = filter.before_capture_start;
         self.with_read(move |conn| {
@@ -715,8 +715,8 @@ impl DvrStore for SqliteStore {
             let sql = format!(
                 "SELECT {RECORDING_COLS} FROM dvr_recordings \
                  WHERE (airing_start < ?1 OR (airing_start = ?1 AND id > ?2)) \
-                   AND {state_clause} AND (?3 IS NULL OR capture_start < ?3) \
-                 ORDER BY airing_start DESC, id LIMIT ?4"
+                   AND {state_clause} AND (?4 IS NULL OR capture_start < ?4) \
+                 ORDER BY airing_start DESC, id LIMIT ?5"
             );
             let mut statement = conn.prepare(&sql)?;
             let rows = statement.query_map(
@@ -1576,5 +1576,134 @@ mod catalog_purge_tests {
             })
             .await
             .expect("verify rollback");
+    }
+}
+
+#[cfg(test)]
+mod recording_page_tests {
+    use super::*;
+    use crate::dvr::{recording_cursor, DvrRecordingFilter};
+
+    #[tokio::test]
+    async fn recording_pages_bind_states_cursor_capture_bound_and_limit_independently() {
+        let store = SqliteStore::open_in_memory().expect("recording page fixture");
+        store.with_conn(|connection| {
+            for (id, start, capture, state) in [
+                ("a", 300, 290, "scheduled"),
+                ("b", 300, 280, "done"),
+                ("c", 200, 190, "deleted"),
+                ("d", 100, 90, "scheduled"),
+                ("e", 50, 40, "done"),
+            ] {
+                connection.execute(
+                    "INSERT INTO dvr_recordings(id,origin,channel_id,guide_number,channel_name,airing_start,airing_end,capture_start,capture_end,title,state,created_at_ms,updated_at_ms) VALUES(?1,'manual',?1,'1','Channel',?2,?2+20,?3,?2+20,'Recording',?4,1,1)",
+                    params![id,start,capture,state],
+                )?;
+            }
+            Ok(())
+        }).await.expect("seed independent ordering and state fixtures");
+        fn ids(rows: &[DvrRecording]) -> Vec<&str> {
+            rows.iter().map(|row| row.id.as_str()).collect()
+        }
+        let default = DvrRecordingFilter::default();
+        let first = store
+            .list_dvr_recordings(&default, None, 2)
+            .await
+            .expect("ordinary first page");
+        assert_eq!(
+            ids(&first),
+            vec!["a", "b"],
+            "ties order by id without duplication"
+        );
+        let after_a = recording_cursor(&first[0]);
+        assert_eq!(
+            ids(&store
+                .list_dvr_recordings(&default, Some(&after_a), 2)
+                .await
+                .expect("tie cursor page")),
+            vec!["b", "d"]
+        );
+        let after_b = recording_cursor(&first[1]);
+        assert_eq!(
+            ids(&store
+                .list_dvr_recordings(&default, Some(&after_b), 2)
+                .await
+                .expect("following page")),
+            vec!["d", "e"]
+        );
+        assert_eq!(
+            ids(&store
+                .list_dvr_recordings(&default, None, 0)
+                .await
+                .expect("minimum page limit")),
+            vec!["a"]
+        );
+        assert_eq!(
+            ids(&store
+                .list_dvr_recordings(
+                    &DvrRecordingFilter {
+                        states: vec![DvrState::Done],
+                        ..Default::default()
+                    },
+                    None,
+                    20
+                )
+                .await
+                .expect("explicit state list")),
+            vec!["b", "e"]
+        );
+        assert_eq!(
+            ids(&store
+                .list_dvr_recordings(
+                    &DvrRecordingFilter {
+                        include_deleted: true,
+                        ..Default::default()
+                    },
+                    None,
+                    20
+                )
+                .await
+                .expect("all recording history")),
+            vec!["a", "b", "c", "d", "e"]
+        );
+        assert_eq!(
+            ids(&store
+                .list_dvr_recordings(
+                    &DvrRecordingFilter {
+                        states: vec![DvrState::Deleted],
+                        include_deleted: false,
+                        before_capture_start: None
+                    },
+                    None,
+                    20
+                )
+                .await
+                .expect("explicit deleted state")),
+            vec!["c"],
+            "naming deleted requests history independently of the empty-list flag"
+        );
+        let filtered = DvrRecordingFilter {
+            states: vec![DvrState::Scheduled],
+            include_deleted: true,
+            before_capture_start: Some(200),
+        };
+        assert_eq!(
+            ids(&store
+                .list_dvr_recordings(&filtered, Some(&after_b), 1)
+                .await
+                .expect("all five independent parameters")),
+            vec!["d"]
+        );
+        let before = DvrRecordingFilter {
+            before_capture_start: Some(200),
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(&store
+                .list_dvr_recordings(&before, None, 20)
+                .await
+                .expect("capture boundary without a state list")),
+            vec!["d", "e"]
+        );
     }
 }

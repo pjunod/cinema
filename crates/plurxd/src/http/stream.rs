@@ -1920,7 +1920,7 @@ async fn stored_markers_for_source(state: &AppState, file: &MediaFile) -> Vec<Ma
 }
 
 #[derive(Clone, Copy)]
-enum MarkerReadPolicy {
+enum PlanningReadPolicy {
     LocalDerivation,
     StoredSourceEvidence,
 }
@@ -2297,7 +2297,7 @@ pub async fn decision(
             identity.as_ref(),
             super::hls::link_receipts::requested_receipt(&headers),
         ),
-        MarkerReadPolicy::LocalDerivation,
+        PlanningReadPolicy::LocalDerivation,
     )
     .await
     .map(Json)
@@ -2310,6 +2310,9 @@ pub(super) async fn decision_for_source_file(
     file: MediaFile,
     q: Caps,
 ) -> Result<DecisionResponse, ApiError> {
+    // Source Start prepares a missing non-Dolby HEVC index under its owned
+    // admission. Keep the common capability plan: an absent index does not
+    // require video encoding or an HDR10 encoder for HDR10 copy delivery.
     decision_for_file(
         state,
         file,
@@ -2317,7 +2320,7 @@ pub(super) async fn decision_for_source_file(
         None,
         None,
         (None, None),
-        MarkerReadPolicy::StoredSourceEvidence,
+        PlanningReadPolicy::StoredSourceEvidence,
     )
     .await
 }
@@ -2329,7 +2332,7 @@ async fn decision_for_file(
     network_prior: Option<plurx_core::domain::NetworkPrior>,
     user: Option<&plurx_core::domain::User>,
     link_evidence: (Option<&crate::telemetry::NetworkIdentity>, Option<&str>),
-    marker_policy: MarkerReadPolicy,
+    marker_policy: PlanningReadPolicy,
 ) -> Result<DecisionResponse, ApiError> {
     let (identity, incumbent_receipt) = link_evidence;
     let id = file.id;
@@ -2511,15 +2514,19 @@ async fn decision_for_file(
         playback::resolve_audio_for_method(&file, &q.profile(decision_now_ms), decision.method);
     // Only a copy needs the census; an encode never carries the source's
     // parameter sets, and a direct play serves them untouched.
-    let probe_json = if decision.method == playback::PlaybackMethod::Remux {
+    let local_derivation = matches!(marker_policy, PlanningReadPolicy::LocalDerivation);
+    let probe_json = if local_derivation && decision.method == playback::PlaybackMethod::Remux {
         crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?
     } else {
+        // Source planning must not mutate its revision witness or launch an
+        // anonymous census. Actual Source preparation owns physical work.
         state.store.get_file_probe_json(id).await?
     };
+    let have_dovi = local_derivation && crate::ffmpeg::has_dovi_rpu().await;
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
         probe_json.as_deref(),
-        crate::ffmpeg::has_dovi_rpu().await,
+        have_dovi,
         decision.preserve_dolby_vision,
     )
     .with_dolby_vision_conversion(decision.convert_dolby_vision);
@@ -2605,8 +2612,8 @@ async fn decision_for_file(
         None
     };
     let markers = match marker_policy {
-        MarkerReadPolicy::LocalDerivation => markers_for(state, &file).await,
-        MarkerReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
+        PlanningReadPolicy::LocalDerivation => markers_for(state, &file).await,
+        PlanningReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
     };
 
     // DTO defaults and the verdict now come from the same selection above.
@@ -3832,6 +3839,7 @@ fn spawn_remux_process_owner(
                     crate::serving_fence::LossOutcome::Recovered {
                         outage,
                         budget_spent,
+                        ..
                     } => {
                         generation = serving.borrow_and_update().loss_generation;
                         tracing::info!(

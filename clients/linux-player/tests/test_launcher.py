@@ -55,12 +55,16 @@ class CallSequence(LauncherCase):
         self.assertTrue(s.revoked)
         args = self.mpv.argv()
         for flag in ("--vo=gpu-next", "--gpu-api=vulkan", "--hwdec=auto-safe",
-                     "--target-colorspace-hint=yes", "--idle=once"):
+                     "--target-colorspace-hint=yes", "--idle=yes", "--keep-open=yes"):
             self.assertIn(flag, args)
         self.assertIn("--ytdl=no", args, "the ytdl hook never runs yt-dlp on a URL")
+        self.assertIn("--osc=no", args, "only Cinema's controller draws playback controls")
+        script = next(a.split("=", 1)[1] for a in args if a.startswith("--script="))
+        self.assertTrue(os.path.isfile(script))
+        self.assertTrue(script.endswith("plurx_player/scripts/cinema.lua"))
         self.assertIn(f"--config-dir={os.path.join(self.config, 'mpv')}", args,
                       "plurx Player's own mpv config, never ~/.config/mpv")
-        self.assertNotIn("--no-config", args, "built-in key bindings and the OSC stay")
+        self.assertNotIn("--no-config", args, "user mpv configuration remains supported")
         sock = next(a for a in args if a.startswith("--input-ipc-server="))
         self.assertTrue(sock.split("=", 1)[1].startswith(self.runtime))
         self.assertEqual(os.listdir(self.runtime), [], "the private socket directory is removed")

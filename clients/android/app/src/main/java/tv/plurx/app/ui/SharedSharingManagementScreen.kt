@@ -8,6 +8,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
@@ -38,12 +41,36 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
     var message by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val networkSecrets = remember { SharedSharingSecretDraft() }
+    val networkDraftRevision by networkSecrets.invalidations.collectAsState()
+    val networkDraft = remember(networkDraftRevision) { networkSecrets.snapshot() }
+    val uriHandler = LocalUriHandler.current
+    var networkLinks by remember { mutableStateOf<List<SharedSharingManagementClient.NetworkShare>>(emptyList()) }
+    var networkWaiting by remember { mutableStateOf(false) }
     suspend fun run(operation: suspend (SharedSharingManagementClient) -> Unit) {
         if (secrets.snapshot() == null || busy) return
         busy = true
         try { operation(SharedSharingManagementClient.create()) }
         catch (failure: Exception) { if (failure is CancellationException) throw failure; message = "${failure.message ?: "Management request failed"}. Refresh current generations before retrying explicitly." }
-        finally { busy = false }
+        finally { networkWaiting = false; networkLinks = emptyList(); busy = false }
+    }
+    suspend fun connect(client: SharedSharingManagementClient, value: String, revision: Long): Boolean {
+        if (!value.startsWith("cinema-connect-v1:")) return true
+        var connection = client.connection(value)
+        if (!secrets.accepts(revision)) return false
+        if (!connection.connected && connection.shares.isNotEmpty()) {
+            networkLinks = connection.shares; networkWaiting = true
+            message = "Authorize the private connection using the importing Cinema server's Tailscale account. Import continues automatically."
+            repeat(100) {
+                delay(3000)
+                if (!networkWaiting || !secrets.accepts(revision)) return false
+                connection = client.connection(value, probe = true)
+                if (connection.connected) { networkWaiting = false; networkLinks = emptyList(); return true }
+            }
+            networkWaiting = false; networkLinks = emptyList()
+            error("Private connection is not ready. Finish Tailscale authorization and retry this invitation.")
+        }
+        return secrets.accepts(revision)
     }
     suspend fun load() = run { client ->
         val local = client.libraries(); val imported = client.imports(); val page = client.exports(); val endpoints = client.endpoints()
@@ -51,9 +78,9 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
             libraries = local; imports = imported; exports = page.rows; nextExport = page.next; cursors.clear(); manifest = endpoints; message = "Current management snapshot loaded."
         }
     }
-    DisposableEffect(secrets) { onDispose { secrets.leave() } }
+    DisposableEffect(secrets) { onDispose { networkWaiting = false; networkLinks = emptyList(); networkSecrets.leave(); secrets.leave() } }
     LaunchedEffect(draftRevision) {
-        if (secrets.snapshot() == null) { imports = emptyList(); exports = emptyList(); invitationId = null; editingExport = null; editingImport = null; editingEndpoints = null; confirmation = null }
+        if (secrets.snapshot() == null) { networkWaiting = false; networkLinks = emptyList(); imports = emptyList(); exports = emptyList(); invitationId = null; editingExport = null; editingImport = null; editingEndpoints = null; confirmation = null }
     }
     LaunchedEffect(Unit) { load() }
     BackHandler { secrets.leave(); onBack() }
@@ -62,6 +89,20 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
         Text("Sharing management", style = MaterialTheme.typography.headlineMedium)
         if (draft == null) Text("Sharing authorization changed or was refused. Leave and reopen management.")
         else {
+            Text("Private network", style = MaterialTheme.typography.titleLarge)
+            Text("Connect this server's Tailscale account once. The API key is encrypted on this server and never shared with recipients.")
+            TextButton(onClick = { uriHandler.openUri("https://login.tailscale.com/admin/settings/keys") }) { Text("Create a Tailscale user API key") }
+            OutlinedTextField(value = networkDraft?.invitation ?: "", onValueChange = { networkSecrets.edit(invitation = it) }, label = { Text("Tailscale API key") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+            Button(enabled = !busy && !networkDraft?.invitation.isNullOrEmpty(), onClick = { scope.launch {
+                val requested = networkSecrets.snapshot() ?: return@launch
+                networkSecrets.clear(requested.revision)
+                run { client -> client.authorizeNetwork(requested.invitation); client.requireCurrent(); message = "Tailscale account connected on this Cinema server." }
+            } }) { Text("Connect Tailscale account") }
+            if (networkWaiting) {
+                Text("Authorize with the Tailscale account used by the importing Cinema server. Import continues automatically.")
+                networkLinks.forEach { share -> TextButton(onClick = { uriHandler.openUri(share.url) }) { Text("Authorize connection to ${share.fqdn}") } }
+                TextButton(onClick = { networkWaiting = false; networkLinks = emptyList() }) { Text("Cancel connection") }
+            }
             Text("Source invitations", style = MaterialTheme.typography.titleLarge)
             Text("Select this server's movie/show libraries. An invitation grants no access until the recipient's pairing code is explicitly approved.")
             libraries.forEach { library ->
@@ -83,12 +124,13 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
                     }
                 }
             } }) { Text("Create one-day invitation") }
-            OutlinedTextField(keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false), value = draft.invitation, onValueChange = { secrets.edit(invitation = it) }, label = { Text("Invitation to import or copy") }, modifier = Modifier.fillMaxWidth())
+            SharedSharingInvitationTools(secrets, draft, invitationId, busy)
             Text("Invitation material is transient and clears on leaving or account changes.")
             invitationId?.let { id -> TextButton(enabled = !busy, onClick = { confirmation = "Cancel invitation" to { client -> client.cancelInvitation(id); client.requireCurrent(); if (secrets.snapshot() != null) { secrets.snapshot()?.let { secrets.clear(it.revision) }; invitationId = null } } }) { Text("Cancel this invitation") } }
             Button(enabled = !busy && draft.invitation.isNotEmpty(), onClick = { scope.launch {
                 val requested = secrets.snapshot() ?: return@launch
                 run { client ->
+                    if (!connect(client, requested.invitation, requested.revision)) return@run
                     val result = client.importSource(requested.invitation); client.requireCurrent()
                     if (secrets.snapshot() != null) { imports = imports.filterNot { it.`import`.id == result.`import`.id } + result; secrets.clear(requested.revision); message = "Source imported. Compare pairing code with the exporting server." }
                 }
@@ -108,6 +150,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
                 TextButton(enabled = !busy && draft.invitation.isNotEmpty(), onClick = { scope.launch {
                     val requested = secrets.snapshot() ?: return@launch
                     run { client ->
+                        if (!connect(client, requested.invitation, requested.revision)) return@run
                         val result = client.rePair(row.`import`, requested.invitation); client.requireCurrent()
                         if (secrets.snapshot() != null) { imports = imports.filterNot { it.`import`.id == result.`import`.id } + result; secrets.clear(requested.revision); message = "Source re-paired. Compare current pairing code." }
                     }

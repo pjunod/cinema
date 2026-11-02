@@ -641,7 +641,7 @@ mod tests {
             ("live_tv/caption_probe.rs".to_owned(), 1),
             ("pipeprobe.rs".to_owned(), 2),
             ("subtitle_ride_along.rs".to_owned(), 1),
-            ("subtitles.rs".to_owned(), 1),
+            ("subtitles.rs".to_owned(), 2),
             ("transcode/media_origin.rs".to_owned(), 1),
         ]);
         let mut actual = BTreeMap::new();

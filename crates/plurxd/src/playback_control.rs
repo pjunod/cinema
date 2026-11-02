@@ -6474,6 +6474,70 @@ impl ProducerDecision {
             Self::Retry { reason, .. } | Self::Fail { reason, .. } => *reason,
         }
     }
+
+    pub(crate) fn failed_attempt(&self) -> u64 {
+        match self {
+            Self::Retry { failed_attempt, .. } | Self::Fail { failed_attempt, .. } => {
+                *failed_attempt
+            }
+        }
+    }
+}
+
+/// The retained producer decision, bound to the exact attempt it failed.
+/// Unlike `decision_reason`, this says *which* attempt and whether a
+/// successor is coming.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FailedAttemptDecision {
+    pub(crate) failed_attempt: u64,
+    pub(crate) retry: bool,
+    pub(crate) reason: &'static str,
+}
+
+/// How a request bound to one exact producer attempt should treat a wait for
+/// that attempt's first served playlist (C5 of
+/// `docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PrepublicationAttemptOutcome {
+    /// The attempt ended before its first served playlist, for this reason.
+    Failed(String),
+    /// A newer attempt has replaced it; the request's owner is stale.
+    Superseded,
+    /// Running, or a successor is on the way: keep waiting.
+    Waiting,
+}
+
+/// Classify exact attempt `attempt` from one coherent actor snapshot whose
+/// current attempt is `current_attempt`. A terminal pre-publication failure
+/// of the current attempt fails it even with no decision retained
+/// (`failure_applied`, `executor_lost`); otherwise only a non-retry decision
+/// that names it does. A retry, or a replacement in progress, keeps waiting,
+/// and a later attempt is never failed on a predecessor's account.
+pub(crate) fn classify_prepublication_attempt(
+    producer: &RollingProducerOperationalSnapshot,
+    current_attempt: u64,
+    attempt: u64,
+) -> PrepublicationAttemptOutcome {
+    if current_attempt > attempt {
+        return PrepublicationAttemptOutcome::Superseded;
+    }
+    let decision = producer
+        .failed_attempt_decision
+        .filter(|decision| decision.failed_attempt == attempt);
+    if current_attempt == attempt {
+        if let Some(kind) = producer.terminal_prepublication_failure {
+            let reason = decision
+                .filter(|decision| !decision.retry)
+                .map_or(kind, |decision| decision.reason);
+            return PrepublicationAttemptOutcome::Failed(reason.to_owned());
+        }
+    }
+    match decision {
+        Some(decision) if !decision.retry => {
+            PrepublicationAttemptOutcome::Failed(decision.reason.to_owned())
+        }
+        _ => PrepublicationAttemptOutcome::Waiting,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -6595,6 +6659,14 @@ pub struct RollingProducerOperationalSnapshot {
     pub completion_attempt: Option<u64>,
     pub completion_final_segment: Option<i64>,
     pub completion_final_end_ms: Option<i64>,
+    /// The retained decision and the exact attempt it failed. Process-local
+    /// classification input only, never serialized.
+    #[serde(skip)]
+    pub(crate) failed_attempt_decision: Option<FailedAttemptDecision>,
+    /// Why the current attempt failed before first-media publication, when
+    /// it has (`has_terminal_prepublication_failure`). Never serialized.
+    #[serde(skip)]
+    pub(crate) terminal_prepublication_failure: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -9705,6 +9777,23 @@ impl RollingControlActor {
         }
     }
 
+    /// What made the current attempt's pre-publication failure terminal, if
+    /// it is: the cause carried by the actor state itself, so a failure with
+    /// no retained decision still has a reason.
+    fn terminal_prepublication_failure_kind(&self) -> Option<&'static str> {
+        if !self.has_terminal_prepublication_failure() {
+            return None;
+        }
+        let control = self.prepublication.as_ref()?;
+        Some(if self.executor_lost {
+            "executor_lost"
+        } else if control.failure_applied {
+            "failure_applied"
+        } else {
+            "producer_failed"
+        })
+    }
+
     fn has_terminal_prepublication_failure(&self) -> bool {
         self.prepublication.as_ref().is_some_and(|control| {
             !control.producer_media_published
@@ -9926,6 +10015,12 @@ impl RollingControlActor {
             completion_attempt,
             completion_final_segment,
             completion_final_end_ms,
+            failed_attempt_decision: decision_evidence.map(|decision| FailedAttemptDecision {
+                failed_attempt: decision.failed_attempt(),
+                retry: matches!(decision.as_ref(), ProducerDecision::Retry { .. }),
+                reason: decision.reason().status(),
+            }),
+            terminal_prepublication_failure: self.terminal_prepublication_failure_kind(),
         }
     }
 

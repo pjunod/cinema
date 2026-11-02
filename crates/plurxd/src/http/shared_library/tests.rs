@@ -3267,6 +3267,82 @@ fn sharing_catalogue_http_rejects_unknown_duplicate_and_oversized_queries() {
     assert!(query(Some("q=film&limit=60")).is_ok());
 }
 #[tokio::test]
+async fn sharing_catalogue_detail_presentation_is_opt_in_and_uses_cached_public_fields() {
+    use plurx_core::sharing_catalogue_details::CatalogueRevisionKey;
+    let _serial = BODY_FIXTURES.lock().await;
+    let fixture = body_fixture().await;
+    let identity = fixture
+        .state
+        .store
+        .sharing_identity(1000)
+        .await
+        .expect("identity");
+    let envelope =
+        CatalogueRevisionKey::generate_sealed(&fixture.state.sharing.key, identity.clone())
+            .expect("purpose key");
+    let writer = rusqlite::Connection::open(&fixture.path).expect("fixture writer");
+    writer
+        .execute_batch(plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA)
+        .expect("purpose schema");
+    writer
+        .execute(
+            "INSERT INTO sharing_catalogue_keys VALUES(1,?1,?2,?3)",
+            rusqlite::params![
+                identity.server_id.to_string(),
+                identity.catalogue_epoch.to_string(),
+                envelope.as_stored()
+            ],
+        )
+        .expect("stored purpose key");
+    writer.execute("UPDATE items SET runtime_ms=7200000,air_date='2024-06-10',tmdb_id=9007199254740993,imdb_id='tt1234567' WHERE id=?1",[fixture.item]).expect("cached metadata");
+    writer.execute("INSERT INTO library_annotations_ratings(item_id,source,value,scale,votes) VALUES(?1,'imdb',8.2,10,1200)",[fixture.item]).expect("cached rating");
+    drop(writer);
+    let router = sharing::peer_router(fixture.state.clone());
+    for suffix in ["", "?presentation=1", "?presentation=2"] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/sharing/v1/items/{}{suffix}", fixture.item))
+                    .header(
+                        "authorization",
+                        format!("CinemaShare {}", fixture.secret.expose()),
+                    )
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        if suffix == "?presentation=2" {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            continue;
+        }
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("authorized body")
+            .to_bytes();
+        let value: Value = serde_json::from_slice(&bytes).expect("detail JSON");
+        if suffix.is_empty() {
+            assert!(
+                value.get("presentation").is_none(),
+                "old receivers keep the closed legacy shape"
+            );
+        } else {
+            assert_eq!(value["presentation"]["runtime_ms"], 7200000);
+            assert_eq!(value["presentation"]["air_date"], "2024-06-10");
+            assert_eq!(value["presentation"]["tmdb_id"], "9007199254740993");
+            assert_eq!(value["presentation"]["imdb_id"], "tt1234567");
+            assert_eq!(value["presentation"]["ratings"][0]["value"], 8.2);
+            assert_eq!(value["presentation"]["ratings"][0]["votes"], 1200);
+        }
+        assert!(!String::from_utf8_lossy(&bytes).contains("/private/"));
+    }
+}
+
+#[tokio::test]
 async fn sharing_source_preparation_uses_complete_live_file_and_real_principal_engine() {
     use super::super::{
         hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget},
@@ -3587,4 +3663,196 @@ async fn sharing_source_preparation_uses_complete_live_file_and_real_principal_e
         sessions, 0,
         "preparation allocates no physical or durable Source session"
     );
+}
+
+#[tokio::test]
+async fn shared_auto_preserves_unindexed_hdr10_hevc_before_source_start() {
+    use plurx_core::playback::PlaybackMethod;
+    let _serial = BODY_FIXTURES.lock().await;
+    let fixture = body_fixture().await;
+    let source = fixture._directory.path().join("unindexed.mkv");
+    std::fs::write(&source, b"planning fixture source presence").expect("source");
+    let writer = rusqlite::Connection::open(&fixture.path).expect("writer");
+    writer.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,hdr,audio_streams) VALUES(0,?1,?2,20,1000,60000,'mkv','hevc',3840,2160,10,1000000,'hdr10','[{\"index\":0,\"codec\":\"eac3\",\"channels\":6,\"default\":true}]')",rusqlite::params![fixture.item,source.to_str().expect("path")]).expect("Source file");
+    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(json!({
+        "v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]},{"codec":"hevc","max_height":2160,"present":["sdr","pq"]}],
+        "audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"progressive_hevc_sample_entries":["hvc1"]
+    })).expect("caps");
+    let query = |force: &str| super::super::stream::Caps {
+        caps_v2: Some(caps.clone()),
+        force: Some(force.to_owned()),
+        audio_offset_ms: Some(250),
+        ..Default::default()
+    };
+    let file = fixture
+        .state
+        .store
+        .get_file(0)
+        .await
+        .expect("file read")
+        .expect("file");
+    let original = super::super::stream::decision_for_source_file(
+        &fixture.state,
+        file.clone(),
+        query("original"),
+    )
+    .await
+    .expect("Original decision");
+    assert_eq!(original.decision.method, PlaybackMethod::Remux);
+    assert!(!original.vod_indexed);
+    let auto =
+        super::super::stream::decision_for_source_file(&fixture.state, file.clone(), query("auto"))
+            .await
+            .expect("Auto decision");
+    let encoded =
+        super::super::stream::decision_for_source_file(&fixture.state, file, query("transcode"))
+            .await
+            .expect("encoded decision");
+    assert_eq!(auto.decision.method, PlaybackMethod::Remux);
+    assert!(
+        auto.decision.transcode_audio,
+        "EAC3 must convert without encoding video"
+    );
+    assert_eq!(auto.decision.delivered_dynamic_range, "hdr10");
+    assert!(
+        !auto.vod_indexed,
+        "Source Start owns cold index preparation"
+    );
+    assert!(matches!(
+        auto.delivery,
+        super::super::stream::DeliveryPlan::Remux { .. }
+    ));
+    assert_eq!(encoded.decision.method, PlaybackMethod::Transcode);
+    assert_eq!(
+        encoded.decision.delivered_dynamic_range, "sdr",
+        "fixture has no HDR encoder: copy must not depend on one"
+    );
+    let mut hevc_only = query("auto");
+    hevc_only
+        .caps_v2
+        .as_mut()
+        .expect("caps")
+        .video
+        .retain(|video| video.codec == "hevc");
+    let file = fixture
+        .state
+        .store
+        .get_file(0)
+        .await
+        .expect("read")
+        .expect("file");
+    let copy = super::super::stream::decision_for_source_file(&fixture.state, file, hevc_only)
+        .await
+        .expect("HEVC-only HDR10 client");
+    assert_eq!(copy.decision.method, PlaybackMethod::Remux);
+    assert_eq!(copy.decision.delivered_dynamic_range, "hdr10");
+    let mut sdr_only = query("auto");
+    for video in &mut sdr_only.caps_v2.as_mut().expect("caps").video {
+        video
+            .present
+            .retain(|transfer| *transfer == plurx_core::playback::Transfer::Sdr);
+    }
+    let file = fixture
+        .state
+        .store
+        .get_file(0)
+        .await
+        .expect("read")
+        .expect("file");
+    let sdr = super::super::stream::decision_for_source_file(&fixture.state, file, sdr_only)
+        .await
+        .expect("SDR-only client");
+    assert_eq!(sdr.decision.method, PlaybackMethod::Transcode);
+    assert_eq!(sdr.decision.delivered_dynamic_range, "sdr");
+    // The real Source preparation must freeze the same copy request the
+    // client builds from that decision, before any physical producer admission.
+    use plurx_core::sharing_catalogue_details::CatalogueRevisionKey;
+    use plurx_core::store::sharing_catalogue_details::SourceDetailsRead;
+    let identity = fixture
+        .state
+        .store
+        .sharing_identity(1000)
+        .await
+        .expect("identity");
+    let envelope =
+        CatalogueRevisionKey::generate_sealed(&fixture.state.sharing.key, identity.clone())
+            .expect("revision key");
+    let key = CatalogueRevisionKey::open(&fixture.state.sharing.key, identity.clone(), &envelope)
+        .expect("open key");
+    writer
+        .execute_batch(plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA)
+        .expect("revision schema");
+    writer
+        .execute(
+            "INSERT INTO sharing_catalogue_keys VALUES(1,?1,?2,?3)",
+            rusqlite::params![
+                identity.server_id.to_string(),
+                identity.catalogue_epoch.to_string(),
+                envelope.as_stored()
+            ],
+        )
+        .expect("revision key row");
+    let hash = secret_hash(SecretDomain::Grant, &fixture.secret);
+    let SourceDetailsRead::Authorized(witness) = fixture
+        .state
+        .store
+        .source_item_file_witness(
+            &hash,
+            fixture.grant,
+            SourceId::parse(&fixture.item.to_string()).expect("item"),
+            SourceId::parse("0").expect("file"),
+        )
+        .await
+        .expect("witness")
+    else {
+        panic!("authorized source")
+    };
+    let target = super::super::hls::SourcePlaybackTarget {
+        server_id: identity.server_id,
+        catalogue_epoch: identity.catalogue_epoch,
+        library_id: SourceId::parse(&fixture.library.to_string()).expect("library"),
+        item_id: SourceId::parse(&fixture.item.to_string()).expect("item"),
+        file_id: SourceId::parse("0").expect("file"),
+        revision: key.file_revision(&witness).expect("revision"),
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("CinemaShare {}", fixture.secret.expose())
+            .parse()
+            .expect("fixture credential"),
+    );
+    headers.insert(
+        "cinemashare-viewer",
+        "a".repeat(64).parse().expect("viewer"),
+    );
+    let body:super::super::hls::CreateSession=serde_json::from_value(json!({"playback_id":"shared-auto-regression","request_id":uuid::Uuid::new_v4(),"copy":true,"aac":true,"presentation":"vod","caps":caps})).expect("copy request");
+    let prepared =
+        super::super::hls::prepare_source_playback(&fixture.state, &headers, target, body)
+            .await
+            .expect("Source HDR10 copy preparation");
+    assert_eq!(prepared.decision().decision.method, PlaybackMethod::Remux);
+    assert_eq!(
+        prepared.decision().decision.delivered_dynamic_range,
+        "hdr10"
+    );
+    assert!(matches!(
+        prepared.request().kind,
+        crate::transcode::SessionKind::Copy { .. }
+    ));
+    // A cold H.264 Source can build its index; it still uses copy admission.
+    writer
+        .execute("UPDATE files SET video_codec='h264',hdr=NULL,bit_depth=8,width=1920,height=1080 WHERE id=0", [])
+        .expect("H264 source");
+    let h264 = fixture
+        .state
+        .store
+        .get_file(0)
+        .await
+        .expect("read")
+        .expect("file");
+    let cold = super::super::stream::decision_for_source_file(&fixture.state, h264, query("auto"))
+        .await
+        .expect("cold H264 decision");
+    assert_eq!(cold.decision.method, PlaybackMethod::Remux);
 }

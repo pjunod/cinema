@@ -13,7 +13,7 @@ fn subtitle_source_job_argv_has_no_index_pipe_and_ends_in_null_sentinel() {
     let plan =
         crate::subtitle_ride_along::RideAlongPlan::standalone(temp.path(), 7, stamp, vec![0])
             .expect("plan");
-    let argv = subtitle_source_argv("/dev/fd/3", &plan);
+    let argv = subtitle_source_argv("/dev/fd/3", &[], &plan);
     assert!(argv.iter().all(|arg| arg != "pipe:1"));
     assert!(argv.last().is_some_and(|arg| arg.ends_with("[f=null]-")));
     assert!(argv.windows(2).any(|pair| pair == ["-i", "/dev/fd/3"]));
@@ -2082,7 +2082,27 @@ async fn busy_workers_allow_one_foreground_self_claim_and_one_subtitle_producer(
         EncoderCaps::default(),
         Pipeline::Cpu,
     ));
-    let _busy = transcode.test_mark_live_waiting();
+    store
+        .put_setting(keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("bounded CPU pool");
+    jobs.share_subtitle_admissions(transcode.admissions());
+    let background = transcode
+        .admit_fragment()
+        .await
+        .expect("real background CPU permit");
+    assert!(transcode.fragment_worker_idle(&background));
+    let background_manager = Arc::clone(&transcode);
+    let yielding = tokio::spawn(async move {
+        tokio::time::timeout(crate::admission::QUEUE_WAIT, async {
+            while background_manager.fragment_worker_idle(&background) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background observes registered foreground pressure");
+        drop(background);
+    });
     let (request, _) = jobs
         .request_file_analysis(file_id, false, "subtitle_source", "playback")
         .await
@@ -2091,6 +2111,11 @@ async fn busy_workers_allow_one_foreground_self_claim_and_one_subtitle_producer(
     let (first, second) = tokio::join!(
         jobs.self_claim_subtitle_source(&request.request_id, work.path()),
         jobs.self_claim_subtitle_source(&request.request_id, work.path())
+    );
+    yielding.await.expect("cooperative background yield");
+    assert!(
+        !transcode.admissions().live_is_waiting(),
+        "successful admission releases waiter before extracting"
     );
     assert_eq!((first as u8) + (second as u8), 1, "one owner runs");
     let rows = store.analysis_requests(20).await.expect("requests");
@@ -2300,8 +2325,16 @@ async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_
             crate::subtitle_ride_along::RideAlongPlan::standalone(work.path(), 8, stamp, vec![0])
                 .expect("normal plan");
         assert!(matches!(
-            run_subtitle_source_pass(plan, &source, work.path(), &lost, Some(&transcode), &|| {},)
-                .await,
+            run_subtitle_source_pass(
+                plan,
+                &source,
+                &[],
+                work.path(),
+                &lost,
+                Some(&transcode),
+                &|| {},
+            )
+            .await,
             Err(AnalysisResolutionError::Retry {
                 code: "foreground_preempted",
                 charge_attempt: false,
@@ -2312,7 +2345,7 @@ async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_
         crate::subtitle_ride_along::RideAlongPlan::standalone(work.path(), 8, stamp, vec![0])
             .expect("foreground plan");
     assert!(
-        run_subtitle_source_pass(plan, &source, work.path(), &lost, None, &|| {})
+        run_subtitle_source_pass(plan, &source, &[], work.path(), &lost, None, &|| {})
             .await
             .is_ok()
     );

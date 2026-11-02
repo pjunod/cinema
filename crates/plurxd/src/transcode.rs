@@ -790,6 +790,15 @@ pub struct TranscodeManager {
     /// loop last resolved. Recovery may reopen the process, but registrations
     /// admitted under an older generation still refuse themselves.
     serving_loss_generation: AtomicU64,
+    /// How the current (or last) outage stands, published by
+    /// `serving_fence_loop`, the one owner of the outage budget. HTTP reads
+    /// it to hold a running stream's request across a short outage; nothing
+    /// that reads it can spend or reset the budget.
+    outage_resolution: tokio::sync::watch::Sender<crate::serving_fence::OutageResolution>,
+    /// Whether `serving_fence_loop` is running to publish `outage_resolution`.
+    /// Without it nothing resolves an outage, so a waiter fails fast as it
+    /// did before the hold existed.
+    outage_owner_active: AtomicBool,
     /// Lock-free projection for Prometheus. The session map remains the
     /// authority; every production insert/removal publishes its resulting
     /// length while holding that map's lock.

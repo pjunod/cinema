@@ -10,6 +10,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [LINUX-PLAYER-CINEMA-UI.md](LINUX-PLAYER-CINEMA-UI.md) | Cinema-style native controls, scoped library metadata and Next, quality replacement ownership, package qualification and installed 0.4.0; owner confirms UI/quality switching, live TV Next pending. | open |
 | [LINUX-PLAYER-PLAN.md](LINUX-PLAYER-PLAN.md) | How Dolby Vision plays on Linux through plurx: a web handoff to plurx Player (an mpv launcher), the server playback handoff (§3.1), Profile 7 FEL composed in the player (reconstructed Profile 8.1 from the server for clients that cannot compose), the closed-form mapping in a private mpv, packaging, and the milestones with their acceptance. | open |
 | [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) | Android/TV platform reports, browser peak choices, session boundaries and the synthetic PQ comparison; physical qualification pending. | open |
 | [LINUX-PLAYER-PLAN.md](LINUX-PLAYER-PLAN.md) | How Dolby Vision reaches Linux through plurx: mpv with a launcher, the playback handoff, the caps the player claims, Profile 7 FEL composed in the player, reconstructed P8.1 for other clients (M2), and the milestones. | open |
@@ -100,6 +101,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) | Adversarial review of the RCA at `5c605768`: §5.3's web regression refuted, the index pass proven to be one full demux (so Fix C rides on it for free), answers to all seven questions, six rulings. | done |
 | [SUBTITLE-CLUSTER-EXTRACTION-PLAN.md](SUBTITLE-CLUSTER-EXTRACTION-PLAN.md) | v2 implementation contract and M0–M5 execution log for clustered text and PGS extraction, queueing, hydration and backfill; fleet evidence pending. | built |
 | [SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md](SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md) | Seven findings and dispositions that shaped the v2 contract. | done |
+| [SUBTITLE-CUE-INDEX-RCA.md](SUBTITLE-CUE-INDEX-RCA.md) | Why text subtitles came and went (every reader demuxed the picture to find them), and the Matroska cue-index reader that reads only the subtitle blocks. | built |
 | [PARALLEL-SUBTITLE-RANGES-STATUS.md](PARALLEL-SUBTITLE-RANGES-STATUS.md) | Distributed playback text windows: bounded-seek evidence, implementation and verification status. | built |
 | [SUBTITLE-CLUSTER-EXTRACTION-STATUS.md](SUBTITLE-CLUSTER-EXTRACTION-STATUS.md) | Current K-09 milestone, review and merge qualification status; fleet evidence pending. | built |
 | [SUBTITLE-RELIABILITY-COMPLETION.md](SUBTITLE-RELIABILITY-COMPLETION.md) | Current cross-client subtitle defects, measured engine recovery, and reconciled remaining subtitle work. | built |

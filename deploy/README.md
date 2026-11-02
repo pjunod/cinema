@@ -160,6 +160,17 @@ node id, which is the only case where a picker shows a UUID.
 
 ### Sharing uses an explicit Linux bridge profile
 
+For automatic enable/disable on a supported rootful Linux Compose checkout,
+upgrade the server to a build with `plurxd sharing host-capabilities`, then run
+`python3 scripts/install-sharing-host` once from the repository root. This is
+an explicit local administrator installation. It preserves the current image,
+proves the current Compose service hash before replacement, prepares the private
+bridge/configuration and installs the host worker. The saved sharing switch then
+drives private forwarding and address discovery. Root-running, privileged,
+extra-capability and user-namespace-remapped containers are outside this managed
+profile. See [host setup and qualification](../docs/features/SHARING-HOST-SETUP.md).
+The recipe below remains the manual deployment path.
+
 The ordinary Compose service stays on Docker networking. Shared libraries use
 a separate TLS listener; the default node-local `host_loopback` profile binds
 only loopback. To make that listener reachable through Docker's loopback-only

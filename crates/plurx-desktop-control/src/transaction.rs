@@ -86,6 +86,26 @@ impl JournalV1 {
             Phase::RecoveryRequired => RecoveryAction::HoldUnknown,
         }
     }
+    /// Reconcile a shutdown committed before the controller recorded its receipt.
+    /// Absence of the bound process alone never proves a clean shutdown.
+    pub fn complete_clean_shutdown(
+        &mut self,
+        receipt: ShutdownReceiptV1,
+        process_gone: bool,
+        supervisor_stopped: bool,
+    ) -> Result<()> {
+        self.validate_identity()?;
+        if self.phase != Phase::ShutdownCommitted
+            || !clean_receipt_matches(self, &receipt)
+            || !process_gone
+            || !supervisor_stopped
+        {
+            return Err(Error::new(ErrorCode::UnsafeShutdown, "committed shutdown lacks matching clean receipt and stopped process/supervisor evidence"));
+        }
+        self.transition(Phase::CleanStop)?;
+        self.clean_receipt = Some(receipt);
+        Ok(())
+    }
     pub fn validate_identity(&self) -> Result<()> {
         if self.schema_version != 1
             || uuid::Uuid::parse_str(&self.transaction_id).is_err()

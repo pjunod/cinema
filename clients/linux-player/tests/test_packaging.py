@@ -36,6 +36,7 @@ class Packaging(unittest.TestCase):
             self.assertTrue(glob.glob(os.path.join(ROOT, source)), source)
             self.assertTrue(destination.startswith("usr/"), destination)
         self.assertIn(["plurx-player", "usr/bin/"], rows)
+        self.assertIn(["plurx_player/scripts/*.lua", "usr/lib/plurx-player/plurx_player/scripts/"], rows)
         for name in os.listdir(os.path.join(ROOT, "debian")):
             path = os.path.join(ROOT, "debian", name)
             if os.path.isfile(path):

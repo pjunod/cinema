@@ -69,7 +69,7 @@ def validate_native_package(package):
             raise ValueError(f"native package is missing {name}")
     manifest = json.loads(manifest_path.read_text())
     if (manifest.get("source_sha256") != tool.SOURCE_SHA256 or manifest.get("source_commit") != tool.COMMIT
-            or manifest.get("parser_abi") != "plurx-source-wasi-p1-v1-wasmtime-49.0.2"):
+            or manifest.get("parser_abi") != "plurx-source-wasi-p1-v1-wasmtime-50.0.0"):
         raise ValueError("native parser provenance source/ABI does not match the package")
     if (parser.stat().st_size != manifest.get("module_bytes") or parser.stat().st_size > 32 * 1024 * 1024
             or tool.digest(parser) != manifest.get("module_sha256") or parser.read_bytes()[:8] != b"\0asm\1\0\0\0"):

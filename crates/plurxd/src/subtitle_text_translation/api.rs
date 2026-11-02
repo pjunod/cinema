@@ -202,7 +202,7 @@ pub(crate) async fn create(
             )
         })?;
 
-    let payload = JobPayload::SubtitleTextTranslate {
+    let payload = JobPayload::SubtitleTextTranslateArtifact {
         file_id,
         source_size: file.size,
         source_mtime: file.mtime,
@@ -248,10 +248,63 @@ pub(crate) async fn retry(
     let mut payload = job.supported_payload()?;
     match &mut payload {
         JobPayload::SubtitleTextTranslate {
+            file_id,
+            source_size,
+            source_mtime,
+            subtitle_index,
+            input_sha256,
+            admin_user_id,
+            target_node_id,
+            ..
+        }
+        | JobPayload::SubtitleTextTranslateArtifact {
+            file_id,
+            source_size,
+            source_mtime,
+            subtitle_index,
+            input_sha256,
             admin_user_id,
             target_node_id,
             ..
         } => {
+            if !config::read(&state).await?.enabled {
+                return Err(conflict(
+                    "disabled",
+                    "Enable text subtitle translation in Settings",
+                ));
+            }
+            if !super::workers(&state)
+                .await?
+                .iter()
+                .any(|worker| worker["status"] == "verified")
+            {
+                return Err(conflict(
+                    "translation_unverified",
+                    "Install and test the text translation model in Settings",
+                ));
+            }
+            let file = state
+                .store
+                .get_file(*file_id)
+                .await?
+                .filter(|file| file.size == *source_size && file.mtime == *source_mtime)
+                .ok_or_else(|| conflict("source_changed", "The media source changed"))?;
+            // Retry is the explicit acquisition boundary. A claimed translation
+            // never regenerates missing/evicted input from the media source.
+            let bytes = super::input_bytes(&state, &file, *subtitle_index)
+                .await
+                .map_err(|_| {
+                    invalid(
+                        "subtitle_unavailable",
+                        "A complete text subtitle is required",
+                    )
+                })?;
+            if hex::encode(Sha256::digest(bytes)) != *input_sha256 {
+                return Err(conflict(
+                    "subtitle_changed",
+                    "The source subtitle changed; start a new translation",
+                ));
+            }
             *admin_user_id = user.id;
             *target_node_id = state.node_id.clone();
         }
@@ -268,7 +321,14 @@ pub(crate) async fn retry(
         _ => return Err(ApiError::NotFound("text translation job")),
     }
 
-    enqueue(&state, user.id, &input.request_id, digest, payload).await
+    enqueue(
+        &state,
+        user.id,
+        &input.request_id,
+        digest,
+        payload.into_artifact_text(),
+    )
+    .await
 }
 async fn replay(
     state: &AppState,
@@ -373,7 +433,9 @@ pub(crate) async fn job(
     let payload = job.supported_payload()?;
     if !matches!(
         payload,
-        JobPayload::SubtitleTextTranslate { .. } | JobPayload::SubtitleTextModelOperation { .. }
+        JobPayload::SubtitleTextTranslate { .. }
+            | JobPayload::SubtitleTextTranslateArtifact { .. }
+            | JobPayload::SubtitleTextModelOperation { .. }
     ) {
         return Err(ApiError::NotFound("text translation job"));
     }
@@ -386,7 +448,9 @@ async fn projection(
 ) -> Result<Value, ApiError> {
     let mut result = Value::Null;
     if job.state == JobState::Succeeded {
-        if let JobPayload::SubtitleTextTranslate { file_id, .. } = payload {
+        if let JobPayload::SubtitleTextTranslate { file_id, .. }
+        | JobPayload::SubtitleTextTranslateArtifact { file_id, .. } = payload
+        {
             if let Some(file) = state.store.get_file(*file_id).await? {
                 let key = artifact_key(payload)?;
                 for track in &file.subtitle_streams {
@@ -406,9 +470,83 @@ async fn projection(
         .checkpoint
         .as_ref()
         .filter(|checkpoint| checkpoint["fence"].as_i64() == Some(job.fence));
-    let waiting =
-        job.state == JobState::Queued && !state.transcode.speech_capacity_observation().await.2;
+    let (phase, reason) = status_phase(
+        job.state,
+        matches!(
+            payload,
+            JobPayload::SubtitleTextTranslate { .. }
+                | JobPayload::SubtitleTextTranslateArtifact { .. }
+        ),
+        checkpoint,
+        job.fence,
+        state.transcode.speech_capacity_observation().await.2,
+    );
     Ok(
-        json!({"version":1,"job_id":job.id,"state":job.state,"phase":if waiting{Some("waiting_for_capacity")}else{checkpoint.and_then(|c|c["phase"].as_str())},"reason":if waiting{Some("waiting_for_playback_capacity")}else{job.last_error_code.as_deref().map(super::manager::safe_reason)},"retryable":matches!(job.state,JobState::Failed|JobState::Cancelled),"progress":{"completed":checkpoint.and_then(|c|c["completed_cues"].as_u64()).unwrap_or(0),"total":checkpoint.and_then(|c|c["total_cues"].as_u64()).unwrap_or(0)},"result":result}),
+        json!({"version":1,"job_id":job.id,"state":job.state,"phase":phase,"reason":reason.or_else(||job.last_error_code.as_deref().map(super::manager::safe_reason)),"retryable":matches!(job.state,JobState::Failed|JobState::Cancelled),"progress":{"completed":checkpoint.and_then(|c|c["completed_cues"].as_u64()).unwrap_or(0),"total":checkpoint.and_then(|c|c["total_cues"].as_u64()).unwrap_or(0)},"result":result}),
     )
+}
+
+fn status_phase(
+    state: JobState,
+    is_text_translate: bool,
+    checkpoint: Option<&Value>,
+    fence: i64,
+    capacity_available: bool,
+) -> (Option<&str>, Option<&'static str>) {
+    let checkpoint = checkpoint.filter(|checkpoint| checkpoint["fence"].as_i64() == Some(fence));
+    let phase = checkpoint.and_then(|checkpoint| checkpoint["phase"].as_str());
+    let waiting = state == JobState::Queued && is_text_translate && !capacity_available;
+    if waiting {
+        (
+            Some("waiting_for_capacity"),
+            Some("waiting_for_playback_capacity"),
+        )
+    } else {
+        (phase, None)
+    }
+}
+
+#[cfg(test)]
+mod status_phase_tests {
+    use super::status_phase;
+    use plurx_core::store::background_jobs::JobState;
+    use serde_json::json;
+
+    #[test]
+    fn fresh_queued_translation_reports_capacity_wait() {
+        assert_eq!(
+            status_phase(JobState::Queued, true, None, 1, false),
+            (
+                Some("waiting_for_capacity"),
+                Some("waiting_for_playback_capacity")
+            )
+        );
+    }
+
+    #[test]
+    fn queued_model_operation_keeps_its_download_phase() {
+        let checkpoint = json!({"fence": 1, "phase": "downloading"});
+        assert_eq!(
+            status_phase(JobState::Queued, false, Some(&checkpoint), 1, false),
+            (Some("downloading"), None)
+        );
+    }
+
+    #[test]
+    fn running_model_operation_preserves_capacity_phase() {
+        let checkpoint = json!({"fence": 1, "phase": "waiting_for_capacity"});
+        assert_eq!(
+            status_phase(JobState::Running, false, Some(&checkpoint), 1, true),
+            (Some("waiting_for_capacity"), None)
+        );
+    }
+
+    #[test]
+    fn stale_checkpoint_is_ignored() {
+        let checkpoint = json!({"fence": 0, "phase": "downloading"});
+        assert_eq!(
+            status_phase(JobState::Queued, false, Some(&checkpoint), 1, false),
+            (None, None)
+        );
+    }
 }

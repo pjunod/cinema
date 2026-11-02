@@ -1957,6 +1957,39 @@ impl Session {
         ))
     }
 
+    /// C5: how a wait bound to exact attempt `producer_attempt` stands, read
+    /// from one coherent actor snapshot (see
+    /// `playback_control::classify_prepublication_attempt`). Legacy sessions,
+    /// an unreachable actor and a session-level terminal all answer
+    /// `Waiting`: the existing checks own those cases.
+    pub(super) async fn prepublication_attempt_outcome_before(
+        &self,
+        producer_attempt: u64,
+        deadline: Instant,
+    ) -> crate::playback_control::PrepublicationAttemptOutcome {
+        use crate::playback_control::PrepublicationAttemptOutcome;
+        if !self.actor_managed_prepublication_process {
+            return PrepublicationAttemptOutcome::Waiting;
+        }
+        let Some(snapshot) = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.control.snapshot(),
+        )
+        .await
+        .ok()
+        .flatten() else {
+            return PrepublicationAttemptOutcome::Waiting;
+        };
+        if snapshot.terminal.is_some() {
+            return PrepublicationAttemptOutcome::Waiting;
+        }
+        crate::playback_control::classify_prepublication_attempt(
+            &snapshot.producer_control,
+            snapshot.delivery.producer_attempt,
+            producer_attempt,
+        )
+    }
+
     /// A cache-integrity failure owner remains an exact response capability
     /// after its detached cleanup removes this Session from the live registry.
     /// The monotonic cleanup latch and first-writer failure cell together make

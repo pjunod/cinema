@@ -619,6 +619,161 @@ async fn cancelled_background_admission_removes_its_queued_turn() {
     assert!(manager.fragment_worker_idle(&next));
 }
 
+#[tokio::test]
+async fn progressive_caption_admission_requests_cooperative_background_yield() {
+    use std::{future::Future, task::Poll};
+    use tokio_util::sync::CancellationToken;
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("two-thread budget");
+    let (manager, _work, _cache) = cached_manager(&store);
+    let held = manager
+        .admit_fragment()
+        .await
+        .expect("real background holder");
+    let cancel = CancellationToken::new();
+    let mut queued = Box::pin(manager.admit_progressive_speech(&cancel));
+    std::future::poll_fn(|cx| {
+        assert!(queued.as_mut().poll(cx).is_pending());
+        if manager.admissions.live_is_waiting() {
+            Poll::Ready(())
+        } else {
+            // Budget lookup may yield before the admission waiter exists.
+            // Its registered database waker schedules the next poll.
+            Poll::Pending
+        }
+    })
+    .await;
+    assert!(manager.admissions.live_is_waiting());
+    assert!(
+        !manager.fragment_worker_idle(&held),
+        "existing background worker sees cooperative yield pressure"
+    );
+    assert!(
+        manager.admit_speech().await.is_none(),
+        "model/self-test path remains speculative"
+    );
+    drop(held);
+    let caption = queued
+        .await
+        .expect("demanded progressive work follows yielded background");
+    assert!(
+        !manager.admissions.live_is_waiting(),
+        "own wait ends before execution"
+    );
+    assert!(manager.speech_capacity_available(&caption));
+    assert_eq!(manager.admissions.software_in_use(), 2);
+    drop(caption);
+    assert_eq!(manager.admissions.software_in_use(), 0);
+    assert!(!manager.background_worker_in_use());
+}
+
+#[tokio::test]
+async fn progressive_caption_admission_does_not_bypass_viewers_offline_work_or_cpu_budget() {
+    use std::{future::Future, task::Poll};
+    use tokio_util::sync::CancellationToken;
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("two-thread budget");
+    let (manager, _work, _cache) = cached_manager(&store);
+    let held = manager.admit_fragment().await.expect("background holder");
+    let cancel = CancellationToken::new();
+    let mut queued = Box::pin(manager.admit_progressive_speech(&cancel));
+    std::future::poll_fn(|cx| {
+        assert!(queued.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let viewer = manager.admissions.wait_for_slot();
+    drop(held);
+    assert!(
+        queued.await.is_none(),
+        "another waiting viewer wins over caption work"
+    );
+    assert_eq!(manager.admissions.software_in_use(), 0);
+    assert!(!manager.background_worker_in_use());
+    assert!(
+        manager.admissions.live_is_waiting(),
+        "only the real viewer remains waiting"
+    );
+    drop(viewer);
+    manager
+        .offline_waiting
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(manager.admit_progressive_speech(&cancel).await.is_none());
+    manager
+        .offline_waiting
+        .store(false, std::sync::atomic::Ordering::Release);
+    assert!(!manager.admissions.live_is_waiting());
+    store
+        .put_setting(keys::SW_POOL_THREADS, "1")
+        .await
+        .expect("insufficient CPU budget");
+    assert!(
+        manager.admit_progressive_speech(&cancel).await.is_none(),
+        "inference never takes oversized lone-job exception"
+    );
+    assert_eq!(manager.admissions.software_in_use(), 0);
+    assert!(!manager.admissions.live_is_waiting());
+}
+
+#[tokio::test(start_paused = true)]
+async fn progressive_caption_admission_timeout_and_cancellation_release_waiter() {
+    use std::{future::Future, task::Poll};
+    use tokio_util::sync::CancellationToken;
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let (manager, _work, _cache) = cached_manager(&store);
+    let held = manager.admit_fragment().await.expect("background holder");
+    let cancel = CancellationToken::new();
+    let started = tokio::time::Instant::now();
+    assert!(manager.admit_progressive_speech(&cancel).await.is_none());
+    assert_eq!(started.elapsed(), crate::admission::QUEUE_WAIT);
+    assert!(!manager.admissions.live_is_waiting());
+    let mut queued = Box::pin(manager.admit_progressive_speech(&cancel));
+    std::future::poll_fn(|cx| {
+        assert!(queued.as_mut().poll(cx).is_pending());
+        if manager.admissions.live_is_waiting() {
+            Poll::Ready(())
+        } else {
+            // Budget lookup may yield before the admission waiter exists.
+            // Its registered database waker schedules the next poll.
+            Poll::Pending
+        }
+    })
+    .await;
+    assert!(manager.admissions.live_is_waiting());
+    cancel.cancel();
+    assert!(queued.await.is_none());
+    assert!(!manager.admissions.live_is_waiting());
+    let alive = CancellationToken::new();
+    let mut abandoned = Box::pin(manager.admit_progressive_speech(&alive));
+    std::future::poll_fn(|cx| {
+        assert!(abandoned.as_mut().poll(cx).is_pending());
+        if manager.admissions.live_is_waiting() {
+            Poll::Ready(())
+        } else {
+            // Budget lookup may yield before the admission waiter exists.
+            // Its registered database waker schedules the next poll.
+            Poll::Pending
+        }
+    })
+    .await;
+    drop(abandoned);
+    assert!(!manager.admissions.live_is_waiting());
+    drop(held);
+    assert!(
+        manager.admit_fragment().await.is_some(),
+        "no admission or heavy permit leaked"
+    );
+}
+
 async fn recipe_hash_for_options(
     mgr: &TranscodeManager,
     file: &plurx_core::domain::MediaFile,

@@ -807,6 +807,7 @@ struct CaptionHTTPReply<T> {
 struct CaptionServiceError: LocalizedError {
     let status: Int
     let code: String
+    var operationId: String? = nil
     var ambiguous: Bool { status == 408 || status >= 500 }
     var errorDescription: String? { Self.message(code) }
     static func message(_ code: String?) -> String {
@@ -880,9 +881,9 @@ extension PlurxAPI {
         guard authorization.generation == Session.shared.playbackAuthorization.generation else { throw CancellationError() }
         guard let http = response as? HTTPURLResponse else { throw CaptionProtocolError.invalid }
         guard (200..<300).contains(http.statusCode) else {
-            struct Failure: Decodable { let code: String? }
+            struct Failure: Decodable { let code: String?; let operationId: String? }
             let failure = try? Self.decoder.decode(Failure.self, from: data)
-            throw CaptionServiceError(status: http.statusCode, code: failure?.code ?? "network_error")
+            throw CaptionServiceError(status: http.statusCode, code: failure?.code ?? "network_error", operationId: http.statusCode == 409 && failure?.code == "operation_stopped" ? failure?.operationId : nil)
         }
         guard http.statusCode == 204 || http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("application/json") == true else {
             throw CaptionProtocolError.invalid

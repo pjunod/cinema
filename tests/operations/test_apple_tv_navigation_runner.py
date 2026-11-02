@@ -1,6 +1,11 @@
 """A successful xcodebuild exit alone cannot qualify an empty/skipped UI run."""
 import importlib.machinery
 import importlib.util
+import json
+import os
+import subprocess
+import tempfile
+from unittest.mock import patch
 from pathlib import Path
 import unittest
 import re
@@ -53,3 +58,73 @@ class TVNavigationRunnerTests(unittest.TestCase):
         for name in classes:
             self.assertIn("            - " + name, navigation)
             self.assertIn("            - " + name, physical)
+
+
+class TVNavigationResumeTests(unittest.TestCase):
+    def test_pending_selection_is_exact_complement_of_retained_originals(self):
+        required = ['Suite/testOne', 'Suite/testTwo']
+        plan = {'current_commit': 'head', 'current_run': 4,
+                'tv_cases': {'required_tests': required, 'passes': {'Suite/testOne': {'test': 'Suite/testOne'}},
+                             'pending': ['Suite/testTwo']}}
+        with tempfile.TemporaryDirectory() as directory, patch.object(RUNNER, 'REQUIRED', required), \
+                patch.dict(os.environ, {'GITHUB_RUN_ID': '4'}):
+            path = Path(directory) / 'plan.json'
+            path.write_text(json.dumps(plan))
+            self.assertEqual(RUNNER.resume_selection(path, 'head')[0], ['Suite/testTwo'])
+            plan['tv_cases']['pending'] = required
+            path.write_text(json.dumps(plan))
+            with self.assertRaises(RuntimeError):
+                RUNNER.resume_selection(path, 'head')
+
+    def test_failed_execution_exports_own_cases_and_checks_final_source(self):
+        selected = ['Suite/testOne', 'Suite/testTwo']
+        log = ("Test Case '-[plurx_tvOSUITests.Suite testOne]' started.\n"
+               "Test Case '-[plurx_tvOSUITests.Suite testOne]' passed (1.234 seconds).\n"
+               "Test Case '-[plurx_tvOSUITests.Suite testTwo]' started.\n"
+               "Test Case '-[plurx_tvOSUITests.Suite testTwo]' failed (2.345 seconds).\n")
+        summary = {'passedTests': 1, 'failedTests': 1, 'skippedTests': 0}
+        snapshot = ('head', False, 'digest')
+        for final in (snapshot, ('head', True, 'changed')):
+            with self.subTest(final=final), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / 'result'
+                def command(*args, **kwargs):
+                    if args[:2] == ('xcodebuild', 'test'):
+                        kwargs['stdout'].write(log)
+                        bundle = output / 'navigation.xcresult'
+                        bundle.mkdir()
+                        (bundle / 'Info.plist').write_text('placeholder')
+                        raise subprocess.CalledProcessError(65, args)
+                    return subprocess.CompletedProcess(args, 0, stdout='device' if args[:3] == ('xcrun', 'simctl', 'create') else '')
+                with patch.object(RUNNER, 'REQUIRED', selected), \
+                        patch.object(RUNNER, 'source_snapshot', side_effect=[snapshot, final]), \
+                        patch.object(RUNNER, 'run', side_effect=command), \
+                        patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=json.dumps(summary))), \
+                        patch.dict(os.environ, {}, clear=True), \
+                        patch.object(RUNNER.sys, 'argv', ['runner', '--output', str(output)]):
+                    self.assertEqual(RUNNER.main(), 1)
+                receipt = json.loads((output / 'receipt.json').read_text())
+                self.assertEqual(receipt['source_unchanged'], final == snapshot)
+                self.assertEqual(receipt['case_results'], {'Suite/testOne': 'passed', 'Suite/testTwo': 'failed'}
+                                 if final == snapshot else {})
+
+
+    def test_complete_retained_union_executes_no_native_case(self):
+        required = ['Suite/testOne']
+        retained = {'Suite/testOne': {'test': 'Suite/testOne'}}
+        plan = {'current_commit': 'head', 'current_run': 4,
+                'tv_cases': {'required_tests': required, 'passes': retained, 'pending': []}}
+        with tempfile.TemporaryDirectory() as directory:
+            path, output = Path(directory) / 'plan.json', Path(directory) / 'result'
+            path.write_text(json.dumps(plan))
+            with patch.object(RUNNER, 'REQUIRED', required), \
+                    patch.object(RUNNER, 'source_snapshot', return_value=('head', False, 'digest')), \
+                    patch.object(RUNNER, 'run', return_value=subprocess.CompletedProcess([], 0, stdout='Xcode')) as command, \
+                    patch.dict(os.environ, {'GITHUB_RUN_ID': '4', 'PLURX_TV_NAVIGATION_PLAN': str(path)}), \
+                    patch.object(RUNNER.sys, 'argv', ['runner', '--output', str(output)]):
+                self.assertEqual(RUNNER.main(), 0)
+                command.assert_called_once_with('xcodebuild', '-version', capture_output=True)
+            receipt = json.loads((output / 'receipt.json').read_text())
+            self.assertTrue(receipt['native_suite_complete'])
+            self.assertEqual(receipt['suite_passes'], retained)
+            self.assertEqual(receipt['case_results'], {})
+            self.assertNotIn('command', receipt)

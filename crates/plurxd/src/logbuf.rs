@@ -19,6 +19,9 @@ use tracing_subscriber::Layer;
 pub struct LogBuffers {
     pub general: Arc<LogBuffer>,
     pub cluster: Arc<LogBuffer>,
+    /// A copy of every shared-library event, also kept in `general`, so the
+    /// Sharing page can show its own history after playback logs roll over.
+    pub sharing: Arc<LogBuffer>,
 }
 
 impl Default for LogBuffers {
@@ -26,8 +29,24 @@ impl Default for LogBuffers {
         Self {
             general: Arc::new(LogBuffer::default()),
             cluster: Arc::new(LogBuffer::default()),
+            sharing: Arc::new(LogBuffer::new(500)),
         }
     }
+}
+
+/// Shared-library modules: `sharing*` and `shared_*` below a plurx crate,
+/// except the cluster's playback cache, which only shares a name prefix.
+pub fn is_sharing_target(target: &str) -> bool {
+    let mut segments = target.split("::");
+    if !matches!(segments.next(), Some("plurx" | "plurxd" | "plurx_core")) {
+        return false;
+    }
+    segments.any(|segment| {
+        segment.starts_with("sharing")
+            || (segment.starts_with("shared_")
+                && segment != "shared_cache"
+                && !segment.starts_with("shared_cache_"))
+    })
 }
 
 /// Targets emitted by plurx membership plus its Raft/replication dependencies.
@@ -248,6 +267,31 @@ mod tests {
     }
 
     #[test]
+    fn sharing_targets_cover_setup_peers_and_tailscale_shares_only() {
+        for target in [
+            "plurxd::sharing",
+            "plurxd::sharing_host",
+            "plurxd::sharing_network",
+            "plurxd::sharing_diagnosis",
+            "plurxd::http::sharing",
+            "plurxd::http::shared_receiver_playback",
+            "plurx::sharing",
+            "plurx_core::sharing_tls",
+        ] {
+            assert!(is_sharing_target(target), "{target}");
+        }
+        for target in [
+            "plurxd::shared_cache",
+            "plurxd::scratch_put",
+            "plurxd::transcode",
+            "hiqlite::sharing",
+            "plurx_core::cluster::membership",
+        ] {
+            assert!(!is_sharing_target(target), "{target}");
+        }
+    }
+
+    #[test]
     fn scoped_layers_keep_cluster_events_out_of_the_general_ring() {
         use tracing_subscriber::filter::filter_fn;
         use tracing_subscriber::prelude::*;
@@ -255,6 +299,7 @@ mod tests {
         let logs = LogBuffers {
             general: Arc::new(LogBuffer::new(10)),
             cluster: Arc::new(LogBuffer::new(10)),
+            sharing: Arc::new(LogBuffer::new(10)),
         };
         let subscriber = tracing_subscriber::registry()
             .with(
@@ -277,6 +322,25 @@ mod tests {
         assert_eq!(cluster[0].message, "membership");
         assert_eq!(cluster[1].message, "raft detail");
     }
+}
+
+/// Route this thread's events into `buffer` until the returned guard drops.
+///
+/// tracing-core 0.1.36 computes a callsite's interest from the registering
+/// thread's default alone while only one dispatcher is registered
+/// (`Dispatchers::has_just_one`). If this test's subscriber is that one and
+/// another test thread reaches a callsite first, the callsite caches "never"
+/// from that thread's no-op default, and this thread's event at it is
+/// dropped. A second, silent dispatcher kept registered alongside keeps the
+/// shortcut off, so interest is computed from every live dispatcher.
+#[cfg(test)]
+pub(crate) fn capture_for_test(buffer: &Arc<LogBuffer>) -> impl Sized {
+    use tracing_subscriber::prelude::*;
+    let peer = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let current = tracing::subscriber::set_default(
+        tracing_subscriber::registry().with(BufferLayer(Arc::clone(buffer))),
+    );
+    (current, peer)
 }
 
 /// A `MakeWriter` that keeps what a subscriber formatted, so a test can read

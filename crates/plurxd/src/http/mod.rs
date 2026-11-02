@@ -447,6 +447,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/playback-handoffs"
         | "/api/v1/playback-handoffs/redeem"
         | "/api/v1/playback-handoffs/self"
+        | "/api/v1/playback-handoffs/self/context"
+        | "/api/v1/playback-handoffs/self/next"
         | "/api/v1/playback-handoffs/{id}"
         | "/api/v1/files/{id}/stream.mp4"
         | "/api/v1/files/{id}/subs/{subtitle}"
@@ -1725,6 +1727,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/playback-handoffs/self",
             delete(playback_handoffs::revoke_self),
+        )
+        .route(
+            "/playback-handoffs/self/context",
+            get(playback_handoffs::context),
+        )
+        .route(
+            "/playback-handoffs/self/next",
+            post(playback_handoffs::advance_next),
         )
         .route("/playback-handoffs/{id}", get(playback_handoffs::status))
         .route(
@@ -3138,6 +3148,30 @@ async fn mutable_media_serving_gate(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    let hls_route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .and_then(|matched| {
+            hls::fence::hls_session_route(request.method().as_str(), matched.as_str())
+        });
+    let Some(route) = hls_route else {
+        return serving_gate(&state, request, next).await;
+    };
+    let path = request.uri().path().to_owned();
+    hls::fence::observe_hls_session_response(&state.serving, route, &path, async {
+        if route.existing_session_read {
+            hls::fence::hold_for_outage_resolution(&state).await;
+        }
+        serving_gate(&state, request, next).await
+    })
+    .await
+}
+
+async fn serving_gate(
+    state: &AppState,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
     let starts_media = crate::serving_fence::ServingFence::starts_mutable_media(
         request.method().as_str(),
         request.uri().path(),
@@ -3155,6 +3189,9 @@ async fn mutable_media_serving_gate(
                 response
                     .headers_mut()
                     .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+                response
+                    .extensions_mut()
+                    .insert(error::ApiErrorCode("restart_drain_active"));
                 return response;
             }
         }
@@ -3177,6 +3214,9 @@ async fn mutable_media_serving_gate(
         response
             .headers_mut()
             .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    if let Some(code) = policy.code {
+        response.extensions_mut().insert(error::ApiErrorCode(code));
     }
     response
 }

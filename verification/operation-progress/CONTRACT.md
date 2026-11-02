@@ -7,6 +7,51 @@ and [WAIT-MAP.md](WAIT-MAP.md) (source waits and external boundaries).
 This contract defines the meaning of `OperationProgress.tla`; it does not
 extend the original [safety contract](../durable-jobs/CONTRACT.md).
 
+## Artifact-only text translation — scoped source review on 2026-10-28
+
+Managed v3 / SQLite v121 exempts only the new closed
+`subtitle_text_translate_artifact` job kind. Its worker reads pinned, bounded,
+materialized VTT bytes, verifies the original input SHA, and retains source,
+model, configuration, administrative and publication authority checks. A miss
+fails explicitly; Retry reacquires input before enqueue. Legacy
+`subtitle_text_translate` remains source-fenced because old workers can extract
+media. Old candidate-kind filters cannot dispatch the new kind; queued and
+running legacy jobs are not rewritten. The upgrade requires exact v2 DDL and
+marker, commits atomically, and preserves existing owners and reservations.
+
+The selected `library_scan` / `metadata_refresh` source-domain and provider
+rows, claim identity, renewal, binding, publication and settlement remain
+unchanged, as do the two-reader and one-speculative-reader limits. The v3 view
+and upgrade guards are mapped correspondence inputs. Caption inference,
+rolling upgrades and input acquisition remain outside this finite model;
+model/configuration/property/bound/toolchain bytes are unchanged. This source
+review supplies no new runtime, formal-execution or qualification evidence.
+
+## Subtitle resource admission — scoped refresh on 2026-10-28
+
+Codex reviewed `c3d764a01` against `f2120bd9a`. Five mapped whole-file pins
+change: the shared queue adds exact demand-bound caption admission, the
+replicated store installs a guarded managed-resource v2 view, and the transcode
+manager adds a bounded cooperative wait used only by demanded progressive
+captions. The selected `admit_fragment` path remains try-only. Library worker
+admission, claim, domain/token/publication lock order, completion, settlement,
+heartbeat retirement and physical-admission lifetime are unchanged.
+
+The v2 view is now a mapped input because it supplies current source-reader
+requirements. `library_scan` and `metadata_refresh` keep their source-domain
+and provider rows. Artifact-only text model setup loses its media-reader row;
+qualified caption demand can use the existing reserved live slot without
+changing the two-reader/one-speculative-reader limits. Competing caption work
+can cause selected background work to yield; this package does not establish
+per-job source scheduling fairness or caption progress. Its stable-demand and
+external-return premises remain explicit.
+
+Every existing mapped anchor remains unique and unchanged. Model, configuration,
+fairness, property, bound and toolchain bytes are unchanged; no model delta is
+needed for these out-of-scope caption paths. Online schema upgrades, caption
+admission and playback require their own runtime evidence. This source mapping
+review does not renew historical qualification or claim fresh TLC execution.
+
 ## Useful completion and cleanup are separate observations
 
 `request = "done"` means a durable, non-pending library request result

@@ -36,7 +36,7 @@ class MacosDaemonPackageCase(unittest.TestCase):
         module.write_bytes(b"\0asm\1\0\0\0")
         recipe = TOOL.recipe()
         self.manifest = {"source_sha256": recipe.SOURCE_SHA256, "source_commit": recipe.COMMIT,
-                         "parser_abi": "plurx-source-wasi-p1-v1-wasmtime-49.0.2", "module_bytes": 8,
+                         "parser_abi": "plurx-source-wasi-p1-v1-wasmtime-50.0.0", "module_bytes": 8,
                          "module_sha256": hashlib.sha256(module.read_bytes()).hexdigest()}
         (provenance / "manifest.json").write_text(json.dumps(self.manifest))
         self.native_manifest = {"source_sha256": recipe.SOURCE_SHA256, "source_commit": recipe.COMMIT,

@@ -733,6 +733,20 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
             .await;
         assert!(rendition.readers.lock().await.is_empty());
     }
+    // End and slot reap do not join an in-flight driver preparation pass. Wait
+    // for that pass to observe the removed demand and release its permit too.
+    wait_until(
+        "shared audio family physically releases its credits",
+        Duration::from_secs(5),
+        async || encoding.admissions.software_in_use() == 0,
+    )
+    .await;
+    for rendition in [&soundtrack, &video_rendition] {
+        assert!(
+            rendition.retained_admission.current().is_none(),
+            "cache owns no family credit"
+        );
+    }
     assert_eq!(
         encoding.admissions.software_in_use(),
         0,
@@ -1219,7 +1233,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
             .is_err(),
         "End refuses preparation"
     );
-    for rendition in owned {
+    for rendition in &owned {
         rendition.gen_epoch.fetch_add(1, Relaxed);
         let _ = rendition
             .slot
@@ -1231,6 +1245,18 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
             )
             .await;
         assert!(rendition.readers.lock().await.is_empty());
+    }
+    wait_until(
+        "autonomous family physically releases its credits",
+        Duration::from_secs(5),
+        async || encoding.admissions.software_in_use() == 0,
+    )
+    .await;
+    for rendition in &owned {
+        assert!(
+            rendition.retained_admission.current().is_none(),
+            "cache owns no autonomous family credit"
+        );
     }
     assert_eq!(
         encoding.admissions.software_in_use(),

@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-26, plurx has 403 routes declared by the ordinary listener's
+As of 2026-10-28, plurx has 408 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 403 routes across the registered routers.
+plurx has 408 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -142,7 +142,7 @@ audience (`TokenAudience` in `crates/plurx-core/src/store/mod.rs`):
 |---|---|---|
 | `Native` | a `tokens` row with no Jellyfin marker | `AuthUser` and every extractor built on it |
 | `JellyfinCompatibility` | a `tokens` row with a `jellyfin_login_tokens` marker | the Jellyfin façade only (§22) |
-| `PlaybackHandoff` | a `playback_handoffs_tokens` row (not in `tokens`), unexpired, whose minting token still exists | `PlaybackPrincipal` (the decision, HLS create, direct play, text subtitle, item progress and client-log routes, for one file) and `HandoffToken` (`DELETE /api/v1/playback-handoffs/self`) — §13.2 |
+| `PlaybackHandoff` | a `playback_handoffs_tokens` row (not in `tokens`), unexpired, whose minting token still exists | `PlaybackPrincipal` (the decision, HLS create, direct play, text subtitle, item progress and client-log routes, for one file) and `HandoffToken` (self-revocation, restricted context and explicit next-episode advancement) — §13.2 |
 
 `AuthUser` asks for the native audience, so a Jellyfin login or a playback
 handoff token is an unknown bearer there: 401, exactly as for a token that was
@@ -822,7 +822,10 @@ names, and `404` for any other name.
 `?level=` (default `trace`), `?limit=` (default 500, capped at 2000),
 `?scope=cluster` to read the isolated membership and Raft ring instead of the
 general one — two rings, so replication chatter cannot evict playback
-diagnostics. Entries are `{ts_ms, level, target, message}`, oldest first.
+diagnostics. `?scope=sharing` reads a copy of every shared-library event
+(host setup, connection checks, Tailscale shares, pairing), kept so playback
+chatter cannot evict a connection failure; those events also stay in the
+general ring. Entries are `{ts_ms, level, target, message}`, oldest first.
 
 ### 5.5 `POST /api/v1/client-log`
 
@@ -2699,6 +2702,8 @@ row updates nothing and returns the existing winning row.
 | POST | `/api/v1/playback-handoffs/redeem` | **none** — the code is the credential | Body `{code, device?}`; 200 `{token, handoff_id, file_id, item_id, start_ms, audio, subtitle, user, origin, expires_at}` (`item_id` is the file's item, for progress). A code never minted (or not code-shaped) 404; a code already redeemed, past its 120 s, or minted by a token since revoked 410 `handoff_gone` |
 | GET | `/api/v1/playback-handoffs/{id}` | the minting bearer | `{redeemed: bool}`. Any other bearer, even the same user's, 404 |
 | DELETE | `/api/v1/playback-handoffs/self` | playback handoff token only | Revoke the presented handoff token; 204. A native bearer 401 |
+| GET | `/api/v1/playback-handoffs/self/context` | playback handoff token only | Restricted metadata for the token's current file plus its immediate next episode; 200 context below. No requested item/file id or library browsing; missing current item/file 404 |
+| POST | `/api/v1/playback-handoffs/self/next` | playback handoff token only | Body `{expected_file_id}`. Resolve the immediate next episode on the server and atomically replace the token's file scope; 200 updated context. Stale predecessor 409 `handoff_stale`; no successor/file 404. Native, expired or revoked bearer 401. Unknown body fields are refused |
 
 **Why.** A web session sometimes has to give another local app — the Linux
 player ([LINUX-PLAYER-PLAN.md](clients/LINUX-PLAYER-PLAN.md) §3.1) — playback
@@ -2721,7 +2726,28 @@ It lives six hours from redemption and dies
 with the token that minted it — logout, a password change, revoking that
 device — so signing out of the web app stops the player too.
 
-It is accepted only here, and only for the handed-off file:
+**Player context and next episode.** Context is
+`{file_id, item_id, start_ms: 0, audio: null, subtitle: null, metadata, next}`.
+`metadata` contains only `title`, `series_title`, `kind`, `overview`, `year`,
+`season_number`, `episode_number`, `runtime_ms`, and `air_date`; optional facts
+are `null`. `next` is `null` or `{file_id, item_id, metadata}`. No filesystem
+paths, credentials, sibling lists or generic library access are exposed.
+The next episode follows the existing ordered children within the current
+season, then the first episode of the immediate next season. The selected
+file is the first in the ordinary quality-ordered file list whose bounded
+availability observation is not confirmed missing; an unknown observation
+remains eligible and the source open decides. Movies, a final episode, missing
+hierarchy or a successor without an eligible file have no next entry.
+
+Reading next metadata grants no playback access. Only an explicit Next request
+changes the existing token's one-file scope; it preserves the original expiry,
+login binding and token identity. The expected predecessor is compared inside
+the write, so a repeated request cannot skip another episode. Old-file playback
+and progress requests then fail their scope checks. Clients complete the old
+item's final progress before requesting Next and open the returned file at zero.
+A lost response can be resolved by reading context with the same token.
+
+It is accepted only here, and only for its currently authorized file:
 
 | Route | Scope check |
 |---|---|
@@ -2732,6 +2758,8 @@ It is accepted only here, and only for the handed-off file:
 | `POST /api/v1/items/{id}/progress` | `id` is the handed-off file's item |
 | `POST /api/v1/client-log` | none: reports are attributed to the user |
 | `DELETE /api/v1/playback-handoffs/self` | itself |
+| `GET /api/v1/playback-handoffs/self/context` | current file metadata and the server-resolved successor summary only |
+| `POST /api/v1/playback-handoffs/self/next` | expected current file; only the server-resolved immediate successor can become authorized |
 
 A route above for another file or item answers 403 `handoff_scope`. Every other
 user route answers 401, because the token is not a native bearer. HLS control,
@@ -4100,7 +4128,9 @@ including errors, carries `Cache-Control: no-store`.
 | GET / PUT | `/api/v1/sharing/settings` | Read or save the sharing enabled choice. Saving either choice succeeds independently of readiness. |
 | GET | `/api/v1/sharing/status` | Read this serving node's timestamped listener, certificate, egress and import observations. Unobserved host Serve and node-key state are `unknown`. |
 | GET / PUT | `/api/v1/sharing/endpoints` | Read or replace approved source endpoints with `expected_revision` CAS. |
-| POST | `/api/v1/sharing/invitations` | Issue an expiring invitation for selected local movie/show libraries. |
+| GET / PUT | `/api/v1/sharing/network-authorization` | Inspect node-local authorization/cleanup facts or seal a verified user-owned Tailscale API key; never returns the key. GET also returns the key's `tailnet` and, every 30 s, whether each recent device share was `accepted` and `accepted_by` which login (`shares`, `observed_at_ms`, `observation_error`). |
+| POST | `/api/v1/sharing/connection` | Inspect a combined invitation, return bounded Tailscale consent links, or probe pinned reachability with `probe: true`; never accepts provider permissions on behalf of the recipient. |
+| POST | `/api/v1/sharing/invitations` | Issue one expiring Cinema invitation including single-use Tailscale device shares for selected local movie/show libraries. `include_network: false` explicitly issues the legacy format for an existing private connection. |
 | DELETE | `/api/v1/sharing/invitations/{id}` | Cancel the invitation. |
 | GET | `/api/v1/sharing/exports` | List source grants and their pending or active authority. |
 | POST | `/api/v1/sharing/exports/{id}/approve` | Approve the compared pairing code using the expected grant generation. |
@@ -4112,9 +4142,39 @@ including errors, carries `Cache-Control: no-store`.
 | GET / PUT | `/api/v1/sharing/imports/{id}/assignments` | Read the complete assignment snapshot or replace individually assigned local viewers using assignment-generation CAS. |
 | GET | `/api/v1/sharing/imports/{import}/libraries` | Read fresh Source library scope using the current administrator login and import authority, independently of viewer assignments. |
 | PUT | `/api/v1/sharing/imports/{id}/endpoints` | Update recipient-side numeric hints, retaining approved pins unless an owner explicitly confirms replacements. |
+| GET | `/api/v1/sharing/imports/{id}/connection` | Diagnose this serving node's pinned connection to the import's approved source endpoints; read-only, sends no credential. |
 | DELETE | `/api/v1/sharing/imports/{id}` | Disconnect the import and advance its lifecycle. |
 | ANY | `/sharing` | Refuse peer traffic on the ordinary listener with `404 sharing_not_found`. |
 | ANY | `/sharing/{*path}` | Refuse every peer path on the ordinary listener with the same typed 404. |
+
+`POST /api/v1/sharing/connection` returns `name`, bounded `network` consent
+links, `connected`, and `connection_error`. With `probe: true`, a failed
+pinned connection returns one fixed code: `sharing_peer_unavailable`,
+`sharing_identity_mismatch`, `sharing_protocol_unsupported`,
+`sharing_peer_auth_failed`, or `sharing_invalid_peer_response`. Consent
+links remain available when verification fails. An unchecked or successful
+probe returns a null error; unchecked `connected: false` is not evidence
+of a failed connection. This route never persists an import. Probe and
+import failures log their phase, fixed code and local correlation UUIDs,
+without invitation secrets, consent URLs or peer credentials.
+
+A probe also returns `diagnosis`, and `GET /api/v1/sharing/imports/{id}/connection`
+returns the same object for a saved import: `connected`, a fixed `outcome`
+(`connected`, `not_shared`, `no_answer`, `peer_offline`, `blocked`, `refused`,
+`certificate_mismatch`, `tls_failed`, `no_private_source`, `identity_mismatch`,
+`auth_failed`, `protocol_unsupported`, `invalid_response` or `unavailable`),
+an operator `summary` and `next_step`, `checked_at_ms`, `elapsed_ms`, the
+`source` machine name, `this_server` (this host's Tailscale login, tailnet,
+machine name and IPv4 when observable) and one `attempts` row per approved
+numeric address with its dial stage (`connected`, `timed_out`, `refused`,
+`unreachable`, `connect_failed`, `certificate_mismatch`, `tls_failed`,
+`no_private_source`, `invalid_target`), elapsed time and, on native hosts,
+whether the address is in this host's Tailscale netmap (`visible`,
+`peer_online`). `not_shared` means a native receiver's own netmap lacks the
+source: the device share has not been accepted with this host's account.
+The ordinary pinned connection decides `connected`; the diagnosis never
+relaxes a pin. An import whose identity-checked connection fails returns its
+diagnosis in the typed error body.
 
 `GET /api/v1/sharing/endpoints` returns `{ "manifest": null }` before
 initial address setup; a configured manifest contains `revision` and
@@ -4123,6 +4183,25 @@ initial address setup; a configured manifest contains `revision` and
 before Create and offers the existing address editor, retaining the selected
 libraries for return. Address updates remain explicit `expected_revision`
 CAS writes with pin confirmation; no invitation POST is replayed.
+
+`GET /api/v1/sharing/status` also returns node-local `host_setup` with
+`state`, `message` and `checked_at_ms`. When a step failed, `detail` names
+it, quoting the host tool's own words with links removed. `tailscale` carries
+the host's `login_name`, `tailnet`, `dns_name` and `ipv4` when the host's CLI
+could be observed (native hosts; absent inside a container). Optional `tailscale_online` reports the
+host's observed Tailscale control-plane connection (`true` or `false`); absent
+means unknown, including host helper reports that omit this fact. It is independent of forwarding
+readiness and does not prove reachability from another Cinema. States distinguish `pending`,
+`disabled`, `ready`, `tailscale_missing`, `sign_in_required`,
+`permission_required`, `port_conflict`, `host_helper_required`,
+`deployment_required`, `native_setup_required` and `unavailable`.
+`native_setup_required` describes a native installation needing its installed
+service or manual private forwarding, rather than a Docker host helper.
+`ready` confirms local host
+configuration; peer access and two-home reachability still need pairing.
+Managed host reconciliation may CAS-update this node's observed address and
+certificate in the endpoint manifest. Other hosts, custom ports and an existing
+four-host selection are preserved. This never creates or approves an invitation.
 Configuration does not prove reachability. See
 [Cinema address setup](OPERATIONS.md#sharing-cinema-addresses--set-up-before-creating-invitations)
 for the private Serve port and trusted pin source.
@@ -4148,6 +4227,23 @@ its assigned import/library scope. Item and library IDs remain canonical
 Source decimal strings; they are never local catalogue IDs. A full item
 reference contains the import, Source server, catalogue epoch, library and
 item. File references add the Source file, revision and import lifecycle.
+
+Item details include optional `item.presentation`: `runtime_ms`, `air_date`,
+canonical string `tmdb_id`, `imdb_id`, and up to four cached review-site
+`ratings` (`source`, `value`, `scale`, optional `votes`). The Source reads
+these fields from the authorized item snapshot and its existing ratings
+cache; browsing does not call a rating provider. B requests the extension
+with `?presentation=1` on the Source detail read. Older Sources may omit it,
+and requests from older receivers retain the original response shape. This
+extension applies to item details; catalogue pages keep their bounded summary
+records. The web detail page also renders the already-delivered year, genres,
+video, audio and subtitle facts.
+
+Shared Auto decisions use a supported encoded plan when an HEVC remux has no
+usable HLS index: Shared playback cannot use Local's continuous progressive
+remux fallback. The Source selects the plan before initial preparation, with
+the same client capabilities and track choices. Explicit Original requests
+retain their copy semantics; H.264 remux can still build its index on demand.
 
 | Method | Absolute path | Operation |
 |---|---|---|

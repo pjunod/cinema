@@ -991,7 +991,10 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
     file.dolby_vision.profile = Some(8);
     file.path = testfixtures::source("closed-gop");
     file.duration_ms = Some(12_000);
-    let videos = video_identities(&file, None, true, false);
+    // The budget is independent of the optional dovi_rpu filter. The CI
+    // FFmpeg 6 build has filter_units but not dovi_rpu; claiming the latter
+    // makes the child exit before the paced input can reach its deadline.
+    let videos = video_identities(&file, None, false, false);
     assert_eq!(videos.len(), 2);
     let mut pass = shared_index_pass(
         &file,
@@ -1031,7 +1034,11 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
         let IndexOutcome::Failed(failure) = build.outcome else {
             panic!("{:?}", build.outcome);
         };
-        assert_eq!(failure.code, IndexFailureCode::IndexBudgetExceeded);
+        assert_eq!(
+            failure.code,
+            IndexFailureCode::IndexBudgetExceeded,
+            "the paced shared pass must hit its budget: {failure:?}"
+        );
     }
 }
 
@@ -1986,7 +1993,7 @@ async fn a_landing_in_a_real_index_resolves_uniquely() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod dv_title_companion {
     use super::*;
 
@@ -2056,6 +2063,7 @@ mod dv_title_companion {
 
     /// The daemon's own index pass on a real title, with an installed
     /// processing bundle, yields the aggregate the standalone scan published.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "physical: a processing bundle (PLURX_DV_PROCESSING_DIR), a Dolby Vision title and its standalone aggregate"]
     async fn physical_the_index_pass_reads_the_standalone_title_aggregate() {

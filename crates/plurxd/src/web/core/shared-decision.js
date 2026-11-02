@@ -2,44 +2,75 @@
 // Decisions describe delivery; they never acquire a B session or start media.
 const SHARED_DECISION=(()=>{
   const MAX=4*1024*1024,REQUEST_MAX=128*1024;
-  let contexts=new WeakMap();const accepted=new WeakMap(),bases=new WeakMap(),watches=new Map(),jobs=new Set();let watchAuth=AUTH_GENERATION;
-  const fail=()=>{throw new Error("Shared decision unavailable");};
+  let contexts=new WeakMap(),accepted=new WeakMap(),bases=new WeakMap();const watches=new Map(),jobs=new Set();let watchAuth=AUTH_GENERATION;
+  const fail=(stage="client_contract")=>{
+    // Only call-site constants enter diagnostics: never log peer payloads,
+    // opaque locators, credentials or local file paths.
+    console.warn("Shared playback response refused",{stage});
+    throw Object.assign(new Error("Shared decision unavailable"),{code:"sharing_client_contract",stage});
+  };
+  // Keep the closed server reason instead of presenting every failed Start as
+  // a decision failure. Peer messages and arbitrary response text stay private.
+  function refusal(status,value,mode){
+    const messages={sharing_source_unavailable:"Cinema could not reach the sharing host to load this file. Check that it is awake and connected, then try again.",
+      sharing_metadata_capacity:"The sharing host is busy loading library details. Try again shortly.",
+      sharing_start_unresolved:"The sharing host could not confirm playback preparation.",
+      sharing_start_unavailable:"The sharing host is unavailable for playback.",
+      sharing_start_deadline:"The sharing host took too long to prepare playback.",
+      sharing_start_capacity:"The sharing host is busy. Try again shortly.",
+      sharing_start_conflict:"This shared playback request changed. Reopen the item and try again.",
+      sharing_start_unsupported:"This shared playback change is not available yet.",
+      sharing_start_dolby_vision_unsupported:"Dolby Vision is not available for shared playback yet.",
+      sharing_decision_unavailable:"The sharing host could not determine how to play this file."};
+    const code=typeof value?.code==="string"&&Object.hasOwn(messages,value.code)?value.code:null;
+    const message=status===401||status===403?"Shared playback authorization is no longer available.":
+      code?messages[code]:mode==="start"||mode==="restart"?"Shared playback could not prepare.":"Shared decision unavailable";
+    console.warn("Shared playback request refused",{status,mode,code:code||"unrecognized_refusal"});
+    throw Object.assign(new Error(message),{status,...(code?{code}:{})});
+  }
   function authorized(c){return c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API;}
   function current(c){return c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API&&c.generation===PAGE_RENDER_GENERATION&&c.route===location.hash;}
   function capture(){const c=Object.freeze({auth:AUTH_GENERATION,token:TOKEN,origin:API,generation:PAGE_RENDER_GENERATION,route:location.hash});if(!c.token||!current(c))fail();origin(c);return c;}
   function origin(c){const u=new URL(c.origin,location.href);if(!["http:","https:"].includes(u.protocol)||u.username||u.password||u.search||u.hash||u.pathname!=="/api/v1")fail();return u.origin;}
   function retire(){contexts=new WeakMap();for(const j of jobs){j.controller.abort();j.reader?.cancel().catch(()=>{});}}
+  function retireAuthorization(){retire();accepted=new WeakMap();bases=new WeakMap();}
   function copy(value){if(Array.isArray(value))return Object.freeze(value.map(copy));if(value&&typeof value==="object"){const o=Object.create(null);for(const [k,v]of Object.entries(value))o[k]=copy(v);return Object.freeze(o);}return value;}
   // Engine fields stay numbers where exact, while future/identity integers that
   // cannot be represented by Number remain lossless BigInts.
   function engine(value){if(typeof value==="bigint"&&value>=BigInt(Number.MIN_SAFE_INTEGER)&&value<=BigInt(Number.MAX_SAFE_INTEGER))return Number(value);if(Array.isArray(value))return value.map(engine);if(value&&typeof value==="object"){const o=Object.create(null);for(const [k,v]of Object.entries(value))o[k]=engine(v);return o;}return value;}
   async function read(path,c,body=null,signal=null,mode="page",conflict=false){
     const valid=()=>mode==="session"||mode==="restart"?authorized(c):current(c);
-    if(!valid()||signal?.aborted)fail();const controller=new AbortController(),job={controller,reader:null};jobs.add(job);
+    if(!valid()||signal?.aborted)fail("request_lifecycle");const controller=new AbortController(),job={controller,reader:null};jobs.add(job);
     const abort=()=>controller.abort();signal?.addEventListener("abort",abort,{once:true});const timer=setTimeout(abort,mode==="start"||mode==="restart"?310000:30000);
     try{
       const expected=origin(c)+path,response=await fetch(expected,{method:body===null?"GET":"POST",headers:{authorization:"Bearer "+c.token,...(body===null?{}:{"content-type":"application/json"})},...(body===null?{}:{body}),credentials:"omit",cache:"no-store",redirect:"error",signal:controller.signal});
-      if(!valid()||controller.signal.aborted||response.redirected||response.url!==expected){await response.body?.cancel();fail();}
-      if(response.status!==200&&!(conflict&&response.status===409)){await response.body?.cancel();if(response.status===401||response.status===403)retire();fail();}
-      const declared=response.headers.get("content-length");if(declared!==null&&(!/^(0|[1-9][0-9]*)$/.test(declared)||BigInt(declared)>BigInt(MAX))){await response.body?.cancel();fail();}
+      if(!valid()||controller.signal.aborted||response.redirected||response.url!==expected){await response.body?.cancel();fail("response_origin_or_lifecycle");}
+      if(response.status===401||response.status===403){retireAuthorization();void response.body?.cancel().catch(()=>{});refusal(response.status,null,mode);}
+      const rejected=response.status!==200&&!(conflict&&response.status===409),maximum=rejected?16384:MAX;
+      const declared=response.headers.get("content-length");if(declared!==null&&(!/^(0|[1-9][0-9]*)$/.test(declared)||BigInt(declared)>BigInt(maximum))){await response.body?.cancel();if(rejected){if(response.status===401||response.status===403)retire();refusal(response.status,null,mode);}fail();}
       const reader=response.body?.getReader();if(!reader)fail();job.reader=reader;const chunks=[];let length=0;
-      try{for(;;){const p=await reader.read();if(!valid()||controller.signal.aborted)fail();if(p.done)break;if(!(p.value instanceof Uint8Array))fail();length+=p.value.byteLength;if(length>MAX)fail();chunks.push(p.value);}}
+      try{for(;;){const p=await reader.read();if(!valid()||controller.signal.aborted)fail();if(p.done)break;if(!(p.value instanceof Uint8Array))fail();length+=p.value.byteLength;if(length>maximum){if(rejected){if(response.status===401||response.status===403)retire();refusal(response.status,null,mode);}fail();}chunks.push(p.value);}}
       catch(e){await reader.cancel().catch(()=>{});throw e;}finally{job.reader=null;reader.releaseLock();}
       if(!valid()||controller.signal.aborted)fail();const bytes=new Uint8Array(length);let offset=0;for(const p of chunks){bytes.set(p,offset);offset+=p.byteLength;}
-      const value=sharingJSON(new TextDecoder("utf-8",{fatal:true}).decode(bytes));
+      let value;
+      try{value=sharingJSON(new TextDecoder("utf-8",{fatal:true}).decode(bytes));}
+      catch(error){if(!rejected)throw error;}
+      if(rejected){if(response.status===401||response.status===403)retire();refusal(response.status,value,mode);}
       return conflict?{status:response.status,value}:value;
     }finally{clearTimeout(timer);signal?.removeEventListener("abort",abort);jobs.delete(job);}
   }
   async function details(reference,signal=null){
     const ref=sharedCatalogueReference(reference),c=capture();
     const detail=await read(`/api/v1/shared/imports/${ref.import_id}/items/${ref.item_id}`,c,null,signal);
-    if(!current(c)||detail.item?.source!=="shared"||JSON.stringify(sharedCatalogueReference(detail.item?.reference))!==JSON.stringify(ref)||!Array.isArray(detail.files)||detail.files.length>64)fail();
+    if(!current(c))fail("details_lifecycle");
+    if(detail.item?.source!=="shared"||JSON.stringify(sharedCatalogueReference(detail.item?.reference))!==JSON.stringify(ref))fail("details_identity");
+    if(!Array.isArray(detail.files)||detail.files.length>64)fail("details_files");
     const lifecycle=sharingInteger(detail.lifecycle_generation),watch=watchState(ref,detail.watch),files=detail.files.map(file=>{
       const context=sharedPlaybackFileContextFromDetail(ref,file,lifecycle);contexts.set(context,{...c,watch});return Object.freeze({file:copy(engine(file)),context});
     });
     return Object.freeze({detail:copy(engine(detail)),files:Object.freeze(files)});
   }
-  function integer(value){const n=typeof value==="bigint"?value:typeof value==="number"&&Number.isSafeInteger(value)?BigInt(value):null;if(n===null||n<0n||n>BigInt(Number.MAX_SAFE_INTEGER))fail();return Number(n);}
+  function integer(value){const n=typeof value==="bigint"?value:typeof value==="number"&&Number.isSafeInteger(value)?BigInt(value):null;if(n===null||n<0n||n>BigInt(Number.MAX_SAFE_INTEGER))fail("watch_integer");return Number(n);}
   function watchState(ref,watch){
     if(watchAuth!==AUTH_GENERATION){watches.clear();watchAuth=AUTH_GENERATION;}
     const key=JSON.stringify([ref.server_id,ref.catalogue_epoch,ref.item_id]);
@@ -72,7 +103,7 @@ const SHARED_DECISION=(()=>{
     const direct=body.presentation==="direct";
     if(body.presentation!=null&&body.presentation!=="vod"&&!direct||direct&&(body.native_subtitles===true||body.subtitle_burn!=null))unsupported();
     if(body.caps?.v!==2||typeof body.playback_id!=="string"||!body.playback_id||body.playback_id.length>128||/[\u0000-\u001f\u007f]/.test(body.playback_id)
-      ||typeof body.request_id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.request_id))fail();
+      ||typeof body.request_id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.request_id))fail("start_identity");
     const text=JSON.stringify(body);if(new TextEncoder().encode(text).length>24*1024)fail();
     const raw=await read(playbackFileUrl(base,"hls/sessions"),c,text,signal,restart?"restart":"start"),response=engine(raw);
     if(restart?!authorized(c):!current(c))fail();
@@ -133,8 +164,8 @@ const SHARED_DECISION=(()=>{
   }
   function validate(raw,context){
     const ref=raw?.reference;
-    if(raw?.file_id!==context.source_file_id||!ref||ref.file_id!==context.source_file_id||ref.revision!==context.file_revision||ref.lifecycle_generation!==context.lifecycle_generation||JSON.stringify(sharedCatalogueReference(ref.item))!==JSON.stringify(context.source_ref))fail();
-    if(!["direct_play","remux","transcode"].includes(raw.method)||raw.delivery?.mode!==(raw.method==="direct_play"?"direct":raw.method))fail();
+    if(raw?.file_id!==context.source_file_id||!ref||ref.file_id!==context.source_file_id||ref.revision!==context.file_revision||ref.lifecycle_generation!==context.lifecycle_generation||JSON.stringify(sharedCatalogueReference(ref.item))!==JSON.stringify(context.source_ref))fail("decision_identity");
+    if(!["direct_play","remux","transcode"].includes(raw.method)||raw.delivery?.mode!==(raw.method==="direct_play"?"direct":raw.method))fail("decision_delivery");
     descriptive(raw.play_url,context);
     for(const k of ["url","sessions_url"]){if(raw.delivery[k]!=null){descriptive(raw.delivery[k],context);if(k==="sessions_url"&&raw.delivery[k]!==context.file_base+"/hls/sessions")fail();}}
     const decision=engine(raw);decision.reference.lifecycle_generation=ref.lifecycle_generation;return decision;
