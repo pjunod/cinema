@@ -372,6 +372,7 @@ enum PlayerNaturalEndAction: Equatable {
 @MainActor
 final class PlayerLifecycleCoordinator: ObservableObject {
     @Published private(set) var isTearingDown = false
+    private var isBackgrounded = false
 
     private var didTeardown = false
     private var didFinish = false
@@ -386,13 +387,36 @@ final class PlayerLifecycleCoordinator: ObservableObject {
 
     func finish(
         teardown cleanup: () -> Void,
+        backgroundCompletion: (@MainActor () -> Void)? = nil,
         completion: @escaping @MainActor () -> Void
     ) {
-        enqueueCompletion(completion)
+        enqueueCompletion {
+            if self.isBackgrounded, let backgroundCompletion {
+                backgroundCompletion()
+            } else {
+                completion()
+            }
+        }
         guard !didFinish else { return }
         didFinish = true
         isTearingDown = true
         teardown(cleanup)
+    }
+
+    /// tvOS suspension can outlive the attached stream's lease. Close while
+    /// the app still owns its player so wake returns to the title with a saved
+    /// position, rather than exposing a failed item. Inactive is also used for
+    /// temporary system UI and must keep the player; iOS keeps its PiP owner.
+    func sceneChanged(
+        to phase: ScenePhase,
+        teardown cleanup: () -> Void,
+        completion: @escaping @MainActor () -> Void
+    ) {
+        #if os(tvOS)
+        isBackgrounded = phase == .background
+        guard isBackgrounded, !didFinish else { return }
+        finish(teardown: cleanup, completion: completion)
+        #endif
     }
 
     /// Cleanup and the tearing-down state are write-once; completion ownership
@@ -683,6 +707,7 @@ struct PlayerView: View {
     @State private var remoteTrackMenu: CinemaRemoteTrackKind?
     @State private var networkPreview = RemotePreviewOwnership()
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     let itemId: Int
     let fileId: Int
@@ -946,6 +971,13 @@ struct PlayerView: View {
             try? await Task.sleep(nanoseconds: 100_000_000)
             focusedControl = .playPause
             #endif
+        }
+        .onChange(of: scenePhase) { _, phase in
+            lifecycle.sceneChanged(
+                to: phase,
+                teardown: { teardownPlayback() },
+                completion: { dismiss() }
+            )
         }
         .onDisappear {
             remotePlayback.detach(remoteOwner)
@@ -1261,6 +1293,8 @@ struct PlayerView: View {
     ) {
         lifecycle.finish(teardown: {
             teardownPlayback(deactivateAudioSession: !continuingPlayback)
+        }, backgroundCompletion: {
+            dismiss()
         }) {
             if let completion {
                 completion()
