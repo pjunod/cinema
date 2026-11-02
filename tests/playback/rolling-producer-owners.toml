@@ -3479,7 +3479,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Each serves one prebound ephemeral HTTP/TLS socket; both observe the same
 # cancellation token, and the fixture cancels it and awaits both JoinHandles.
 # No production task, child process or rolling-producer owner is added.
-expected_occurrences = 1049
+# PR1350 playback cache reconciliation: +2 test-only admission tasks in
+# admission_after_cancelled_scan and the persistent inventory conflict test.
+# Each JoinHandle is awaited before its fixture returns; neither owns a
+# production writer, timer loop or child process.
+expected_occurrences = 1051
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5198,7 +5202,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # retry; rolling/session.rs timeout_at bounding the M5 actor snapshot;
 # playback_cache.rs the settings task's 1 s interval, its IO_TIMEOUT Store
 # read, and the first-read wait. The rest are test-only.
-expected_occurrences = 1947
+# PR1350 playback cache reconciliation: +3 in playback_cache.rs. The one
+# production timeout is awaited inline by reserve_owned and bounds all scan
+# retries and owner work to IO_TIMEOUT + PRESSURE_TIMEOUT (40 seconds), after
+# the existing operation-lock wait. Cancellation drops the admission future
+# and operation guard; detached eviction callbacks retain their existing
+# fences until settlement. No production task or timer loop is introduced.
+# The other two timeouts bound test-only waits for scan/pressure entry; the
+# admission tasks remain joined and timeouts supply no accounting evidence.
+expected_occurrences = 1950
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

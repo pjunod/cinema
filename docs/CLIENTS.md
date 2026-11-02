@@ -130,6 +130,11 @@ SwiftUI/AVPlayer source tree, two targets, wired to the runtime-caps →
 app-managed background offline downloads of server-prepared HLS; the action
 stays hidden on tvOS. `xcodegen generate` builds both targets.
 
+On Apple TV, backgrounding the on-demand player (including automatic sleep
+while paused) closes playback and hands the last position back to the title
+screen. Waking returns there; Resume opens a fresh stream. Temporary inactive
+states such as system controls keep the player attached.
+
 **Android/Google TV** — The easy one. Media3/ExoPlayer direct-plays MKV
 natively; HEVC/AV1/DV ride device decoders (Shield, 2019+ Sonys fine;
 Media3's dav1d module covers AV1-less SoCs). Sideloading via adb/APK remains
