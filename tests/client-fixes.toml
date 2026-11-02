@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "apple.tv-settings-category-input-adapter"
+commits = ["91f218139058f527d89b031a3c6d86d69d561535"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "private struct TVSettingsCategoryEntryAdapter: ViewModifier"
+test = "tests/operations/test_player_input_fence.py"
+test_anchor = "def test_the_fence_passes_the_repository_as_it_stands"
+
+[[fixes]]
 id = "apple.tv-settings-category-entry"
 commits = ["ffcc6d5e63b935d3b18efec376849c21b0f7b104"]
 source = "clients/apple/Sources/SettingsView.swift"
