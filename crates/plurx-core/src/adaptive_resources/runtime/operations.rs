@@ -35,6 +35,13 @@ mod finite_terminal;
 #[cfg(unix)]
 mod finite_vod;
 mod live_settlement;
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod native_result_fixture;
 mod pipe_drains;
 #[cfg(target_os = "linux")]
 pub(in crate::adaptive_resources::runtime) mod planning_collector;
@@ -120,7 +127,7 @@ struct OwnedRole {
     #[cfg(target_os = "linux")]
     copy_vod: Option<copy_vod::CopyLaunch>,
     #[cfg(target_os = "linux")]
-    copy_admission_failed: bool,
+    copy_cleanup: Option<Arc<super::copy_vod::CopyCleanupCustody>>,
     #[cfg(unix)]
     finite_app: Option<Arc<super::finite_lifetime::FiniteAppState>>,
     #[cfg(target_os = "linux")]
@@ -701,7 +708,7 @@ impl NodeResourceRuntime {
                 #[cfg(target_os = "linux")]
                 copy_vod: None,
                 #[cfg(target_os = "linux")]
-                copy_admission_failed: false,
+                copy_cleanup: None,
                 #[cfg(unix)]
                 finite_app: None,
                 #[cfg(target_os = "linux")]
@@ -1124,6 +1131,52 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
+        // Only named adapters select a retained entered bit. Resolve and
+        // validate the original registration BEFORE queuing its durable arm.
+        // Ordinary unnamed launches retain their existing path.
+        #[cfg(unix)]
+        #[derive(Clone, Copy)]
+        enum NamedAdapter {
+            Finite,
+            #[cfg(target_os = "linux")]
+            Copy,
+        }
+        #[cfg(unix)]
+        let named_adapter = if let Some(acquisition) = named_arm {
+            #[cfg(target_os = "linux")]
+            {
+                match (role.finite_vod.as_ref(), role.copy_vod.as_ref()) {
+                    (Some(finite), None)
+                        if finite.root_member == member && finite.acquisition_id == acquisition =>
+                    {
+                        Some(NamedAdapter::Finite)
+                    }
+                    (None, Some(copy))
+                        if copy.root_member == member && copy.acquisition_id == acquisition =>
+                    {
+                        Some(NamedAdapter::Copy)
+                    }
+                    _ => return Err(OperationError::State),
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                match role.finite_vod.as_ref() {
+                    Some(finite)
+                        if finite.root_member == member && finite.acquisition_id == acquisition =>
+                    {
+                        Some(NamedAdapter::Finite)
+                    }
+                    _ => return Err(OperationError::State),
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        if named_arm.is_some() {
+            return Err(OperationError::State);
+        }
         if !role.armed.contains(&member) {
             if role.transition.is_none() {
                 start_named_transition(
@@ -1142,6 +1195,11 @@ impl NodeResourceRuntime {
                 return Err(OperationError::State);
             }
             self.finish_transition(id, role).await?;
+        }
+        #[cfg(all(test, target_os = "linux", feature = "fixtures"))]
+        if matches!(named_adapter, Some(NamedAdapter::Copy)) {
+            self.fixture_copy_stage(copy_vod::CopyStartFixtureStage::RootArmed)
+                .await;
         }
         if Instant::now() >= deadline {
             if let Some(graph) = role.graph.take() {
@@ -1171,12 +1229,21 @@ impl NodeResourceRuntime {
         let launched = if named_arm.is_some() {
             #[cfg(unix)]
             {
-                let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
-                if finite.root_member != member || Some(finite.acquisition_id) != named_arm {
-                    return Err(OperationError::State);
-                }
+                let entered = match named_adapter.ok_or(OperationError::State)? {
+                    NamedAdapter::Finite => {
+                        &mut role
+                            .finite_vod
+                            .as_mut()
+                            .ok_or(OperationError::State)?
+                            .entered
+                    }
+                    #[cfg(target_os = "linux")]
+                    NamedAdapter::Copy => {
+                        &mut role.copy_vod.as_mut().ok_or(OperationError::State)?.entered
+                    }
+                };
                 graph
-                    .spawn_selected_durable_root(command, work, arm, &mut finite.entered)
+                    .spawn_selected_durable_root(command, work, arm, entered)
                     .await
             }
             #[cfg(not(unix))]
@@ -1208,7 +1275,9 @@ impl NodeResourceRuntime {
         };
         role.roots.insert(member, root);
         #[cfg(unix)]
-        if named_arm.is_some() {
+        if matches!(named_adapter, Some(NamedAdapter::Finite)) {
+            // Copy keeps the actual registered control in this GraphRoot and
+            // its original ChildJob; it needs no separate finite control cell.
             let control = root.registered_control().ok_or(OperationError::State)?;
             role.finite_vod
                 .as_ref()
@@ -1365,6 +1434,11 @@ impl NodeResourceRuntime {
         self.close_retained_entry(role.binding)?;
         if let Some(graph) = role.graph.take() {
             role.sealed = Some(graph.seal());
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(copy) = role.copy_vod.as_mut() {
+            copy.closing = true;
+            copy.progress.notify_waiters();
         }
         if role.transition.is_none() {
             start_transition(&self.journal, role, Mutation::Seal, Effect::Seal, deadline)?;

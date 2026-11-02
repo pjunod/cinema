@@ -89,3 +89,36 @@ fn discovered_source_growth_commits_original_parent_and_child_but_refuses_copy_r
     };
     assert!(members.iter().any(|member| member.envelope == full));
 }
+
+#[test]
+fn v7_typed_prepare_persists_complete_planning_adapter_inventory() {
+    let (mut f, _) = planning_source_fixture();
+    let expected = typed_manifest(&f)
+        .members
+        .iter()
+        .map(|m| m.adapter().to_owned())
+        .collect::<BTreeSet<_>>();
+    let prepared = prepare(&mut f);
+    assert_eq!(prepared.obligations.len(), 1);
+    let mut statement = f
+        .storage
+        .connection
+        .prepare("SELECT adapter FROM members")
+        .unwrap();
+    let actual = statement
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<BTreeSet<_>, _>>()
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert!(actual.contains("fixed_probe_discover_source"));
+    assert!(actual.contains("fixed_probe_discover_task"));
+    assert!(actual.contains("fixed_planning_engine_task"));
+    assert_eq!(
+        crate::resource_custody::transaction::snapshot(&f.storage.connection, &f.storage.witness)
+            .unwrap()
+            .obligations
+            .len(),
+        1
+    );
+}

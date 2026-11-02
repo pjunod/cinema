@@ -2431,7 +2431,7 @@ impl EncodedEngine {
         let executable = EncodedExecutable {
             path: producer.path().to_owned(),
             digest: producer.sha256().to_owned(),
-            object_version: producer.object_version().to_owned(),
+            object_version: engine_object_version_from_identity(producer.source_identity()),
             linux_binding: None,
         };
         // Validate the pure planning representation too. These constructors
@@ -2440,7 +2440,7 @@ impl EncodedEngine {
         let reporter = EncodedExecutable {
             path: reporter.path().to_owned(),
             digest: reporter.sha256().to_owned(),
-            object_version: reporter.object_version().to_owned(),
+            object_version: engine_object_version_from_identity(reporter.source_identity()),
             linux_binding: None,
         };
         reporter.finite_software_plan()?;
@@ -3769,17 +3769,28 @@ pub(crate) fn engine_path_version(path: &std::path::Path) -> Result<String, Stri
 }
 
 #[cfg(unix)]
-fn engine_object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(format!(
+fn engine_object_version_from_identity(
+    identity: plurx_core::source_identity::SourceIdentity,
+) -> String {
+    // The finite engine cache predates the source namespace's `s1:` prefix.
+    // Project the SAME observed stat identity into its existing seven-field
+    // namespace; this performs no reopen, attestation or native settlement.
+    format!(
         "{}:{}:{}:{}:{}:{}:{}",
-        metadata.dev(),
-        metadata.ino(),
-        metadata.size(),
-        metadata.mtime(),
-        metadata.mtime_nsec(),
-        metadata.ctime(),
-        metadata.ctime_nsec()
+        identity.dev,
+        identity.ino,
+        identity.size,
+        identity.mtime,
+        identity.mtime_nsec,
+        identity.ctime,
+        identity.ctime_nsec
+    )
+}
+
+#[cfg(unix)]
+fn engine_object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
+    Ok(engine_object_version_from_identity(
+        plurx_core::source_identity::SourceIdentity::from_metadata(metadata),
     ))
 }
 

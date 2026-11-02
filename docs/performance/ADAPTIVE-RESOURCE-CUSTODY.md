@@ -1,12 +1,49 @@
 # Adaptive resource custody — storage, startup and recovery limits
 
-**Status:** open · journal, startup and private owned-operation bridge compiled;
-production physical admission and recovery remain incomplete. Integration owner:
-direct Codex harness (`/root`), draft PR #1248; former Hermes Sol task is parked. The [implementation ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) is the
-current source/evidence and remaining M0–M7 authority. Nothing here authorizes
-deployment, a device operation or deletion of unresolved accounting.
+**Status:** open · implementation active · updated 2026-10-29. Selected Linux
+owners use the retained journal and operation book; complete admission and
+recovery remain unfinished. The [implementation ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md)
+records source, execution evidence and remaining M0–M7 work separately. No
+unresolved accounting may be deleted to regain capacity.
 
-## What exists through b63cb217c
+## Registered planning closure — non-entry needs its own proof
+
+The original probe and engine tasks are acquired owners once registered. Each
+waits first on its own one-shot start receiver. Dropping that sender without
+sending can establish non-entry only after the same registered handle joins
+with its private non-entry result. Panic, lost outcomes and generic task errors
+cannot produce that witness.
+
+The [planning collector](../../crates/plurx-core/src/adaptive_resources/runtime/operations/planning_tasks.rs)
+retains both original handles and checks their binding, member and registration
+identity. The [settlement adapter](../../crates/plurx-core/src/adaptive_resources/runtime/operations/planning_settlement.rs)
+also requires the same sealed graph's native absence proof. An acquired source
+parent remains separate: its actual aliases must drain and its original close
+operation must finish before P can settle. Cancellation or a surviving alias
+retains these same witnesses and owners for retry.
+
+| Planning task state | Accepted close evidence |
+|---|---|
+| Never registered | Existing task-never-acquired disposition, with separate original source closure. |
+| Registered and positively joined without entry | Distinct `FixedProbeDiscoverTaskNeverEnteredV1` or `FixedPlanningEngineTaskNeverEnteredV1` fact, bound to the original task and join. |
+| Entered, failed, panicked or lost outcome | Existing supported native closure, otherwise full retained charge. A never-entered fact cannot stand in for it. |
+
+The new [typed facts](../../crates/plurx-core/src/resource_custody/codec_v2/settlement.rs)
+contain no invented executable or media digest. They require absent task
+observations and matching cross-member root/copy facts; old decoders reject
+unknown tags. Full borrowed DTO and size validation precedes consuming any
+one-shot proof. The original P native and application owners are destroyed before the matching
+durable settlement releases P. M remains separately counted until its actual
+application owner is gone. Nonzero original overage is not cleared by task non-entry.
+
+Eight runtime/codec regressions are authored for these paths; exact-source
+compilation and behavioral execution are pending. This implements selected
+planning closure, not complete R1 selective recovery, native peak bounds or
+legacy admission coverage. Startup still refuses if
+`has_unreconciled_custody()` remains true after reconciliation, before competing
+legacy native work; its remaining replacement is tracked in the ledger.
+
+## Historical storage and bridge record through b63cb217c
 
 The node-local authority is separate from replicated Store, recovery catalogue,
 telemetry and caches:
@@ -119,12 +156,11 @@ physical proof. Its normal API cannot mark Closed or refund a local reservation;
 fixture history erasure exists only under the contract-test compilation feature.
 Worker RPC/admission/publication composition remains open, not advertised ready.
 
-No positive old-owner/restart recovery backend is implemented yet. The interim
-startup path therefore refuses pending custody BEFORE cleanup or legacy competing
-work. This preserves protected paths but is not the final availability/recovery
-implementation: selective reconciliation and unaffected serving still remain.
-No normal production path has been switched to finite physical demands, and
-successful root waits or file closes still do not establish descendant extinction.
+The production startup guard still refuses unreconciled custody before cleanup
+or competing legacy native work. Selected Linux owners and supported recovery
+paths do not establish complete selective reconciliation or unaffected serving.
+A successful root wait or file close alone does not establish descendant
+extinction. Keep the original unresolved owners and their full charge.
 
 An existing namespace, including an empty directory, malformed file or dangling
 symlink, is Existing authority, not a reason to retry FirstInstallation. Missing,

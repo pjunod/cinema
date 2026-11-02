@@ -197,10 +197,15 @@ impl RenditionDir {
     pub(crate) fn from_finite_producer(
         owner: plurx_core::adaptive_resources::runtime::finite_vod::SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
+        compatibility: crate::vodencode::FiniteSoftwareCompatibility,
     ) -> Self {
         let output = owner.output();
         let producer = std::sync::Arc::new(
-            crate::vodserve::finite_software::FiniteSoftwareProducer::new(owner, cache_grant),
+            crate::vodserve::finite_software::FiniteSoftwareProducer::new(
+                owner,
+                cache_grant,
+                compatibility,
+            ),
         );
         Self {
             dir: output.path().to_owned(),
@@ -213,6 +218,26 @@ impl RenditionDir {
     }
     pub(crate) fn is_finite(&self) -> bool {
         self.writes.finite.is_some()
+    }
+
+    /// A serving view over a retained S that the retained registry owns. Its
+    /// rendition never retires that output; dropping the view only releases
+    /// the borrowed application alias.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_retained_finite(output: FiniteOutput) -> RenditionDir {
+        RenditionDir {
+            dir: output.path().to_owned(),
+            writes: std::sync::Arc::new(PendingWrites {
+                finite: Some(FinitePublication::new(output)),
+                retained_carrier: true,
+                ..PendingWrites::default()
+            }),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn borrows_retained_output(&self) -> bool {
+        self.writes.retained_carrier
     }
 
     /// Return the finite output selector without exposing or duplicating its

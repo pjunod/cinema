@@ -180,3 +180,31 @@ fn failed_acquisition_cannot_start_publication() {
     assert!(native.observation().is_none());
     assert!(!root.path().join(INIT_NAME).exists());
 }
+
+#[test]
+fn every_fixed_metadata_name_is_publishable_and_syncable() {
+    // complete-v1.json is the finite artifact manifest core publishes and
+    // syncs last; refusing it left every selected static artifact unpublished.
+    for name in crate::fs_secure::FIXED_METADATA_NAMES {
+        PublicationRequest::for_metadata_operation(name, b"x".to_vec(), uuid::Uuid::new_v4())
+            .unwrap();
+        crate::fs_secure::sync_files::SyncFile::new(
+            name,
+            crate::fs_secure::FileIdentity {
+                device: 1,
+                inode: 1,
+                size: 1,
+                changed_seconds: 0,
+                changed_nanoseconds: 0,
+            },
+            None,
+        )
+        .unwrap();
+    }
+    assert!(PublicationRequest::for_metadata_operation(
+        "other.json",
+        b"x".to_vec(),
+        uuid::Uuid::new_v4()
+    )
+    .is_err());
+}

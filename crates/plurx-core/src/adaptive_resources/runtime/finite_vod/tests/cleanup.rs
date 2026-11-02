@@ -1,11 +1,12 @@
-//! Actual queued journal and fixed software producer owners. Authored/compiled
-//! only; behavioral/native execution waits for complete-candidate Fable review.
+//! Actual queued journal and fixed producer owners. Execution and
+//! qualification are recorded separately in source-bound receipts.
 use super::*;
 use crate::domain::MediaFile;
 use crate::resource_custody::InstallationContext;
 use crate::transcode::*;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::os::unix::fs::MetadataExt;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
@@ -79,6 +80,42 @@ fn original_owner(
     root: &Path,
     reject_prepare: bool,
 ) -> (Arc<NodeResourceRuntime>, SoftwareVodOwner) {
+    let (runtime, owner) = original_owner_at_generation(
+        root,
+        reject_prepare,
+        SoftwareVodRequest::INITIAL_GENERATION_EPOCH,
+    );
+    (
+        runtime,
+        owner.expect("same original accepted queue command"),
+    )
+}
+
+/// The existing actual Software fixture with its same private preparation
+/// selector. This grants no native owner, outcome, FD or closure capability.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(in crate::adaptive_resources::runtime) fn original_entered_prefix_fixture(
+    root: &Path,
+) -> (
+    Arc<NodeResourceRuntime>,
+    SoftwareVodOwner,
+    OwnedPreparation,
+    Uuid,
+) {
+    let (runtime, owner) = original_owner(root, false);
+    let preparation = owner.preparation.clone();
+    let member = owner.scratch_member;
+    (runtime, owner, preparation, member)
+}
+
+fn original_owner_at_generation(
+    root: &Path,
+    reject_prepare: bool,
+    generation_epoch: u64,
+) -> (
+    Arc<NodeResourceRuntime>,
+    Result<SoftwareVodOwner, FiniteVodError>,
+) {
     crate::testfixtures::require_ffmpeg();
     let source = root.join("source.mkv");
     crate::testfixtures::run(
@@ -186,7 +223,7 @@ fn original_owner(
     .expect("actual software recipe");
     let execution = TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), ".")
         .expect("actual execution");
-    let grid = VodFrameGrid::new(24_000, 1).expect("original pump grid");
+    let grid = VodFrameGrid::new(24, 1).expect("original pump grid");
     let command = SoftwareAvcCommand::compile(
         &file,
         &plan,
@@ -201,8 +238,22 @@ fn original_owner(
             &executable_digest,
         )
         .expect("actual executable plan"),
+        // Engine path versions use their existing seven-field metadata
+        // format; SourceIdentity's s1 wire prefix belongs to source custody.
         FiniteEngineSnapshot::from_captured(
-            &[(executable_path, executable_identity.render_s1())],
+            &[(
+                executable_path,
+                format!(
+                    "{}:{}:{}:{}:{}:{}:{}",
+                    executable_metadata.dev(),
+                    executable_metadata.ino(),
+                    executable_metadata.size(),
+                    executable_metadata.mtime(),
+                    executable_metadata.mtime_nsec(),
+                    executable_metadata.ctime(),
+                    executable_metadata.ctime_nsec(),
+                ),
+            )],
             None,
         )
         .expect("actual engine metadata fence"),
@@ -240,52 +291,70 @@ fn original_owner(
     // The original public constructor queues these immutable bounds. The
     // actual journal validator rejects zero file objects; no fixture returns
     // an injected error or replaces the original accepted command/result.
-    let owner = runtime
-        .prepare_software_vod(
-            SoftwareVodRequest {
-                rendition_id: "original-finite".into(),
-                generation_epoch: 0,
-                recipe_source_binding: "actual-original-source".into(),
-                command,
-                producer: super::tests::pump_plan(),
-                sources: vec![FiniteSourceRequest {
-                    path: source,
-                    media_file_id: "1".into(),
-                    object_version: identity.render_s1(),
-                    scanner_size: file.size,
-                    scanner_mtime: file.mtime,
-                }],
-                segment_count: 1,
-                encoded_process_marker: true,
-                demand: WorkloadDemand {
-                    resources: Metric::Known(vector),
-                    limit_epoch: 1,
-                    trial: false,
-                },
-                application_owner_bytes: 0,
-                output: FiniteOutputLimits {
-                    response_memory_bytes: 1024 * 1024,
-                    retained_metadata_bytes: 1024 * 1024,
-                    client_state_bytes: 1024 * 1024,
-                    resident_file_objects: if reject_prepare { 0 } else { 4 },
-                    resident_logical_bytes: 4 * 1024 * 1024,
-                    reserved_storage_bytes: 64 * 1024 * 1024,
-                    one_file_logical_bytes: 1024 * 1024,
-                    one_io_payload_bytes: 1024 * 1024,
-                    live_handles: 8,
-                    reader_leases: 4,
-                    resident_memory_bytes: 1024 * 1024,
-                    allocation_unit_bytes: 4096,
-                    per_object_reserve_bytes: 4096,
-                    child_directory_reserve_bytes: 4096,
-                    parent_entry_reserve_bytes: 4096,
-                    bootstrap_memory_bytes: 1024 * 1024,
-                },
+    let owner = runtime.prepare_software_vod(
+        SoftwareVodRequest {
+            rendition_id: "original-finite".into(),
+            generation_epoch,
+            recipe_source_binding: "actual-original-source".into(),
+            command,
+            producer: super::tests::pump_plan(),
+            sources: vec![FiniteSourceRequest {
+                path: source,
+                media_file_id: "1".into(),
+                object_version: identity.render_s1(),
+                scanner_size: file.size,
+                scanner_mtime: file.mtime,
+            }],
+            segment_count: 1,
+            encoded_process_marker: true,
+            demand: WorkloadDemand {
+                resources: Metric::Known(vector),
+                limit_epoch: 1,
+                trial: false,
             },
-            deadline(),
-        )
-        .expect("same original accepted queue command");
+            application_owner_bytes: 0,
+            output: FiniteOutputLimits {
+                response_memory_bytes: 1024 * 1024,
+                retained_metadata_bytes: 1024 * 1024,
+                client_state_bytes: 1024 * 1024,
+                resident_file_objects: if reject_prepare { 0 } else { 4 },
+                resident_logical_bytes: 4 * 1024 * 1024,
+                reserved_storage_bytes: 64 * 1024 * 1024,
+                one_file_logical_bytes: 1024 * 1024,
+                one_io_payload_bytes: 1024 * 1024,
+                live_handles: 8,
+                reader_leases: 4,
+                // Bootstrap, maximum payload, and bounded sync/publication workspace.
+                resident_memory_bytes: 3 * 1024 * 1024,
+                allocation_unit_bytes: 4096,
+                per_object_reserve_bytes: 4096,
+                child_directory_reserve_bytes: 4096,
+                parent_entry_reserve_bytes: 4096,
+                bootstrap_memory_bytes: 1024 * 1024,
+            },
+        },
+        deadline(),
+    );
     (runtime, owner)
+}
+
+#[tokio::test]
+async fn zero_typed_software_generation_refuses_before_any_reservation() {
+    let root = tempfile::tempdir().expect("actual software generation fixture");
+    let (runtime, result) = original_owner_at_generation(root.path(), false, 0);
+    let Err(error) = result else {
+        panic!("zero typed generation must not allocate an owner");
+    };
+    assert!(error.definitely_before_reservation());
+    assert_eq!(
+        runtime.accounting().expect("same empty ledger").used,
+        ResourceVector::default()
+    );
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("original journal drain");
 }
 
 async fn finish_same_ticket(
@@ -395,10 +464,9 @@ async fn cancelled_original_source_root_observation_resumes_before_parent_file_c
         .prepare_inputs(deadline())
         .await
         .expect("same actual source/executable Files");
-    owner
-        .open_output(deadline())
-        .await
-        .expect("actual original output prefix");
+    // start() owns the original output bootstrap before native root entry.
+    // Pre-opening it here would re-enter arm_scratch_bootstrap after SinkReady,
+    // whose original pending root job has already been acknowledged.
     let gate = Gate::install(owner.source_members[0]);
     {
         let start = owner.start(deadline());
@@ -422,4 +490,64 @@ async fn cancelled_original_source_root_observation_resumes_before_parent_file_c
         charge
     );
     finish_same_ticket(runtime, owner, ticket).await;
+}
+
+#[tokio::test]
+async fn existing_rendition_child_fails_start_and_original_cancel_settles_the_whole_r() {
+    let root = tempfile::tempdir().expect("durable actual native fixture");
+    let (runtime, mut owner) = original_owner(root.path(), false);
+    // Another owner's directory already occupies this exact rendition name.
+    // The original mkdirat must fail with EEXIST and never adopt it.
+    let foreign = owner.directory_path.as_ref().clone();
+    std::fs::create_dir_all(&foreign).expect("foreign existing rendition child");
+    std::fs::write(foreign.join("foreign-marker"), b"not ours").expect("foreign content");
+    assert!(
+        owner.start(deadline()).await.is_err(),
+        "an existing child is never adopted as the output"
+    );
+    // The daemon's failed-start path: stop, then join the never-entered root.
+    owner.request_stop().expect("original stop request");
+    assert!(
+        owner.join_producer().await.is_err(),
+        "no producer root was ever entered"
+    );
+    let charge = runtime.accounting().expect("whole original R held").used;
+    assert_ne!(charge, ResourceVector::default());
+    let mut ticket = owner
+        .prepare_cancel(deadline())
+        .await
+        .expect("a definite failed child creation still closes the held parent and settles R");
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("native close alone does not refund app")
+            .used,
+        charge
+    );
+    drop(owner);
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("same original ticket settles after the last application alias");
+    assert_eq!(
+        runtime.accounting().expect("one final refund").used,
+        ResourceVector::default()
+    );
+    assert!(
+        runtime
+            .retained_preparations()
+            .expect("original book")
+            .is_empty(),
+        "no original preparation remains retained"
+    );
+    assert_eq!(
+        std::fs::read(foreign.join("foreign-marker")).expect("foreign child untouched"),
+        b"not ours"
+    );
+    drop(ticket);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("no original app/native selector remains")
+        .drain()
+        .expect("join original journal");
 }

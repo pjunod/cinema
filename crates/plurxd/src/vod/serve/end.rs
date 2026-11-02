@@ -226,7 +226,13 @@ impl VodServe {
                 }
             }
             drop(sessions);
-            if rendition.ephemeral_processing {
+            // A retained carrier borrows its S from the retained registry;
+            // unregister it with its last session so that S stays evictable.
+            #[cfg(target_os = "linux")]
+            let carrier = rendition.dir.borrows_retained_output();
+            #[cfg(not(target_os = "linux"))]
+            let carrier = false;
+            if rendition.ephemeral_processing || carrier {
                 serve
                     .shared
                     .purge_if_dormant(&rendition.key, Duration::ZERO)

@@ -8,6 +8,9 @@ use tokio::sync::oneshot;
 #[cfg(test)]
 mod tests;
 
+#[cfg(all(target_os = "linux", test))]
+mod fixtures;
+
 const MAX_OWNED_OPERATIONS: usize = 2048;
 
 /// Requested capacity of one queued journal operation retained in the
@@ -111,6 +114,29 @@ fn unavailable() -> CustodyError {
 }
 
 impl CustodyJournal {
+    /// Install before the SAME original settlement is queued. This observes
+    /// committed data only and grants no receipt, release or replay authority.
+    #[cfg(all(target_os = "linux", test))]
+    pub(crate) fn fixture_settlement_reply_gate(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<fixtures::SettlementReplyGate, CustodyError> {
+        codec::nonnil(operation_id)?;
+        let book = self.book.lock().map_err(|_| unavailable())?;
+        if book.operations.contains_key(&operation_id) {
+            return Err(CustodyError::new(
+                ErrorKind::Conflict,
+                "fixture settlement operation already queued",
+            ));
+        }
+        fixtures::SettlementReplyGate::install(self.owner_id, operation_id).ok_or_else(|| {
+            CustodyError::new(
+                ErrorKind::Conflict,
+                "fixture settlement reply gate already installed",
+            )
+        })
+    }
+
     /// Blocking startup only. Keep the returned reconstruction authoritative and
     /// cleanup-only until main installs every charge/latch/protected path.
     pub fn open(options: OpenOptions) -> Result<(Self, RecoverySnapshot), CustodyError> {
@@ -233,6 +259,10 @@ impl CustodyJournal {
                 let _daemon_lock = daemon_lock;
                 while let Ok(work) = receiver.recv() {
                     let result = run(&mut storage, owner_id, &worker_book, &work.operation);
+                    // Exact fixture-only delayed acknowledgment, after actual
+                    // COMMIT/result storage and after every run() guard drops.
+                    #[cfg(all(target_os = "linux", test))]
+                    fixtures::after_run(owner_id, &work.operation, &result);
                     let _ = work.reply.send(result);
                 }
             })?;

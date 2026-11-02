@@ -13,7 +13,7 @@ pub(super) fn prepare(
     trial: Option<Uuid>,
 ) -> Result<DiskResult, CustodyError> {
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if !(3..=6).contains(&version)
+    if !(3..=7).contains(&version)
         || batch.obligations.is_empty()
         || batch.obligations.len() > 6
         || batch.obligations.len() != handles.len()

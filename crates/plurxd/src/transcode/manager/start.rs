@@ -227,7 +227,7 @@ fn selected_copy_request(
     }
     let mut request = CopyVodRequest {
         rendition_id,
-        generation_epoch: 0,
+        generation_epoch: CopyVodRequest::INITIAL_GENERATION_EPOCH,
         recipe_source_binding: planning.recipe_binding.clone(),
         source: planning.report.finite_source_request(),
         command,
@@ -348,6 +348,13 @@ impl TranscodeManager {
                 .expect("authentic global quota");
         let quota = crate::playback_cache::FiniteCacheReservation::enter(quota);
         let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        // Match production after the original P retirement and cache wait:
+        // obtain a real current observation without rebinding the finalized
+        // request's demand or allocation epoch.
+        runtime
+            .refresh_admission_capacity(deadline)
+            .await
+            .expect("actual current capacity before original copy R");
         let mut original = runtime
             .prepare_copy_vod(request, deadline)
             .await
@@ -489,12 +496,22 @@ impl TranscodeManager {
         let quota = crate::playback_cache::FiniteCacheReservation::enter(quota);
         // Real CopySink constructor refuses this only after R was queued.
         request.operation_timeout = Duration::from_secs(121);
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        // P and quota waits consume the earlier observation. Reobserve the
+        // actual node before testing the post-R constructor boundary.
+        runtime
+            .refresh_admission_capacity(deadline)
+            .await
+            .expect("actual current capacity before the constructor refusal");
         let error = runtime
-            .prepare_copy_vod(request, std::time::Instant::now() + Duration::from_secs(90))
+            .prepare_copy_vod(request, deadline)
             .await
             .err()
             .expect("actual generic post-R constructor error");
-        assert!(!error.definitely_before_reservation());
+        assert!(
+            !error.definitely_before_reservation(),
+            "the real constructor refusal must occur after R: {error:?}"
+        );
         drop(quota);
         assert!(
             crate::playback_cache::is_pinned(&path),
@@ -643,6 +660,13 @@ impl TranscodeManager {
             .await
             .expect("same original P application/journal retirement");
         let path_id = request.rendition_id.clone();
+        // The actual P/journal close can outlive its earlier observation.
+        // Production reobserves here while keeping this exact finalized
+        // demand and allocation epoch; exercise that same boundary.
+        runtime
+            .refresh_admission_capacity(deadline)
+            .await
+            .expect("actual current capacity after original copy planning close");
         let mut original = runtime
             .prepare_copy_vod(request, deadline)
             .await
@@ -3081,6 +3105,14 @@ impl TranscodeManager {
                 .finish_retirement(deadline)
                 .await
                 .map_err(|error| format!("settling selected copy planning metadata: {error}"))?;
+            // P/native/journal and quota waits consume the earlier capacity
+            // observation. Reobserve before R; keep the finalized resource
+            // demand and allocation epoch unchanged: changed policy, lower
+            // capacity or Unknown evidence still refuses it.
+            runtime
+                .refresh_admission_capacity(deadline)
+                .await
+                .map_err(|error| format!("observing final selected copy admission: {error:?}"))?;
             // Error cleanup may await after R. Convert the SAME grant before
             // polling this constructor; generic errors/default Drop hold it.
             let quota = crate::playback_cache::FiniteCacheReservation::enter(quota);
@@ -3107,7 +3139,7 @@ impl TranscodeManager {
                 .ok_or("selected copy actor budget exceeds client partition")?;
             // queue_copy_vod already retained this SAME preparation before
             // returning owner. Cancellation drops owner, setting its original
-            // cleanup_requested flag; ordinary maintain_failed_copy_admissions
+            // cleanup repair request; ordinary maintain_failed_copy_admissions
             // selects that book entry through retained_preparations(). No
             // detached registration race or lost local selector is introduced.
             let output = owner.output();

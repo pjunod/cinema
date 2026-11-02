@@ -1,3 +1,7 @@
+# Final task/C5 source census (2026-10-28): preserves every forbidden zero.
+# Three added task sites and the extra child-launch/teardown sites are fixtures.
+# Seven production timers bound the same Source cleanup/admission; fifty are fixture waits.
+# Counts reconcile the reviewed original-owner wrappers and fixtures, not native qualification.
 # Main 6c8c98c79 sharing source correspondence (2026-10-29):
 # +3 task sites: two daemon BackgroundLoopGuard-token loops and the invitation
 # issue owner that keeps state/cleanup-file responsibility after receiver loss.
@@ -857,7 +861,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # cancellation-aware poll holds the live capacity waiter across its bounded
 # admission deadline. The waiter is dropped on admission, cancellation or
 # timeout; the sleep neither owns inference nor starts work by itself.
-expected_occurrences = 87
+expected_occurrences = 94
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1571,7 +1575,7 @@ pattern = "MediaSessionEnd"
 # `end_media_session_if_owner`, pinned to owner epoch 1 and the observed lease
 # expiry, before releasing its dispatch row. plurx-core Store tests cover the
 # same exact-owner end. No new end authority.
-expected_occurrences = 7
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-exact-playback-route-read"
@@ -1646,7 +1650,7 @@ pattern = "end_media_session_if_owner"
 # `end_media_session_if_owner`, pinned to owner epoch 1 and the observed lease
 # expiry, before releasing its dispatch row. plurx-core Store tests cover the
 # same exact-owner end. No new end authority.
-expected_occurrences = 5
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-exact-activation-handoff-store"
@@ -1803,7 +1807,7 @@ pattern = "publication_ready_at_ms"
 # Adaptive source audit e1d42fb2: Three actual publication_ready_at_ms checks bind adaptive
 # claim/adopt/origin readiness to MEDIA_SESSION_PUBLICATION_BLOCKED; one terminal_memory.rs
 # destructuring occurrence sizes the actual retained route.
-expected_occurrences = 151
+expected_occurrences = 153
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -1873,7 +1877,7 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # blocked activation before its existing Confirm settlement; no shipped write.
 # Adaptive source audit e1d42fb2: The three new MEDIA_SESSION_PUBLICATION_BLOCKED references
 # are the same origin/adoption/claim readiness guards; they add no publication authority.
-expected_occurrences = 58
+expected_occurrences = 60
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -2054,7 +2058,7 @@ pattern = "terminal_reason"
 # Adaptive source audit e1d42fb2: playback_control.rs excludes a replaced route from unrelated
 # End authority; terminal_memory.rs adds destructuring and actual optional-string sizing of
 # terminal_reason.
-expected_occurrences = 55
+expected_occurrences = 56
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -2134,7 +2138,7 @@ pattern = "expected_lease_expires_at_ms"
 # `end_media_session_if_owner`, pinned to owner epoch 1 and the observed lease
 # expiry, before releasing its dispatch row. plurx-core Store tests cover the
 # same exact-owner end. No new end authority.
-expected_occurrences = 4
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-takeover-settlement-capacity"
@@ -2234,7 +2238,7 @@ pattern = "rendition_build_gate"
 # serialization across resolve/adaptive prepare/original finite close; two finite_software
 # fixture references exercise abandoned build/metadata wait. Existing purge gate moved within
 # the same owner.
-expected_occurrences = 39
+expected_occurrences = 40
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -3360,7 +3364,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
 # the cancellation regression, which explicitly aborts and awaits it. Both
 # are test-only and settle their handles before fixture teardown.
-expected_occurrences = 1085
+# Source HTTP fixture Store setup adds one blocking join bridge and one
+# owned 8 MiB std thread, positively joined before returning the real Store.
+# Both use the original runtime; Source worker stacks remain unchanged.
+# This is test-only pre-R bootstrap, not a new media producer or close proof.
+# Compose task and current-main owner sites: 1089; exact source census still required.
+expected_occurrences = 1089
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3606,7 +3615,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # threads relocate existing decode_facts workers. Title ride.spawn is an owned Rust helper
 # invocation. Remaining delta is bounded test launch sites, not independent production
 # authority.
-expected_occurrences = 83
+# Source HTTP fixture Store setup adds one blocking join bridge and one
+# owned 8 MiB std thread, positively joined before returning the real Store.
+# Both use the original runtime; Source worker stacks remain unchanged.
+# This is test-only pre-R bootstrap, not a new media producer or close proof.
+expected_occurrences = 85
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5078,7 +5091,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
 # Main 6c8c98c79 composition: 2002 + (1901 - 1899) = 2004; source equality remains required.
-expected_occurrences = 2008
+# Compose task and current-main owner sites: 2065; exact source census still required.
+expected_occurrences = 2065
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6222,13 +6236,18 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # threads, custodied process launch, and test child/status calls. Each actual changed
 # production launch remains in its original registered/admitted owner; these totals do not
 # equate every output/status match with an OS launch.
+# Source HTTP fixture Store setup adds one blocking join bridge and one
+# owned 8 MiB std thread, positively joined before returning the real Store.
+# Both use the original runtime; Source worker stacks remain unchanged.
+# This is test-only pre-R bootstrap, not a new media producer or close proof.
 # +2 for shared cached-presentation compatibility: Response::status() assertions
 # in sharing_catalogue_detail_presentation_is_opt_in_and_uses_cached_public_fields
 # inspect the in-process Axum oneshot response for invalid opt-in and success.
 # These reads launch no task or child and introduce no producer ownership.
 # Combined with main's Live TV HTTP assertion: 809 + 2 = 811 reviewed matches.
 # Main 6c8c98c79 composition: 831 + (811 - 808) = 834; source equality remains required.
-expected_occurrences = 843
+# Compose task and current-main owner sites: 845; exact source census still required.
+expected_occurrences = 845
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6529,7 +6548,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # retain the exact child; priority adds exact registered-control actions and fixture waits.
 # Test-only finite/attempt fixtures account for the remaining calls. No raw numeric-
 # descriptor/native absence authority is inferred.
-expected_occurrences = 373
+# Compose task and current-main owner sites: 377; exact source census still required.
+expected_occurrences = 377
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

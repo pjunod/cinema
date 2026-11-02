@@ -38,7 +38,7 @@ fn local_request(path: PathBuf, file_id: i64, chunks: usize) -> DirectSourceRequ
     let media_file_id = file_id.to_string();
     let memory = DirectSourceRequest::minimum_memory_bytes(
         path_len,
-        media_file_id.len(),
+        media_file_id.capacity(),
         1,
         4096,
         chunks,
@@ -59,7 +59,7 @@ fn local_request(path: PathBuf, file_id: i64, chunks: usize) -> DirectSourceRequ
         demand: WorkloadDemand {
             resources: Metric::Known(ResourceVector {
                 cpu_ns_per_second: 0,
-                peak_memory_bytes: memory + 4096,
+                peak_memory_bytes: memory,
                 handles: 1,
                 ..ResourceVector::default()
             }),
@@ -100,6 +100,43 @@ async fn actual_direct_owners_share_one_cpu_domain_until_last_known_close_and_ap
         .open(deadline())
         .await
         .expect("second original FD");
+    let journal =
+        rusqlite::Connection::open(root.path().join("resource-custody/obligations.sqlite3"))
+            .unwrap();
+    assert_eq!(
+        journal
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    let mut statement = journal
+        .prepare("SELECT adapter,phase FROM members ORDER BY adapter,member_id")
+        .unwrap();
+    let persisted = statement
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|(adapter, _)| adapter == "direct_read_domain")
+            .count(),
+        1
+    );
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|(adapter, _)| adapter == "direct_source_file")
+            .count(),
+        2
+    );
+    assert!(persisted
+        .iter()
+        .filter(|(adapter, _)| adapter == "direct_source_file")
+        .all(|(_, phase)| phase == "acquired"));
+    drop(statement);
+    drop(journal);
     let mut first_ticket = first_owner
         .prepare_retirement(deadline())
         .await
@@ -375,4 +412,59 @@ fn restart_closes_only_positive_old_direct_domains_and_validates_close_history()
             "rewritten close history cannot become a valid empty reconstruction"
         );
     }
+}
+
+// These are negative constructor checks on the actual runtime and original
+// request. No absence receipt is manufactured from a missing returned owner.
+#[tokio::test]
+async fn expired_invalid_and_overflow_direct_requests_are_before_reservation() {
+    let root = tempfile::tempdir().expect("isolated runtime");
+    let runtime = actual_runtime(root.path());
+    let path = root.path().join("unopened.bin");
+    std::fs::write(&path, b"actual unopened source").expect("actual source");
+    let baseline = runtime.accounting().expect("before requests").used;
+    let expired = runtime.prepare_direct_source(local_request(path.clone(), 1, 1), Instant::now());
+    assert!(expired
+        .err()
+        .expect("expired request")
+        .definitely_before_reservation());
+    let mut invalid = local_request(path.clone(), 1, 1);
+    invalid.path = PathBuf::from("relative.bin");
+    assert!(runtime
+        .prepare_direct_source(invalid, deadline())
+        .err()
+        .expect("invalid path")
+        .definitely_before_reservation());
+    // A request may retain more text capacity than its visible ID length.
+    // This is the actual constructor boundary, not a synthetic close result:
+    // increasing the captured allocation without increasing its demand must
+    // refuse BEFORE tagging R or opening the native source/domain.
+    let mut retained_capacity = local_request(path.clone(), 1, 1);
+    retained_capacity.media_file_id.reserve(1024);
+    assert!(retained_capacity.media_file_id.capacity() > retained_capacity.media_file_id.len());
+    assert!(runtime
+        .prepare_direct_source(retained_capacity, deadline())
+        .err()
+        .expect("retained original ID capacity exceeds its earlier demand")
+        .definitely_before_reservation());
+    let mut overflow = local_request(path, 1, 1);
+    overflow.application_owner_bytes = u64::MAX;
+    assert!(runtime
+        .prepare_direct_source(overflow, deadline())
+        .err()
+        .expect("layout overflow")
+        .definitely_before_reservation());
+    assert_eq!(
+        runtime.accounting().expect("no R/domain charge").used,
+        baseline
+    );
+    assert!(runtime
+        .direct_read_domain
+        .lock()
+        .expect("original domain slot")
+        .is_none());
+    assert!(
+        !DirectSourceError(OperationError::State).definitely_before_reservation(),
+        "generic post-reservation state remains uncertain"
+    );
 }

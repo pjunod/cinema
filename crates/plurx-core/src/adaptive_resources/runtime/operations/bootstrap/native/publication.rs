@@ -29,6 +29,23 @@ struct PublicationResult {
     result: std::io::Result<()>,
 }
 impl Publication {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn fixture_job_identity(
+        &self,
+    ) -> (Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool) {
+        (
+            self.io_id.uuid(),
+            self.observe_id.uuid(),
+            self.join_id.uuid(),
+            self.pending.as_ref().map(JoinHandle::id),
+            self.acknowledged,
+        )
+    }
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn retained_heap_bytes(
         &self,
     ) -> Result<usize, OperationError> {
@@ -42,9 +59,6 @@ impl Publication {
             .retained_heap_bytes()
             .and_then(|bytes| bytes.checked_add(self.content_binding.capacity()))
             .ok_or(OperationError::State)
-    }
-    pub(super) fn acknowledged(&self) -> bool {
-        self.acknowledged
     }
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn ready_for_transfer(
         &self,
@@ -121,10 +135,32 @@ impl Publication {
         let request = self.request.take().expect("validated retained request");
         let directory = held.files.remove(&copy).expect("validated SAME child");
         let mut native = PublicationIo::from_held_directory(request, directory);
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        let fixture_io = self.io_id.uuid();
         let (enter, registered) = tokio::sync::oneshot::channel();
         let pending = runtime.spawn_blocking(move || {
             let result = match registered.blocking_recv() {
-                Ok(()) => native.run(),
+                Ok(()) => {
+                    let result = native.run();
+                    #[cfg(all(
+                        test,
+                        feature = "fixtures",
+                        target_os = "linux",
+                        any(target_arch = "x86_64", target_arch = "aarch64")
+                    ))]
+                    if result.is_ok() {
+                        super::super::super::native_result_fixture::after_result(
+                            super::super::super::native_result_fixture::Kind::Publication,
+                            fixture_io,
+                        );
+                    }
+                    result
+                }
                 Err(_) => Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "publication native entry was never released",
@@ -133,6 +169,20 @@ impl Publication {
             PublicationResult { native, result }
         });
         self.pending = Some(pending);
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        super::super::super::native_result_fixture::bind_job(
+            super::super::super::native_result_fixture::Kind::Publication,
+            fixture_io,
+            self.pending
+                .as_ref()
+                .expect("same original publication job")
+                .id(),
+        );
         // The original handle is registered BEFORE its native-entry permission.
         Ok(enter)
     }
@@ -246,11 +296,7 @@ impl NodeResourceRuntime {
             || state.asset.totals.pending_jobs != 0
             || bootstrap.change.is_some()
             || bootstrap.next_arm.is_some()
-            || bootstrap
-                .publication
-                .as_ref()
-                .is_some_and(|p| !p.acknowledged)
-            || bootstrap.sync.as_ref().is_some_and(|s| !s.acknowledged)
+            || !bootstrap.native_io_ready()
             || !bootstrap.plan.outputs.contains(&output)
         {
             return Err(OperationError::State);
@@ -271,12 +317,7 @@ impl NodeResourceRuntime {
             OutputKey::CompleteArtifactManifest => "complete-v1.json".to_owned(),
         };
         let content_binding = format!("sha256:{:x}", Sha256::digest(payload.as_slice()));
-        let metadata = matches!(
-            output,
-            OutputKey::IdentityMetadata
-                | OutputKey::EncodedProcessMetadata
-                | OutputKey::CompleteArtifactManifest
-        );
+        let metadata = output.is_fixed_metadata();
         let validated = if matches!(output, OutputKey::Playlist) {
             if let Some((_, old)) = prior_playlist {
                 PublicationRequest::for_playlist_replacement(Vec::new(), io_id.uuid(), old)?
@@ -350,6 +391,7 @@ impl NodeResourceRuntime {
             PublicationRequest::for_operation(&name, std::mem::take(payload), io_id.uuid())
         }
         .expect("same already-validated name/id and bounded payload length");
+        bootstrap.publication_registered = true;
         bootstrap.publication = Some(Publication {
             io_id,
             observe_id,
@@ -448,10 +490,7 @@ impl NodeResourceRuntime {
                     payload_capacity: publication.payload_capacity,
                     copy_id: publication.copy_id,
                 }
-            } else if matches!(
-                publication.output,
-                OutputKey::IdentityMetadata | OutputKey::EncodedProcessMetadata
-            ) {
+            } else if publication.output.is_fixed_metadata() {
                 AssetIoV1::PublishMetadata {
                     slot_id: FileSlotId(publication.io_id),
                     output: publication.output,

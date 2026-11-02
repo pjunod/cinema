@@ -197,6 +197,21 @@ impl ResponseBudget {
         })
     }
 
+    /// Stop new allocations without claiming that any existing owner is gone.
+    /// Copy's authenticated native-close stage uses this fence; only the
+    /// unchanged empty check below may authorize final typed settlement.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn stop_new_allocations(
+        &self,
+    ) -> Result<(), OperationError> {
+        let mut state = self.state.lock().map_err(|_| OperationError::State)?;
+        if state.failed {
+            return Err(OperationError::State);
+        }
+        state.closing = true;
+        Ok(())
+    }
+
     /// Atomic with reserve: a successful close fence excludes every future
     /// allocation, while existing buffers make retirement wait/refuse.
     pub(in crate::adaptive_resources::runtime) fn begin_close_if_empty(

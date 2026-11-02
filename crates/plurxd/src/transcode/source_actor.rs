@@ -127,6 +127,8 @@ impl TranscodeManager {
 #[cfg(test)]
 #[path = "tests/source_actor.rs"]
 mod tests;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use tests::SourceFactoryIngressFixture;
 
 #[path = "source_control.rs"]
 pub(crate) mod control;
@@ -226,6 +228,33 @@ pub(super) struct SourceWorkerRegistry {
     probe_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
     native_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
 }
+/// Original factory admission for Source P/R and producer work only. Earlier
+/// HTTP planning/availability IO is outside this custody boundary. An armed
+/// owner lost without its exact terminal settlement leaves persistent restart
+/// uncertainty; waiter loss and Rust Drop never supply native-close evidence.
+pub(super) struct SourceRestartAdmission {
+    admission: Option<crate::serving_fence::RestartAdmission>,
+}
+impl SourceRestartAdmission {
+    fn new(admission: crate::serving_fence::RestartAdmission) -> Self {
+        Self {
+            admission: Some(admission),
+        }
+    }
+    fn known_settled(mut self) {
+        drop(self.admission.take());
+    }
+}
+impl Drop for SourceRestartAdmission {
+    fn drop(&mut self) {
+        if let Some(admission) = &self.admission {
+            admission.retain_native_cleanup_uncertainty(
+                plurx_core::process::bounded::OriginalWorkUncertainty::CollectorDropped,
+            );
+        }
+    }
+}
+
 struct SourceViewerInner {
     control_target_duration_ms: i64,
     control_hooks: control::SourceControlHookOwner,
@@ -234,9 +263,9 @@ struct SourceViewerInner {
     assignment: SourceDispatchAssignment,
     manager: std::sync::Weak<TranscodeManager>,
     gate: Arc<SourceProducerAuthority>,
-    /// Present only for a direct-play owner: the fenced file it serves. Such
-    /// an owner has no producer and never publishes an HLS Start.
-    direct: Option<Arc<direct::SourceDirectFile>>,
+    /// Immutable delivery kind remains available to cached Start/End replies
+    /// after the original actor's application alias has retired.
+    direct: bool,
     retirement_deadline: std::sync::OnceLock<Instant>,
     state: std::sync::Mutex<SourceViewerState>,
     changed: tokio::sync::Notify,
@@ -269,7 +298,23 @@ enum SourcePhysicalSettlement {
         SourcePreparationSettlements,
     ),
 }
+impl SourcePhysicalSettlement {
+    /// Original producer/preparation closure only. A Source SQL refusal is
+    /// separate; this never certifies another assignment or a lost native job.
+    fn matches(&self, assignment: &SourceDispatchAssignment) -> bool {
+        match self {
+            Self::NoProducer(preparations) => preparations.matches(assignment),
+            Self::Registered(receipt, preparations) => {
+                receipt.matches(assignment) && preparations.matches(assignment)
+            }
+        }
+    }
+}
 struct SourceViewerState {
+    // Only this redundant actor alias retires at the original joined worker's
+    // ticket handoff. Actual body/open/read aliases still own their application.
+    direct: Option<Arc<direct::SourceDirectFile>>,
+    restart_admission: Option<SourceRestartAdmission>,
     native: Option<Arc<super::source_subtitles::SourceNativeTracks>>,
     start: Option<Result<crate::http::hls::StartResponse, SourceWorkerError>>,
     retirement_requested: bool,
@@ -285,6 +330,24 @@ struct SourceViewerState {
         Option<Result<crate::http::sharing_direct_wire::SourceDirectStart, SourceWorkerError>>,
     /// The last admitted direct byte open; status never moves it.
     direct_activity: Option<Instant>,
+}
+
+/// Known requested inline actor payload and its identified Arc strong/weak
+/// words. This includes the actual kind/state/custody layout and padding;
+/// strings, allocator internals, Tokio/native and complete peaks are separate.
+#[cfg(target_os = "linux")]
+pub(super) fn source_actor_requested_bytes() -> usize {
+    std::mem::size_of::<SourceViewerInner>() + 2 * std::mem::size_of::<usize>()
+}
+
+impl SourceViewerInner {
+    fn direct_file(&self) -> Option<Arc<direct::SourceDirectFile>> {
+        self.state
+            .lock()
+            .expect("Source worker state")
+            .direct
+            .clone()
+    }
 }
 
 /// A waiter for one actual registered owner. Dropping this value cannot cancel
@@ -340,7 +403,7 @@ impl SourceResponseGuard {
         #[cfg(target_os = "linux")]
         if self
             .owner
-            .direct
+            .direct_file()
             .as_ref()
             .is_some_and(|direct| !direct.admitted_unchanged())
         {
@@ -372,7 +435,7 @@ impl SourceResponseGuard {
             #[cfg(target_os = "linux")]
             if self
                 .owner
-                .direct
+                .direct_file()
                 .as_ref()
                 .is_some_and(|direct| !direct.admitted_unchanged())
             {
@@ -412,7 +475,7 @@ impl SourceViewerActor {
         deadline: Instant,
     ) -> Result<crate::http::hls::StartResponse, SourceWorkerError> {
         // A direct owner has no HLS Start, status, control or resources.
-        if self.0.direct.is_some() {
+        if self.0.direct {
             return Err(SourceWorkerError::Unsupported);
         }
         loop {
@@ -553,7 +616,7 @@ impl SourceViewerActor {
         if Instant::now() >= deadline {
             return Err(SourceWorkerError::Deadline);
         }
-        if self.0.direct.is_some() {
+        if self.0.direct {
             return Err(SourceWorkerError::Unsupported);
         }
         let native = self
@@ -1015,6 +1078,13 @@ impl TranscodeManager {
                 SourceWorkerError::Unavailable,
             ));
         }
+        // Replay borrows the original owner and its original restart admission.
+        if let Some(actor) = self.lookup_source_worker(&assignment) {
+            return Ok(actor);
+        }
+        let restart_admission = state.serving.try_restart_admission().await.ok_or_else(|| {
+            SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Unavailable)
+        })?;
         let registry_boot_id = state.sharing.accepted_drivers.boot_id();
         let mut registry = self.source_workers.entries.lock().expect("Source workers");
         if let Some(owner) = registry
@@ -1048,8 +1118,10 @@ impl TranscodeManager {
                 ingress,
             }),
             retirement_deadline: Default::default(),
-            direct: None,
+            direct: false,
             state: std::sync::Mutex::new(SourceViewerState {
+                direct: None,
+                restart_admission: Some(SourceRestartAdmission::new(restart_admission)),
                 start: None,
                 retirement_requested: false,
                 retirement_mode: crate::sharing_connection_custody::DriverCloseMode::Drain,
@@ -1238,6 +1310,68 @@ impl TranscodeManager {
         deadline: Instant,
         work: &mut Option<super::source_preparation::SourceProbeOperation>,
     ) -> Result<Arc<crate::vodencode::Encoding>, SourceWorkerError> {
+        #[cfg(target_os = "linux")]
+        if let Some(operation) = work
+            .as_ref()
+            .filter(|operation| operation.uses_fixed_planning())
+        {
+            // A changed setting cannot convert an already selected original
+            // P into a second admission or the legacy native path on replay.
+            let snapshot = Arc::clone(
+                operation
+                    .fixed_snapshot()
+                    .map_err(|_| SourceWorkerError::Unavailable)?,
+            );
+            return self
+                .prepare_source_fixed_encoded_recipe(owner, prepared, &snapshot, deadline, work, 0)
+                .await;
+        }
+        #[cfg(target_os = "linux")]
+        if prepared.request().subtitle_burn.is_none()
+            && prepared.request().continuous_media.is_none()
+            && prepared.request().dv_processing_destination.is_none()
+            && !prepared.request().hdr10
+            && !prepared.native_subtitles().0
+            && self.pipeline == Pipeline::Cpu
+            && plurx_core::playback::hdr_route(prepared.file()).is_none()
+        {
+            let snapshot = Arc::new(
+                self.store
+                    .playback_planning_snapshot(prepared.file().id, &super::QUALITY_PLANNING_KEYS)
+                    .await
+                    .map_err(|_| SourceWorkerError::Unavailable)?
+                    .ok_or(SourceWorkerError::Unavailable)?,
+            );
+            if self.encoder_for_preference(
+                snapshot
+                    .settings
+                    .get(keys::HWACCEL)
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            ) == Encoder::Software
+            {
+                // Measure this actual unpolled coordinator layout. Dropping
+                // this observation enters no work; the next future has the
+                // identical type and borrows the same registered operation.
+                let pending = self.prepare_source_fixed_encoded_recipe(
+                    owner, prepared, &snapshot, deadline, work, 0,
+                );
+                let frame_bytes = std::mem::size_of_val(&pending);
+                drop(pending);
+                // Selection commits to admitted P. A refusal/Unknown is never
+                // retried through the legacy source opener or native probe.
+                return self
+                    .prepare_source_fixed_encoded_recipe(
+                        owner,
+                        prepared,
+                        &snapshot,
+                        deadline,
+                        work,
+                        frame_bytes,
+                    )
+                    .await;
+            }
+        }
         let permit = self.admit_source_copy(deadline).await.inspect_err(|error| { tracing::warn!(target: "plurxd::transcode", stage = "source_encoded.probe_admission", error_class = ?error, "Source encoded preparation refused"); })?;
         let source =
             crate::fragment_index_cluster::open_source_playback_fence(prepared.file(), None)
@@ -1301,6 +1435,142 @@ impl TranscodeManager {
                 tracing::warn!(target: "plurxd::transcode", stage = "source_encoded.encoder_plan", error_class, "Source encoded preparation refused");
                 SourceWorkerError::Unavailable
             })
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn prepare_source_fixed_encoded_recipe(
+        &self,
+        owner: &Arc<SourceViewerInner>,
+        prepared: &crate::http::hls::PreparedSourcePlayback,
+        snapshot: &Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+        deadline: Instant,
+        work: &mut Option<super::source_preparation::SourceProbeOperation>,
+        coordinator_frame_bytes: usize,
+    ) -> Result<Arc<crate::vodencode::Encoding>, SourceWorkerError> {
+        let refused = |error: String| {
+            tracing::warn!(target: "plurxd::transcode", stage = "source_encoded.fixed_planning", %error, "Source admitted software planning refused");
+            SourceWorkerError::Unavailable
+        };
+        let runtime = self
+            .resource_runtime
+            .as_ref()
+            .ok_or_else(|| refused("Source planning runtime is unavailable".into()))?;
+        if snapshot.file.id != prepared.file().id
+            || snapshot.file.path != prepared.file().path
+            || snapshot.file.size != prepared.file().size
+            || snapshot.file.mtime != prepared.file().mtime
+        {
+            return Err(refused("Source planning scanner binding changed".into()));
+        }
+        if work.is_none() {
+            let proof = owner.gate.current_preparation(&owner.assignment).await?;
+            if !prepared.matches_assignment(proof.assignment()) {
+                return Err(SourceWorkerError::Conflict);
+            }
+            runtime
+                .refresh_admission_capacity(deadline)
+                .await
+                .map_err(|error| {
+                    refused(format!("observing Source planning capacity: {error:?}"))
+                })?;
+            let requested = (|| -> Option<usize> {
+                super::adaptive_attempts::planning_snapshot_requested_heap_bytes(snapshot)?
+                    .checked_add(std::mem::size_of::<
+                        plurx_core::store::PlaybackPlanningSnapshot,
+                    >())?
+                    .checked_add(2 * std::mem::size_of::<usize>())?
+                    .checked_add(prepared.request().selected_finite_requested_heap_bytes()?)?
+                    .checked_add(super::source_preparation::fixed_source_requested_bytes())?
+                    .checked_add(coordinator_frame_bytes)?
+                    .checked_add(super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)
+            })()
+            .ok_or_else(|| refused("Source planning requested capacity overflow".into()))?;
+            let request = super::adaptive_attempts::fixed_planning_request(
+                self,
+                snapshot,
+                prepared.fingerprint(),
+                requested,
+            )
+            .map_err(refused)?;
+            #[cfg(test)]
+            self.source_workers
+                .probe_hooks
+                .deny_fixed_cpu_if_armed(runtime)
+                .map_err(refused)?;
+            // Synchronous P/M registration precedes the first native await.
+            // The operation slot survives a cancelled waiter and supplies its
+            // SAME original owner to replay and final Source cleanup.
+            match super::source_preparation::start_source_fixed_probe(
+                runtime,
+                request,
+                Arc::clone(snapshot),
+                proof.assignment().clone(),
+                deadline,
+            ) {
+                Ok(operation) => *work = Some(operation),
+                Err(failure) => {
+                    let (error, held) = failure.into_parts();
+                    // Only exact pre-reservation refusal leaves no P selector.
+                    // Generic constructor uncertainty stays in this SAME
+                    // existing operation slot and cannot settle Source SQL.
+                    *work = held;
+                    #[cfg(test)]
+                    self.source_workers.probe_hooks.record_fixed_refusal(&error);
+                    return Err(refused(error));
+                }
+            }
+        }
+        let operation = work.as_ref().expect("registered Source planning operation");
+        if !operation.fixed_matches(&owner.assignment, prepared.fingerprint()) {
+            return Err(SourceWorkerError::Conflict);
+        }
+
+        #[cfg(test)]
+        self.source_workers
+            .probe_hooks
+            .install_fixed_native(operation)
+            .await;
+        #[cfg(test)]
+        self.source_workers.probe_hooks.before_fixed_inputs().await;
+
+        drop(owner.gate.current_preparation(&owner.assignment).await?);
+        operation
+            .prepare_fixed_inputs(deadline)
+            .await
+            .map_err(refused)?;
+        #[cfg(test)]
+        self.source_workers.probe_hooks.before_fixed_collect().await;
+        drop(owner.gate.current_preparation(&owner.assignment).await?);
+        let report = operation.fixed_report(deadline).await.map_err(refused)?;
+        // Pure refinement consumes only immutable facts from this SAME M.
+        // It neither exports the SourceCell File nor repeats native discovery.
+        let refinement = self.resolve_adaptive_encoding_from_probe(
+            prepared.request(),
+            prepared.file(),
+            operation.fixed_snapshot().map_err(refused)?,
+            report,
+        );
+        let refinement_frame = std::mem::size_of_val(&refinement);
+        let encoding = refinement.await.map_err(refused)?;
+        let requested = encoding
+            .requested_heap_bytes()
+            .and_then(|bytes| bytes.checked_add(refinement_frame))
+            .ok_or_else(|| refused("Source refined recipe capacity is unknown".into()))?;
+        if requested > super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES {
+            return Err(refused(
+                "Source refined recipe exceeds its explicit P-to-R allowance".into(),
+            ));
+        }
+        drop(owner.gate.current_preparation(&owner.assignment).await?);
+        // Only the original native receipts refund P. M/application aliases
+        // remain retained by this operation and every resulting Encoding.
+        operation
+            .finish_fixed_native(deadline)
+            .await
+            .map_err(refused)?;
+        #[cfg(test)]
+        self.source_workers.probe_hooks.after_evidence().await;
+        Ok(encoding)
     }
 
     async fn run_source_owner(
@@ -1694,9 +1964,16 @@ impl TranscodeManager {
             owner.changed.notify_waiters();
             // A Store fault retains the actual owner and sealed physical
             // settlement evidence. Retry SQL without inventing a new producer.
+            #[cfg(test)]
+            let retry_delay = owner
+                .control_hooks
+                .fixture_settlement_retry_delay()
+                .unwrap_or(SOURCE_SETTLEMENT_RETRY);
+            #[cfg(not(test))]
+            let retry_delay = SOURCE_SETTLEMENT_RETRY;
             tokio::select! {
                 () = shutdown.cancelled() => break result,
-                () = tokio::time::sleep(SOURCE_SETTLEMENT_RETRY) => {}
+                () = tokio::time::sleep(retry_delay) => {}
             }
         };
         if let Err(fault) = settlement {
@@ -1709,6 +1986,41 @@ impl TranscodeManager {
                 reason = ?fault,
                 "Source owner left its settlement unresolved; the session lease sweep reclaims its row"
             );
+        }
+        // SQL failure leaves the row to its lease sweep; it is not evidence
+        // of unknown native work. Only matching ORIGINAL physical/preparation
+        // closure disarms this factory admission. Keep the existing body
+        // barrier even when SQL failed before reaching it.
+        // Preserve ingress-before-producer ordering on the normal path.
+        // If SQL prevented that path, still drive the original native owner
+        // now; a SQL error itself neither proves nor forbids native closure.
+        let native_cleanup = self
+            .settle_source_physical(owner, &mut reserved, &mut physical, &mut preparations)
+            .await;
+        let native_settled = native_cleanup.is_ok()
+            && physical
+                .as_ref()
+                .is_some_and(|proof| proof.matches(&owner.assignment));
+        if native_settled && (!owner.direct || !cfg!(target_os = "linux")) {
+            Self::wait_source_bodies(owner).await;
+            #[cfg(not(target_os = "linux"))]
+            drop(
+                owner
+                    .state
+                    .lock()
+                    .expect("Source worker state")
+                    .direct
+                    .take(),
+            );
+            if let Some(admission) = owner
+                .state
+                .lock()
+                .expect("Source worker state")
+                .restart_admission
+                .take()
+            {
+                admission.known_settled();
+            }
         }
         // The owner is finished either way. Its registry slot is not capacity
         // the stopped owner can still use.
@@ -1724,7 +2036,18 @@ impl TranscodeManager {
         }
         owner.changed.notify_waiters();
     }
-    async fn settle_source_owner(
+    async fn wait_source_bodies(owner: &Arc<SourceViewerInner>) {
+        loop {
+            let notification = owner.changed.notified();
+            tokio::pin!(notification);
+            notification.as_mut().enable();
+            if owner.state.lock().expect("Source worker state").bodies == 0 {
+                break;
+            }
+            notification.await;
+        }
+    }
+    async fn settle_source_physical(
         &self,
         owner: &Arc<SourceViewerInner>,
         reserved: &mut Option<crate::vodserve::ReservedSourceVodRendition>,
@@ -1747,17 +2070,23 @@ impl TranscodeManager {
                 SourcePhysicalSettlement::NoProducer(std::mem::take(preparations))
             });
         }
-        if matches!(physical, Some(SourcePhysicalSettlement::Registered(receipt, _)) if !receipt.matches(&owner.assignment))
+        if !physical
+            .as_ref()
+            .is_some_and(|proof| proof.matches(&owner.assignment))
         {
             return Err(SourceSettlementFault::Mismatch);
         }
-        let preparations = match physical.as_ref().expect("Source physical settlement") {
-            SourcePhysicalSettlement::NoProducer(preparations)
-            | SourcePhysicalSettlement::Registered(_, preparations) => preparations,
-        };
-        if !preparations.matches(&owner.assignment) {
-            return Err(SourceSettlementFault::Mismatch);
-        }
+        Ok(())
+    }
+    async fn settle_source_owner(
+        &self,
+        owner: &Arc<SourceViewerInner>,
+        reserved: &mut Option<crate::vodserve::ReservedSourceVodRendition>,
+        physical: &mut Option<SourcePhysicalSettlement>,
+        preparations: &mut SourcePreparationSettlements,
+    ) -> Result<(), SourceSettlementFault> {
+        self.settle_source_physical(owner, reserved, physical, preparations)
+            .await?;
         let incarnation = owner.assignment.binding().incarnation_id().to_string();
         let route = self
             .store
@@ -1802,16 +2131,22 @@ impl TranscodeManager {
         } else {
             None
         };
-        loop {
-            let notification = owner.changed.notified();
-            tokio::pin!(notification);
-            notification.as_mut().enable();
-            if owner.state.lock().expect("Source worker state").bodies == 0 {
-                break;
-            }
-            notification.await;
-        }
-        let released = if let Some(terminal) = terminal {
+        Self::wait_source_bodies(owner).await;
+        // The negative test seam substitutes only the Store result BEFORE its
+        // write. Native/preparation closure and the body barrier above remain
+        // actual, and no committed release is rewritten as a failure.
+        #[cfg(test)]
+        let release_override = owner.control_hooks.fixture_settlement_sql(
+            physical
+                .as_ref()
+                .expect("original Source physical settlement"),
+            &owner.assignment,
+        );
+        #[cfg(not(test))]
+        let release_override = None::<Result<SourceReleaseOutcome, plurx_core::error::StoreError>>;
+        let released = if let Some(result) = release_override {
+            result
+        } else if let Some(terminal) = terminal {
             self.store
                 .settle_source_terminal_worker(&owner.assignment, &terminal)
                 .await

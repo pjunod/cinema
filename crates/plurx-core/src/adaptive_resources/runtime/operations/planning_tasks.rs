@@ -21,12 +21,8 @@ pub(super) struct PlanningTasks {
     inputs: Option<FixedPlanningProbeRequest>,
     source: Option<FixedPlanningSourceRequest>,
     observed_source: Option<String>,
-    probe: Option<
-        tokio::task::JoinHandle<Result<AdmittedProbeCompletion, AdmittedProbeNativeFailure>>,
-    >,
-    engine: Option<
-        tokio::task::JoinHandle<Result<FixedEngineNativeCompletion, FixedEngineNativeFailure>>,
-    >,
+    probe: Option<tokio::task::JoinHandle<ProbeTaskOutcome>>,
+    engine: Option<tokio::task::JoinHandle<EngineTaskOutcome>>,
     // A failed native task may still own its original child, job, pidfd or
     // pipe. Keep that owner in the charged P book rather than reducing it to
     // an error string and implicitly dropping the only cleanup authority.
@@ -39,7 +35,7 @@ pub(super) struct PlanningTasks {
     /// Bounded audit observations captured at join, before report data
     /// moves to M. They stay charged under P until its settlement.
     pub(super) probe_observed: Option<v2::FixedProbeDiscoverTaskObservedV1>,
-    pub(super) engine_observed: Option<v2::FixedPlanningEngineTaskObservedV1>,
+    pub(super) engine_observed: Option<v2::FixedPlanningEngineTaskObservedV2>,
     /// Pre-minted, resumable enrichment operations. Order: probe version,
     /// probe document, engine version, engine dependency roots; then the
     /// probe and engine task observations.
@@ -50,15 +46,23 @@ pub(super) struct PlanningTasks {
     pub(super) settlement_operation_id: Uuid,
     pub(super) unknown: bool,
     pub(super) entered: bool,
+    pub(super) probe_join_operation: Option<Uuid>,
+    pub(super) engine_join_operation: Option<Uuid>,
+    pub(super) probe_never_entered: Option<JoinedPlanningTaskNeverEntered>,
+    pub(super) engine_never_entered: Option<JoinedPlanningTaskNeverEntered>,
+    pub(super) registered_unentered_graph:
+        Option<crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph>,
     pub(super) never_entered:
         Option<crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph>,
 }
 
 /// Settlement-relevant summary of the original P tasks. Joined native owners
 /// or strict retained never-entered inputs may close; uncertainty stays held.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PlanningNativeState {
     NotEntered,
+    /// Both ORIGINAL registered tasks positively joined after receiver error.
+    RegisteredNeverEntered,
     /// A handle or unconsumed report remains; joining may still finish it.
     Pending,
     /// An unknown sibling or failed native owner; P stays charged.
@@ -77,6 +81,11 @@ impl PlanningTasks {
             || self.unknown
             || self.probe.is_some()
             || self.engine.is_some()
+            || self.probe_join_operation.is_some()
+            || self.engine_join_operation.is_some()
+            || self.probe_never_entered.is_some()
+            || self.engine_never_entered.is_some()
+            || self.registered_unentered_graph.is_some()
             || self.probe_failure.is_some()
             || self.engine_failure.is_some()
             || self.probe_report.is_some()
@@ -106,6 +115,52 @@ impl PlanningTasks {
             self.engine_plan.member_id.uuid(),
         ])
     }
+    pub(super) fn registered_unentered_members(
+        &self,
+        binding: ReservationBinding,
+    ) -> Result<[Uuid; 6], OperationError> {
+        if !self.entered
+            || self.inputs.is_some()
+            || self.never_entered.is_some()
+            || self.probe.is_some()
+            || self.engine.is_some()
+            || self.probe_failure.is_some()
+            || self.engine_failure.is_some()
+            || self.probe_report.is_some()
+            || self.engine_report.is_some()
+            || self.probe_closed.is_some()
+            || self.engine_closed.is_some()
+            || self.probe_observed.is_some()
+            || self.engine_observed.is_some()
+            || self.root_observations.iter().any(|o| o.committed)
+            || self.probe_task_observation.committed
+            || self.engine_task_observation.committed
+            || !self.probe_never_entered.as_ref().is_some_and(|proof| {
+                proof.matches(
+                    binding,
+                    self.probe_plan.member_id.uuid(),
+                    self.probe_join_operation,
+                )
+            })
+            || !self.engine_never_entered.as_ref().is_some_and(|proof| {
+                proof.matches(
+                    binding,
+                    self.engine_plan.member_id.uuid(),
+                    self.engine_join_operation,
+                )
+            })
+        {
+            return Err(OperationError::State);
+        }
+        Ok([
+            self.probe_plan.version_root_member_id.uuid(),
+            self.probe_plan.document_root_member_id.uuid(),
+            self.probe_plan.member_id.uuid(),
+            self.engine_plan.version_root_member_id.uuid(),
+            self.engine_plan.dependency_root_member_id.uuid(),
+            self.engine_plan.member_id.uuid(),
+        ])
+    }
     pub(super) fn consume_never_entered_inputs(&mut self) {
         // The graph witness is already retained; this pure request cannot be
         // moved to an original task after its acquisition entry was sealed.
@@ -115,6 +170,11 @@ impl PlanningTasks {
         self.source_spec.is_some()
     }
     pub(super) fn native_state(&self) -> PlanningNativeState {
+        if let Some(proof) = &self.probe_never_entered {
+            if self.registered_unentered_members(proof.0.binding).is_ok() {
+                return PlanningNativeState::RegisteredNeverEntered;
+            }
+        }
         if self.unknown || self.probe_failure.is_some() || self.engine_failure.is_some() {
             PlanningNativeState::Uncertain
         } else if !self.entered {
@@ -154,7 +214,57 @@ impl PlanningObservation {
     }
 }
 
+// Only the original private worker can construct this signal, after its
+// one-shot receive failed and its SAME input payload has been destroyed.
+struct PlanningTaskNeverEntered {
+    binding: ReservationBinding,
+    member: Uuid,
+    join_operation: Uuid,
+}
+pub(super) struct JoinedPlanningTaskNeverEntered(PlanningTaskNeverEntered);
+impl JoinedPlanningTaskNeverEntered {
+    pub(super) fn matches(
+        &self,
+        binding: ReservationBinding,
+        member: Uuid,
+        join: Option<Uuid>,
+    ) -> bool {
+        self.0.binding == binding
+            && self.0.member == member
+            && join == Some(self.0.join_operation)
+            && !self.0.join_operation.is_nil()
+    }
+    pub(super) fn member(&self) -> Uuid {
+        self.0.member
+    }
+    pub(super) fn join_operation(&self) -> Uuid {
+        self.0.join_operation
+    }
+}
+// Keep the SAME original native owner inline; boxing would add an uncharged
+// allocation. planning_task_frame_bytes accounts the complete actual futures.
+#[allow(clippy::large_enum_variant)]
+enum ProbeTaskOutcome {
+    Native(Result<AdmittedProbeCompletion, AdmittedProbeNativeFailure>),
+    NeverEntered(PlanningTaskNeverEntered),
+}
+#[allow(clippy::large_enum_variant)]
+enum EngineTaskOutcome {
+    Native(Result<FixedEngineNativeCompletion, FixedEngineNativeFailure>),
+    NeverEntered(PlanningTaskNeverEntered),
+}
+struct EngineTaskInput {
+    plan: v2::FixedPlanningEngineTaskV1,
+    boot: Option<Uuid>,
+    deadline: Instant,
+    binding: ReservationBinding,
+    join_operation: Uuid,
+}
+
 struct ProbeTaskInput {
+    binding: ReservationBinding,
+    member: Uuid,
+    join_operation: Uuid,
     source: source_files::RetainedSourceLease,
     observed: String,
     request: FixedPlanningProbeRequest,
@@ -165,56 +275,118 @@ struct ProbeTaskInput {
 async fn original_probe_task(
     input: Option<ProbeTaskInput>,
     start: Option<tokio::sync::oneshot::Receiver<()>>,
-) -> Result<AdmittedProbeCompletion, AdmittedProbeNativeFailure> {
-    let input =
-        input.ok_or_else(|| AdmittedProbeNativeFailure::before_entry(DecodeFactError::Deadline))?;
-    start
-        .ok_or_else(|| AdmittedProbeNativeFailure::before_entry(DecodeFactError::Deadline))?
+) -> ProbeTaskOutcome {
+    let Some(start) = start else {
+        return ProbeTaskOutcome::Native(Err(AdmittedProbeNativeFailure::before_entry(
+            DecodeFactError::CacheInvariant,
+        )));
+    };
+    // First await, before discovery, File work or any blocking/native prefix.
+    if start.await.is_err() {
+        let Some(input) = input else {
+            return ProbeTaskOutcome::Native(Err(AdmittedProbeNativeFailure::before_entry(
+                DecodeFactError::CacheInvariant,
+            )));
+        };
+        let absent = PlanningTaskNeverEntered {
+            binding: input.binding,
+            member: input.member,
+            join_operation: input.join_operation,
+        };
+        drop(input); // including the original held-source alias and request
+        return ProbeTaskOutcome::NeverEntered(absent);
+    }
+    let result = async move {
+        let input = input.ok_or_else(|| {
+            AdmittedProbeNativeFailure::before_entry(DecodeFactError::CacheInvariant)
+        })?;
+        let FixedPlanningProbeRequest {
+            probe_program_locator,
+            cache,
+            catalog,
+            selected_stream,
+            work,
+            ..
+        } = input.request;
+        planning_collector::run_fixed_probe(
+            input.source,
+            input.observed,
+            probe_program_locator,
+            cache,
+            catalog,
+            selected_stream,
+            work,
+            input.deadline,
+            input.version_close,
+            input.document_close,
+        )
         .await
-        .map_err(|_| AdmittedProbeNativeFailure::before_entry(DecodeFactError::Deadline))?;
-    let FixedPlanningProbeRequest {
-        probe_program_locator,
-        cache,
-        catalog,
-        selected_stream,
-        work,
-        ..
-    } = input.request;
-    planning_collector::run_fixed_probe(
-        input.source,
-        input.observed,
-        probe_program_locator,
-        cache,
-        catalog,
-        selected_stream,
-        work,
-        input.deadline,
-        input.version_close,
-        input.document_close,
-    )
-    .await
+    }
+    .await;
+    ProbeTaskOutcome::Native(result)
 }
 async fn original_engine_task(
-    input: Option<(v2::FixedPlanningEngineTaskV1, Option<Uuid>, Instant)>,
+    input: Option<EngineTaskInput>,
     start: Option<tokio::sync::oneshot::Receiver<()>>,
-) -> Result<FixedEngineNativeCompletion, FixedEngineNativeFailure> {
-    let (plan, boot, deadline) =
-        input.ok_or_else(|| std::io::Error::other("missing original engine input"))?;
-    start
-        .ok_or_else(|| std::io::Error::other("missing original engine start"))?
-        .await
-        .map_err(|_| std::io::Error::other("original engine start dropped"))?;
-    #[cfg(test)]
-    tests::stages::before_engine_native(plan.member_id.uuid()).await;
-    planning_collector::run_fixed_engine(plan, boot, deadline).await
+) -> EngineTaskOutcome {
+    let Some(start) = start else {
+        return EngineTaskOutcome::Native(Err(std::io::Error::other(
+            "missing original engine receiver",
+        )
+        .into()));
+    };
+    // The consumed sender is the sole way into the actual collector.
+    if start.await.is_err() {
+        let Some(input) = input else {
+            return EngineTaskOutcome::Native(Err(std::io::Error::other(
+                "missing original engine input",
+            )
+            .into()));
+        };
+        let absent = PlanningTaskNeverEntered {
+            binding: input.binding,
+            member: input.plan.member_id.uuid(),
+            join_operation: input.join_operation,
+        };
+        drop(input);
+        return EngineTaskOutcome::NeverEntered(absent);
+    }
+    let result = async move {
+        let EngineTaskInput {
+            plan,
+            boot,
+            deadline,
+            ..
+        } = input.ok_or_else(|| std::io::Error::other("missing original engine input"))?;
+        #[cfg(test)]
+        tests::stages::before_engine_native(plan.member_id.uuid()).await;
+        #[cfg(any(test, feature = "fixtures"))]
+        let original_version_close = plan.version_close_operation_id.uuid();
+        let result = planning_collector::run_fixed_engine(plan, boot, deadline).await;
+        // A genuine JoinError/lost result AFTER the actual collector returns.
+        // This does not inject a kernel wait failure or construct any close proof.
+        #[cfg(any(test, feature = "fixtures"))]
+        if result.is_ok() {
+            crate::process::fixed_planning_engine::fixtures::panic_after_native_return(
+                original_version_close,
+            );
+        }
+        result
+    }
+    .await;
+    EngineTaskOutcome::Native(result)
 }
 
 pub(in crate::adaptive_resources::runtime) fn planning_task_frame_bytes() -> Option<usize> {
-    // Constructing an unpolled future does no native work or heap allocation.
-    // Option::None has the SAME compiler-generated future layout as Some.
+    // Tokio's task storage contains either the actual future or its returned
+    // original outcome. None constructs the SAME future layout without work.
+    let probe = std::mem::size_of_val(&original_probe_task(None, None))
+        .max(std::mem::size_of::<ProbeTaskOutcome>());
+    let engine = std::mem::size_of_val(&original_engine_task(None, None))
+        .max(std::mem::size_of::<EngineTaskOutcome>());
     std::mem::size_of::<PlanningTasks>()
-        .checked_add(std::mem::size_of_val(&original_probe_task(None, None)))?
-        .checked_add(std::mem::size_of_val(&original_engine_task(None, None)))
+        .checked_add(probe)?
+        .checked_add(engine)
 }
 
 pub(in crate::adaptive_resources::runtime) type PlanningOwnerFences = (
@@ -290,22 +462,17 @@ impl NodeResourceRuntime {
         }
         Some(counts)
     }
+}
 
-    pub(in crate::adaptive_resources::runtime) fn register_planning_tasks(
-        &self,
-        owner: &OwnedPreparation,
-        planned: &mut super::super::planning_probe::plan::PlannedProbe,
+/// The same pure original inputs and pre-minted operations, moved into P
+/// before exposure. This is not a task, native receipt or entry permission.
+#[repr(transparent)]
+pub(in crate::adaptive_resources::runtime) struct PreparedPlanningTasks(PlanningTasks);
+impl PreparedPlanningTasks {
+    pub(in crate::adaptive_resources::runtime) fn new(
+        planned: super::super::planning_probe::plan::PlanningTaskPlan,
         request: FixedPlanningProbeRequest,
-    ) -> Result<(), OperationError> {
-        self.validate_preparation(owner)?;
-        let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
-        if bundle.roles.len() != 2 {
-            return Err(OperationError::State);
-        }
-        let role = &mut bundle.roles[0];
-        if role.planning_tasks.is_some() || role.refunded {
-            return Err(OperationError::State);
-        }
+    ) -> Self {
         let probe = &planned.probe_plan;
         let engine = &planned.engine_plan;
         let root_observations = [
@@ -316,17 +483,17 @@ impl NodeResourceRuntime {
         ];
         let probe_task_observation = PlanningObservation::new(probe.member_id.uuid());
         let engine_task_observation = PlanningObservation::new(engine.member_id.uuid());
-        role.planning_tasks = Some(PlanningTasks {
+        Self(PlanningTasks {
             probe_observed: None,
             engine_observed: None,
             root_observations,
             probe_task_observation,
             engine_task_observation,
             settlement_operation_id: Uuid::new_v4(),
-            probe_plan: planned.probe_plan.clone(),
-            engine_plan: planned.engine_plan.clone(),
+            probe_plan: planned.probe_plan,
+            engine_plan: planned.engine_plan,
             source_member: planned.source_member,
-            source_spec: planned.source_spec.take(),
+            source_spec: Some(planned.source_spec),
             inputs: Some(request),
             source: None,
             observed_source: None,
@@ -340,27 +507,30 @@ impl NodeResourceRuntime {
             engine_closed: None,
             unknown: false,
             entered: false,
+            probe_join_operation: None,
+            engine_join_operation: None,
+            probe_never_entered: None,
+            engine_never_entered: None,
+            registered_unentered_graph: None,
             never_entered: None,
-        });
-        Ok(())
+        })
     }
+    pub(super) fn install(self, role: &mut OwnedRole) {
+        assert!(
+            !role.refunded && role.planning_tasks.is_none(),
+            "fresh private P slot"
+        );
+        role.planning_tasks = Some(self.0);
+    }
+}
 
-    pub(in crate::adaptive_resources::runtime) fn planning_owner_fences(
+impl NodeResourceRuntime {
+    #[cfg(test)]
+    pub(in crate::adaptive_resources::runtime) fn planning_constructor_checkpoint(
         &self,
         owner: &OwnedPreparation,
-    ) -> Result<PlanningOwnerFences, OperationError> {
-        let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
-        let release = Arc::clone(
-            &bundle
-                .roles
-                .get(1)
-                .and_then(|role| role.planning_metadata.as_ref())
-                .ok_or(OperationError::State)?
-                .release,
-        );
-        let cleanup = Arc::clone(&release.cleanup_requested);
-        let known_closed = Arc::clone(&release.known_closed);
-        Ok((release, cleanup, known_closed))
+    ) {
+        tests::construction::after_private_install(owner);
     }
 
     pub(in crate::adaptive_resources::runtime) async fn prepare_planning_inputs(
@@ -397,6 +567,37 @@ impl NodeResourceRuntime {
             .await
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
+    pub(in crate::adaptive_resources::runtime) async fn fixture_planning_native_gate(
+        &self,
+        owner: &OwnedPreparation,
+        panic_after_native_return: bool,
+    ) -> Result<
+        crate::process::fixed_planning_engine::fixtures::FixedPlanningNativeGate,
+        OperationError,
+    > {
+        self.validate_preparation(owner)?;
+        let bundle = owner.state.lock().await;
+        // Registration alone is sufficient for this diagnostic hook. Durable
+        // preparation/source entry still occurs through the original APIs.
+        if bundle.roles.len() != 2 || bundle.roles[0].refunded {
+            return Err(OperationError::State);
+        }
+        let task = bundle.roles[0]
+            .planning_tasks
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        if task.entered || task.unknown || task.never_entered.is_some() {
+            return Err(OperationError::State);
+        }
+        crate::process::fixed_planning_engine::fixtures::FixedPlanningNativeGate::install(
+            task.engine_plan.version_close_operation_id.uuid(),
+            task.engine_plan.member_id.uuid(),
+            panic_after_native_return,
+        )
+        .ok_or(OperationError::State)
+    }
+
     pub(in crate::adaptive_resources::runtime) async fn collect_planning_tasks(
         &self,
         owner: &OwnedPreparation,
@@ -409,7 +610,17 @@ impl NodeResourceRuntime {
         if !bundle.installed || bundle.roles.len() != 2 {
             return Err(OperationError::State);
         }
-        self.eligible(&bundle)?;
+        // Epoch/drain/overage gates new entry, never the join of tasks that
+        // this SAME original P already registered and may have released.
+        let registered = bundle.roles[0]
+            .planning_tasks
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .entered;
+        if !registered {
+            self.eligible(&bundle)?;
+        }
+        let mut hold_error = None;
         let bundle_id = bundle.id;
         let cleanup_requested = bundle.roles[1]
             .planning_metadata
@@ -473,7 +684,14 @@ impl NodeResourceRuntime {
             });
             task.observed_source = Some(observed.clone());
             let (probe_start, probe_wait) = tokio::sync::oneshot::channel();
+            let probe_join = Uuid::new_v4();
+            let engine_join = Uuid::new_v4();
+            task.probe_join_operation = Some(probe_join);
+            task.engine_join_operation = Some(engine_join);
             let input = ProbeTaskInput {
+                binding,
+                member: task.probe_plan.member_id.uuid(),
+                join_operation: probe_join,
                 source: source_lease,
                 observed,
                 request,
@@ -491,14 +709,34 @@ impl NodeResourceRuntime {
             };
             let (engine_start, engine_wait) = tokio::sync::oneshot::channel();
             task.engine = Some(tokio::spawn(original_engine_task(
-                Some((task.engine_plan.clone(), boot, deadline)),
+                Some(EngineTaskInput {
+                    plan: task.engine_plan.clone(),
+                    boot,
+                    deadline,
+                    binding,
+                    join_operation: engine_join,
+                }),
                 Some(engine_wait),
             )));
             task.entered = true;
             // Both handles are now original retained book members. Neither
             // source, process, image nor parser can enter before this point.
-            let _ = probe_start.send(());
-            let _ = engine_start.send(());
+            #[cfg(test)]
+            tests::stages::before_registered_entry(task.engine_plan.member_id.uuid()).await;
+            let probe_released = self.release_native_entry(binding, probe_start).is_ok();
+            #[cfg(test)]
+            tests::stages::between_registered_entries(task.engine_plan.member_id.uuid()).await;
+            let engine_released = self.release_native_entry(binding, engine_start).is_ok();
+            if !probe_released || !engine_released {
+                // Each failed release drops only its own unopened sender.
+                // An earlier sibling may already own native work: retain and
+                // join BOTH original handles below before reporting refusal.
+                task.unknown = true;
+                hold_error = self
+                    .retain_planning_uncertainty(binding)
+                    .err()
+                    .or(hold_error);
+            }
         }
         if let Some(original) = task.probe.as_mut() {
             let joined = tokio::time::timeout_at(deadline.into(), original)
@@ -506,78 +744,131 @@ impl NodeResourceRuntime {
                 .map_err(|_| OperationError::Deadline)?;
             task.probe = None;
             let native = match joined {
-                Ok(Ok(native)) => native,
-                Ok(Err(failure)) => {
+                Ok(ProbeTaskOutcome::Native(Ok(native))) => Some(native),
+                Ok(ProbeTaskOutcome::NeverEntered(absent))
+                    if absent.binding == binding
+                        && absent.member == task.probe_plan.member_id.uuid()
+                        && Some(absent.join_operation) == task.probe_join_operation =>
+                {
+                    task.probe_never_entered = Some(JoinedPlanningTaskNeverEntered(absent));
+                    None
+                }
+                Ok(ProbeTaskOutcome::Native(Err(failure))) => {
+                    #[cfg(all(test, feature = "fixtures"))]
+                    eprintln!(
+                        "original planning probe native failure: {:?}",
+                        failure.error
+                    );
                     tracing::warn!(reason = ?failure.error.fallback_reason(), "original planning probe failed; retaining native owners for cleanup");
                     task.probe_failure = Some(failure);
                     task.unknown = true;
-                    self.retain_planning_uncertainty(binding)?;
-                    return Err(OperationError::State);
+                    hold_error = self
+                        .retain_planning_uncertainty(binding)
+                        .err()
+                        .or(hold_error);
+                    None
                 }
                 _ => {
                     task.unknown = true;
-                    self.retain_planning_uncertainty(binding)?;
-                    return Err(OperationError::State);
+                    hold_error = self
+                        .retain_planning_uncertainty(binding)
+                        .err()
+                        .or(hold_error);
+                    None
                 }
             };
-            if task.probe_plan.source_member_id.uuid() != task.source_member {
-                return Err(OperationError::State);
+            if let Some(native) = native {
+                if task.probe_plan.source_member_id.uuid() != task.source_member {
+                    return Err(OperationError::State);
+                }
+                let known = FixedProbeKnownClosed::from_joined_original(
+                    native,
+                    &task.probe_plan,
+                    task.observed_source
+                        .as_deref()
+                        .ok_or(OperationError::State)?,
+                )
+                .inspect_err(|error| {
+                    #[cfg(all(test, feature = "fixtures"))]
+                    eprintln!("original planning probe completion proof refused: {error:?}");
+                    #[cfg(not(all(test, feature = "fixtures")))]
+                    let _ = error;
+                })?;
+                let (report, closure) = known.split();
+                task.probe_observed = Some(v2::FixedProbeDiscoverTaskObservedV1 {
+                    task: task.probe_plan.clone(),
+                    executable_object_version: report.executable_object_version.clone(),
+                    executable_sha256: report.executable_sha256.clone(),
+                    build_digest: report.build_digest.clone(),
+                });
+                task.probe_report = Some(report);
+                task.probe_closed = Some(closure);
+                #[cfg(test)]
+                tests::stages::probe_joined(task.engine_plan.member_id.uuid());
             }
-            let known = FixedProbeKnownClosed::from_joined_original(
-                native,
-                &task.probe_plan,
-                task.observed_source
-                    .as_deref()
-                    .ok_or(OperationError::State)?,
-            )?;
-            let (report, closure) = known.split();
-            task.probe_observed = Some(v2::FixedProbeDiscoverTaskObservedV1 {
-                task: task.probe_plan.clone(),
-                executable_object_version: report.executable_object_version.clone(),
-                executable_sha256: report.executable_sha256.clone(),
-                build_digest: report.build_digest.clone(),
-            });
-            task.probe_report = Some(report);
-            task.probe_closed = Some(closure);
-            #[cfg(test)]
-            tests::stages::probe_joined(task.engine_plan.member_id.uuid());
         }
         if let Some(original) = task.engine.as_mut() {
+            // Refuse an unencodable audit plan before awaiting/taking the
+            // SAME original task. Even an impossible admitted-plan defect
+            // must leave its JoinHandle and native custody installed.
+            let plan_sha256 = v2::engine_task_plan_sha256(&task.engine_plan)?;
             let joined = tokio::time::timeout_at(deadline.into(), original)
                 .await
                 .map_err(|_| OperationError::Deadline)?;
             task.engine = None;
             let native = match joined {
-                Ok(Ok(native)) => native,
-                Ok(Err(failure)) => {
+                Ok(EngineTaskOutcome::Native(Ok(native))) => Some(native),
+                Ok(EngineTaskOutcome::NeverEntered(absent))
+                    if absent.binding == binding
+                        && absent.member == task.engine_plan.member_id.uuid()
+                        && Some(absent.join_operation) == task.engine_join_operation =>
+                {
+                    task.engine_never_entered = Some(JoinedPlanningTaskNeverEntered(absent));
+                    None
+                }
+                Ok(EngineTaskOutcome::Native(Err(failure))) => {
+                    #[cfg(all(test, feature = "fixtures"))]
+                    eprintln!(
+                        "original planning engine native failure: phase={:?}, error={:?}",
+                        failure.phase, failure.error
+                    );
                     task.engine_failure = Some(failure);
                     task.unknown = true;
-                    self.retain_planning_uncertainty(binding)?;
-                    return Err(OperationError::State);
+                    hold_error = self
+                        .retain_planning_uncertainty(binding)
+                        .err()
+                        .or(hold_error);
+                    None
                 }
                 _ => {
                     task.unknown = true;
-                    self.retain_planning_uncertainty(binding)?;
-                    return Err(OperationError::State);
+                    hold_error = self
+                        .retain_planning_uncertainty(binding)
+                        .err()
+                        .or(hold_error);
+                    None
                 }
             };
-            let known =
-                FixedEngineKnownClosed::from_joined_original(native, task.engine_plan.clone())?;
-            let (report, closure) = known.split();
-            task.engine_observed = Some(v2::FixedPlanningEngineTaskObservedV1 {
-                task: task.engine_plan.clone(),
-                used_file_slots: u16::try_from(closure.used_file_slots())
-                    .map_err(|_| OperationError::State)?,
-                media_digest: closure.media_digest().to_owned(),
-            });
-            task.engine_report = Some(report);
-            task.engine_closed = Some(closure);
+            if let Some(native) = native {
+                let known =
+                    FixedEngineKnownClosed::from_joined_original(native, task.engine_plan.clone())?;
+                let (report, closure) = known.split();
+                task.engine_observed = Some(v2::FixedPlanningEngineTaskObservedV2 {
+                    member_id: task.engine_plan.member_id,
+                    plan_sha256,
+                    used_file_slots: u16::try_from(closure.used_file_slots())
+                        .map_err(|_| OperationError::State)?,
+                    media_digest: closure.media_digest().to_owned(),
+                });
+                task.engine_report = Some(report);
+                task.engine_closed = Some(closure);
+            }
         }
         // An uncertain sibling cannot justify discarding or replacing the
         // other original task. Join any retained handles above, but never
         // turn partial completion into a successful planning report.
         if task.unknown {
-            return Err(OperationError::State);
+            return Err(hold_error.unwrap_or(OperationError::State));
         }
         let probe = task.probe_report.take().ok_or(OperationError::State)?;
         let engine = task.engine_report.take().ok_or(OperationError::State)?;

@@ -170,13 +170,13 @@ pub(super) fn validate_count(connection: &Connection, counted: i64) -> Result<()
     Ok(())
 }
 
-/// v1-v5 migration validation uses the original full stream. A recognized v6
+/// v1-v5 migration validation uses the original full stream. Recognized v6/v7
 /// startup has already validated every projection row against result_json.
 pub(super) fn indexed(connection: &Connection) -> Result<bool, CustodyError> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     match version {
         1..=5 => Ok(false),
-        6 => Ok(true),
+        6 | 7 => Ok(true),
         _ => Err(codec::invalid()),
     }
 }

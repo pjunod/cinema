@@ -275,6 +275,13 @@ impl FixedPlanningNoTaskGraph {
     pub(in crate::adaptive_resources) fn operation_id(&self) -> v2::Id {
         self.operation_id
     }
+    pub(in crate::adaptive_resources) fn registered_probe_matches(
+        &self,
+        binding: crate::adaptive_resources::ReservationBinding,
+        member: Uuid,
+    ) -> bool {
+        self.binding == binding && self.members[2] == member
+    }
     pub(in crate::adaptive_resources) fn source_matches(
         &self,
         source: &v2::FixedProbeDiscoverSourceV1,
@@ -315,9 +322,11 @@ impl FixedPlanningNoTaskGraph {
 }
 
 impl super::SealedPhysicalGraph {
-    /// Only original sealed custody may mint this absence witness. Runtime
-    /// separately consumes its retained, unpolled task inputs; a snapshot or
-    /// caller-supplied status flag cannot replace either proof.
+    /// Only original sealed custody may mint this NATIVE namespace absence.
+    /// It does not establish whether a runtime-book collector was registered.
+    /// Runtime additionally retains either untouched inputs, or distinct
+    /// original receiver-error AND positive-join witnesses for BOTH tasks.
+    /// These paths emit distinct task facts; this graph cannot replace them.
     pub(in crate::adaptive_resources) async fn try_fixed_planning_no_task_graph(
         &self,
         members: [Uuid; 6],

@@ -121,7 +121,7 @@ fn preparation(runtime: &NodeResourceRuntime) -> super::super::operations::Owned
 
 #[cfg(target_os = "linux")]
 pub(super) fn pump_plan() -> SoftwareAvcPumpPlan {
-    let grid = crate::transcode::VodFrameGrid::new(24_000, 1).expect("canonical grid");
+    let grid = crate::transcode::VodFrameGrid::new(24, 1).expect("canonical grid");
     let plan = SegmentPlan {
         version: SEGPLAN_VERSION,
         timescale: grid.numerator,
@@ -129,7 +129,7 @@ pub(super) fn pump_plan() -> SoftwareAvcPumpPlan {
             index: 0,
             kind: PlanEntryKind::Video,
             start_ticks: 0,
-            duration_ticks: 24_000,
+            duration_ticks: u64::from(grid.numerator),
             est_bytes: 1_000_000,
             cut: PlanCut::EndOfStream,
             fragments: 1,

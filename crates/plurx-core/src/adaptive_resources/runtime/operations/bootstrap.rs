@@ -26,7 +26,11 @@ pub(super) struct BootstrapMember {
     #[cfg(unix)]
     publication: Option<native::publication::Publication>,
     #[cfg(unix)]
+    publication_registered: bool,
+    #[cfg(unix)]
     sync: Option<native::sync::Sync>,
+    #[cfg(unix)]
+    sync_registered: bool,
     #[cfg(unix)]
     readers: BTreeMap<Uuid, readers::ReaderEntry>,
     #[cfg(unix)]
@@ -35,7 +39,151 @@ pub(super) struct BootstrapMember {
     prefix_removal: Option<prefix_removal::LiveRemoval>,
 }
 
+// Negative fixture custody only: each variant retains the actual acknowledged
+// owner taken from the original slot. This type cannot create a run or receipt.
+#[cfg(all(test, target_os = "linux", feature = "fixtures"))]
+pub(super) enum OriginalNativeIoFixture {
+    Publication(Box<native::publication::Publication>),
+    Sync(native::sync::Sync),
+}
+
 impl BootstrapMember {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_publication_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool)> {
+        self.publication
+            .as_ref()
+            .map(|owner| owner.fixture_job_identity())
+    }
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_sync_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool)> {
+        self.sync.as_ref().map(|owner| owner.fixture_job_identity())
+    }
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_cleanup_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool)> {
+        self.retirement.as_ref()?.fixture_job_identity()
+    }
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_live_removal_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool)> {
+        self.prefix_removal
+            .as_ref()
+            .map(|owner| owner.fixture_job_identity())
+    }
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_root_arm_operation(&self) -> Option<Uuid> {
+        self.root_arm.map(|(io, _)| io.uuid())
+    }
+
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_root_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>)> {
+        self.native_root
+            .as_ref()
+            .map(native::RootCell::fixture_job_identity)
+    }
+
+    #[cfg(all(test, target_os = "linux", feature = "fixtures"))]
+    pub(super) fn fixture_take_original_native_io(
+        &mut self,
+        publication: bool,
+    ) -> OriginalNativeIoFixture {
+        assert!(self.native_io_ready(), "only actual acknowledged owners");
+        let original = if publication {
+            assert!(self.publication_registered);
+            OriginalNativeIoFixture::Publication(Box::new(
+                self.publication.take().expect("original publication owner"),
+            ))
+        } else {
+            assert!(self.sync_registered);
+            OriginalNativeIoFixture::Sync(self.sync.take().expect("original sync owner"))
+        };
+        assert!(!self.native_io_slots_consistent());
+        original
+    }
+
+    #[cfg(all(test, target_os = "linux", feature = "fixtures"))]
+    pub(super) fn fixture_restore_original_native_io(&mut self, original: OriginalNativeIoFixture) {
+        assert!(!self.native_io_slots_consistent());
+        match original {
+            OriginalNativeIoFixture::Publication(run) => {
+                assert!(self.publication_registered && self.publication.is_none());
+                self.publication = Some(*run);
+            }
+            OriginalNativeIoFixture::Sync(run) => {
+                assert!(self.sync_registered && self.sync.is_none());
+                self.sync = Some(run);
+            }
+        }
+        assert!(self.native_io_ready(), "same acknowledged owner restored");
+    }
+    // Sticky registration provenance, not native success. A run is stored
+    // synchronously before any Arm/worker/native entry. Missing issued owners
+    // remain inconsistent; only a genuinely dormant slot may be absent.
+    #[cfg(unix)]
+    fn native_io_slots_consistent(&self) -> bool {
+        self.publication_registered == self.publication.is_some()
+            && self.sync_registered == self.sync.is_some()
+    }
+
+    #[cfg(unix)]
+    fn native_io_ready(&self) -> bool {
+        self.native_io_slots_consistent()
+            && self
+                .publication
+                .as_ref()
+                .is_none_or(|run| run.ready_for_transfer())
+            && self
+                .sync
+                .as_ref()
+                .is_none_or(|run| run.ready_for_transfer())
+    }
+
+    #[cfg(unix)]
+    fn native_io_dormant(&self) -> bool {
+        !self.publication_registered
+            && !self.sync_registered
+            && self.publication.is_none()
+            && self.sync.is_none()
+    }
+
     #[cfg_attr(
         not(target_os = "linux"),
         allow(
@@ -62,10 +210,15 @@ pub(super) fn btree_requested_upper_bound<K, V>(len: usize) -> Option<usize> {
     node.checked_mul(len)?.checked_mul(2)
 }
 
+/// Scratch routing while the producer process root never entered. These
+/// dispositions do not close an acquired filesystem prefix or grant a refund.
 #[cfg(unix)]
 pub(super) enum NeverRootBootstrap {
     UnarmedPlaceholder,
     ObservedNeverEntered,
+    /// Keep the same advanced scratch prefix for its actual native driver.
+    /// This is neither absence nor an observed NeverEntered witness.
+    RetainedPrefix,
 }
 
 /// Fully validated target fold while the actual native cells remain owned by
@@ -102,7 +255,9 @@ impl PreparedBootstrapTransfer {
             next_arm: None,
             native_root: source.native_root.take(),
             publication: source.publication.take(),
+            publication_registered: source.publication_registered,
             sync: source.sync.take(),
+            sync_registered: source.sync_registered,
             readers: std::mem::take(&mut source.readers),
             retirement: source.retirement.take(),
             prefix_removal: source.prefix_removal.take(),
@@ -139,11 +294,7 @@ impl BootstrapMember {
             || self.next_arm.is_some()
             || self.prefix_removal.is_some()
             || state.asset.totals.pending_jobs != 0
-            || self
-                .publication
-                .as_ref()
-                .is_some_and(|p| !p.ready_for_transfer())
-            || self.sync.as_ref().is_some_and(|s| !s.ready_for_transfer())
+            || !self.native_io_ready()
         {
             return Ok(false);
         }
@@ -184,6 +335,7 @@ impl BootstrapMember {
             || self.next_arm.is_some()
             || self.retirement.is_some()
             || self.prefix_removal.is_some()
+            || !self.native_io_ready()
         {
             return Err(OperationError::State);
         }
@@ -229,17 +381,19 @@ impl BootstrapMember {
     ) -> Result<NeverRootBootstrap, OperationError> {
         let fold = self.fold.as_ref().ok_or(OperationError::State)?;
         let state = fold.state();
-        if self.change.is_some()
-            || self.next_arm.is_some()
-            || state.bootstrap.phase != BootstrapPhase::Unstarted
-        {
+        if self.change.is_some() || self.next_arm.is_some() {
             return Err(OperationError::State);
+        }
+        if state.bootstrap.phase != BootstrapPhase::Unstarted {
+            // A process-root absence proof says nothing about scratch-root or
+            // sink acquisition. Preserve every original owner; the normal
+            // close_producer_finite_native driver still owes actual closure.
+            return Ok(NeverRootBootstrap::RetainedPrefix);
         }
         if self.root_arm.is_none() {
             if armed
                 || self.native_root.is_some()
-                || self.publication.is_some()
-                || self.sync.is_some()
+                || !self.native_io_dormant()
                 || !self.readers.is_empty()
                 || self.retirement.is_some()
                 || state.asset.head.is_some()
@@ -293,7 +447,9 @@ impl BootstrapMember {
             next_arm: None,
             native_root: Some(native_root),
             publication: None,
+            publication_registered: false,
             sync: None,
+            sync_registered: false,
             readers: BTreeMap::new(),
             retirement: None,
             prefix_removal: None,
@@ -390,6 +546,7 @@ impl BootstrapMember {
             .native_root
             .as_ref()
             .is_some_and(|root| root.retained_child_ready(&expected_directories))
+            || !self.native_io_slots_consistent()
             || !self
                 .publication
                 .as_ref()
@@ -417,7 +574,8 @@ impl BootstrapMember {
     pub(super) async fn join_registered_native(&mut self) -> Result<(), OperationError> {
         #[cfg(unix)]
         {
-            let mut first_error = None;
+            let mut first_error =
+                (!self.native_io_slots_consistent()).then_some(OperationError::State);
             if let Some(root) = self.native_root.as_mut() {
                 if let Err(error) = root.join_registered().await {
                     first_error = Some(error);
@@ -562,7 +720,11 @@ impl NodeResourceRuntime {
                     #[cfg(unix)]
                     publication: None,
                     #[cfg(unix)]
+                    publication_registered: false,
+                    #[cfg(unix)]
                     sync: None,
+                    #[cfg(unix)]
+                    sync_registered: false,
                     #[cfg(unix)]
                     readers: BTreeMap::new(),
                     #[cfg(unix)]

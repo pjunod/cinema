@@ -60,6 +60,29 @@ fn checked_caps(capacities: impl IntoIterator<Item = usize>) -> Option<usize> {
     capacities.into_iter().try_fold(0usize, usize::checked_add)
 }
 
+/// Requested heap a selected P owner retains for its planning snapshot. A
+/// request whose candidate context already holds this SAME `Arc` counts it
+/// through `selected_finite_requested_heap_bytes`; charging it again would
+/// claim capacity no owner retains. The selected-static worker and its
+/// fixture share this rule so both charge the same original obligation.
+pub(super) fn retained_planning_snapshot_bytes(
+    request: &super::SessionRequest,
+    snapshot: &Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+) -> Option<usize> {
+    let held_by_request = request.candidate_context.as_ref().is_some_and(|context| {
+        context
+            .planning_snapshot
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, snapshot))
+    });
+    if held_by_request {
+        return Some(0);
+    }
+    (std::mem::size_of::<plurx_core::store::PlaybackPlanningSnapshot>()
+        + 2 * std::mem::size_of::<usize>())
+    .checked_add(planning_snapshot_requested_heap_bytes(snapshot)?)
+}
+
 /// The P coordinator keeps the actual planning statement through fresh
 /// probe refinement. Count its owned application capacities rather than
 /// treating the original JSON wire length as a memory reservation. The

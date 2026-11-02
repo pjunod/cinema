@@ -1,9 +1,66 @@
-# Adaptive playback contract history — M0 proposals and manager direction
+# Adaptive playback contract history — decisions and original proposals
 
 **Status:** done · historical contract proposals and manager direction, not current implementation or acceptance evidence.
 **Written:** 2026-10-22.
 
 Companion to the [current adaptive playback resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md), which records implementation and evidence. This file preserves the two former M0 contract sections verbatim so their historical constraints and limits remain available without presenting them as current ownership or completed behavior. The approved implementation scope remains in the [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md).
+
+## Native uncertainty admission policy — 2026-10-26
+
+The user selected operation-local reservation retention after the supplied
+Opus implementation review exposed the process-wide coupling. Genuine native
+uncertainty keeps its existing P/R reservation held and prevents a planned
+restart from declaring the node drained or committing shutdown. It does not
+by itself reject unrelated new work: normal capacity, readiness, active drain,
+release and admission-identity checks still apply.
+
+This decision does not clear uncertainty, mint a closure or return capacity.
+An operation that reserved nothing has no resource charge to retain. Earlier
+unbudgeted availability/file-open work remains an explicit coverage limit;
+this policy adds no fabricated reservation for it. SQL-only failure and pure
+pre-reservation refusal must not be reported as unknown native cleanup.
+
+The user supplied the implementation review of code
+`5267b8721312b86e205ac99217c20a159b0fec4a` against effort
+`48eccfd748741bab47d945e68c7713a4c213ea60`, attributed to Claude Opus 5.5
+with an Opus copy-cleanup sub-review. Its SHA-256 is
+`97f0d42b524143dced18f03975acae890106292d265a21a1a8107c954359fccc`.
+The source-only verdict requires B1–B4 and C1–C2 fixes and authored regressions
+before focused qualification. It grants neither execution evidence nor full
+adaptive-playback acceptance. The current [copy review](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md)
+records disposition and remaining scope. Behavioral tests remain on hold.
+
+## Copy partial-start decision — 2026-10-26
+
+The user supplied a bounded review attributed to Claude Opus 5.5 against
+implementation `46dc2805b9b6688b5052494605250898a6b105c7` and request
+`8b6331e5634eb315626e60103d58a96b347501a2`. Its design decisions are accepted:
+one cleanup driver selects actual NeverRoot / RootOnly / Joined native
+witnesses; process entry with no retained Child stays Unknown with full R.
+No same-boot restart settlement authority or unbound-root fact is added.
+
+A registered parser is acquired even if its consuming one-shot latch was
+never delivered. Positive internal `NeverEntered` requires that exact receive
+error, natural original-handle join and matching delivery state. It stays
+internal; existing `VodOutputTaskV1` records closed task owners without
+asserting entry, output or success. Only an actually unregistered parser may
+use `VodOutputTaskNeverAcquiredV1`, including when armed but unobserved.
+Captured observations must resolve under their original operation IDs.
+
+The driver retains existing retry custody rather than a parallel staged
+closure state machine. Kill precedes a blocking aborted-task join; natural
+parser failure must signal the original child before awaiting stderr, since a
+post-join kill cannot unblock that wait. Checked closes, actual root wait,
+source/prefix closure, complete DTO validation before one-shot consumption,
+rich-bundle destruction and the last application-owner barrier remain required.
+Permanent holds skip maintenance and expose their actual charge/reason; a
+failed kill remains retryable and restarting alone does not refund charge.
+
+This is bounded design evidence, not completed-candidate review or execution.
+The supplied review SHA-256 is
+`dc9df50930130a30adee9ec91a52e62bf06392509d25e8bff677dc7439505672`.
+Current implementation and remaining evidence belong in the
+[copy review](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md) and resource ledger.
 
 ## M4 request intent decision — 2026-10-26
 

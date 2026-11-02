@@ -17,7 +17,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
-pub(in crate::resource_custody) use typed::tests::bootstrap::frozen_source_fixture;
+pub(in crate::resource_custody) use typed::tests::bootstrap::frozen_source_fixture_v6;
 
 pub(super) fn validate_owner(owner: &OwnerIdentity) -> Result<(), CustodyError> {
     codec::nonnil(owner.owner_id)?;
@@ -264,7 +264,7 @@ pub(super) fn snapshot(
     let mut trials = BTreeSet::new();
     let mut protected = BTreeSet::new();
     let schema_version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if !(1..=6).contains(&schema_version) {
+    if !(1..=7).contains(&schema_version) {
         return Err(codec::invalid());
     }
     if schema_version >= 6 {
@@ -463,12 +463,19 @@ pub(super) fn snapshot(
     if trials.len() > 1 {
         return Err(codec::invalid());
     }
+    // Exact v1 has only family-owned obligations. The retained asset table
+    // first exists in v2; select by the already-recognized schema version,
+    // never by treating a missing/failed table read as empty authority.
+    let ownership_query = if schema_version == 1 {
+        "SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1),0"
+    } else {
+        "SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1),EXISTS(SELECT 1 FROM retained_asset_owners WHERE obligation_id=?1)"
+    };
     for record in &obligations {
-        let (family, asset): (bool, bool) = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1),EXISTS(SELECT 1 FROM retained_asset_owners WHERE obligation_id=?1)",
-            [record.obligation_id.as_bytes()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (family, asset): (bool, bool) =
+            connection.query_row(ownership_query, [record.obligation_id.as_bytes()], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
         if family == asset {
             return Err(codec::invalid());
         }
@@ -1042,7 +1049,7 @@ pub(super) fn execute(
         }
         let decoded = codec::decode::<DiskResult>(&result)?;
         let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version == 6 {
+        if version >= 6 {
             membership::validate(&tx, operation.id, &decoded)?;
         }
         decoded

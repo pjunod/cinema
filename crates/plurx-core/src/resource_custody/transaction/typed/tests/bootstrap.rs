@@ -191,7 +191,18 @@ fn observed_directory(
 }
 
 pub(in crate::resource_custody) fn frozen_source_fixture() -> FrozenSourceFixture {
+    frozen_source_fixture_for_schema(false)
+}
+
+pub(in crate::resource_custody) fn frozen_source_fixture_v6() -> FrozenSourceFixture {
+    frozen_source_fixture_for_schema(true)
+}
+
+fn frozen_source_fixture_for_schema(v6: bool) -> FrozenSourceFixture {
     let mut f = bootstrap();
+    if v6 {
+        super::install_empty_v6_fixture(&mut f.storage);
+    }
     let Command::PrepareTyped { batch, .. } = &mut f.command.command else {
         unreachable!()
     };
@@ -679,6 +690,27 @@ fn scratch_v3_old_decoder_rejects_new_results_without_sql_schema_change() {
         RetiredWithAssets(RetirementAck),
     }
     let mut f = bootstrap();
+    let version_before: i64 = f
+        .storage
+        .connection
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    let catalog_before = f
+        .storage
+        .connection
+        .prepare("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
     let (handle, member, plan) = arm(&mut f);
     let command = root_arm(&f, &handle, member, &plan);
     execute(&mut f.storage, &command, f.owner).unwrap();
@@ -688,6 +720,23 @@ fn scratch_v3_old_decoder_rejects_new_results_without_sql_schema_change() {
         .connection
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, version_before);
+    let catalog_after = f
+        .storage
+        .connection
+        .prepare("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(catalog_after, catalog_before);
+
     snapshot(&f.storage.connection, &f.storage.witness).unwrap();
 }

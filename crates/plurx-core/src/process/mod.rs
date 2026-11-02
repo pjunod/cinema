@@ -14,6 +14,9 @@ mod job_control;
 pub mod observation;
 pub mod priority;
 pub mod rlimit;
+#[cfg(all(target_os = "linux", any(test, feature = "fixtures")))]
+#[doc(hidden)]
+pub mod spawn_faults;
 
 pub use priority::{ChildClass, ChildWork};
 
@@ -117,11 +120,37 @@ pub(crate) fn spawn_job_custodied(
 ) -> Result<(tokio::process::Child, ChildJob), Box<OwnedSpawnFailure>> {
     priority::apply(command, work.class);
     configure_suspended(command);
+    // Fixture context is captured on the ORIGINAL caller task, before owner
+    // dispatch. The typed closure below carries it into that same request;
+    // no task-local lookup occurs on the persistent owner thread.
+    #[cfg(all(target_os = "linux", any(test, feature = "fixtures")))]
+    let spawn_fault = spawn_faults::capture();
+    #[cfg(all(target_os = "linux", any(test, feature = "fixtures")))]
+    if spawn_fault
+        .as_ref()
+        .is_some_and(|fault| fault.before_owner_dispatch())
+    {
+        return Err(Box::new(OwnedSpawnFailure {
+            error: spawn_faults::generic_failure(),
+            child: None,
+            job: None,
+        }));
+    }
     #[allow(clippy::disallowed_methods)] // the launcher itself
     let mut child = spawn_on_owner(
         command,
         || tokio::process::Command::new(""),
-        |command| command.spawn(),
+        move |command| {
+            #[cfg(all(target_os = "linux", any(test, feature = "fixtures")))]
+            if let Some(fault) = spawn_fault.filter(|fault| fault.after_std_spawn()) {
+                // SAME command, on spawn_on_owner's existing thread. A genuine
+                // std child is retained only by fixture teardown before any
+                // Tokio registration; runtime receives the generic no-handle
+                // error below and must keep its original obligation Unknown.
+                return fault.fail_after_std_spawn(command.as_std_mut());
+            }
+            command.spawn()
+        },
     )
     .map_err(|error| {
         Box::new(OwnedSpawnFailure {

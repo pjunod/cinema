@@ -1,54 +1,75 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation active · updated 2026-10-26. PR #1248 on
-`effort/adaptive-playback-resources` is the sole effort. Work continues on normal
-committed source; current main `087e836d3` is merged. Draft source publication
-and [copy-start review](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md) use the ordinary
-branch/PR workflow. No Hermes or external API review is being dispatched.
-Complete-candidate independent Fable review/fixes precede behavioral tests,
-which remain NOT RUN. All V1–V5 and R1/M0–M7 remain OPEN.
+**Status:** open · implementation active · updated 2026-10-29. PR #1248 remains
+the sole effort; task PR #1293 is unmerged. Current committed implementation
+`b1f2794d79b1012714a6de0644c72df44f10e9e1` includes effort
+`29a238af69bd2e101f0a5b4d6ed21fb1404f8ed1` and main
+`6c8c98c79b06ee3e814515fc168f7dd8c7408384`. Later main changes still require integration
+and qualification before final effort promotion.
 
-Selected software/static VOD retains original native/application cleanup,
-operator cache quota and typed pressure retirement. Copy request limits now
-match core's existing48MiB cap; its finalized quota is reserved before R and
-follows the same Session/native close ticket until actual actor/app/native
-retirement. Copy has no R→S transfer. Generic errors retain charge; only exact
-before-R provenance refunds an unentered quota grant. All session initializers
-now compile with that field. Copy native launch and partial-start closure are
-still open; the pinned review identifies the earlier named-arm wiring refusal
-and four acquisition boundaries rather than claiming they already run.
+This exact implementation passed all three macOS compiler phases and Linux
+Core/daemon all-target strict Clippy with fixture/cluster features. Receipt
+SHA-256 values: host `8f3164937669c23f2da7bb8d95310f86e93f9723dfa763c96cb5973c94d1f75a`;
+native `32562e6e5124dca4f8ec3ecd106c1d50f466baa183fc566a4585835fdd4464da`.
+The first current Linux behavioral run selected 206 cases and stopped after
+**31 passes and one failure**, with zero ignored or incomplete executed cases.
+All five registered-planning entry/cancellation cases passed. Static playback
+failed during fixture recipe resolution: its legacy resolver rejects the zero
+software budget before the selected static worker is reached. That failure
+remains under repair; it is not a passing candidate. Behavioral receipt SHA-256:
+`7af46d30d2415dadffecc2c75a0a1e62c32d3669839d54c9403b812354b77aaf`. A diagnostic run continues independent
+cases; it grants no passing qualification before its final result. The focused
+web cleanup regression passed one case with zero skipped; receipt SHA-256:
+`c25142d8c361cc4eae1a956a80017b89b2d5935933db683772be12b5e413790c`.
 
-Preparation now retains its real controller handle through positive join and
-same-operation Store proof. Unknown outcomes and response aliases keep the
-same context/capacity. Selected End probes its actor's actual private plan,
-skips unnecessary preparation ownership and refuses an intervening missing-
-admission race before adoption; input allocation precedes snapshot creation.
-Private task/channel/serializer/allocator and native aggregate peaks remain
-Unknown, so these projections are not complete finite-memory qualification.
+Earlier failed runs remain tied to their source and are preserved in the review
+history. The separately tested M2 observation and M4 outage components are not
+integrated into this candidate. Required behavioral tests are authorized; no
+full behavioral, model, mutation or workload acceptance is claimed. V1–V5 and
+R1/M0–M7 remain open. No external review service, deployment or restart is run.
 
-Planning retains its deadline, native/source witnesses and seven-member P
-settlement with structural M. UnknownHeld P still pins M until restart.
-Root-scoped worker intent, bounded durable-fence retry and foreign-fence cleanup
-are connected. Origin never issues Close or refunds native ownership.
-Shared storage domains and the unclosed-provisional inventory consumer remain
-missing. Original probe/inference/library workers retain their admissions;
-subtitle worker/result lifetime repairs are being compiled in isolation.
-Remaining fragment/native adapters and selective recovery are still open.
+The copy driver retains the same NeverRoot/RootOnly/Joined witnesses and
+one-shot settlement. Positive post-Arm refusal may close the never-entered
+root; actual retirement wakes the original parser even at its full output
+window. Post-mint identity contradictions retain the witness and full charge
+as a permanent hold. A missing task selector never proves no registered writer.
+R15 now authors the actual entered-parser/full-window retirement case, without
+claiming caller cancellation at every await. Complete preflight still precedes
+one-shot witness consumption; capacity returns only after native and actual
+application owners close. Copy has no R→S transfer.
 
-**Compiler evidence:** Rust1.97.1 native x86_64 core+daemon all-target+cluster
-strict Clippy passed exact `41ad7bebad6c` after current-main and quota integration
-(439.437s, source stable; log SHA-256
-`bd14e391641ca34d13ecebc445572e4ca05f2a9f6ddc397d003293d17a0f0925`).
-The later End delivery passed Mac and Linux-cfg strict checks on its isolated
-source; Linux-cfg stubs link no executable. Combined final-source checks are
-still required. Default-feature Mac strict passed the preceding c420+cfg-fix
-source; Linux default-feature verification remains to run on the joined tree.
-Local compilers run sequentially at j1 after an actual host file-handle failure.
-Static paperwork passed15/15 at `de8f9f4c1`;618 regression anchors resolve,
-including the original490 unchanged fields. These are static/compile facts,
-not behavioral acceptance or completed review.
+Source physical/preparation closure and the real body barrier determine the
+factory admission disposition independently of SQL release. Before-reservation
+validation is classified precisely; a failed unpublished Direct start returns
+its original sealed ticket through actual join/finalization. Known original
+planning cleanup remains resumable after cancellation. Ordinary SQL failures
+and proven pre-reservation refusals do not invent native uncertainty.
+Genuine uncertainty retains its existing operation reservation and blocks
+planned-restart drain/commit; unrelated starts use normal capacity, phase,
+readiness and identity checks. No sticky uncertainty is cleared or refunded.
+C5's source follow-up separates live-ticket custody from repair selection;
+SQL and HTTP retirement coverage remains blocked by daemon failures.
 
-No deployment. Bounded direct recovery retains its held-lock and positive
+Preparation retains its controller through positive join and same-operation
+Store proof. Selected Linux software SDR Source planning retains original P/M
+through recipe/media retirement. Before-factory availability I/O and non-Linux
+preliminary opens remain outside that guard. Complete private/native/allocator/
+executor peaks, P/legacy CPU coexistence, shared storage/provisional recovery,
+broader adapters and selective recovery remain open. Earlier compiler results
+and authored regressions do not close these acceptance gaps.
+
+Earlier published compiler receipts are preserved in
+[the copy review record](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md#15-earlier-published-compiler-receipts).
+Effort source `cc3da4a9003c5fbebefe05cbcbfa92abe3b50bdc` passed native
+Linux core+daemon all-target+cluster strict Clippy in 516.256s with stable
+source (log SHA-256 `0a2167e78a277cc7ac02541bfb827124be842d56213345f40672dba0552bb92c`).
+Joined task source `02bf1fd46e58ae3e1f9e99279f7728a408837fa5` passed all
+three host phases: workspace/format/locked spikes 359.972s, strict core+daemon
+Clippy 380.831s, and vendored Hiqlite Clippy 0.888s, with stable source. The
+vendor check retains its existing configuration warnings. These receipts do
+not cover the pending cgroup fix or replace current-task native execution.
+
+Bounded direct recovery retains its held-lock and positive
 same-boot/PID-namespace old-daemon-exit requirements. Separate obsolete
 recovered-cache eviction retains its existing approval boundary.
 
@@ -214,8 +235,8 @@ retirement; strict proof that S is smaller than R has not run. Same-process
 seeks reuse the existing full-plan owner, while cold-cache/restart remains open.
 The M1 writer samples registered-process CPU/RSS only after durable publication
 and exposes advisory diagnostics; M2 policy does not consume those observations.
-Direct-source adapter work is active. All V1–V5 and R1/M0–M7 remain OPEN; tests
-remain NOT RUN, and there has been no final review or qualification.
+Direct-source adapter work is active. All V1–V5 and R1/M0–M7 remain open.
+Current executed results are recorded at the top; final qualification remains open.
 
 Earlier compiler receipts and source scopes remain historical evidence only.
 They do not cover later source checkpoints; current native results must be

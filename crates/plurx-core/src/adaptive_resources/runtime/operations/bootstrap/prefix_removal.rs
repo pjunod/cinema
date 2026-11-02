@@ -25,6 +25,21 @@ pub(super) struct LiveRemoval {
 }
 
 impl LiveRemoval {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_job_identity(&self) -> (Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool) {
+        (
+            self.io.uuid(),
+            self.observe.uuid(),
+            self.join.uuid(),
+            self.cell.fixture_job(),
+            self.joined,
+        )
+    }
     pub(super) fn launched(&self) -> bool {
         self.launched
     }
@@ -69,14 +84,7 @@ impl NodeResourceRuntime {
                 || bootstrap.change.is_some()
                 || bootstrap.retirement.is_some()
                 || bootstrap.next_arm.is_some()
-                || bootstrap
-                    .publication
-                    .as_ref()
-                    .is_some_and(|cell| !cell.ready_for_transfer())
-                || bootstrap
-                    .sync
-                    .as_ref()
-                    .is_some_and(|cell| !cell.ready_for_transfer())
+                || !bootstrap.native_io_ready()
             {
                 return Err(OperationError::State);
             }
@@ -189,6 +197,24 @@ impl NodeResourceRuntime {
                     .bootstrap
                     .get_mut(&member)
                     .ok_or(OperationError::State)?;
+                let state = bootstrap
+                    .fold
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .state();
+                let baseline = [
+                    state
+                        .bootstrap
+                        .current
+                        .as_ref()
+                        .map(|directory| &directory.observed),
+                    state
+                        .bootstrap
+                        .parent
+                        .as_ref()
+                        .map(|directory| &directory.observed),
+                    state.asset.directory.as_ref(),
+                ];
                 let removal = bootstrap
                     .prefix_removal
                     .as_mut()
@@ -198,6 +224,14 @@ impl NodeResourceRuntime {
                         .native_root
                         .as_mut()
                         .ok_or(OperationError::State)?,
+                    &baseline,
+                    #[cfg(all(
+                        test,
+                        feature = "fixtures",
+                        target_os = "linux",
+                        any(target_arch = "x86_64", target_arch = "aarch64")
+                    ))]
+                    (member, removal.io.uuid()),
                 )?;
                 removal.launched = true;
                 let _ = entry.send(());

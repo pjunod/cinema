@@ -1,3 +1,15 @@
+#[cfg(target_os = "linux")]
+#[path = "../source_actor/restart_admission_tests.rs"]
+mod restart_admission_tests;
+
+#[cfg(target_os = "linux")]
+#[path = "../source_actor/settlement_tests.rs"]
+mod settlement_tests;
+
+#[cfg(target_os = "linux")]
+#[path = "source_fixed_native.rs"]
+mod fixed_native;
+
 use super::*;
 
 /// This fixture boots the production one-voter selector. Candidate installation
@@ -135,9 +147,37 @@ fn source_fixture_store(
             + '_,
     >,
 > {
-    Box::pin(crate::sharing_fixture_clock::select_applied_singleton(
-        config,
-    ))
+    Box::pin(async move {
+        // Only private, pre-admission Store bootstrap uses the daemon-main
+        // debug-frame allowance. Source factory/native work still runs on
+        // the ORIGINAL runtime's ordinary worker stacks after this returns.
+        // Construct the actual selector future INSIDE the owned thread.
+        let runtime = tokio::runtime::Handle::current();
+        assert!(
+            matches!(
+                runtime.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            ),
+            "Source fixture bootstrap requires its original multithread runtime"
+        );
+        std::thread::scope(|scope| {
+            let bootstrap = std::thread::Builder::new()
+                .name("source-fixture-store-bootstrap".into())
+                .stack_size(8 * 1024 * 1024)
+                .spawn_scoped(scope, move || {
+                    runtime.block_on(Box::pin(
+                        crate::sharing_fixture_clock::select_applied_singleton(config),
+                    ))
+                })
+                .expect("owned Source fixture Store bootstrap thread");
+            // No cancellable await or detached owner exists between launch
+            // and positive join. Scope also joins if this parent unwinds.
+            match bootstrap.join() {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        })
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -145,7 +185,50 @@ async fn source_unknown_local_register_actual_closure_and_exact_ack_clear_pendin
 ) {
     Box::pin(source_copy_preadmission_fixture(55)).await;
 }
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_original_p_open_inputs_cancelled_waiter_replays_same_m_and_cleanup() {
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(0))).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_selected_software_actor_uses_original_p_and_retains_m_through_media_retirement() {
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(1))).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_original_p_native_collector_cancellation_joins_same_cleanup_before_source_release()
+{
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(2))).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_actual_expired_planning_and_stale_direct_refusals_hold_no_reservation() {
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(3))).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_actual_application_lease_refusal_retires_same_original_planning_owner() {
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(4))).await;
+}
+
 async fn source_copy_preadmission_fixture(mode: u8) {
+    source_copy_preadmission_fixture_with_fixed(mode, None).await;
+}
+
+async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Option<u8>) {
+    source_copy_preadmission_fixture_with_restart(mode, fixed_case, None).await;
+}
+
+async fn source_copy_preadmission_fixture_with_restart(
+    mode: u8,
+    fixed_case: Option<u8>,
+    restart_case: Option<u8>,
+) {
     use crate::http::hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget};
     use plurx_core::{
         config::Config,
@@ -163,17 +246,40 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     config.storage.data_dir = directory.path().join("database");
     (config.cluster.raft_bind, config.cluster.api_bind) = source_fixture_addresses();
     config.cluster.advertise_host = "localhost".into();
+    crate::canonicalize_storage_roots(&mut config)
+        .expect("production non-destructive storage preflight before Store ownership");
     let mut selected = source_fixture_store(&config)
         .await
         .expect("actual standalone voter");
+    eprintln!("Source fixture: actual standalone voter selected");
     selected
         .store
         .put_setting(keys::SHARING_ENABLED, "true")
         .await
         .expect("saved Source choice before startup");
+    eprintln!("Source fixture: saved Source choice");
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual Source startup coordinator"));
+    eprintln!("Source fixture: Source schema prepared");
+    #[cfg(target_os = "linux")]
+    let fixed_runtime =
+        if fixed_case.is_some() || (12..=20).contains(&mode) || (80..=83).contains(&mode) {
+            Some(
+                crate::resource_runtime::open_before_cleanup(&mut selected, &config)
+                    .await
+                    .expect("real Source custody startup")
+                    .expect("Linux Source runtime"),
+            )
+        } else {
+            None
+        };
+    #[cfg(not(target_os = "linux"))]
+    assert!(
+        fixed_case.is_none(),
+        "fixed Source P fixture requires Linux"
+    );
+    eprintln!("Source fixture: original resource runtime opened or not selected");
     let client = selected.local_client().expect("actual local client");
     let master = Arc::clone(&selected.credential_key);
     let membership = selected.membership_manager();
@@ -181,6 +287,7 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         .prepare_purpose_master(Arc::clone(&master))
         .await
         .expect("actual selected master");
+    eprintln!("Source fixture: original purpose master prepared");
     let mut state = source_fixture_state();
     let state_mut = Arc::get_mut(&mut state).expect("sole fixture state");
     eprintln!("Source fixture: state constructed without Router");
@@ -196,6 +303,11 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         config.sharing.clone(),
     ));
     state_mut.node_id = selected.identity.node_id.clone();
+    #[cfg(target_os = "linux")]
+    {
+        state_mut.resource_runtime = fixed_runtime.clone();
+    }
+
     state_mut
         .membership
         .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
@@ -551,6 +663,114 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         .await
         .expect("assignment")
         .expect("actual local assignment");
+    #[cfg(target_os = "linux")]
+    if let Some(fixed_case) = fixed_case {
+        let runtime = fixed_runtime.expect("actual started runtime");
+        let dirs = crate::configured_dirs(&config.storage);
+        let manager = Arc::new(
+            TranscodeManager::new(
+                Arc::clone(store),
+                directory.path().join("workers"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_cache_layout(
+                dirs.cache,
+                dirs.runtime_cache,
+                dirs.subs,
+                dirs.renditions,
+                "fixture identity supplied by admitted P".into(),
+                selected.identity.node_id.clone(),
+                Some(membership.clone()),
+                Some(Arc::clone(&runtime)),
+            ),
+        );
+        if fixed_case == 1 {
+            source_actual_actor_boxed(
+                state,
+                Arc::clone(&manager),
+                prepared,
+                assignment.clone(),
+                12,
+                restart_case,
+                client.clone(),
+            )
+            .await;
+            // Media/ingress/child/body retirement is complete, but the same
+            // long-lived manager still caches its original dormant recipe.
+            // That Encoding legitimately retains M; planning repair alone
+            // cannot evict a live cache alias or treat it as already absent.
+            let (cached_path, original_encoding) = manager
+                .vod
+                .settled_source_recipe_for_actor_test(&assignment)
+                .await;
+            assert!(original_encoding.upgrade().is_some());
+            assert_eq!(
+                runtime
+                    .planning_ownership_diagnostics()
+                    .expect("actual original M inventory before cache eviction")
+                    .metadata_owners,
+                1,
+                "logical media retirement must not refund the cached recipe's M"
+            );
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    // Explicitly exercise the original eviction callback,
+                    // without claiming real capacity pressure or TTL expiry.
+                    // It must retire/drop the actual cached recipe before the
+                    // original planning supervisor can return M's charge.
+                    manager
+                        .vod
+                        .pressure_evict_source_recipe_for_actor_test(&cached_path)
+                        .await
+                        .expect("original Source cache eviction callback");
+                    manager.vod.maintain().await;
+                    manager.reconcile_adaptive_attempt_tasks().await;
+                    if runtime
+                        .planning_ownership_diagnostics()
+                        .is_some_and(|counts| counts.metadata_owners == 0)
+                    {
+                        assert!(
+                            original_encoding.upgrade().is_none(),
+                            "M cannot return while the original cached Encoding remains alive"
+                        );
+                        assert!(
+                            matches!(std::fs::symlink_metadata(&cached_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                            "the actual cache owner must remove the original recipe directory"
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("FAILURE watchdog: actual actor's original M aliases did not retire");
+        } else {
+            match fixed_case {
+                0 => super::super::source_preparation::source_fixed_planning_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
+                2 => super::super::source_preparation::source_native_cancelled_collector_cleanup_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
+                3 => super::super::source_preparation::source_before_reservation_refusal_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
+                4 => super::super::source_preparation::source_application_lease_refusal_cleanup_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
+                _ => panic!("unknown fixed Source fixture case"),
+            }
+            store
+                .seal_source_ingress_custody(&assignment)
+                .await
+                .expect("actual no-entry ingress seal");
+            assert_eq!(
+                store
+                    .settle_source_assigned_without_activation(&assignment)
+                    .await
+                    .expect("exact no-activation Source cleanup"),
+                SourceReleaseOutcome::Released
+            );
+        }
+        selected
+            .shutdown()
+            .await
+            .expect("actual voter shutdown after original P cleanup");
+        return;
+    }
     let media = store.get_file(1).await.expect("file read").expect("file");
     if mode < 5 {
         let crate::fragindex::IndexOutcome::Built(index) = Box::pin(crate::fragindex::build(
@@ -580,12 +800,29 @@ async fn source_copy_preadmission_fixture(mode: u8) {
             .expect("actual cold index read")
             .is_none());
     }
-    let manager = Arc::new(TranscodeManager::new(
+    let manager = TranscodeManager::new(
         Arc::clone(store),
         directory.path().join("workers"),
         EncoderCaps::default(),
         Pipeline::Cpu,
-    ));
+    );
+    #[cfg(target_os = "linux")]
+    let manager = if let Some(runtime) = fixed_runtime {
+        let dirs = crate::configured_dirs(&config.storage);
+        manager.with_cache_layout(
+            dirs.cache,
+            dirs.runtime_cache,
+            dirs.subs,
+            dirs.renditions,
+            "fixture cache configuration; recipe uses original P attestation".into(),
+            selected.identity.node_id.clone(),
+            Some(membership.clone()),
+            Some(runtime),
+        )
+    } else {
+        manager
+    };
+    let manager = Arc::new(manager);
     if let Some(mut second_prepared) = second_prepared {
         let now = crate::fragment_index_cluster::unix_ms();
         let SourceIntentRead::Ready(second_intent) = store
@@ -644,7 +881,16 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         return;
     }
     if mode >= 5 {
-        source_actual_actor_boxed(state, manager, prepared, assignment, mode, client.clone()).await;
+        source_actual_actor_boxed(
+            state,
+            manager,
+            prepared,
+            assignment,
+            mode,
+            restart_case,
+            client.clone(),
+        )
+        .await;
         selected.shutdown().await.expect("actual voter shutdown");
         return;
     }
@@ -685,7 +931,16 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     drop(admitted);
     assert_eq!(manager.admissions.software_in_use(), 0);
     if (2..=4).contains(&mode) {
-        source_actual_actor_boxed(state, manager, prepared, assignment, mode, client.clone()).await;
+        source_actual_actor_boxed(
+            state,
+            manager,
+            prepared,
+            assignment,
+            mode,
+            restart_case,
+            client.clone(),
+        )
+        .await;
         selected.shutdown().await.expect("actual voter shutdown");
         return;
     }
@@ -958,10 +1213,17 @@ fn source_actual_actor_boxed(
     prepared: crate::http::hls::PreparedSourcePlayback,
     assignment: SourceDispatchAssignment,
     mode: u8,
+    restart_case: Option<u8>,
     client: hiqlite::Client,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(source_actual_actor(
-        state, manager, prepared, assignment, mode, client,
+        state,
+        manager,
+        prepared,
+        assignment,
+        mode,
+        restart_case,
+        client,
     ))
 }
 async fn source_actual_actor(
@@ -970,13 +1232,18 @@ async fn source_actual_actor(
     prepared: crate::http::hls::PreparedSourcePlayback,
     assignment: SourceDispatchAssignment,
     mode: u8,
+    restart_case: Option<u8>,
     client: hiqlite::Client,
 ) {
     if mode == 55 {
         source_actual_unknown_register_reconciliation(state, manager, assignment).await;
         return;
     }
-    if matches!(mode, 3 | 19 | 28) {
+    #[cfg(target_os = "linux")]
+    if mode == 19 {
+        manager.source_workers.probe_hooks.arm_fixed_cpu_denial();
+    }
+    if matches!(mode, 3 | 28) || (mode == 19 && !cfg!(target_os = "linux")) {
         state
             .store
             .put_setting(keys::SW_POOL_THREADS, "3")
@@ -1108,6 +1375,20 @@ async fn source_actual_actor(
         assert_eq!(manager.admissions.software_in_use(), 0);
         return;
     }
+    #[cfg(target_os = "linux")]
+    if (80..=83).contains(&mode) {
+        settlement_tests::exercise(
+            state,
+            manager,
+            prepared,
+            assignment,
+            (*activation, ingress_permission),
+            ingress_fixture,
+            mode,
+        )
+        .await;
+        return;
+    }
     let index_pause = match mode {
         6 => Some(manager.source_workers.index_hooks.pause_after_spawn()),
         7 | 9 | 10 | 11 => Some(manager.source_workers.index_hooks.pause_before_spawn()),
@@ -1117,14 +1398,49 @@ async fn source_actual_actor(
                 .index_hooks
                 .pause_after_wait_failure(),
         ),
-        13 => Some(manager.source_workers.probe_hooks.pause_after_spawn()),
-        14 | 16 | 17 | 18 => Some(manager.source_workers.probe_hooks.pause_before_spawn()),
-        15 => Some(
-            manager
-                .source_workers
-                .probe_hooks
-                .pause_after_wait_failure(),
-        ),
+        13 => {
+            #[cfg(target_os = "linux")]
+            {
+                manager.source_workers.probe_hooks.arm_fixed_native(false);
+                None
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Some(manager.source_workers.probe_hooks.pause_after_spawn())
+            }
+        }
+        17 => {
+            #[cfg(target_os = "linux")]
+            {
+                Some(
+                    manager
+                        .source_workers
+                        .probe_hooks
+                        .pause_before_fixed_inputs(),
+                )
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Some(manager.source_workers.probe_hooks.pause_before_spawn())
+            }
+        }
+        14 | 16 | 18 => Some(manager.source_workers.probe_hooks.pause_before_spawn()),
+        15 => {
+            #[cfg(target_os = "linux")]
+            {
+                manager.source_workers.probe_hooks.arm_fixed_native(true);
+                None
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Some(
+                    manager
+                        .source_workers
+                        .probe_hooks
+                        .pause_after_wait_failure(),
+                )
+            }
+        }
         20 => Some(manager.source_workers.probe_hooks.pause_after_evidence()),
         22 => Some(manager.source_workers.native_hooks.pause_after_spawn()),
         23 | 25 | 26 | 27 => Some(manager.source_workers.native_hooks.pause_before_spawn()),
@@ -1136,7 +1452,13 @@ async fn source_actual_actor(
         ),
         _ => None,
     };
-    let actor = Box::pin(manager.start_source_worker(
+    #[cfg(target_os = "linux")]
+    let restart_fence = if restart_case == Some(0) {
+        Some(restart_admission_tests::before_factory(&state).await)
+    } else {
+        None
+    };
+    let admitted = Box::pin(manager.start_source_worker(
         Arc::clone(&state),
         assignment.clone(),
         *activation,
@@ -1144,8 +1466,21 @@ async fn source_actual_actor(
         prepared,
         Instant::now() + Duration::from_secs(15),
     ))
-    .await
-    .expect("owned Source task");
+    .await;
+    #[cfg(target_os = "linux")]
+    if let Some(fence) = restart_fence {
+        restart_admission_tests::refused_factory(
+            &state,
+            &manager,
+            &assignment,
+            admitted,
+            ingress_fixture,
+            fence,
+        )
+        .await;
+        return;
+    }
+    let actor = admitted.expect("owned Source task");
     if mode == 54 {
         actor
             .wait_ready(Instant::now() + Duration::from_secs(15))
@@ -1207,12 +1542,54 @@ async fn source_actual_actor(
         .lookup_source_worker(&assignment)
         .expect("full assignment lookup");
     assert!(Arc::ptr_eq(&actor.0, &joined.0));
+    #[cfg(target_os = "linux")]
+    if let Some(case) = restart_case {
+        drop(joined);
+        restart_admission_tests::after_factory(
+            &state,
+            &manager,
+            &actor,
+            &assignment,
+            mode,
+            case,
+            ingress_monitor,
+        )
+        .await;
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = restart_case;
+    #[cfg(target_os = "linux")]
+    if matches!(mode, 13 | 15) {
+        drop(joined);
+        fixed_native::exercise(&state, &manager, &actor, &assignment, mode, ingress_monitor).await;
+        return;
+    }
+
     if let Some(pause) = index_pause {
-        let held = pause.reached().await;
+        let held = tokio::time::timeout(Duration::from_secs(30), pause.reached())
+            .await
+            .expect("FAILURE watchdog: original Source stage was not reached");
+        let fixed = cfg!(target_os = "linux") && (12..=20).contains(&mode);
         assert_eq!(
             manager.admissions.software_in_use(),
-            if mode == 20 { 0 } else { 4 }
+            if fixed || mode == 20 { 0 } else { 4 }
         );
+        #[cfg(target_os = "linux")]
+        if fixed {
+            let counts = manager
+                .resource_runtime
+                .as_ref()
+                .expect("real Source runtime")
+                .planning_ownership_diagnostics()
+                .expect("complete P/M stage inventory");
+            assert_eq!(counts.metadata_owners, 1);
+            assert_eq!(counts.native_roles_held, usize::from(mode != 20));
+            assert_eq!(
+                counts.original_tasks_pending, 0,
+                "the pre-collector/after-close fixture stage is not native entry proof"
+            );
+        }
         assert!(manager.vod.session_ids().await.is_empty());
         assert!(state
             .store
@@ -1227,11 +1604,15 @@ async fn source_actual_actor(
         } else {
             manager.source_workers.index_hooks.spawned_pid()
         };
-        if matches!(mode, 6 | 8 | 13 | 15 | 20 | 22 | 24) {
-            assert!(pid > 0, "actual Source index child started");
-        } else {
-            assert_eq!(pid, 0, "refusal point precedes any actual child");
+        if !fixed {
+            if matches!(mode, 6 | 8 | 13 | 15 | 20 | 22 | 24) {
+                assert!(pid > 0, "actual legacy Source child started");
+            } else {
+                assert_eq!(pid, 0, "legacy refusal point precedes its child");
+            }
         }
+        // Fixed mode20 already joined its actual native tasks; its legacy
+        // PID slot is unused and cannot stand in for native absence proof.
         assert!(matches!(
             actor.wait_ready(Instant::now()).await,
             Err(SourceWorkerError::Deadline)
@@ -1277,8 +1658,8 @@ async fn source_actual_actor(
         }
         assert_eq!(
             manager.admissions.software_in_use(),
-            if mode == 20 { 0 } else { 4 },
-            "probe capacity matches actual settlement stage"
+            if fixed || mode == 20 { 0 } else { 4 },
+            "actual P/M custody or legacy permit matches its own stage"
         );
         assert_eq!(actor.settlement_status(), None);
         drop(held);
@@ -1331,6 +1712,35 @@ async fn source_actual_actor(
             .expect("owned no-spawn cleanup budget")
             .expect("actual admission failed without a child");
         assert_eq!(manager.admissions.software_in_use(), 0);
+        #[cfg(target_os = "linux")]
+        if mode == 19 {
+            manager
+                .source_workers
+                .probe_hooks
+                .assert_fixed_cpu_refusal();
+            let runtime = manager
+                .resource_runtime
+                .as_ref()
+                .expect("exclusive fresh19runtime");
+            let accounting = runtime
+                .accounting()
+                .expect("actual negative admission accounting");
+            assert!(matches!(
+                accounting.capacity.cpu_ns_per_second,
+                plurx_core::process::observation::Metric::Known(0)
+            ));
+            assert_eq!(
+                accounting.used,
+                plurx_core::adaptive_resources::ResourceVector::default()
+            );
+            let counts = runtime
+                .planning_ownership_diagnostics()
+                .expect("complete postrefusal inventory");
+            assert_eq!(counts.native_roles_held, 0);
+            assert_eq!(counts.metadata_owners, 0);
+            assert_eq!(counts.original_tasks_pending, 0);
+        }
+
         assert!(state
             .store
             .media_session_route_by_incarnation(&assignment.binding().incarnation_id().to_string())
@@ -1389,10 +1799,32 @@ async fn source_actual_actor(
             .source_workers
             .index_hooks
             .assert_closed_parent_settlements(),
-        12 => manager
-            .source_workers
-            .probe_hooks
-            .assert_closed_parent_settlements(),
+        12 => {
+            #[cfg(target_os = "linux")]
+            if let Some(runtime) = &manager.resource_runtime {
+                let counts = runtime
+                    .planning_ownership_diagnostics()
+                    .expect("actual selected P/M inventory");
+                assert_eq!(
+                    counts.native_roles_held, 0,
+                    "the actor finished the original P native closer"
+                );
+                assert_eq!(
+                    counts.metadata_owners, 1,
+                    "actual serving Encoding aliases retain M"
+                );
+            } else {
+                manager
+                    .source_workers
+                    .probe_hooks
+                    .assert_closed_parent_settlements();
+            }
+            #[cfg(not(target_os = "linux"))]
+            manager
+                .source_workers
+                .probe_hooks
+                .assert_closed_parent_settlements();
+        }
         21 => manager
             .source_workers
             .native_hooks
@@ -2205,12 +2637,12 @@ async fn source_actual_actor(
     ingress_monitor.join().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_copy_cold_index_refuses_changed_actual_file_before_child() {
     source_copy_preadmission_fixture(10).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_copy_cold_index_refuses_purpose_floor_loss_before_child() {
     source_copy_preadmission_fixture(11).await;
 }
@@ -2404,7 +2836,7 @@ fn assert_descriptor(_pause: &resource::SourceResourceJobPause, _open: bool, _wh
 /// Real accepted Hyper custody for factory fixtures. This transport setup is
 /// not distributed playback qualification; it prevents a fabricated permission
 /// or closure token from standing in for an accepted writer.
-struct SourceFactoryIngressFixture {
+pub(crate) struct SourceFactoryIngressFixture {
     state: Arc<crate::state::AppState>,
     assignment: SourceDispatchAssignment,
     obligation: crate::sharing_connection_custody::CapturedIngressObligation,
@@ -2465,7 +2897,7 @@ fn source_fixture_ack_race_committed(
             == plurx_core::sharing_ingress_custody::CustodyMutation::Replay
 }
 impl SourceFactoryIngressFixture {
-    async fn new(
+    pub(crate) async fn new(
         state: Arc<crate::state::AppState>,
         assignment: &SourceDispatchAssignment,
     ) -> Self {
@@ -2587,7 +3019,7 @@ impl SourceFactoryIngressFixture {
             stop: Some(stop),
         }
     }
-    async fn permission(&self) -> SourceIngressAdmissionPermission {
+    pub(crate) async fn permission(&self) -> SourceIngressAdmissionPermission {
         let members = self
             .state
             .membership
@@ -2607,7 +3039,7 @@ impl SourceFactoryIngressFixture {
             .expect("guarded permission issuer")
             .expect("registered actual ingress permission")
     }
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         self.close_transport(true, None).await;
     }
     async fn close_transport(mut self, seal: bool, retirement_owner: Option<SourceViewerActor>) {

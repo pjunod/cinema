@@ -73,13 +73,36 @@ pub(crate) enum StaticArtifactExposure {
     Obsolete,
 }
 
+/// What a NEW candidate attachment later needs to borrow the settled static
+/// S: the same dispatch-attested candidate binding the run encoded under and
+/// the executable, engine and source metadata it ran with. It is captured
+/// from the original recipe before that recipe is released, and is the only
+/// authority the exposed artifact carries; a Store row or manifest never
+/// stands in for it.
+pub(crate) struct StaticArtifactProvenance {
+    pub(super) candidate: Option<RetainedCandidateBinding>,
+    pub(super) executable: String,
+    pub(super) engine: String,
+    pub(super) source_metadata: [u8; 32],
+}
+
+impl StaticArtifactProvenance {
+    pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
+        self.executable
+            .capacity()
+            .checked_add(self.engine.capacity())
+    }
+}
+
 /// Complete pure P-side output plan. The original P owner remains charged
 /// while the request, immutable plan and publication buffers are allocated.
 /// After its native close, R admission consumes this object synchronously.
 pub(crate) struct StaticArtifactAdmission {
     pub(super) request: SoftwareVodRequest,
     pub(super) cache_grant: crate::playback_cache::CacheReservation,
+    pub(super) compatibility: crate::vodencode::FiniteSoftwareCompatibility,
     pub(super) policy: StaticArtifactPolicy,
+    pub(super) provenance: StaticArtifactProvenance,
     pub(super) workspace: u64,
     pub(super) publication: StaticArtifactPublication,
     pub(super) logical: retained_manifest::LogicalOutput,
@@ -92,9 +115,11 @@ impl StaticArtifactAdmission {
     /// unknown producer peak; future R parser/native work is separate.
     pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
         std::mem::size_of::<Self>()
+            .checked_add(crate::vodencode::FiniteSoftwareCompatibility::requested_heap_bytes()?)?
             .checked_add(self.request.requested_heap_bytes()?)?
             .checked_add(self.publication.requested_heap_bytes()?)?
-            .checked_add(self.logical.requested_heap_bytes()?)
+            .checked_add(self.logical.requested_heap_bytes()?)?
+            .checked_add(self.provenance.requested_heap_bytes()?)
     }
 }
 
@@ -276,7 +301,9 @@ impl StaticArtifactPublication {
 /// its original cancellation ticket has settled.
 pub(crate) struct StaticArtifactRun {
     cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
+    compatibility: Option<crate::vodencode::FiniteSoftwareCompatibility>,
     policy: StaticArtifactPolicy,
+    provenance: StaticArtifactProvenance,
     owner: SoftwareVodOwner,
     output: FiniteOutput,
     events: Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>>,
@@ -290,19 +317,27 @@ pub(crate) struct StaticArtifactRun {
 }
 
 impl StaticArtifactRun {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Each argument is a distinct admitted owner the one original static run must hold until its own retirement; a grouping struct would carry no invariant."
+    )]
     pub(super) fn new(
         mut owner: SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
+        compatibility: crate::vodencode::FiniteSoftwareCompatibility,
         publication: StaticArtifactPublication,
         logical: retained_manifest::LogicalOutput,
         application_lease: FiniteApplicationLease,
         policy: StaticArtifactPolicy,
+        provenance: StaticArtifactProvenance,
     ) -> Self {
         let events = owner.take_events();
         let output = owner.output();
         Self {
             cache_grant: Some(cache_grant),
+            compatibility: Some(compatibility),
             policy,
+            provenance,
             owner,
             output,
             events,
@@ -319,6 +354,17 @@ impl StaticArtifactRun {
         &mut self,
     ) -> Option<crate::playback_cache::FiniteCacheReservation> {
         self.cache_grant.take()
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn original_output_for_test(&self) -> FiniteOutput {
+        self.output.clone()
+    }
+
+    pub(crate) fn take_compatibility(
+        &mut self,
+    ) -> Option<crate::vodencode::FiniteSoftwareCompatibility> {
+        self.compatibility.take()
     }
 
     pub(crate) fn request_stop(&self) -> io::Result<()> {
@@ -345,6 +391,9 @@ impl StaticArtifactRun {
         logical: &retained_manifest::LogicalOutput,
         registry_bytes: usize,
     ) -> Option<usize> {
+        // The common finite profile already charges the one original
+        // compatibility Arc. Add this run's actual fixed wrapper field via
+        // size_of<Self>, without charging that same allocation a second time.
         std::mem::size_of::<Self>()
             .checked_add(publication.requested_heap_bytes()?)?
             .checked_add(logical.requested_heap_bytes()?)?
@@ -399,6 +448,9 @@ impl StaticArtifactRun {
             .retire_output(deadline)
             .await
             .map_err(|error| error.into_io_error())?;
+        if let Some(compatibility) = self.compatibility.take() {
+            compatibility.known_retired();
+        }
         if let Some(grant) = self.cache_grant.take() {
             grant.retained();
         }
@@ -409,6 +461,18 @@ impl StaticArtifactRun {
             .clone();
         let mut artifact = manifest.into_finite_artifact(retained)?;
         artifact.static_policy = Some(self.policy);
+        // The settled S keeps the run's own candidate binding and origin so a
+        // later NEW candidate attachment resolves it exactly like a privately
+        // prepared complete output. The manifest it was built from carries
+        // neither: a discovered manifest must never mint this authority.
+        artifact.candidate = self.provenance.candidate.clone();
+        let _ = artifact.private_preparation_origin.set(
+            super::retained::PreparedOrigin::settled_static(
+                uuid::Uuid::new_v4(),
+                artifact.id,
+                &self.provenance,
+            ),
+        );
         Ok(artifact)
     }
 }

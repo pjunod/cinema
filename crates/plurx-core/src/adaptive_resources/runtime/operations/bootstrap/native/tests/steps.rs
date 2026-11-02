@@ -279,3 +279,73 @@ async fn bootstrap_native_linux_existing_child_is_never_adopted() {
     assert!(result.audit.acquired.is_none());
     assert_eq!(result.files.len(), 1);
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn cleanup_directory_subset_preserves_original_unlent_files_and_rejects_incomplete_inventory()
+{
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().canonicalize().unwrap();
+    let (mut cell, plan) = native_parent(&path).await;
+    let parent = cell
+        .result
+        .as_ref()
+        .unwrap()
+        .audit
+        .acquired
+        .clone()
+        .unwrap();
+    let operation = BootstrapIoV1::CreateRenditionChild {
+        parent: reference(&cell),
+        copy_id: id(),
+    };
+    cell.launch_next(&plan, id(), &operation)
+        .unwrap()
+        .send(())
+        .unwrap();
+    let result = cell.join().await.unwrap();
+    assert_eq!(
+        result.audit.outcome,
+        v2::scratch::NativeOutcomeV1::Completed
+    );
+    let child = result.audit.acquired.clone().unwrap();
+    let original_fds: BTreeMap<_, _> = result
+        .files
+        .iter()
+        .map(|(id, file)| (*id, file.as_raw_fd()))
+        .collect();
+    let baseline = [None, Some(&parent), Some(&child)];
+    assert!(cell
+        .lend_observed_directories(std::slice::from_ref(&child), &[None, None, Some(&child)])
+        .is_err());
+    let mut foreign = child.clone();
+    foreign.directory_id = id();
+    assert!(cell
+        .lend_observed_directories(&[foreign], &baseline)
+        .is_err());
+    assert!(cell
+        .lend_observed_directories(&[child.clone(), child.clone()], &baseline)
+        .is_err());
+    assert_eq!(cell.result.as_ref().unwrap().files.len(), 2);
+    for (selected, retained) in [(&child, &parent), (&parent, &child)] {
+        let mut lent = cell
+            .lend_observed_directories(std::slice::from_ref(selected), &baseline)
+            .unwrap();
+        assert_eq!(lent.len(), 1);
+        assert_eq!(
+            lent[&selected.held_copy_ids[0]].as_raw_fd(),
+            original_fds[&selected.held_copy_ids[0]]
+        );
+        let held = &cell.result.as_ref().unwrap().files;
+        assert_eq!(held.len(), 1);
+        assert_eq!(
+            held[&retained.held_copy_ids[0]].as_raw_fd(),
+            original_fds[&retained.held_copy_ids[0]]
+        );
+        assert!(!cell.no_original_handles());
+        cell.return_observed_directories(std::slice::from_ref(selected), &mut lent)
+            .unwrap();
+        assert!(lent.is_empty());
+        assert_eq!(cell.result.as_ref().unwrap().files.len(), 2);
+    }
+}

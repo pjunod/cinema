@@ -53,6 +53,7 @@ pub(super) enum StaticFinite {
     /// selector. Do not repeat the claim or infer a release from this DTO.
     AdmissionUnknown {
         _cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
+        _compatibility: Option<crate::vodencode::FiniteSoftwareCompatibility>,
     },
     Running(crate::vodserve::StaticArtifactRun),
     Retained(Arc<crate::vodserve::retained::RetainedVodArtifact>),
@@ -63,6 +64,7 @@ pub(super) enum StaticFinite {
     Closing {
         ticket: FiniteCloseTicket,
         cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
+        compatibility: Option<crate::vodencode::FiniteSoftwareCompatibility>,
     },
     Exposed,
     Closed,
@@ -307,22 +309,10 @@ fn planning_application_bytes(
         .checked_add(frame_bytes)?
         .checked_add(std::mem::size_of::<SessionRequest>())?
         .checked_add(request.selected_finite_requested_heap_bytes()?)?
-        .checked_add(super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)?;
-    if request.candidate_context.as_ref().is_none_or(|context| {
-        context
-            .planning_snapshot
-            .as_ref()
-            .is_none_or(|held| !Arc::ptr_eq(held, snapshot))
-    }) {
-        bytes = bytes
-            .checked_add(
-                std::mem::size_of::<plurx_core::store::PlaybackPlanningSnapshot>()
-                    + 2 * std::mem::size_of::<usize>(),
-            )?
-            .checked_add(
-                super::adaptive_attempts::planning_snapshot_requested_heap_bytes(snapshot)?,
-            )?;
-    }
+        .checked_add(super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)?
+        .checked_add(super::adaptive_attempts::retained_planning_snapshot_bytes(
+            request, snapshot,
+        )?)?;
     // The claimed job and its separately decoded catalog stay live in the
     // caller while this original coordinator awaits native work.
     bytes = bytes
@@ -400,6 +390,11 @@ fn planning_application_bytes(
 }
 
 impl TranscodeManager {
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn static_handoff_limit_for_test() -> usize {
+        super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES
+    }
+
     /// Pure shared branch selection. Once selected, every refusal remains in
     /// the same typed owner; it cannot trigger a fresh legacy preparation.
     pub(crate) fn uses_selected_static_intent(
@@ -470,11 +465,13 @@ impl TranscodeManager {
                 let _ = run.request_stop();
                 if let Ok(ticket) = run.prepare_cancel(deadline).await {
                     let cache_grant = run.take_cache_grant();
+                    let compatibility = run.take_compatibility();
                     let old = std::mem::replace(
                         &mut *finite,
                         StaticFinite::Closing {
                             ticket,
                             cache_grant,
+                            compatibility,
                         },
                     );
                     drop(old); // rich R owner/lease precede compact final settlement
@@ -483,8 +480,12 @@ impl TranscodeManager {
             StaticFinite::Closing {
                 ticket,
                 cache_grant,
+                compatibility,
             } => {
                 if ticket.finish_retirement(deadline).await.is_ok() {
+                    if let Some(compatibility) = compatibility.take() {
+                        compatibility.known_retired();
+                    }
                     if let Some(grant) = cache_grant.take() {
                         grant.known_closed();
                     }
@@ -536,6 +537,7 @@ impl TranscodeManager {
                         StaticFinite::Closing {
                             ticket,
                             cache_grant: None,
+                            compatibility: None,
                         },
                     );
                     drop(old); // original rich S aliases must precede its final refund
@@ -740,7 +742,11 @@ impl TranscodeManager {
                 .prepare_inputs(deadline)
                 .await
                 .map_err(|error| PreparationError::Retry(error.to_string()))?;
-            let report = if let Some(report) = entry.report.lock().await.as_ref().cloned() {
+            // Edition 2021 keeps an `if let` scrutinee's temporaries alive
+            // through `else`, so the cached-report guard must be released
+            // before the miss path takes the same lock to store the report.
+            let cached = entry.report.lock().await.as_ref().cloned();
+            let report = if let Some(report) = cached {
                 report
             } else {
                 let report = owner
@@ -848,6 +854,20 @@ impl TranscodeManager {
         {
             let mut finite = entry.finite.lock().await;
             if matches!(&*finite, StaticFinite::Planned(_)) {
+                // Compatibility, cache-quota and P/native/journal waits
+                // consume the capacity observation taken while planning.
+                // Reobserve before R; keep the finalized resource demand
+                // and allocation epoch unchanged: changed policy, lower
+                // capacity or Unknown evidence still refuses it. Planned
+                // stays installed on failure so the same owner resumes it.
+                runtime
+                    .refresh_admission_capacity(deadline)
+                    .await
+                    .map_err(|error| {
+                        PreparationError::Retry(format!(
+                            "observing final static artifact admission: {error:?}"
+                        ))
+                    })?;
                 let StaticFinite::Planned(planned) =
                     std::mem::replace(&mut *finite, StaticFinite::Empty)
                 else {
@@ -856,7 +876,8 @@ impl TranscodeManager {
                 match self.vod.admit_static_artifact(planned, deadline) {
                     Ok(run) => *finite = StaticFinite::Running(run),
                     Err(error) => {
-                        let (message, definitely_unreserved, cache_grant) = error.into_parts();
+                        let (message, definitely_unreserved, cache_grant, compatibility) =
+                            error.into_parts();
                         // Only core's exact pre-reservation provenance proves
                         // no original R escaped. Generic admission/rollback
                         // errors remain unknown; never replay this request.
@@ -865,6 +886,7 @@ impl TranscodeManager {
                         } else {
                             StaticFinite::AdmissionUnknown {
                                 _cache_grant: cache_grant,
+                                _compatibility: compatibility,
                             }
                         };
                         return Err(PreparationError::Retry(message));

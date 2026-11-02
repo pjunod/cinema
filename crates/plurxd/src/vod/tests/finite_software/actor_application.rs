@@ -16,7 +16,7 @@ async fn original_application_lease_waits_for_last_actor_snapshot_before_same_ro
         .await
         .expect("actual admission capacity");
     let capacity = runtime.accounting().expect("observed capacity").capacity;
-    let mut request = finite_profile::compile(
+    let (mut request, _finalized_threads) = finite_profile::compile(
         &fixture.serve.shared,
         &"e".repeat(64),
         &fixture.recipe,
@@ -129,7 +129,7 @@ async fn original_actor_fixture() -> OriginalActorFixture {
         .refresh_admission_capacity(deadline)
         .await
         .expect("actual capacity");
-    let mut request = finite_profile::compile(
+    let (mut request, _finalized_threads) = finite_profile::compile(
         &fixture.serve.shared,
         &"e".repeat(64),
         &fixture.recipe,

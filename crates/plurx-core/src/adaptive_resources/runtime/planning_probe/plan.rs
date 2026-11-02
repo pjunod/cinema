@@ -11,7 +11,6 @@ use crate::adaptive_resources::runtime::operations::plans::{
     FixedProbeDiscoverPlan, SourceCopyOwner, SourceCopyPlan, TypedGraphPlan, TypedMemberPlan,
 };
 use crate::adaptive_resources::runtime::operations::source_files::SourceOpenSpec;
-use crate::adaptive_resources::runtime::operations::{OperationError, OwnedPreparation};
 use crate::adaptive_resources::{
     FamilyDemand, FamilyRole, FamilyRoleDemand, MemoryClaim, ResourceVector, WorkloadDemand,
 };
@@ -23,19 +22,28 @@ use std::time::Instant;
 // install. Not an assertion of native peak RSS; P records UnknownPeak.
 const REPORT_STORAGE_ALLOWANCE_BYTES: u64 = 256 * 1024 * 1024;
 
-pub(in crate::adaptive_resources::runtime) struct PlannedProbe {
-    pub(in crate::adaptive_resources::runtime) preparation: OwnedPreparation,
+pub(in crate::adaptive_resources::runtime) struct PlanningTaskPlan {
     pub(in crate::adaptive_resources::runtime) source_member: Uuid,
-    pub(in crate::adaptive_resources::runtime) source_spec: Option<SourceOpenSpec>,
+    pub(in crate::adaptive_resources::runtime) source_spec: SourceOpenSpec,
     pub(in crate::adaptive_resources::runtime) probe_plan: v2::FixedProbeDiscoverTaskV1,
     pub(in crate::adaptive_resources::runtime) engine_plan: v2::FixedPlanningEngineTaskV1,
 }
 
+// All callers in this module precede the single initialized preparation
+// below. Its returned errors must retain their own post-reservation meaning.
 fn invalid() -> OperationError {
-    OperationError::State
+    OperationError::BeforeReservation(super::super::operations::PreReservationRefusal::Admission(
+        crate::adaptive_resources::AdmissionRefusal::InvalidBundle,
+    ))
+}
+fn before_reservation_error(error: OperationError) -> OperationError {
+    match error {
+        OperationError::BeforeReservation(_) => error,
+        _ => invalid(),
+    }
 }
 fn id() -> Result<v2::Id, OperationError> {
-    v2::Id::new(Uuid::new_v4()).map_err(Into::into)
+    v2::Id::new(Uuid::new_v4()).map_err(|_| invalid())
 }
 fn add(values: impl IntoIterator<Item = u64>) -> Result<u64, OperationError> {
     values.into_iter().try_fold(0u64, |sum, value| {
@@ -63,9 +71,9 @@ fn slot(member_id: v2::Id, owned_by: Option<v2::Id>, depends_on: Vec<v2::Id>) ->
 
 pub(in crate::adaptive_resources::runtime) fn prepare(
     runtime: &Arc<NodeResourceRuntime>,
-    request: &FixedPlanningProbeRequest,
+    request: FixedPlanningProbeRequest,
     deadline: Instant,
-) -> Result<PlannedProbe, OperationError> {
+) -> Result<FixedPlanningProbeOwner, OperationError> {
     if !cfg!(target_os = "linux")
         || Instant::now() >= deadline
         || !request.source.path.is_absolute()
@@ -111,7 +119,7 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
         filesystem_domain: v2::FilesystemDomain {
             platform: v2::FilesystemPlatform::Linux,
             domain_id: id()?,
-            daemon_owner_id: v2::Id::new(runtime.owner.owner_id)?,
+            daemon_owner_id: v2::Id::new(runtime.owner.owner_id).map_err(|_| invalid())?,
             os_boot: runtime.owner.os_boot.clone(),
             mount_namespace: v2::NativeValue::Known {
                 value: mount_namespace,
@@ -277,6 +285,8 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
         multiply(profile.max_engine_command_output_bytes, 4)?,
         profile.engine_hash_buffer_bytes,
         profile.retained_custody_bytes,
+        super::super::operations::planning_settlement::registered_planning_preflight_bytes()
+            .ok_or_else(invalid)?,
         u64::try_from(request.requested_heap_bytes().ok_or_else(invalid)?)
             .map_err(|_| invalid())?,
         u64::try_from(std::mem::size_of::<FixedPlanningProbeRequest>()).map_err(|_| invalid())?,
@@ -284,7 +294,11 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
         u64::try_from(request.source.path.capacity()).map_err(|_| invalid())?,
         u64::try_from(request.source.media_file_id.capacity()).map_err(|_| invalid())?,
     ])?;
-    let epoch = runtime.ledger.snapshot()?.limit_epoch;
+    let epoch = runtime
+        .ledger
+        .snapshot()
+        .map_err(|_| invalid())?
+        .limit_epoch;
     let roles = [
         FamilyRoleDemand {
             role: FamilyRole::Video,
@@ -374,8 +388,21 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
             }],
         },
     ];
-    let family = runtime.new_family()?;
-    let preparation = match runtime.prepare_typed_families_claiming(
+    // Build the ORIGINAL registration exactly once, before reservation. It
+    // owns the existing request/catalog/spec, plans and observation IDs; no
+    // native task, source/program lookup or replacement ID is created here.
+    let application_bytes = request.application_metadata_bytes;
+    let tasks = super::super::operations::planning_tasks::PreparedPlanningTasks::new(
+        PlanningTaskPlan {
+            source_member: source_member.uuid(),
+            source_spec,
+            probe_plan,
+            engine_plan,
+        },
+        request,
+    );
+    let family = runtime.new_family().map_err(before_reservation_error)?;
+    match runtime.prepare_typed_families_claiming_initialized(
         &[FamilyDemand {
             identity: family,
             roles: &roles,
@@ -386,23 +413,44 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
             MemoryClaim::PlanningMetadata,
         ]),
         deadline,
+        |preparation| {
+            let (release, cleanup_requested, known_closed) = runtime.initialize_private_planning(
+                preparation,
+                application_bytes,
+                book_structural_bytes,
+                metadata_bytes,
+                tasks,
+            );
+            // Complete the existing Drop-armed selector before publication.
+            // Later unwinding signals this SAME original maintenance owner.
+            FixedPlanningProbeOwner {
+                runtime: Arc::clone(runtime),
+                preparation: Some(preparation.clone()),
+                release,
+                cleanup_requested,
+                known_closed,
+            }
+        },
     ) {
-        Ok(preparation) => preparation,
+        Ok((_preparation, owner)) => Ok(owner),
         Err(error) => {
             let _ = runtime.remove_unused_family(family);
-            return Err(error);
+            Err(error)
         }
-    };
-    runtime.register_planning_metadata(
-        &preparation,
-        request.application_metadata_bytes,
-        book_structural_bytes,
-    )?;
-    Ok(PlannedProbe {
-        preparation,
-        source_member: source_member.uuid(),
-        source_spec: Some(source_spec),
-        probe_plan,
-        engine_plan,
-    })
+    }
 }
+
+#[cfg(test)]
+pub(in crate::adaptive_resources::runtime) fn original_preparation_for_test(
+    owner: &FixedPlanningProbeOwner,
+) -> OwnedPreparation {
+    owner
+        .preparation
+        .as_ref()
+        .expect("original constructor selector")
+        .clone()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "plan/tests.rs"]
+mod tests;

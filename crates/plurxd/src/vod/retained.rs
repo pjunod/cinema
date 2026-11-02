@@ -191,7 +191,11 @@ pub(crate) async fn test_assert_sealed_cached_delivery(
         serve
             .shared
             .retained_artifacts
-            .acquire_expected_for_request(expected, rendition, &rendition.recipe.retained_logical)
+            .acquire_expected_for_request(
+                expected,
+                &rendition.retained_probe(),
+                &rendition.recipe.retained_logical,
+            )
             .is_some(),
         "sealed receipt is strict restore authority"
     );
@@ -200,7 +204,11 @@ pub(crate) async fn test_assert_sealed_cached_delivery(
     assert!(serve
         .shared
         .retained_artifacts
-        .acquire_expected_for_request(&changed, rendition, &rendition.recipe.retained_logical)
+        .acquire_expected_for_request(
+            &changed,
+            &rendition.retained_probe(),
+            &rendition.recipe.retained_logical,
+        )
         .is_none());
     let readers = rendition.readers.lock().await;
     let manifest = rendition.manifest.lock().await;
@@ -392,6 +400,26 @@ pub(super) struct PreparedOrigin {
     executable: String,
     engine: String,
     source_metadata: [u8; 32],
+}
+
+impl PreparedOrigin {
+    /// Mint the origin of a settled static S from the same run that encoded
+    /// it. The run's own executable and engine digests and the admitted
+    /// source metadata are the authority; no Store row or manifest is read.
+    #[cfg(target_os = "linux")]
+    pub(super) fn settled_static(
+        reservation: uuid::Uuid,
+        artifact_id: uuid::Uuid,
+        provenance: &super::background_artifact::StaticArtifactProvenance,
+    ) -> Self {
+        Self {
+            _reservation: reservation,
+            artifact_id,
+            executable: provenance.executable.clone(),
+            engine: provenance.engine.clone(),
+            source_metadata: provenance.source_metadata,
+        }
+    }
 }
 
 /// Private versioned metadata identity complements the held physical object
@@ -1270,7 +1298,7 @@ impl RetainedArtifactRegistry {
     pub(super) fn acquire_expected_for_request(
         &self,
         facts: &crate::transcode::RetainedOutputFacts,
-        rendition: &Rendition,
+        probe: &RetainedAttachProbe<'_>,
         incoming_logical: &Option<super::retained_manifest::LogicalOutput>,
     ) -> Option<Arc<RetainedVodArtifact>> {
         if !facts.valid() {
@@ -1287,18 +1315,15 @@ impl RetainedArtifactRegistry {
         let artifact = self.acquire(&origin)?;
         (artifact.facts() == *facts
             && artifact.logical == *incoming_logical
-            && (artifact.recipe_key == rendition.key
+            && (artifact.recipe_key == probe.key
                 || ((artifact.durable
                     || artifact
                         .private_preparation_origin
                         .get()
                         .is_some_and(|origin| origin.artifact_id == artifact.id))
                     && artifact.logical.is_some()
-                    && artifact.observation.preimage.playlist.as_slice()
-                        == rendition.playlist.as_slice()))
-            && rendition.source.as_ref().is_some_and(|source| {
-                source.unchanged() && source.object_version() == artifact.source_version
-            }))
+                    && artifact.observation.preimage.playlist.as_slice() == probe.playlist))
+            && probe.attaches_under_source_version(&artifact.source_version))
         .then_some(artifact)
     }
 
@@ -1307,14 +1332,14 @@ impl RetainedArtifactRegistry {
     /// PreparedOrigin; restart discovery does not participate in this lookup.
     pub(super) async fn acquire_prepared_manual(
         &self,
-        rendition: &Rendition,
+        probe: &RetainedAttachProbe<'_>,
         incoming_logical: &Option<super::retained_manifest::LogicalOutput>,
         incoming_file: &MediaFile,
     ) -> Option<Arc<RetainedVodArtifact>> {
-        if rendition.recipe.measured_candidate.is_some() || incoming_logical.is_none() {
+        if probe.recipe.measured_candidate.is_some() || incoming_logical.is_none() {
             return None;
         }
-        self.acquire_prepared_private(rendition, incoming_logical, incoming_file, None)
+        self.acquire_prepared_private(probe, incoming_logical, incoming_file, None)
             .await
     }
 
@@ -1322,7 +1347,7 @@ impl RetainedArtifactRegistry {
     /// never a persisted job result or a discovered manifest.
     pub(super) async fn acquire_prepared_candidate(
         &self,
-        rendition: &Rendition,
+        probe: &RetainedAttachProbe<'_>,
         incoming_logical: &Option<super::retained_manifest::LogicalOutput>,
         incoming_file: &MediaFile,
         request: &SessionRequest,
@@ -1330,19 +1355,19 @@ impl RetainedArtifactRegistry {
         if tracing::enabled!(target: "plurxd::vodserve", tracing::Level::DEBUG) {
             tracing::debug!(target: "plurxd::vodserve",
                 context_present = request.candidate_context.is_some(),
-                binding_present = rendition.recipe.measured_candidate.is_some(),
+                binding_present = probe.recipe.measured_candidate.is_some(),
                 incoming_logical_present = incoming_logical.is_some(),
                 request_audio_present = request.audio_delivery.is_some(),
-                recipe_audio_present = rendition.recipe.audio_delivery.is_some(),
+                recipe_audio_present = probe.recipe.audio_delivery.is_some(),
                 request_audio_valid = request.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
-                recipe_audio_valid = rendition.recipe.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
-                audio_identity_matches = request.audio_delivery.as_ref().zip(rendition.recipe.audio_delivery.as_ref())
+                recipe_audio_valid = probe.recipe.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
+                audio_identity_matches = request.audio_delivery.as_ref().zip(probe.recipe.audio_delivery.as_ref())
                     .is_some_and(|(r, a)| r.byte_identity() == a.byte_identity()),
                 "Prepared candidate acquisition prerequisites");
             if let Some((context, binding)) = request
                 .candidate_context
                 .as_ref()
-                .zip(rendition.recipe.measured_candidate.as_ref())
+                .zip(probe.recipe.measured_candidate.as_ref())
             {
                 let candidate = &context.selected_candidate;
                 let matches = serde_json::json!({
@@ -1372,7 +1397,7 @@ impl RetainedArtifactRegistry {
             }
         }
         let context = request.candidate_context.as_ref()?;
-        let binding = rendition.recipe.measured_candidate.as_ref()?;
+        let binding = probe.recipe.measured_candidate.as_ref()?;
         let candidate = &context.selected_candidate;
         if request.presentation != crate::transcode::Presentation::Vod
             || !candidate.identity_matches()
@@ -1407,23 +1432,19 @@ impl RetainedArtifactRegistry {
             request.audio_delivery.as_ref()?
         };
         if !audio.valid_snapshot()
-            || !rendition
-                .recipe
-                .audio_delivery
-                .as_ref()
-                .is_some_and(|actual| {
-                    actual.valid_snapshot() && actual.byte_identity() == audio.byte_identity()
-                })
+            || !probe.recipe.audio_delivery.as_ref().is_some_and(|actual| {
+                actual.valid_snapshot() && actual.byte_identity() == audio.byte_identity()
+            })
         {
             return None;
         }
-        self.acquire_prepared_private(rendition, incoming_logical, incoming_file, Some(binding))
+        self.acquire_prepared_private(probe, incoming_logical, incoming_file, Some(binding))
             .await
     }
 
     async fn acquire_prepared_private(
         &self,
-        rendition: &Rendition,
+        probe: &RetainedAttachProbe<'_>,
         incoming_logical: &Option<super::retained_manifest::LogicalOutput>,
         incoming_file: &MediaFile,
         candidate: Option<&RetainedCandidateBinding>,
@@ -1434,9 +1455,9 @@ impl RetainedArtifactRegistry {
                 "Prepared retained output acquisition unavailable");
             return None;
         }
-        let (executable_digest, engine_digest) = match &rendition.recipe.encoding {
+        let (executable_digest, engine_digest) = match &probe.recipe.encoding {
             Some(encoding) => {
-                if !recipe_engine_is_current(&rendition.recipe).await {
+                if !recipe_engine_is_current(probe.recipe).await {
                     tracing::debug!(target: "plurxd::vodserve",
                         recipe_engine_current = false,
                         "Prepared retained output acquisition unavailable");
@@ -1497,15 +1518,15 @@ impl RetainedArtifactRegistry {
                         source_metadata_matches = origin.is_some_and(|o| o.source_metadata == source_metadata),
                         candidate_matches = artifact.candidate.as_ref() == candidate,
                         actual_audio_valid = artifact.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
-                        requested_audio_valid = rendition.recipe.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
-                        audio_identity_matches = artifact.audio_delivery.as_ref().zip(rendition.recipe.audio_delivery.as_ref())
+                        requested_audio_valid = probe.recipe.audio_delivery.as_ref().is_some_and(|a| a.valid_snapshot()),
+                        audio_identity_matches = artifact.audio_delivery.as_ref().zip(probe.recipe.audio_delivery.as_ref())
                             .is_some_and(|(a, r)| a.byte_identity() == r.byte_identity()),
                         validated = artifact.validated.load(Acquire),
                         logical_matches = artifact.logical == *incoming_logical,
-                        playlist_matches = artifact.observation.preimage.playlist == rendition.playlist,
-                        source_present = rendition.source.is_some(),
-                        source_unchanged = rendition.source.as_ref().is_some_and(|s| s.unchanged()),
-                        source_version_matches = rendition.source.as_ref().is_some_and(|s| s.object_version() == artifact.source_version),
+                        playlist_matches = artifact.observation.preimage.playlist.as_slice() == probe.playlist,
+                        source_present = probe.source_present(),
+                        source_unchanged = probe.source_unchanged(),
+                        source_version_matches = probe.attaches_under_source_version(&artifact.source_version),
                         candidate_fields = %binding,
                         logical_fields = ?logical,
                         "Prepared retained output acquisition comparison");
@@ -1520,7 +1541,7 @@ impl RetainedArtifactRegistry {
                         artifact
                             .audio_delivery
                             .as_ref()
-                            .zip(rendition.recipe.audio_delivery.as_ref())
+                            .zip(probe.recipe.audio_delivery.as_ref())
                             .is_some_and(|(actual, requested)| {
                                 actual.valid_snapshot()
                                     && requested.valid_snapshot()
@@ -1529,14 +1550,12 @@ impl RetainedArtifactRegistry {
                     })
                     && artifact.validated.load(Acquire)
                     && artifact.logical == *incoming_logical
-                    && artifact.observation.preimage.playlist == rendition.playlist
-                    && rendition.source.as_ref().is_some_and(|source| {
-                        source.unchanged() && source.object_version() == artifact.source_version
-                    }))
+                    && artifact.observation.preimage.playlist.as_slice() == probe.playlist
+                    && probe.attaches_under_source_version(&artifact.source_version))
                 .then(|| artifact.facts())
             })
         }?;
-        self.acquire_expected_for_request(&facts, rendition, incoming_logical)
+        self.acquire_expected_for_request(&facts, probe, incoming_logical)
     }
 
     /// Only an exact issued proof may request lazy full-byte validation. The
@@ -1550,7 +1569,7 @@ impl RetainedArtifactRegistry {
         budget: Duration,
     ) -> Option<Arc<RetainedVodArtifact>> {
         if let Some(artifact) =
-            self.acquire_expected_for_request(facts, rendition, incoming_logical)
+            self.acquire_expected_for_request(facts, &rendition.retained_probe(), incoming_logical)
         {
             return Some(artifact);
         }
@@ -1626,7 +1645,7 @@ impl RetainedArtifactRegistry {
             return None;
         }
         artifact.validated.store(true, Release);
-        self.acquire_expected_for_request(facts, rendition, incoming_logical)
+        self.acquire_expected_for_request(facts, &rendition.retained_probe(), incoming_logical)
     }
     #[cfg(test)]
     pub(super) fn acquire_expected(
@@ -1634,7 +1653,11 @@ impl RetainedArtifactRegistry {
         facts: &crate::transcode::RetainedOutputFacts,
         rendition: &Rendition,
     ) -> Option<Arc<RetainedVodArtifact>> {
-        self.acquire_expected_for_request(facts, rendition, &rendition.recipe.retained_logical)
+        self.acquire_expected_for_request(
+            facts,
+            &rendition.retained_probe(),
+            &rendition.recipe.retained_logical,
+        )
     }
     #[cfg(test)]
     async fn reacquire_expected(
@@ -2795,7 +2818,12 @@ mod tests {
         let reused = serve
             .shared
             .retained_artifacts
-            .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &request)
+            .acquire_prepared_candidate(
+                &rendition.retained_probe(),
+                logical,
+                &rendition.recipe.file,
+                &request,
+            )
             .await
             .expect("reuse exact server-resolved encoded audio");
         assert_eq!(reused.facts(), facts);
@@ -2818,7 +2846,12 @@ mod tests {
             serve
                 .shared
                 .retained_artifacts
-                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &altered)
+                .acquire_prepared_candidate(
+                    &rendition.retained_probe(),
+                    logical,
+                    &rendition.recipe.file,
+                    &altered
+                )
                 .await
                 .is_none(),
             "changed route claim refuses"
@@ -2829,7 +2862,12 @@ mod tests {
             serve
                 .shared
                 .retained_artifacts
-                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &altered)
+                .acquire_prepared_candidate(
+                    &rendition.retained_probe(),
+                    logical,
+                    &rendition.recipe.file,
+                    &altered
+                )
                 .await
                 .is_none(),
             "changed source offset refuses"
@@ -2844,7 +2882,12 @@ mod tests {
             serve
                 .shared
                 .retained_artifacts
-                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &altered)
+                .acquire_prepared_candidate(
+                    &rendition.retained_probe(),
+                    logical,
+                    &rendition.recipe.file,
+                    &altered
+                )
                 .await
                 .is_none(),
             "explicit mismatched audio must not fallback"
@@ -2865,7 +2908,12 @@ mod tests {
             serve
                 .shared
                 .retained_artifacts
-                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &invalid)
+                .acquire_prepared_candidate(
+                    &rendition.retained_probe(),
+                    logical,
+                    &rendition.recipe.file,
+                    &invalid
+                )
                 .await
                 .is_none(),
             "invalid explicit snapshot must not fallback"
@@ -2876,7 +2924,12 @@ mod tests {
             serve
                 .shared
                 .retained_artifacts
-                .acquire_prepared_candidate(&rendition, logical, &rendition.recipe.file, &claimless)
+                .acquire_prepared_candidate(
+                    &rendition.retained_probe(),
+                    logical,
+                    &rendition.recipe.file,
+                    &claimless
+                )
                 .await
                 .is_none(),
             "missing snapshot cannot borrow authority without its typed claim"
@@ -2890,7 +2943,7 @@ mod tests {
                 .shared
                 .retained_artifacts
                 .acquire_prepared_candidate(
-                    &rendition,
+                    &rendition.retained_probe(),
                     &altered_logical,
                     &rendition.recipe.file,
                     &request
@@ -2998,7 +3051,11 @@ mod tests {
             serve
                 .shared
                 .retained_artifacts
-                .acquire_expected_for_request(&facts, &fresh, &fresh.recipe.retained_logical)
+                .acquire_expected_for_request(
+                    &facts,
+                    &fresh.retained_probe(),
+                    &fresh.recipe.retained_logical,
+                )
                 .expect("verified incoming cached attachment")
         };
         let session = Session {

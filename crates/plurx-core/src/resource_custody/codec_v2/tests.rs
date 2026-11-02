@@ -585,3 +585,5 @@ fn old_task_domain_extinction_requires_exact_root_and_process_identity() {
     *root_creation_marker = 0;
     assert!(validate_settlement(&manifest, &envelopes, &zero_marker).is_err());
 }
+
+mod copy_task_settlement;

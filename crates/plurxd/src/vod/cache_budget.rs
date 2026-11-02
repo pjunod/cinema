@@ -612,7 +612,7 @@ mod pressure_regressions {
     }
 }
 
-#[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
+#[cfg(all(test, target_os = "linux"))]
 pub(super) async fn pressure_evict_test(shared: &Arc<Shared>, path: &Path) -> io::Result<bool> {
     VodCacheOwner(Arc::downgrade(shared))
         .evict(&CacheCandidate {

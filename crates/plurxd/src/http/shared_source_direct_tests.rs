@@ -549,3 +549,154 @@ async fn sharing_source_direct_symlink_or_resized_file_refuses() {
     peer.stop().await;
     fixture.shutdown().await;
 }
+
+/// Native/SQL End precedes original typed ticket settlement. Cached reply
+/// actors retain their immutable kind, while only their redundant application
+/// alias retires at the actual joined-worker handoff. No fixture clears a lease.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_direct_original_restart_admission_moves_to_retained_ticket() {
+    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let session = started(&fixture).await;
+    let manager = &fixture.state.transcode;
+    assert_eq!(manager.fixture_source_direct_restart_custody(), (1, 0, 0));
+    let runtime = fixture
+        .state
+        .resource_runtime
+        .as_ref()
+        .expect("actual Direct runtime");
+    let charged = runtime.accounting().expect("original Direct R").used;
+    assert!(charged.handles > 0);
+    let gate = Arc::new(SourceReadJobGate::default());
+    let peer = peer(&fixture, Some(Arc::clone(&gate))).await;
+    let response = parked_body(&fixture, &session, &peer, &gate).await;
+    let fence = fixture
+        .state
+        .serving
+        .begin_restart_preparation_until(crate::state::clock_ms() as u64 + 60_000)
+        .await
+        .expect("actual planned-outage fence");
+    let status = fixture.state.serving.restart_drain_status(0).await;
+    assert_eq!(status.admissions_in_flight, 1);
+    assert!(!status.drained);
+    let client = reqwest::Client::builder().build().expect("End client");
+    let end_url = direct_url(peer.address, &fixture, &session, "end");
+    let headers = fixture.headers.clone();
+    let known = serde_json::to_vec(&session.known).expect("same known lineage");
+    let mut ending = tokio::spawn(async move {
+        client
+            .post(end_url)
+            .headers(headers)
+            .body(known)
+            .send()
+            .await
+            .expect("actual End")
+            .bytes()
+            .await
+            .expect("actual End receipt")
+    });
+    drop(response);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut ending)
+            .await
+            .is_err(),
+        "cancelled body/waiter must not settle the original parked native read"
+    );
+    assert!(!gate.complete());
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("native read still owns original R")
+            .used,
+        charged
+    );
+    assert_eq!(manager.fixture_source_direct_restart_custody(), (1, 0, 0));
+    assert_eq!(
+        fixture
+            .state
+            .serving
+            .restart_drain_status(0)
+            .await
+            .admissions_in_flight,
+        1
+    );
+    gate.release();
+    let receipt = tokio::time::timeout(Duration::from_secs(15), ending)
+        .await
+        .expect("FAILURE watchdog: original read did not join")
+        .expect("actual End owner");
+    let receipt: Value = serde_json::from_slice(&receipt).expect("terminal receipt");
+    assert_eq!(receipt["settled"], true);
+    assert_eq!(receipt["session_id"], session.known["session_id"]);
+    assert!(gate.complete() && gate.file_closed());
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            // Original maintenance positively joins the SAME worker and moves
+            // its actual ticket/guard; no synthetic completion is installed.
+            manager.reconcile_source_direct_tasks();
+            let custody = manager.fixture_source_direct_restart_custody();
+            if custody.1 == 1 {
+                assert_eq!(custody.0, 0);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("FAILURE watchdog: original direct ticket handoff missing");
+    let status = fixture.state.serving.restart_drain_status(0).await;
+    assert_eq!(status.admissions_in_flight, 1);
+    assert!(
+        !status.drained,
+        "native/SQL End alone cannot discharge original ticket custody"
+    );
+    assert_eq!(fixture.active_source_sessions().await, 0);
+    // This exclusive fixture runs original maintenance explicitly. Even if
+    // the actual finalizer returned, no completion counter can disarm before
+    // maintenance positively joins that SAME handle's successful result.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let custody = manager.fixture_source_direct_restart_custody();
+            assert_eq!(custody.0, 0);
+            assert_eq!(custody.1, 1);
+            if custody.2 == 1 {
+                assert_eq!(
+                    fixture
+                        .state
+                        .serving
+                        .restart_drain_status(0)
+                        .await
+                        .admissions_in_flight,
+                    1
+                );
+                manager.reconcile_source_direct_tasks();
+                assert_eq!(
+                    manager.fixture_source_direct_restart_custody(),
+                    (0, 0, 0),
+                    "only original finalizer joined Ok may remove guarded ticket"
+                );
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("FAILURE watchdog: genuine original ticket/app settlement did not finish");
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("actual joined typed refund")
+            .used,
+        plurx_core::adaptive_resources::ResourceVector::default()
+    );
+    let settled = fixture.state.serving.restart_drain_status(0).await;
+    assert_eq!(settled.admissions_in_flight, 0);
+    assert!(settled.drained);
+    fixture
+        .state
+        .serving
+        .cancel_planned_outage_preparation(fence, 0)
+        .await;
+    peer.stop().await;
+    fixture.shutdown().await;
+}

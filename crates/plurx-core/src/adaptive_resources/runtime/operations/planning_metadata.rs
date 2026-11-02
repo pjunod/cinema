@@ -4,42 +4,50 @@ use super::*;
 use crate::resource_custody::PhysicalTypedSettlement;
 
 impl NodeResourceRuntime {
-    pub(in crate::adaptive_resources::runtime) fn register_planning_metadata(
+    /// Called only by the fixed initializer while the original bundle is
+    /// private and the operations book excludes every observer. Never call
+    /// validate_preparation or another book-locking registration from here.
+    pub(in crate::adaptive_resources::runtime) fn initialize_private_planning(
         &self,
         owner: &OwnedPreparation,
         application_bytes: usize,
         book_structural_bytes: u64,
-    ) -> Result<(), OperationError> {
-        self.validate_preparation(owner)?;
-        let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
-        if bundle.roles.len() != 2 {
-            return Err(OperationError::State);
-        }
+        expected_metadata_bytes: u64,
+        tasks: super::planning_tasks::PreparedPlanningTasks,
+    ) -> super::planning_tasks::PlanningOwnerFences {
+        let mut bundle = owner
+            .state
+            .try_lock()
+            .expect("unpublished original P/M bundle");
+        assert_eq!(bundle.roles.len(), 2, "fixed original P/M composition");
         let role = &mut bundle.roles[1];
-        let [v2::MemberPlan::FixedProbeMetadataV1 { metadata, .. }] =
-            role.typed_members.as_deref().ok_or(OperationError::State)?
+        let [v2::MemberPlan::FixedProbeMetadataV1 { metadata, .. }] = role
+            .typed_members
+            .as_deref()
+            .expect("bound private metadata plan")
         else {
-            return Err(OperationError::State);
+            unreachable!("fixed private metadata member");
         };
-        if role.planning_metadata.is_some()
-            || role.finite_app.is_some()
-            || u64::try_from(application_bytes).map_or(true, |bytes| {
-                bytes
-                    .checked_add(book_structural_bytes)
-                    .is_none_or(|total| total >= metadata.retained_memory_bytes)
-            })
-        {
-            return Err(OperationError::State);
-        }
+        assert!(role.planning_metadata.is_none() && role.finite_app.is_none());
+        // Pure plan arithmetic established this strict report remainder before
+        // reservation. No fallible conversion/allocation protocol starts here.
+        assert_eq!(
+            metadata.retained_memory_bytes, expected_metadata_bytes,
+            "same prevalidated original metadata allowance"
+        );
         let state = super::super::planning_probe::PlanningMetadataRole::new(
             metadata.clone(),
             role.binding,
             application_bytes,
             book_structural_bytes,
         );
-        role.finite_app = Some(Arc::clone(&state.release.application));
+        let release = Arc::clone(&state.release);
+        let cleanup = Arc::clone(&release.cleanup_requested);
+        let known_closed = Arc::clone(&release.known_closed);
+        role.finite_app = Some(Arc::clone(&release.application));
         role.planning_metadata = Some(state);
-        Ok(())
+        tasks.install(&mut bundle.roles[0]);
+        (release, cleanup, known_closed)
     }
 
     /// Logical attempt cleanup may retain its exact Close DTO/controller under
@@ -116,6 +124,7 @@ impl NodeResourceRuntime {
         };
         if original != &metadata.plan
             || !metadata.release.application.released()
+            || role.graph.is_some()
             || !role.sources.is_empty()
             || !role.roots.is_empty()
             || !role.drains.is_empty()
@@ -174,6 +183,12 @@ impl NodeResourceRuntime {
             })),
             effect: Effect::Settle,
         });
+        // The exact empty original M graph was validated above. Destroy it
+        // before the final rich-bundle drop takes ledger.inner: its Drop
+        // conservatively locks that ledger to retain the original charge.
+        // The one-shot metadata closure/command is already retained, and no
+        // await or fallible step separates that transfer from this drop.
+        role.sealed = None;
         Ok(())
     }
 }

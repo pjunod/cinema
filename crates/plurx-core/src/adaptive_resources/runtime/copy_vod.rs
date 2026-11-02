@@ -8,20 +8,25 @@ use crate::copy_segmenter::Limits;
 use crate::fmp4::FragmentReaderBounds;
 use std::time::Duration;
 
+mod cleanup_custody;
+pub(in crate::adaptive_resources::runtime) mod cleanup_memory;
 mod command;
 mod owner;
 mod sink;
 
+pub(in crate::adaptive_resources::runtime) use cleanup_custody::{
+    CopyCleanupCustody, CopyCloseClaim,
+};
 pub use command::CopyPipeCommand;
 pub use owner::{
-    CopyCloseTicket, CopyFile, CopyOutput, CopyProductionResult, CopyServedRevision, CopyVodOwner,
-    COPY_VOD_MAX_SEGMENT_BYTES,
+    CopyCleanupHoldDiagnostic, CopyCleanupHoldReason, CopyCloseTicket, CopyFile, CopyOutput,
+    CopyProductionResult, CopyServedRevision, CopyVodOwner, COPY_VOD_MAX_SEGMENT_BYTES,
 };
 pub(in crate::adaptive_resources) use sink::CopySink;
 
 impl NodeResourceRuntime {
-    /// Read-only maintenance diagnostic for an admitted copy constructor that
-    /// failed after its original R was charged. Busy book cells conservatively
+    /// Read-only maintenance diagnostic for original copy cleanup without a
+    /// live close claim. Busy book cells conservatively
     /// report true; a false answer is never physical close authority.
     pub fn has_failed_copy_admission(&self) -> bool {
         self.has_failed_copy_admission_inner()
@@ -44,6 +49,7 @@ impl NodeResourceRuntime {
 /// The daemon supplies policy bounds; they confer no native entry authority.
 pub struct CopyVodRequest {
     pub rendition_id: String,
+    /// Nonzero typed asset generation, fixed before admission.
     pub generation_epoch: u64,
     pub recipe_source_binding: String,
     pub source: FiniteSourceRequest,
@@ -61,6 +67,11 @@ pub struct CopyVodRequest {
 }
 
 impl CopyVodRequest {
+    /// First typed asset generation of a newly admitted immutable owner.
+    /// The legacy scheduler's zero-based epoch is a separate counter; this
+    /// value never resets or rewrites an existing admitted asset.
+    pub const INITIAL_GENERATION_EPOCH: u64 = 1;
+
     /// The fixed parser/name cardinality. A source duration cannot prove a
     /// smaller count: the rolling strict-target cut can precede the nominal
     /// six-second floor, and EOF can emit another short segment. Exhausting

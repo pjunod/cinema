@@ -28,6 +28,7 @@ const ENCODED_MARKER_BYTES: u64 = 4 * 1024;
 pub(crate) struct FiniteSoftwareProducer {
     owner: Mutex<SoftwareVodOwner>,
     cache_grant: std::sync::Mutex<Option<crate::playback_cache::FiniteCacheReservation>>,
+    compatibility: std::sync::Mutex<Option<crate::vodencode::FiniteSoftwareCompatibility>>,
     // Captured before publication. Source-spec paths are only removed and
     // source Vec capacities never grow; no live owner lock is needed while
     // the original driver holds it through production and retirement.
@@ -74,12 +75,14 @@ impl FiniteSoftwareProducer {
     pub(crate) fn new(
         owner: SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
+        compatibility: crate::vodencode::FiniteSoftwareCompatibility,
     ) -> Self {
         Self {
             control: owner.control(),
             owner_heap_bound: owner.requested_heap_bytes(),
             owner: Mutex::new(owner),
             cache_grant: std::sync::Mutex::new(Some(cache_grant)),
+            compatibility: std::sync::Mutex::new(Some(compatibility)),
             stage: AtomicU8::new(PREPARED),
             produced_through: AtomicU64::new(0),
             suspended: AtomicBool::new(false),
@@ -93,7 +96,25 @@ impl FiniteSoftwareProducer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
+    pub(super) fn take_compatibility(
+        &self,
+    ) -> Option<crate::vodencode::FiniteSoftwareCompatibility> {
+        self.compatibility
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+    fn compatibility_reservation(&self) -> Option<crate::vodencode::EncodePermit> {
+        self.compatibility
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(crate::vodencode::FiniteSoftwareCompatibility::reservation)
+    }
     fn commit_retained_cache(&self) {
+        if let Some(compatibility) = self.take_compatibility() {
+            compatibility.known_retired();
+        }
         if let Some(grant) = self.take_cache_grant() {
             grant.retained();
         }
@@ -109,7 +130,8 @@ impl FiniteSoftwareProducer {
     pub(super) fn projected_heap_bytes(owner_heap: usize) -> Option<usize> {
         std::mem::size_of::<Self>()
             .checked_add(2 * std::mem::size_of::<usize>())?
-            .checked_add(owner_heap)
+            .checked_add(owner_heap)?
+            .checked_add(crate::vodencode::FiniteSoftwareCompatibility::requested_heap_bytes()?)
     }
 
     /// Resolve and observe the original media and held executable before a
@@ -357,17 +379,31 @@ pub(super) fn projected_driver_future_bytes() -> usize {
     ) -> usize {
         std::mem::size_of::<F>()
     }
-    fn metadata_frame_bytes<
-        F: std::future::Future<Output = Result<(FiniteMetadataLease, FiniteClientStateLease), String>>,
+    type BuildFutureFactory<F> = fn(
+        &'static Arc<Shared>,
+        &'static str,
+        Option<FragmentIndex>,
+        Recipe,
+        SegmentPlan,
+        &'static VodSettings,
+        Option<usize>,
+        &'static mut Option<super::shared::PreparedAttemptCleanup>,
+    ) -> F;
+    fn build_frame_bytes<
+        F: std::future::Future<
+            Output = Result<(Arc<Rendition>, Option<FiniteApplicationLease>), String>,
+        >,
     >(
-        _: fn(&'static Shared, &'static str, &'static FiniteOutput, usize, usize, Instant) -> F,
+        _: BuildFutureFactory<F>,
     ) -> usize {
         std::mem::size_of::<F>()
     }
-    // Include the concrete construction-hook, original borrowed cell wait and
-    // timeout frame. Private executor/timer/allocator storage remains Unknown.
+    // The concrete builder already contains its metadata-hook/timeout child
+    // frame, compatibility wait, finalized u32 and same-grant locals. Count
+    // that actual layout once, beside the original driver future. Plain tuple
+    // fields add no heap; private executor/timer/allocator peaks remain Unknown.
     frame_bytes(run)
-        .checked_add(metadata_frame_bytes(reserve_metadata_until))
+        .checked_add(build_frame_bytes(build_inner))
         .expect("compiler-projected finite frames fit usize")
 }
 
@@ -507,62 +543,14 @@ async fn build_inner(
             )
             .await
             .map_err(|error| format!("reserving recovered finite rendition metadata: {error}"))?;
-        let deadline = Instant::now() + settings.materialize_budget;
-        let identity_len = output
-            .file_len(FiniteFile::IdentityMetadata)
-            .await
-            .map_err(|error| format!("reading recovered finite identity length: {error}"))?
-            .ok_or("recovered finite identity is missing")?;
-        let mut identity_file = ReadyFile::Finite {
-            output: output.clone(),
-            file: FiniteFile::IdentityMetadata,
-            len: identity_len,
-        };
-        let identity_bytes = identity_file
-            .read_all_bounded(IDENTITY_METADATA_BYTES, deadline)
-            .await
-            .map_err(|error| format!("reading recovered finite identity: {error}"))?;
-        let identity = init::decode_identity(&identity_bytes)
-            .ok_or("recovered finite identity is malformed")?;
-        drop(identity_bytes);
-        if !output.has_encoded_process_metadata() {
-            return Err("recovered finite process marker is absent".into());
-        }
-        let marker_len = output
-            .file_len(FiniteFile::EncodedProcessMetadata)
-            .await
-            .map_err(|error| format!("reading recovered finite marker length: {error}"))?
-            .ok_or("recovered finite process marker is missing")?;
-        let mut marker_file = ReadyFile::Finite {
-            output: output.clone(),
-            file: FiniteFile::EncodedProcessMetadata,
-            len: marker_len,
-        };
-        let marker = marker_file
-            .read_all_bounded(ENCODED_MARKER_BYTES, deadline)
-            .await
-            .map_err(|error| format!("reading recovered finite process marker: {error}"))?;
-        let current = recipe
-            .encoding
-            .as_ref()
-            .ok_or("recovered finite encoding is missing")?
-            .engine
-            .stable_software_digest()
-            .ok_or("same-boot finite software engine identity unavailable")?;
-        if std::str::from_utf8(&marker).ok().map(str::trim) != Some(current) {
-            return Err("recovered finite output belongs to another boot or engine".into());
-        }
-        let mut manifest = Manifest::new(plan.clone());
-        for entry in 0..segment_count {
-            let len = output
-                .file_len(FiniteFile::Segment(entry))
-                .await
-                .map_err(|error| format!("reading recovered finite segment {entry}: {error}"))?
-                .ok_or_else(|| format!("recovered finite segment {entry} is missing"))?;
-            if !manifest.materialize(entry, len, now_ms()) {
-                return Err("recovered finite segment is outside the immutable plan".into());
-            }
-        }
+        let (manifest, identity) = completed_output_state(
+            &output,
+            &recipe,
+            &plan,
+            segment_count,
+            Instant::now() + settings.materialize_budget,
+        )
+        .await?;
         let dir = RenditionDir::from_finite(output);
         let rendition = Shared::construct_rendition(
             key,
@@ -630,7 +618,7 @@ async fn build_inner(
             "finite software admission refused: no unspent hard CPU budget",
         ));
     }
-    let mut request = finite_profile::compile(
+    let (mut request, finalized_encoder_threads) = finite_profile::compile(
         shared,
         key,
         &recipe,
@@ -645,6 +633,26 @@ async fn build_inner(
             .charge_application_owner_bytes(bytes)
             .map_err(|error| format!("charging adaptive attempt owner: {error}"))?;
     }
+    // This aliases the same selected request for legacy compatibility only.
+    // The core CPU demand above came from hard total capacity; do not subtract
+    // this thread-pool claim again or add it as another physical core role.
+    let compatibility = recipe
+        .encoding
+        .as_ref()
+        .expect("selected finite encoding")
+        .admit_finite_compatibility(
+            software_pool_threads,
+            finalized_encoder_threads,
+            false,
+            admission_deadline,
+        )
+        .await
+        .ok_or_else(|| {
+            crate::transcode::vod_refusal_error(
+                "vod_family_capacity",
+                "finite software compatibility pool is occupied",
+            )
+        })?;
     // Reserve before the cleanup-map lock: global pressure calls back into
     // owners. No R/output IO exists while this borrowed await is pending.
     let cache_grant = tokio::time::timeout_at(
@@ -669,11 +677,13 @@ async fn build_inner(
     .await
     .map_err(|_| "finite build cleanup slot deadline elapsed".to_owned())??;
     let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
+    let compatibility = compatibility.enter();
     let owner = match runtime.prepare_software_vod(request, admission_deadline) {
         Ok(owner) => owner,
         Err(error) => {
             if error.definitely_before_reservation() {
                 cache_grant.known_closed();
+                compatibility.known_retired();
             }
             return Err(if let Some(refusal) = error.admission_refusal() {
                 crate::transcode::vod_refusal_error(
@@ -714,7 +724,7 @@ async fn build_inner(
     let application_lease = application_owner_bytes
         .map(|bytes| owner.take_application_lease(bytes))
         .transpose();
-    let dir = build_slot.install(owner, cache_grant);
+    let dir = build_slot.install(owner, cache_grant, compatibility);
     let output = dir
         .finite_output()
         .expect("installed original finite output");
@@ -781,6 +791,30 @@ async fn build_inner(
         manifest,
         IdentityState::default(),
     );
+    // Continuous/family attachment adopts this SAME entitlement, rather than
+    // charging another compatibility permit. The producer retains its worker
+    // claim so this alias cannot enter a second native generation.
+    let compatibility_alias = producer
+        .compatibility_reservation()
+        .expect("fresh finite producer retains original compatibility claim");
+    let same_compatibility = {
+        let mut binding = rendition.retained_admission.lock_binding();
+        binding.current().is_none()
+            && binding
+                .bind(compatibility_alias.clone())
+                .same_reservation(&compatibility_alias)
+    };
+    if !same_compatibility {
+        if application_owner_bytes.is_some() {
+            *failed_attempt_cleanup = Some(
+                rendition
+                    .dir
+                    .finite_build_cleanup_selector()
+                    .expect("failed fresh finite binding retains original cleanup arm"),
+            );
+        }
+        return Err("fresh finite compatibility entitlement is not the original claim".into());
+    }
     match attach_metadata_partitions(rendition, metadata_lease, client_lease) {
         Ok(rendition) => Ok((rendition, application_lease)),
         Err((error, rendition)) => {
@@ -796,6 +830,135 @@ async fn build_inner(
             Err(error)
         }
     }
+}
+
+/// Read the complete immutable serving state of an existing finite S: its
+/// identity, same-boot encoded process marker and every planned segment
+/// length. This opens counted reads only; it never acquires or closes S.
+async fn completed_output_state(
+    output: &FiniteOutput,
+    recipe: &Recipe,
+    plan: &SegmentPlan,
+    segment_count: u32,
+    deadline: Instant,
+) -> Result<(Manifest, InitIdentity), String> {
+    let identity_len = output
+        .file_len(FiniteFile::IdentityMetadata)
+        .await
+        .map_err(|error| format!("reading finite output identity length: {error}"))?
+        .ok_or("finite output identity is missing")?;
+    let mut identity_file = ReadyFile::Finite {
+        output: output.clone(),
+        file: FiniteFile::IdentityMetadata,
+        len: identity_len,
+    };
+    let identity_bytes = identity_file
+        .read_all_bounded(IDENTITY_METADATA_BYTES, deadline)
+        .await
+        .map_err(|error| format!("reading finite output identity: {error}"))?;
+    let identity =
+        init::decode_identity(&identity_bytes).ok_or("finite output identity is malformed")?;
+    drop(identity_bytes);
+    if !output.has_encoded_process_metadata() {
+        return Err("finite output process marker is absent".into());
+    }
+    let marker_len = output
+        .file_len(FiniteFile::EncodedProcessMetadata)
+        .await
+        .map_err(|error| format!("reading finite output marker length: {error}"))?
+        .ok_or("finite output process marker is missing")?;
+    let mut marker_file = ReadyFile::Finite {
+        output: output.clone(),
+        file: FiniteFile::EncodedProcessMetadata,
+        len: marker_len,
+    };
+    let marker = marker_file
+        .read_all_bounded(ENCODED_MARKER_BYTES, deadline)
+        .await
+        .map_err(|error| format!("reading finite output process marker: {error}"))?;
+    let current = recipe
+        .encoding
+        .as_ref()
+        .ok_or("finite output encoding is missing")?
+        .engine
+        .stable_software_digest()
+        .ok_or("same-boot finite software engine identity unavailable")?;
+    if std::str::from_utf8(&marker).ok().map(str::trim) != Some(current) {
+        return Err("finite output output belongs to another boot or engine".into());
+    }
+    let mut manifest = Manifest::new(plan.clone());
+    for entry in 0..segment_count {
+        let len = output
+            .file_len(FiniteFile::Segment(entry))
+            .await
+            .map_err(|error| format!("reading finite output segment {entry}: {error}"))?
+            .ok_or_else(|| format!("finite output segment {entry} is missing"))?;
+        if !manifest.materialize(entry, len, now_ms()) {
+            return Err("finite output segment is outside the immutable plan".into());
+        }
+    }
+    Ok((manifest, identity))
+}
+
+/// The serving rendition for a session that an exposed retained S captured
+/// before any R was admitted. The retained registry alone owns that S: this
+/// rendition borrows its counted output in the recovered-S shape, with no
+/// producer, build slot or cache admission of its own. Its metadata and
+/// reader partitions are charged to the settled S's own role.
+pub(super) async fn retained_carrier(
+    shared: &Shared,
+    key: &str,
+    index: Option<FragmentIndex>,
+    recipe: Recipe,
+    plan: SegmentPlan,
+    settings: &VodSettings,
+    output: FiniteOutput,
+) -> Result<Arc<Rendition>, String> {
+    let segment_count = u32::try_from(plan.len())
+        .map_err(|_| "finite software segment count overflows".to_owned())?;
+    let deadline = Instant::now() + settings.materialize_budget;
+    // The carrier's daemon metadata and reader tables are charged to the
+    // settled S's own role partitions, like a recovered S. The carrier never
+    // mints a closing owner, so no closing-owner heap is projected.
+    let projected_metadata = finite_metadata::projected_requested_heap_bytes(
+        &recipe,
+        index.as_ref(),
+        &plan,
+        key,
+        &shared.base.join(key),
+    )
+    .and_then(|bytes| bytes.checked_add(output.requested_heap_bytes()?))
+    .ok_or("retained carrier metadata projection overflowed or is unsupported")?;
+    let (metadata_lease, client_lease) = reserve_metadata_until(
+        shared,
+        key,
+        &output,
+        projected_metadata,
+        finite_profile::CLIENT_STATE_BYTES as usize,
+        deadline,
+    )
+    .await?;
+    let (manifest, identity) =
+        completed_output_state(&output, &recipe, &plan, segment_count, deadline).await?;
+    let rendition = Shared::construct_rendition(
+        key,
+        RenditionDir::from_retained_finite(output),
+        recipe,
+        None,
+        plan,
+        index,
+        settings,
+        None,
+        false,
+        None,
+        manifest,
+        IdentityState {
+            identity: Some(identity),
+            from_disk: true,
+        },
+    );
+    attach_metadata_partitions(rendition, metadata_lease, client_lease)
+        .map_err(|(error, _rendition)| error)
 }
 
 pub(super) async fn run(

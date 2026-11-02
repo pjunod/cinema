@@ -422,6 +422,27 @@ impl SourceCell {
         Ok((lease, length, object_version))
     }
 
+    /// Pin this SAME committed original File for an alias-barrier fixture.
+    /// This does not consume the collector's one-shot lease or open an FD.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn planning_parent_alias_for_test(&self) -> Result<Arc<File>, OperationError> {
+        if !matches!(self.plan, v2::MemberPlan::FixedProbeDiscoverSourceV1 { .. })
+            || !self.observed_committed
+            || self.pending.is_some()
+            || self.spec.is_some()
+            || self.lease_issued
+            || !matches!(self.parent_close, ParentCloseState::NotStarted)
+        {
+            return Err(OperationError::State);
+        }
+        let file = self
+            .result
+            .as_ref()
+            .and_then(|result| result.file.as_ref())
+            .ok_or(OperationError::State)?;
+        Ok(Arc::clone(file))
+    }
+
     /// Await only the original source-open worker if it was registered. The
     /// actual file/observation remain cached; this does not launch or observe it.
     pub(super) async fn join_registered(&mut self) -> Result<(), OperationError> {
@@ -1543,6 +1564,13 @@ impl SourceCell {
                 }
             };
             let (enter, registered) = tokio::sync::oneshot::channel();
+            #[cfg(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            let close_operation = self.parent_close_operation_id;
             let task = runtime.spawn_blocking(move || {
                 if registered.blocking_recv().is_err() {
                     return ParentCloseOutcome::NotEntered;
@@ -1551,14 +1579,53 @@ impl SourceCell {
                 // SAFETY: this worker owns the original File allocation, has
                 // converted it to a raw descriptor, and calls close once.
                 let result = unsafe { libc::close(raw_fd) };
-                if result == 0 {
-                    ParentCloseOutcome::Closed
-                } else if let Some(errno) = std::io::Error::last_os_error().raw_os_error() {
-                    ParentCloseOutcome::Failed(errno)
-                } else {
-                    ParentCloseOutcome::Unknown
+                #[cfg(all(
+                    test,
+                    feature = "fixtures",
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ))]
+                {
+                    let outcome = if result == 0 {
+                        ParentCloseOutcome::Closed
+                    } else if let Some(errno) = std::io::Error::last_os_error().raw_os_error() {
+                        ParentCloseOutcome::Failed(errno)
+                    } else {
+                        ParentCloseOutcome::Unknown
+                    };
+                    super::native_result_fixture::after_result(
+                        super::native_result_fixture::Kind::SourceParentClose,
+                        close_operation,
+                    );
+                    outcome
+                }
+                #[cfg(not(all(
+                    test,
+                    feature = "fixtures",
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )))]
+                {
+                    if result == 0 {
+                        ParentCloseOutcome::Closed
+                    } else if let Some(errno) = std::io::Error::last_os_error().raw_os_error() {
+                        ParentCloseOutcome::Failed(errno)
+                    } else {
+                        ParentCloseOutcome::Unknown
+                    }
                 }
             });
+            #[cfg(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            super::native_result_fixture::bind_job(
+                super::native_result_fixture::Kind::SourceParentClose,
+                close_operation,
+                task.id(),
+            );
             self.parent_close = ParentCloseState::Registered {
                 task,
                 enter: Some(enter),
@@ -1704,6 +1771,19 @@ impl SourceCell {
         matches!(&self.parent_close, ParentCloseState::Closed)
     }
 
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_parent_close_job(&self) -> Option<tokio::task::Id> {
+        match &self.parent_close {
+            ParentCloseState::Registered { task, .. } => Some(task.id()),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn parent_close_operation_id(&self) -> Uuid {
         self.parent_close_operation_id
@@ -1740,6 +1820,148 @@ impl SourceCell {
         self.finite_closed_fact_with(FiniteProcessClosedProof::RootOnly(closure))
     }
 
+    /// Read-only sticky failure classification, never close/refund evidence.
+    /// A cancelled waiter leaves its SAME opener/closer handle retained and
+    /// remains retryable. Only consumed join failure or terminal close failure
+    /// is permanent; retrying a failed numeric close could hit a recycled fd.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn copy_cleanup_permanently_unknown(&self) -> bool {
+        if self.pending.is_some()
+            || matches!(&self.parent_close, ParentCloseState::Registered { .. })
+        {
+            return false;
+        }
+        self.failed_join
+            || matches!(
+                &self.parent_close,
+                ParentCloseState::Failed(_) | ParentCloseState::Unknown
+            )
+    }
+
+    /// Read only the SAME durably acknowledged root-copy metadata. Cleanup
+    /// may already have moved the original File into its retained closer, so
+    /// this must never borrow a descriptor, fstat or reconstruct an envelope.
+    /// A true result is acknowledgment data only, never native-close proof.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn copy_root_observation_committed(
+        &self,
+        root_member: Uuid,
+        acquisition_id: Uuid,
+    ) -> Result<bool, OperationError> {
+        let v2::MemberPlan::SourceV1 { source: plan, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        let v2::SourceRecovery::LocalSourceHandlesV1 { graph_id, .. } = &plan.recovery;
+        let mut roots = plan.planned_copies.iter().filter(|copy| {
+            matches!(copy.owner, v2::CopyOwner::OwnedRoot { graph_id: selected, root_member_id }
+                if selected == *graph_id && root_member_id.uuid() == root_member)
+        });
+        let root = roots.next().ok_or(OperationError::State)?;
+        if roots.next().is_some()
+            || root.acquisition_operation_id.uuid() != acquisition_id
+            || plan.planned_copies.len() != 2
+        {
+            return Err(OperationError::State);
+        }
+        if !self.root_observed_committed {
+            if self.selected_root_member.is_some()
+                || self
+                    .pending_root
+                    .as_ref()
+                    .is_some_and(|(member, copy, _)| *member != root_member || copy != root)
+            {
+                return Err(OperationError::State);
+            }
+            return Ok(false);
+        }
+        let observed = self
+            .result
+            .as_ref()
+            .and_then(|result| result.observed.as_ref())
+            .ok_or(OperationError::State)?;
+        if !self.observed_committed
+            || self.selected_root_member != Some(root_member)
+            || self.pending_root.is_some()
+            || observed.version != 1
+            || observed.holder_id != plan.holder_id
+            || observed.member_id != plan.member_id
+            || observed.source_association != plan.source_association
+            || observed.access != plan.access
+            || observed.native_object.filesystem_domain != plan.filesystem_domain
+            || observed.copies != plan.planned_copies
+        {
+            return Err(OperationError::State);
+        }
+        Ok(true)
+    }
+
+    /// Borrow only metadata from the SAME acknowledged source envelope for
+    /// pure settlement preflight. An open result before journal acknowledgment
+    /// is not a durable observation. The File/close worker is never accessed.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn copy_observed_for_settlement(
+        &self,
+        expected: &v2::MemberPlan,
+    ) -> Result<Option<&v2::SourceObserved>, OperationError> {
+        if &self.plan != expected || !matches!(expected, v2::MemberPlan::SourceV1 { .. }) {
+            return Err(OperationError::State);
+        }
+        if !self.observed_committed {
+            if self.root_observed_committed || self.selected_root_member.is_some() {
+                return Err(OperationError::State);
+            }
+            return Ok(None);
+        }
+        if self.root_observed_committed {
+            let root = self.selected_root_member.ok_or(OperationError::State)?;
+            let v2::MemberPlan::SourceV1 { source: plan, .. } = expected else {
+                return Err(OperationError::State);
+            };
+            let acquisition = plan
+                .planned_copies
+                .iter()
+                .find_map(|copy| {
+                    matches!(copy.owner, v2::CopyOwner::OwnedRoot { root_member_id, .. }
+                    if root_member_id.uuid() == root)
+                    .then_some(copy.acquisition_operation_id.uuid())
+                })
+                .ok_or(OperationError::State)?;
+            if !self.copy_root_observation_committed(root, acquisition)? {
+                return Err(OperationError::State);
+            }
+        } else if self.selected_root_member.is_some() {
+            return Err(OperationError::State);
+        }
+        self.result
+            .as_ref()
+            .and_then(|result| result.observed.as_ref())
+            .map(Some)
+            .ok_or(OperationError::State)
+    }
+
+    /// Negative fixture corruption AFTER real native closure/proof minting.
+    /// This touches no File/FD or closure capability; the existing fact
+    /// validator must reject parent/root close-operation identity collision.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::adaptive_resources::runtime::operations) fn fixture_parent_close_operation_collision(
+        &mut self,
+        root_close_operation: Uuid,
+    ) {
+        assert!(self.parent_closed());
+        self.parent_close_operation_id = root_close_operation;
+    }
+
+    /// The SAME copy root's native closure, with no registered parser, closes
+    /// only the inventoried inherited copy after this cell's checked parent
+    /// close. Unobserved root-copy enrichment still must match its exact slot.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn copy_root_only_closed_fact(
+        &self,
+        closure: &crate::adaptive_resources::physical_graph::copy_vod::CopyRootOnlyClosure,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        self.finite_closed_fact_with(FiniteProcessClosedProof::CopyRootOnly(closure))
+    }
+
     fn finite_closed_fact_with(
         &self,
         proof: FiniteProcessClosedProof<'_>,
@@ -1767,6 +1989,14 @@ impl SourceCell {
                     closure.acquisition_id(),
                     closure.close_operation_id(),
                     true,
+                ),
+                #[cfg(target_os = "linux")]
+                FiniteProcessClosedProof::CopyRootOnly(closure) => (
+                    closure.generation(),
+                    closure.root_member(),
+                    closure.acquisition_id(),
+                    closure.close_operation_id(),
+                    false,
                 ),
             };
         if !self.parent_closed()
@@ -1890,11 +2120,20 @@ impl SourceCell {
         &self,
         proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
     ) -> Result<(), OperationError> {
+        self.fixed_probe_native_absence_plan(proof, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixed_probe_native_absence_plan(
+        &self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+        joined_original_lease: bool,
+    ) -> Result<(), OperationError> {
         let v2::MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } = &self.plan else {
             return Err(OperationError::State);
         };
         if !proof.source_matches(source)
-            || self.lease_issued
+            || self.lease_issued && !joined_original_lease
             || self.failed_join
             || self.root_observed_committed
             || self.selected_root_member.is_some()
@@ -1945,11 +2184,102 @@ impl SourceCell {
     }
 
     #[cfg(target_os = "linux")]
+    fn fixed_probe_registered_nonentry_plan(
+        &self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+        joined: &super::planning_tasks::JoinedPlanningTaskNeverEntered,
+        binding: ReservationBinding,
+        join_operation: Uuid,
+    ) -> Result<(), OperationError> {
+        if !self.lease_issued
+            || !proof.registered_probe_matches(binding, joined.member())
+            || !joined.matches(binding, joined.member(), Some(join_operation))
+        {
+            return Err(OperationError::State);
+        }
+        self.fixed_probe_native_absence_plan(proof, true)
+    }
+
+    /// A registered probe issued its original held-source lease. Only the
+    /// SAME positively joined receiver-error witness authorizes checking that
+    /// original lease for extinction; Arc::try_unwrap still refuses aliases.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn close_fixed_probe_parent_after_registered_nonentry(
+        &mut self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+        joined: &super::planning_tasks::JoinedPlanningTaskNeverEntered,
+        binding: ReservationBinding,
+        join_operation: Uuid,
+    ) -> Result<(), OperationError> {
+        self.fixed_probe_registered_nonentry_plan(proof, joined, binding, join_operation)?;
+        self.join_registered().await?;
+        self.close_parent_inner(true, true).await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn fixed_probe_registered_nonentry_closed_fact(
+        &self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+        joined: &super::planning_tasks::JoinedPlanningTaskNeverEntered,
+        binding: ReservationBinding,
+        join_operation: Uuid,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        self.fixed_probe_registered_nonentry_plan(proof, joined, binding, join_operation)?;
+        self.fixed_probe_native_absence_closed_fact(proof, true)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn with_fixed_probe_unentered_observation(
+        &mut self,
+        preflight: impl FnOnce(&Option<v2::Observed>) -> Result<(), OperationError>,
+    ) -> Result<(), OperationError> {
+        if !self.observed_committed
+            || self.root_observed_committed
+            || self.pending_root.is_some()
+            || !self.parent_closed()
+        {
+            return Err(OperationError::State);
+        }
+        // Lend the SAME acknowledged metadata without cloning its dynamic
+        // strings/copy vector. Synchronous RAII restores it even if preflight
+        // rejects or unwinds; no original owner is moved across an await.
+        struct Restore<'a> {
+            slot: &'a mut Option<v2::SourceObserved>,
+            envelope: Option<v2::Observed>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                if let Some(v2::Observed::FixedProbeDiscoverSourceV1 { source }) =
+                    self.envelope.take()
+                {
+                    *self.slot = Some(source);
+                }
+            }
+        }
+        let slot = &mut self.result.as_mut().ok_or(OperationError::State)?.observed;
+        let source = slot.take().ok_or(OperationError::State)?;
+        let restore = Restore {
+            slot,
+            envelope: Some(v2::Observed::FixedProbeDiscoverSourceV1 { source }),
+        };
+        preflight(&restore.envelope)
+    }
+
+    #[cfg(target_os = "linux")]
     pub(super) fn fixed_probe_no_task_closed_fact(
         &self,
         proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
     ) -> Result<v2::ClosedFact, OperationError> {
-        self.fixed_probe_no_task_plan(proof)?;
+        self.fixed_probe_native_absence_closed_fact(proof, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixed_probe_native_absence_closed_fact(
+        &self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+        joined_original_lease: bool,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        self.fixed_probe_native_absence_plan(proof, joined_original_lease)?;
         if self.pending.is_some() {
             return Err(OperationError::State);
         }
@@ -2069,6 +2399,8 @@ enum FiniteProcessClosedProof<'a> {
     RootOnly(&'a crate::adaptive_resources::physical_graph::finite_vod::FiniteVodRootOnlyClosure),
     #[cfg(target_os = "linux")]
     CopyJoined(&'a crate::adaptive_resources::physical_graph::copy_vod::CopyProcessClosure),
+    #[cfg(target_os = "linux")]
+    CopyRootOnly(&'a crate::adaptive_resources::physical_graph::copy_vod::CopyRootOnlyClosure),
 }
 
 pub(super) fn acknowledge(

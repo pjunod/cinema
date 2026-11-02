@@ -8,6 +8,7 @@ pub(super) struct FiniteClosingOwner {
     producer: Mutex<Option<Arc<super::finite_software::FiniteSoftwareProducer>>>,
     ticket: Mutex<Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteCloseTicket>>,
     cache_grant: std::sync::Mutex<Option<crate::playback_cache::FiniteCacheReservation>>,
+    compatibility: std::sync::Mutex<Option<crate::vodencode::FiniteSoftwareCompatibility>>,
     claimed_bytes: AtomicU64,
     claimed_admitted: AtomicBool,
     known_closed: AtomicBool,
@@ -98,8 +99,9 @@ impl FiniteBuildSlot<'_> {
         mut self,
         owner: plurx_core::adaptive_resources::runtime::finite_vod::SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
+        compatibility: crate::vodencode::FiniteSoftwareCompatibility,
     ) -> RenditionDir {
-        let mut dir = RenditionDir::from_finite_producer(owner, cache_grant);
+        let mut dir = RenditionDir::from_finite_producer(owner, cache_grant, compatibility);
         let output = dir.finite_output().expect("fresh finite output");
         let producer = dir
             .finite_producer()
@@ -110,6 +112,7 @@ impl FiniteBuildSlot<'_> {
             producer: Mutex::new(Some(producer)),
             ticket: Mutex::new(None),
             cache_grant: std::sync::Mutex::new(None),
+            compatibility: std::sync::Mutex::new(None),
             claimed_bytes: AtomicU64::new(0),
             claimed_admitted: AtomicBool::new(false),
             known_closed: AtomicBool::new(false),
@@ -1180,8 +1183,16 @@ impl Shared {
         // Single-flight only this key. No Store, filesystem, process, manifest,
         // or reader await below owns the node-wide registry mutex.
         let existing = {
-            let renditions = self.renditions.lock().await;
+            let mut renditions = self.renditions.lock().await;
             match renditions.get(key).map(Arc::clone) {
+                // A carrier serves only sessions its retained S captured
+                // before build. A request that S cannot serve gets its own
+                // producer; the carrier owns no output to retire.
+                #[cfg(target_os = "linux")]
+                Some(existing) if existing.dir.borrows_retained_output() => {
+                    renditions.remove(key);
+                    None
+                }
                 Some(existing)
                     if existing.failure().is_none() && !existing.closed.load(Relaxed) =>
                 {
@@ -1800,6 +1811,11 @@ impl Shared {
         {
             return;
         }
+        // The retained registry already charges a carrier's borrowed S.
+        #[cfg(target_os = "linux")]
+        if rendition.dir.borrows_retained_output() {
+            return;
+        }
         let budgets = Budgets {
             working_set_bytes: rendition.working_set_budget,
             admission_sizing_bytes: rendition.completed_cache_budget,
@@ -1945,6 +1961,24 @@ impl Shared {
         if !dormant {
             return;
         }
+        // A retained carrier owns no output: the retained registry alone
+        // retires its S. Unregistering the dormant view releases only its
+        // borrowed alias, so that S can be evicted once its readers drain.
+        #[cfg(target_os = "linux")]
+        if rendition.dir.borrows_retained_output() {
+            let mut renditions = self.renditions.lock().await;
+            if renditions
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, &rendition))
+            {
+                renditions.remove(key);
+                rendition.closed.store(true, Release);
+                rendition.gen_epoch.fetch_add(1, Relaxed);
+                rendition.kick();
+                self.pool.close(key);
+            }
+            return;
+        }
         if !rendition.ephemeral_processing {
             match self.store.quality_reserved_intervals(key).await {
                 Ok(intervals) if intervals.is_empty() => {}
@@ -1978,6 +2012,7 @@ impl Shared {
                 producer: Mutex::new(rendition.dir.finite_producer()),
                 ticket: Mutex::new(None),
                 cache_grant: std::sync::Mutex::new(None),
+                compatibility: std::sync::Mutex::new(None),
                 claimed_bytes: AtomicU64::new(0),
                 claimed_admitted: AtomicBool::new(false),
                 known_closed: AtomicBool::new(false),
@@ -2270,6 +2305,7 @@ impl Shared {
             producer: Mutex::new(Some(producer)),
             ticket: Mutex::new(None),
             cache_grant: std::sync::Mutex::new(None),
+            compatibility: std::sync::Mutex::new(None),
             claimed_bytes: AtomicU64::new(0),
             claimed_admitted: AtomicBool::new(false),
             known_closed: AtomicBool::new(false),
@@ -2376,6 +2412,13 @@ impl Shared {
                 // the last rich closing owner. Other selectors retain their
                 // own final-drop guard and will delay final refund.
                 if let Some(producer) = producer.as_ref() {
+                    if let Some(compatibility) = producer.take_compatibility() {
+                        *closing
+                            .compatibility
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(compatibility);
+                    }
                     if let Some(grant) = producer.take_cache_grant() {
                         *closing
                             .cache_grant
@@ -2418,6 +2461,14 @@ impl Shared {
                 tracing::warn!(target: "plurxd::vodserve", rendition = %key,
                     %error, "finite terminal close remains charged for retry");
                 return;
+            }
+            if let Some(compatibility) = closing
+                .compatibility
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                compatibility.known_retired();
             }
             if let Some(grant) = closing
                 .cache_grant

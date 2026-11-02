@@ -454,7 +454,7 @@ jobs:
     name: Apple compile and native TV navigation
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
     concurrency:
@@ -472,8 +472,8 @@ jobs:
         run: |
           xcode_version="$(xcodebuild -version)"
           printf '%s\n' "$xcode_version"
-          grep -Fxq "Xcode 27.1" <<< "$xcode_version"
-          grep -Fxq "Build version 27A9275" <<< "$xcode_version"
+          grep -Fxq "Xcode 27.2" <<< "$xcode_version"
+          grep -Fxq "Build version 27B52" <<< "$xcode_version"
           xcrun --find swift
       - name: Authenticate compatible original native test receipts
         id: native_receipts

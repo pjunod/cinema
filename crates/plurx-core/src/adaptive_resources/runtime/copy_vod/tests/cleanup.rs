@@ -1,5 +1,5 @@
-//! Actual queued copy owners and original copy receipts. Authored/compiled
-//! only; behavioral/native execution requires complete-candidate Fable review.
+//! Actual queued journal and fixed producer owners. Execution and
+//! qualification are recorded separately in source-bound receipts.
 use super::*;
 use crate::domain::MediaFile;
 use crate::resource_custody::InstallationContext;
@@ -22,7 +22,10 @@ fn executable_path() -> PathBuf {
     std::fs::canonicalize(selected).expect("canonical actual executable")
 }
 
-async fn actual_request(root: &Path, rejected: bool) -> (Arc<NodeResourceRuntime>, CopyVodRequest) {
+pub(super) async fn actual_request(
+    root: &Path,
+    rejected: bool,
+) -> (Arc<NodeResourceRuntime>, CopyVodRequest) {
     crate::testfixtures::require_ffmpeg();
     let source =
         std::fs::canonicalize(crate::testfixtures::source("h264")).expect("actual media source");
@@ -126,7 +129,7 @@ async fn actual_request(root: &Path, rejected: bool) -> (Arc<NodeResourceRuntime
         .expect("original known fixture capacity");
     let request = CopyVodRequest {
         rendition_id: "original-copy".into(),
-        generation_epoch: 0,
+        generation_epoch: CopyVodRequest::INITIAL_GENERATION_EPOCH,
         recipe_source_binding: "actual-original-copy-source".into(),
         source: FiniteSourceRequest {
             path: source,
@@ -169,7 +172,8 @@ async fn actual_request(root: &Path, rejected: bool) -> (Arc<NodeResourceRuntime
             // No hook injects its known rollback or manufactures a close fact.
             live_handles: if rejected { 1 } else { 8 },
             reader_leases: 4,
-            resident_memory_bytes: 1024 * 1024,
+            // Bootstrap, maximum payload, and bounded sync/publication workspace.
+            resident_memory_bytes: 3 * 1024 * 1024,
             allocation_unit_bytes: 4096,
             per_object_reserve_bytes: 4096,
             child_directory_reserve_bytes: 4096,
@@ -363,4 +367,145 @@ async fn copy_constructor_error_after_r_never_becomes_before_reservation_provena
             .next_family
             > family_counter
     );
+}
+
+#[tokio::test]
+async fn selected_copy_named_arm_starts_same_root_replays_release_and_fully_joins_originals() {
+    let root = tempfile::tempdir().expect("actual selected-copy launch fixture");
+    let (runtime, mut owner) = actual_owner(root.path(), false).await;
+    let charged = runtime
+        .accounting()
+        .expect("original admitted copy charge")
+        .used;
+    assert_ne!(charged, ResourceVector::default());
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024 * 1024)
+        .expect("same original rich application lease");
+
+    // Actual verified FFmpeg SourceV1, inherited source descriptors, named
+    // root, registered ChildJob, and original parser. No software launch or
+    // software FixedImage/closure substitutes for this copy operation.
+    owner
+        .start(deadline())
+        .await
+        .expect("original selected copy native start");
+    let original = runtime
+        .fixture_copy_launch_identity(&owner.preparation)
+        .await
+        .expect("original copy root/task/control and acknowledged source observations");
+    runtime
+        .start_copy_vod(&owner.preparation, 0, deadline())
+        .await
+        .expect("same operation replays without taking a second start sender");
+    let replay = runtime
+        .fixture_copy_launch_identity(&owner.preparation)
+        .await
+        .expect("same original registrations after release replay");
+    assert_eq!(
+        replay, original,
+        "replay replaced an original root, parser, or observation"
+    );
+
+    // A real parser terminal may report media failure under this fixture's
+    // small immutable limits. Neither outcome is native-close evidence.
+    let parser = owner
+        .wait_producer_result(deadline())
+        .await
+        .expect("actual original parser terminal, not latch-delivery inference");
+    // Failure-only watchdog around the SAME borrowed native wait. Elapsed
+    // fails the fixture; it cannot establish a join, closure, or refund.
+    let producer = tokio::time::timeout_at(deadline().into(), owner.stop_producer(false))
+        .await
+        .expect("original producer join exceeded fixture deadline; no closure proved")
+        .expect("join original copy producer");
+    assert_eq!(producer.segments, parser.segments);
+    assert!(!producer.completed || parser.completed);
+    runtime
+        .fixture_copy_joined_identity(&owner.preparation, &original)
+        .await
+        .expect("actual CopyProcessClosure after original root/parser/pipes/source parent joins");
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("joined role remains charged")
+            .used,
+        charged
+    );
+
+    let mut ticket = owner
+        .prepare_retirement(false, deadline())
+        .await
+        .expect("same copy-specific full native and scratch retirement");
+    drop(owner);
+    assert_eq!(ticket.fixture_application_released(), Some(false));
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err(),
+        "live original output/application aliases permitted a refund"
+    );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("actual aliases remain charged")
+            .used,
+        charged
+    );
+    drop(output);
+    assert_eq!(ticket.fixture_application_released(), Some(false));
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err(),
+        "the final original application alias permitted a refund"
+    );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("last actual alias remains charged")
+            .used,
+        charged
+    );
+    drop(application);
+    assert_eq!(ticket.fixture_application_released(), Some(true));
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("same original typed settlement after final aliases drop");
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("one matching original refund")
+            .used,
+        ResourceVector::default()
+    );
+    drop(ticket);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("no original owner remains")
+        .drain()
+        .expect("join actual custody journal");
+}
+
+#[tokio::test]
+async fn zero_typed_copy_generation_refuses_before_any_reservation() {
+    let root = tempfile::tempdir().expect("actual copy generation fixture");
+    let (runtime, mut request) = actual_request(root.path(), false).await;
+    request.generation_epoch = 0;
+    let Err(error) = runtime.prepare_copy_vod(request, deadline()).await else {
+        panic!("zero typed generation must not allocate an owner");
+    };
+    assert!(error.definitely_before_reservation());
+    assert_eq!(
+        runtime.accounting().expect("same empty ledger").used,
+        ResourceVector::default()
+    );
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("original journal drain");
 }

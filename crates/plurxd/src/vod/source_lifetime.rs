@@ -64,6 +64,29 @@ impl SourceRenditionOwners {
                         .detached
             })
     }
+    /// Test-only observation of this exact original assignment after all of
+    /// its real dispatch/child associations have positively retired. This
+    /// cannot detach an owner or manufacture any producer-close receipt.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn settled_assignment_for_actor_test(
+        &self,
+        assignment: &SourceDispatchAssignment,
+    ) -> bool {
+        let state = self.state.lock().expect("Source rendition owners");
+        state.assigned_namespace
+            && state.pending_dispatches == 0
+            && state.initial_permit.is_none()
+            && state
+                .current
+                .as_ref()
+                .is_none_or(|token| token.confirmed_reap().is_some())
+            && state
+                .owners
+                .iter()
+                .any(|owner| owner.assignment.same_identity(assignment))
+            && state.owners.iter().all(|owner| owner.fully_settled())
+    }
+
     pub(super) fn attach(
         &self,
         assignment: &SourceDispatchAssignment,

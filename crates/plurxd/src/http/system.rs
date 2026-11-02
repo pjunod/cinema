@@ -249,6 +249,84 @@ pub async fn setup(
     }))
 }
 
+/// Copy cleanup reasons and reserved charge from the same retained runtime role.
+/// These diagnostics confer no closure or settlement authority.
+#[derive(Serialize)]
+pub struct CopyCleanupHoldDto {
+    pub preparation_id: uuid::Uuid,
+    pub graph_id: Option<uuid::Uuid>,
+    pub reason_code: &'static str,
+    pub reason: &'static str,
+    pub held_resources: plurx_core::adaptive_resources::ResourceVector,
+}
+
+#[cfg(target_os = "linux")]
+fn copy_cleanup_holds(
+    runtime: &plurx_core::adaptive_resources::runtime::NodeResourceRuntime,
+) -> Option<Vec<CopyCleanupHoldDto>> {
+    use plurx_core::adaptive_resources::runtime::copy_vod::CopyCleanupHoldReason;
+    Some(
+        runtime
+            .copy_cleanup_holds()?
+            .into_iter()
+            .map(|hold| {
+                let (reason_code, reason) = match hold.reason {
+                    CopyCleanupHoldReason::UncertainLaunch => {
+                        ("uncertain_launch", "Process launch outcome is unknown")
+                    }
+                    CopyCleanupHoldReason::PoisonedTerminal => {
+                        ("poisoned_terminal", "Parser terminal record is unavailable")
+                    }
+                    CopyCleanupHoldReason::LostTaskTerminal => {
+                        ("lost_task_terminal", "Parser terminal result is missing")
+                    }
+                    CopyCleanupHoldReason::AbandonedTask => (
+                        "abandoned_task",
+                        "Parser task did not finish with a known result",
+                    ),
+                    CopyCleanupHoldReason::FailedPipeClose => {
+                        ("failed_pipe_close", "Pipe closure could not be confirmed")
+                    }
+                    CopyCleanupHoldReason::FailedSourceClose => (
+                        "failed_source_close",
+                        "Source closure could not be confirmed",
+                    ),
+                    CopyCleanupHoldReason::FailedParserKill => (
+                        "failed_parser_kill",
+                        "Child termination is pending another cleanup attempt",
+                    ),
+                    CopyCleanupHoldReason::UnboundRootIdentity => (
+                        "unbound_root_identity",
+                        "Process identity could not be bound to custody",
+                    ),
+                    CopyCleanupHoldReason::TerminalIdentityMismatch => (
+                        "terminal_identity_mismatch",
+                        "Parser start and terminal records disagree",
+                    ),
+                    CopyCleanupHoldReason::ValidationRejected => (
+                        "validation_rejected",
+                        "Copy cleanup records could not be validated",
+                    ),
+                };
+                CopyCleanupHoldDto {
+                    preparation_id: hold.preparation_id,
+                    graph_id: hold.graph_id,
+                    reason_code,
+                    reason,
+                    held_resources: hold.held_resources,
+                }
+            })
+            .collect(),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn copy_cleanup_holds(
+    _runtime: &plurx_core::adaptive_resources::runtime::NodeResourceRuntime,
+) -> Option<Vec<CopyCleanupHoldDto>> {
+    None
+}
+
 /// Node-local physical accounting only; absence/failure never means zero usage.
 #[derive(Serialize)]
 pub struct ResourceOwnershipDto {
@@ -258,6 +336,7 @@ pub struct ResourceOwnershipDto {
     pub accounting: Option<plurx_core::adaptive_resources::LedgerSnapshot>,
     pub history: Option<plurx_core::resource_history::HistoryDiagnostics>,
     pub planning: Option<plurx_core::adaptive_resources::runtime::PlanningOwnershipDiagnostics>,
+    pub copy_cleanup: Option<Vec<CopyCleanupHoldDto>>,
 }
 impl ResourceOwnershipDto {
     fn read(state: &AppState) -> Self {
@@ -270,6 +349,7 @@ impl ResourceOwnershipDto {
                 accounting: None,
                 history: None,
                 planning: None,
+                copy_cleanup: None,
             };
         };
         let unreconciled_custody = Some(runtime.has_unreconciled_custody());
@@ -281,6 +361,7 @@ impl ResourceOwnershipDto {
                 accounting: Some(accounting),
                 history: runtime.history_diagnostics(),
                 planning: runtime.planning_ownership_diagnostics(),
+                copy_cleanup: copy_cleanup_holds(runtime),
             },
             Err(_) => Self {
                 state: "accounting_unavailable",
@@ -289,6 +370,7 @@ impl ResourceOwnershipDto {
                 accounting: None,
                 history: runtime.history_diagnostics(),
                 planning: runtime.planning_ownership_diagnostics(),
+                copy_cleanup: copy_cleanup_holds(runtime),
             },
         }
     }

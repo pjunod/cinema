@@ -161,7 +161,8 @@ impl TranscodeManager {
         let application_owner_bytes = Self::local_direct_application_bytes().ok_or(())?;
         let memory = DirectSourceRequest::minimum_memory_bytes(
             path_len,
-            media_file_id.len(),
+            // Retain and charge the same formatted String allocation.
+            media_file_id.capacity(),
             1,
             CHUNK,
             CHUNKS,

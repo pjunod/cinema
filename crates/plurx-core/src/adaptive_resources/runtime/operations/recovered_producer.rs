@@ -315,7 +315,7 @@ impl NodeResourceRuntime {
             finite_vod: None,
             #[cfg(target_os = "linux")]
             copy_vod: None,
-            copy_admission_failed: false,
+            copy_cleanup: None,
             finite_app: None,
             #[cfg(target_os = "linux")]
             planning_metadata: None,

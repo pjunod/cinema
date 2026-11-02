@@ -23,6 +23,12 @@ struct State {
     pipe: Mutex<Option<NativePipe>>,
     reader_alive: AtomicBool,
     close_failed: AtomicBool,
+    // Per-original fixture: lose the result AFTER its real checked close.
+    // No external numeric-fd close/reuse and no production field or branch.
+    #[cfg(all(test, feature = "fixtures", target_os = "linux"))]
+    lose_close_result: AtomicBool,
+    #[cfg(all(test, feature = "fixtures", target_os = "linux"))]
+    checked_close_calls: std::sync::atomic::AtomicUsize,
 }
 
 /// Move-only async reader. It exposes no descriptor, handle, or clone operation.
@@ -69,6 +75,14 @@ pub(super) struct PipeRecord {
 }
 
 impl PipeRecord {
+    #[cfg(all(test, feature = "fixtures", target_os = "linux"))]
+    pub(super) fn fixture_lose_next_close_result(&self) {
+        self.state.lose_close_result.store(true, Ordering::Release);
+    }
+    #[cfg(all(test, feature = "fixtures", target_os = "linux"))]
+    pub(super) fn fixture_checked_close_calls(&self) -> usize {
+        self.state.checked_close_calls.load(Ordering::Acquire)
+    }
     /// Close only after every reader owner has actually dropped its reader.
     /// A poisoned lock keeps the original pipe in the retained state.
     pub(super) fn close_after_reader_drop(&self) -> io::Result<()> {
@@ -86,13 +100,49 @@ impl PipeRecord {
             return Err(io::Error::other("original finite pipe close was uncertain"));
         }
         if let Some(native) = pipe.take() {
-            if let Err(error) = close_native(native) {
+            #[cfg(all(test, feature = "fixtures", target_os = "linux"))]
+            self.state
+                .checked_close_calls
+                .fetch_add(1, Ordering::AcqRel);
+            let closed = close_native(native);
+            #[cfg(all(test, feature = "fixtures", target_os = "linux"))]
+            let closed = if self.state.lose_close_result.swap(false, Ordering::AcqRel) {
+                // Authentic original close-result loss, NOT a claim that the
+                // kernel close returned EBADF. Never close the numeric fd again.
+                let _ = closed;
+                Err(io::Error::other(
+                    "fixture lost original checked-close result",
+                ))
+            } else {
+                closed
+            };
+            if let Err(error) = closed {
                 self.state.close_failed.store(true, Ordering::Release);
                 return Err(error);
             }
         }
         Ok(())
     }
+}
+
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+std::thread_local! {
+    static UNCLAIMED_STDOUT_CLOSE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(super) fn fixture_unclaimed_stdout_close_calls() -> usize {
+    UNCLAIMED_STDOUT_CLOSE_CALLS.with(std::cell::Cell::get)
 }
 
 /// Consume one original pipe and observe the kernel close result exactly once.
@@ -121,6 +171,13 @@ fn close_native(_pipe: NativePipe) -> io::Result<()> {
 
 #[cfg(unix)]
 pub(super) fn close_unclaimed_stdout(pipe: ChildStdout) -> io::Result<()> {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    UNCLAIMED_STDOUT_CLOSE_CALLS.with(|calls| calls.set(calls.get() + 1));
     close_native(NativePipe::Stdout(pipe))
 }
 
@@ -144,11 +201,19 @@ pub(super) fn prepare(
         pipe: Mutex::new(Some(NativePipe::Stdout(stdout))),
         reader_alive: AtomicBool::new(true),
         close_failed: AtomicBool::new(false),
+        #[cfg(all(test, feature = "fixtures", target_os = "linux"))]
+        lose_close_result: AtomicBool::new(false),
+        #[cfg(all(test, feature = "fixtures", target_os = "linux"))]
+        checked_close_calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let stderr = Arc::new(State {
         pipe: Mutex::new(Some(NativePipe::Stderr(stderr))),
         reader_alive: AtomicBool::new(true),
         close_failed: AtomicBool::new(false),
+        #[cfg(all(test, feature = "fixtures", target_os = "linux"))]
+        lose_close_result: AtomicBool::new(false),
+        #[cfg(all(test, feature = "fixtures", target_os = "linux"))]
+        checked_close_calls: std::sync::atomic::AtomicUsize::new(0),
     });
     (
         [

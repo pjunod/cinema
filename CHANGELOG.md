@@ -121,6 +121,22 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Cancelling a producer that never started still retires its acquired scratch
+  root and sink through their original native owners before releasing charge.
+- Selected finite software and copy starts use valid output generations;
+  malformed zero-generation requests refuse before reserving capacity.
+- Selected copy preparation installs its original response budget and parser
+  work together before acquisition, while retaining its early cleanup owner.
+- Custody startup validates the filesystem-root ancestor without granting a
+  root directory capability or relaxing no-follow and private-storage checks.
+- Copy startup cancellation retains its original process, task and journal
+  operations through cleanup. Unknown outcomes keep their reservation, and
+  System resource ownership reports the held charge and cleanup reason.
+- Finished direct Source sessions release the cached actor's application
+  reference at its original retirement handoff. Active reads and the original
+  retirement ticket continue to retain capacity until they actually finish.
+- Source producer starts use the existing planned-outage admission and retain
+  that same guard through their original cleanup and settlement.
 - Selected Linux finite software VOD retains client controls, terminal replies
   and HTTP failure bodies within explicit memory partitions until their final
   owners drop. Cancellation drains the original driver and native jobs before

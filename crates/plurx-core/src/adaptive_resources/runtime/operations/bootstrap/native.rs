@@ -55,6 +55,21 @@ pub(super) fn directory_metadata_bytes(
         .checked_add(native_metadata_bytes(&directory.native_object)?)
 }
 impl RootCell {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_job_identity(&self) -> (Uuid, Uuid, Uuid, Option<tokio::task::Id>) {
+        (
+            self.io_id.uuid(),
+            self.observe_id.uuid(),
+            self.join_id.uuid(),
+            self.pending.as_ref().map(JoinHandle::id),
+        )
+    }
+
     pub(super) fn retained_heap_bytes(&self) -> Result<usize, OperationError> {
         if self.pending.is_some() || self.failed_join {
             return Err(OperationError::State);
@@ -240,32 +255,44 @@ impl RootCell {
         Ok(())
     }
 
-    /// Lend an exact set of original charged directory Files to one cleanup
-    /// worker. Every identity is checked before the first File is moved.
+    /// Validate the complete original directory inventory, then lend only the
+    /// action's exact subset. Unused originals remain here throughout the job.
     pub(super) fn lend_observed_directories(
         &mut self,
         observed: &[v2::scratch::DirectoryObservedV1],
+        baseline: &[Option<&v2::scratch::DirectoryObservedV1>; 3],
     ) -> Result<BTreeMap<v2::Id, File>, OperationError> {
         if self.pending.is_some() || self.failed_join || observed.is_empty() {
             return Err(OperationError::State);
         }
         let held = self.result.as_mut().ok_or(OperationError::State)?;
         let last_known = held.audit.outcome == v2::scratch::NativeOutcomeV1::Completed
-            && held.audit.acquired.as_ref() == observed.last();
+            && held.audit.acquired.as_ref() == baseline.iter().rev().flatten().copied().next();
         let never_entered = held.audit.outcome == v2::scratch::NativeOutcomeV1::NeverEntered
             && held.audit.acquired.is_none()
             && held.audit.closed_copy_ids.is_empty()
             && held.audit.child_effect == ChildEffect::None
             && held.audit.inventory == InventoryCertainty::Exact;
+        // An entered mkdirat that failed with EEXIST acquired and closed
+        // nothing: the configured parent is still the exact held original.
+        let unchanged_child = matches!(
+            held.audit.outcome,
+            v2::scratch::NativeOutcomeV1::Failed { .. }
+        ) && held.audit.acquired.is_none()
+            && held.audit.closed_copy_ids.is_empty()
+            && held.audit.child_effect == ChildEffect::Unchanged
+            && held.audit.inventory == InventoryCertainty::Exact;
         // A cancelled next-step latch reports NeverEntered but leaves the
         // preceding original directory File in this cell. Its exact copy ID
         // and native identity are checked below before any File is moved.
-        if (!last_known && !never_entered) || held.files.len() != observed.len() {
+        if (!last_known && !never_entered && !unchanged_child)
+            || held.files.len() != baseline.iter().flatten().count()
+        {
             return Err(OperationError::State);
         }
         let domain = &observed[0].native_object.filesystem_domain;
         let mut copies = std::collections::BTreeSet::new();
-        for directory in observed {
+        for directory in baseline.iter().flatten() {
             if directory.held_copy_ids.len() != 1
                 || &directory.native_object.filesystem_domain != domain
             {
@@ -292,6 +319,19 @@ impl RootCell {
                     (v2::NativeValue::Known { value }, v2::NativeValue::Known { value: actual })
                         if *value == actual
                 )
+            {
+                return Err(OperationError::State);
+            }
+        }
+        // Subset membership includes the whole observed identity, not merely
+        // a copy ID. Validate all requested moves before taking any File.
+        copies.clear();
+        for directory in observed {
+            if !baseline
+                .iter()
+                .flatten()
+                .any(|expected| *expected == directory)
+                || !copies.insert(directory.held_copy_ids[0])
             {
                 return Err(OperationError::State);
             }
@@ -373,8 +413,39 @@ impl RootCell {
                     },
                 };
             }
+            #[cfg(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            {
+                let result = open_root(domain, io, copy, observe_id);
+                super::super::native_result_fixture::after_result(
+                    super::super::native_result_fixture::Kind::BootstrapRoot,
+                    io.uuid(),
+                );
+                result
+            }
+            #[cfg(not(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )))]
             open_root(domain, io, copy, observe_id)
         });
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        super::super::native_result_fixture::bind_job(
+            super::super::native_result_fixture::Kind::BootstrapRoot,
+            io.uuid(),
+            pending.id(),
+        );
         let cell = Self {
             io_id: io,
             observe_id,
@@ -556,7 +627,8 @@ impl NodeResourceRuntime {
         let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded
-            || !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
+            || (!matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
+                && (allow_entry || role.phase != Phase::UnknownHeld))
             || role
                 .transition
                 .as_ref()

@@ -2408,7 +2408,15 @@ pub(crate) fn real_source_start_fixture_with(
     Box::pin(async move {
         let fixture_body_budget =
             crate::transcode::TranscodeManager::source_fixture_body_budget().await;
-        build_real_source_start_fixture(mode, recipient_server_id, None, fixture_body_budget).await
+        // Keep this forwarding fixture frame small without changing the
+        // original current-thread Direct test's scheduling or runtime.
+        Box::pin(build_real_source_start_fixture(
+            mode,
+            recipient_server_id,
+            None,
+            fixture_body_budget,
+        ))
+        .await
     })
 }
 #[cfg(test)]
@@ -2437,6 +2445,59 @@ fn real_source_start_fixture_at(
     ))
 }
 #[cfg(test)]
+pub(crate) fn source_http_fixture_store(
+    config: plurx_core::config::Config,
+    startup_clock: Option<std::sync::Arc<crate::StartupObservationHttp>>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    plurx_core::cluster::migration::SelectedStore,
+                    plurx_core::error::StoreError,
+                >,
+            > + Send,
+    >,
+> {
+    Box::pin(async move {
+        // Only pre-R Store setup gets the existing fixture debug-frame
+        // allowance. Construct AND poll the selector on this owned thread,
+        // using the ORIGINAL runtime for its tasks, timers and I/O.
+        let runtime = tokio::runtime::Handle::current();
+        let bootstrap = std::thread::Builder::new()
+            .name("source-http-fixture-store-bootstrap".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                runtime.block_on(Box::pin(async move {
+                    if let Some(clock) = startup_clock {
+                        Box::pin(
+                            plurx_core::cluster::migration::select_daemon_store_observing(
+                                &config,
+                                Some(clock.as_ref()),
+                            ),
+                        )
+                        .await
+                    } else {
+                        crate::sharing_fixture_clock::select_applied_singleton(&config).await
+                    }
+                }))
+            })
+            .expect("owned Source HTTP fixture Store bootstrap thread");
+        // The current-thread runtime must keep driving I/O while setup runs.
+        // This bridge owns and positively joins the SAME setup thread, with
+        // no cancellable await inside the bridge and no replacement runtime.
+        let mut joined = tokio::task::spawn_blocking(move || match bootstrap.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        });
+        match (&mut joined).await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => panic!("owned Source HTTP Store join bridge cancelled: {error}"),
+        }
+    })
+}
+
+#[cfg(test)]
 async fn build_real_source_start_fixture(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
@@ -2444,7 +2505,6 @@ async fn build_real_source_start_fixture(
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealSourceStartFixture {
     use plurx_core::{
-        cluster::migration::select_daemon_store_observing,
         config::Config,
         domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
         sharing::{new_secret, secret_hash, InvitationRecord, SecretDomain, ShareClaim, SourceId},
@@ -2452,6 +2512,7 @@ async fn build_real_source_start_fixture(
         store::{keys, sharing_catalogue_details::SourceDetailsRead},
     };
     use std::sync::Arc;
+    eprintln!("real Source HTTP fixture: entered original fixture body");
     let directory = crate::test_tempdir().expect("real Source fixture");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
@@ -2465,14 +2526,15 @@ async fn build_real_source_start_fixture(
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
+    crate::canonicalize_storage_roots(&mut config)
+        .expect("production non-destructive storage preflight before Store ownership");
     let startup_clock =
         advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));
-    let mut selected = if let Some(clock) = &startup_clock {
-        Box::pin(select_daemon_store_observing(&config, Some(clock.as_ref()))).await
-    } else {
-        crate::sharing_fixture_clock::select_applied_singleton(&config).await
-    }
-    .expect("actual one voter");
+    eprintln!("real Source HTTP fixture: before original Store selector");
+    let mut selected = source_http_fixture_store(config.clone(), startup_clock.clone())
+        .await
+        .expect("actual one voter");
+    eprintln!("real Source HTTP fixture: original Store selector returned");
     selected
         .store
         .put_setting(keys::SHARING_ENABLED, "true")
@@ -2480,11 +2542,14 @@ async fn build_real_source_start_fixture(
         .expect("saved choice");
     // Run the real pre-serving factory before constructing State/listeners.
     // No manual candidate DDL or synthetic capability rows admit this fixture.
+    eprintln!("real Source HTTP fixture: before original Source schema factory");
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual startup factory"));
+    eprintln!("real Source HTTP fixture: original Source schema factory returned");
     #[cfg(target_os = "linux")]
     let direct_runtime = if matches!(mode, SourceFixtureMode::Direct) {
+        eprintln!("real Source HTTP fixture: before original custody startup");
         Some(
             crate::resource_runtime::open_before_cleanup(&mut selected, &config)
                 .await
@@ -2494,8 +2559,11 @@ async fn build_real_source_start_fixture(
     } else {
         None
     };
+    eprintln!("real Source HTTP fixture: original custody startup returned or not selected");
     let client = selected.local_client().expect("local voter client");
+    eprintln!("real Source HTTP fixture: before original State construction");
     let mut state = Arc::new(crate::http::source_actor_test_state());
+    eprintln!("real Source HTTP fixture: original State constructed");
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
     #[cfg(target_os = "linux")]
     if let Some(runtime) = direct_runtime {
@@ -2633,7 +2701,9 @@ async fn build_real_source_start_fixture(
             .arg("color=s=320x180:r=24")
             .args(["-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y"]);
     }
+    eprintln!("real Source HTTP fixture: before actual fixture FFmpeg");
     let generated = generate.arg(&file).output().await.expect("actual FFmpeg");
+    eprintln!("real Source HTTP fixture: actual fixture FFmpeg returned");
     assert!(
         generated.status.success(),
         "{}",
