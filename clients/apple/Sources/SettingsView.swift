@@ -152,9 +152,7 @@ struct SettingsView: View {
                 .frame(width: 360)
                 .focusScope(categoryFocus)
                 .focusSection()
-                .onMoveCommand { direction in
-                    if direction == .right { contentEntryRequest += 1 }
-                }
+                .tvSettingsCategoryEntry { contentEntryRequest += 1 }
                 .onChange(of: focusedCategory) { _, value in
                     if let value { lastCategory = value; selectedCategory = value }
                 }
