@@ -1197,7 +1197,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                 }, requestHlsSession: { _, _, _ in hls }, requestHlsStatus: { _, id in
                     PlaybackSessionStatus(id: id)
                 })
-            let model = AppModel()
+            let model = AppModel(startServices: false)
             controller.start(model: model, itemId: 1, fileId: 1, startMs: 814_473,
                              durationMs: 900_000, title: "Ingress preparation fixture")
             let load = try XCTUnwrap(controller.loadingTask)
