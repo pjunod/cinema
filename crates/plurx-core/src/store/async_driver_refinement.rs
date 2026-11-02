@@ -203,14 +203,18 @@ async fn sql<T: QueueSql>(store: &T, statement: &str, parameters: Value) -> Vec<
 // Compare every column of every durable table in this slice after a failed
 // CAS. Column discovery comes from the installed production schema, so a new
 // column cannot silently evade the no-mutation observation.
+//
+// The set is unordered for every consumer (the checkers key by table name and
+// the exported rows are a name-keyed map), so the closed registry in
+// store-schema.json keeps it in sorted order and this list must match exactly.
 const SNAPSHOT_TABLES: [&str; 9] = [
-    "background_jobs",
-    "background_job_waiters",
     "background_job_attempts",
-    "background_job_reservations",
-    "background_job_domain_leases",
-    "background_library_requests",
     "background_job_commands",
+    "background_job_domain_leases",
+    "background_job_reservations",
+    "background_job_waiters",
+    "background_jobs",
+    "background_library_requests",
     "job_leases",
     "settings",
 ];
