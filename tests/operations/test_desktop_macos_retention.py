@@ -1052,7 +1052,9 @@ class NativeEventMergeBase(unittest.TestCase):
 class PreflightSuccessorScope(unittest.TestCase):
     """Main's reviewed 15 -> 30 minute preflight budget is the only accepted difference from the producer job."""
     def current(self):
-        return native.workflow_parts((ROOT/native.WORKFLOW).read_bytes())[1]['preflight']
+        # The reviewed Node patch pin is a separate successor (NodeSuccessorScope); undo it here.
+        block = native.workflow_parts((ROOT/native.WORKFLOW).read_bytes())[1]['preflight']
+        return block.replace(native.NODE_SUCCESSOR_VERSION, native.NODE_LEGACY_VERSION, 1)
 
     def test_only_the_reviewed_budget_differs_from_the_producer_preflight(self):
         current = self.current()
@@ -1072,6 +1074,37 @@ class PreflightSuccessorScope(unittest.TestCase):
                 except native.receipts.ReceiptError:
                     continue
                 self.assertNotEqual(native.digest(successor), native.WORKFLOW_SCOPE_PINS['preflight_successor'])
+
+
+class NodeSuccessorScope(unittest.TestCase):
+    """Main's reviewed setup-node 22.23.2 -> 22.23.4 pin is the only accepted difference in paperwork and preflight."""
+    def current(self, name):
+        return native.workflow_parts((ROOT/native.WORKFLOW).read_bytes())[1][name]
+
+    def test_paperwork_and_preflight_differ_from_the_producer_only_by_the_node_patch_pin(self):
+        paperwork = self.current('paperwork')
+        legacy = paperwork.replace(native.NODE_SUCCESSOR_VERSION, native.NODE_LEGACY_VERSION, 1)
+        self.assertNotEqual(legacy, paperwork)
+        self.assertEqual(native.digest(legacy), native.WORKFLOW_SCOPE_PINS['paperwork'])
+        self.assertEqual(native.successor_node(legacy), paperwork)
+        self.assertEqual(native.digest(paperwork), native.WORKFLOW_SCOPE_PINS['paperwork_node_successor'])
+        preflight = self.current('preflight')
+        budget = preflight.replace(native.NODE_SUCCESSOR_VERSION, native.NODE_LEGACY_VERSION, 1)
+        self.assertNotEqual(budget, preflight)
+        self.assertEqual(native.digest(budget), native.WORKFLOW_SCOPE_PINS['preflight_successor'])
+        self.assertEqual(native.successor_node(budget), preflight)
+        self.assertEqual(native.digest(preflight), native.WORKFLOW_SCOPE_PINS['preflight_node_successor'])
+
+    def test_any_other_node_pin_is_not_the_successor(self):
+        for name in ('paperwork', 'preflight'):
+            block = self.current(name)
+            for other in (b'22.23.3', b'22.23.5', b'22'):
+                changed = block.replace(b'"22.23.4"', b'"' + other + b'"', 1)
+                with self.subTest(name=name, node=other):
+                    self.assertNotEqual(changed, block)
+                    self.assertNotEqual(native.digest(changed), native.WORKFLOW_SCOPE_PINS[name + '_node_successor'])
+        with self.assertRaises(native.receipts.ReceiptError):
+            native.successor_node(b'no node pin here\n')
 
 
 class NativeToolchainContract(unittest.TestCase):

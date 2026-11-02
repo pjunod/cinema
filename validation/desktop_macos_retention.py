@@ -104,6 +104,8 @@ WORKFLOW_SCOPE_PINS = {
     'scope':'2ee2d0586a98a440b0e44800c44ba35286baad0e5c01d49808e62b7fdba3199d',
     'preflight':'054ad52683b711f4b286557d88f5f4999de0cfa20f3645043f484f2c9629c27c',
     'preflight_successor':'e0e71b3e6542a3ef423e2f12da1ff9e4ce450b79d292ddaea13b96e38f28bbab',
+    'paperwork_node_successor':'7e6b6bc1997fcefdb0d37c9dfb16363142e4d807a2134e8fb263e10354caf599',
+    'preflight_node_successor':'e59e7a67dd8cff6ab2a4fa61811cb9d1507c85ec7669c813578a07faa1285344',
     'legacy_apple':'c6bd7e2361ac9055999c183f2f53b36b4a40fdf72b7cf1167a5990d271639e19',
     'adapted_apple':'519df6d3b88a2ba381cd1633379b1a040ea04ce962471c7783f124d8fd887194',
 }
@@ -123,6 +125,16 @@ PREFLIGHT_SUCCESSOR_BUDGET = (b'    # A cold continuation can run the full unit 
 def successor_preflight(preflight):
     require(preflight.count(PREFLIGHT_LEGACY_BUDGET) == 1, 'Reviewed preflight budget is ambiguous')
     return preflight.replace(PREFLIGHT_LEGACY_BUDGET, PREFLIGHT_SUCCESSOR_BUDGET, 1)
+# Main then raised the setup-node patch pin from 22.23.2 to 22.23.4 (the patched upstream build) in the
+# paperwork and preflight jobs. That pin is the only reviewed difference on top of the producer text (and,
+# for preflight, on top of the reviewed budget successor above); the scope job does not use Node.
+NODE_LEGACY_VERSION = b'          node-version: "22.23.2"\n'
+NODE_SUCCESSOR_VERSION = b'          node-version: "22.23.4"\n'
+
+
+def successor_node(block):
+    require(block.count(NODE_LEGACY_VERSION) == 1, 'Reviewed Node patch pin is ambiguous')
+    return block.replace(NODE_LEGACY_VERSION, NODE_SUCCESSOR_VERSION, 1)
 RECIPE_PINS = {
     'Cargo.toml':('100644','72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f'),
     'clients/server-tray/macos/build':('100755','b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0'),
@@ -586,8 +598,13 @@ def workflow_scope(workspace,commit,legacy):
     current_preamble,blocks = workflow_parts(current)
     successor = successor_preflight(baseline['preflight'])
     require(digest(successor) == WORKFLOW_SCOPE_PINS['preflight_successor'], 'Reviewed preflight successor differs')
+    node_successors = {'paperwork':successor_node(baseline['paperwork']),'preflight':successor_node(successor)}
+    require(digest(node_successors['paperwork']) == WORKFLOW_SCOPE_PINS['paperwork_node_successor']
+        and digest(node_successors['preflight']) == WORKFLOW_SCOPE_PINS['preflight_node_successor'],
+        'Reviewed Node patch successor differs')
     require(current_preamble == preamble and all(name in blocks and blocks[name] in (baseline[name],)
-        + ((successor,) if name == 'preflight' else ()) for name in PROTECTED_DEPENDENCIES),
+        + ((successor,) if name == 'preflight' else ()) + ((node_successors[name],) if name in node_successors else ())
+        for name in PROTECTED_DEPENDENCIES),
         'Unsupported native workflow preamble/dependency scope')
     apple = blocks.get('apple_compile')
     require(apple is not None, 'Unsupported native Apple job scope')
