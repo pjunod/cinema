@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Run native tvOS navigation tests on an isolated simulator; retain a receipt.
 
-No receipt is a qualification unless the complete required suite passes.
+Only the complete union of authenticated retained and newly passed cases succeeds.
 The result bundle preserves failed assertions and native screenshots.
 """
 import argparse
 import datetime
 import hashlib
 import json
+import os
 import plistlib
 import re
 import shutil
@@ -65,6 +66,53 @@ def verify_summary(summary, expected):
         raise RuntimeError(f"Incomplete native journey execution: {summary}")
 
 
+def case_outcomes(log, selected):
+    """Reject duplicate, retried, unexpected or malformed XCTest case events."""
+    started, outcomes = set(), {}
+    pattern = re.compile(r"^Test Case '-\[plurx_tvOSUITests\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' "
+                         r"(started\.|(passed|failed|skipped) \([0-9]+(?:\.[0-9]+)? seconds\)\.)$")
+    for line in log.splitlines():
+        if not line.startswith('Test Case '):
+            continue
+        event = pattern.fullmatch(line)
+        if event is None:
+            raise RuntimeError('Unrecognized native test event')
+        test = event[1] + '/' + event[2]
+        if test not in selected:
+            raise RuntimeError('Unexpected native test identity: ' + test)
+        if event[3] == 'started.':
+            if test in started:
+                raise RuntimeError('Repeated native test start: ' + test)
+            started.add(test)
+        else:
+            if test not in started or test in outcomes:
+                raise RuntimeError('Ambiguous native test outcome: ' + test)
+            outcomes[test] = event[4]
+    return outcomes
+
+
+def resume_selection(path, sha):
+    """Only the preceding authenticated CI planner may supply retained cases.
+
+    A combined receipt never becomes origin evidence: future planners read each
+    original archive's own case_results/log, not this inherited pass map.
+    """
+    if any(parent.is_symlink() for parent in (path, *path.parents)) or path.stat().st_size > 4 * 1024 * 1024:
+        raise RuntimeError('Unsafe native resume plan')
+    plan = json.loads(path.read_text())
+    cases = plan.get('tv_cases', {})
+    passes, pending = cases.get('passes'), cases.get('pending')
+    if (plan.get('current_commit') != sha
+            or plan.get('current_run') != int(os.environ['GITHUB_RUN_ID'])
+            or cases.get('required_tests') != REQUIRED
+            or not isinstance(passes, dict) or not set(passes) <= set(REQUIRED)
+            or any(not isinstance(record, dict) or record.get('test') != test
+                   for test, record in passes.items())
+            or pending != [test for test in REQUIRED if test not in passes]):
+        raise RuntimeError('Native resume source/selection mismatch')
+    return pending, passes
+
+
 def screenshot_name(name):
     """Artifact uploads reject native capture names containing e.g. colons."""
     safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '-', name)
@@ -98,18 +146,40 @@ def main():
     parser.add_argument("--derived-data", type=Path, help="Reusable isolated build cache")
     parser.add_argument("--runtime", default="com.apple.CoreSimulator.SimRuntime.tvOS-26-5")
     options = parser.parse_args()
+    if (len(options.only_testing) != len(set(options.only_testing))
+            or any(test not in REQUIRED for test in options.only_testing)):
+        parser.error('--only-testing requires unique required journey IDs')
+    plan_path = os.environ.get('PLURX_TV_NAVIGATION_PLAN')
+    if plan_path and options.only_testing:
+        parser.error('A CI resume plan cannot be combined with manual selection')
     output = options.output.resolve()
     if output == ROOT or ROOT in output.parents:
         parser.error("--output must be outside the source checkout")
     output.mkdir(parents=True, exist_ok=False)
     derived = (options.derived_data or (output / "DerivedData")).resolve()
     sha, dirty, source_hash = source_snapshot()
-    receipt = {"schema": 1, "source_sha": sha, "source_tree_sha256": source_hash,
+    selected, retained = options.only_testing or REQUIRED, {}
+    if plan_path:
+        selected, retained = resume_selection(Path(plan_path), sha)
+    receipt = {"schema": 2, "source_sha": sha, "source_tree_sha256": source_hash,
                "source_dirty": dirty, "derived_data": str(derived), "required_tests": REQUIRED,
-               "selected_tests": options.only_testing or REQUIRED,
+               "selected_tests": selected, "retained_passes": retained, "case_results": {},
                "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                "status": "failed", "qualification": False, "coverage_scope": "Native library, root, details, settings, DVR, reporting and playback journeys; physical accessibility and lifecycle acceptance separate",
                "result_bundle": str(output / "navigation.xcresult")}
+    if not selected:
+        receipt["xcode"] = run("xcodebuild", "-version", capture_output=True).stdout.strip()
+        receipt["runtime"] = options.runtime
+        end_sha, end_dirty, end_hash = source_snapshot()
+        receipt["finished_source"] = {"sha": end_sha, "dirty": end_dirty, "tree_sha256": end_hash}
+        receipt["source_unchanged"] = (end_sha, end_dirty, end_hash) == (sha, dirty, source_hash)
+        receipt["suite_passes"] = retained
+        receipt["native_suite_complete"] = set(retained) == set(REQUIRED)
+        receipt["status"] = 'passed' if receipt["source_unchanged"] and receipt["native_suite_complete"] else 'failed'
+        receipt["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        print(output / "receipt.json")
+        return 0 if receipt["status"] == "passed" else 1
     device = None
     try:
         receipt["xcode"] = run("xcodebuild", "-version", capture_output=True).stdout.strip()
@@ -130,7 +200,7 @@ def main():
                    "-default-test-execution-time-allowance", "180",
                    "-maximum-test-execution-time-allowance", "240", "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]
         command += [f"-only-testing:plurx-tvOSUITests/{test}"
-                    for test in (options.only_testing or REQUIRED)]
+                    for test in selected]
         receipt["command"] = command
         with (output / "xcodebuild.log").open("w") as log:
             run(*command, stdout=log, stderr=subprocess.STDOUT)
@@ -139,16 +209,27 @@ def main():
         summary = json.loads(run("xcrun", "xcresulttool", "get", "test-results", "summary",
                                  "--path", receipt["result_bundle"], capture_output=True).stdout)
         receipt["test_summary"] = summary
-        expected = len(options.only_testing or REQUIRED)
+        expected = len(selected)
         verify_summary(summary, expected)
         if source_snapshot() != (sha, dirty, source_hash):
             raise RuntimeError("Source changed during the native run; this result cannot qualify the candidate")
         receipt["status"] = "passed"
-        receipt["native_suite_complete"] = not options.only_testing
+        receipt["native_suite_complete"] = set(selected) | set(retained) == set(REQUIRED)
         receipt["qualification"] = False  # Physical/accessibility acceptance is separate.
     except (subprocess.CalledProcessError, RuntimeError) as error:
         receipt["error"] = str(error)
     finally:
+        try:
+            end_sha, end_dirty, end_hash = source_snapshot()
+            receipt["finished_source"] = {"sha": end_sha, "dirty": end_dirty, "tree_sha256": end_hash}
+            receipt["source_unchanged"] = (end_sha, end_dirty, end_hash) == (sha, dirty, source_hash)
+            if not receipt["source_unchanged"]:
+                raise RuntimeError('Source changed during native execution')
+            log_path = output / 'xcodebuild.log'
+            receipt["case_results"] = case_outcomes(log_path.read_text(), selected) if log_path.exists() else {}
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+            receipt["status"] = "failed"
+            receipt["error"] = str(error)
         bundle = Path(receipt["result_bundle"])
         if (bundle / "Info.plist").exists() and "test_summary" not in receipt:
             summary_result = subprocess.run(
@@ -187,7 +268,26 @@ def main():
                     "executable_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                     "bundle_sha256": bundle_hash.hexdigest(),
                 }
+        summary = receipt.get('test_summary', {})
+        if summary and any(type(summary.get(field)) is not int or summary[field] !=
+                           list(receipt['case_results'].values()).count(outcome)
+                           for field, outcome in (('passedTests', 'passed'), ('failedTests', 'failed'),
+                                                  ('skippedTests', 'skipped'))):
+            receipt['status'] = 'failed'
+            receipt['error'] = 'Native named outcomes and result summary disagree'
+        if receipt['status'] == 'passed' and (set(receipt['case_results']) != set(selected)
+                or set(receipt['case_results'].values()) != {'passed'}):
+            receipt['status'] = 'failed'
+            receipt['error'] = 'Native success omitted selected case outcomes'
+        own_passes = {test for test, outcome in receipt["case_results"].items() if outcome == 'passed'}
+        receipt["suite_passes"] = {**retained, **{test: {"source_sha": sha, "own": True}
+                                                  for test in sorted(own_passes)}}
+        receipt["native_suite_complete"] = set(receipt["suite_passes"]) == set(REQUIRED)
         receipt["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    if plan_path and not receipt["native_suite_complete"]:
+        receipt["status"] = "failed"
+        receipt["error"] = 'Native resume did not cover every required journey'
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(output / "receipt.json")
     return 0 if receipt["status"] == "passed" else 1

@@ -14,7 +14,7 @@ run-name: github release ${{ inputs.release_tag || (github.event_name == 'push' 
 #   plurxd-X.Y.Z-windows-x86_64.zip         Windows 10 1809+ / Server 2019+
 #   plurx-desktop_X.Y.Z-1_{amd64,arm64}.deb optional local Linux GUI
 #   plurx-desktop-X.Y.Z-1.{x86_64,aarch64}.rpm
-#   plurx-update-v1.json + plurx-update-v1.json.sig (raw Ed25519)
+#   plurx-update-v1.json + .sig (raw Ed25519), only for qualified in-app upgrades
 #   SHA256SUMS
 #
 # Forgejo reads this file as well, because its runners take .github/workflows.
@@ -27,7 +27,8 @@ run-name: github release ${{ inputs.release_tag || (github.event_name == 'push' 
 # holds this file to its own contract instead of the self-hosted one.
 #
 # The build jobs hold a read-only token and hand their output on as workflow
-# artifacts. Only `publish`, which compiles and runs nothing from the source,
+# artifacts. A separate protected macOS job signs/notarizes the archive without
+# executing its contents. Only `publish`, which compiles and runs nothing from the source,
 # can write: it checks that it holds exactly the expected files, computes
 # SHA256SUMS over them, and creates the release in one step.
 #
@@ -86,6 +87,7 @@ jobs:
       build_ref: ${{ steps.release.outputs.build_ref }}
       source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
       expect_version: ${{ steps.release.outputs.expect_version }}
+      publish_updates: ${{ steps.update_qualification.outputs.enabled }}
     steps:
       - name: Validate the release tag and read its source
         id: release
@@ -165,6 +167,29 @@ jobs:
             echo "expect_version=plurxd $version ($build_ref)"
           } >> "$GITHUB_OUTPUT"
           echo "$mode: builds $commit as plurxd $version ($build_ref)"
+
+      - name: Select qualified in-app update publication
+        id: update_qualification
+        if: steps.release.outputs.mode == 'release'
+        env:
+          UPGRADE_FROM: ${{ vars.PLURX_UPDATE_UPGRADE_FROM }}
+          DATA_COMPATIBILITY: ${{ vars.PLURX_UPDATE_DATA_COMPATIBILITY }}
+          CLUSTER_COMPATIBILITY: ${{ vars.PLURX_UPDATE_CLUSTER_COMPATIBILITY }}
+          MINIMUM_CONTROLLER: ${{ vars.PLURX_UPDATE_MINIMUM_CONTROLLER }}
+          ROLLBACK: ${{ vars.PLURX_UPDATE_ROLLBACK }}
+        run: |
+          set -euo pipefail
+          enabled=true
+          for name in UPGRADE_FROM DATA_COMPATIBILITY CLUSTER_COMPATIBILITY MINIMUM_CONTROLLER ROLLBACK; do
+            if [ -z "${!name}" ]; then
+              enabled=false
+              printf 'In-app update qualification is missing: %s\n' "$name" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+          if [ "$enabled" = false ]; then
+            echo 'Verified installers will publish without advertising authenticated in-app upgrades.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   linux:
     name: Linux packages (${{ matrix.arch }})
@@ -336,8 +361,9 @@ jobs:
             test -x /usr/bin/plurx-control
             test -x /usr/lib/plurx-control/plurx-recovery
             test -f /etc/plurx/installation.json
-            su -s /bin/sh plurx -c "PLURX_DATA_DIR=/var/lib/plurx PLURX_BIND=127.0.0.1:32400 plurxd run" \
+            su -s /bin/sh plurx -c "echo \$\$ > /tmp/plurxd-smoke.pid; exec env PLURX_DATA_DIR=/var/lib/plurx PLURX_BIND=127.0.0.1:32400 plurxd run" \
               > /tmp/plurxd.log 2>&1 &
+            smoke_launcher=$!
             tries=0
             until curl -fsS http://127.0.0.1:32400/readyz >/dev/null 2>&1; do
               tries=$((tries + 1))
@@ -345,10 +371,16 @@ jobs:
               sleep 1
             done
             curl -fsS http://127.0.0.1:32400/api/v1/server; echo
+            # This container has no systemd owner to stop this manual process.
+            read -r smoke_daemon < /tmp/plurxd-smoke.pid
+            [[ "$smoke_daemon" =~ ^[1-9][0-9]*$ ]] && [ "$smoke_daemon" -gt 1 ]
+            kill -TERM -- "$smoke_daemon"
+            wait "$smoke_launcher"
           '
-          # Removal keeps the state and the user and records that it happened;
-          # installing again consumes that record (and so re-enables the
-          # service on a systemd host).
+          # Force reinstall while the trusted guard is still installed, then
+          # remove last. A retained managed record without its removed guard
+          # deliberately requires repair before any new payload is unpacked.
+          # Removal keeps the state/user and records that it happened.
           removed='
             test ! -e /usr/bin/plurxd
             test "$(stat -c %U /var/lib/plurx)" = plurx
@@ -358,42 +390,53 @@ jobs:
             test "$(plurxd --version)" = "$EXPECT_VERSION"
             test ! -e /var/lib/plurx/.plurxd-package-removed
           '
+          package_manager='
+            package_command() {
+              if "$@" > /tmp/plurx-package-manager.log 2>&1; then
+                return 0
+              else
+                status=$?
+                tail -n 80 /tmp/plurx-package-manager.log >&2
+                return "$status"
+              fi
+            }
+          '
           run_in() {
             local image=$1 script=$2
             echo "::group::$image"
             docker run --rm --volume "$PWD/dist:/dist:ro" \
               --env EXPECT_VERSION --env DEB --env RPM \
-              "$image" bash -euo pipefail -c "$script"
+              "$image" bash -euo pipefail -c "$package_manager"$'\n'"$script"
             echo "::endgroup::"
           }
           deb='
             export DEBIAN_FRONTEND=noninteractive
-            apt-get -qq update
-            apt-get -qq install -y --no-install-recommends "/dist/$DEB" curl >/dev/null
+            package_command apt-get -qq update
+            package_command apt-get -qq install -y --no-install-recommends "/dist/$DEB" curl
             '"$serve"'
-            apt-get -qq remove -y plurxd >/dev/null
-            '"$removed"'
-            apt-get -qq install -y --no-install-recommends "/dist/$DEB" >/dev/null
+            package_command apt-get -qq install --reinstall -y --no-install-recommends "/dist/$DEB"
             '"$reinstalled"'
+            package_command apt-get -qq remove -y plurxd
+            '"$removed"'
           '
           run_in debian:12 "$deb"
           run_in ubuntu:24.04 "$deb"
           run_in fedora:42 '
-            dnf -y -q install "/dist/$RPM" util-linux >/dev/null
-            command -v curl >/dev/null || dnf -y -q install curl >/dev/null
+            package_command dnf -y -q install "/dist/$RPM" util-linux
+            command -v curl >/dev/null || package_command dnf -y -q install curl
             '"$serve"'
-            dnf -y -q remove plurxd >/dev/null
-            '"$removed"'
-            dnf -y -q install "/dist/$RPM" >/dev/null
+            package_command dnf -y -q reinstall "/dist/$RPM"
             '"$reinstalled"'
+            package_command dnf -y -q remove plurxd
+            '"$removed"'
           '
           # RHEL takes ffmpeg from RPM Fusion, which a stock image lacks, so
           # this proves the scriptlets and that the binary loads there.
           run_in almalinux:9 '
-            rpm -i --nodeps "/dist/$RPM"
+            package_command rpm -i --nodeps "/dist/$RPM"
             test "$(plurxd --version)" = "$EXPECT_VERSION"
             test "$(stat -c %U:%a /var/lib/plurx)" = plurx:750
-            rpm -e --nodeps plurxd
+            package_command rpm -e --nodeps plurxd
             '"$removed"'
           '
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -408,9 +451,40 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  macos_source_parser:
+    name: canonical macOS source parser
+    needs: resolve
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Fetch the release source
+        env:
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git init -q release-source
+          git -C release-source fetch -q --depth 1 "$REPO_URL" "$COMMIT"
+          git -C release-source checkout -q --detach FETCH_HEAD
+      - name: Build the architecture-neutral parser once for both native slices
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential patch curl ca-certificates
+          python3 scripts/build-macos-source-parser --output "$RUNNER_TEMP/source-parser" --jobs 3
+          tar -C "$RUNNER_TEMP/source-parser" -czf ../source-parser.tar.gz .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-source-parser
+          path: source-parser.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   macos_build:
     name: macOS plurxd (${{ matrix.arch }})
-    needs: resolve
+    needs: [resolve, macos_source_parser]
     if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
     runs-on: ${{ matrix.runner }}
     # A slice takes about an hour on these runners (63 min arm64, 72 min
@@ -442,6 +516,10 @@ jobs:
           git init -q release-source
           git -C release-source fetch -q --depth 1 "$REPO_URL" "$COMMIT"
           git -C release-source checkout -q --detach FETCH_HEAD
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-source-parser
+          path: shared-parser
       - name: Build and run plurxd on ${{ matrix.arch }}
         working-directory: release-source
         env:
@@ -465,7 +543,10 @@ jobs:
             --version "$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)" \
             --output "$RUNNER_TEMP/Plurx Server.app"
           tar -C "$RUNNER_TEMP" -czf "../slice/desktop-$ARCH.tar.gz" 'Plurx Server.app'
-          python3 scripts/build-macos-source-parser --output "$RUNNER_TEMP/source-parser" --jobs 3
+          # Independent host compilers can round WASM floating constants
+          # differently. Both native packages must carry the exact same module.
+          mkdir "$RUNNER_TEMP/source-parser"
+          tar -C "$RUNNER_TEMP/source-parser" -xzf ../shared-parser/source-parser.tar.gz
           python3 scripts/build-macos-video-ffmpeg --output "$RUNNER_TEMP/media-package" \
             --source-parser-package "$RUNNER_TEMP/source-parser"
           tar -C "$RUNNER_TEMP/media-package" -czf "../slice/media-$ARCH.tar.gz" .
@@ -537,14 +618,6 @@ jobs:
             --control-dir "$RUNNER_TEMP/universal/bin" --version "$VERSION" \
             --source-commit "${{ needs.resolve.outputs.commit }}" --output "$PWD/dist/$name"
           test "$("dist/$name/runtime/plurxd" --version)" = "$EXPECT_VERSION"
-          if [ "${{ needs.resolve.outputs.mode }}" = release ]; then
-            # Actual Apple evidence is mandatory. A candidate assembled with
-            # ad-hoc signing fails closed here; no env flag can bless it.
-            # Protected Developer ID/notary configuration must precede the
-            # first official desktop-cohort release; local dry runs remain usable.
-            python3 scripts/package-macos --verify-distribution "$PWD/dist/$name" \
-              --team-id "${{ vars.PLURX_MACOS_DEVELOPER_TEAM_ID }}"
-          fi
           python3 scripts/package-macos --archive "$PWD/dist/$name" --output "$PWD/dist/$name.tar.gz"
           rm -rf "dist/$name"
           ls -l dist
@@ -563,6 +636,88 @@ jobs:
           codesign --verify --deep --strict "$package/Plurx Server.app"
           # Actual login/stop/reboot and rollback are native qualification,
           # separate from archive assembly; this job does not claim them.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ needs.resolve.outputs.mode == 'release' && 'macos-candidate' || 'release-macos' }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 7
+
+  macos_signing:
+    name: sign and notarize the macOS install archive
+    needs: [resolve, macos]
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode == 'release'
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: macos-release-signing
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
+      SOURCE_DATE_EPOCH: ${{ needs.resolve.outputs.source_date_epoch }}
+      PACKAGING_COMMIT: ${{ github.sha }}
+      TRUSTED_PACKAGING_COMMIT: ${{ vars.PLURX_TRUSTED_PACKAGING_COMMIT }}
+    steps:
+      - name: Fetch only the explicitly approved immutable packaging code
+        run: |
+          set -euo pipefail
+          [[ "$TRUSTED_PACKAGING_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$PACKAGING_COMMIT" = "$TRUSTED_PACKAGING_COMMIT"
+          git init -q trusted
+          git -C trusted fetch -q --depth 1 "$REPO_URL" "$TRUSTED_PACKAGING_COMMIT"
+          git -C trusted checkout -q --detach FETCH_HEAD
+          test "$(git -C trusted rev-parse HEAD)" = "$TRUSTED_PACKAGING_COMMIT"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-candidate
+          path: candidate
+      - name: Sign every native image, notarize, staple and verify the complete archive
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.PLURX_MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.PLURX_MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_PRIVATE_KEY: ${{ secrets.PLURX_MACOS_NOTARY_PRIVATE_KEY }}
+          SIGNING_IDENTITY: ${{ vars.PLURX_MACOS_SIGNING_IDENTITY }}
+          TEAM_ID: ${{ vars.PLURX_MACOS_DEVELOPER_TEAM_ID }}
+          NOTARY_KEY_ID: ${{ vars.PLURX_MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ vars.PLURX_MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          for name in CERTIFICATE_BASE64 CERTIFICATE_PASSWORD NOTARY_PRIVATE_KEY SIGNING_IDENTITY TEAM_ID NOTARY_KEY_ID NOTARY_ISSUER_ID; do
+            test -n "${!name}" || { echo "::error::missing macOS release configuration: $name"; exit 1; }
+          done
+          credentials="$RUNNER_TEMP/macos-release-credentials"
+          mkdir "$credentials"
+          keychain="$credentials/signing.keychain-db"
+          cleanup() {
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -rf "$credentials"
+          }
+          trap cleanup EXIT
+          python3 -c 'import base64,os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"macos-release-credentials","certificate.p12").write_bytes(base64.b64decode(os.environ["CERTIFICATE_BASE64"],validate=True))'
+          printf '%s\n' "$NOTARY_PRIVATE_KEY" > "$credentials/notary.p8"
+          keychain_password=$(openssl rand -hex 32)
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$credentials/certificate.p12" -P "$CERTIFICATE_PASSWORD" -t cert -f pkcs12 -k "$keychain" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          rm -f "$credentials/certificate.p12"
+          unset CERTIFICATE_BASE64 CERTIFICATE_PASSWORD NOTARY_PRIVATE_KEY keychain_password
+          mkdir dist
+          python3 trusted/scripts/sign-macos-release \
+            --archive "$PWD/candidate/plurxd-$VERSION-macos-universal.tar.gz" \
+            --output "$PWD/dist/plurxd-$VERSION-macos-universal.tar.gz" \
+            --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
+            --identity "$SIGNING_IDENTITY" --team-id "$TEAM_ID" \
+            --key "$credentials/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID"
+      - name: Remove Apple credentials even after cancellation
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/macos-release-credentials/signing.keychain-db" >/dev/null 2>&1 || true
+          rm -rf "$RUNNER_TEMP/macos-release-credentials"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-macos
@@ -652,8 +807,8 @@ jobs:
 
   desktop_metadata:
     name: validate complete desktop cohort (fixture signatures on dry runs)
-    needs: [resolve, linux, macos, windows, windows_smoke]
-    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
+    needs: [resolve, linux, macos, macos_signing, windows, windows_smoke]
+    if: github.server_url == 'https://github.com' && !cancelled() && !failure() && needs.resolve.outputs.mode != 'qualification'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # No environment or secrets: candidate qualification needs no owner approval.
@@ -719,7 +874,7 @@ jobs:
   desktop_signing:
     name: validate and sign desktop release metadata
     needs: [resolve, desktop_metadata]
-    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode == 'release'
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode == 'release' && needs.resolve.outputs.publish_updates == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Configure required reviewers and trusted branch/tag restrictions here.
@@ -804,8 +959,8 @@ jobs:
 
   publish:
     name: publish the release (a dry run stops at the check)
-    needs: [resolve, linux, macos, windows, windows_smoke, desktop_signing]
-    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode == 'release'
+    needs: [resolve, linux, macos, macos_signing, windows, windows_smoke, desktop_metadata, desktop_signing]
+    if: github.server_url == 'https://github.com' && !cancelled() && !failure() && needs.resolve.outputs.mode == 'release'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -815,6 +970,7 @@ jobs:
       TAG: ${{ needs.resolve.outputs.tag }}
       VERSION: ${{ needs.resolve.outputs.version }}
       COMMIT: ${{ needs.resolve.outputs.commit }}
+      PUBLISH_UPDATES: ${{ needs.resolve.outputs.publish_updates }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -830,9 +986,11 @@ jobs:
             "plurx-desktop_${VERSION}-1_amd64.deb" "plurx-desktop_${VERSION}-1_arm64.deb" \
             "plurx-desktop-${VERSION}-1.x86_64.rpm" "plurx-desktop-${VERSION}-1.aarch64.rpm" \
             "plurx-tray-${VERSION}-linux-amd64.tar.gz" "plurx-tray-${VERSION}-linux-arm64.tar.gz" \
-            "plurx-update-v1.json" "plurx-update-v1.json.sig" \
             "plurxd-${VERSION}-macos-universal.tar.gz" "plurxd-${VERSION}-windows-x86_64.zip" \
             | LC_ALL=C sort)
+          if [ "$PUBLISH_UPDATES" = true ]; then
+            expected=$(printf '%s\n' "$expected" "plurx-update-v1.json" "plurx-update-v1.json.sig" | LC_ALL=C sort)
+          fi
           test "$(ls assets | LC_ALL=C sort)" = "$expected" || {
             echo "::error::unexpected asset set:"; ls -l assets; exit 1; }
           (cd assets && sha256sum $(ls | LC_ALL=C sort)) > SHA256SUMS
@@ -871,6 +1029,11 @@ jobs:
             found && /^## \[/ { exit }
             found { print }
           ' source/CHANGELOG.md > notes.md
+          if [ "$PUBLISH_UPDATES" = true ]; then
+            printf '\n## In-app updates\n\nThis release includes authenticated update metadata for the qualified upgrade baselines.\n' >> notes.md
+          else
+            printf '\n## In-app updates\n\nThis release provides verified manual installers. Authenticated in-app upgrades are not advertised until upgrade qualification is complete.\n' >> notes.md
+          fi
           deb="plurxd_${VERSION}-1"
           rpm="plurxd-${VERSION}-1"
           cat >> notes.md <<NOTES

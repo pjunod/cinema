@@ -696,15 +696,38 @@ mod tests {
 
     #[test]
     fn the_playback_start_path_never_reads_the_cache() {
-        // The real GET and POST routes share `decision`; this catches a
-        // future edit that diverts either through the detail observation.
+        // The authenticated GET and POST wrappers delegate to the real
+        // decision handlers; neither may divert through detail observation.
         let routes = include_str!("http/mod.rs");
         let decision_route = routes
             .split_once("\"/files/{id}/decision\",")
             .expect("playback decision route")
             .1;
-        assert!(decision_route.contains("get(stream::decision)"));
-        assert!(decision_route.contains(".post(stream::decision_post)"));
+        let decision_route = decision_route.split_once(".route(").expect("next route").0;
+        assert!(decision_route.contains("get(playback_handoffs::scoped_decision)"));
+        assert!(decision_route.contains(".post(playback_handoffs::scoped_decision_post)"));
+        let wrappers = include_str!("http/playback_handoffs.rs");
+        for (handler, delegation) in [
+            ("pub async fn scoped_decision(", "super::stream::decision("),
+            (
+                "pub async fn scoped_decision_post(",
+                "super::stream::decision_post(",
+            ),
+        ] {
+            let body = wrappers
+                .split_once(handler)
+                .expect("scoped decision wrapper")
+                .1
+                .split_once("\n}\n")
+                .expect("wrapper body")
+                .0;
+            assert!(body.contains("principal.require_file(id)?;"));
+            assert!(
+                body.contains(delegation),
+                "the scoped wrapper keeps the fresh-read handler"
+            );
+            assert!(!body.contains("availability"));
+        }
 
         let source = include_str!("http/stream.rs");
         let start = source

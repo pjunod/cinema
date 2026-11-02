@@ -816,6 +816,9 @@ pub struct AppState {
     pub logs: Arc<LogBuffer>,
     /// Replication/membership detail kept out of the general diagnostics ring.
     pub cluster_logs: Arc<LogBuffer>,
+    /// Shared-library connection, setup and Tailscale-share events, kept
+    /// apart so playback chatter cannot evict a connection failure.
+    pub sharing_logs: Arc<LogBuffer>,
     /// The coming-soon rail's cached answer from Curator (plan §11.2).
     pub coming_soon: Arc<crate::http::ComingSoonCache>,
     /// Pushes watch state to Curator when enabled (plan §11.1).
@@ -1092,6 +1095,7 @@ impl AppState {
             LogBuffers {
                 general: logs,
                 cluster: Arc::new(LogBuffer::default()),
+                sharing: Arc::new(LogBuffer::new(64)),
             },
         )
     }
@@ -1349,6 +1353,7 @@ impl AppState {
             system,
             logs: logs.general,
             cluster_logs: logs.cluster,
+            sharing_logs: logs.sharing,
             coming_soon,
             watched,
             progress,
@@ -3286,6 +3291,7 @@ pub(crate) async fn subtitle_source_pipeline_version() -> String {
 
 fn subtitle_source_argv(
     input: &str,
+    input_args: &[String],
     plan: &crate::subtitle_ride_along::RideAlongPlan,
 ) -> Vec<String> {
     let mut args = vec![
@@ -3295,9 +3301,9 @@ fn subtitle_source_argv(
         "-copyts".to_owned(),
         "-threads".to_owned(),
         "1".to_owned(),
-        "-i".to_owned(),
-        input.to_owned(),
     ];
+    args.extend(input_args.iter().cloned());
+    args.extend(["-i".to_owned(), input.to_owned()]);
     args.extend(plan.args());
     args
 }
@@ -3317,6 +3323,7 @@ fn subtitle_source_covered(
 async fn run_subtitle_source_pass(
     plan: crate::subtitle_ride_along::RideAlongPlan,
     source: &std::fs::File,
+    input_args: &[String],
     runtime_cache: &Path,
     lost: &CancellationToken,
     preempt_when_busy: Option<&TranscodeManager>,
@@ -3339,7 +3346,7 @@ async fn run_subtitle_source_pass(
         .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?
         .to_string_lossy()
         .into_owned();
-    let args = subtitle_source_argv(&input, &plan);
+    let args = subtitle_source_argv(&input, input_args, &plan);
     let mut command = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
@@ -9683,16 +9690,38 @@ impl JobManager {
             );
         };
         let started = Instant::now();
+        // Every planned track cue-indexed: the pass reads those blocks and
+        // runs its unchanged command against them. The command is already
+        // `-copyts`, so the subset's own timeline is the answer.
+        // Read from the attested object, so what is published is what was
+        // hashed. An empty subset keeps the demux: FFmpeg 6.1+ fails a tee
+        // whose outputs never receive a packet.
+        let sparse = crate::subtitles::sparse_subtitle_input(
+            file,
+            plan.tracks(),
+            None,
+            crate::subtitles::SparseTimeline::Raw,
+            Some(attested.observation.object_version.as_str()),
+            crate::process_control::ChildWork::background("subtitle source extraction"),
+        )
+        .await
+        .filter(|sparse| sparse.blocks > 0);
         tracing::info!(
             file_id = file.id,
             node_id,
             pgs_count,
             text_count,
+            cue_indexed_blocks = sparse.as_ref().map(|sparse| sparse.blocks),
             "subtitle_source job reading source"
         );
         let pending = run_subtitle_source_pass(
             plan,
-            &attested.handle,
+            sparse
+                .as_ref()
+                .map_or(&attested.handle, |sparse| &sparse.handle),
+            sparse
+                .as_ref()
+                .map_or(&[][..], |sparse| sparse.input_args.as_slice()),
             runtime_cache,
             lost,
             if request.priority == "foreground" {
@@ -12797,3 +12826,7 @@ fn error_status(message: &str) -> ScanStatus {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "state/backfill_tests.rs"]
+mod backfill_tests;

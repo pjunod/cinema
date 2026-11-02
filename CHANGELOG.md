@@ -129,6 +129,82 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared libraries across Tailscale accounts: a Cinema running as the macOS
+  LaunchAgent can now observe its own Tailscale, so it binds its private
+  source address and can connect to other Cinemas (the Tailscale app answered
+  launchd-started CLI calls as its GUI and every check failed silently).
+  Settings → Sharing shows a connection checklist naming the host's Tailscale
+  account, the exact failing setup step, whether each saved connection is
+  reachable and — on Check connection — why not (share not accepted by this
+  account, source offline, port refused, certificate mismatch, no private
+  source address). The import form names the account that must accept the
+  Tailscale share; senders see whether, and by whom, each share was accepted.
+  A dedicated sharing activity log (`/api/v1/system/logs?scope=sharing`)
+  records setup changes, checks, shares and cleanup failures.
+
+- Embedded text subtitles in Matroska files are read through the file's own
+  cue index when it provably names every subtitle frame, instead of demuxing
+  the whole picture: a 4K remux's track takes a few thousand small reads
+  rather than a full-file scan, so windows land ahead of the playhead and the
+  whole track no longer times out. Other files keep the full demux.
+
+- Shared HDR10 playback builds a missing HEVC copy index instead of forcing
+  video encoding and SDR on hosts without an HDR10 encoder. Unsupported EAC3
+  audio converts to AAC while the HDR10 video and static metadata stay intact.
+
+- Sharing hides revoked recipients by default, explains pairing and viewer
+  assignment steps, and refreshes incoming requests automatically. Invitation
+  imports verify an existing private connection immediately, show actionable
+  failures with bounded retries, and log connection/import failure codes
+  without exposing invitation secrets or credentials.
+  Native Mac setup recognizes legacy installed services and no longer treats
+  ordinary native daemons as Docker containers. Shared playback accepts the
+  current audio downmix plans and excludes public-only output advisories from
+  peer decisions instead of reporting an unexplained preparation failure.
+  HTTP browser sessions generate UUID request identities even without
+  `crypto.randomUUID`, allowing shared playback to start. Source connection
+  failures have a distinct message and catalogue-stage diagnostics.
+
+- Progressive subtitle translation keeps FFmpeg progress updates out of source
+  clock evidence, preventing valid decoded ranges from failing before inference.
+
+- Shared playback handoff and quality reopen accept the producer's bounded
+  playlist start hint instead of returning 503 when playback resumes after zero.
+- Update the macOS source parser runtime to fix an abort in native exception
+  handling, preserving its deadline, memory, stack and capability limits.
+
+- Sharing-host setup reaps its helper before timeout or cancellation returns,
+  while retaining the helper's native user/IPC environment. The lifecycle
+  inventory now records the sharing-host and invitation owners and their tests.
+- Existing-text subtitle inference consumes verified caption artifacts without
+  waiting for unrelated media readers; legacy extraction jobs remain fenced.
+- Progressive captions decode valid surround audio without treating FFmpeg
+  side-data logs as malformed timestamps or losing the final window to log caps.
+- Progressive captions recover an existing stopped operation through a validated
+  read before explicit Resume, including operations without a published asset.
+  Current nonretryable range failures are visible without hiding available
+  coverage or offering unsupported retries.
+- Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
+- Sharing setup shows the Tailscale connection and saved account authorization
+  up front, confirms key saves by reading them back, and refreshes connection
+  status after setup. Cluster gateway addresses and node-local setup are labeled
+  separately.
+
+
+
+- Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
+- Progressive subtitle decoding resolves the normal PATH-based media tools to
+  canonical executables before launching its clean, descriptor-bound children.
+
+- Cluster maintenance commits its release intent with the elected coordinator's
+  exact lease, acknowledges the current process, and counts active sessions
+  before allowing maintenance exit.
+
+- Recording lists bind paging, state filters, and capture boundaries independently
+  instead of returning a database error.
+- Model and media-tool verification detects immediate same-size byte changes
+  even when filesystem timestamps coincide.
+- Cinema invitations now include external Tailscale device consent and resume import when the private connection is ready; account authorization, endpoint discovery and invitation cleanup are managed in Sharing.
 - Fresh macOS Vulkan media builds include libplacebo's pinned fast_float
   headers, allowing floating-point parsing with the macOS 12 deployment target.
 
@@ -387,6 +463,16 @@ bump may break compatibility and a **patch** bump never does.
   settling repeated attachment to the same player layer.
 - Apple Playback info reports the installed Auto rung after a prepared quality
   switch, so an encoded 720p stream no longer retains the original Remux label.
+
+- GitHub macOS releases sign and notarize the complete install archive in a
+  protected job before publication, retaining component hashes and the stapled
+  app ticket. A single canonical WASM parser is shared by both native slices
+  so host-specific floating-point folding cannot prevent universal assembly.
+  Manual installers publish independently of in-app upgrade
+  qualification; unqualified releases omit update metadata. Dry-run builds
+  remain available without Apple credentials. Linux release smoke tests force
+  reinstall before removal, preserve the missing-guard refusal, and retain
+  package-manager diagnostics on failure.
 
 ## [0.7.0] — 2026-10-17
 

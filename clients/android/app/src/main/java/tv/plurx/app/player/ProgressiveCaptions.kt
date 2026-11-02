@@ -132,6 +132,36 @@ internal data class CaptionBinding(val options: CaptionOptions, val profile: Cap
         asset.audio_index == audio.audio_ordinal && asset.spoken_language == selection.spokenLanguage &&
         asset.output_language == outputLanguage && asset.timeline_contract == options.timeline_contract
 }
+internal fun captionRangeFailureMessage(reason: String?): String = when (reason) {
+    "source_clock_unsupported" -> "This source timeline is not supported for progressive captions."
+    "inference_timeout" -> "Speech processing exceeded its time limit for this range."
+    "output_invalid" -> "Caption output failed validation for this range."
+    else -> "Caption processing failed for this range."
+}
+internal fun captionCurrentFailure(value: CaptionOperation, coreMs: Long?, position: Long, covered: Boolean): CaptionFailedRange? {
+    if (covered || coreMs == null || coreMs <= 0) return null
+    val core = position.coerceAtLeast(0) / coreMs
+    val active = value.active_job
+    if (active != null && active.state in setOf("queued", "running", "cancelling") && (active.core_index == null || active.core_index == core)) return null
+    return value.failed_ranges.firstOrNull { it.core_index == core }
+}
+
+/** A stopped Create conflict is a read handle, never a producer receipt. */
+internal fun captionValidateRecovery(value: CaptionOperation, id: String, file: Long, chosen: CaptionBinding) {
+    require(runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false))
+    require(value.version == 1 && value.operation_id == id && value.file_id == file.toString() &&
+        value.source_size == chosen.options.source_size && value.source_mtime == chosen.options.source_mtime &&
+        value.profile_id == chosen.profile.profile_id && value.model_id == chosen.profile.model_id &&
+        chosen.profile.model_sha256?.let { captionHash(it) && value.model_sha256 == it } == true &&
+        value.timeline_contract == chosen.profile.timeline_contract && value.timeline_contract == chosen.options.timeline_contract &&
+        value.audio_index == chosen.audio.audio_ordinal && value.task == chosen.selection.task &&
+        value.spoken_language == chosen.selection.spokenLanguage && value.output_language == chosen.outputLanguage &&
+        value.state in setOf("checking_source", "waiting_model", "waiting_capacity", "translating", "partial", "suspended", "stopped", "complete", "failed") &&
+        (value.asset_id == null || captionHash(value.asset_id) && value.content_revision?.let(::captionHash) == true)) { "Caption source or profile changed" }
+    captionCounter(value.operation_epoch); captionCounter(value.view_revision)
+    captionValidateFailures(value.failed_ranges, value.failed_ranges_next_cursor)
+}
+
 internal fun captionBinding(options: CaptionOptions, selectedAudioOrdinal: Long?, selection: ProgressiveCaptionSelection): CaptionBinding {
     require(options.version == 1 && options.duration_ms in 1..14_400_000 && options.models.size <= 16 && options.audio_tracks.size <= 64)
     require(options.source_origin_ms != null) { "The source clock has not been verified" }
@@ -384,7 +414,12 @@ internal class ProgressiveCaptions(
                             })
                         if (!settleProducer(chosen, g)) return@launch
                     } catch (e: CancellationException) { throw e }
-                    catch (e: Exception) { ambiguous = captionActionAmbiguous(e); if (!actions.owns(owner)) return@launch; throw e }
+                    catch (e: Exception) {
+                        ambiguous = captionActionAmbiguous(e)
+                        if (!actions.owns(owner)) return@launch
+                        val recovery = (e as? RefusalException)?.takeIf { it.status == 409 && it.code == "operation_stopped" }?.operationId
+                        if (recovery != null) observeOperation(recovery, chosen, g, recovery = true) else throw e
+                    }
                     finally { if (actions.finish(owner, ambiguous) && !ambiguous) createRequest = null }
                 }
                 val id = intent.operationId
@@ -452,9 +487,10 @@ internal class ProgressiveCaptions(
         }
     }
 
-    private suspend fun observeOperation(id: String, chosen: CaptionBinding, g: Long) {
+    private suspend fun observeOperation(id: String, chosen: CaptionBinding, g: Long, recovery: Boolean = false) {
         val value = captionRead<CaptionOperation>(api().captionOperation(id))
-        if (!current(g)) return
+        if (!current(g) || recovery && binding != chosen) return
+        if (recovery) captionValidateRecovery(value, id, fileId, chosen)
         require(value.version == 1 && value.operation_id == id && value.profile_id == chosen.profile.profile_id &&
             value.source_size == chosen.options.source_size && value.source_mtime == chosen.options.source_mtime &&
             value.audio_index == chosen.audio.audio_ordinal && value.task == chosen.selection.task &&
@@ -465,10 +501,15 @@ internal class ProgressiveCaptions(
             it.operation_epoch == value.operation_epoch && it.view_revision == value.view_revision }
         failedRangePage = page
         operation = if (page != null) value.copy(failed_ranges = page.entries, failed_ranges_next_cursor = page.next_cursor) else value
+        if (recovery) { intent.operationId = id; receipt = null; heartbeatAttempt.clear() }
         observe(value.server_now_ms)
         if (value.state == "stopped") { intent.stopped = true; receipt = null }
+        val at = position()
+        val failure = captionCurrentFailure(operation ?: value, chosen.profile.window?.core_ms, at,
+            SystemClock.elapsedRealtime() < lastLeaseDeadline && cachedSegments.values.any { at >= it.start_ms && at < it.end_ms })
         status = when {
             intent.stopped -> "Stopped — cached captions remain available. Resume requires an explicit action."
+            failure != null -> captionRangeFailureMessage(failure.reason)
             value.state == "failed" -> "Failed: ${value.reason ?: "unknown reason"}"
             value.source_check.state == "checking" -> "Checking source: ${value.source_check.bytes_read} / ${value.source_check.total_bytes} bytes"
             value.active_job != null -> value.active_job.phase.replace('_', ' ')

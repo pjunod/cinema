@@ -3983,7 +3983,7 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.subtitle_managed_schema_version().await?;
-        if version == Some(2) {
+        if version == Some(3) {
             return Ok(());
         }
         if version.is_none() {
@@ -4000,24 +4000,47 @@ impl HiqliteAuthStore {
                 ));
             }
         }
+        if self.subtitle_managed_schema_version().await? == Some(1) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::RESOURCE_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::resource_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::resource_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? == Some(1) {
+                result?;
+                return Err(StoreError::Migration(
+                    "managed resource schema upgrade did not settle".into(),
+                ));
+            }
+        }
         if self.subtitle_managed_schema_version().await? == Some(2) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::ARTIFACT_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::artifact_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::artifact_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? == Some(2) {
+                result?;
+                return Err(StoreError::Migration(
+                    "managed artifact schema upgrade did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(3) {
             return Ok(());
         }
-        let mut statements = vec![(
-            super::subtitle_managed_schema::RESOURCE_GUARD.to_owned(),
-            params!(super::subtitle_managed_schema::resource_predecessor_view()),
-        )];
-        statements.extend(
-            super::subtitle_managed_schema::resource_statements()
-                .into_iter()
-                .map(|sql| (sql, params!())),
-        );
-        admit_schema_migration(admission)?;
-        let result = self.schema_migration_transaction(statements).await;
-        if self.subtitle_managed_schema_version().await? == Some(2) {
-            return Ok(());
-        }
-        result?;
         Err(StoreError::Migration(
             "managed resource schema upgrade did not settle".into(),
         ))

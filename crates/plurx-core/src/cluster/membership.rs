@@ -6913,10 +6913,10 @@ impl MembershipManager {
         }
         if maintenance_requested {
             statements.push((
-                "UPDATE cluster_node_maintenance SET acknowledged_at = COALESCE(acknowledged_at, $2) \
-                     WHERE node_id = $1"
+                "UPDATE cluster_node_maintenance SET acknowledged_at = COALESCE(acknowledged_at, $1) \
+                     WHERE node_id = $2"
                     .to_owned(),
-                params!(inner.identity.node_id.as_str(), now),
+                params!(now, inner.identity.node_id.as_str()),
             ));
         }
         statements.push((
@@ -8160,9 +8160,9 @@ impl MembershipManager {
                 ),
                 (
                     "INSERT INTO cluster_operation_lease_intents (claim_id) \
-                     SELECT $2 WHERE EXISTS (SELECT 1 FROM cluster_operation_leases lease \
-                       WHERE lease.singleton = 1 AND lease.node_id = $1 \
-                         AND lease.operation = 'maintenance' AND lease.claim_id = $2) \
+                     SELECT lease.claim_id FROM cluster_operation_leases lease \
+                     WHERE lease.singleton = 1 AND lease.node_id = $1 \
+                       AND lease.operation = 'maintenance' AND lease.claim_id = $2 \
                      ON CONFLICT(claim_id) DO NOTHING"
                         .to_owned(),
                     vec![
@@ -8172,9 +8172,9 @@ impl MembershipManager {
                 ),
                 (
                     "INSERT INTO cluster_operation_lease_releases (claim_id) \
-                     SELECT $2 WHERE EXISTS (SELECT 1 FROM cluster_operation_leases lease \
-                       WHERE lease.singleton = 1 AND lease.node_id = $1 \
-                         AND lease.operation = 'maintenance' AND lease.claim_id = $2) \
+                     SELECT lease.claim_id FROM cluster_operation_leases lease \
+                     WHERE lease.singleton = 1 AND lease.node_id = $1 \
+                       AND lease.operation = 'maintenance' AND lease.claim_id = $2 \
                      ON CONFLICT(claim_id) DO NOTHING"
                         .to_owned(),
                     vec![
@@ -9807,12 +9807,12 @@ impl MembershipManager {
                         maintenance.acknowledged_at AS maintenance_acknowledged_at, \
                         EXISTS (SELECT 1 FROM cluster_node_capabilities capability \
                           WHERE capability.node_id = n.node_id \
-                            AND capability.capability = $2 \
+                            AND capability.capability = $1 \
                             AND capability.last_seen_at = n.last_seen_at) AS maintenance_capable, \
                         (SELECT COUNT(*) FROM media_sessions session \
                           WHERE session.owner_node_id = n.node_id \
                             AND session.state = 'active' \
-                            AND session.lease_expires_at_ms > $1) AS active_media_sessions, \
+                            AND session.lease_expires_at_ms > $2) AS active_media_sessions, \
                         EXISTS (SELECT 1 FROM cluster_node_removals AS removal \
                           WHERE removal.node_id = n.node_id) AS removal_pending \
                  FROM cluster_nodes n \
@@ -9822,7 +9822,7 @@ impl MembershipManager {
                  WHERE n.removed_at IS NULL \
                    AND n.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each($3)) \
                  ORDER BY n.raft_id",
-                params!(now, NODE_MAINTENANCE_CAPABILITY, members_json.as_str()),
+                params!(NODE_MAINTENANCE_CAPABILITY, now, members_json.as_str()),
             )
             .await?;
         let protocol = self

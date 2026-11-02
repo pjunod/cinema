@@ -1327,6 +1327,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_translation_schema::CONTINUITY_MIGRATION,
     // v120: artifact-only text model setup does not reserve media source readers.
     super::subtitle_managed_schema::RESOURCE_MIGRATION,
+    // v121: artifact-only text translation does not reserve media source readers.
+    super::subtitle_managed_schema::ARTIFACT_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1782,6 +1784,9 @@ impl SqliteStore {
         if !already_applied {
             if version == super::subtitle_managed_schema::RESOURCE_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_resource_predecessor(&tx)?;
+            }
+            if version == super::subtitle_managed_schema::ARTIFACT_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_artifact_predecessor(&tx)?;
             }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;

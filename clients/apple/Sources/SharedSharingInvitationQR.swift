@@ -14,8 +14,9 @@ enum SharedSharingInvitationQR {
 
     static func invitation(_ text: String) throws -> String {
         let value = text
-        let suffix = value.utf8.dropFirst(16)
-        guard value.hasPrefix("cinema-share-v1:"), value.utf8.count <= 10_939, !suffix.isEmpty,
+        let combined = value.hasPrefix("cinema-connect-v1:")
+        let suffix = value.utf8.dropFirst(combined ? 18 : 16)
+        guard (combined || value.hasPrefix("cinema-share-v1:")), value.utf8.count <= (combined ? 15_018 : 10_939), !suffix.isEmpty,
               suffix.allSatisfy({ byte in byte == 45 || byte == 95 || (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte) }) else {
             throw SharedSharingManagementError.invalid("That QR code does not contain a Cinema sharing invitation.")
         }

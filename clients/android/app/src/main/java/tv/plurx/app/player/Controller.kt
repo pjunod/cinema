@@ -6703,10 +6703,14 @@ internal fun TrackMenu(
                         onClick = progressiveCaptions::retry)
                     else if (target != null) TrackRow("Resume / retry generation", false, true) { progressiveCaptions.retry(target) }
                     else if (op == null) TrackRow("Retry generation request", false, true, onClick = progressiveCaptions::retry)
-                    if (op?.state == "partial") op.failed_ranges.filter { it.retryable }.forEach { range ->
-                        val rangeTarget = captionRetryTarget(op, range)
-                        TrackRow("Retry failed range ${range.core_index + 1}", false, true) { progressiveCaptions.retry(rangeTarget) }
-                    }
+                    op?.let { observed -> observed.failed_ranges.forEach { range ->
+                        if (observed.state == "partial" && range.retryable) {
+                            val rangeTarget = captionRetryTarget(observed, range)
+                            TrackRow("Retry failed range ${range.core_index + 1}", false, true) { progressiveCaptions.retry(rangeTarget) }
+                        } else if (!range.retryable) {
+                            Text("Range ${range.core_index + 1}: ${captionRangeFailureMessage(range.reason)}")
+                        }
+                    } }
                     if (op?.failed_ranges_next_cursor != null) TrackRow("More failed ranges", false, true,
                         onClick = progressiveCaptions::loadMoreFailedRanges)
                 }

@@ -158,8 +158,19 @@ class TVNavigationTestCase: XCTestCase {
             let focusedTab = app.tabBars.buttons.matching(focused).firstMatch
             if !targetIsTab && focusedTab.exists { remote.press(.down); continue }
             if targetIsTab && !focusedTab.exists { remote.press(.up); continue }
+            // Meridian owns a vertical semantic rail rather than a native
+            // top tab bar. Enter or leave its content horizontally; geometry
+            // alone otherwise walks Down at the rail's final destination.
+            let targetIsRail = target.identifier.hasPrefix("viewer-tab-")
+            let sourceIsRail = current.identifier.hasPrefix("viewer-tab-")
             let destination = target.frame
             let source = current.frame
+            if !targetIsRail && sourceIsRail && destination.minX >= source.maxX {
+                remote.press(.right); continue
+            }
+            if targetIsRail && !sourceIsRail && source.minX >= destination.maxX {
+                remote.press(.left); continue
+            }
             if abs(destination.midX - source.midX) < min(destination.width, source.width) / 2
                 && abs(destination.midY - source.midY) > min(destination.height, source.height) / 2 {
                 remote.press(destination.midY > source.midY ? .down : .up)
@@ -244,9 +255,9 @@ class TVNavigationTestCase: XCTestCase {
                 predicate: NSPredicate { _, _ in self.hasNativeFocus(target, in: app) }, object: nil)
             result = XCTWaiter.wait(for: [expectation], timeout: timeout)
         }
-        let focusDebug = app.staticTexts["choice-focus-debug"]
-        if focusDebug.exists { print("NATIVE_CHOICE_FOCUS_DEBUG=\(focusDebug.label)") }
         if result != .completed || captureOnSuccess {
+            let focusDebug = app.staticTexts["choice-focus-debug"]
+            if focusDebug.exists { print("NATIVE_CHOICE_FOCUS_DEBUG=\(focusDebug.label)") }
             let screenshot = app.screenshot()
             let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("PlurxNavigationCaptures")
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

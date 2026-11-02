@@ -114,7 +114,7 @@ internal class SharedSharingAssignmentMatrix(row: SharedSharingImportSummary,
 
 internal object SharedSharingValidation {
     fun ids(values: List<String>) { require(values.size <= 64 && values.toSet().size == values.size && values.all(PlaybackFileContext::canonicalId)) }
-    fun invitation(value: String): Boolean = value.matches(Regex("^cinema-share-v1:[A-Za-z0-9_-]{1,10923}$"))
+    fun invitation(value: String): Boolean = value.matches(Regex("^(cinema-share-v1:[A-Za-z0-9_-]{1,10923}|cinema-connect-v1:[A-Za-z0-9_-]{1,15000})$"))
     fun code(value: String): Boolean = value.matches(Regex("^[0-9a-f]{16}$"))
     fun assignments(values: List<SharedSharingAssignmentGroup>) {
         ids(values.map { it.library_id })

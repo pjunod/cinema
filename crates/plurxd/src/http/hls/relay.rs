@@ -102,6 +102,7 @@ pub(super) async fn relay_if_remote(
             .map_err(|error| {
                 ApiError::ServiceUnavailable(format!("media worker relay unavailable: {error:?}"))
             })?;
+        fence::note_relay(&route.owner_node_id);
         let peer_status = response.status();
         if !relay_status_requires_reclassification(peer_status) {
             return Ok(Some(response));

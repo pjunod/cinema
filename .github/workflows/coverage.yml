@@ -1,7 +1,6 @@
 name: coverage
 
-# Coverage is diagnostic work. Manual runs use a reserved VM so pushes never
-# consume the runners needed to merge pull requests.
+# Manual diagnostics share the existing capacity-one full-unit registration.
 on:
   workflow_dispatch:
 
@@ -10,46 +9,23 @@ env:
 
 concurrency:
   group: coverage-main
-  # A new manual measurement supersedes stale requests; each measures main.
   cancel-in-progress: true
 
 jobs:
   coverage:
     name: coverage
-    # This label belongs only to a reserved VM, outside the merge pool.
-    runs-on: [self-hosted, Linux, X64, lab, ci-coverage]
-    container:
-      image: ubuntu:24.04
-      options: --cpus 2 --memory 6g --memory-swap 10g
+    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]
+    # The existing :host registration launches one bounded standard Docker child.
+    # Fixed default, sharing and replicated corpora need more than the old 120m.
+    timeout-minutes: 240
+    if: github.ref == 'refs/heads/main'
     env:
       CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "2"
-    # Instrumented cold builds need headroom beyond the ordinary unit lane.
-    # The uninstrumented suite alone grew to ~55 minutes in the week of
-    # 2026-09-27 (the fast lane went 35 -> 60 -> 90). Runs 4087, 4103, 4106 and
-    # 4115 were all cut off at exactly 45:00 inside the llvm-cov step,
-    # still passing tests, so a 45-minute bound could no longer finish.
-    timeout-minutes: 120
-    # Manual runs on other refs must never overwrite the main badge.
-    if: github.ref == 'refs/heads/main'
-    # Private-repository coverage badge — no codecov.io account or token.
-    # Measure the runner-neutral fast lane and force-push both the endpoint JSON
-    # and a directly renderable SVG to an orphan `badges` branch. The README's
-    # branch-relative URL resolves through either Forgejo or GitHub, so each host
-    # authenticates the private image request itself.
     steps:
-      - name: Install coverage prerequisites
-        run: |
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get -o Acquire::Retries=3 update
-          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-            build-essential ca-certificates clang cmake curl git jq libssl-dev lld llvm \
-            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          # A queued or retried run measures current main, never an older event.
           ref: main
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
@@ -58,25 +34,34 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: coverage
-      - uses: https://github.com/taiki-e/install-action@72f835688cb6c15903b796f704b01e652a2b8835 # cargo-llvm-cov
-      # Instrumented tests need the same ffmpeg as the regular Rust unit lane.
-      - uses: ./.github/actions/ffmpeg
-        with:
-          major: "6"
       - name: Measure line coverage
-        # Tests intentionally terminate helper processes. A helper can leave one
-        # truncated .profraw behind even though the suite and every other profile
-        # completed; merge the valid profiles, but still fail if none are valid.
-        run: >-
-          cargo llvm-cov --workspace --locked --exclude plurx-cluster-check
-          --no-fail-fast --summary-only --json --output-path cov.json --failure-mode all
+        env:
+          # Ubuntu 24.04, the same resolved base used for the repair measurement.
+          COVERAGE_IMAGE: ubuntu@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/target/unit-coverage-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          scripts/unit-coverage --image "$COVERAGE_IMAGE" \
+            --cache-root "${{ steps.cargo-cache.outputs.cache-root }}" --output "$output"
+          cp -- "$output/cov.json" cov.json
       - name: Publish the unit coverage badge
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           pct=$(jq -er '.data[0].totals.lines.percent | select(type == "number" and . >= 0 and . <= 100)' cov.json)
-          measured_on=$(date -u +%F)
+          receipt="$GITHUB_WORKSPACE/target/unit-coverage-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/receipt.json"
+          measured_on=$(python3 - "$receipt" <<'PYTHON'
+          import json
+          import sys
+          from datetime import datetime, timezone
+          with open(sys.argv[1]) as source:
+              timestamp = datetime.fromisoformat(json.load(source)["measured_at_utc"].replace("Z", "+00:00"))
+          if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+              raise ValueError("measurement timestamp must include its timezone")
+          print(timestamp.astimezone(timezone.utc).date().isoformat())
+          PYTHON
+          )
           msg=$(printf '%.1f' "$pct"); int=${msg%.*}
           if   [ "$int" -ge 90 ]; then color=brightgreen; fill='#4c1'
           elif [ "$int" -ge 75 ]; then color=green;       fill='#97ca00'
@@ -88,6 +73,7 @@ jobs:
             --branch badges \
             --alias codex/badges \
             --filename coverage \
+            --receipt "$receipt" \
             --label "unit coverage" \
             --message "${msg}% · ${measured_on} UTC" \
             --fill "$fill" \
@@ -101,8 +87,3 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
-      - name: Restore persistent runner workspace ownership
-        if: always()
-        run: |
-          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
-          chown -R "$owner" "$GITHUB_WORKSPACE"

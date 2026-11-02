@@ -636,7 +636,10 @@ impl EncodedExecutable {
     /// is also pumping media bodies — the exact stall the batch exists to
     /// remove.
     pub fn attestation_object(&self) -> (std::path::PathBuf, String) {
-        (self.path.clone(), self.object_version.clone())
+        (
+            self.path.clone(),
+            pinned_engine_object_version(&self.object_version, &self.digest),
+        )
     }
 }
 
@@ -2757,8 +2760,11 @@ impl EncodedEngine {
         let mut objects = Vec::new();
         for path in paths {
             let (object_digest, version) = hash_engine_object(path).await?;
+            objects.push((
+                path.clone(),
+                pinned_engine_object_version(&version, &hex::encode(&object_digest)),
+            ));
             digest.update(object_digest);
-            objects.push((path.clone(), version));
         }
         Ok(Self {
             digest: hex::encode(digest.finalize()),
@@ -2817,12 +2823,96 @@ async fn fragment_index_engine_snapshot_is_current(engine: &FragmentIndexEngine)
     current
 }
 
+fn pinned_engine_object_version(version: &str, digest: &str) -> String {
+    format!("{version}|sha256:{digest}")
+}
+
+#[cfg(unix)]
+fn engine_metadata_has_settled(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(seconds), Ok(nanoseconds)) = (
+        u64::try_from(metadata.ctime()),
+        u32::try_from(metadata.ctime_nsec()),
+    ) else {
+        return false;
+    };
+    if nanoseconds >= 1_000_000_000 {
+        return false;
+    }
+    std::time::SystemTime::UNIX_EPOCH
+        .checked_add(Duration::new(seconds, nanoseconds))
+        .and_then(|stamp| std::time::SystemTime::now().duration_since(stamp).ok())
+        .is_some_and(|age| age >= Duration::from_secs(2))
+}
+
+#[cfg(not(unix))]
+fn engine_metadata_has_settled(_: &std::fs::Metadata) -> bool {
+    true
+}
+
+fn engine_object_is_current(path: &std::path::Path, expected: &str) -> bool {
+    let (version, digest) = expected
+        .split_once("|sha256:")
+        .map_or((expected, None), |(version, digest)| {
+            (version, Some(digest))
+        });
+    if engine_path_version(path).ok().as_deref() != Some(version) {
+        return false;
+    }
+    let Some(expected_digest) = digest else {
+        return true;
+    };
+    if let Some(cached) = cached_engine_digest(path, version) {
+        return hex::encode(cached) == expected_digest;
+    }
+    // Timestamp updates can be coalesced for a newly written object. Until
+    // a hash was taken outside that window, publication checks its pinned
+    // bytes as well as metadata. Installed, settled binaries keep the cheap
+    // metadata-only path.
+    let verify = || -> Option<bool> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).ok()?;
+        let before = file.metadata().ok()?;
+        let settled_before_read = engine_metadata_has_settled(&before);
+        if before.len() > ENGINE_OBJECT_MAX_BYTES {
+            return Some(false);
+        }
+        let mut hash = Sha256::new();
+        let mut buffer = [0_u8; 256 * 1024];
+        let mut count = 0_u64;
+        loop {
+            let read = file.read(&mut buffer).ok()?;
+            if read == 0 {
+                break;
+            }
+            count += read as u64;
+            if count > ENGINE_OBJECT_MAX_BYTES {
+                return Some(false);
+            }
+            hash.update(&buffer[..read]);
+        }
+        let after = file.metadata().ok()?;
+        if engine_path_version(path).ok().as_deref() != Some(version) {
+            return Some(false);
+        }
+        #[cfg(unix)]
+        if engine_object_version(&after).ok().as_deref() != Some(version) {
+            return Some(false);
+        }
+        let actual = hash.finalize().to_vec();
+        if hex::encode(&actual) != expected_digest {
+            return Some(false);
+        }
+        remember_engine_digest(path, version, &actual, settled_before_read);
+        Some(true)
+    };
+    verify().unwrap_or(false)
+}
+
 fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool {
-    objects.iter().all(|(path, expected)| {
-        engine_path_version(path)
-            .ok()
-            .is_some_and(|current| &current == expected)
-    })
+    objects
+        .iter()
+        .all(|(path, expected)| engine_object_is_current(path, expected))
 }
 
 /// Run the same fail-closed identity comparison away from runtime workers.
@@ -2849,10 +2939,7 @@ async fn engine_objects_are_current_batch_with_linux(
     let started = Instant::now();
     let current = tokio::task::spawn_blocking(move || {
         if let Some((path, expected)) = extra {
-            if !engine_path_version(&path)
-                .ok()
-                .is_some_and(|current| current == expected)
-            {
+            if !engine_object_is_current(&path, &expected) {
                 return false;
             }
         }
@@ -3005,8 +3092,11 @@ async fn fragment_index_engine_with_source(
     for path in dependency_paths {
         match hash_engine_object(&path).await {
             Ok((object_digest, version)) => {
+                objects.push((
+                    path,
+                    pinned_engine_object_version(&version, &hex::encode(&object_digest)),
+                ));
                 object_digests.push(object_digest);
-                objects.push((path, version));
             }
             Err(error) => {
                 #[cfg(target_os = "macos")]
@@ -3403,12 +3493,12 @@ async fn read_bounded_with_limit(
 /// Digests of engine objects keyed by path and the cheap object version
 /// (`engine_object_version`: device, inode, size, mtime and ctime). The same
 /// version identity already decides whether a hash raced a replacement, so a
-/// matching version proves the bytes are the ones hashed. A replaced or
-/// touched object has a new version and is hashed again. The key set is the
+/// settled version can reuse the hash. A newly changed file is rehashed until
+/// timestamp coalescing can no longer hide an immediate write. The key set is the
 /// resolved encoder and its loaded dependencies, so it stays small.
 /// Digest per engine object path, tagged with the object version it was taken at.
 type EngineObjectDigests =
-    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>)>>;
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>, bool)>>;
 static ENGINE_OBJECT_DIGESTS: std::sync::LazyLock<EngineObjectDigests> =
     std::sync::LazyLock::new(Default::default);
 
@@ -3417,15 +3507,18 @@ fn cached_engine_digest(path: &std::path::Path, version: &str) -> Option<Vec<u8>
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(path)
-        .filter(|(cached, _)| cached == version)
-        .map(|(_, digest)| digest.clone())
+        .filter(|(cached, _, settled)| *settled && cached == version)
+        .map(|(_, digest, _)| digest.clone())
 }
 
-fn remember_engine_digest(path: &std::path::Path, version: &str, digest: &[u8]) {
+fn remember_engine_digest(path: &std::path::Path, version: &str, digest: &[u8], settled: bool) {
     ENGINE_OBJECT_DIGESTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(path.to_owned(), (version.to_owned(), digest.to_vec()));
+        .insert(
+            path.to_owned(),
+            (version.to_owned(), digest.to_vec(), settled),
+        );
 }
 
 /// SHA-256 of one engine object plus its object version. Only the first
@@ -3461,6 +3554,7 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
     let version = engine_object_version(&metadata)?;
     #[cfg(windows)]
     let version = windows_engine_object_version(&source)?;
+    let settled_before_read = engine_metadata_has_settled(&metadata);
     if let Some(digest) = cached_engine_digest(path, &version) {
         return Ok((digest, version));
     }
@@ -3502,7 +3596,7 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
         ));
     }
     let digest = object.finalize().to_vec();
-    remember_engine_digest(path, &version, &digest);
+    remember_engine_digest(path, &version, &digest, settled_before_read);
     Ok((digest, version))
 }
 

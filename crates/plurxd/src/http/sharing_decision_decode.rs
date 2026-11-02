@@ -94,7 +94,16 @@ struct DecisionSelection {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum DownmixMatrix {
-    RequiresLayoutMeasurement { source_channels: u8 },
+    RequiresLayoutMeasurement {
+        source_channels: u8,
+    },
+    #[serde(rename = "lo_ro_5_1")]
+    LoRo51,
+    #[serde(rename = "lo_ro_7_1")]
+    LoRo71,
+    LimitedDefault {
+        source_channels: u8,
+    },
 }
 
 #[derive(Serialize, Deserialize)]

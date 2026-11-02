@@ -160,23 +160,85 @@ pub async fn dial_numeric_peer(
     pin: &str,
     egress: &PinnedEgress,
 ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, StoreError> {
-    crate::sharing::validate_tailnet_name(ts_fqdn).map_err(|_| unavailable())?;
-    if !crate::sharing::is_tailnet_address(address.ip()) || address.port() == 0 {
-        return Err(unavailable());
+    dial_numeric_peer_classified(address, ts_fqdn, pin, egress)
+        .await
+        .map_err(|_| unavailable())
+}
+
+/// Why one pinned dial did not produce a verified TLS stream. Operator-facing
+/// diagnosis only: every variant is a refusal and none relaxes the pin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DialFailure {
+    /// The endpoint or pin is not a valid private Tailnet target.
+    InvalidTarget,
+    /// No private source address or interface could be bound for egress.
+    NoPrivateSource,
+    /// Nothing answered within the connect budget.
+    TimedOut,
+    /// The machine answered, but nothing accepted the connection on the port.
+    Refused,
+    /// The local network stack has no route to the address.
+    Unreachable,
+    /// The TCP connect failed for another reason.
+    ConnectFailed,
+    /// A TLS server answered, but its key is not the approved Cinema pin.
+    CertificateMismatch,
+    /// TCP connected but the TLS handshake did not complete.
+    TlsFailed,
+}
+
+impl DialFailure {
+    fn from_connect(error: &std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        match error.kind() {
+            ErrorKind::TimedOut => Self::TimedOut,
+            ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset => Self::Refused,
+            ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => Self::Unreachable,
+            ErrorKind::AddrNotAvailable | ErrorKind::AddrInUse => Self::NoPrivateSource,
+            _ => Self::ConnectFailed,
+        }
     }
-    let config = pinned_client(pin)?;
-    let name = ServerName::try_from(ts_fqdn.to_owned()).map_err(|_| unavailable())?;
-    let socket = bound_tcp_socket(address, egress)?;
+    fn from_handshake(error: &std::io::Error) -> Self {
+        let rustls_error = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>());
+        match rustls_error {
+            Some(rustls::Error::InvalidCertificate(_)) => Self::CertificateMismatch,
+            _ => Self::TlsFailed,
+        }
+    }
+}
+
+/// [`dial_numeric_peer`] with the failing stage retained for diagnosis.
+pub async fn dial_numeric_peer_classified(
+    address: std::net::SocketAddr,
+    ts_fqdn: &str,
+    pin: &str,
+    egress: &PinnedEgress,
+) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, DialFailure> {
+    crate::sharing::validate_tailnet_name(ts_fqdn).map_err(|_| DialFailure::InvalidTarget)?;
+    if !crate::sharing::is_tailnet_address(address.ip()) || address.port() == 0 {
+        return Err(DialFailure::InvalidTarget);
+    }
+    let config = pinned_client(pin).map_err(|_| DialFailure::InvalidTarget)?;
+    let name = ServerName::try_from(ts_fqdn.to_owned()).map_err(|_| DialFailure::InvalidTarget)?;
+    let socket = bound_tcp_socket(address, egress).map_err(|_| DialFailure::NoPrivateSource)?;
     tokio::time::timeout(Duration::from_secs(5), async {
-        let stream = socket.connect(address).await.map_err(|_| unavailable())?;
-        stream.set_nodelay(true).map_err(|_| unavailable())?;
+        let stream = socket
+            .connect(address)
+            .await
+            .map_err(|error| DialFailure::from_connect(&error))?;
+        stream
+            .set_nodelay(true)
+            .map_err(|_| DialFailure::ConnectFailed)?;
         tokio_rustls::TlsConnector::from(Arc::new(config))
             .connect(name, stream)
             .await
-            .map_err(|_| unavailable())
+            .map_err(|error| DialFailure::from_handshake(&error))
     })
     .await
-    .map_err(|_| unavailable())?
+    .map_err(|_| DialFailure::TimedOut)?
 }
 
 /// Bind before connecting; also used for the fixed Tailscale DNS TCP retry.
@@ -567,6 +629,75 @@ impl SharingTlsListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dial_failures_name_the_stage_that_refused() {
+        use std::io::{Error, ErrorKind};
+        for (kind, expected) in [
+            (ErrorKind::TimedOut, DialFailure::TimedOut),
+            (ErrorKind::ConnectionRefused, DialFailure::Refused),
+            (ErrorKind::HostUnreachable, DialFailure::Unreachable),
+            (ErrorKind::NetworkUnreachable, DialFailure::Unreachable),
+            (ErrorKind::AddrNotAvailable, DialFailure::NoPrivateSource),
+            (ErrorKind::Other, DialFailure::ConnectFailed),
+        ] {
+            assert_eq!(DialFailure::from_connect(&Error::from(kind)), expected);
+        }
+        // tokio-rustls reports a refused certificate as InvalidData wrapping
+        // the verifier's error; a pin mismatch must not read as a dead link.
+        let mismatch = Error::new(
+            ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure),
+        );
+        assert_eq!(
+            DialFailure::from_handshake(&mismatch),
+            DialFailure::CertificateMismatch
+        );
+        assert_eq!(
+            DialFailure::from_handshake(&Error::from(ErrorKind::UnexpectedEof)),
+            DialFailure::TlsFailed
+        );
+    }
+    #[tokio::test]
+    async fn classified_dial_refuses_targets_outside_the_tailnet_before_any_socket() {
+        let egress = PinnedEgress::LocalAddress("100.64.0.9".parse().expect("fixture"));
+        for (address, name, pin) in [
+            (
+                "192.168.1.10:32443",
+                "cinema.tail123.ts.net",
+                "a".repeat(64),
+            ),
+            ("100.64.0.10:32443", "cinema.example.com", "a".repeat(64)),
+            (
+                "100.64.0.10:32443",
+                "cinema.tail123.ts.net",
+                "nodekey".into(),
+            ),
+        ] {
+            assert_eq!(
+                dial_numeric_peer_classified(
+                    address.parse().expect("fixture"),
+                    name,
+                    &pin,
+                    &egress
+                )
+                .await
+                .err(),
+                Some(DialFailure::InvalidTarget)
+            );
+        }
+        let unbound = PinnedEgress::LocalAddress(std::net::Ipv4Addr::UNSPECIFIED.into());
+        assert_eq!(
+            dial_numeric_peer_classified(
+                "100.64.0.10:32443".parse().expect("fixture"),
+                "cinema.tail123.ts.net",
+                &"a".repeat(64),
+                &unbound
+            )
+            .await
+            .err(),
+            Some(DialFailure::NoPrivateSource)
+        );
+    }
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn sharing_tls_macos_source_interface_is_pinned_and_missing_sources_refuse() {

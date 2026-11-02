@@ -5577,6 +5577,21 @@ fn prepared_vod_start_hint_preserves_full_timeline_and_preceding_acquisition() {
     assert_eq!(text.matches("#EXT-X-START:").count(), 1);
     assert!(text.starts_with(&format!("#EXTM3U\n{hint}")));
     assert_eq!(text.replace(hint, "").as_bytes(), original);
+    let resource = plurx_core::sharing_resources::SharingHlsResource::parse("index.m3u8")
+        .expect("actual Source playlist resource");
+    plurx_core::sharing_resources::validate_sharing_playlist(&resource, &hinted)
+        .expect("the shared Source relays the actual nonzero attachment start hint");
+    let acquired = vod_serve_delivery::playlist_with_acquisition_start(
+        original,
+        Some(293_106),
+        Some(1_000),
+        670_000,
+    );
+    assert!(std::str::from_utf8(&acquired)
+        .expect("actual acquisition playlist")
+        .contains("#EXT-X-START:TIME-OFFSET=1.000,PRECISE=NO\n"));
+    plurx_core::sharing_resources::validate_sharing_playlist(&resource, &acquired)
+        .expect("the shared Source relays the actual prepared acquisition hint");
     assert_eq!(
         vod_serve_delivery::playlist_with_preferred_start(original, None),
         original

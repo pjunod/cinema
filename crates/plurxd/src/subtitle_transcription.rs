@@ -3471,11 +3471,16 @@ mod tests {
         .expect("active claim");
         let fence = active.fence();
         let manager_cancel = fence.loss_token().child_token();
+        store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+            .await
+            .expect("two-thread speech budget");
         let admission = state
             .transcode
-            .admit_fragment()
+            .admit_speech()
             .await
-            .expect("idle admission");
+            .expect("idle speech admission");
+        assert!(state.transcode.speech_capacity_available(&admission));
         let mut operation = Box::pin(self_test_managed(
             &state,
             &engine,

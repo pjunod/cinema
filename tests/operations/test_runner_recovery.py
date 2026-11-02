@@ -248,3 +248,56 @@ class RunnerReconcileCase(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "refusing to replace"):
                 self.swap_module().ensure_swap(swap)
             self.assertEqual(swap.read_text(), "existing data")
+
+
+class OperatorPauseCase(unittest.TestCase):
+    """ci-fleet's Drain must survive watchdog passes; Start VM must target one VM."""
+
+    execute = RunnerRecoveryCase.execute
+
+    def setUp(self):
+        RunnerRecoveryCase.setUp(self)
+        self.paused = tempfile.TemporaryDirectory()
+        self.addCleanup(self.paused.cleanup)
+
+    def pause(self):
+        (Path(self.paused.name) / self.name).write_text(json.dumps({"actor": "operator", "reason": "measuring"}))
+
+    def pass_with(self, **kwargs):
+        return watchdog.recover(self.config, self.state, execute=self.execute, memory=lambda: 20 * watchdog.GIB,
+                                host="lab6", now=10000, paused_dir=self.paused.name, **kwargs)
+
+    def test_a_drained_runner_stays_stopped_across_two_passes(self):
+        self.instance["status"] = "Running"
+        self.active = "inactive"
+        self.pause()
+        for _ in range(2):
+            receipt = self.pass_with()
+            self.assertEqual(receipt["deferred"], [f"{self.name}: paused by operator: measuring"])
+        self.assertFalse([c for c in self.commands if "start" in c], self.commands)
+
+    def test_a_paused_stopped_vm_is_not_booted(self):
+        self.pause()
+        self.pass_with()
+        self.assertNotIn(("incus", "start", "--project", "github-runners", self.name), self.commands)
+
+    def test_resume_lets_the_next_pass_start_the_daemon(self):
+        self.instance["status"] = "Running"
+        self.active = "inactive"
+        self.pause()
+        self.pass_with()
+        (Path(self.paused.name) / self.name).unlink()
+        receipt = self.pass_with()
+        self.assertIn(f"{self.name}: daemon started", receipt["recovered"])
+
+    def test_vm_option_recovers_only_that_vm(self):
+        other = "gha-lab6-general-02"
+        self.config["runners"].append({"vm": other, "unit": f"forgejo-runner-{other}.service", "memory_gib": 8})
+        receipt = self.pass_with(only=self.name)
+        self.assertIn(f"{self.name}: VM started", receipt["recovered"])
+        self.assertFalse(any(other in entry for entry in receipt["errors"] + receipt["deferred"]))
+
+    def test_vm_option_refuses_an_unmanaged_vm(self):
+        receipt = self.pass_with(only="gha-lab6-general-09")
+        self.assertEqual(receipt["errors"], ["gha-lab6-general-09: not managed by this host's watchdog"])
+        self.assertFalse([c for c in self.commands if "start" in c])

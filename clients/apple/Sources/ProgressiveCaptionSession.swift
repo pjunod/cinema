@@ -246,7 +246,16 @@ final class ProgressiveCaptionSession: ObservableObject {
                 self.intents[key] = nil; self.chosenProfile = profile; self.chosenLanguage = language
                 await self.poll(captured)
                 self.startLoop(captured)
-            } catch { self.fail(error, captured) }
+            } catch {
+                if let service = error as? CaptionServiceError, service.status == 409,
+                   service.code == "operation_stopped", let id = service.operationId,
+                   self.currentAction(captured, serial), self.selected {
+                    do {
+                        try await self.recoverStopped(id, captured, serial, profile: profile, language: language)
+                        if self.currentAction(captured, serial) { self.intents["create:\(profile.profileId):\(audioOrdinal):\(language)"] = nil }
+                    } catch { self.fail(error, captured) }
+                } else { self.fail(error, captured) }
+            }
         }
         return true
     }
@@ -293,6 +302,22 @@ final class ProgressiveCaptionSession: ObservableObject {
     func retireAndDrain() async {
         retire()
         await networkTasks.drain()
+    }
+
+    private func recoverStopped(_ id: String, _ captured: Int, _ serial: Int,
+                                profile: CaptionProfile, language: String) async throws {
+        guard CaptionValidation.uuid(id), currentAction(captured, serial), selected, let api else { return }
+        let reply: CaptionHTTPReply<CaptionOperation> = try await api.caption("subtitle-translation/operations/\(id)")
+        guard currentAction(captured, serial), selected, profileId == profile.profileId,
+              spokenLanguage == language, let options, let audioOrdinal else { return }
+        let row = reply.value
+        try row.validateRecovery(id: id, file: fileId, options: options, profile: profile, audio: audioOrdinal, language: language)
+        operationId = id; operation = row; epoch = row.operationEpoch; view = row.viewRevision
+        assetId = row.assetId; contentRevision = row.contentRevision
+        demandId = nil; demandGeneration = nil; intents["heartbeat"] = nil
+        stopRequested = row.state == "stopped"; clock(row.serverNowMs)
+        status = CaptionServiceError.message(row.state == "stopped" ? "operation_stopped" : "epoch_conflict")
+        // No loop, demand, retry or continuity is created by discovery.
     }
 
     private func adopt(_ receipt: CaptionReceipt, continuity: String? = nil) throws {
@@ -594,6 +619,9 @@ final class ProgressiveCaptionSession: ObservableObject {
         }
         coverageStatus = end.map { "Coverage ahead: \(max(0, $0 - sample.position) / 1000) seconds." }
             ?? (options?.permissions.demand == true && demandId != nil ? "Not captioned here yet. Preparing this part." : "Not captioned here yet. Ask an administrator to generate this part.")
+        if !stopped, let failure = operation?.currentFailure(position: sample.position, coreMs: chosenProfile?.window?.coreMs, covered: end != nil, displayedFailures: failedRanges) {
+            coverageStatus = CaptionServiceError.message(failure.reason)
+        }
     }
     private func fail(_ error: Error, _ captured: Int, intent: String? = nil) {
         guard current(captured), !(error is CancellationError), (error as NSError).code != NSURLErrorCancelled else { return }

@@ -92,7 +92,7 @@ mod local {
             "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
         ),
     ];
-    static DIGESTS: OnceLock<Mutex<Vec<(FileIdentity, String)>>> = OnceLock::new();
+    static DIGESTS: OnceLock<Mutex<Vec<(FileIdentity, String, bool)>>> = OnceLock::new();
     static INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn cancelled(cancel: &CancellationToken) -> Result<(), String> {
@@ -118,6 +118,32 @@ mod local {
             return Err("invalid_model_catalog_identity".into());
         }
         Ok(())
+    }
+
+    // Filesystems can coalesce ctime updates within a clock tick. A digest
+    // obtained during that window must be read again before metadata can
+    // qualify its reuse; otherwise an immediate same-length write is hidden.
+    fn identity_timestamp_has_settled(identity: FileIdentity) -> bool {
+        identity_timestamp_has_settled_at(identity, std::time::SystemTime::now())
+    }
+
+    fn identity_timestamp_has_settled_at(
+        identity: FileIdentity,
+        now: std::time::SystemTime,
+    ) -> bool {
+        let (Ok(seconds), Ok(nanoseconds)) = (
+            u64::try_from(identity.changed_seconds),
+            u32::try_from(identity.changed_nanoseconds),
+        ) else {
+            return false;
+        };
+        if nanoseconds >= 1_000_000_000 {
+            return false;
+        }
+        std::time::SystemTime::UNIX_EPOCH
+            .checked_add(Duration::new(seconds, nanoseconds))
+            .and_then(|stamp| now.duration_since(stamp).ok())
+            .is_some_and(|age| age >= Duration::from_secs(2))
     }
 
     fn hash_held(file: &mut File, expected: &str, size: u64) -> Result<FileIdentity, String> {
@@ -157,12 +183,15 @@ mod local {
         if before.size != size {
             return Err("artifact_length_mismatch".into());
         }
+        let settled_before_read = identity_timestamp_has_settled(before);
         let cache = DIGESTS.get_or_init(|| Mutex::new(Vec::new()));
         let cached = cache
             .lock()
             .map_err(|_| "artifact_verification_unavailable")?
             .iter()
-            .any(|(identity, digest)| *identity == before && digest == expected);
+            .any(|(identity, digest, settled)| {
+                *settled && *identity == before && digest == expected
+            });
         if !cached {
             check()?;
             file.seek(SeekFrom::Start(0))
@@ -196,7 +225,7 @@ mod local {
             if entries.len() >= 64 {
                 entries.remove(0);
             }
-            entries.push((before, expected.into()));
+            entries.push((before, expected.into(), settled_before_read));
         }
         file.seek(SeekFrom::Start(0))
             .map_err(|_| "artifact_read_failed")?;
@@ -1761,7 +1790,7 @@ mod local {
                 .lock()
                 .expect("digest cache")
                 .iter()
-                .any(|(cached, digest)| *cached == identity && digest == &spec.sha256));
+                .any(|(cached, digest, _)| *cached == identity && digest == &spec.sha256));
             let accepted = open_model_cancellable(&root, &spec, &CancellationToken::new())
                 .await
                 .expect("fresh uncancelled verification");
@@ -1789,7 +1818,12 @@ mod local {
                     .identity,
                 first
             );
-            std::fs::write(&path, b"other bytes").expect("same-length change");
+            // This metadata-only API detects replacement by inode. Byte
+            // integrity, including an in-place write in the same clock tick,
+            // is checked by open_model/hash_held below and in the cache test.
+            let replacement = root.join("replacement");
+            std::fs::write(&replacement, b"other bytes").expect("same-length change");
+            std::fs::rename(&replacement, &path).expect("replace model inode");
             let changed = model_identity(&root, &spec)
                 .await
                 .expect("presence does not hash");
@@ -1814,6 +1848,61 @@ mod local {
             assert_eq!(
                 model_identity(&root, &spec).await.err().as_deref(),
                 Some("model_store_not_service_owned")
+            );
+        }
+
+        #[test]
+        fn metadata_cache_grace_preserves_fractional_seconds_and_refuses_invalid_time() {
+            let identity = FileIdentity {
+                device: 1,
+                inode: 2,
+                size: 11,
+                changed_seconds: 1,
+                changed_nanoseconds: 999_000_000,
+            };
+            let at = |milliseconds| {
+                std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(milliseconds)
+            };
+            assert!(!identity_timestamp_has_settled_at(identity, at(3000)));
+            assert!(!identity_timestamp_has_settled_at(identity, at(3998)));
+            assert!(identity_timestamp_has_settled_at(identity, at(3999)));
+            assert!(!identity_timestamp_has_settled_at(identity, at(1000)));
+            assert!(!identity_timestamp_has_settled_at(
+                FileIdentity {
+                    changed_seconds: -1,
+                    ..identity
+                },
+                at(4000)
+            ));
+            assert!(!identity_timestamp_has_settled_at(
+                FileIdentity {
+                    changed_nanoseconds: 1_000_000_000,
+                    ..identity
+                },
+                at(4000)
+            ));
+        }
+
+        #[test]
+        fn unsettled_metadata_cache_never_substitutes_for_model_bytes() {
+            let root = tempfile::tempdir().expect("root");
+            let path = root.path().join("model");
+            std::fs::write(&path, b"other bytes").expect("changed model");
+            let expected = spec(b"model bytes");
+            let mut handle = File::open(&path).expect("handle");
+            let identity = std_file_identity(&handle).expect("identity");
+            // Model the same identity returned for two writes within one
+            // filesystem tick, independent of this host's timestamp precision.
+            DIGESTS
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+                .expect("cache")
+                .push((identity, expected.sha256.clone(), false));
+            assert_eq!(
+                hash_held(&mut handle, &expected.sha256, expected.download_bytes)
+                    .err()
+                    .as_deref(),
+                Some("artifact_digest_mismatch")
             );
         }
 

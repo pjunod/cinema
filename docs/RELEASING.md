@@ -177,9 +177,9 @@ builds and publishes the GitHub release for that tag:
 
 | Download | For | Checked before publishing |
 |---|---|---|
-| `plurxd_X.Y.Z-1_amd64.deb`, `_arm64.deb` | Debian 12+, Ubuntu 24.04+ | installed, started as `plurx` to `/readyz`, removed and reinstalled on Debian 12 and Ubuntu 24.04 |
+| `plurxd_X.Y.Z-1_amd64.deb`, `_arm64.deb` | Debian 12+, Ubuntu 24.04+ | installed, started as `plurx` to `/readyz`, force-reinstalled while installed, then removed on Debian 12 and Ubuntu 24.04 |
 | `plurxd-X.Y.Z-1.x86_64.rpm`, `.aarch64.rpm` | Fedora, RHEL 9+ (ffmpeg from RPM Fusion) | the same on Fedora 42; scriptlets and binary on AlmaLinux 9 |
-| `plurxd-X.Y.Z-macos-universal.tar.gz` | macOS, Apple Silicon and Intel | each slice runs on its own hardware; `./install` from the unpacked archive readies the agent |
+| `plurxd-X.Y.Z-macos-universal.tar.gz` | macOS, Apple Silicon and Intel | each slice reports its version on its own hardware; complete closure, Developer ID, notarization, stapled ticket and Gatekeeper checks |
 | `plurxd-X.Y.Z-windows-x86_64.zip` | Windows x64 | `scripts/package-windows`; `plurxd.exe --version` on Windows Server 2022 |
 | `SHA256SUMS` | all of the above | computed over exactly the files published |
 
@@ -195,13 +195,24 @@ repointed at `/usr/bin`. Installing creates the `plurx` user and
 `/var/lib/plurx` (a directory the package does not own, so no upgrade resets
 it and no removal deletes it), then enables and starts the service; an upgrade
 restarts it only if it is running; removing stops and disables it and keeps
-the state, and installing again re-enables it. The macOS archive is the
-universal binary beside `deploy/install` and the agent template, so `./install`
-in the unpacked folder is the whole install.
+the state. With a retained managed installation record, installing again after
+removal requires restoring the trusted package guard first; preinstall refuses
+to unpack a new payload when that guard is absent. The workflow tests forced
+reinstallation while the guard remains installed, followed by removal. The macOS archive is the
+universal runtime, desktop app and controllers beside `deploy/install`. Its
+architecture-neutral WASM source parser is built once and shared unchanged by
+both native media slices; independent host SDK builds can emit slightly
+different floating-point constants, and universal assembly requires identical
+parser bytes and ABI. The complete parser provenance travels with that shared
+artifact. Thus
+`./install` in the unpacked folder is the whole install. Actual startup, login,
+reboot and rollback behavior remain separate native qualification evidence.
 
-The build jobs hold a read-only token and pass their output on as one-day
-workflow artifacts. Only the last job can write, and it compiles nothing: it
-checks that it holds exactly the six expected files, computes `SHA256SUMS`, and
+The build jobs hold a read-only token and pass their output on as
+workflow artifacts retained for seven days. Only the last job can write, and
+it compiles nothing: it checks the exact twelve native assets (plus the
+manifest/signature pair only when in-app upgrades are qualified), computes
+`SHA256SUMS`, and
 creates the release in one `gh release create`, which publishes only once
 every file is attached. A release that is already published is never rebuilt
 over; a draft an interrupted publish left behind is replaced. The tag is
@@ -216,9 +227,10 @@ everything and publishes nothing. GitHub starts no workflow for a push that
 carries more than three tags, so a mirror catching up on several releases at
 once needs the back-fill dispatch for each.
 
-Forgejo reads `.github/workflows` too. Every job's whole condition is
-`github.server_url == 'https://github.com'`, which Forgejo evaluates on the
-server and records as skipped without a runner. The contract
+Forgejo reads `.github/workflows` too. Every job starts with the positive
+`github.server_url == 'https://github.com'` condition, with explicit mode and
+status routing where needed. Forgejo evaluates that gate on the server and
+records these jobs as skipped without allocating a runner. The contract
 `test_github_only_workflows_never_reach_the_fleet` holds the file to that
 exact gate, to GitHub-hosted runners, to local actions plus GitHub's two
 pinned artifact actions, to tag-push and dispatch triggers only, and to one
@@ -339,25 +351,37 @@ native upgrade path.
 restrict deployment branches/tags to `main` and `v*`, and upload the private PEM
 with `gh secret set PLURX_UPDATE_ED25519_PRIVATE_KEY --env desktop-release-signing
 --repo pjunod/cinema < /protected/path/key.pem`. Keep private bytes out of command
-arguments, logs, pull requests and build artifacts. Set these environment
-variables only for the reviewed, qualified release:
+arguments, logs, pull requests and build artifacts. Set the trusted packaging
+commit in the protected signing environment. Set the five `PLURX_UPDATE_*`
+qualification values as **repository variables** only for a reviewed, qualified
+release; the resolver reads them before allocating a protected signing job:
 
 | Variable | Required value |
 |---|---|
-| `PLURX_TRUSTED_PACKAGING_COMMIT` | Exact reviewed workflow commit used to dispatch publication; update after review when packaging changes. |
+| `PLURX_TRUSTED_PACKAGING_COMMIT` | Exact reviewed workflow commit used for this tag/dispatch; refresh it after review for every release, including version-only changes. |
 | `PLURX_UPDATE_UPGRADE_FROM` | Qualified source-version requirement, such as `=0.7.0`; do not infer compatibility from the new version number. |
 | `PLURX_UPDATE_DATA_COMPATIBILITY` | Qualified data-format compatibility identity. |
 | `PLURX_UPDATE_CLUSTER_COMPATIBILITY` | Qualified cluster compatibility identity. |
 | `PLURX_UPDATE_MINIMUM_CONTROLLER` | Lowest controller version tested with this release. |
 | `PLURX_UPDATE_ROLLBACK` | `binary_compatible` after rollback qualification, otherwise `manual_recovery`. |
 
-**Publication:** the GitHub release workflow checks that the dispatch commit
+**Installer publication:** verified native packages/archives and `SHA256SUMS`
+publish independently of in-app upgrade qualification. If any of the five
+`PLURX_UPDATE_*` qualification variables is absent, the release omits update
+metadata and explicitly advertises manual installation only. It does not enter
+the protected update-signing environment or publish an unsigned/fixture feed.
+Apple distribution verification remains mandatory for macOS.
+
+**Authenticated update publication:** when all five qualification variables are
+configured, the GitHub release workflow checks that the dispatch commit
 matches `PLURX_TRUSTED_PACKAGING_COMMIT`, that candidate and approved packaging
 roots agree, and that the private key matches a pinned public key. It signs the
-exact manifest bytes only after checking the native artifact cohort. A complete
-release includes `plurx-update-v1.json` and its detached `.sig`, plus the native
-packages/archives and `SHA256SUMS`. Missing signing configuration or qualification
-must remain a refusal; never substitute fixture keys or bypass authentication.
+exact manifest bytes only after checking the native artifact cohort. Such a
+release also includes `plurx-update-v1.json` and its detached `.sig`, plus the native
+packages/archives and `SHA256SUMS`. Once update publication is selected, missing
+signing configuration or invalid qualification remains a refusal; never
+substitute fixture keys or bypass authentication. Partial qualification never
+advertises an update manifest, even when an Ed25519 key is already configured.
 
 **Reading the result:** a populated public-root document and configured secret
 establish signing capability; they do not mean a signed release is published.
@@ -368,7 +392,53 @@ public roots together in an old-key-signed release before retiring the old key.
 **macOS publication has a separate Apple requirement:** the Ed25519 update key
 is not a code-signing certificate. An existing paid Apple Developer Program
 membership can create a Developer ID Application certificate for direct macOS
-distribution, but an iOS signing certificate cannot substitute for it. Configure
-Developer ID signing and notarization before the first official macOS desktop
-release; the release workflow rejects ad-hoc builds. Follow
-[Apple's Developer ID setup](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/).
+distribution, but an iOS signing certificate cannot substitute for it.
+The release workflow assembles an ad-hoc candidate without Apple credentials,
+then signs and notarizes it in the separate `macos_signing` job. That job never
+executes the candidate. It signs every loadable Mach-O image with a secure
+timestamp and Hardened Runtime, keeps the daemon's source-parser entitlement,
+submits the complete package to Apple, staples the accepted app ticket, and
+checks the existing Developer ID/team/notarization/Gatekeeper policy. The final
+closure and component hashes describe the signed, stapled bytes; the original
+build manifests remain in `provenance/apple-signing.json`.
+
+Create the `macos-release-signing` GitHub environment with required reviewers
+and trusted branch/tag restrictions. Add these environment secrets (private
+bytes belong in GitHub's secret UI or files passed to `gh secret set`, never
+shell arguments or repository files):
+
+| Secret | Value |
+|---|---|
+| `PLURX_MACOS_CERTIFICATE_P12_BASE64` | Base64 of the exported Developer ID Application certificate **and private key** in a password-protected `.p12`. |
+| `PLURX_MACOS_CERTIFICATE_PASSWORD` | Password for that `.p12`. |
+| `PLURX_MACOS_NOTARY_PRIVATE_KEY` | App Store Connect team API private key, including its PEM delimiters. |
+
+Add these environment variables:
+
+| Variable | Value |
+|---|---|
+| `PLURX_MACOS_SIGNING_IDENTITY` | Exact `Developer ID Application: … (TEAMID)` certificate name. |
+| `PLURX_MACOS_DEVELOPER_TEAM_ID` | Ten-character Apple team ID matching the certificate. |
+| `PLURX_MACOS_NOTARY_KEY_ID` | Ten-character App Store Connect team API key ID. |
+| `PLURX_MACOS_NOTARY_ISSUER_ID` | API key issuer UUID. |
+| `PLURX_TRUSTED_PACKAGING_COMMIT` | Exact reviewed workflow commit matching this tag/dispatch; refresh it for every release after review. Desktop metadata signing has its own pin. |
+
+The signing job imports the certificate into a temporary keychain and removes
+it and the notarization key on success, failure or cancellation. Missing
+configuration, rejected notarization, or failed distribution verification
+prevents the macOS upload and publication. The complete native platform cohort
+is always required. The separate desktop update-signing environment and
+qualified compatibility variables above are required only to advertise
+authenticated in-app upgrades; they do not gate manual installer downloads.
+
+A dry run needs neither Apple credentials nor environment approval. It uploads
+an ad-hoc `release-macos` workflow artifact without publishing a GitHub release.
+A tag publication uploads only the verified archive under that artifact name;
+the unsigned intermediate is `macos-candidate`. Dispatch the reviewed workflow
+with an existing `release_tag` to publish that tag, or push a new annotated
+release tag. The artifact is `plurxd-X.Y.Z-macos-universal.tar.gz`; unpack it and
+run `./install`. Existing published releases are never overwritten.
+
+Follow [Apple's Developer ID setup](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/)
+and [notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+for certificate and team API key provisioning.

@@ -5,6 +5,8 @@ use std::sync::LazyLock;
 pub(crate) const SCHEMA: &str = include_str!("subtitle_managed_schema.sql");
 pub(crate) const RESOURCE_MIGRATION: &str = include_str!("subtitle_managed_resources_v2.sql");
 pub(crate) const RESOURCE_MIGRATION_VERSION: i64 = 120;
+pub(crate) const ARTIFACT_MIGRATION: &str = include_str!("subtitle_managed_resources_v3.sql");
+pub(crate) const ARTIFACT_MIGRATION_VERSION: i64 = 121;
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY name";
 
 // The first statement of bootstrap's atomic legacy-probe/managed installation.
@@ -35,13 +37,13 @@ fn rows(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>, StoreError
         .map_err(StoreError::from)
 }
 pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreError> {
-    if version(&rows(conn)?)? != Some(2) {
+    if version(&rows(conn)?)? != Some(3) {
         return Err(StoreError::Migration(
             "managed subtitle schema missing".into(),
         ));
     }
     let count: i64 = conn.query_row(
-        "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=2",
+        "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=3",
         [],
         |row| row.get(0),
     )?;
@@ -70,6 +72,46 @@ pub(crate) fn verify_resource_predecessor(conn: &rusqlite::Connection) -> Result
         ));
     }
     Ok(())
+}
+
+// Called under the migration transaction, before replacing exact v2 DDL.
+pub(crate) fn verify_artifact_predecessor(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    if version(&rows(conn)?)? != Some(2)
+        || conn.query_row(
+            "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=2",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? != 1
+    {
+        return Err(StoreError::Migration(
+            "managed artifact migration requires exact v2 layout".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn artifact_statements() -> Vec<String> {
+    ARTIFACT_MIGRATION
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(feature = "hiqlite-store")]
+pub(crate) const ARTIFACT_GUARD: &str = "SELECT CASE WHEN EXISTS(SELECT 1 FROM subtitle_managed_schema WHERE singleton=1 AND version=2) AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='background_job_required_resources' AND sql=$1) THEN 1 ELSE json('managed artifact predecessor changed') END";
+
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn artifact_predecessor_view() -> String {
+    SHAPES
+        .3
+        .iter()
+        .find(|(name, _)| name == "background_job_required_resources")
+        .expect("v2 resource view")
+        .1
+        .clone()
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -105,42 +147,50 @@ fn normalize(sql: &str) -> String {
 // SQLite normalizes IF NOT EXISTS and terminal semicolons when storing DDL.
 // Measure that normalization instead of inventing a second SQL parser.
 type SchemaShape = Vec<(String, String)>;
-static SHAPES: LazyLock<(SchemaShape, SchemaShape, SchemaShape, SchemaShape)> = LazyLock::new(
-    || {
-        let conn = rusqlite::Connection::open_in_memory().expect("closed schema fixture");
-        conn.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);").expect("closed stubs");
-        let resources = super::background_jobs_resources::SCHEMA
-            .split("-- next statement")
-            .find(|sql| {
-                sql.trim_start()
-                    .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
-            })
-            .expect("bootstrap resource view");
-        conn.execute_batch(resources).expect("bootstrap resources");
-        let bootstrap = rows(&conn).expect("bootstrap resource rows");
-        conn.execute_batch("DROP VIEW background_job_required_resources")
-            .expect("replace bootstrap resources");
-        let old = super::background_jobs_probe::SCHEMA
-            .split("CREATE VIEW IF NOT EXISTS background_job_required_resources")
-            .nth(1)
-            .expect("historical view");
-        conn.execute_batch(&format!(
-            "CREATE VIEW IF NOT EXISTS background_job_required_resources{old}"
-        ))
-        .expect("historical resources");
-        let before = rows(&conn).expect("historical rows");
-        conn.execute_batch(SCHEMA).expect("managed schema");
-        let managed = rows(&conn).expect("managed rows");
-        conn.execute_batch(RESOURCE_MIGRATION)
-            .expect("resource migration");
-        (
-            before,
-            managed,
-            bootstrap,
-            rows(&conn).expect("managed v2 rows"),
-        )
-    },
-);
+static SHAPES: LazyLock<(
+    SchemaShape,
+    SchemaShape,
+    SchemaShape,
+    SchemaShape,
+    SchemaShape,
+)> = LazyLock::new(|| {
+    let conn = rusqlite::Connection::open_in_memory().expect("closed schema fixture");
+    conn.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);").expect("closed stubs");
+    let resources = super::background_jobs_resources::SCHEMA
+        .split("-- next statement")
+        .find(|sql| {
+            sql.trim_start()
+                .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
+        })
+        .expect("bootstrap resource view");
+    conn.execute_batch(resources).expect("bootstrap resources");
+    let bootstrap = rows(&conn).expect("bootstrap resource rows");
+    conn.execute_batch("DROP VIEW background_job_required_resources")
+        .expect("replace bootstrap resources");
+    let old = super::background_jobs_probe::SCHEMA
+        .split("CREATE VIEW IF NOT EXISTS background_job_required_resources")
+        .nth(1)
+        .expect("historical view");
+    conn.execute_batch(&format!(
+        "CREATE VIEW IF NOT EXISTS background_job_required_resources{old}"
+    ))
+    .expect("historical resources");
+    let before = rows(&conn).expect("historical rows");
+    conn.execute_batch(SCHEMA).expect("managed schema");
+    let managed = rows(&conn).expect("managed rows");
+    conn.execute_batch(RESOURCE_MIGRATION)
+        .expect("resource migration");
+    let v2 = rows(&conn).expect("managed v2 rows");
+    conn.execute_batch(ARTIFACT_MIGRATION)
+        .expect("artifact migration");
+    (
+        before,
+        managed,
+        bootstrap,
+        v2,
+        rows(&conn).expect("managed v3 rows"),
+    )
+});
 // Bootstrap also recognizes the exact pre-probe view it just installed. This
 // does not broaden the public extension version predicate: open/migrate must
 // still see either the canonical post-probe predecessor or the complete winner.
@@ -170,6 +220,8 @@ pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreEr
         Ok(Some(1))
     } else if canonical(shape) == canonical(&SHAPES.3) {
         Ok(Some(2))
+    } else if canonical(shape) == canonical(&SHAPES.4) {
+        Ok(Some(3))
     } else {
         Err(StoreError::Migration(
             "managed subtitle schema is partial or incompatible".into(),
@@ -197,6 +249,102 @@ mod tests {
         .expect("resource claim")
         .is_some()
     }
+    #[test]
+    fn text_artifact_upgrade_preserves_readers_and_legacy_worker_fences() {
+        let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
+        SqliteStore::apply_migrations_for_test(&conn, 120).expect("deployed v2");
+        conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','unused',1); INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[]'); INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie'); INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}'); INSERT INTO settings(key,value) VALUES('subtitles.text_translation.config.v1','{\"version\":1,\"enabled\":true}');").expect("current source and authority");
+        queued(
+            &conn,
+            "metadata",
+            "metadata_refresh",
+            r#"{"kind":"metadata_refresh"}"#,
+        );
+        assert!(claim_raw(&conn, "metadata", "metadata_refresh"));
+        for (id, kind) in [
+            ("legacy", "subtitle_text_translate"),
+            ("artifact", "subtitle_text_translate_artifact"),
+        ] {
+            queued(&conn, id, kind, &serde_json::json!({"kind":kind,"file_id":1,"source_size":100,"source_mtime":20,"target_node_id":"node-a","admin_user_id":1}).to_string());
+            assert!(!claim_raw(&conn, id, kind), "v2 fences every text reader");
+        }
+        let before: String = conn.query_row("SELECT json_group_array(json_object('resource',resource_key,'slot',slot,'job',job_id,'fence',fence,'expiry',expires_at_ms)) FROM background_job_reservations", [], |row|row.get(0)).expect("active reservation");
+        let owner: String = conn.query_row("SELECT json_object('state',state,'revision',revision,'claim',claim_id,'fence',fence,'expiry',lease_expires_ms) FROM background_jobs WHERE id='metadata'", [], |row|row.get(0)).expect("active owner");
+        SqliteStore::apply_next_migration_for_test(&conn).expect("v121 upgrade");
+        verify_sqlite(&conn).expect("exact v3 DDL and marker");
+        assert_eq!(before, conn.query_row("SELECT json_group_array(json_object('resource',resource_key,'slot',slot,'job',job_id,'fence',fence,'expiry',expires_at_ms)) FROM background_job_reservations", [], |row|row.get::<_,String>(0)).expect("unchanged reservations"));
+        assert_eq!(owner, conn.query_row("SELECT json_object('state',state,'revision',revision,'claim',claim_id,'fence',fence,'expiry',lease_expires_ms) FROM background_jobs WHERE id='metadata'", [], |row|row.get::<_,String>(0)).expect("unchanged owner"));
+        assert!(
+            !claim_raw(&conn, "legacy", "subtitle_text_translate"),
+            "legacy extraction-capable workers stay source-fenced"
+        );
+        assert!(
+            !claim_raw(&conn, "artifact", "subtitle_text_translate"),
+            "old worker kind cannot claim a new job"
+        );
+        assert!(claim_raw(
+            &conn,
+            "artifact",
+            "subtitle_text_translate_artifact"
+        ));
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM background_job_reservations WHERE job_id='artifact'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .expect("artifact reservations"),
+            0
+        );
+        for (id, kind) in [
+            ("media", "fragment_index_build"),
+            ("future", "future_source_reader"),
+        ] {
+            queued(
+                &conn,
+                id,
+                kind,
+                &serde_json::json!({"kind":kind}).to_string(),
+            );
+            assert!(
+                !claim_raw(&conn, id, kind),
+                "actual and unknown readers remain bounded"
+            );
+        }
+        assert!(
+            conn.query_row(ARTIFACT_GUARD, [artifact_predecessor_view()], |row| row
+                .get::<_, i64>(0))
+                .is_err(),
+            "stale v2 proposal cannot overwrite v3"
+        );
+    }
+
+    #[test]
+    fn text_artifact_upgrade_rolls_back_and_refuses_drifted_v2() {
+        let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
+        SqliteStore::apply_migrations_for_test(&conn, 120).expect("deployed v2");
+        let before = rows(&conn).expect("exact v2");
+        conn.execute_batch("BEGIN").expect("begin");
+        verify_artifact_predecessor(&conn).expect("exact v2 predecessor");
+        conn.execute_batch(ARTIFACT_MIGRATION).expect("upgrade");
+        verify_sqlite(&conn).expect("exact v3");
+        assert!(
+            verify_resource_predecessor(&conn).is_err(),
+            "old v1 installer refuses v3"
+        );
+        conn.execute_batch("ROLLBACK").expect("rollback");
+        assert_eq!(rows(&conn).expect("restored"), before);
+        conn.execute_batch("DROP VIEW background_job_required_resources; CREATE VIEW background_job_required_resources AS SELECT id AS job_id,'source_io' AS resource_key FROM background_jobs").expect("unknown shape");
+        let drift = rows(&conn).expect("drifted shape");
+        assert!(SqliteStore::apply_next_migration_for_test(&conn).is_err());
+        assert_eq!(rows(&conn).expect("unchanged drift"), drift);
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("ordinal"),
+            120
+        );
+    }
+
     #[test]
     fn text_model_resource_upgrade_preserves_active_leases_and_unblocks_artifact_setup() {
         let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
@@ -226,7 +374,7 @@ mod tests {
         let before:String=conn.query_row("SELECT json_group_array(json_object('resource',resource_key,'slot',slot,'job',job_id,'fence',fence,'expiry',expires_at_ms)) FROM background_job_reservations",[],|row|row.get(0)).expect("reservations");
         let owner:String=conn.query_row("SELECT json_object('state',state,'revision',revision,'claim',claim_id,'fence',fence,'expiry',lease_expires_ms) FROM background_jobs WHERE id='metadata'",[],|row|row.get(0)).expect("owner");
         SqliteStore::apply_next_migration_for_test(&conn).expect("transactional upgrade");
-        verify_sqlite(&conn).expect("current schema");
+        verify_artifact_predecessor(&conn).expect("exact historical v2 DDL and marker");
         let after:String=conn.query_row("SELECT json_group_array(json_object('resource',resource_key,'slot',slot,'job',job_id,'fence',fence,'expiry',expires_at_ms)) FROM background_job_reservations",[],|row|row.get(0)).expect("reservations");
         assert_eq!(before, after, "upgrade preserves active reservations");
         assert_eq!(owner,conn.query_row("SELECT json_object('state',state,'revision',revision,'claim',claim_id,'fence',fence,'expiry',lease_expires_ms) FROM background_jobs WHERE id='metadata'",[],|row|row.get::<_,String>(0)).expect("owner"));
