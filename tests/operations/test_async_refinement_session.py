@@ -118,7 +118,7 @@ class CapabilityAndStorageTests(unittest.TestCase):
         for ordinal,run_id in enumerate((8,9,10)):
             prior=copy.deepcopy(base);prior['attempt_runs']=[8,9,10][:ordinal]
             prior['unit_runs']=[8] if ordinal else []
-            rows.append({'id':run_id,'workflow_id':p.WORKFLOW,'event':'workflow_dispatch',
+            rows.append({'id':run_id,'workflow_id':p.WORKFLOW,'event':'','trigger_event':'workflow_dispatch',
                 'event_payload':json.dumps({'inputs':{'operation':'execute','mode':'unit',
                                                      'control':json.dumps(prior)}})})
         base['attempt_runs']=[8,9,10];base['unit_runs']=[8,10]
@@ -667,7 +667,7 @@ class DispatchReservationTests(unittest.TestCase):
         row = {'ordinal': 0, 'control_sha256': self.digest()}
 
         def event(run_id, control):
-            return {'id': run_id, 'workflow_id': p.WORKFLOW, 'event': 'workflow_dispatch', 'event_payload':
+            return {'id': run_id, 'workflow_id': p.WORKFLOW, 'event': '', 'trigger_event': 'workflow_dispatch', 'event_payload':
                     json.dumps({'inputs': {'operation': 'execute', 'mode': 'unit', 'control': json.dumps(control)}})}
 
         def producer(_api, run_id, *_args):

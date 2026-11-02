@@ -233,7 +233,7 @@ class MainAuthenticationTests(MovedMainFixture):
     def completion(self, head, base, *event_bases, expired=()):
         """Run `require_completion` over one earlier complete run per event base, in the given order."""
         event = {'number': 7, 'repository': {'id': 1}, 'pull_request': {'head': {'sha': head}, 'base': {'sha': base}}}
-        runs = [{'commit_sha': head, 'event': 'workflow_dispatch', 'status': 'success', 'id': 9 + index,
+        runs = [{'commit_sha': head, 'event': '', 'trigger_event': 'workflow_dispatch', 'status': 'success', 'id': 9 + index,
                  'event_payload': p.canonical({'inputs': {'mode': 'complete', 'control': p.canonical(
                      {'registration': {'event_base': event_base}}).decode()}}).decode()}
                 for index, event_base in enumerate(event_bases)]

@@ -215,7 +215,7 @@ class ControlCarrierTests(unittest.TestCase):
         class API:
             state='success';attempt=1
             def get(self,path):
-                return {'id':7,'workflow_id':p.WORKFLOW,'event':'workflow_dispatch','commit_sha':'a'*40,
+                return {'id':7,'workflow_id':p.WORKFLOW,'event':'','trigger_event':'workflow_dispatch','commit_sha':'a'*40,
                         'repository':{'id':3},'event_payload':json.dumps(event),'status':self.state}
             def pages(self,path):
                 return [{'id':8,'task_id':9,'name':p.PRODUCER_JOB,'attempt':self.attempt,
@@ -225,6 +225,28 @@ class ControlCarrierTests(unittest.TestCase):
         for state,attempt in (('running',1),('failure',1),('cancelled',1),('success',2)):
             api.state=state;api.attempt=attempt
             with self.subTest(state=state,attempt=attempt),self.assertRaises(receipts.ReceiptError):
+                p.producer(api,7,reg,'unit',('success',))
+
+    def test_producer_authenticates_forgejo_dispatch_trigger_event(self):
+        """Forgejo reports a dispatched run with an empty event and trigger_event=workflow_dispatch."""
+        import json
+        _,frame=self.framed()
+        reg={'source':{'commit':'a'*40},'repository':3}
+        event={'repository':{'id':3},'inputs':{'mode':'unit','registration_sha256':p.digest(p.canonical(reg))}}
+        class API:
+            shape={'event':'','trigger_event':'workflow_dispatch'}
+            def get(self,path):
+                return {'id':7,'workflow_id':p.WORKFLOW,'commit_sha':'a'*40,**self.shape,
+                        'repository':{'id':3},'event_payload':json.dumps(event),'status':'success'}
+            def pages(self,path):
+                return [{'id':8,'task_id':9,'name':p.PRODUCER_JOB,'attempt':1,
+                         'status':'success','run_id':7,'repo_id':3,'log':frame}]
+        api=API()
+        p.producer(api,7,reg,'unit',('success',))
+        for shape in ({'event':'workflow_dispatch'},{'event':'pull_request','trigger_event':'pull_request'},
+                      {'event':'','trigger_event':'push'}):
+            api.shape=shape
+            with self.subTest(shape=shape),self.assertRaises(receipts.ReceiptError):
                 p.producer(api,7,reg,'unit',('success',))
 
     def test_current_control_cannot_be_a_member_of_its_own_zip(self):

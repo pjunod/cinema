@@ -1494,7 +1494,7 @@ def matching_runs(api, expected, control, floor):
     """The workflow runs created by exactly this dispatch (same registration, inputs and control)."""
     matches = []
     for run in api.pages('/actions/runs', {'workflow_id': p.WORKFLOW}, field='workflow_runs'):
-        if run.get('commit_sha') != control['registration']['source']['commit'] or run.get('event') != 'workflow_dispatch':
+        if run.get('commit_sha') != control['registration']['source']['commit'] or not p.dispatched(run):
             continue
         inputs = p.decode(run.get('event_payload', '').encode()).get('inputs', {})
         if (inputs.get('registration_sha256') == expected['registration_sha256']
@@ -3692,7 +3692,7 @@ def require_completion(root, output):
     adoption.validate_live_pr(api.get('/pulls/' + str(scope['pr'])), event, commit)
     candidates = api.pages('/actions/runs', {'workflow_id': p.WORKFLOW}, field='workflow_runs')
     for run in candidates:
-        if run.get('commit_sha') != commit or run.get('event') != 'workflow_dispatch' or run.get('status')!='success':
+        if run.get('commit_sha') != commit or not p.dispatched(run) or run.get('status')!='success':
             continue
         payload = p.decode(run.get('event_payload', '').encode())
         if payload.get('inputs', {}).get('mode') != 'complete':
@@ -5318,7 +5318,7 @@ def attempt_inventory(api,reg,control,current_run=None,*,require_declared=True):
     found={}
     declared={row['ordinal']:row for row in declared_uncertain(control)}
     for run in api.pages('/actions/runs',{'workflow_id':p.WORKFLOW},field='workflow_runs'):
-        if run.get('id')==current_run or run.get('workflow_id')!=p.WORKFLOW or run.get('event')!='workflow_dispatch':continue
+        if run.get('id')==current_run or run.get('workflow_id')!=p.WORKFLOW or not p.dispatched(run):continue
         event=p.decode(run.get('event_payload','').encode());inputs=event.get('inputs',{})
         if inputs.get('operation') not in ('execute','publish'):continue
         prior=p.decode(inputs.get('control','{}').encode())

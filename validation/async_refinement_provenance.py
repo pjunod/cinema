@@ -38,6 +38,16 @@ PRODUCER_JOB = 'async proof session producer'
 COMPLETION_JOB = 'Main promotion gate'
 SCHEMA_PATH = 'verification/async-driver-refinement/paged-proof.schema.json'
 SHA = re.compile(r'[0-9a-f]{64}\Z')
+
+
+def dispatched(run):
+    """Whether a live Forgejo run record was started by workflow_dispatch.
+
+    Forgejo's run API leaves ``event`` empty for dispatched runs and carries the
+    trigger in ``trigger_event`` (the field qualification_unit_continuation
+    already authenticates against); GitHub's ``event`` semantics do not apply.
+    """
+    return run.get('trigger_event') == 'workflow_dispatch'
 COMMIT = re.compile(r'[0-9a-f]{40}\Z')
 PATH = re.compile(r'[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*\Z')
 SELF_FIELDS = {'Page': 'page_id', 'ManifestNode': 'sha256', 'ResourcePlan': 'plan_sha256'}
@@ -282,7 +292,7 @@ def extract_source(archive, destination, expected_sha, source, members):
 def producer(api, run_id, registration, mode, status=('running', 'in_progress', 'success')):
     run = api.get('/actions/runs/' + str(receipts.positive(run_id)))
     require(run.get('id')==run_id and type(run.get('id')) is int
-            and run.get('workflow_id') == WORKFLOW and run.get('event') == 'workflow_dispatch'
+            and run.get('workflow_id') == WORKFLOW and dispatched(run)
             and run.get('commit_sha') == registration['source']['commit']
             and run.get('repository', {}).get('id') == registration['repository'],
             'unregistered producer run/source')
