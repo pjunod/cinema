@@ -761,8 +761,31 @@ impl TranscodeManager {
             true,
         );
         let copy_decision = plurx_core::playback::decide(file, &profile, &node);
+        // Discovery has no retained Copy tuple. Resolve its canonical selected
+        // track with the same sink/route/offset contract as session creation;
+        // decide() alone still inspects the source's default audio track.
+        let resolved_copy_audio =
+            audio_claim
+                .as_ref()
+                .map_or(copy_decision.transcode_audio, |claim| {
+                    let selected = audio.map_or_else(
+                        || file.audio_streams.first(),
+                        |index| {
+                            file.audio_streams
+                                .iter()
+                                .find(|stream| stream.index == index)
+                        },
+                    );
+                    plurx_core::playback::audio::resolve_audio(
+                        selected,
+                        &claim.profile(),
+                        plurx_core::playback::audio::AudioRoute::Progressive,
+                        audio_offset_ms,
+                    )
+                    .transcodes()
+                });
         let (copy_audio, copy_dv, copy_conversion) = retained_copy.unwrap_or((
-            copy_decision.transcode_audio,
+            resolved_copy_audio,
             copy_decision.preserve_dolby_vision,
             copy_decision.convert_dolby_vision,
         ));
