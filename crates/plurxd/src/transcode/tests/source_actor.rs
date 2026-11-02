@@ -2637,12 +2637,12 @@ async fn source_actual_actor(
     ingress_monitor.join().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_copy_cold_index_refuses_changed_actual_file_before_child() {
     source_copy_preadmission_fixture(10).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_copy_cold_index_refuses_purpose_floor_loss_before_child() {
     source_copy_preadmission_fixture(11).await;
 }
