@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Issue #1348: one native held direction keeps previewing until it releases.
+[[fixes]]
+id = "apple.tv-held-timeline-preview"
+commits = ["bbee797e4f656ffb25880d3f2dc3371075c22b47"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "func begin(_ input: PlayerContractInput, preview:"
+test = "clients/apple/Tests/PlayerTimelineHoldTests.swift"
+test_anchor = "func testHoldKeepsPreviewingAndReleaseFencesLateTicks"
+
+[[fixes]]
+id = "apple.tv-native-held-timeline-preview"
+commits = []
+supplements = "apple.tv-held-timeline-preview"
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "recognizer.minimumPressDuration = 0.35"
+test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
+test_anchor = "func testLocalMovieTimelineHoldKeepsPreviewMovingUntilRelease"
+
 # Issue #1347: real tvOS background entry releases the paused player before wake.
 [[fixes]]
 id = "apple.tv-sleep-title-return"
