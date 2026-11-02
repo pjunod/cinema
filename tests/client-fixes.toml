@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Issue #1347: real tvOS background entry releases the paused player before wake.
+[[fixes]]
+id = "apple.tv-sleep-title-return"
+commits = ["bbecc63c938e4973b260e7c0ec3f33a358987262"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "func sceneChanged("
+test = "clients/apple/Tests/PlayerLifecycleTests.swift"
+test_anchor = "func testBackgroundRetiresTVPlayerBeforeReturningToTitle"
+
+[[fixes]]
+id = "apple.tv-background-pending-autoplay"
+commits = []
+supplements = "apple.tv-sleep-title-return"
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "if self.isBackgrounded, let backgroundCompletion"
+test = "clients/apple/Tests/PlayerLifecycleTests.swift"
+test_anchor = "func testBackgroundReplacesPendingAutoplayWithDismissal"
+
 # PR #1331: stop releases the captured HLS session through its configured owner.
 [[fixes]]
 id = "apple.stop-captured-hls-session-owner"
