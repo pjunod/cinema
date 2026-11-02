@@ -8,7 +8,7 @@ enum GrowingPlaylistPreparation {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 60
-        return URLSession(configuration: configuration)
+        return ServerTrust.session(configuration: configuration)
     }()
 
     static func wait(for url: URL, using transport: URLSession? = nil) async throws {

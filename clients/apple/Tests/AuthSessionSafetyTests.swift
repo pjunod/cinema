@@ -6,6 +6,7 @@ import XCTest
 private final class AuthSessionHTTP: URLProtocol {
     enum Answer {
         case http(Int, String)
+        case upgraded(String)
         case failed(URLError.Code)
         case held
     }
@@ -38,12 +39,14 @@ private final class AuthSessionHTTP: URLProtocol {
     override func startLoading() {
         Self.lock.lock()
         Self.seen.append(request)
-        let answer = Self.answers[request.url?.path ?? ""] ?? .http(200, "{}")
+        let path = request.url?.path ?? ""
+        let answer = Self.answers[(request.httpMethod ?? "GET") + " " + path] ?? Self.answers[path] ?? .http(200, "{}")
         let entered = Self.entered
         if case .held = answer { Self.held.append(self) }
         Self.lock.unlock()
         switch answer {
         case .http(let status, let body): deliver(status: status, body: body)
+        case .upgraded(let finalURL): deliver(status: 401, body: "{}", responseURL: URL(string: finalURL))
         case .failed(let code): client?.urlProtocol(self, didFailWithError: URLError(code))
         case .held: entered?()
         }
@@ -51,10 +54,10 @@ private final class AuthSessionHTTP: URLProtocol {
     override func stopLoading() {
         stateLock.lock(); stopped = true; stateLock.unlock()
     }
-    private func deliver(status: Int, body: String) {
+    private func deliver(status: Int, body: String, responseURL: URL? = nil) {
         stateLock.lock(); let cancelled = stopped; stateLock.unlock()
         guard !cancelled else { return }
-        let response = HTTPURLResponse(url: request.url!, statusCode: status,
+        let response = HTTPURLResponse(url: responseURL ?? request.url!, statusCode: status,
             httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(body.utf8))
@@ -107,6 +110,138 @@ final class AuthSessionSafetyTests: XCTestCase {
         }, findSavedServers: findSavedServers, logoutRequest: logoutRequest)
         defer { model.discovery.stop() }
         try await body(model, settings, vault, defaults, name)
+    }
+
+    func testConnectPromotesHTTPBeforeLoginAndNoRedirectAPIReads() async throws {
+        let promoted = "https://saved.invalid:32443"
+        AuthSessionHTTP.configure([
+            "HEAD /api/v1/me": .upgraded(promoted + "/api/v1/me"),
+            "/api/v1/server": .http(200, server),
+            "/api/v1/auth/login": .http(200, #"{"token":"new-bearer","user":{"id":7,"username":"viewer"}}"#),
+            "/api/v1/hubs": .http(200, "{}"), "/api/v1/libraries": .http(200, "[]"),
+            "/api/v1/live-tv/channels": .http(200, #"{"channels":[],"freshness":"fresh","age_seconds":0}"#)
+        ])
+        try await withModel { model, settings, vault, _, _ in
+            await model.connect("http://saved.invalid:32400")
+            XCTAssertEqual(model.phase, .needLogin)
+            XCTAssertEqual(model.origin, promoted)
+            XCTAssertEqual(model.requireAPI().origin, promoted)
+            XCTAssertEqual(settings.origin, promoted)
+            XCTAssertEqual(Session.shared.credentials.origin, promoted)
+            XCTAssertNil(vault.value)
+            XCTAssertEqual(AuthSessionHTTP.requests.first?.httpMethod, "HEAD")
+            XCTAssertEqual(AuthSessionHTTP.requests.first?.url?.absoluteString, "http://saved.invalid:32400/api/v1/me")
+            XCTAssertTrue(AuthSessionHTTP.requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == nil })
+            let identity = try XCTUnwrap(AuthSessionHTTP.requests.first { $0.url?.path == "/api/v1/server" })
+            XCTAssertEqual(identity.url?.scheme, "https")
+            XCTAssertEqual(identity.url?.port, 32443)
+
+            await model.login("viewer", "disposable")
+            XCTAssertEqual(model.phase, .ready)
+            XCTAssertEqual(vault.value, "new-bearer")
+            let login = try XCTUnwrap(AuthSessionHTTP.requests.first { $0.url?.path == "/api/v1/auth/login" })
+            XCTAssertEqual(login.url?.scheme, "https")
+            XCTAssertEqual(login.url?.port, 32443)
+            XCTAssertNil(login.value(forHTTPHeaderField: "Authorization"))
+
+            let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [AuthSessionHTTP.self]
+            let noRedirectTransport = URLSession(configuration: config, delegate: LiveTvNoRedirects(), delegateQueue: nil)
+            let liveTV = LiveTvAPI(origin: model.requireAPI().origin,
+                                   token: Session.shared.credentials.token, session: noRedirectTransport)
+            let lineup = try await liveTV.lineup()
+            XCTAssertTrue(lineup.channels.isEmpty)
+            let read = try XCTUnwrap(AuthSessionHTTP.requests.last { $0.url?.path == "/api/v1/live-tv/channels" })
+            XCTAssertEqual(read.url?.scheme, "https")
+            XCTAssertEqual(read.url?.port, 32443)
+            XCTAssertEqual(read.value(forHTTPHeaderField: "Authorization"), "Bearer new-bearer")
+            XCTAssertTrue(AuthSessionHTTP.requests.filter { $0.value(forHTTPHeaderField: "Authorization") != nil }
+                .allSatisfy { $0.url?.scheme == "https" && $0.url?.host == "saved.invalid" && $0.url?.port == 32443 })
+        }
+    }
+
+    func testSavedHTTPBootstrapPromotesBeforeSendingBearerAndPersistsHTTPS() async throws {
+        let original = "http://saved.invalid:32400"
+        let promoted = "https://saved.invalid:32443"
+        AuthSessionHTTP.configure([
+            "HEAD /api/v1/me": .upgraded(promoted + "/api/v1/me"),
+            "/api/v1/server": .http(200, server),
+            "/api/v1/me": .http(200, #"{"id":1,"username":"saved-viewer"}"#),
+            "/api/v1/hubs": .http(200, "{}"), "/api/v1/libraries": .http(200, "[]")
+        ])
+        try await withModel { model, settings, vault, _, _ in
+            settings.setServer(origin: original, instanceId: "saved-instance", token: "saved-bearer")
+            await model.retrySavedSession()
+            XCTAssertEqual(model.phase, .ready)
+            XCTAssertEqual(model.origin, promoted)
+            XCTAssertEqual(model.requireAPI().origin, promoted)
+            XCTAssertEqual(Session.shared.credentials.origin, promoted)
+            XCTAssertEqual(settings.origin, promoted)
+            XCTAssertEqual(settings.instanceId, "saved-instance")
+            XCTAssertEqual(vault.value, "saved-bearer")
+            let requests = AuthSessionHTTP.requests
+            XCTAssertEqual(requests.first?.httpMethod, "HEAD")
+            XCTAssertEqual(requests.first?.url?.absoluteString, original + "/api/v1/me")
+            XCTAssertNil(requests.first?.value(forHTTPHeaderField: "Authorization"))
+            let identity = try XCTUnwrap(requests.first { $0.url?.path == "/api/v1/server" })
+            XCTAssertEqual(identity.url?.scheme, "https")
+            XCTAssertNil(identity.value(forHTTPHeaderField: "Authorization"))
+            let me = try XCTUnwrap(requests.first { $0.httpMethod == "GET" && $0.url?.path == "/api/v1/me" })
+            XCTAssertEqual(me.url?.scheme, "https")
+            XCTAssertEqual(me.url?.port, 32443)
+            XCTAssertEqual(me.value(forHTTPHeaderField: "Authorization"), "Bearer saved-bearer")
+            XCTAssertTrue(requests.filter { $0.url?.scheme == "http" }
+                .allSatisfy { $0.httpMethod == "HEAD" && $0.value(forHTTPHeaderField: "Authorization") == nil })
+        }
+    }
+
+    func testCrossHostHTTPSUpgradeCannotReachLoginOrReceiveSavedBearer() async throws {
+        AuthSessionHTTP.configure([
+            "HEAD /api/v1/me": .upgraded("https://other.invalid:32443/api/v1/me"),
+            "/api/v1/server": .http(200, server)
+        ])
+        try await withModel { model, settings, vault, _, _ in
+            await model.connect("http://saved.invalid:32400")
+            XCTAssertNotNil(model.authError)
+            XCTAssertNotEqual(model.phase, .needLogin)
+            XCTAssertEqual(settings.origin, "https://saved.invalid")
+            XCTAssertEqual(vault.value, "saved-bearer")
+            XCTAssertNil(Session.shared.credentials.token)
+            XCTAssertEqual(AuthSessionHTTP.requests.map { $0.url?.path }, ["/api/v1/me"])
+            XCTAssertTrue(AuthSessionHTTP.requests.allSatisfy {
+                $0.url?.host == "saved.invalid" && $0.value(forHTTPHeaderField: "Authorization") == nil
+            })
+        }
+    }
+
+    func testSavedHTTPBootstrapRejectsCrossHostUpgradeWithoutSendingItsBearer() async throws {
+        AuthSessionHTTP.configure([
+            "HEAD /api/v1/me": .upgraded("https://other.invalid:32443/api/v1/me"),
+            "/api/v1/server": .http(200, server)
+        ])
+        try await withModel { model, settings, vault, _, _ in
+            settings.setServer(origin: "http://saved.invalid:32400", instanceId: "saved-instance", token: "saved-bearer")
+            await model.retrySavedSession()
+            XCTAssertEqual(model.phase, .reconnectFailed)
+            XCTAssertEqual(settings.origin, "http://saved.invalid:32400")
+            XCTAssertEqual(vault.value, "saved-bearer")
+            XCTAssertNil(Session.shared.credentials.token)
+            XCTAssertFalse(AuthSessionHTTP.requests.isEmpty)
+            XCTAssertTrue(AuthSessionHTTP.requests.allSatisfy {
+                $0.httpMethod == "HEAD" && $0.url?.path == "/api/v1/me"
+                    && $0.url?.host == "saved.invalid" && $0.value(forHTTPHeaderField: "Authorization") == nil
+            })
+        }
+    }
+
+    func testHTTPSConnectUsesSelectedOriginWithoutAnHTTPResolutionProbe() async throws {
+        AuthSessionHTTP.configure(["/api/v1/server": .http(200, server)])
+        try await withModel { model, settings, _, _, _ in
+            await model.connect("https://saved.invalid:32443")
+            XCTAssertEqual(model.phase, .needLogin)
+            XCTAssertEqual(settings.origin, "https://saved.invalid:32443")
+            XCTAssertEqual(AuthSessionHTTP.requests.map { $0.url?.path }, ["/api/v1/server"])
+            XCTAssertTrue(AuthSessionHTTP.requests.allSatisfy { $0.url?.scheme == "https" })
+        }
     }
 
     func testLaunchArgumentsCannotRePairSavedOriginIdentityOrLegacyBearer() async throws {

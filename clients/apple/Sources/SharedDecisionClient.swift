@@ -216,7 +216,7 @@ struct SharedDecisionClient {
         defer { entry.busy = false; registry.active -= 1 }
         if entry.order.needsResync || entry.order.pending.map({ $0.sessionId != playback.context.sessionId }) == true {
             let expected = Session.shared.playbackAuthorization
-            let data = try await Self.detail(reference: reference, transport: URLSession(configuration: configuration), expected: expected)
+            let data = try await Self.detail(reference: reference, transport: ServerTrust.session(configuration: configuration), expected: expected)
             try requireCurrent()
             let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
             let detail = try decoder.decode(SharedLibraryDetail.self, from: data); try detail.validate(expected: reference)
@@ -312,6 +312,15 @@ struct SharedDecisionClient {
 private struct SharedDecisionHTTPResponse { let data: Data; let status: Int }
 
 private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let decision = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(decision.0, decision.1)
+    }
+
     private let request: URLRequest
     private let receiptExchange: ReadAfterHTTP.Exchange
     private let configuration: URLSessionConfiguration

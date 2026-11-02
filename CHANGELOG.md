@@ -8,6 +8,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- Apple clients remember selected self-signed server identities and use them
+  for HTTPS sign-in, artwork and playback without a manually installed certificate.
+
 ## [0.8.0] — 2026-10-29
 
 ### Added

@@ -430,7 +430,7 @@ final class LibraryChannelPlayerController: ObservableObject {
             guard let playlistURL = Session.shared.url(started.playback.playlistUrl) else {
                 throw APIError.badURL
             }
-            let item = AVPlayerItem(url: playlistURL)
+            let item = ServerTrust.playerItem(url: playlistURL)
             item.preferredForwardBufferDuration = 60
             #if os(iOS)
             try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
@@ -752,12 +752,21 @@ final class LibraryChannelPlayerController: ObservableObject {
         guard sequence == tuneSequence, player.currentItem === item else { return }
         let itemError = item.error as NSError?
         let error = notificationError ?? itemError
-        let failedURI = (error?.userInfo[NSURLErrorFailingURLStringErrorKey] as? String)
+        let rawURI = (error?.userInfo[NSURLErrorFailingURLStringErrorKey] as? String)
             ?? (item.asset as? AVURLAsset)?.url.absoluteString
+        let failedURI = rawURI.flatMap { URL(string: $0) }.map {
+            (PlayerTrustProxy.shared.originalURL(for: $0) ?? $0).absoluteString
+        } ?? rawURI
         let detail = PlayerItemFailure.classify(
             fatal: notificationError,
             item: itemError,
-            log: item.errorLog()?.events.map(PlayerItemFailure.LogEntry.init) ?? [],
+            log: item.errorLog()?.events.map { event in
+                let uri = event.uri.flatMap { URL(string: $0) }.map {
+                    (PlayerTrustProxy.shared.originalURL(for: $0) ?? $0).absoluteString
+                } ?? event.uri
+                return PlayerItemFailure.LogEntry(uri: uri, domain: event.errorDomain,
+                                                  status: event.errorStatusCode, comment: event.errorComment)
+            } ?? [],
             failedURI: failedURI
         )
         if playbackError == nil || detail != nil {

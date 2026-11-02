@@ -221,9 +221,31 @@ final class AppModel: ObservableObject {
         origin = savedOrigin
         api = makeAPI(savedOrigin)
 
-        guard let savedToken else { phase = .needLogin; return }
+        guard let savedToken else {
+            do {
+                let resolved = try await requireAPI().connectionOrigin()
+                guard generation == authenticationGeneration else { return }
+                origin = resolved
+                api = makeAPI(resolved)
+                Session.shared.setCredentials(origin: resolved, token: nil)
+                if !transientAuthentication {
+                    settings.setServer(origin: resolved, instanceId: settings.instanceId, token: nil)
+                }
+                phase = .needLogin
+            } catch {
+                guard generation == authenticationGeneration else { return }
+                authError = ServerTrust.shared.failureMessage(for: savedOrigin) ?? error.localizedDescription
+                phase = .reconnectFailed
+            }
+            return
+        }
         var verifiedSavedOrigin = false
         do {
+            let resolved = try await requireAPI().connectionOrigin()
+            guard generation == authenticationGeneration else { return }
+            origin = resolved
+            api = makeAPI(resolved)
+            Session.shared.setCredentials(origin: resolved, token: nil)
             // A saved address can now name another server. Prove the saved
             // instance without credentials before sending its bearer there.
             if let expected = settings.instanceId, !expected.isEmpty {
@@ -236,7 +258,10 @@ final class AppModel: ObservableObject {
                 }
             }
             verifiedSavedOrigin = true
-            Session.shared.setCredentials(origin: savedOrigin, token: savedToken)
+            if !transientAuthentication && resolved != savedOrigin {
+                settings.setServer(origin: resolved, instanceId: settings.instanceId, token: savedToken)
+            }
+            Session.shared.setCredentials(origin: resolved, token: savedToken)
             let me = try await requireAPI().me()
             guard generation == authenticationGeneration else { return }
             username = me.username
@@ -264,7 +289,7 @@ final class AppModel: ObservableObject {
                 phase = .reconnectFailed
                 return
             }
-            Session.shared.setCredentials(origin: savedOrigin, token: nil) // token rotated / server reset
+            Session.shared.setCredentials(origin: origin, token: nil) // token rotated / server reset
             settings.clearToken()
             // "Signed out after 90 days of inactivity." when that is why.
             authError = Session.shared.takeSessionExpiryNotice()
@@ -321,10 +346,14 @@ final class AppModel: ObservableObject {
         displayAwareAutoProtocol = nil
         let a = makeAPI(normalized)
         do {
-            let info = try await a.serverInfo()
+            let resolved = try await a.connectionOrigin()
             guard generation == authenticationGeneration else { return }
-            origin = normalized
-            api = a
+            let connectedAPI = makeAPI(resolved)
+            let info = try await connectedAPI.serverInfo()
+            guard generation == authenticationGeneration else { return }
+            origin = resolved
+            api = connectedAPI
+            Session.shared.setCredentials(origin: resolved, token: nil)
             serverName = info.name
             serverHostname = nil
             displayAwareAuto = info.playbackDisplayAwareAuto == true
@@ -334,11 +363,12 @@ final class AppModel: ObservableObject {
             // The persisted half of the same invariant. A relaunch between here
             // and the login below must not be able to hand server A's bearer to
             // server B — one write, both facts.
-            settings.setServer(origin: normalized, instanceId: info.instanceId, token: nil)
+            settings.setServer(origin: resolved, instanceId: info.instanceId, token: nil)
             phase = .needLogin
         } catch {
             guard generation == authenticationGeneration else { return }
-            authError = "Couldn't reach a Cinema server at \(normalized)"
+            authError = ServerTrust.shared.failureMessage(for: normalized)
+                ?? "Couldn't reach a Cinema server at \(normalized)"
         }
     }
 
@@ -373,7 +403,8 @@ final class AppModel: ObservableObject {
             authError = "Wrong username or password"
         } catch {
             guard generation == authenticationGeneration else { return }
-            authError = "Couldn't reach \(serverName ?? origin). Check Local Network access and the server."
+            authError = ServerTrust.shared.failureMessage(for: origin)
+                ?? "Couldn't reach \(serverName ?? origin). Check Local Network access and the server."
         }
     }
 
@@ -621,6 +652,15 @@ final class AppModel: ObservableObject {
         if let newFavorites { favorites = newFavorites }
     }
 
+    func trustReplacementServer(_ raw: String) async {
+        let normalized = Self.normalizeOrigin(raw)
+        guard let changed = ServerTrust.shared.changedOrigin(for: normalized) else { return }
+        // Never send the old server's bearer to a replacement identity.
+        changeServer()
+        guard ServerTrust.shared.forgetChangedIdentity(origin: changed) else { return }
+        await connect(normalized)
+    }
+
     func changeServer() {
         beginAuthentication()
         watchlist = []
@@ -656,14 +696,28 @@ final class AppModel: ObservableObject {
         autoAbr = false
         displayAwareAutoProtocol = nil
         api = makeAPI(recovered.origin)
-        Session.shared.setCredentials(origin: recovered.origin, token: token)
+        Session.shared.setCredentials(origin: recovered.origin, token: nil)
 
         do {
+            let resolved = try await requireAPI().connectionOrigin()
+            guard generation == authenticationGeneration else { return }
+            let connectedAPI = makeAPI(resolved)
+            if resolved != recovered.origin, let expected = recovered.instanceId {
+                let info = try await connectedAPI.serverInfo()
+                guard generation == authenticationGeneration else { return }
+                guard info.instanceId?.caseInsensitiveCompare(expected) == .orderedSame else {
+                    showReconnectFailure()
+                    return
+                }
+            }
+            origin = resolved
+            api = connectedAPI
+            Session.shared.setCredentials(origin: resolved, token: token)
             let me = try await requireAPI().me()
             guard generation == authenticationGeneration else { return }
             // Persist a move only after this matching instance accepts its
             // token. A failed retry must leave the saved pairing intact.
-            settings.setServer(origin: recovered.origin, instanceId: recovered.instanceId, token: token)
+            settings.setServer(origin: resolved, instanceId: recovered.instanceId, token: token)
             username = me.username
             userId = me.id
             settings.username = me.username
@@ -675,8 +729,8 @@ final class AppModel: ObservableObject {
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
             guard generation == authenticationGeneration else { return }
-            Session.shared.setCredentials(origin: recovered.origin, token: nil)
-            settings.setServer(origin: recovered.origin, instanceId: recovered.instanceId, token: nil)
+            Session.shared.setCredentials(origin: origin, token: nil)
+            settings.setServer(origin: origin, instanceId: recovered.instanceId, token: nil)
             authError = Session.shared.takeSessionExpiryNotice()
             phase = .needLogin
         } catch {

@@ -34,6 +34,15 @@ certificates. Forwarded scheme headers do not bypass the redirect; reverse
 proxies should use HTTPS upstream when native HTTPS is enabled. No HSTS, ACME,
 certificate upload, client trust bypass or deployment is added.
 
+**Native trust amendment — 2026-11-01:** Apple clients enroll the selected
+server's self-signed certificate on first use and retain its identity in the
+app keychain. Changed, expired and invalid identities are refused. HLS playback
+uses an app-private loopback bridge because AVFoundation's fragment loader
+bypasses the asset authentication callback; upstream traffic uses the same
+pinned HTTPS policy. First use trusts the chosen network route. This does not
+install a system root, and browsers retain their normal certificate
+requirements. See the [Apple change note](../apple-builds/1352-self-signed-server-trust.md).
+
 Settings → Developer owns the control while acceptance is incomplete and
 names remaining evidence using `devGraduation`. Once acceptance is complete,
 the permanent toggle moves to Settings → System. Advisory readiness never

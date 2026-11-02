@@ -35,7 +35,7 @@ struct PlaybackControlTransport {
         configuration.waitsForConnectivity = false
         configuration.timeoutIntervalForRequest = 10
         configuration.timeoutIntervalForResource = 10
-        return URLSession(configuration: configuration)
+        return ServerTrust.session(configuration: configuration)
     }()
 
     func send(_ path: String, _ request: ControlRequest, linkReceipt: String? = nil) async throws -> ControlResponse {
