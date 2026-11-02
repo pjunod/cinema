@@ -640,6 +640,17 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         "the counted HTTP body still prevents native S settlement"
     );
     drop(body);
+    // The carrier is unregistered and its metadata/client leases dropped, but
+    // the terminal tombstone keeps its counted session state in S's client
+    // partition for the late-response window, exactly as for any finite
+    // rendition. S stays charged until that original retention expires.
+    serve.shared.retained_artifacts.collect(&serve.shared.base).await;
+    assert_eq!(
+        serve.shared.retained_artifacts.test_capacity_snapshot().0,
+        retained_charge,
+        "the live terminal tombstone's counted session state still holds S"
+    );
+    expire_finite_session_tombstone(&serve, "later-automatic").await;
     // Existing maintenance resumes the same queued original eviction; no
     // replacement native operation or daemon/path-based refund is minted.
     for _ in 0..16 {
