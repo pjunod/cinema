@@ -131,6 +131,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Playback cache admission reconciles concurrent cancelled writes instead of
+  failing a video producer as disk-full while capacity remains, preventing
+  repeated Apple TV buffering and stream retries.
+
 - **HTTP app addresses forward to HTTPS while it is active.** Temporary,
   non-cached redirects preserve the requested path, query, method and body,
   including remapped Docker HTTPS ports. Health, discovery, cluster RPC and
