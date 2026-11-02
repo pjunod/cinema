@@ -10,6 +10,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Web copy/remux playback keeps decision and session-creation quality identities
+  consistent when selecting alternate audio tracks or applying audio offsets.
 - Weekly release readiness validates the shipped Jellyfin FFmpeg runtime in
   a candidate-built CI image instead of waiting for obsolete FFmpeg 6 runners.
 

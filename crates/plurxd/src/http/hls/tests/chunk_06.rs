@@ -5877,6 +5877,106 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
     }
 }
 
+/// Compare actual emitted IDs across decision discovery (no retained Copy
+/// contract) and create discovery, not two digests of a manufactured tuple.
+#[tokio::test]
+async fn ordinary_decision_and_create_catalogs_share_selected_audio_identity() {
+    use crate::transcode::{Presentation, TranscodeManager};
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+
+    plurx_core::testfixtures::require_ffmpeg();
+    let state = resolver_state();
+    let dir = crate::test_tempdir().expect("catalog source");
+    let path = dir.path().join("source.mkv");
+    // Copy catalog discovery binds source identity without demuxing it. The
+    // selected Remux shape below skips unrelated Encode plan/source scans.
+    std::fs::write(&path, b"catalog source identity fixture").expect("source");
+    let metadata = std::fs::metadata(&path).expect("source metadata");
+    let mut first_selection = None;
+    for (label, default_codec, alternate_codec, selected, offset, channels, rate, decoder, expected) in [
+        ("alternate_ac3", "dts", "ac3", Some(7), 0, 6, 48_000, true, false),
+        ("alternate_dts", "ac3", "dts", Some(7), 0, 6, 48_000, true, true),
+        ("offset", "dts", "ac3", Some(7), 175, 6, 48_000, true, true),
+        ("sink_channels", "aac", "ac3", Some(7), 0, 2, 48_000, false, true),
+        ("sink_rate", "aac", "ac3", Some(7), 0, 6, 96_000, false, true),
+        ("default_dts", "dts", "ac3", None, 0, 6, 48_000, true, true),
+    ] {
+        let mut file = staged_source_file();
+        file.path = path.clone();
+        file.size = metadata.len() as i64;
+        file.mtime = metadata.modified().expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH).expect("epoch").as_secs() as i64;
+        file.audio_streams = vec![
+            plurx_core::domain::AudioStream {
+                index: 0, codec: default_codec.into(), channels: Some(6), sample_rate: Some(48_000),
+                channel_layout: Some("5.1".into()), language: None, title: None, default: true,
+            },
+            plurx_core::domain::AudioStream {
+                index: 7, codec: alternate_codec.into(), channels: Some(6), sample_rate: Some(rate),
+                channel_layout: Some("5.1".into()), language: None, title: None, default: false,
+            },
+        ];
+        let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+            "v":2, "video":[{"codec":"h264","present":["sdr"],"max_height":2160}],
+            "containers":["mp4"],"transports":["progressive","hls"],
+            "audio":if decoder { vec!["aac","ac3"] } else { vec!["aac"] },
+            "audio_sinks":[
+                {"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+                {"codec":"ac3","max_channels":channels,"sample_rates_hz":[48000],"passthrough":true}
+            ]
+        })).expect("caps");
+        let snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+            file: file.clone(), probe_json: None, settings: Default::default(),
+            generation: 1, item_title: None,
+        };
+        let mut body = CreateSession {
+            copy: Some(true), audio: selected, audio_offset_ms: Some(offset),
+            caps: Some(caps.clone()), ..bare_create()
+        };
+        body.audio = TranscodeManager::candidate_audio_from_snapshot(&snapshot, body.audio);
+        let query = body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(None));
+        assert_eq!(query.copy_contract.expect("Copy contract").0, expected, "{label}");
+        let selector = QualityCandidate {
+            id: CandidateId::for_recipe_digest([0; 32]), recipe_digest: [0; 32],
+            route: CandidateRoute::Remux, planned_codec: None, processed_dv: false,
+            normalized_geometry: true, width: 3840, height: 2160, target_height: 2160,
+            average_bps: None, peak_bps: None, grade: plurx_core::transcode::OutputGrade::Sdr,
+            decoder_compatible: true, complete_cache: false, sustainable: true,
+        };
+        let decision = state.transcode.quality_catalog_from_snapshot_progress(
+            &snapshot, &caps, body.audio, offset, None, Presentation::Vod,
+            None, None, None, None, Some(&selector),
+        ).await;
+        let creation = state.transcode.quality_catalog_from_snapshot_progress(
+            &snapshot, &caps, query.audio_index, query.audio_offset_ms, query.subtitle_burn,
+            Presentation::Vod, query.copy_contract, None, query.audio_claim.as_ref(),
+            None, Some(&selector),
+        ).await;
+        let advertised = decision.candidates.iter().find(|row| row.route == CandidateRoute::Remux)
+            .unwrap_or_else(|| panic!("{label}: decision Copy absent: {:?}", decision.selected_unavailable));
+        let created = creation.candidates.iter().find(|row| row.route == CandidateRoute::Remux)
+            .unwrap_or_else(|| panic!("{label}: create Copy absent: {:?}", creation.selected_unavailable));
+        assert!(advertised.identity_matches() && advertised.playable(), "{label}");
+        assert!(created.identity_matches() && created.playable(), "{label}");
+        assert_eq!(advertised.id, created.id, "{label}: decision advertised another audio recipe");
+        assert_eq!(advertised.recipe_digest, created.recipe_digest, "{label}");
+        let mut request = body.into_request(file.id, 2160);
+        request.audio_claim = query.audio_claim.clone();
+        reconcile_request_audio(Some(&file), &mut request);
+        let crate::transcode::SessionKind::Copy { aac, .. } = request.kind else {
+            panic!("{label}: expected Copy");
+        };
+        assert_eq!(aac, expected, "{label}: execution audio differs");
+        if label == "alternate_ac3" { first_selection = Some(advertised.id); }
+        if label == "default_dts" {
+            let stale = first_selection.expect("alternate candidate");
+            assert_ne!(stale, created.id);
+            assert!(creation.candidates.iter().all(|row| row.id != stale),
+                "a different selected audio ID must not alias the current catalog");
+        }
+    }
+}
+
 #[tokio::test]
 async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
     let state = resolver_state();
