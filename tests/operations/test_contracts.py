@@ -1666,6 +1666,69 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--dry-run", result.stdout)
         self.assertIn("--allow-unknown", result.stdout)
 
+    def test_ship_physical_preserves_adb_serials_with_spaces(self):
+        script = read("scripts/ship-physical")
+        android = script.split('if [[ $DO_ANDROID -eq 1 ]]; then\n  log ', 1)[1]
+        android = 'if [[ $DO_ANDROID -eq 1 ]]; then\n  log ' + android.split(
+            "# Summary", 1
+        )[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            adb = Path(tmp) / "adb"
+            adb.write_text(textwrap.dedent("""\
+                #!/bin/bash
+                case "$1" in
+                  start-server) exit 0 ;;
+                  devices)
+                    printf 'List of devices attached\\n'
+                    printf 'adb-device (2)._adb-tls-connect._tcp\\tdevice\\n'
+                    printf 'offline-device\\toffline\\n'
+                    printf 'emulator-5554\\tdevice\\n'
+                    printf 'plain-device\\tdevice\\n'
+                    ;;
+                  -s)
+                    case "$3" in
+                      shell)
+                        cat >/dev/null
+                        case "$4" in
+                          getprop) printf 'Fixture Device\\n' ;;
+                          dumpsys) printf 'versionCode=1\\n' ;;
+                        esac
+                        ;;
+                      install) printf 'Success\\n' ;;
+                    esac
+                    ;;
+                esac
+                """))
+            adb.chmod(0o755)
+            harness = textwrap.dedent("""\
+                set -euo pipefail
+                ADB=$1
+                DO_ANDROID=1
+                ALLOW_UNKNOWN=1
+                KNOWN_ANDROID_PATTERNS=(fixture)
+                ANDROID_PACKAGE=fixture.app
+                ANDROID_CODE=2
+                VERSION=fixture
+                APK=fixture.apk
+                log() { :; }
+                warn() { :; }
+                record_installed() { printf '%s\\n' "$1"; }
+                record_skipped() { :; }
+                record_failed() { exit 1; }
+                """) + android
+            result = subprocess.run(
+                ["bash", "-c", harness, "fixture", str(adb)],
+                input="",
+                text=True,
+                check=True,
+                stdout=subprocess.PIPE,
+                timeout=10,
+            )
+        self.assertEqual(result.stdout.splitlines(), [
+            "Fixture_Device [adb-device (2)._adb-tls-connect._tcp] → fixture (2)",
+            "Fixture_Device [plain-device] → fixture (2)",
+        ])
+
     def test_apple_developer_team_is_injected_instead_of_tracked(self):
         script = read("scripts/ship-physical")
         project = read("clients/apple/project.yml")
@@ -2117,8 +2180,7 @@ assert.equal(context.ACT_TIMER, null);
                 "49933ea5288caeca8642d1e84afbd3f7d6820020",
                 contract_preflight,
             )
-            self.assertIn('node-version: "22.23.2"' if workflow == "main-fast-lane"
-                          else 'node-version: "22"', contract_preflight)
+            self.assertIn('node-version: "22.23.4"', contract_preflight)
             self.assertLess(
                 contract_preflight.index(
                     "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
@@ -2644,7 +2706,8 @@ assert.equal(context.ACT_TIMER, null);
             fast_rust_steps["Install Rust gate prerequisites"], "run"
         )
         self.assertTrue(any("python3" in line for line in prerequisites))
-        self.assertTrue(any("nodejs" in line for line in prerequisites))
+        self.assertTrue(any("xz-utils" in line for line in prerequisites))
+        self.assertIn("node --version | grep -Fx 'v22.23.4'", fast_jobs["rust_compile"])
         self.assertEqual(
             workflow_step_literal(fast_rust_steps["Lint the workspace"], "run"),
             ["make lint"],
@@ -3682,7 +3745,7 @@ assert.equal(context.ACT_TIMER, null);
             ),
             2,
         )
-        self.assertIn('node-version: "24"', android_device)
+        self.assertIn('node-version: "24.22.1"', android_device)
         self.assertIn("npm ci --prefix .github/actions/android-emulator-ready --ignore-scripts --omit=dev", android_device)
         provenance = read(".github/actions/android-emulator-ready/upstream.json")
         self.assertIn("4c44018e59b437e86cdfc41da381398f93ed8808", provenance)

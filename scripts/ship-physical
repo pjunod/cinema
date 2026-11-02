@@ -432,10 +432,14 @@ if [[ $DO_ANDROID -eq 1 ]]; then
   log "inventorying physical Android devices"
   "$ADB" start-server >/dev/null 2>&1 || true
 
-  SERIALS="$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}')"
+  # ADB's serial field can contain spaces (for example an mDNS "(2)" suffix).
+  # Split at its tab separator, then preserve each complete serial below.
+  SERIALS="$("$ADB" devices | awk -F '\t' '$2=="device" {print $1}')"
   [[ -n "$SERIALS" ]] || warn "no reachable Android devices — nothing installed on the Android side"
 
-  for serial in $SERIALS; do
+  # Keep the inventory off stdin: adb shell may read stdin while querying a device.
+  while IFS= read -r serial <&3; do
+    [[ -n "$serial" ]] || continue
     # Emulators are not the physical fleet.
     if [[ "$serial" == emulator-* ]]; then
       record_skipped "$serial (emulator)"
@@ -489,7 +493,7 @@ if [[ $DO_ANDROID -eq 1 ]]; then
       fi
       record_failed "$model [$serial]"
     fi
-  done
+  done 3<<< "$SERIALS"
 fi
 
 # --------------------------------------------------------------------------
