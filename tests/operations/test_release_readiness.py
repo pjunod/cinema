@@ -57,28 +57,36 @@ class ReleaseReadinessCase(unittest.TestCase):
         calls = []
         def build(args):
             calls.append(args)
-            self.assertEqual(args[:3], ["docker", "buildx", "build"])
-            self.assertIn("linux/amd64", args)
-            if "--iidfile" in args:
-                self.assertIn("PLURX_CI_SOURCE_SHA=candidate-sha", args)
+            if args[:3] == ["docker", "buildx", "build"]:
+                self.assertIn("linux/amd64", args)
+                self.assertIn("--load", args)
                 self.assertEqual(args[-1], ".")
-                self.assertIn("FROM runtime-assets-dolby-amd64 AS ci\n",
-                              Path(args[args.index("--file") + 1]).read_text())
-                self.assertIn("--build-context", args)
+                if "--file" in args:
+                    self.assertIn("PLURX_CI_SOURCE_SHA=candidate-sha", args)
+                    self.assertIn("FROM runtime-assets-dolby-amd64 AS ci\n",
+                                  Path(args[args.index("--file") + 1]).read_text())
+                    self.assertIn("--build-context", args)
                 Path(args[args.index("--iidfile") + 1]).write_text(image)
             return 0
         with patch.object(readiness.subprocess, "check_output", return_value="candidate-sha\n"), \
-             patch.object(readiness, "run_owned", side_effect=build):
+             patch.object(readiness, "run_owned", side_effect=build), \
+             patch.object(readiness.subprocess, "run") as cleanup:
             self.assertEqual(readiness.build_image(), image)
         self.assertEqual(calls[0][calls[0].index("--target") + 1], "linux-dolby-package-export")
-        self.assertEqual(calls[1][calls[1].index("--target") + 1], "ci")
+        self.assertEqual(calls[1][:2], ["docker", "create"])
+        self.assertEqual(calls[2][:2], ["docker", "cp"])
+        self.assertTrue(calls[2][2].endswith(":/package"))
+        self.assertEqual(calls[3][calls[3].index("--target") + 1], "ci")
+        self.assertEqual(cleanup.call_args.args[0][:3], ["docker", "rm", "--force"])
 
     def test_missing_immutable_image_id_refuses_execution(self):
         def bad_build(args):
             if "--iidfile" in args:
-                Path(args[args.index("--iidfile") + 1]).write_text("moving-image:latest")
+                value = "moving-image:latest" if "--file" in args else "sha256:" + "a" * 64
+                Path(args[args.index("--iidfile") + 1]).write_text(value)
         with patch.object(readiness.subprocess, "check_output", return_value="candidate\n"), \
-             patch.object(readiness, "run_owned", side_effect=bad_build):
+             patch.object(readiness, "run_owned", side_effect=bad_build), \
+             patch.object(readiness.subprocess, "run"):
             with self.assertRaisesRegex(ValueError, "immutable CI image ID"):
                 readiness.build_image()
 

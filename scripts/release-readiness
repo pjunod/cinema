@@ -89,6 +89,40 @@ def ci_dockerfile(source: str) -> str:
     return source[:start] + source[end:] + "\n" + stage + "\n"
 
 
+def read_image_id(path: Path) -> str:
+    image = path.read_text().strip()
+    if len(image) != 71 or not image.startswith("sha256:") or any(
+        char not in "0123456789abcdef" for char in image[7:]
+    ):
+        raise ValueError("builder returned no immutable CI image ID")
+    return image
+
+
+def export_package(output: Path) -> Path:
+    """Copy the exact export stage without BuildKit's local-file exporter.
+
+    The fleet's Docker/Buildx local exporter can stop transferring files in
+    the large SDK provenance tree. Load its identical scratch image instead
+    and use Docker's archive API. The extraction container is never started.
+    """
+    image_id = output / "package-image-id"
+    run_owned([
+        "docker", "buildx", "build", "--load", "--platform", "linux/amd64",
+        "--target", "linux-dolby-package-export", "--iidfile", str(image_id), ".",
+    ])
+    image = read_image_id(image_id)
+    name = "plurx-readiness-package-" + uuid.uuid4().hex
+    exported = output / "media"
+    exported.mkdir()
+    try:
+        run_owned(["docker", "create", "--name", name, image, "/unused"])
+        run_owned(["docker", "cp", f"{name}:/package", str(exported)])
+    finally:
+        subprocess.run(["docker", "rm", "--force", name], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+    return exported / "package"
+
+
 def build_image() -> str:
     """Build exactly the media contract selected by release publication."""
     source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -98,13 +132,8 @@ def build_image() -> str:
         output = Path(output)
         extra = []
         if target == "runtime-assets-dolby-amd64":
-            exported = output / "media"
-            run_owned([
-                "docker", "buildx", "build", "--platform", "linux/amd64",
-                "--target", "linux-dolby-package-export",
-                "--output", f"type=local,dest={exported}", ".",
-            ])
-            extra = ["--build-context", f"linux-dolby-package={exported / 'package'}"]
+            exported = export_package(output)
+            extra = ["--build-context", f"linux-dolby-package={exported}"]
         generated = output / "Dockerfile.readiness"
         generated.write_text(ci_dockerfile(dockerfile))
         image_id = output / "image-id"
@@ -114,11 +143,7 @@ def build_image() -> str:
             "--build-arg", "PLURX_CI_SOURCE_SHA=" + source,
             "--iidfile", str(image_id), ".",
         ])
-        image = image_id.read_text().strip()
-    if len(image) != 71 or not image.startswith("sha256:") or any(
-        char not in "0123456789abcdef" for char in image[7:]
-    ):
-        raise ValueError("builder returned no immutable CI image ID")
+        image = read_image_id(image_id)
     print(f"Release readiness source: {source}; media target: {target}", flush=True)
     return image
 
