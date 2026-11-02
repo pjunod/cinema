@@ -5,18 +5,8 @@ use plurx_core::store::background_jobs_library::{
     LibraryTrigger, LibraryWorkInput, LibraryWorkQuery, LibraryWorkRecord, LibraryWorkResult,
     NewLibraryWork, MAX_LIBRARY_RESULT_BYTES,
 };
-use plurx_worker_control::library_lifecycle::{
-    self, Effect, Effects, Event, Interrupt, Settlement, SettlementKind, State,
-};
-
-/// All events come from the immediately preceding effect's result. A stale
-/// pair here is an internal driver bug; it must not invent a recovery protocol.
-fn advance_library_lifecycle(state: &mut State, event: Event) -> Effects {
-    let (next, effects) = library_lifecycle::step(*state, event)
-        .expect("library driver event must match its current protocol phase");
-    *state = next;
-    effects
-}
+#[path = "library_work/env.rs"]
+mod env;
 
 impl JobManager {
     pub(super) async fn trigger(
@@ -241,7 +231,6 @@ impl JobManager {
             crate::background_jobs::faults::worker::Point::Claimed,
         )
         .await;
-        let fence = active.fence();
         let library_id = match job.supported_payload() {
             Ok(
                 JobPayload::LibraryScan { library_id, .. }
@@ -252,293 +241,11 @@ impl JobManager {
                 return false;
             }
         };
-        // The controller owns protocol phases; these Options own the actual
-        // guards. Only the corresponding effects consume them. Impossible
-        // phase/resource combinations are driver programming errors, rather
-        // than a second cleanup protocol alongside the controller.
-        let mut active = Some(active);
-        let mut admission = Some(admission);
-        let mut lease = None;
-        let mut publisher = None;
-        let mut work_result = None;
-        let mut controller = State::Initial;
-        let mut effects = advance_library_lifecycle(&mut controller, Event::Start);
-        while !effects.as_slice().is_empty() {
-            let current = effects;
-            effects = Effects::empty();
-            for effect in current.as_slice() {
-                match *effect {
-                    Effect::AcquireDomain => {
-                        let acquired = match self
-                            .acquire_job(format!("scan:library:{library_id}"))
-                            .await
-                        {
-                            Ok(Some(acquired)) => {
-                                #[cfg(test)]
-                                crate::background_jobs::faults::worker::at(
-                                    crate::background_jobs::faults::worker::Point::DomainAcquired,
-                                )
-                                .await;
-                                lease = Some(acquired);
-                                true
-                            }
-                            result => {
-                                #[cfg(test)]
-                                crate::background_jobs::faults::worker::at(
-                                    crate::background_jobs::faults::worker::Point::DomainUnavailable,
-                                )
-                                .await;
-                                if let Err(error) = result {
-                                    tracing::warn!(library_id, %error, "library domain lease unavailable");
-                                }
-                                false
-                            }
-                        };
-                        effects = advance_library_lifecycle(
-                            &mut controller,
-                            Event::DomainOutcome {
-                                acquired,
-                                now_ms: if acquired { 0 } else { clock_ms() },
-                            },
-                        );
-                    }
-                    Effect::Bind => {
-                        publisher = Some(
-                            lease
-                                .as_ref()
-                                .expect("Bind requires an acquired library domain")
-                                .publisher(self.store.as_ref()),
-                        );
-                        let accepted = match fence
-                            .bind_library(publisher.as_ref().expect("Bind just created publisher"))
-                            .await
-                        {
-                            Ok(true) => {
-                                #[cfg(test)]
-                                crate::background_jobs::faults::worker::at(
-                                    crate::background_jobs::faults::worker::Point::Bound,
-                                )
-                                .await;
-                                true
-                            }
-                            result => {
-                                tracing::warn!(
-                                    library_id,
-                                    ?result,
-                                    "library publication binding refused"
-                                );
-                                false
-                            }
-                        };
-                        effects = advance_library_lifecycle(
-                            &mut controller,
-                            Event::BindOutcome { accepted },
-                        );
-                    }
-                    Effect::Process => {
-                        let lease = lease.as_ref().expect("Process requires the bound domain");
-                        let publisher = publisher
-                            .as_ref()
-                            .expect("Process requires the bound publisher");
-                        let admission = admission
-                            .as_ref()
-                            .expect("Process retains physical admission");
-                        let cancellation = tokio_util::sync::CancellationToken::new();
-                        let queue_loss = fence.loss_token();
-                        let domain_loss = lease.loss_token();
-                        let result = {
-                            #[cfg(test)]
-                            crate::background_jobs::faults::worker::at_with_signals(
-                                crate::background_jobs::faults::worker::Point::Processing,
-                                Some(crate::background_jobs::faults::worker::Signals {
-                                    queue_loss: queue_loss.clone(),
-                                    domain_loss: domain_loss.clone(),
-                                }),
-                            )
-                            .await;
-                            let work = plurx_core::process::bounded::cancellable(
-                                cancellation.clone(),
-                                self.process_library_requests(
-                                    &job.id, library_id, lease, publisher, &fence,
-                                ),
-                            );
-                            tokio::pin!(work);
-                            let mut pressure = tokio::time::interval(Duration::from_millis(250));
-                            let (interrupt, mut completed) = loop {
-                                tokio::select! {
-                                    biased;
-                                    () = queue_loss.cancelled() => {
-                                        #[cfg(test)]
-                                        crate::background_jobs::faults::worker::at(
-                                            crate::background_jobs::faults::worker::Point::QueueLoss,
-                                        )
-                                        .await;
-                                        break (Interrupt::QueueLoss, None);
-                                    }
-                                    () = domain_loss.cancelled() => {
-                                        #[cfg(test)]
-                                        crate::background_jobs::faults::worker::at(
-                                            crate::background_jobs::faults::worker::Point::DomainLoss,
-                                        )
-                                        .await;
-                                        break (Interrupt::DomainLoss, None);
-                                    }
-                                    _ = pressure.tick() => {
-                                        let pressured = !transcode.fragment_worker_idle(admission);
-                                        #[cfg(test)]
-                                        let pressured = pressured
-                                            || crate::background_jobs::faults::worker::force_pressure();
-                                        if pressured {
-                                            #[cfg(test)]
-                                            crate::background_jobs::faults::worker::at(
-                                                crate::background_jobs::faults::worker::Point::Pressure,
-                                            )
-                                            .await;
-                                            break (Interrupt::Pressure, None);
-                                        }
-                                    }
-                                    result = &mut work => break (Interrupt::Completed, Some(result)),
-                                }
-                            };
-                            // This executor stays in the work future's lexical
-                            // scope so cancellation is followed by its real join.
-                            let interruption = advance_library_lifecycle(
-                                &mut controller,
-                                Event::Interrupt(interrupt),
-                            );
-                            let mut joined = None;
-                            for effect in interruption.as_slice() {
-                                match effect {
-                                    Effect::RevokeDomain => lease.revoke(),
-                                    Effect::CancelWork => cancellation.cancel(),
-                                    Effect::AwaitWorkJoin => {
-                                        joined = Some(match completed.take() {
-                                            Some(result) => result,
-                                            None => work.as_mut().await,
-                                        });
-                                    }
-                                    _ => unreachable!(
-                                        "interrupt emits only cancellation/join effects"
-                                    ),
-                                }
-                            }
-                            joined.expect("every interrupt consumes the work join")
-                        };
-                        #[cfg(test)]
-                        crate::background_jobs::faults::worker::at(
-                            crate::background_jobs::faults::worker::Point::WorkJoined,
-                        )
-                        .await;
-                        // `work` has returned only after the blocking walker and
-                        // any bounded media child joined. Admission is still held.
-                        effects = advance_library_lifecycle(
-                            &mut controller,
-                            Event::WorkJoined { ok: result.is_ok() },
-                        );
-                        work_result = Some(result);
-                    }
-                    Effect::DropPublisher => {
-                        drop(publisher.take().expect("cleanup requires the publisher"));
-                    }
-                    Effect::ReleaseDomain => {
-                        let settlement = match controller {
-                            State::Releasing { settlement } => settlement,
-                            _ => unreachable!("ReleaseDomain is emitted only while Releasing"),
-                        };
-                        let unbound = settlement == SettlementKind::Refused;
-                        if !unbound {
-                            #[cfg(test)]
-                            crate::background_jobs::faults::worker::at(
-                                crate::background_jobs::faults::worker::Point::ReleaseStarted,
-                            )
-                            .await;
-                        }
-                        if let Err(error) = lease
-                            .take()
-                            .expect("release consumes the acquired domain")
-                            .release()
-                            .await
-                        {
-                            if unbound {
-                                tracing::warn!(%error, "releasing unbound library lease");
-                            } else {
-                                tracing::warn!(library_id, %error, "releasing library domain lease");
-                            }
-                        }
-                        if !unbound {
-                            #[cfg(test)]
-                            crate::background_jobs::faults::worker::at(
-                                crate::background_jobs::faults::worker::Point::ReleaseFinished,
-                            )
-                            .await;
-                        }
-                        if settlement == SettlementKind::Retry {
-                            let error = work_result
-                                .as_ref()
-                                .expect("retry follows a work result")
-                                .as_ref()
-                                .expect_err("retry follows failed work");
-                            tracing::warn!(library_id, %error, "durable library attempt failed");
-                        }
-                        // Preserve sampling after release (and its fault point),
-                        // including when release itself returned an ambiguity.
-                        let now_ms = if settlement == SettlementKind::None {
-                            0
-                        } else {
-                            clock_ms()
-                        };
-                        let retry_delay_ms = if settlement == SettlementKind::Retry {
-                            crate::background_jobs::retry_delay_ms(&job.id, job.failed_attempts)
-                        } else {
-                            0
-                        };
-                        effects = advance_library_lifecycle(
-                            &mut controller,
-                            Event::DomainReleased {
-                                now_ms,
-                                retry_delay_ms,
-                            },
-                        );
-                    }
-                    Effect::Settle(settlement) => {
-                        settle_library(
-                            &fence,
-                            match settlement {
-                                Settlement::Yield { not_before_ms } => JobSettlement::Yield {
-                                    error_code: None,
-                                    checkpoint: None,
-                                    not_before_ms,
-                                },
-                                Settlement::Retry { not_before_ms } => JobSettlement::Retry {
-                                    error_code: "library_execution_failed".into(),
-                                    not_before_ms,
-                                },
-                            },
-                        )
-                        .await;
-                    }
-                    Effect::RetireQueue => {
-                        active.take().expect("queue is retired once").finish().await;
-                        #[cfg(test)]
-                        crate::background_jobs::faults::worker::at(
-                            crate::background_jobs::faults::worker::Point::Finished,
-                        )
-                        .await;
-                    }
-                    Effect::DropAdmission => {
-                        drop(admission.take().expect("admission is released once, last"));
-                        #[cfg(test)]
-                        crate::background_jobs::faults::worker::at(
-                            crate::background_jobs::faults::worker::Point::AdmissionDropped,
-                        )
-                        .await;
-                    }
-                    Effect::RevokeDomain | Effect::CancelWork | Effect::AwaitWorkJoin => {
-                        unreachable!("work effects are consumed inside the Process scope");
-                    }
-                }
-            }
-        }
+        let mut environment =
+            env::TokioEnvironment::new(self, transcode, job, library_id, active, admission);
+        plurx_worker_control::library_driver::run_driver(&mut environment)
+            .await
+            .expect("library environment replies must match the shared driver request");
         true
     }
 
@@ -793,6 +500,58 @@ mod tests {
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::{EncoderCaps, Pipeline};
     use tokio::sync::{mpsc, oneshot};
+
+    /// A bounded ready-source schedule: every selected non-pressuring tick
+    /// advances one period, so restoring tick-before-work fails after three
+    /// decisions. No timeout or assumptions about the runtime's poll cadence.
+    #[tokio::test(start_paused = true)]
+    async fn library_worker_ready_work_precedes_burst_pressure_ticks() {
+        use plurx_worker_control::library_driver::{select_work, Selected};
+        use std::future::{pending, poll_fn};
+        use std::task::Poll;
+
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        let work_polls = std::cell::Cell::new(0);
+        let mut work = std::pin::pin!(poll_fn(|_| {
+            work_polls.set(work_polls.get() + 1);
+            Poll::Ready(())
+        }));
+        let mut completed_on = None;
+        for decision in 0..3 {
+            match select_work(pending::<()>(), pending::<()>(), work.as_mut(), tick.tick()).await {
+                Selected::Work(()) => {
+                    completed_on = Some(decision);
+                    break;
+                }
+                Selected::Tick => tokio::time::advance(Duration::from_millis(250)).await,
+                _ => panic!("loss futures are pending"),
+            }
+        }
+        assert_eq!(
+            completed_on,
+            Some(0),
+            "ready work must outrank every ready tick"
+        );
+        assert_eq!(work_polls.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn library_worker_selector_preserves_loss_precedence_and_pending_work_pressure() {
+        use plurx_worker_control::library_driver::{select_work, Selected};
+        use std::future::{pending, ready};
+        assert_eq!(
+            select_work(ready(()), ready(()), ready(()), ready(())).await,
+            Selected::QueueLoss
+        );
+        assert_eq!(
+            select_work(pending::<()>(), ready(()), ready(()), ready(())).await,
+            Selected::DomainLoss
+        );
+        assert_eq!(
+            select_work(pending::<()>(), pending::<()>(), pending::<()>(), ready(())).await,
+            Selected::Tick
+        );
+    }
 
     type SpawnedWorker = (
         tokio::task::JoinHandle<(bool, u8)>,

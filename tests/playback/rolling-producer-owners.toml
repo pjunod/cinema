@@ -5210,7 +5210,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # fences until settlement. No production task or timer loop is introduced.
 # The other two timeouts bound test-only waits for scan/pressure entry; the
 # admission tasks remain joined and timeouts supply no accounting evidence.
-expected_occurrences = 1950
+# Library worker driver: +1 timer, the paused-clock `tokio::time::interval` in
+# library_work::tests::library_worker_ready_work_precedes_burst_pressure_ticks.
+# It is a local 250ms interval awaited through the shared select_work selector
+# for at most three decisions; it spawns nothing and owns no admission, publisher,
+# queue token or child. The production pressure interval only moved from
+# library_work.rs to library_work/env.rs (TokioEnvironment::poll_work) with no
+# constructor delta and stays local to the admission-retaining selection scope.
+expected_occurrences = 1951
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
