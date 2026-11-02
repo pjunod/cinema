@@ -54,6 +54,7 @@ struct SettingsPicker<Selection: Hashable, Content: View>: View {
     private let selection: Binding<Selection>
     private let value: String
     private let identifier: String
+    private let controlIdentifier: String
     private let content: Content
 
     init(_ title: String, value: String, selection: Binding<Selection>, identifier: String? = nil,
@@ -62,6 +63,7 @@ struct SettingsPicker<Selection: Hashable, Content: View>: View {
         self.selection = selection
         self.value = value
         self.identifier = identifier ?? title
+        self.controlIdentifier = identifier ?? "settings-control-" + title
         self.content = content()
     }
 
@@ -78,7 +80,9 @@ struct SettingsPicker<Selection: Hashable, Content: View>: View {
             }
             .frame(maxWidth: .infinity)
         }
-        .accessibilityIdentifier(identifier)
+        .accessibilityIdentifier(controlIdentifier)
+        .accessibilityLabel(title)
+        .accessibilityValue(value)
         #else
         Picker(title, selection: selection) { content }
             .accessibilityIdentifier(identifier)
@@ -88,9 +92,12 @@ struct SettingsPicker<Selection: Hashable, Content: View>: View {
 
 struct SettingsView: View {
     var category: TVSettingsCategory? = nil
+    var entryRequest = 0
+    @FocusState private var focusedEntry: TVSettingsCategory?
     @FocusState private var focusedCategory: TVSettingsCategory?
     @State private var lastCategory = TVSettingsCategory.playback
     @State private var selectedCategory = TVSettingsCategory.playback
+    @State private var contentEntryRequest = 0
     @Namespace private var categoryFocus
     @EnvironmentObject var model: AppModel
     @EnvironmentObject private var remoteClient: RemoteClientModel
@@ -145,13 +152,16 @@ struct SettingsView: View {
                 .frame(width: 360)
                 .focusScope(categoryFocus)
                 .focusSection()
+                .onMoveCommand { direction in
+                    if direction == .right { contentEntryRequest += 1 }
+                }
                 .onChange(of: focusedCategory) { _, value in
                     if let value { lastCategory = value; selectedCategory = value }
                 }
                 Divider()
                 VStack(alignment: .leading, spacing: 12) {
                     Text(selectedCategory.rawValue).font(.title2.bold()).padding(.horizontal, 24)
-                    SettingsView(category: selectedCategory)
+                    SettingsView(category: selectedCategory, entryRequest: contentEntryRequest)
                         .id(selectedCategory)
                 }
                 .focusSection()
@@ -159,7 +169,13 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .navigationTitle("Settings")
-        } else { settingsForm }
+        } else {
+            settingsForm.onChange(of: entryRequest) { _, _ in
+                // Enter a category at its first control, independently of the
+                // sidebar row's vertical alignment with the form's controls.
+                focusedEntry = category
+            }
+        }
         #else
         settingsForm
         #endif
@@ -176,6 +192,7 @@ struct SettingsView: View {
                         Text(quality.label).tag(quality)
                     }
                 }
+                .focused($focusedEntry, equals: .playback)
                 SettingsPicker("Audio language", value: languages.first { $0.id == model.audioLang }?.name ?? model.audioLang, selection: audioBinding) {
                     ForEach(languages) { Text($0.name).tag($0.id) }
                 }
@@ -240,6 +257,7 @@ struct SettingsView: View {
                 ), identifier: "settings-viewer-layout") {
                     ForEach(ViewerLayout.allCases) { layout in Text(layout.label).tag(layout) }
                 }
+                .focused($focusedEntry, equals: .appearance)
                 SettingsPicker("Theme", value: model.theme.label, selection: Binding(
                     get: { model.theme },
                     set: { model.setTheme($0) }
@@ -312,6 +330,7 @@ struct SettingsView: View {
                         Text(layout.label).tag(layout)
                     }
                 }
+                .focused($focusedEntry, equals: .liveTv)
                 #endif
                 NavigationLink("On/off, tuner, guide, recording and Library channels") { LiveTvSettingsView() }
             } header: {
@@ -325,13 +344,17 @@ struct SettingsView: View {
             }
             .settingsCategory(.liveTv, selection: category)
 
-            Section("Sharing") { NavigationLink("Shared libraries and Source status") { SharedSharingSettingsView() } }
-                .settingsCategory(.sharing, selection: category)
+            Section("Sharing") {
+                NavigationLink("Shared libraries and Source status") { SharedSharingSettingsView() }
+                    .focused($focusedEntry, equals: .sharing)
+            }
+            .settingsCategory(.sharing, selection: category)
 
             Section("Account") {
                 LabeledContent("Signed in as", value: model.username ?? "—")
                 LabeledContent("Server", value: serverSettingsLabel(name: model.serverName, hostname: model.serverHostname) ?? model.origin)
                 Button("Change server") { model.changeServer() }
+                    .focused($focusedEntry, equals: .account)
                 Button("Sign out", role: .destructive) {
                     if DiagnosticReportModel.shared.hasPendingUnsubmitted { diagnosticSignOutConfirmation = true; return }
                     #if os(iOS)
@@ -356,16 +379,19 @@ struct SettingsView: View {
 
             Section("Remotes & devices") {
                 NavigationLink("Manage remote pairings") { RemoteDeviceSettingsView() }
+                    .focused($focusedEntry, equals: .remotes)
                 Text(remoteClient.status).font(.caption)
             }
             .settingsCategory(.remotes, selection: category)
             Section("Developer") {
                 NavigationLink("Shared libraries, Cinema remotes and other features awaiting evidence") { LiveTvDeveloperView() }
+                    .focused($focusedEntry, equals: .developer)
             }
             .settingsCategory(.developer, selection: category)
 
             Section("Help") {
                 DiagnosticReportButton()
+                    .focused($focusedEntry, equals: .help)
                 Text("Save a private diagnostic ZIP on your phone, then attach it to your bug report.").font(.caption)
             }
             .settingsCategory(.help, selection: category)

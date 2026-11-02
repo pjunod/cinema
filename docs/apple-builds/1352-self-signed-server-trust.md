@@ -33,3 +33,9 @@ replacement recovery and discards the previous login before enrollment.
 Certificate policy and playlist regressions run in XCTest. Native self-signed
 HLS was also exercised against a real TLS fixture. These checks do not claim
 physical Apple TV acceptance or an installed device update.
+
+Apple TV Settings also directs category entry to its first setting. The native
+navigation suite exposed spatial focus landing on Theme instead of Layout;
+the category rail now requests the intended entry control explicitly.
+Picker controls also expose distinct accessibility identities, names and values
+while retaining their visible setting labels.
