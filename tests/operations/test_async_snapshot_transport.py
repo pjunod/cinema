@@ -1640,6 +1640,34 @@ class ActivationTransferTests(ChildPlanBase):
         self.assertEqual(self.context.ledger.claims[str((active / 'catalog.sqlite').relative_to(self.root))][0],
                          held['catalog.sqlite'])
 
+    def test_a_continuing_writer_holds_the_activated_catalog_writably_and_is_never_also_attached_to_it(self):
+        """RESULT-GRANT ABI: an attachment confers no authority and may not alias a writable allocation.
+
+        A continuation expand reads the activated catalog for check_continuation/validate_restore and then
+        writes it, but the catalog is held by the SAME main reservation the grant delegates writably. So the
+        parent adds no read-only attachment (the issuer would refuse the alias) and the Rust child opens its
+        read-only validation view through the writable catalog_main allocation.
+        """
+        restored, request = self.restored(), {'operation': 'expand'}
+        session.activate_generation(restored, self.out, request)
+        relative = (self.out / 'state' / 'catalog.sqlite').relative_to(self.root).as_posix()
+        held = self.owners(self.out / 'state' / 'catalog.sqlite')[0]
+        allocations, attachments = self.context.child_plan(request, self.out / 'quantum')
+        self.assertEqual(attachments, [])
+        main = [e for e in allocations if (e['resource'], e['component']) == ('catalog_main', 'main')]
+        self.assertEqual([(e['relative_path'], e['reservation_id']) for e in main], [(relative, held.reservation_id)])
+        alias = {'reservation_id': held.reservation_id, 'owner': held.owner, 'resource': 'catalog_main',
+                 'component': 'main', 'bytes': held.bytes, 'relative_path': relative, 'recursive': False,
+                 'access': 'read_only'}
+        before = self.used()
+        with self.assertRaises(physical.PhysicalPolicyError):
+            self.context.ledger.issue_child_grant(allocations, [alias], self.context.binding(), self.context.lease)
+        self.assertEqual(self.used(), before)
+        self.assertFalse(held.delegated)
+        child = self.load(self.issue(request, self.out / 'quantum'))
+        self.assertGreaterEqual(child.limits[('catalog_main', 'main')], held.bytes)
+        self.assertEqual(child.descriptor['attachments'], [])
+
     def test_a_reaped_writer_returns_the_delegated_file_to_the_parent_still_charged(self):
         restored, request = self.restored(), {'operation': 'unit'}
         session.activate_generation(restored, self.out, request)

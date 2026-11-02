@@ -3387,7 +3387,7 @@ async fn run_paged_quantum(
     }
     let config = catalog_result(request.config())?;
     if !fresh {
-        let readonly = catalog_result(paged::Catalog::validation(config.clone()))?;
+        let readonly = catalog_result(paged::Catalog::resumed_view(&request.operation, config.clone()))?;
         let prior = catalog_result(request.check_continuation(&readonly))?;
         let (bytes, hash) = catalog_result(request.expected_backup(&prior, deadline))?;
         let receipt = catalog_result(

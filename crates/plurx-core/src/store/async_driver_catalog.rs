@@ -1519,9 +1519,43 @@ impl Catalog {
         Ok(descriptor)
     }
     pub fn validation(config: CatalogConfig) -> CatalogResult<Self> {
+        Self::validation_view(config, false)
+    }
+    /// The read-only view of the restored catalog a resumed request starts from. A
+    /// restore validator attaches the restore reservation the parent holds read-only;
+    /// a writer (expand / temporal_import) continues from the activated catalog its
+    /// own grant already holds writably, so its view spends that allocation instead.
+    pub fn resumed_view(operation: &str, config: CatalogConfig) -> CatalogResult<Self> {
+        if operation == "validate_restore" {
+            Self::validation(config)
+        } else {
+            Self::continuation_validation(config)
+        }
+    }
+    /// The read-only view a continuing writer opens of the catalog it is about to
+    /// write. The activated catalog is no longer a restore-staging file: the parent
+    /// delegated its single main reservation to this child as the writable
+    /// `catalog_main` allocation, and the grant ABI refuses an attachment that
+    /// aliases a writable allocation. The view therefore spends that allocation and
+    /// nothing else; it is still opened read-only, so check_continuation and
+    /// validate_restore cannot mutate the bytes the writer then continues from.
+    pub fn continuation_validation(config: CatalogConfig) -> CatalogResult<Self> {
+        Self::validation_view(config, true)
+    }
+    fn validation_view(config: CatalogConfig, own_allocation: bool) -> CatalogResult<Self> {
         config.validate()?;
         let mut limits = config.limits()?;
         let attachment = match &config.grant {
+            Some(grant) if own_allocation => {
+                // The file must lie inside the writable main allocation; that
+                // allocation (already narrowed into `limits`) is the held bound.
+                if !grant.allocation_covers("catalog_main", "main", &config.path) {
+                    return Err(CatalogError::ResourceIncomplete(
+                        "continuing catalog is outside its granted main allocation".into(),
+                    ));
+                }
+                grant.limit("catalog_main", "main")
+            }
             // A restored image attaches the reservation the parent already holds;
             // it never receives a second main allocation of its own. Its ceiling
             // is the policy's main database cap bounded by that held reservation.
@@ -4209,6 +4243,65 @@ mod tests {
             .collect::<Result<_, _>>()
             .expect("rows");
         assert_eq!(found, ["/earlier", "/later"], "matching members in unit order");
+    }
+
+    /// A resumed writer's catalog is the activated one its grant holds writably (the
+    /// parent never also attaches it: an attachment may not alias a writable allocation).
+    /// Its read-only validation view must therefore open through that allocation, while
+    /// a restore validator still needs the attachment and the allocation does not stand in.
+    #[test]
+    fn resumed_writer_opens_its_validation_view_through_its_own_main_allocation() {
+        let directory = tempfile::tempdir().expect("owned scratch");
+        let root = directory.path().canonicalize().expect("root");
+        let live = Catalog::disk(fixture_configuration(root.join("live.sqlite"))).expect("live");
+        drop(live);
+        let activated = root.join("catalog.sqlite");
+        std::fs::copy(root.join("live.sqlite"), &activated).expect("activated image");
+        let held = std::fs::metadata(&activated).expect("size").len();
+        let writable = |main: u64, path: &str| {
+            let entries = ["main", "journal", "temp"].map(|component| {
+                let bytes = match component {
+                    "main" => main,
+                    "journal" => 9 * 1024 * 1024,
+                    _ => 8 * 1024 * 1024,
+                };
+                grant::GrantEntry::for_test("catalog_main", component, bytes, path)
+            });
+            std::sync::Arc::new(grant::ChildGrant::for_test(&root, entries.to_vec(), Vec::new()))
+        };
+        let mut config = fixture_configuration(activated.clone());
+        config.grant = Some(writable(4 * 1024 * 1024, "catalog.sqlite"));
+        for operation in ["expand", "temporal_import"] {
+            // Each request starts from its own freshly activated image.
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let _ = std::fs::remove_file(root.join(format!("catalog.sqlite{suffix}")));
+            }
+            std::fs::copy(root.join("live.sqlite"), &activated).expect("activated image");
+            Catalog::resumed_view(operation, config.clone())
+                .unwrap_or_else(|error| panic!("{operation} writer view: {error:?}"));
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(root.join(format!("catalog.sqlite{suffix}")));
+        }
+        // The real sequence: validate read-only, drop the view, then open the writer.
+        drop(Catalog::resumed_view("expand", config.clone()).expect("view"));
+        Catalog::disk(config.clone()).expect("the writer opens after its validation view closed");
+        assert!(
+            matches!(Catalog::resumed_view("validate_restore", config.clone()), Err(CatalogError::ResourceIncomplete(reason)) if reason.contains("attachment")),
+            "a restore validator is not a writer: only an attachment opens its view"
+        );
+        let mut elsewhere = config.clone();
+        elsewhere.grant = Some(writable(4 * 1024 * 1024, "elsewhere.sqlite"));
+        assert!(
+            matches!(Catalog::resumed_view("expand", elsewhere), Err(CatalogError::ResourceIncomplete(reason)) if reason.contains("granted main")),
+            "a catalog outside the writer's main allocation has no view"
+        );
+        let mut small = config;
+        small.grant = Some(writable(held - 1, "catalog.sqlite"));
+        assert!(
+            matches!(Catalog::resumed_view("expand", small), Err(CatalogError::ResourceIncomplete(reason)) if reason.contains("exceeds")),
+            "the view is bounded by the granted main allocation"
+        );
     }
 
     #[test]
