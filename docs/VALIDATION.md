@@ -27,6 +27,18 @@ make validate-full     # include browser, client, and packaging checks
 make validate-nightly  # exhaustive playback, recovery, bounds, and packaging
 ```
 
+The nightly deep-validation and mutation jobs use `scripts/release-readiness`
+to build the tested commit's CI tooling on the same media package selected
+by release publication. Their host FFmpeg is irrelevant. Deep validation
+retains host-loopback access and task-owned scratch paths for sibling Docker
+tests, plus the explicitly configured Live TV device/tuner settings. Missing
+hardware prerequisites still fail the strict profile. Mutation setup failures
+fail the job; mutation outcomes remain report-only, with their summary and
+evidence under `target/mutants`. Both jobs select bounded Incus guests on
+non-voter hosts and limit the test container to three CPUs and 8 GiB without
+swap. Host-network Live TV fixtures retain only the low-port bind capability
+when dropping to the checkout owner.
+
 Use `make validate-staged` during ordinary work. Use `make validate` when the
 working tree is complicated or path selection itself is in doubt. Use
 `make validate-full` before a risky merge or release; it can take longer and

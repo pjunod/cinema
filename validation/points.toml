@@ -1531,6 +1531,7 @@ paths = [
   "scripts/registry-push",
   "scripts/release-cut",
   "scripts/release-readiness",
+  "scripts/nightly-mutation",
   "scripts/sign-android-release",
   "tests/operations/**",
   "tests/desktop/**",

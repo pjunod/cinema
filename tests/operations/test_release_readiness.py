@@ -105,6 +105,8 @@ class ReleaseReadinessCase(unittest.TestCase):
                 "PLURX_FFMPEG": "/wrong/ffmpeg6", "PATH": "/wrong/bin",
                 "CI_REGISTRY_PULL_TOKEN": "never-forward-this", "GITHUB_TOKEN": "nor-this",
                 "GITHUB_SHA": "candidate", "RUST_TEST_THREADS": "2",
+                "PLURX_LIVE_TV_DEVICE": "http://tuner.test",
+                "PLURX_LIVE_TV_TUNERS": "2", "PLURX_SKIP_UI_BASELINE": "1",
             }
             with patch.dict(os.environ, env, clear=True), \
                  patch.object(Path, "cwd", return_value=root), \
@@ -113,15 +115,24 @@ class ReleaseReadinessCase(unittest.TestCase):
                  patch.object(readiness.subprocess, "check_output", return_value=json.dumps([
                      {"Name": "buildx", "Path": str(buildx)},
                  ])):
-                args = readiness.container_command("sha256:" + "a" * 64, ["make", "release-check"], "test-release")
+                args = readiness.container_command("sha256:" + "a" * 64, ["make", "release-check"], "test-release", host_network=True, memory_gb=8)
             mounts = [args[i + 1] for i, value in enumerate(args) if value == "--mount"]
             self.assertIn(f"type=bind,source={root},target={root}", mounts)
-            for path in (root / "cargo", root / "build"):
+            for path in (root / "cargo", root / "build", root / "tmp" / "shipped-runtime-tmp"):
                 self.assertIn(f"type=bind,source={path},target={path}", mounts)
             self.assertIn(f"type=bind,source={docker},target=/usr/local/bin/docker,readonly", mounts)
             self.assertIn(f"type=bind,source={buildx},target=/usr/local/lib/docker/cli-plugins/docker-buildx,readonly", mounts)
             self.assertNotIn("--privileged", args)
+            self.assertEqual(args[args.index("--memory") + 1], "8g")
+            self.assertEqual(args[args.index("--memory-swap") + 1], "8g")
+            self.assertEqual(args[args.index("--network") + 1], "host")
             settings = dict(args[i + 1].split("=", 1) for i, value in enumerate(args) if value == "--env")
+            self.assertEqual(settings["READINESS_HOST_NETWORK"], "1")
+            self.assertEqual(settings["TMPDIR"], str(root / "tmp" / "shipped-runtime-tmp"))
+            self.assertEqual(settings["PLURX_LIVE_TV_DEVICE"], "http://tuner.test")
+            self.assertEqual(settings["PLURX_LIVE_TV_TUNERS"], "2")
+            self.assertNotIn("PLURX_SKIP_UI_BASELINE", settings)
+            self.assertNotIn("GITHUB_STEP_SUMMARY", settings)
             self.assertEqual(settings["PLURX_FFMPEG"], "/usr/lib/jellyfin-ffmpeg/ffmpeg")
             self.assertEqual(settings["PLURX_FFPROBE"], "/usr/lib/jellyfin-ffmpeg/ffprobe")
             self.assertEqual(settings["PLURX_BOUND_FFPROBE"], "/usr/local/lib/plurx/ffprobe")
@@ -137,6 +148,16 @@ class ReleaseReadinessCase(unittest.TestCase):
             self.assertIn('exec setpriv --reuid "$READINESS_UID"', readiness.BOOTSTRAP)
             self.assertIn('test "$(readlink -f "$(command -v ffmpeg)")" = "$PLURX_FFMPEG"', readiness.BOOTSTRAP)
             self.assertIn('test "$(readlink -f "$(command -v ffprobe)")" = "$PLURX_FFPROBE"', readiness.BOOTSTRAP)
+
+    def test_nightly_options_reach_container_without_consuming_command_flags(self):
+        with patch.object(readiness, "build_image", return_value="sha256:" + "a" * 64), \
+             patch.object(readiness, "container_command", return_value=["docker", "run"]) as command, \
+             patch.object(readiness.signal, "signal"), \
+             patch.object(readiness, "run_owned", return_value=0), \
+             patch.object(readiness.subprocess, "run"):
+            self.assertEqual(readiness.main(["--memory-gb", "8", "--host-network", "make", "--quiet", "validate-nightly"]), 0)
+            self.assertEqual(command.call_args.args[1], ["make", "--quiet", "validate-nightly"])
+            self.assertEqual(command.call_args.kwargs, {"host_network": True, "memory_gb": 8})
 
     def test_check_failure_is_preserved_and_container_is_removed(self):
         with patch.object(readiness, "build_image", return_value="sha256:" + "a" * 64), \

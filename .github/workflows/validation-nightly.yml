@@ -21,10 +21,11 @@ jobs:
   deep-validation:
     if: ${{ !inputs.fuzz_only }}
     name: playback, recovery, bounds, clients, UI, and packaging
-    # The deep tier is the gate's own evidence run one level further, so it uses
-    # the gate's pinned ffmpeg. `ffmpeg8-pacing` below is where the other major
-    # gets covered. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
+    # SDK builds stay inside hard-bounded VMs on verified non-voter hosts.
+    runs-on: [self-hosted, Linux, X64, lab, incus, ci-store]
+    env:
+      CARGO_BUILD_JOBS: "1"
+      RUST_TEST_THREADS: "2"
     timeout-minutes: 240
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -34,15 +35,13 @@ jobs:
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
-      - uses: https://github.com/Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - uses: ./.github/actions/ffmpeg
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
         with:
-          major: "6"
-      - uses: ./.github/actions/playwright
-        with:
-          version: "1.62.0"
-      - name: Run every scheduled validation
-        run: make validate-nightly
+          lane: nightly-deep
+          disk-gb: "45"
+      - name: Run every scheduled validation with the shipped media runtime
+        run: python3 scripts/release-readiness --memory-gb 8 --host-network make validate-nightly
       # Split, because the two halves have wildly different value per byte.
       #
       # The JSON under target/validation is what anyone actually reads weeks
@@ -75,6 +74,14 @@ jobs:
             target/ui-baseline
           if-no-files-found: warn
           retention-days: 3
+
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
   pgs-fuzz:
     name: bounded PGS parser fuzz campaign
@@ -253,59 +260,32 @@ jobs:
   mutation:
     if: ${{ !inputs.fuzz_only }}
     name: report-only weekly mutation spot-check
-    # Mutants are judged by whether the suite kills them, and the suite spawns
-    # ffmpeg, so this needs the same pinned build. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
-    timeout-minutes: 90
+    # Mutants execute against the same shipping media package as the app.
+    runs-on: [self-hosted, Linux, X64, lab, incus, ci-store]
+    env:
+      CARGO_BUILD_JOBS: "1"
+      RUST_TEST_THREADS: "2"
+    timeout-minutes: 120
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
-      - uses: https://github.com/Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
         with:
-          key: nightly-mutation
-      - uses: ./.github/actions/ffmpeg
-        with:
-          major: "6"
-      - name: Install the mutation spot-checker
-        run: cargo install cargo-mutants --locked
-        timeout-minutes: 20
-      - name: Mutation spot-check the last seven days
+          lane: nightly-mutation
+          disk-gb: "45"
+      - name: Mutation spot-check using the shipped media runtime
         id: mutants
-        continue-on-error: true
-        timeout-minutes: 60
+        run: python3 scripts/release-readiness --memory-gb 8 bash scripts/nightly-mutation
+      - name: Publish mutation summary
+        if: always()
         run: |
-          mkdir -p target/mutants
-          mapfile -t changed < <(
-            git log --since=7.days --name-only --format= \
-              | grep -E '^crates/.*\.rs$' \
-              | sort -u
-          )
-          if (( ${#changed[@]} == 0 )); then
-            echo "## Mutation spot-check: no Rust files changed in seven days" \
-              >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          if test -f target/mutants/summary.md; then
+            cat target/mutants/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
-          file_args=()
-          for path in "${changed[@]}"; do
-            file_args+=(--file "$path")
-          done
-          set +e
-          cargo mutants --timeout 300 --output target/mutants "${file_args[@]}"
-          status=$?
-          set -e
-          echo "## Mutation spot-check (report-only)" >> "$GITHUB_STEP_SUMMARY"
-          echo "cargo-mutants exit status: $status" >> "$GITHUB_STEP_SUMMARY"
-          if grep -RqsE 'MISSED|TIMEOUT' target/mutants; then
-            echo "Surviving or timed-out mutants were reported; inspect the artifact." \
-              >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "No surviving mutant marker was found in the report." \
-              >> "$GITHUB_STEP_SUMMARY"
-          fi
-          exit 0
       - name: Upload mutation evidence
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -314,3 +294,11 @@ jobs:
           path: target/mutants
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}

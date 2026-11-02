@@ -7,6 +7,7 @@ as the host user so compilation never leaves root-owned files behind.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -54,7 +55,13 @@ test -x "$PLURX_PLAYBACK_CHROME"
 # Bookworm docker.io client is too old for this fleet's Docker 29 API.
 setpriv --reuid "$READINESS_UID" --regid "$READINESS_GID" --groups "$READINESS_GROUPS" docker version
 setpriv --reuid "$READINESS_UID" --regid "$READINESS_GID" --groups "$READINESS_GROUPS" docker buildx version
-exec setpriv --reuid "$READINESS_UID" --regid "$READINESS_GID" --groups "$READINESS_GROUPS" "$@"
+# Host-network live-TV fixtures bind port 80 as the checkout owner. Preserve
+# only this capability when dropping root; no host sysctl changes are needed.
+capabilities=()
+if [ "$READINESS_HOST_NETWORK" = 1 ]; then
+  capabilities=(--inh-caps=+net_bind_service --ambient-caps=+net_bind_service)
+fi
+exec setpriv --reuid "$READINESS_UID" --regid "$READINESS_GID" --groups "$READINESS_GROUPS" "${capabilities[@]}" "$@"
 '''
 
 # Pass provenance and build settings, never the host's credential environment or
@@ -65,6 +72,7 @@ FORWARD_ENV = (
     "GITHUB_RUN_NUMBER", "GITHUB_RUN_ATTEMPT", "GITHUB_SERVER_URL",
     "GITHUB_API_URL", "GITHUB_WORKSPACE", "CARGO_BUILD_JOBS", "RUST_TEST_THREADS",
     "CARGO_INCREMENTAL", "CARGO_TERM_COLOR",
+    "PLURX_LIVE_TV_DEVICE", "PLURX_LIVE_TV_TUNERS",
 )
 
 
@@ -166,7 +174,9 @@ def run_owned(args: list[str], *, check: bool = True) -> int:
     return status
 
 
-def container_command(image: str, command: list[str], name: str) -> list[str]:
+def container_command(image: str, command: list[str], name: str, *, host_network: bool = False, memory_gb: int = 16) -> list[str]:
+    if memory_gb not in (8, 16):
+        raise ValueError("runtime memory must be 8 or 16 GiB")
     workspace = Path.cwd().resolve()
     if not (workspace / "Cargo.toml").is_file() or not (workspace / ".git").exists():
         raise ValueError("run from the checked-out repository root")
@@ -176,12 +186,17 @@ def container_command(image: str, command: list[str], name: str) -> list[str]:
     cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))).resolve()
     target = Path(os.environ.get("CARGO_TARGET_DIR", str(workspace / "target"))).resolve()
     home = Path(os.environ["RUNNER_TEMP"]).resolve() / "release-readiness-home"
+    scratch = Path(os.environ["RUNNER_TEMP"]).resolve() / "shipped-runtime-tmp"
     args = [
         "docker", "run", "--rm", "--init", "--pull=never", "--name", name,
-        "--cpus", "3", "--memory", "16g", "--memory-swap", "18g", "--pids-limit", "4096",
+        "--cpus", "3", "--memory", f"{memory_gb}g",
+        "--memory-swap", "8g" if memory_gb == 8 else "18g", "--pids-limit", "4096",
         "--workdir", str(workspace),
     ]
-    for path in dict.fromkeys((workspace, cargo_home, target, home)):
+    if host_network:
+        # Nightly sibling-container tests probe ports on the Docker host.
+        args += ["--network", "host"]
+    for path in dict.fromkeys((workspace, cargo_home, target, home, scratch)):
         path.mkdir(parents=True, exist_ok=True)
         if "," in str(path):
             raise ValueError("Docker mount paths cannot contain commas")
@@ -205,6 +220,7 @@ def container_command(image: str, command: list[str], name: str) -> list[str]:
         args += ["--mount", f"type=bind,source={source},target={destination},readonly"]
     env = {
         "HOME": str(home), "CARGO_HOME": str(cargo_home), "CARGO_TARGET_DIR": str(target),
+        "TMPDIR": str(scratch), "READINESS_HOST_NETWORK": "1" if host_network else "0",
         "READINESS_MEDIA_TARGET": media_target((workspace / "Dockerfile").read_text()),
         "READINESS_UID": str(os.getuid()), "READINESS_GID": str(os.getgid()),
         "READINESS_GROUPS": ",".join(str(g) for g in sorted({os.getgid(), *os.getgroups()})),
@@ -221,13 +237,19 @@ def container_command(image: str, command: list[str], name: str) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if not argv:
-        raise ValueError("usage: release-readiness <command> [arguments ...]")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host-network", action="store_true")
+    parser.add_argument("--memory-gb", type=int, choices=(8, 16), default=16)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    options = parser.parse_args(argv)
+    if not options.command:
+        parser.error("a command is required")
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda received, _frame: sys.exit(128 + received))
     image = build_image()
     name = "plurx-release-readiness-" + uuid.uuid4().hex
-    args = container_command(image, argv, name)
+    args = container_command(image, options.command, name, host_network=options.host_network,
+                             memory_gb=options.memory_gb)
     print(f"Release readiness runtime: {image}", flush=True)
     try:
         return run_owned(args, check=False)
