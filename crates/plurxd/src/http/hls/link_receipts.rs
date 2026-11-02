@@ -1517,7 +1517,7 @@ mod tests {
         // The incumbent's published response names its candidate: the
         // measured-Link verdict records that candidate's rung.
         let incumbent = QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: CandidateId::for_recipe_digest([4; 32]),
             recipe_digest: [4; 32],
             route: CandidateRoute::Encode,
@@ -2586,7 +2586,7 @@ mod tests {
         let row = |height: u32| {
             let digest = [height as u8; 32];
             QualityCandidate {
-                processed_hdr10: false,
+                processed_dv: false,
                 id: CandidateId::for_recipe_digest(digest),
                 recipe_digest: digest,
                 route: CandidateRoute::Encode,
@@ -2945,7 +2945,7 @@ mod tests {
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
         let digest = [12; 32];
         let original = QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Remux,
@@ -3018,7 +3018,7 @@ mod tests {
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
         let digest = [4; 32];
         let candidate = QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Encode,
@@ -3427,6 +3427,30 @@ mod tests {
             .put_setting(plurx_core::store::keys::DV_HDR_PROCESSING, "1")
             .await
             .expect("processing preference");
+        // A processed description belongs to a real DV source contract. The
+        // ordinary intake fixture is SDR H.264 and cannot seed a DV hint.
+        let probe = plurx_core::scan::probe::parse_probe_json(&serde_json::json!({
+            "format":{"duration":"12.0"},"streams":[{
+                "index":0,"codec_type":"video","codec_name":"hevc","profile":"Main 10",
+                "width":1920,"height":1080,"pix_fmt":"yuv420p10le",
+                "sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1",
+                "color_transfer":"smpte2084","color_primaries":"bt2020","color_space":"bt2020nc",
+                "side_data_list":[{"side_data_type":"DOVI configuration record","dv_profile":8,
+                    "dv_level":6,"rpu_present_flag":1,"el_present_flag":0,"bl_present_flag":1,
+                    "dv_bl_signal_compatibility_id":1}]
+            }]
+        }));
+        state
+            .store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("source path"),
+                file.size,
+                file.mtime,
+                &probe,
+            )
+            .await
+            .expect("processed source contract");
         let snapshot = state
             .store
             .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
@@ -3435,7 +3459,8 @@ mod tests {
             .expect("source");
         let caps = serde_json::from_value(serde_json::json!({"v":2,
             "video":[{"codec":"hevc","profiles":["main10"],"present":["hdr10"]}],
-            "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"]
+            "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],
+            "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
         }))
         .expect("caps");
         let query = crate::media_pool::QualityCatalogRequest {
@@ -3456,7 +3481,7 @@ mod tests {
             [6; 32],
             720,
         );
-        context.selected_candidate.processed_hdr10 = true;
+        context.selected_candidate.processed_dv = true;
         context.selected_candidate.planned_codec = Some("hevc".into());
         context.selected_candidate.grade = plurx_core::transcode::OutputGrade::Hdr10;
         context.catalog_query = Some(query.clone());
@@ -3471,6 +3496,23 @@ mod tests {
             .expect("request");
         request.candidate_context = Some(Box::new(context));
         state.transcode.remember_processed_candidate(&request);
+        assert_eq!(
+            state
+                .transcode
+                .processed_quality_descriptions(
+                    request
+                        .candidate_context
+                        .as_ref()
+                        .expect("context")
+                        .planning_snapshot
+                        .as_deref()
+                        .expect("snapshot"),
+                    &query,
+                )
+                .len(),
+            1,
+            "the fixture must remember an independently valid processed descriptor",
+        );
         let pause = state
             .transcode
             .test_hooks()

@@ -99,7 +99,6 @@ function renderSettings(){
   restoreSettingsMounts(keep);
   revealSettingsAnchor(tab);
   if(tab==="developer")cinemaRemoteLoadManagement();
-  if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
   if(tab==="cluster"&&settingsClusterEnabled()){ applyClusterFolds(); return refreshClusterLogs(); }
 }
 function settingsPanel(tab,d){
@@ -109,11 +108,11 @@ function settingsPanel(tab,d){
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions,d.developerReadiness);
   if(tab==="users")        return usersPanel(d.users,d.settings);
-  if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
+  if(tab==="system")       return systemPanel(d.sys);
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="sharing")      return sharingManagementPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
-  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness)+cinemaRemoteLocalCards();
+  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness,httpsSettingsMount(d.https))+cinemaRemoteLocalCards();
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // The section header: name, one line of summary, the section's bulk actions.
@@ -199,14 +198,14 @@ function precachePanel(settings){
   const state = settings.cache_max_gb
     ? `${fmtBytes(used)} of ${settings.cache_max_gb} GB used`
     : `off${used?` — ${fmtBytes(used)} still stored, cleared on the next sweep`:""}`;
-  return setCard(`${cardHead("Pre-transcoding","Encodes ahead of time what you're most likely to play next — what you're part-way through, what's up next in a show, then anything 4K or HDR that arrived recently — so pressing play costs nothing.",`<span class="pill${settings.cache_max_gb?" ok":""}">${esc(state)}</span>`)}
+  return setCard(`${cardHead("Playback cache","One disk budget for playback renditions, pre-transcodes, subtitles and temporary playback output. Old unused files are evicted first; active playback stays protected.",`<span class="pill${settings.cache_max_gb?" ok":""}">${esc(state)}</span>`)}
     <div class="setfields">
       <div><label for="cache-produce">Look for work</label>${everySelect("cache-produce",PRODUCE_EVERY,settings.cache_produce_mins,"How often to check what's worth encoding ahead of time")}</div>
-      <div><label for="cache-gb">Disk budget</label><select id="cache-gb" class="every" title="How much disk finished pre-transcodes may occupy before the oldest are evicted">
+      <div><label for="cache-gb">Disk budget</label><select id="cache-gb" class="every" title="Total disk space all playback caches may occupy before unused files are evicted">
           ${CACHE_SIZES.map(n=>`<option value="${n}"${Number(settings.cache_max_gb)===n?' selected':''}>${n?n+" GB":"Off"}</option>`).join("")}
         </select></div>
     </div>
-    <div class="hint"><b>It shares the encoder with live playback and always loses:</b> the moment anyone presses play it stops and hands the hardware over, picking up later from where it stopped. Only sources nothing plays natively are worth it (4K, HDR, HEVC); an ordinary 1080p file is skipped. A budget of <b>Off</b> stops production and clears what's stored. What it is doing right now is on Activity.</div>
+    <div class="hint"><b>It shares the encoder with live playback and always loses:</b> the moment anyone presses play it stops and hands the hardware over, picking up later from where it stopped. Only sources nothing plays natively are worth it (4K, HDR, HEVC); an ordinary 1080p file is skipped. A budget of <b>Off</b> stops new cache writes and clears unused cached files. Active files stay protected until released. What it is doing right now is on Activity.</div>
     ${setCardFoot("savePrecache")}`);
 }
 // Stored subtitle tracks: the subtitle-source store's footprint on this node,
@@ -230,10 +229,10 @@ function subtitleStorePanel(settings){
   const why=concern?`<div class="setwarn">⚠ <b>Review stored-track readiness:</b> ${esc(gate.reason||"a requirement is not met")}. The observations are advisory on ${SUBSRC_SWITCH_LINK}.</div>`:"";
   const ago=d.footprint_age_ms!=null?` (measured ${fmtDur(d.footprint_age_ms)||"just now"}${d.footprint_age_ms>=1000?" ago":""})`:"";
   const measured=fp
-    ? `<p class="hint">On this node the store holds <b>${esc(size)}</b>${esc(ago)}, of a ${fmtBytes(d.cap_bytes)||"—"} cap; the least recently used files go first.</p>`
+    ? `<p class="hint">On this node the store holds <b>${esc(size)}</b>${esc(ago)}, within the shared ${fmtBytes(d.cap_bytes)||"—"} playback budget; unused files compete with the other playback caches for eviction.</p>`
     : Number(settings.vod_index_mins)===0
-      ? `<p class="hint">The store's size on this node is not measured: background analysis is paused (Settings → Analysis), and the sweep that measures the store runs with each analysis pass. The store is capped at ${fmtBytes(d.cap_bytes)||"—"}.</p>`
-      : `<p class="hint">The store's size on this node is not measured yet: the next background analysis pass's sweep measures it. The store is capped at ${fmtBytes(d.cap_bytes)||"—"}.</p>`;
+      ? `<p class="hint">The store's size on this node is not measured: background analysis is paused (Settings → Analysis), and the sweep that measures the store runs with each analysis pass. Stored tracks share the ${fmtBytes(d.cap_bytes)||"—"} playback budget.</p>`
+      : `<p class="hint">The store's size on this node is not measured yet: the next background analysis pass's sweep measures it. Stored tracks share the ${fmtBytes(d.cap_bytes)||"—"} playback budget.</p>`;
   const riding=d.riding||[];
   const rideTitle=r=>{
     const name=esc(r.title||`File ${r.file_id}`);
@@ -667,7 +666,7 @@ function playbackPanel(settings,readiness){
   // Chapter thumbnails and both decoder controls graduated from Developer on
   // 2026-09-28; quality switching, this browser's second player and the PGS
   // overlay on 2026-10-10 (Paul's Developer lifecycle). Each keeps its own Save.
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${subtitleTranslationCard()}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${subtitleTranslationCard()}${openInCard()}${hdrDisplayPeakCard()}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
 }
 
 function searchSettingsCard(readiness){

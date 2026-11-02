@@ -4,10 +4,6 @@
 [![PR lint](../badges-pr-lint/lint.svg)](docs/VALIDATION.md)
 [![unit coverage](../badges/coverage.svg)](docs/VALIDATION.md)
 
-The PR badges show the latest passing ready-PR gate and Rust lint result.
-Coverage refreshes automatically on pushes to `main`; the badge includes the
-last successful measurement date (UTC).
-
 A self-hosted media server for movies, TV, anime, ebooks, audiobooks, home
 videos, and photos. Cinema combines a Rust server, a browser player and admin
 UI, and native Apple and Android clients. Your library stays on your hardware;
@@ -90,6 +86,10 @@ planned work in detail.
 - **Compatibility and history.** A bounded Plex-compatible API for supported
   clients, plus optional Trakt history and scrobbling. See the
   [feature inventory](docs/FEATURES.md) for the supported directions and limits.
+- **Optional HTTPS.** Enable an additional node-local listener in Settings →
+  Developer, using a persistent self-signed identity or supplied certificate
+  files. Restart to apply; HTTP remains available. Client trust and physical
+  playback qualification remain explicit in the [HTTPS ledger](docs/server/HTTPS-BUILD.md).
 - **Operations you can inspect.** Live activity, scan results, logs, readiness
   checks, Prometheus metrics, and playback diagnostics. Replicated storage,
   cluster membership, transport recovery, and media-pool tooling have
@@ -212,7 +212,7 @@ records setup, upgrades, ownership and hardware acceptance.
 |---|---|---|
 | Raspberry Pi 5 (server and HDMI Cinema) | `make pi-setup` | 64-bit Pi OS Trixie Desktop; provisions Docker/media tools and browser; native/systemd selectable |
 | Docker / Compose | `make install-docker`, then `make docker-up` | Docker with Compose; configured media and data mounts |
-| macOS (launchd, VideoToolbox) | `make install-macos` — [macOS guide](deploy/MACOS.md) | Xcode Command Line Tools, Homebrew, Rust via rustup |
+| macOS (launchd, VideoToolbox) | `make install-macos` — [macOS guide](deploy/MACOS.md) | Xcode Command Line Tools; installs missing Homebrew, rustup and pinned Rust as needed |
 | Native service (systemd, launchd, or the Windows service) | `make install` | Repository-pinned Rust toolchain, or a prebuilt `plurxd` via `INSTALL_FLAGS=--binary` |
 | Core binaries and GUI tray | `make install-binary` | GUI hosts receive the companion with a fresh server stopped and automatic startup off; headless hosts receive the standalone core |
 | Build from source | `cargo run -p plurxd` | Repository-pinned Rust toolchain; `ffmpeg` and `ffprobe` |

@@ -39,6 +39,8 @@ pub enum Check {
 pub enum Kind {
     Header,
     Info,
+    /// Explanatory prose belongs in the wrapping control window, not the panel menu.
+    Detail,
     Command,
     Separator,
 }
@@ -291,7 +293,10 @@ pub fn build(s: &Snapshot) -> Vec<Entry> {
             ));
             if let Some(detail) = &st.server_startup.detail {
                 if !detail.is_empty() {
-                    out.push(Entry::info(detail.clone()));
+                    out.push(Entry {
+                        kind: Kind::Detail,
+                        ..Entry::info(detail.clone())
+                    });
                 }
             }
             out.push(Entry::checked(

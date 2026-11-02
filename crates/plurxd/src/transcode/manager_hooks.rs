@@ -8,8 +8,21 @@ use super::*;
 /// is a supertrait only so a test can reach the test hooks behind the
 /// manager.
 pub(crate) trait TranscodeManagerHooks: std::any::Any + Send + Sync {
+    /// An admitted processed preparation reached its named ownership boundary.
+    fn processed_preparation_boundary(
+        &self,
+        _session: &str,
+        _boundary: &'static str,
+    ) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
     /// Known descriptions are published before unrelated ordinary planning.
     fn before_quality_catalog_ordinary(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    /// Pause: `serving_fence_loop` has resolved one loss and not yet
+    /// published the resolution, the window in which a new loss can land.
+    fn after_outage_loss_resolved(&self) -> crate::seam_hooks::HookFuture<'static> {
         Box::pin(crate::seam_hooks::HookReady)
     }
     /// Pause: a subtitle playlist's bytes and exact owner are resolved and its
@@ -104,6 +117,7 @@ impl TranscodeManagerHooks for NoopTranscodeManagerHooks {
 #[derive(Default)]
 pub(crate) struct TranscodeManagerTestHooks {
     pub(crate) quality_catalog_ordinary: crate::seam_hooks::PauseSlot,
+    pub(crate) outage_loss_resolved: crate::seam_hooks::PauseSlot,
     pub(crate) subtitle_playlist_commit: crate::seam_hooks::PauseSlot,
     pub(crate) vod_publication_admission: crate::seam_hooks::PauseSlot,
     pub(crate) vod_fallback_start: crate::seam_hooks::PauseSlot,
@@ -138,8 +152,30 @@ pub(crate) struct TranscodeManagerTestHooks {
 
 #[cfg(test)]
 impl TranscodeManagerHooks for TranscodeManagerTestHooks {
+    fn processed_preparation_boundary(
+        &self,
+        session: &str,
+        boundary: &'static str,
+    ) -> crate::seam_hooks::HookFuture<'static> {
+        #[cfg(target_os = "linux")]
+        {
+            let session = session.to_owned();
+            Box::pin(async move {
+                TranscodeManager::processed_preparation_test_boundary(&session, boundary).await;
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (session, boundary);
+            Box::pin(crate::seam_hooks::HookReady)
+        }
+    }
+
     fn before_quality_catalog_ordinary(&self) -> crate::seam_hooks::HookFuture<'static> {
         self.quality_catalog_ordinary.hold()
+    }
+    fn after_outage_loss_resolved(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.outage_loss_resolved.hold()
     }
     fn before_subtitle_playlist_commit(&self) -> crate::seam_hooks::HookFuture<'static> {
         self.subtitle_playlist_commit.hold()

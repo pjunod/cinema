@@ -580,7 +580,11 @@ function refreshLogStream(cluster){
   })();
   return run.promise;
 }
-function refreshLogs(){ return refreshLogStream(false); }
+function refreshLogs(){
+  const disclosure=/** @type {HTMLDetailsElement|null} */(document.getElementById("system-logs"));
+  if(disclosure&&!disclosure.open)return Promise.resolve();
+  return refreshLogStream(false);
+}
 function refreshClusterLogs(){ return refreshLogStream(true); }
 async function addLib(btn){
   const name=document.getElementById("eln-new").value.trim(), sel=document.getElementById("elk-new").value;

@@ -233,7 +233,8 @@ function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry
   }
   p.controlSeek={sequence,intentGeneration,
     targetMs:Math.max(0,Math.round(targetSec*1000)),
-    executed:false,frameFloor,audioPositionMs:null,seekTelemetry};
+    executed:false,frameFloor,audioPositionMs:null,seekTelemetry,captionViewerSeek:supersedeIntent};
+  if(supersedeIntent&&typeof translationPlaybackSeek==="function")translationPlaybackSeek(p,p.controlSeek);
   if(preserveContinuousManualQuality)p.continuousQuality?.noteSeek?.(targetSec);
   const reporter=p.controlReporter;
   const predicted=reporter&&!reporter.stopped?(Number(reporter.sequence)||0)+1:null;
@@ -253,6 +254,7 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
   // request (contract §3.4).
   playbackSurfaceStep({intent_settled:pending.sequence});
   pending.executed=true;
+  if(pending.captionViewerSeek&&typeof translationPlaybackSeek==="function")translationPlaybackSeek(p,pending);
   pending.executedAt=performance.now();
   pending.attachment=p.mediaAttachment;
   pending.targetFrame=null;
@@ -344,8 +346,8 @@ function playbackProgressTick(v,p,frameSample=false){
   let frames=null, frameSource="none";
   if(streamHasVideo(p,v)){
     if(p.controlHasFrameCallbacks){
-      // Callback support is itself the observation contract. Zero presented
-      // callbacks is real evidence and must not fall through to a decoded-frame
+      // Count delivered callbacks independently of their timestamp quality.
+      // Zero callbacks is real evidence and must not fall through to a decoded-frame
       // counter that can advance while the compositor remains frozen.
       frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
     }else try{
@@ -522,7 +524,7 @@ function pbTick(){
   if(sk){ sk.setAttribute("aria-valuenow", Math.round(f*100)); sk.setAttribute("aria-valuetext", clockFromSec(pos)+(tot>0?" of "+clockFromSec(tot):"")); }
   // Seeking a transcode restarts the session at a new offset, which moves the
   // whole subtitle timeline — re-shift the cues whenever that happens.
-  if(playbackOwnsAttachedMedia(PLAYER)&&!PLAYER.controlSeek&&PLAYER.curSub>=0 && PLAYER._subOff!=null && PLAYER._subOff!==(PLAYER.offset||0)) setSub(PLAYER.curSub);
+  if(playbackOwnsAttachedMedia(PLAYER)&&!PLAYER.controlSeek&&PLAYER.curSub>=0 && PLAYER._subOff!=null && PLAYER._subOff!==(PLAYER.offset||0)) attachPlaybackSubtitle(v,PLAYER,PLAYER.curSub);
 }
 function pbSyncPlayIcon(){ const v=document.getElementById("video"), b=document.getElementById("pbplay");
   if(b&&v){ const paused=(v.paused||v.ended),following=!!(PLAYER&&PLAYER.libraryChannel); b.textContent=paused?"▶":"❚❚"; b.setAttribute("aria-label", paused&&following?"Resume live":paused?"Play":"Pause"); b.title=paused&&following?"Resume live":"Play / Pause (space)"; } }
@@ -581,11 +583,20 @@ async function resumeQualityBoundary(p){
 function setPlayerPlaying(playing){
   const v=document.getElementById("video");
   if(!v||typeof playing!=="boolean") return false;
+  if(PLAYER?.playPermissionDenied&&!hasPendingPlaybackOpen(PLAYER)){
+    PLAYER.wantsPlayback=playing;
+    if(playing) togglePlay();
+    return true;
+  }
   if(playerWantsPlayback(v)!==playing) togglePlay();
   return true;
 }
 function togglePlay(origin="viewer_control"){
   const v=document.getElementById("video"); if(!v) return;
+  if(PLAYER?.playPermissionDenied&&!hasPendingPlaybackOpen(PLAYER)){
+    PLAYER.wantsPlayback=true;
+    return playbackSurfaceAction("retry");
+  }
   if(PLAYER&&PLAYER.libraryChannel&&v.paused
     &&LIBRARY_CHANNEL_CLOCK.now()>=Number(PLAYER.libraryChannel.ends_at_ms||0)){
     libraryChannelBoundary().catch(()=>{}); return;

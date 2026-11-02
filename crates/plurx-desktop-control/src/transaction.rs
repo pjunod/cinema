@@ -86,6 +86,26 @@ impl JournalV1 {
             Phase::RecoveryRequired => RecoveryAction::HoldUnknown,
         }
     }
+    /// Reconcile a shutdown committed before the controller recorded its receipt.
+    /// Absence of the bound process alone never proves a clean shutdown.
+    pub fn complete_clean_shutdown(
+        &mut self,
+        receipt: ShutdownReceiptV1,
+        process_gone: bool,
+        supervisor_stopped: bool,
+    ) -> Result<()> {
+        self.validate_identity()?;
+        if self.phase != Phase::ShutdownCommitted
+            || !clean_receipt_matches(self, &receipt)
+            || !process_gone
+            || !supervisor_stopped
+        {
+            return Err(Error::new(ErrorCode::UnsafeShutdown, "committed shutdown lacks matching clean receipt and stopped process/supervisor evidence"));
+        }
+        self.transition(Phase::CleanStop)?;
+        self.clean_receipt = Some(receipt);
+        Ok(())
+    }
     pub fn validate_identity(&self) -> Result<()> {
         if self.schema_version != 1
             || uuid::Uuid::parse_str(&self.transaction_id).is_err()
@@ -129,6 +149,19 @@ impl JournalV1 {
         self.phase = next;
         Ok(())
     }
+}
+/// Shared read-only refusal for preflight and transaction creation.
+pub fn ensure_resolved(active: Option<&JournalV1>) -> Result<()> {
+    if let Some(j) = active.filter(|j| !j.terminal()) {
+        return Err(Error::new(
+            ErrorCode::Busy,
+            format!(
+                "installation has unresolved transaction {} at {:?}; run plurx-recovery --transaction {}",
+                j.transaction_id, j.phase, j.transaction_id
+            ),
+        ));
+    }
+    Ok(())
 }
 pub struct TransactionStore {
     pub root: SecureDir,
@@ -177,12 +210,7 @@ impl TransactionStore {
         operation: Operation,
         candidate: Option<&VerifiedManifest>,
     ) -> Result<JournalV1> {
-        if self.active()?.is_some_and(|j| !j.terminal()) {
-            return Err(Error::new(
-                ErrorCode::Busy,
-                "installation has an unresolved transaction",
-            ));
-        }
+        ensure_resolved(self.active()?.as_ref())?;
         let observed = supervisor::observe(i)?;
         if !observed.stopped() && observed.process.is_none() {
             return Err(Error::new(

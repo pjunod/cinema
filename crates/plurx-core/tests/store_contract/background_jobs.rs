@@ -6,6 +6,231 @@ use super::{
 use plurx_core::domain::PretranscodeRequirements;
 use plurx_core::store::background_jobs::*;
 
+// A real queued/claimed metadata job retains the same source-reader reservation
+// as the long-running production holder that exposed model/range starvation.
+async fn metadata_source_request(
+    store: &dyn plurx_core::store::Store,
+    library_id: i64,
+    now_ms: i64,
+) -> ClaimJob {
+    let id = uuid::Uuid::new_v4().to_string();
+    store
+        .enqueue_job(EnqueueJob {
+            id: id.clone(),
+            payload: JobPayload::MetadataRefresh {
+                library_id,
+                generation: id.clone(),
+            },
+            dedupe_key: id.clone(),
+            priority: 0,
+            not_before_ms: now_ms,
+            now_ms,
+            request: JobRequest {
+                scope: "source-resource-regression".into(),
+                request_id: id.clone(),
+                request_digest: "9".repeat(64),
+                consumer_kind: "metadata".into(),
+                consumer_ref: id.clone(),
+                target_node_id: None,
+                deadline_ms: None,
+                retain_identity: false,
+            },
+        })
+        .await
+        .expect("enqueue metadata reader");
+    ClaimJob {
+        job_id: id,
+        expected_revision: 0,
+        node_id: "worker".into(),
+        boot_id: uuid::Uuid::new_v4().to_string(),
+        claim_id: uuid::Uuid::new_v4().to_string(),
+        kind: JobKind::MetadataRefresh,
+        payload_version: 1,
+        now_ms,
+        dispatched_at_ms: now_ms,
+    }
+}
+
+#[tokio::test]
+async fn text_model_install_claim_does_not_wait_for_metadata_source_reader() {
+    use plurx_core::store::background_jobs_transcription::ModelAction;
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "text-model-resource").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let library_id = store
+            .get_item(file.item_id)
+            .await
+            .expect("item")
+            .expect("item")
+            .library_id;
+        let admin = store
+            .create_user("text-model-admin", "hash", true)
+            .await
+            .expect("admin");
+        let metadata = metadata_source_request(store.as_ref(), library_id, 1000).await;
+        assert!(
+            matches!(
+                store
+                    .claim_job(metadata.clone())
+                    .await
+                    .expect("metadata claim"),
+                ClaimOutcome::Claimed { .. }
+            ),
+            "{backend}"
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: JobPayload::SubtitleTextModelOperation {
+                    action: ModelAction::Install,
+                    model_id: "opus-mt-mul-en".into(),
+                    catalog_revision: "plurx-marian-mul-en-v1".into(),
+                    model_sha256: "a".repeat(64),
+                    adapter_contract: "candle-marian-0.11-v1".into(),
+                    target_node_id: "worker".into(),
+                    target_boot_id: uuid::Uuid::new_v4().to_string(),
+                    admin_user_id: admin.id,
+                },
+                dedupe_key: id.clone(),
+                priority: 0,
+                not_before_ms: 1001,
+                now_ms: 1001,
+                request: JobRequest {
+                    scope: "subtitle-text-model".into(),
+                    request_id: id.clone(),
+                    request_digest: "b".repeat(64),
+                    consumer_kind: "subtitle_text_translation".into(),
+                    consumer_ref: id.clone(),
+                    target_node_id: Some("worker".into()),
+                    deadline_ms: Some(100000),
+                    retain_identity: true,
+                },
+            })
+            .await
+            .expect("text model enqueue");
+        let outcome = store
+            .claim_artifact_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: "worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::SubtitleTextModelOperation,
+                payload_version: 1,
+                now_ms: 1002,
+                dispatched_at_ms: 1002,
+            })
+            .await
+            .expect("text model claim");
+        assert!(
+            matches!(outcome, ClaimOutcome::Claimed { .. }),
+            "{backend}: artifact download must not wait for metadata"
+        );
+        let holders = store
+            .source_io_holders(1002)
+            .await
+            .expect("source reservations");
+        assert!(
+            holders.iter().any(|held| held.work_id == metadata.job_id),
+            "{backend}"
+        );
+        assert!(
+            !holders.iter().any(|held| held.work_id == id),
+            "{backend}: model setup must not own media reader"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fragment_admission_receipts_cannot_bypass_analysis_or_source_fences() {
+    for_each_backend(|store, backend| async move {
+        for scenario in ["replay", "cancelled", "reclaimed", "source_changed"] {
+            let prefix = format!("fragment-receipt-{scenario}");
+            let (_, file_id) = seed_file(&store, &prefix).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let source = "a".repeat(64);
+            let pipeline = "b".repeat(64);
+            let cache_key = plurx_core::store::cluster_fragment_index_key(
+                file_id, file.size, file.mtime, &source, &pipeline,
+            ).expect("fragment identity");
+            let mut stale = None;
+            let mut now_ms = 1_000;
+            let analysis_request = if scenario == "source_changed" {
+                None
+            } else {
+                let request = plurx_core::store::NewAnalysisRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(), file_id,
+                    source_size: file.size, source_mtime: file.mtime,
+                    component: "fragment_index".into(), pipeline_version: pipeline.clone(),
+                    video_identity: String::new(), requested_generation: prefix.clone(),
+                    priority: "normal".into(), trigger: "background".into(),
+                    force_rebuild: false, target_node_id: "node-a".into(),
+                    not_before_ms: now_ms, created_at_ms: now_ms,
+                };
+                store.enqueue_analysis_request(&request).await.expect("analysis request");
+                let first = store.claim_analysis_request("node-a", now_ms, now_ms + 20)
+                    .await.expect("claim").expect("claim");
+                stale = Some(first.clone());
+                if scenario == "reclaimed" {
+                    assert!(store.claim_analysis_request("node-a", now_ms + 20, now_ms + 1_020)
+                        .await.expect("expire analysis owner").is_none());
+                    now_ms += 20 + plurx_core::store::analysis_backoff_ms(
+                        &request.request_id, 1, 5_000, 300_000,
+                    );
+                    let current = store.claim_analysis_request("node-a", now_ms, now_ms + 1_000)
+                        .await.expect("reclaim").expect("current claim");
+                    assert!(current.fence > first.fence);
+                    Some(current)
+                } else { Some(first) }
+            };
+            let mut input = EnqueueFragmentJob {
+                job: plurx_core::store::NewClusterFragmentIndexJob {
+                    cache_key: cache_key.clone(), file_id, source_size: file.size,
+                    source_mtime: file.mtime, source_sha256: source, pipeline_sha256: pipeline,
+                    priority: "normal".into(), trigger: "background".into(),
+                    target_node_id: "node-a".into(), not_before_ms: now_ms, created_at_ms: now_ms,
+                }, analysis_request, repair: false, now_ms,
+            };
+            let EnqueueOutcome::Accepted { job_id, .. } = store.enqueue_fragment_job(input.clone())
+                .await.expect("valid initial handoff") else { panic!("{backend}/{scenario}: initial handoff refused") };
+            if scenario == "source_changed" {
+                assert!(matches!(store.enqueue_fragment_job(input.clone()).await.expect("ordinary replay"),
+                    EnqueueOutcome::Existing { cancelled: false, .. }));
+                store.upsert_file(file.item_id, &format!("/{prefix}/movie.mkv"), file.size,
+                    file.mtime + 1, &plurx_core::domain::ProbeResult::default())
+                    .await.expect("replace source generation");
+            } else {
+                input.analysis_request = stale;
+                if scenario == "cancelled" {
+                    store.cancel_analysis_request_admin(
+                        &input.analysis_request.as_ref().expect("analysis").request_id, now_ms + 1,
+                    ).await.expect("cancel submitted analysis");
+                }
+                // Receipt reuse used to let a stale caller raise both priorities.
+                input.analysis_request.as_mut().expect("analysis").priority = "foreground".into();
+            }
+            input.job.priority = "foreground".into();
+            let before = serde_json::json!({
+                "job": store.background_job(&job_id).await.expect("before job"),
+                "waiters": store.job_waiters(WaiterQuery { job_id: job_id.clone(), after: None, limit: 100 }).await.expect("before waiters").waiters,
+                "domain": store.cluster_fragment_index_job(&cache_key, "node-a").await.expect("before domain"),
+            });
+            let outcome = store.enqueue_fragment_job(input).await.expect("fenced replay verdict");
+            assert!(matches!((&outcome, scenario), (EnqueueOutcome::SourceChanged, "source_changed")
+                | (EnqueueOutcome::RequestFenced, "replay" | "cancelled" | "reclaimed")),
+                "{backend}/{scenario}: {outcome:?}");
+            let after = serde_json::json!({
+                "job": store.background_job(&job_id).await.expect("after job"),
+                "waiters": store.job_waiters(WaiterQuery { job_id: job_id.clone(), after: None, limit: 100 }).await.expect("after waiters").waiters,
+                "domain": store.cluster_fragment_index_job(&cache_key, "node-a").await.expect("after domain"),
+            });
+            assert_eq!(after, before, "{backend}/{scenario}: fenced replay mutated durable state");
+        }
+    }).await;
+}
+
 #[tokio::test]
 async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_fenced() {
     for_each_backend(|store, backend| async move {
@@ -4702,6 +4927,7 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                 .expect("probe");
             // A provider identity never shares the generated-caption namespace.
             let online = plurx_core::domain::DownloadedSubtitle {
+                text_translation: None,
                 source_size: file.size,
                 source_mtime: file.mtime,
                 provider_file_id: 123,
@@ -4803,6 +5029,7 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                 panic!("{backend}: claim refused")
             };
             let caption = plurx_core::domain::DownloadedSubtitle {
+                text_translation: None,
                 source_size: file.size,
                 source_mtime: file.mtime,
                 provider_file_id: 0,
@@ -5183,6 +5410,8 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
             .observe_subtitle_job(ObserveSubtitleJob {
                 token: token.clone(),
                 phase: SubtitlePhase::Downloading,
+                completed_cues: None,
+                total_cues: None,
                 now_ms: now + 1
             })
             .await
@@ -5211,6 +5440,8 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
             .observe_subtitle_job(ObserveSubtitleJob {
                 token: token.clone(),
                 phase: SubtitlePhase::Verifying,
+                completed_cues: None,
+                total_cues: None,
                 now_ms: now + 2
             })
             .await
@@ -5321,6 +5552,8 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
                 .observe_subtitle_job(ObserveSubtitleJob {
                     token,
                     phase: SubtitlePhase::Verifying,
+                    completed_cues: None,
+                    total_cues: None,
                     now_ms: now + 3
                 })
                 .await
@@ -5495,6 +5728,7 @@ async fn managed_caption_execution_provenance_survives_publish_reopen_and_legacy
         }),
     };
     let caption = DownloadedSubtitle {
+        text_translation: None,
         source_size: file.size,
         source_mtime: file.mtime,
         provider_file_id: 0,
@@ -5629,6 +5863,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             .expect("save unready");
         assert_eq!(saved["outcome"], "saved", "{backend}");
         let profile = TranslationProfile {
+            task: Default::default(),
             version: 1,
             model_id: "small".into(),
             model_sha256: "a".repeat(64),
@@ -5644,6 +5879,8 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             source_size: file.size,
             source_mtime: file.mtime,
         };
+        let continuity = uuid::Uuid::new_v4().to_string();
+        let playback = uuid::Uuid::new_v4().to_string();
         let input = TranslationMutation {
             user_id: user.id,
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -5657,10 +5894,11 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
                 spoken_language: "de".into(),
                 duration_ms: 61000,
                 target_node_id: "worker".into(),
-                playback_id: uuid::Uuid::new_v4().to_string(),
+                playback_id: playback.clone(),
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                continuity_id: Some(continuity.clone()),
             },
         };
         let accepted = store
@@ -5677,6 +5915,12 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             .await
             .expect("job")
             .expect("job");
+        let library_id=store.get_item(file.item_id).await.expect("item").expect("item").library_id;
+        let metadata_request=metadata_source_request(store.as_ref(),library_id,1150).await;
+        let ClaimOutcome::Claimed {job:metadata_job}=store.claim_job(metadata_request).await.expect("metadata reader") else {panic!("{backend}: metadata must hold speculative reader")};
+        assert!(matches!(store.claim_artifact_job(ClaimJob {
+            job_id:prep.id.clone(),expected_revision:prep.revision,node_id:"worker".into(),boot_id:boot.clone(),claim_id:uuid::Uuid::new_v4().to_string(),kind:JobKind::SubtitleTranslationPrepare,payload_version:1,now_ms:17000,dispatched_at_ms:17000
+        }).await.expect("expired preparation demand"),ClaimOutcome::Contended),"{backend}: expired demand cannot give preparation the live slot");
         let claimed = store
             .claim_artifact_job(ClaimJob {
                 job_id: prep.id.clone(),
@@ -5737,6 +5981,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             file_id: id,
             recipe: recipe.clone(),
             target_node_id: "worker".into(),
+            producer_preparation_job_id: prep.id.clone(),
         };
         store
             .enqueue_job(EnqueueJob {
@@ -5759,11 +6004,22 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             })
             .await
             .expect("range");
+        let third_reader=metadata_source_request(store.as_ref(),library_id,1451).await;
         let candidate = store
             .background_job(&jobid)
             .await
             .expect("job")
             .expect("job");
+        assert!(matches!(store.claim_artifact_job(ClaimJob {
+            job_id:jobid.clone(),expected_revision:candidate.revision,node_id:"worker".into(),boot_id:boot.clone(),claim_id:uuid::Uuid::new_v4().to_string(),kind:JobKind::SubtitleTranslationRange,payload_version:1,now_ms:17000,dispatched_at_ms:17000
+        }).await.expect("expired demand claim"),ClaimOutcome::Contended),"{backend}: expired demand cannot borrow the live source slot");
+        let wrong_id=uuid::Uuid::new_v4().to_string();
+        let mut wrong_recipe=recipe.clone();wrong_recipe.operation_id=uuid::Uuid::new_v4().to_string();
+        let wrong=store.enqueue_job(EnqueueJob {id:wrong_id.clone(),payload:JobPayload::SubtitleTranslationRange {file_id:id,recipe:wrong_recipe,target_node_id:"worker".into(),producer_preparation_job_id:prep.id.clone()},dedupe_key:wrong_id.clone(),priority:1,not_before_ms:1452,now_ms:1452,request:JobRequest {scope:"forged-range".into(),request_id:wrong_id.clone(),request_digest:"d".repeat(64),consumer_kind:"subtitle_translation_range".into(),consumer_ref:op.clone(),target_node_id:Some("worker".into()),deadline_ms:None,retain_identity:false}}).await.expect("wrong operation enqueue");
+        assert!(!matches!(wrong,EnqueueOutcome::Accepted{..}|EnqueueOutcome::Existing{..}),"{backend}: another operation's demand is not source authority");
+        let forged_id=uuid::Uuid::new_v4().to_string();
+        store.enqueue_job(EnqueueJob {id:forged_id.clone(),payload:JobPayload::FragmentIndexBuild {file_id:id,source_generation:"forged-source".into(),source_size:file.size,source_mtime:file.mtime,source_sha256:"d".repeat(64),cache_key:"e".repeat(64),pipeline_digest:"f".repeat(64)},dedupe_key:forged_id.clone(),priority:1,not_before_ms:1452,now_ms:1452,request:JobRequest {scope:"forged-range".into(),request_id:forged_id.clone(),request_digest:"e".repeat(64),consumer_kind:"subtitle_translation_range".into(),consumer_ref:op.clone(),target_node_id:Some("worker".into()),deadline_ms:Some(10000),retain_identity:false}}).await.expect("forged consumer enqueue");
+        assert!(matches!(store.claim_artifact_job(ClaimJob {job_id:forged_id,expected_revision:0,node_id:"worker".into(),boot_id:boot.clone(),claim_id:uuid::Uuid::new_v4().to_string(),kind:JobKind::FragmentIndexBuild,payload_version:1,now_ms:1453,dispatched_at_ms:1453}).await.expect("forged consumer claim"),ClaimOutcome::Contended),"{backend}: a consumer label cannot grant a media reader the live slot");
         let claimed = store
             .claim_artifact_job(ClaimJob {
                 job_id: jobid,
@@ -5781,7 +6037,46 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
         let ClaimOutcome::Claimed { job } = claimed else {
             panic!("{backend}: {claimed:?}");
         };
+        assert!(matches!(store.claim_job(third_reader.clone()).await.expect("third reader"),ClaimOutcome::Contended),"{backend}: two source readers remain the hard maximum");
         let token = job.token.expect("token");
+        let advanced = store
+            .mutate_subtitle_translation(TranslationMutation {
+                user_id: user.id,
+                request_id: uuid::Uuid::new_v4().to_string(),
+                request_digest: "6".repeat(64),
+                intent_expires_at_ms: 300000,
+                now_ms: 1550,
+                action: TranslationAction::Demand {
+                    operation_id: op.clone(),
+                    expected_operation_epoch: 1,
+                    demand_id: accepted["demand_id"].as_str().expect("demand").into(),
+                    expected_generation: 1,
+                    playback_id: playback,
+                    position_ms: 31000,
+                    playback_rate: 1.0,
+                    paused: false,
+                    continuity_id: Some(continuity.clone()),
+                },
+            })
+            .await
+            .expect("advance across core boundary");
+        assert_eq!(advanced["continuity_id"], continuity, "{backend}");
+        let interest = store
+            .read_subtitle_translation(TranslationRead {
+                user_id: 0,
+                now_ms: 1551,
+                query: TranslationQuery::RangeInterest {
+                    job_id: job.id.clone(),
+                },
+            })
+            .await
+            .expect("owned continuity");
+        assert_eq!(
+            interest[0]["interested"], true,
+            "{backend}: running core survives advancing viewer"
+        );
+        store.settle_job(SettleJob {token:metadata_job.token.expect("metadata token"),settlement:JobSettlement::Yield {error_code:None,checkpoint:None,not_before_ms:20000},now_ms:1552}).await.expect("release metadata reader");
+        assert!(matches!(store.claim_job(ClaimJob {now_ms:1553,dispatched_at_ms:1553,..third_reader}).await.expect("spare speculative reader"),ClaimOutcome::Claimed{..}),"{backend}: held range stays a live reader under its captured continuity after playback advances");
         let segment = SegmentDraft {
             asset_id: asset.clone(),
             core_index: 0,
@@ -5819,7 +6114,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             store
                 .acquire_translation_lease(AcquireTranslationLease {
                     user_id: user.id,
-                    asset_id: asset,
+                    asset_id: asset.clone(),
                     now_ms: 1700
                 })
                 .await
@@ -5831,6 +6126,110 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             .maintain_translation_cache(1800)
             .await
             .expect("bounded cache upkeep");
+        for (offset, core_index) in [2, 1].into_iter().enumerate() {
+            let now = 1810 + (offset as i64) * 30;
+            let mut next = recipe.clone();
+            next.core_index = core_index;
+            let job_id = uuid::Uuid::new_v4().to_string();
+            let payload = JobPayload::SubtitleTranslationRange {
+                file_id: id,
+                recipe: next.clone(),
+                target_node_id: "worker".into(),
+                producer_preparation_job_id: prep.id.clone(),
+            };
+            store
+                .enqueue_job(EnqueueJob {
+                    id: job_id.clone(),
+                    payload: payload.clone(),
+                    dedupe_key: job_id.clone(),
+                    priority: 1,
+                    not_before_ms: now,
+                    now_ms: now,
+                    request: JobRequest {
+                        scope: "translation".into(),
+                        request_id: job_id.clone(),
+                        request_digest: "5".repeat(64),
+                        consumer_kind: "subtitle_translation_range".into(),
+                        consumer_ref: op.clone(),
+                        target_node_id: Some("worker".into()),
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("remaining core enqueue");
+            let queued = store
+                .background_job(&job_id)
+                .await
+                .expect("job")
+                .expect("queued core");
+            let claim = store
+                .claim_artifact_job(ClaimJob {
+                    job_id,
+                    expected_revision: queued.revision,
+                    node_id: "worker".into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::SubtitleTranslationRange,
+                    payload_version: 1,
+                    now_ms: now + 1,
+                    dispatched_at_ms: now + 1,
+                })
+                .await
+                .expect("claim remaining core");
+            let ClaimOutcome::Claimed { job } = claim else {
+                panic!("{backend}: {claim:?}")
+            };
+            let token = job.token.expect("core token");
+            let (start_ms, end_ms) = next.core_bounds().expect("core bounds");
+            let segment = SegmentDraft {
+                asset_id: asset.clone(),
+                core_index,
+                start_ms,
+                end_ms,
+                cues: vec![],
+                provenance: ExecutionProvenance {
+                    engine_sha256: "c".repeat(64),
+                    model_sha256: profile.model_sha256.clone(),
+                    operation_epoch: 1,
+                    platform: "linux-x86_64".into(),
+                    profile_id: profile.id().expect("profile"),
+                    source_sha256: "b".repeat(64),
+                    worker_fence: token.fence,
+                },
+            };
+            assert!(
+                store
+                    .publish_translation_segment(PublishTranslationSegment {
+                        token,
+                        source: payload,
+                        segment,
+                        now_ms: now + 2
+                    })
+                    .await
+                    .expect("remaining publication"),
+                "{backend}"
+            );
+            let rows = store
+                .read_subtitle_translation(TranslationRead {
+                    user_id: user.id,
+                    now_ms: now + 3,
+                    query: TranslationQuery::Operation {
+                        operation_id: op.clone(),
+                    },
+                })
+                .await
+                .expect("operation completion");
+            assert_eq!(
+                rows[0]["state"],
+                if core_index == 1 {
+                    "complete"
+                } else {
+                    "partial"
+                },
+                "{backend}: all expected readable cores, not the last core or row count alone"
+            );
+        }
         let stop = store
             .mutate_subtitle_translation(TranslationMutation {
                 user_id: user.id,
@@ -5853,6 +6252,123 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
                 .expect("replay"),
             accepted,
             "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn text_caption_dispatch_refuses_unowned_work_and_reads_absent_state() {
+    use plurx_core::store::shared_caption_read::{
+        GrantCaptionPrincipal, GrantCaptionQuery, GrantCaptionRead,
+    };
+    use plurx_core::store::subtitle_text_translation::{PublishTextSlice, TextTranslationCue};
+    for_each_backend(|store, backend| async move {
+        let source = JobPayload::SubtitleTextTranslate {
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 20,
+            subtitle_index: 0,
+            input_sha256: "a".repeat(64),
+            source_language: "de".into(),
+            target_language: "en".into(),
+            engine_sha256: "e".repeat(64),
+            model_id: "opus-mt-mul-en".into(),
+            model_sha256: "b".repeat(64),
+            adapter_contract: "candle-marian-0.11-v1".into(),
+            target_node_id: "worker".into(),
+            admin_user_id: 1,
+        };
+        let publication = PublishTextSlice {
+            token: JobToken {
+                job_id: uuid::Uuid::new_v4().to_string(),
+                node_id: "worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                fence: 1,
+                revision: 1,
+                lease_expires_ms: 2_000,
+            },
+            source: source.clone(),
+            cues: vec![TextTranslationCue {
+                cue_index: 0,
+                input_sha256: "c".repeat(64),
+                id: "cue-0".into(),
+                start_ms: 0,
+                end_ms: 1_000,
+                text: "Translated caption".into(),
+            }],
+            now_ms: 1_000,
+        };
+        assert!(
+            !store
+                .publish_text_translation_slice(publication.clone())
+                .await
+                .expect("unclaimed publication verdict"),
+            "{backend}: no claimed authority"
+        );
+        let mut invalid = publication;
+        invalid.token.fence = 0;
+        assert!(
+            store.publish_text_translation_slice(invalid).await.is_err(),
+            "{backend}: invalid fence refused"
+        );
+        assert!(
+            store
+                .read_text_translation_cues(source)
+                .await
+                .expect("absent text cues")
+                .is_empty(),
+            "{backend}: refused publication created no output"
+        );
+        assert!(
+            store
+                .read_text_translation_cues(JobPayload::MetadataRefresh {
+                    library_id: 1,
+                    generation: uuid::Uuid::new_v4().to_string()
+                })
+                .await
+                .is_err(),
+            "{backend}: unsupported source refused"
+        );
+        let request_id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            store
+                .text_translation_request_receipt(1, &request_id, &"a".repeat(64))
+                .await
+                .expect("absent receipt")
+                .is_none(),
+            "{backend}: no invented receipt"
+        );
+        assert!(
+            store
+                .text_translation_request_receipt(0, &request_id, &"a".repeat(64))
+                .await
+                .is_err(),
+            "{backend}: invalid receipt principal refused"
+        );
+        let read = GrantCaptionRead {
+            principal: GrantCaptionPrincipal {
+                grant_id: uuid::Uuid::new_v4().to_string(),
+                binding_sha256: "f".repeat(64),
+                file_id: 1,
+            },
+            now_ms: 1_000,
+            query: GrantCaptionQuery::Assets { after: None },
+        };
+        assert!(
+            store
+                .read_shared_captions(read.clone())
+                .await
+                .expect("absent shared captions")
+                .is_empty(),
+            "{backend}: no invented asset"
+        );
+        let mut invalid = read;
+        invalid.principal.grant_id = "invalid".into();
+        assert!(
+            store.read_shared_captions(invalid).await.is_err(),
+            "{backend}: invalid grant refused"
         );
     })
     .await;

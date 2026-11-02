@@ -7,13 +7,14 @@ const base=`/api/v1/shared/imports/${ref.import_id}/files/${"L".repeat(236)}`,re
 function detail(id="9007199254740993",life="9223372036854775807"){return `{"item":{"source":"shared","reference":${JSON.stringify(ref)}},"lifecycle_generation":${life},"files":[{"file_id":"${id}","revision":"${revision}","file_base":"${base}","reference":{"item":${JSON.stringify(ref)},"file_id":"${id}","revision":"${revision}","lifecycle_generation":${life}}}]}`;}
 function wire(id="9007199254740993",life="9223372036854775807"){return `{"file_id":"${id}","reference":{"item":${JSON.stringify(ref)},"file_id":"${id}","revision":"${revision}","lifecycle_generation":${life}},"method":"remux","play_url":"${base}/stream.mp4?audio=4095","delivery":{"mode":"remux","url":"${base}/stream.mp4?audio=4095","sessions_url":"${base}/hls/sessions"},"audio_tracks":[{"index":3,"codec":"aac","channels":6}],"subtitle_tracks":[{"index":1,"protocol":"vtt","format":"subrip"}],"quality_ladder":[{"height":1080,"bitrate":8000000}],"timeline_origin_ms":1234,"delivered_dynamic_range":"sdr","future_exact":9223372036854775807}`;}
 function response(text,url,status=200,options={}){const r=new Response(text,{status,headers:options.headers||{}});Object.defineProperty(r,"url",{value:options.url||url});Object.defineProperty(r,"redirected",{value:!!options.redirected});return r;}
-function harness(handler=null){const requests=[],ctx=vm.createContext({console,URL,URLSearchParams,Uint8Array,TextEncoder,TextDecoder,AbortController,setTimeout,clearTimeout,fetch:async(url,options)=>{requests.push({url,options});return handler?handler(url,options,requests.length):response(options.method==="GET"?detail():wire(),url);},location:{href:"https://b.test/#/shared",hash:"#/shared"},navigator:{userAgent:"actual-browser-fixture"}});
- const functions=[['pages/sharing-management.js',['sharingJSON','sharingInteger']],['pages/shared-libraries.js',['sharedCatalogueId','sharedCatalogueUuid','sharedCatalogueLibraryReference','sharedCatalogueReference']],['player/decode-tiers.js',['browserOutputChannels','browserOutputChannelsCached','browserAudioSinks','capsDocument','currentCapsDocument']]].flatMap(([file,names])=>names.map(n=>fn(file,n))).join('\n');
+function harness(handler=null,diagnosticConsole=console,cryptoApi=undefined,pageOrigin="https://b.test"){const requests=[],ctx=vm.createContext({console:diagnosticConsole,crypto:cryptoApi,URL,URLSearchParams,Uint8Array,TextEncoder,TextDecoder,AbortController,setTimeout,clearTimeout,fetch:async(url,options)=>{requests.push({url,options});return handler?handler(url,options,requests.length):response(options.method==="GET"?detail():wire(),url);},location:{href:pageOrigin+"/#/shared",hash:"#/shared"},navigator:{userAgent:"actual-browser-fixture"}});
+ const functions=[['pages/sharing-management.js',['sharingJSON','sharingInteger']],['pages/shared-libraries.js',['sharedCatalogueId','sharedCatalogueUuid','sharedCatalogueLibraryReference','sharedCatalogueReference']],['player/decode-tiers.js',['browserOutputChannels','browserOutputChannelsCached','browserAudioSinks','capsDocument','hdrDisplayPeakCaps','currentCapsDocument']]].flatMap(([file,names])=>names.map(n=>fn(file,n))).join('\n');
  vm.runInContext(`let TOKEN="first",API="/api/v1",AUTH_GENERATION=2,PAGE_RENDER_GENERATION=7;
  const SERVER={build:"test",playback_display_aware_auto:false},PLAY_CAPS={vcodec:"h264,hevc,hevc10",acodec:"aac",container:"mp4",maxheight:1080,progressiveHevcSampleEntries:["hvc1"]};
  let BROWSER_OUTPUT_CHANNELS=null;
  function decodeLimits(){return [];}function measuredPresentationTarget(){return null;}
- `+fs.readFileSync(WEB+'core/file-context.js','utf8')+'\n'+functions+'\n'+fs.readFileSync(WEB+'core/shared-decision.js','utf8')+`\nthis.h={details:SHARED_DECISION.details,decision:SHARED_DECISION.decision,start:SHARED_DECISION.start,progress:SHARED_DECISION.progress,successor:SHARED_DECISION.successor,status:sharedPlaybackStatusMetrics,retire:sharedDecisionRetire,caps:currentCapsDocument,factory:sharedPlaybackFileContextFromDetail,key:playbackFileKey,change(){TOKEN="next";AUTH_GENERATION++;sharedDecisionRetire();},leave(){PAGE_RENDER_GENERATION++;sharedDecisionRetire();},origin(){API="https://other.test/api/v1";},overflow(){PLAY_CAPS.acodec="a".repeat(128*1024);},};`,ctx);return {...ctx.h,requests};}
+ const PLAYBACK_ID="http-browser-fixture";function vodClientContract(){return {session:{}};}function capsDocumentIsUsable(caps){return caps?.v===2;}
+ `+fs.readFileSync(WEB+'core/file-context.js','utf8')+'\n'+functions+'\n'+fn('player/session.js','newRequestId')+'\n'+fn('player/directed-change.js','openSession')+'\n'+fs.readFileSync(WEB+'core/shared-decision.js','utf8')+`\nthis.h={openSession,newRequestId,details:SHARED_DECISION.details,decision:SHARED_DECISION.decision,start:SHARED_DECISION.start,progress:SHARED_DECISION.progress,successor:SHARED_DECISION.successor,status:sharedPlaybackStatusMetrics,retire:sharedDecisionRetire,caps:currentCapsDocument,factory:sharedPlaybackFileContextFromDetail,key:playbackFileKey,change(){TOKEN="next";AUTH_GENERATION++;sharedDecisionRetire();},leave(){PAGE_RENDER_GENERATION++;sharedDecisionRetire();},origin(){API="https://other.test/api/v1";},overflow(){PLAY_CAPS.acodec="a".repeat(128*1024);},};`,ctx);return {...ctx.h,requests};}
 test("actual v2 builder preserves complete engine fields and exact Source identities",async()=>{
  for(const id of ['0','9007199254740993','9223372036854775807']){
   const h=harness((url,o)=>response(o.method==='GET'?detail(id):wire(id),url)),r=await h.details(ref),c=r.files[0].context,d=await h.decision(c,{force:'original',audio:4095,subtitle:-1,audio_offset_ms:-15000});
@@ -60,6 +61,21 @@ test("old account refusal cannot retire new account decision context",async()=>{
 const sid="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 function startReply(){return {session_id:sid,playlist_url:`/api/v1/hls/${sid}/master.m3u8`,vod:true,start_seconds:12.5,duration_ms:90000,media_origin_ms:0,control:{protocol:"plurx-playback-control-v1",url:`/api/v1/hls/${sid}/control`,generation:"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",control_epoch:1,next_exchange_ms:5000,lease_timeout_ms:300000}};}
 function startBody(h){return {request_id:"cccccccc-cccc-4ccc-8ccc-cccccccccccc",playback_id:"browser-fixture",caps:h.caps(),start:12.5,force:"original",height:null,previous_session_id:null,control_sequence:null,reopen_reason:null,intent:null};}
+test("HTTP shared playback opens a session with UUID request identities without randomUUID",async()=>{
+ const {webcrypto}=require("node:crypto");
+ for(const cryptoApi of [{getRandomValues:bytes=>webcrypto.getRandomValues(bytes)},undefined]){
+  const h=harness((url,options)=>response(options.method==="GET"?detail():url.endsWith('/hls/sessions')?JSON.stringify(startReply()):wire(),url),{warn(){}},cryptoApi,"http://b.test");
+  const context=(await h.details(ref)).files[0].context;
+  await h.decision(context,{force:"transcode"});
+  const result=await h.openSession(context,{height:720,force:"transcode"});
+  assert.equal(result.session_id,sid);
+  assert.equal(h.requests.length,3,"details, decision and actual Start all complete");
+  const request=h.requests.at(-1),body=JSON.parse(request.options.body);
+  assert.equal(request.url,"http://b.test"+base+"/hls/sessions");
+  const ids=new Set([body.request_id]);for(let i=0;i<32;i++)ids.add(h.newRequestId());
+  assert.equal(ids.size,33);for(const id of ids)assert.match(id,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+ }
+});
 test("synthetic complete B Start retains original caps resume and explicit null fields",async()=>{
  const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(startReply()),u)),c=(await h.details(ref)).files[0].context,b=startBody(h),r=await h.start(c,b);
  assert.deepEqual(JSON.parse(h.requests[1].options.body),JSON.parse(JSON.stringify(b)));
@@ -271,4 +287,73 @@ test("HLS HEVC requires selected MSE transport and every claimed profile",async(
  assert.ok(queries.some(c=>c.video.transferFunction==="pq"));
  for(const override of [{nativeHls:true},{hlsJsSupported:false},{mediaSource:{isTypeSupported:()=>false}},{mediaCapabilities:{decodingInfo:async()=>({supported:false})}}])
   assert.deepEqual(Array.from(await probe([true,true,false,true,false],null,{...injected,...override})),[]);
+});
+
+
+test("Shared Start keeps a bounded typed refusal instead of reporting a decision failure",async()=>{
+ for(const [code,message]of [["sharing_start_unresolved","could not confirm playback preparation"],["sharing_start_deadline","took too long"],["sharing_start_capacity","is busy"]]){
+  const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify({code,message:"untrusted peer detail"}),u,o.method==='GET'?200:503));
+  const c=(await h.details(ref)).files[0].context;
+  await assert.rejects(h.start(c,startBody(h)),e=>e.status===503&&e.code===code&&e.message.includes(message)&&!e.message.includes("untrusted"));
+ }
+ for(const body of ["not JSON",JSON.stringify({code:"private_source_reason",message:"secret upstream path"}),"x".repeat(16385)]){
+  const h=harness((u,o)=>response(o.method==='GET'?detail():body,u,o.method==='GET'?200:503));
+  const c=(await h.details(ref)).files[0].context;
+  await assert.rejects(h.start(c,startBody(h)),e=>e.status===503&&e.code===undefined&&e.message==="Shared playback could not prepare.");
+ }
+});
+
+
+test("a streamed Shared authorization refusal retires context without draining its body",async()=>{
+ for(const status of [401,403]){
+  let cancelled=false;
+  const h=harness((u,o)=>{
+   if(o.method==='GET')return response(detail(),u);
+   const r=new Response(new ReadableStream({pull(){return new Promise(()=>{});},cancel(){cancelled=true;}}),{status});
+   Object.defineProperty(r,'url',{value:u});return r;
+  });
+  const c=(await h.details(ref)).files[0].context;
+  await assert.rejects(h.decision(c),e=>e.status===status&&e.message.includes("authorization"));
+  assert.equal(cancelled,true,"refused body is cancelled without waiting on a chunk");
+  const before=h.requests.length;await assert.rejects(h.decision(c));assert.equal(h.requests.length,before,"refused context retires before another request");
+ }
+});
+
+
+test("Shared authorization refusal invalidates accepted sessions as well as page contexts",async()=>{
+ for(const status of [401,403]){
+  const h=harness((u,o)=>response(o.method==='GET'?detail():u.endsWith('/hls/sessions')?JSON.stringify(startReply()):'{}',u,o.method==='GET'||u.endsWith('/hls/sessions')?200:status));
+  const baseContext=(await h.details(ref)).files[0].context;
+  const bound=(await h.start(baseContext,startBody(h)))._sharedContext;
+  await assert.rejects(h.decision(bound),e=>e.status===status);
+  const before=h.requests.length;
+  await assert.rejects(h.decision(bound));
+  await assert.rejects(h.start(bound,startBody(h)));
+  await assert.rejects(h.progress(bound,1000,90000,false));
+  await assert.rejects(h.decision(baseContext));
+  assert.equal(h.requests.length,before,"no accepted-session or page request survives authorization refusal");
+ }
+});
+
+test("shared details connection failures keep their typed reason before any playback decision",async()=>{
+ for(const [code,status,message]of [["sharing_source_unavailable",503,"could not reach the sharing host"],["sharing_metadata_capacity",429,"busy loading library details"]]){
+  const diagnostics=[],logger={warn:(message,facts)=>diagnostics.push({message,...facts})};
+  const h=harness(url=>response(JSON.stringify({code,message:"private upstream detail"}),url,status),logger);
+  await assert.rejects(h.details(ref),error=>error.status===status&&error.code===code&&error.message.includes(message)&&!error.message.includes("private"));
+  assert.equal(h.requests.length,1,"a failed details read never starts a playback decision");
+  assert.deepEqual(diagnostics,[{message:"Shared playback request refused",status,mode:"page",code}]);
+ }
+});
+
+test("shared client refusal logs only its fixed validation phase and HTTP status",async()=>{
+ const diagnostics=[],logger={warn:(message,facts)=>diagnostics.push({message,...facts})};
+ const foreign=JSON.parse(detail());foreign.item.source="foreign";foreign.peer_secret="must-not-be-logged";
+ const h=harness(url=>response(JSON.stringify(foreign),url),logger);
+ await assert.rejects(h.details(ref),error=>error.stage==="details_identity"&&error.code==="sharing_client_contract");
+ assert.deepEqual(diagnostics,[{message:"Shared playback response refused",stage:"details_identity"}]);
+ diagnostics.length=0;
+ const refused=harness((url,options)=>response(options.method==="GET"?detail():JSON.stringify({code:"unknown_peer_code",error:"must-not-be-logged"}),url,options.method==="GET"?200:502),logger);
+ const c=(await refused.details(ref)).files[0].context;await assert.rejects(refused.decision(c));
+ assert.deepEqual(diagnostics,[{message:"Shared playback request refused",status:502,mode:"page",code:"unrecognized_refusal"}]);
+ assert.equal(JSON.stringify(diagnostics).includes("must-not-be-logged"),false);
 });

@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: plurx contributors <noreply@plurx.invalid>
+Date: Mon, 26 Oct 2026 12:00:00 +0000
+Subject: [PATCH 1/5] wayland: don't send an unknown MaxCLL or MaxFALL
+
+Both are optional in wp_image_description_creator_params_v1, and the
+protocol refuses a value at or below the minimum luminance: Weston 16 ends
+the connection on maxFALL 0 ("must be in the range (0.0, 1e+6]"). The
+target hint often carries 0 for an unknown level, so send each only when it
+is above the minimum luminance.
+---
+ video/out/wayland_common.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/video/out/wayland_common.c b/video/out/wayland_common.c
+index ba063baf2..fe37b4f88 100644
+--- a/video/out/wayland_common.c
++++ b/video/out/wayland_common.c
+@@ -3794,8 +3794,12 @@ static void set_color_management(struct vo_wayland_state *wl, struct pl_color_sp
+                 lrintf(hdr.min_luma * WAYLAND_MIN_LUM_FACTOR), lrintf(hdr.max_luma));
+         }
+         MP_VERBOSE(wl, "max_cll: %f, max_fall: %f\n", hdr.max_cll, hdr.max_fall);
+-        wp_image_description_creator_params_v1_set_max_cll(image_creator_params, lrintf(hdr.max_cll));
+-        wp_image_description_creator_params_v1_set_max_fall(image_creator_params, lrintf(hdr.max_fall));
++        // Both are optional, and the protocol refuses a value at or below the
++        // minimum luminance, so an unknown (zero) level is not sent.
++        if (hdr.max_cll > hdr.min_luma && lrintf(hdr.max_cll) > 0)
++            wp_image_description_creator_params_v1_set_max_cll(image_creator_params, lrintf(hdr.max_cll));
++        if (hdr.max_fall > hdr.min_luma && lrintf(hdr.max_fall) > 0)
++            wp_image_description_creator_params_v1_set_max_fall(image_creator_params, lrintf(hdr.max_fall));
+     }
+     image_description = wp_image_description_creator_params_v1_create(image_creator_params);
+     cm_dispatch_color_queue(wl, image_description);

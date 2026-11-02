@@ -105,6 +105,10 @@ int main(int argc, char **argv)
     }
     require(!strcmp(mode,"normal") || !strcmp(mode,"missing-el") || !strcmp(mode,"swapped-rpu") || !strcmp(mode,"swapped-el") || !strcmp(mode,"missing-rpu"), "known control mode");
     struct input bl = open_input(argv[1]), el = open_input(argv[2]);
+    require(bl.stream->avg_frame_rate.num > 0 && bl.stream->avg_frame_rate.den > 0 &&
+            el.stream->avg_frame_rate.num > 0 && el.stream->avg_frame_rate.den > 0 &&
+            av_cmp_q(bl.stream->avg_frame_rate, el.stream->avg_frame_rate) == 0,
+            "matching positive declared BL/EL frame rates");
     AVFormatContext *output = NULL;
     require(avformat_alloc_output_context2(&output, NULL, "matroska", argv[4]) >= 0 && output,
             "output context");
@@ -112,6 +116,10 @@ int main(int argc, char **argv)
     require(stream && avcodec_parameters_copy(stream->codecpar, bl.stream->codecpar) >= 0,
             "base codec parameters");
     stream->time_base = bl.stream->time_base;
+    // Matroska needs this for DefaultDuration; codecpar/time_base alone lose it.
+    // Preserve the encoder's declaration, not a guessed packet duration.
+    stream->avg_frame_rate = bl.stream->avg_frame_rate;
+    stream->r_frame_rate = bl.stream->r_frame_rate;
     AVCodecParameters *par = stream->codecpar;
     AVPacketSideData *configuration = av_packet_side_data_new(&par->coded_side_data,
         &par->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF, sizeof(AVDOVIDecoderConfigurationRecord), 0);
@@ -145,13 +153,15 @@ int main(int argc, char **argv)
                 av_compare_ts(base->duration,bl.stream->time_base,enhancement->duration,el.stream->time_base) == 0,
                 "encoder BL/EL packet durations match");
         // This index chooses a known synthetic RPU tag; it never assigns timestamps.
-        int source = av_rescale_q(base->pts, bl.stream->time_base, (AVRational){1,24});
+        int source = av_rescale_q(base->pts, bl.stream->time_base,
+                                 av_inv_q(bl.stream->avg_frame_rate));
         require(source >= 0 && source < COUNT, "known logical source time");
         int el_source = source;
         if (!strcmp(mode,"swapped-el") && (source == 1 || source == 2)) {
             el_source = 3 - source;
             for (int other = 0; other < COUNT; other++) {
-                int candidate = av_rescale_q(el.packet[other]->pts, el.stream->time_base, (AVRational){1,24});
+                int candidate = av_rescale_q(el.packet[other]->pts, el.stream->time_base,
+                                           av_inv_q(el.stream->avg_frame_rate));
                 if (candidate == el_source)
                     enhancement = el.packet[other];
             }

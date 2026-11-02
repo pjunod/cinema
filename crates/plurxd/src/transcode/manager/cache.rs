@@ -1037,6 +1037,7 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
+            processing_note: None,
             retained_output: None,
             audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),

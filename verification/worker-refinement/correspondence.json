@@ -1,0 +1,1287 @@
+{
+  "schema_version": 1,
+  "status": "reviewed",
+  "model_file": "verification/worker-refinement/WorkerRefinement.tla",
+  "model_sha256": "abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0",
+  "tests": [
+    {
+      "id": "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete",
+      "file": "crates/plurxd/src/library_work.rs",
+      "name": "library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+    },
+    {
+      "id": "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop",
+      "file": "crates/plurxd/src/library_work.rs",
+      "name": "library_worker_domain_loss_joins_before_release_and_admission_drop"
+    },
+    {
+      "id": "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement",
+      "file": "crates/plurxd/src/library_work.rs",
+      "name": "library_worker_queue_loss_joins_before_release_and_retirement"
+    },
+    {
+      "id": "crates/plurxd/src/library_work.rs::tests::library_worker_admission_pressure_joins_before_release_and_drop",
+      "file": "crates/plurxd/src/library_work.rs",
+      "name": "library_worker_admission_pressure_joins_before_release_and_drop"
+    },
+    {
+      "id": "crates/plurxd/src/library_work.rs::tests::library_worker_reconciles_lost_completion_acknowledgement",
+      "file": "crates/plurxd/src/library_work.rs",
+      "name": "library_worker_reconciles_lost_completion_acknowledgement"
+    },
+    {
+      "id": "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_captured_token_completes_while_durable_owners_current",
+      "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+      "name": "formal_publication_library_captured_token_completes_while_durable_owners_current"
+    },
+    {
+      "id": "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_completion_after_release_and_rebind_is_rejected",
+      "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+      "name": "formal_publication_library_completion_after_release_and_rebind_is_rejected"
+    }
+  ],
+  "actions": [
+    {
+      "kind": "action",
+      "action": "DispatchRejected",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No deterministic real-source conformance schedule covers this model transition; source mapping is descriptive."
+    },
+    {
+      "kind": "action",
+      "action": "DetachedReleaseApply",
+      "worker": "shared",
+      "source": {
+        "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
+        "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
+      },
+      "held_across_await": [],
+      "completed_by": "store/backend",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No schedule pauses a dispatched release and observes its detached durable application."
+    },
+    {
+      "kind": "action",
+      "action": "RenewalLostAck",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Heartbeat is a spawned task outside the task-local test barrier; renewal deadline and durable expiry are not controlled."
+    },
+    {
+      "kind": "action",
+      "action": "ProbeReturn",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "Admission",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "ClaimSend",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "DomainSend",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "BindSend",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "ItemSend",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "CompleteSend",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
+        "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_reconciles_lost_completion_acknowledgement"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "ReleaseSend",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "SettleSend",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "StoreApply",
+      "worker": "shared",
+      "source": {
+        "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
+        "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
+      },
+      "held_across_await": [],
+      "completed_by": "store/backend",
+      "trust": "abstraction",
+      "schedules": [
+        "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_captured_token_completes_while_durable_owners_current",
+        "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_completion_after_release_and_rebind_is_rejected"
+      ],
+      "gap": "The S1 direct Store call checks that the captured token is accepted while durable owners remain current; it does not exercise local revocation or an in-flight dispatched write."
+    },
+    {
+      "kind": "action",
+      "action": "StoreReply",
+      "worker": "shared",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
+        "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_reconciles_lost_completion_acknowledgement"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "CompleteTimeout",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
+        "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_reconciles_lost_completion_acknowledgement"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "DetachedApply",
+      "worker": "shared",
+      "source": {
+        "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
+        "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
+      },
+      "held_across_await": [],
+      "completed_by": "store/backend",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The test checks the backend durable-owner predicate directly; it does not create an already-dispatched write paused across local revocation."
+    },
+    {
+      "kind": "action",
+      "action": "DrainDetached",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
+        "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_reconciles_lost_completion_acknowledgement"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "CallerReturn",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
+        "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_reconciles_lost_completion_acknowledgement"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "WorkerTokenIntent",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No deterministic real-source conformance schedule covers this model transition; source mapping is descriptive."
+    },
+    {
+      "kind": "action",
+      "action": "WorkerTokenGrant",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No deterministic real-source conformance schedule covers this model transition; source mapping is descriptive."
+    },
+    {
+      "kind": "action",
+      "action": "AuthorityReturn",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No deterministic real-source conformance schedule covers this model transition; source mapping is descriptive."
+    },
+    {
+      "kind": "action",
+      "action": "WorkerPubIntent",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No deterministic real-source conformance schedule covers this model transition; source mapping is descriptive."
+    },
+    {
+      "kind": "action",
+      "action": "WorkerPubGrant",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No deterministic real-source conformance schedule covers this model transition; source mapping is descriptive."
+    },
+    {
+      "kind": "action",
+      "action": "ScanStart",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "WalkReturn",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "ScanFinish",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "Reconcile",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
+        "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_reconciles_lost_completion_acknowledgement"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "Cancel",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "WorkFault",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No deterministic schedule injects a processing fault; this transition is model-only."
+    },
+    {
+      "kind": "action",
+      "action": "QueueLoss",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
+      ],
+      "gap": "Worker schedule raises local queue-loss notification only; durable expiry/TTL recovery is not driven."
+    },
+    {
+      "kind": "action",
+      "action": "DomainIntent",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned domain-heartbeat task is outside the task-local test barrier; this heartbeat transition is unchecked."
+    },
+    {
+      "kind": "action",
+      "action": "DomainGrant",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned domain-heartbeat task is outside the task-local test barrier; this heartbeat transition is unchecked."
+    },
+    {
+      "kind": "action",
+      "action": "ReverseTokenGrant",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Model-only reverse-edge mutation for control analysis; no production transition corresponds."
+    },
+    {
+      "kind": "action",
+      "action": "DomainDispatch",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned domain-heartbeat task is outside the task-local test barrier; dispatch is not observed by a Rust schedule."
+    },
+    {
+      "kind": "action",
+      "action": "DomainApply",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned domain-heartbeat task is outside the task-local test barrier; durable heartbeat application is not observed."
+    },
+    {
+      "kind": "action",
+      "action": "DomainReturn",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned domain-heartbeat task is outside the task-local test barrier; heartbeat response handling is unchecked."
+    },
+    {
+      "kind": "action",
+      "action": "DomainStop",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No schedule controls or observes stopping and joining the spawned domain-heartbeat task."
+    },
+    {
+      "kind": "action",
+      "action": "RenewalDeadline",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Heartbeat is a spawned task outside the task-local test barrier; renewal deadline and durable expiry are not controlled."
+    },
+    {
+      "kind": "action",
+      "action": "QueueIntent",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; this heartbeat transition is unchecked."
+    },
+    {
+      "kind": "action",
+      "action": "QueueGrant",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; this heartbeat transition is unchecked."
+    },
+    {
+      "kind": "action",
+      "action": "QueueAuthorityReturn",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; durable authority return is unchecked."
+    },
+    {
+      "kind": "action",
+      "action": "QueueDispatch",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; dispatch is not observed by a Rust schedule."
+    },
+    {
+      "kind": "action",
+      "action": "QueueApply",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; durable heartbeat application is not observed."
+    },
+    {
+      "kind": "action",
+      "action": "QueueReturn",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; heartbeat response handling is unchecked."
+    },
+    {
+      "kind": "action",
+      "action": "QueueStop",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No schedule controls or observes stopping and joining the spawned queue-heartbeat task."
+    },
+    {
+      "kind": "action",
+      "action": "ReleaseJoin",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "ReleaseFailure",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No schedule injects a release failure or observes its ambiguous durable outcome."
+    },
+    {
+      "kind": "action",
+      "action": "ReleaseRetry",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No schedule injects a failed release and observes retry behavior."
+    },
+    {
+      "kind": "action",
+      "action": "DomainExpiry",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Heartbeat is a spawned task outside the task-local test barrier; renewal deadline and durable expiry are not controlled."
+    },
+    {
+      "kind": "action",
+      "action": "LostSettlement",
+      "worker": "shared",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
+        "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The lost-settlement transition is distinct from lost completion acknowledgement; no schedule injects it."
+    },
+    {
+      "kind": "action",
+      "action": "FinishJoin",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "FinishRetire",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "DropAdmission",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurx-worker-control/src/library_lifecycle.rs",
+        "symbol": "library_lifecycle::step",
+        "anchor": "pub fn step(state: State, event: Event)",
+        "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ],
+      "gap": "The production controller emits ordered DropAdmission; the daemon executes the real guard drop. Controller local safety does not prove complete driver trace refinement or asynchronous progress."
+    },
+    {
+      "kind": "action",
+      "action": "QueueExpiry",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
+      ],
+      "gap": "Worker schedule raises local queue-loss notification only; durable expiry/TTL recovery is not driven."
+    },
+    {
+      "kind": "action",
+      "action": "Wake",
+      "worker": "shared",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "TimeObserved",
+      "worker": "shared",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "action",
+      "action": "Arrival",
+      "worker": "shared",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Tests enqueue finite requests before worker execution; recurring arrivals are an abstraction."
+    },
+    {
+      "kind": "boundary",
+      "action": "select.queue_loss",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
+      ]
+    },
+    {
+      "kind": "boundary",
+      "action": "select.domain_loss",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
+      ]
+    },
+    {
+      "kind": "boundary",
+      "action": "select.admission_pressure",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_admission_pressure_joins_before_release_and_drop"
+      ]
+    },
+    {
+      "kind": "boundary",
+      "action": "select.work_returned",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "boundary",
+      "action": "lock.acquire.queue_token_mutex",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "claim_library",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Boundary is inventoried from source but not controlled or asserted by current schedules."
+    },
+    {
+      "kind": "boundary",
+      "action": "lock.release.queue_token_mutex",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "ActiveBackgroundJob::finish",
+        "anchor": "pub(crate) async fn finish(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Boundary is inventoried from source but not controlled or asserted by current schedules."
+    },
+    {
+      "kind": "boundary",
+      "action": "lock.acquire.domain_fence",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
+      ]
+    },
+    {
+      "kind": "boundary",
+      "action": "lock.release.domain_fence",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
+      ]
+    },
+    {
+      "kind": "boundary",
+      "action": "heartbeat.queue.deadline",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "ActiveBackgroundJob::claim",
+        "anchor": "let heartbeat = tokio::spawn(async move {",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Spawned heartbeat timing/stop/join are outside task-local control; the path is inventoried only."
+    },
+    {
+      "kind": "boundary",
+      "action": "heartbeat.domain.deadline",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Spawned heartbeat timing/stop/join are outside task-local control; the path is inventoried only."
+    },
+    {
+      "kind": "boundary",
+      "action": "heartbeat.queue.stop_join",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "ActiveBackgroundJob::finish",
+        "anchor": "pub(crate) async fn finish(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Spawned heartbeat timing/stop/join are outside task-local control; the path is inventoried only."
+    },
+    {
+      "kind": "boundary",
+      "action": "heartbeat.domain.stop_join",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Spawned heartbeat timing/stop/join are outside task-local control; the path is inventoried only."
+    },
+    {
+      "kind": "boundary",
+      "action": "release.attempt",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
+      ]
+    },
+    {
+      "kind": "boundary",
+      "action": "release.retry",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Ambiguous release and exact-token retry are source-traced but not asserted by a deterministic schedule."
+    },
+    {
+      "kind": "boundary",
+      "action": "release.ambiguous_fallback",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/job_lease.rs",
+        "symbol": "ActiveJobLease::release",
+        "anchor": "pub(crate) async fn release(",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "Ambiguous release and exact-token retry are source-traced but not asserted by a deterministic schedule."
+    },
+    {
+      "kind": "boundary",
+      "action": "retire.claim",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "ActiveBackgroundJob::finish",
+        "anchor": "pub(crate) async fn finish(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
+      ]
+    },
+    {
+      "kind": "boundary",
+      "action": "drop.admission",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurxd/src/library_work.rs",
+        "symbol": "work_library_queue",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      "held_across_await": [],
+      "completed_by": "worker task",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
+      ]
+    },
+    {
+      "kind": "boundary",
+      "action": "sql.complete_library_work.trigger",
+      "worker": "both",
+      "source": {
+        "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "symbol": "formal_publication_library_completion_after_release_and_rebind_is_rejected",
+        "anchor": "async fn formal_publication_library_completion_after_release_and_rebind_is_rejected()",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
+      },
+      "held_across_await": [],
+      "completed_by": "store trigger",
+      "trust": "code-fact",
+      "schedules": [
+        "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_completion_after_release_and_rebind_is_rejected"
+      ]
+    }
+  ]
+}

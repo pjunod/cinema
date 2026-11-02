@@ -21,6 +21,21 @@ def recipe():
 
 
 class LinuxDolbyPackageCase(unittest.TestCase):
+    def test_download_checksum_failure_identifies_only_public_input_and_hashes(self):
+        module = recipe()
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "fc-source.tar.gz"
+            archive.write_bytes(b"wrong downloaded payload")
+            actual = module.sha(archive)
+            module.verify_source_download(archive, actual)
+            expected = "a" * 64
+            with self.assertRaises(ValueError) as failure:
+                module.verify_source_download(archive, expected)
+            self.assertEqual(str(failure.exception),
+                "immutable source download checksum mismatch: "
+                f"fc-source.tar.gz expected={expected} actual={actual}")
+            self.assertNotIn(str(archive.parent), str(failure.exception))
+
     def test_git_source_offer_fetches_pinned_commit_instead_of_repository_html(self):
         import hashlib
         import time

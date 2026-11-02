@@ -80,9 +80,18 @@ function playbackFileSuffix(suffix){
     ||new RegExp(`^chapters/${index}/thumb$`).test(suffix)) return suffix;
   playbackFileReject();
 }
+// Local text translation reads choices or creates an administrative job. These
+// exact routes never enter the Shared grammar or inherit a media session.
+function localPlaybackFileWorkSuffix(suffix){
+  if(suffix==="subtitle-text-translation/options")return true;
+  // JobPayload::SubtitleTextTranslate validates this source index at 0..=1023.
+  const match=typeof suffix==="string"&&/^subtitles\/(0|[1-9][0-9]{0,3})\/translation$/.exec(suffix);
+  return !!match&&Number(match[1])<=1023;
+}
 // The Shared file grammar (plurx_core::sharing_resources::SharingFileResource)
 // bounds track and chapter indexes at 4095; Local keeps its own wider bound.
 function sharedPlaybackFileSuffix(suffix){
+  if(typeof suffix==="string"&&/^(?:captions|captions\/[a-f0-9]{64}\/(?:manifest|segments\/[a-f0-9]{64}))$/.test(suffix))return suffix;
   playbackFileSuffix(suffix);
   const index=/^(?:subs|chapters)\/([0-9]+)/.exec(suffix);
   if(index&&Number(index[1])>4095) playbackFileReject();
@@ -90,6 +99,20 @@ function sharedPlaybackFileSuffix(suffix){
 }
 function playbackFileQuery(suffix,query){
   if(!query||typeof query!=="object"||Array.isArray(query)) playbackFileReject();
+  if(suffix==="captions"||suffix.startsWith("captions/")){
+    const keys=Object.keys(query);
+    if(suffix==="captions"){
+      if(keys.length===0)return "";
+      if(keys.length!==1||keys[0]!=="after"||! /^[a-f0-9]{64}$/.test(query.after))playbackFileReject();
+      return "after="+query.after;
+    }
+    if(suffix.endsWith("/manifest")){
+      if(keys.length!==1||keys[0]!=="position_ms"||!Number.isSafeInteger(query.position_ms)||query.position_ms<0||query.position_ms>14400000)playbackFileReject();
+      return "position_ms="+query.position_ms;
+    }
+    if(keys.length!==1||keys[0]!=="lease"||typeof query.lease!=="string"||!PLAYBACK_FILE_UUID.test(query.lease)||query.lease==="00000000-0000-0000-0000-000000000000")playbackFileReject();
+    return "lease="+query.lease;
+  }
   // Actual Caps and StreamQuery fields, including named-profile/native
   // compatibility claims. The browser currently emits a subset in capsQuery.
   const capabilities=["client","device","profile","vcodec","vmaxheight","acodec", "container",
@@ -139,9 +162,10 @@ function playbackFileQuery(suffix,query){
 }
 function playbackFileUrl(value,suffix,query={}){
   const context=playbackFileContext(value);
-  if(context.source_ref.kind==="local") playbackFileSuffix(suffix); else sharedPlaybackFileSuffix(suffix);
+  const localWork=context.source_ref.kind==="local"&&localPlaybackFileWorkSuffix(suffix);
+  if(!localWork){if(context.source_ref.kind==="local") playbackFileSuffix(suffix); else sharedPlaybackFileSuffix(suffix);}
   let q=playbackFileQuery(suffix,query);
-  if(context.session_id&&!["decision","hls/sessions"].includes(suffix))
+  if(context.session_id&&!localWork&&!["decision","hls/sessions"].includes(suffix))
     q+=(q?"&":"")+`session=${context.session_id}`;
   return context.file_base+"/"+suffix+(q?"?"+q:"");
 }

@@ -1204,7 +1204,11 @@
                 ..Default::default()
             },
         ).await;
-        store.put_setting(keys::HLS_READRATE, "0").await.expect("readrate");
+        // Retention is optional: a busy capture refuses rather than slowing
+        // ordinary publication. Pace this positive fixture without the default
+        // 90-second initial burst, just like d3_copy_session below.
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced retention");
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("retained allowance");
         // Rolling retention is a Developer switch, off by default (D3).
         store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
@@ -1216,6 +1220,7 @@
         manager.record_retained_headroom(1 << 50);
         let options = CopySessionOptions {
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
             transcode_audio: false,
             preserve_dolby_vision: false,
         };
@@ -1230,9 +1235,40 @@
                 if let Some(artifact) = manager.vod.acquire_rolling_output(production) {
                     break artifact;
                 }
+                assert!(
+                    !first.failed.load(Acquire),
+                    "copy failed before retained completion: {:?}",
+                    first.failure_reason()
+                );
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-        }).await.expect("normal child and reader completion publish retained inventory");
+        }).await;
+        let artifact = match artifact {
+            Ok(artifact) => artifact,
+            Err(elapsed) => {
+                // Diagnose only after the unchanged completion deadline. Do
+                // not poll/reap the child or wait indefinitely on its owners.
+                let actor = tokio::time::timeout(
+                    Duration::from_secs(1), first.control.snapshot(),
+                ).await;
+                let child = first.child.try_lock()
+                    .map_err(|_| "child slot locked")
+                    .map(|child| child.as_ref().map(|child| (
+                        child.producer_attempt, child.id(), child.terminal_exit_snapshot(),
+                    )));
+                let collection = first.rolling_collection.as_ref()
+                    .map(|collection| (collection.abandoned(), collection.directory_for_test()));
+                let failed = first.failed.load(Acquire);
+                let failure = failed.then(|| first.failure_reason());
+                panic!(
+                    "normal child and reader completion publish retained inventory: {elapsed:?}; \
+                     failed={failed}; failure={failure:?}; actor={actor:?}; \
+                     child(attempt,pid,exit)={child:?}; \
+                     collection(abandoned,directory)={collection:?}; retained={:?}",
+                    manager.vod.retained_snapshot(),
+                );
+            }
+        };
         let rates = artifact.bandwidth().expect("complete mux rates");
         assert!(rates.average_bps > 0 && rates.peak_bps >= rates.average_bps);
         let next = manager.start_copy(file_id, 0.0, None, options, "owner", "second")
@@ -1278,6 +1314,7 @@
         manager.record_retained_headroom(1 << 50);
         let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "refused-proof").await.expect("ordinary copy");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("owner");
         let production = session.rolling_provenance.as_ref().expect("actual source binding");
@@ -1373,14 +1410,17 @@
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
         // Rolling retention is a Developer switch, off by default (D3).
         store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
-        store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
+        // Obtain the complete retained fixture before testing its revocation;
+        // optional capture contention belongs to the dedicated busy-owner test.
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced retention");
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
             work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu));
         // No sampler runs in a test: publish the headroom it would have.
         manager.record_retained_headroom(1 << 50);
         let options = CopySessionOptions { convert_dolby_vision: false,
-            transcode_audio: false, preserve_dolby_vision: false };
+            transcode_audio: false, preserve_dolby_vision: false, dual_layer_as_copied: false };
         let first = manager.start_copy(file_id, 0.0, None, options, "owner", "integrity-first")
             .await.expect("real producer");
         let incumbent = manager.sessions.lock().await.get(&first.session_id).cloned().expect("first");
@@ -1447,6 +1487,7 @@
         manager.record_retained_headroom(1 << 50);
         let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "busy-proof").await.expect("ordinary start");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
         let collection = session.rolling_collection.as_ref().expect("optional reservation");
@@ -1506,6 +1547,7 @@
         manager.record_retained_headroom(1 << 50);
         let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "d3").await.expect("ordinary start");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
         (manager, session, info, file_id, media, work)
@@ -1664,6 +1706,7 @@
         manager.store.put_setting(keys::HLS_READRATE, "1").await.expect("paced");
         let second_info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "d3-second").await.expect("second start");
         let second = manager.sessions.lock().await.get(&second_info.session_id).cloned()
             .expect("second");
@@ -1897,6 +1940,7 @@
                 None,
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                 },
@@ -2062,19 +2106,13 @@
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));
-        // Burst then crawl, sized so this legacy (no-demand) viewer earns its
-        // first snapshot from the burst instead of at ENDLIST. The legacy
-        // publication clock wants `ROLLING_INITIAL_RUNWAY_MS` (48 s) ahead of
-        // the wall clock since bootstrap; at a 1x crawl the producer never
-        // gains on that clock, so the runway has to come from the burst. A
-        // 50 s burst closes the 6 s copy segment past 48 s at once; the next
-        // segments then close at 1x, 6 s apart, so the served window (capped
-        // at 48 s until a fetch) stays a full publication batch ahead of the
-        // staged frontier for about twelve seconds -- the window in which the
-        // assertions below run. A larger burst stages a complete next batch
-        // immediately and is held by the publication clock, correctly. The
-        // 180 s clip keeps ENDLIST out of the test entirely.
-        store.put_setting(keys::HLS_READRATE, "1").await.expect("s");
+        // The publication control needs a sustainable producer. A nominal
+        // 1x input pace measures below 1x once real startup/I/O overhead is
+        // included and correctly fails admission on a busy host. Use 2x so
+        // that overhead cannot decide the behavior under test. The 50 s
+        // initial burst supplies the first snapshot's runway; the 180 s
+        // source keeps ENDLIST outside the first snapshot/fetch assertions.
+        store.put_setting(keys::HLS_READRATE, "2").await.expect("s");
         store
             .put_setting(keys::HLS_BURST_SECS, "50")
             .await
@@ -2099,6 +2137,7 @@
                 None,
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                 },
@@ -2240,7 +2279,7 @@
             mgr.flow_control(&session, &info.session_id).await;
             assert!(!session.suspended.load(Relaxed));
             let status = mgr.session_status(&info.session_id).await.expect("status");
-            assert_eq!(status.readrate, 1.0, "HLS exposes its effective input pace");
+            assert_eq!(status.readrate, 2.0, "HLS exposes its effective input pace");
             assert_eq!(status.production_policy, "publication_clock_legacy");
             assert_eq!(status.hold_reason, None);
             assert_eq!(status.resume_below_bytes, None);

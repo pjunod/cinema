@@ -646,6 +646,7 @@ async fn vod_ready_metered(
         observed_media_duration_ms: None,
         delivery,
         retained_lease: None,
+        cache_pin: None,
         file: tokio::fs::File::open(path)
             .await
             .expect("open VOD response object"),
@@ -2638,6 +2639,7 @@ fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
         aac: false,
         preserve_dolby_vision: preserve,
         convert_dolby_vision: convert,
+        dual_layer_as_copied: false,
     };
     let badge = |kind: &SessionKind| {
         (
@@ -3405,6 +3407,95 @@ async fn negotiated_relay_uses_owner_local_acquisition_and_preserves_cached_mani
     assert_eq!(fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("unchanged"),baseline);
 }
 
+/// M2 truthfulness: the reconstructed 8.1 claims "FEL used" only from the
+/// served-window receipt or the selected plan, never from the source's tags;
+/// the plain conversion it falls back to says FEL is unused and why.
+#[cfg(target_os = "linux")]
+#[test]
+fn reconstructed_p81_claims_fel_only_from_processing_truth_and_its_fallback_says_why() {
+    use plurx_core::playback::enhancement::EnhancementBadge;
+    use plurx_core::transcode::dv_processing::DvEffectiveProcessingReport;
+    use plurx_core::transcode::OutputGrade;
+    let file = dolby_vision_p7_file();
+    let reconstructed = crate::transcode::SessionKind::Transcode { height: 2160 };
+    let fel_row = |shown: &plurx_core::playback::enhancement::PlaybackEnhancement| {
+        shown
+            .details
+            .iter()
+            .find(|row| row.badge == EnhancementBadge::Fel)
+            .cloned()
+            .expect("FEL row for a P7 FEL source")
+    };
+    // No plan or receipt fact: the P7 FEL source alone must not light FEL.
+    let unknown = session_enhancement(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8),
+        None, None, None, None).expect("DV source");
+    assert!(!fel_row(&unknown).active, "{:?}", unknown);
+    let generation = "00000000-0000-4000-8000-0000000000a1";
+    let report = |fel: bool| {
+        DvEffectiveProcessingReport::from_owner_wire(
+            serde_json::json!({"generation":generation,"hdr10_enhanced":false,
+                "profile81_reconstructed":true,"fel_contributed":fel,
+                "applied_operations":if fel {
+                    vec!["RpuColorConversion","TargetMapping","LinearNlqResidual"]
+                } else { vec!["RpuColorConversion","TargetMapping"] }})
+            .to_string()
+            .as_bytes(),
+            generation,
+            Some("dolby_vision"),
+        )
+        .expect("a reconstructed 8.1 report")
+    };
+    // The served-window receipt outranks the plan in both directions.
+    let receipt_no = session_enhancement(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8),
+        Some(true), Some(&report(false)), None, None).expect("DV source");
+    assert!(!fel_row(&receipt_no).active);
+    let receipt_yes = session_enhancement(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8),
+        Some(true), Some(&report(true)), None, None).expect("DV source");
+    assert!(fel_row(&receipt_yes).active);
+    assert_eq!(
+        receipt_yes.active,
+        [EnhancementBadge::Fel, EnhancementBadge::Rpu, EnhancementBadge::Dyn]
+    );
+    // The busy-slot decline reaches the converted fallback's FEL row.
+    let converted = crate::transcode::SessionKind::Copy {
+        convert_dolby_vision: true,
+        dual_layer_as_copied: false,
+        aac: false,
+        preserve_dolby_vision: true,
+    };
+    // The reason a real second reconstruction gets from the worker's slot.
+    let busy = {
+        use plurx_core::transcode::dv_processing::DvDestination;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let base = crate::test_tempdir().expect("runtime dir");
+        let manager = crate::transcode::TranscodeManager::new(
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store")),
+            base.path().join("runtime"),
+            plurx_core::transcode::EncoderCaps::default(),
+            plurx_core::transcode::Pipeline::Cpu,
+        );
+        rt.block_on(async {
+            let _held = manager
+                .acquire_reconstruction_slot(DvDestination::Profile81)
+                .await
+                .expect("first");
+            manager
+                .acquire_reconstruction_slot(DvDestination::Profile81)
+                .await
+                .expect_err("second live reconstruction")
+        })
+    };
+    let fallback = session_enhancement(Some(&file), &converted, OutputGrade::Hdr10, None, None,
+        None, None, Some(&busy)).expect("DV source");
+    let row = fel_row(&fallback);
+    assert!(!row.active);
+    assert!(row.text.contains(&busy), "{}", row.text);
+    assert_eq!(fallback.active, [EnhancementBadge::Dyn]);
+}
+
 /// The indicator's route comes from the selected processing plan, not from
 /// whether the first window's report has arrived: a create that beats its
 /// report must still describe HDR10-E, and a staged copy successor keeps the
@@ -3418,6 +3509,7 @@ fn a_reconstructed_profile81_copy_is_described_as_reconstructed() {
     let file = dolby_vision_p7_file();
     let converted = crate::transcode::SessionKind::Copy {
         convert_dolby_vision: true,
+        dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: true,
     };
@@ -3490,6 +3582,7 @@ fn the_enhancement_follows_the_selected_plan_before_any_report() {
     assert!(base.details.iter().all(|detail| !detail.text.contains("Settings")));
     let native = crate::transcode::SessionKind::Copy {
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: true,
     };

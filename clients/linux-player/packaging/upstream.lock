@@ -1,0 +1,22 @@
+# Pinned upstream sources for the private libplacebo and mpv in plurx-player.
+#
+# libplacebo 7.387.0 and an mpv master commit (2026-10-26), newer than the
+# 7.360.1 and 0.41.0 Ubuntu 26.10 ships, because Dolby Vision Profile 7 FEL
+# composition (pl_frame.enhancement_layer, API 367; mpv's enhancement-layer
+# pairing and dovi_split) is in no mpv release yet. An mpv commit pin's
+# version is <last release>+git<date>.<short commit>, and its URL names the
+# full commit. The tarballs are upstream's archives, checked by sha256.
+#
+# Changing a version here changes the package version too: the upstream part
+# of debian/changelog's version must end in +lp<libplacebo>.mpv<mpv>, and
+# fetch-sources.sh refuses a mismatch.
+#
+# apt-snapshot pins the build and verification environment: every apt
+# command in the containers resolves against snapshot.ubuntu.com at that
+# timestamp (packaging/apt-snapshot.sh), so a later build gets the same
+# compiler, FFmpeg, glslang and the rest. Move it forward deliberately.
+apt-snapshot 20261025T000000Z
+#
+# name      version  sha256                                                            url
+libplacebo  7.387.0  3bf5d72786682c194387c33d563872f6bfe202a9816f9dde6535a31a9b2e0d74  https://code.videolan.org/videolan/libplacebo/-/archive/v7.387.0/libplacebo-v7.387.0.tar.gz
+mpv         0.41.0+git20261026.e59d90c  68941962a5ad84165c3ebde877a7e2e1acb77c79bf5b06c33abe3d1b24cad34a  https://github.com/mpv-player/mpv/archive/e59d90c843339fe3c22f6e3d032216bb50a06725.tar.gz

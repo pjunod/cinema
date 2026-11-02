@@ -1142,7 +1142,7 @@ function attachSession(v, t, info, wantSec){
   stopPlaybackControl(t);
   t.controlRenderOverride=null;
   t.controlObservationOverride=null;
-  t.offset=info.start_seconds||0;
+  t.offset=Number.isSafeInteger(info.media_origin_ms)?info.media_origin_ms/1000:(Number.isFinite(info.start_seconds)?info.start_seconds:0);
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
   if(t.fileContext&&playbackFileContext(t.fileContext).source_ref.kind!=="local"){

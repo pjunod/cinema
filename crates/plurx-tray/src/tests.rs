@@ -882,6 +882,40 @@ fn prepare_of_another_version_is_never_applied() {
 }
 
 #[test]
+fn upgrade_results_only_request_attention_for_failures() {
+    for state in [
+        UpdateState::Complete,
+        UpdateState::Cancelled,
+        UpdateState::Failed,
+        UpdateState::RecoveryRequired,
+    ] {
+        for purpose in [
+            Purpose::PollUpdate(TXN.into()),
+            Purpose::Apply(TXN.into()),
+            Purpose::Cancel(TXN.into()),
+        ] {
+            let mut core = core_with(ServiceState::Running);
+            core.snapshot.update = Some(update(UpdateState::Installing, "0.7.1"));
+            let polled = matches!(purpose, Purpose::PollUpdate(_));
+            let effects =
+                core.completed(purpose, Ok(ControlResult::Update(update(state, "0.7.1"))));
+            assert_eq!(core.snapshot.update.as_ref().unwrap().state, state);
+            assert_eq!(
+                effects.contains(&Effect::ShowUpgrade),
+                matches!(state, UpdateState::Failed | UpdateState::RecoveryRequired),
+                "{state:?} polled={polled}"
+            );
+            assert!(effects.contains(&Effect::Render));
+            if state == UpdateState::Complete {
+                assert!(core
+                    .act(Action::ShowUpgradeProgress)
+                    .contains(&Effect::ShowUpgrade));
+            }
+        }
+    }
+}
+
+#[test]
 fn recovery_transaction_is_followed_and_blocks_start() {
     let mut core = Core::new("0.7.0", Management::Supported, "pjunod/cinema");
     core.poll();

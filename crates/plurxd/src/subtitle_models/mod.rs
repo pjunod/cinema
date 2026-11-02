@@ -1406,10 +1406,9 @@ pub(crate) async fn worker_pass(
         )?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
-        let operation =
-            async {
-                if let JobPayload::SubtitleModelOperation { action, .. } = &payload {
-                    if !fence
+        let operation = async {
+            if let JobPayload::SubtitleModelOperation { action, .. } = &payload {
+                if !fence
                     .observe_subtitle(if *action == ModelAction::Install {
                         plurx_core::store::background_jobs_transcription::SubtitlePhase::Downloading
                     } else {
@@ -1419,47 +1418,43 @@ pub(crate) async fn worker_pass(
                 {
                     return Err(StoreError::Task("subtitle_operation_fenced".into()));
                 }
-                    let preadmission = if *action == ModelAction::Verify {
-                        Some(state.transcode.admit_fragment().await.ok_or_else(|| {
-                            StoreError::Task("waiting_for_playback_capacity".into())
-                        })?)
-                    } else {
-                        None
-                    };
-                    let model = match action {
-                        ModelAction::Install => {
-                            artifacts::install_model(&state.subtitle_models.root, spec, &cancel)
-                                .await
-                                .map_err(StoreError::Task)?
-                        }
-                        ModelAction::Verify => {
-                            hash_admitted_model(
-                                state,
-                                spec,
-                                &cancel,
-                                preadmission.as_ref().expect("verification admission"),
-                            )
-                            .await?
-                        }
-                        _ => {
-                            return Err(StoreError::Task(
-                                "translation model operation owned by translation worker".into(),
-                            ))
-                        }
-                    };
-                    if automatic_model_identity.is_some_and(|accepted| accepted != model.identity) {
-                        return Err(StoreError::Task("automatic_verification_obsolete".into()));
+                let preadmission = if *action == ModelAction::Verify {
+                    Some(admit_model_test(state, &fence, &cancel).await?)
+                } else {
+                    None
+                };
+                let model = match action {
+                    ModelAction::Install => {
+                        artifacts::install_model(&state.subtitle_models.root, spec, &cancel)
+                            .await
+                            .map_err(StoreError::Task)?
                     }
-                    let admission = match preadmission {
-                        Some(admission) => admission,
-                        None => state.transcode.admit_fragment().await.ok_or_else(|| {
-                            StoreError::Task("waiting_for_playback_capacity".into())
-                        })?,
-                    };
-                    if !state.transcode.fragment_worker_idle(&admission) {
-                        return Err(StoreError::Task("waiting_for_playback_capacity".into()));
+                    ModelAction::Verify => {
+                        hash_admitted_model(
+                            state,
+                            spec,
+                            &cancel,
+                            preadmission.as_ref().expect("verification admission"),
+                        )
+                        .await?
                     }
-                    if !fence
+                    _ => {
+                        return Err(StoreError::Task(
+                            "translation model operation owned by translation worker".into(),
+                        ))
+                    }
+                };
+                if automatic_model_identity.is_some_and(|accepted| accepted != model.identity) {
+                    return Err(StoreError::Task("automatic_verification_obsolete".into()));
+                }
+                let admission = match preadmission {
+                    Some(admission) => admission,
+                    None => admit_model_test(state, &fence, &cancel).await?,
+                };
+                if !state.transcode.speech_capacity_available(&admission) {
+                    return Err(StoreError::Task("waiting_for_playback_capacity".into()));
+                }
+                if !fence
                     .observe_subtitle(
                         plurx_core::store::background_jobs_transcription::SubtitlePhase::Verifying,
                     )
@@ -1467,92 +1462,92 @@ pub(crate) async fn worker_pass(
                 {
                     return Err(StoreError::Task("subtitle_operation_fenced".into()));
                 }
-                    crate::subtitle_transcription::self_test_managed(
-                        state, &engine, &model, &fence, &admission, &cancel,
+                crate::subtitle_transcription::self_test_managed(
+                    state, &engine, &model, &fence, &admission, &cancel,
+                )
+                .await?;
+                if cancel.is_cancelled() {
+                    return Err(StoreError::Task("worker_interrupted".into()));
+                }
+                let named = artifacts::model_identity(&state.subtitle_models.root, spec)
+                    .await
+                    .map_err(StoreError::Task)?;
+                if named != model.identity {
+                    return Err(StoreError::Task(
+                        if automatic_model_identity.is_some() {
+                            "automatic_verification_obsolete"
+                        } else {
+                            "artifact_changed"
+                        }
+                        .into(),
+                    ));
+                }
+                let receipt =
+                    plurx_core::store::background_jobs_transcription::SubtitleModelReceipt {
+                        node_id: String::new(),
+                        boot_id: String::new(),
+                        model_id: spec.id.clone(),
+                        model_sha256: spec.sha256.clone(),
+                        adapter_contract: engine.adapter_contract.clone(),
+                        engine_sha256: engine.binary_sha256.clone(),
+                        model_file_identity: artifacts::identity_key(model.identity),
+                        engine_file_identity: artifacts::identity_key(engine.identity),
+                        job_id: String::new(),
+                        fence: 0,
+                        verified_at_ms: 0,
+                    };
+                fence.publish_subtitle_model(payload.clone(), receipt).await
+            } else if let JobPayload::SubtitleTranscribeManaged {
+                file_id,
+                source_size,
+                source_mtime,
+                ..
+            } = &payload
+            {
+                let source = prepared_source
+                    .as_ref()
+                    .expect("preclaim source eligibility");
+                let current = state
+                    .store
+                    .get_file(*file_id)
+                    .await?
+                    .ok_or_else(|| StoreError::Task("source_changed".into()))?;
+                if current.size != *source_size || current.mtime != *source_mtime {
+                    return Err(StoreError::Task("source_changed".into()));
+                }
+                if !source.held.unchanged()
+                    || crate::fragment_index_cluster::open_source_playback_fence(
+                        &source.file,
+                        Some(source.held.object_version()),
                     )
-                    .await?;
-                    if cancel.is_cancelled() {
-                        return Err(StoreError::Task("worker_interrupted".into()));
-                    }
-                    let named = artifacts::model_identity(&state.subtitle_models.root, spec)
-                        .await
-                        .map_err(StoreError::Task)?;
-                    if named != model.identity {
-                        return Err(StoreError::Task(
-                            if automatic_model_identity.is_some() {
-                                "automatic_verification_obsolete"
-                            } else {
-                                "artifact_changed"
-                            }
-                            .into(),
-                        ));
-                    }
-                    let receipt =
-                        plurx_core::store::background_jobs_transcription::SubtitleModelReceipt {
-                            node_id: String::new(),
-                            boot_id: String::new(),
-                            model_id: spec.id.clone(),
-                            model_sha256: spec.sha256.clone(),
-                            adapter_contract: engine.adapter_contract.clone(),
-                            engine_sha256: engine.binary_sha256.clone(),
-                            model_file_identity: artifacts::identity_key(model.identity),
-                            engine_file_identity: artifacts::identity_key(engine.identity),
-                            job_id: String::new(),
-                            fence: 0,
-                            verified_at_ms: 0,
-                        };
-                    fence.publish_subtitle_model(payload.clone(), receipt).await
-                } else if let JobPayload::SubtitleTranscribeManaged {
-                    file_id,
-                    source_size,
-                    source_mtime,
-                    ..
-                } = &payload
+                    .await
+                    .is_err()
                 {
-                    let source = prepared_source
-                        .as_ref()
-                        .expect("preclaim source eligibility");
-                    let current = state
-                        .store
-                        .get_file(*file_id)
-                        .await?
-                        .ok_or_else(|| StoreError::Task("source_changed".into()))?;
-                    if current.size != *source_size || current.mtime != *source_mtime {
-                        return Err(StoreError::Task("source_changed".into()));
-                    }
-                    if !source.held.unchanged()
-                        || crate::fragment_index_cluster::open_source_playback_fence(
-                            &source.file,
-                            Some(source.held.object_version()),
-                        )
-                        .await
-                        .is_err()
-                    {
-                        return Err(StoreError::Task("worker_source_unavailable".into()));
-                    }
-                    let file = &source.file;
-                    let model = hash_admitted_model(
-                        state,
-                        spec,
-                        &cancel,
-                        admission.as_ref().expect("generation admission"),
-                    )
-                    .await?;
-                    if Some(model.identity) != model_identity {
-                        return Err(StoreError::Task("worker_interrupted".into()));
-                    }
-                    let caption = crate::subtitle_transcription::transcribe_managed(
-                        state,
-                        file,
-                        &payload,
-                        &engine,
-                        &model,
-                        &fence,
-                        admission.as_ref().expect("generation admission"),
-                        &cancel,
-                    )
-                    .await?;
-                    if !fence
+                    return Err(StoreError::Task("worker_source_unavailable".into()));
+                }
+                let file = &source.file;
+                let model = hash_admitted_model(
+                    state,
+                    spec,
+                    &cancel,
+                    admission.as_ref().expect("generation admission"),
+                )
+                .await?;
+                if Some(model.identity) != model_identity {
+                    return Err(StoreError::Task("worker_interrupted".into()));
+                }
+                let caption = crate::subtitle_transcription::transcribe_managed(
+                    state,
+                    file,
+                    &payload,
+                    &engine,
+                    &model,
+                    &fence,
+                    admission.as_ref().expect("generation admission"),
+                    &cancel,
+                )
+                .await?;
+                if !fence
                     .observe_subtitle(
                         plurx_core::store::background_jobs_transcription::SubtitlePhase::Publishing,
                     )
@@ -1560,11 +1555,11 @@ pub(crate) async fn worker_pass(
                 {
                     return Err(StoreError::Task("subtitle_operation_fenced".into()));
                 }
-                    fence.publish_transcription(payload.clone(), caption).await
-                } else {
-                    Ok(false)
-                }
-            };
+                fence.publish_transcription(payload.clone(), caption).await
+            } else {
+                Ok(false)
+            }
+        };
         let operation = plurx_core::process::bounded::cancellable(cancel.clone(), operation);
         tokio::pin!(operation);
         let result = loop {
@@ -1651,13 +1646,39 @@ pub(crate) async fn worker_pass(
     }
     Ok(())
 }
+async fn admit_model_test(
+    state: &AppState,
+    fence: &crate::background_jobs::JobFence,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<crate::transcode::FragmentAdmission, StoreError> {
+    use plurx_core::store::background_jobs_transcription::SubtitlePhase;
+    if !fence
+        .observe_subtitle(SubtitlePhase::WaitingForCapacity)
+        .await?
+    {
+        return Err(StoreError::Task("subtitle_operation_fenced".into()));
+    }
+    let admission = state
+        .transcode
+        .admit_speech_queued(cancel)
+        .await
+        .ok_or_else(|| StoreError::Task("waiting_for_playback_capacity".into()))?;
+    if cancel.is_cancelled() {
+        return Err(StoreError::Task("worker_interrupted".into()));
+    }
+    if !fence.observe_subtitle(SubtitlePhase::Verifying).await? {
+        return Err(StoreError::Task("subtitle_operation_fenced".into()));
+    }
+    Ok(admission)
+}
+
 async fn hash_admitted_model(
     state: &AppState,
     spec: &CatalogModel,
     cancel: &tokio_util::sync::CancellationToken,
     admission: &crate::transcode::FragmentAdmission,
 ) -> Result<artifacts::ManagedModel, StoreError> {
-    if !state.transcode.fragment_worker_idle(admission) {
+    if !state.transcode.speech_capacity_available(admission) {
         return Err(StoreError::Task("waiting_for_playback_capacity".into()));
     }
     let operation = artifacts::open_model_cancellable(&state.subtitle_models.root, spec, cancel);
@@ -1666,7 +1687,7 @@ async fn hash_admitted_model(
         tokio::select! {
             result=&mut operation=>return result.map_err(StoreError::Task),
             ()=tokio::time::sleep(Duration::from_millis(250))=>{
-                if cancel.is_cancelled() || !state.transcode.fragment_worker_idle(admission) {
+                if cancel.is_cancelled() || !state.transcode.speech_capacity_available(admission) {
                     let reason = if cancel.is_cancelled() { "worker_interrupted" } else { "waiting_for_playback_capacity" };
                     cancel.cancel();
                     let _ = operation.await;

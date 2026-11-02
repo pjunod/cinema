@@ -144,6 +144,13 @@ impl VideoCaps {
 /// A display that shows HDR and a decoder that emits it are different
 /// questions, and conflating them is how a PQ stream reaches an SDR panel and
 /// renders grey — which plays, so nobody reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayPeakSource {
+    Platform,
+    Viewer,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DisplayCaps {
     #[serde(default)]
@@ -152,9 +159,28 @@ pub struct DisplayCaps {
     pub dolby_vision: bool,
     #[serde(default)]
     pub max_nits: Option<i64>,
+    /// Provenance is diagnostic only; it never changes bucket selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_source: Option<DisplayPeakSource>,
     /// Active render-container backing pixels, independent of panel grade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation_target: Option<super::candidate::PresentationTarget>,
+}
+
+impl DisplayCaps {
+    /// Round down to the supported HDR target; Unknown and the future SDR
+    /// range retain the master grade. No display minimum is collected.
+    pub fn hdr10_target_bucket(&self) -> Option<u32> {
+        match self.max_nits? {
+            400..=599 => Some(400),
+            600..=999 => Some(600),
+            1000..=1599 => Some(1000),
+            1600..=1999 => Some(1600),
+            2000..=3999 => Some(2000),
+            4000..=4999 => Some(4000),
+            _ => None,
+        }
+    }
 }
 
 /// Which client build sent this. Diagnostic only — it never influences a
@@ -413,6 +439,7 @@ impl DeviceCaps {
                 hdr: legacy.hdr,
                 dolby_vision: legacy.dv || !legacy.dv_profiles.is_empty(),
                 max_nits: None,
+                peak_source: None,
                 presentation_target: None,
             }),
             learned_limits: Vec::new(),
@@ -1033,5 +1060,53 @@ mod display_geometry_tests {
                 .rectangle(),
             Some((2400, 1600))
         );
+    }
+}
+
+#[cfg(test)]
+mod display_target_tests {
+    use super::*;
+    #[test]
+    fn display_peak_bucket_rounds_down_and_unknown_stays_master() {
+        for (peak, expected) in [
+            (None, None),
+            (Some(-1), None),
+            (Some(0), None),
+            (Some(399), None),
+            (Some(400), Some(400)),
+            (Some(599), Some(400)),
+            (Some(600), Some(600)),
+            (Some(999), Some(600)),
+            (Some(1000), Some(1000)),
+            (Some(1599), Some(1000)),
+            (Some(1600), Some(1600)),
+            (Some(1999), Some(1600)),
+            (Some(2000), Some(2000)),
+            (Some(3999), Some(2000)),
+            (Some(4000), Some(4000)),
+            (Some(4999), Some(4000)),
+            (Some(5000), None),
+            (Some(i64::MAX), None),
+        ] {
+            for source in [
+                None,
+                Some(DisplayPeakSource::Platform),
+                Some(DisplayPeakSource::Viewer),
+            ] {
+                let caps = DisplayCaps {
+                    max_nits: peak,
+                    peak_source: source,
+                    ..Default::default()
+                };
+                assert_eq!(caps.hdr10_target_bucket(), expected);
+                let wire = serde_json::to_string(&caps).expect("caps serialize");
+                assert!(!wire.contains("min_nits"));
+                let restored: DisplayCaps = serde_json::from_str(&wire).expect("caps parse");
+                assert_eq!(restored.peak_source, source);
+            }
+        }
+        let old: DisplayCaps = serde_json::from_str("{}").expect("old caps");
+        assert_eq!(old.hdr10_target_bucket(), None);
+        assert!(serde_json::from_str::<DisplayCaps>(r#"{"max_nits":"1000"}"#).is_err());
     }
 }

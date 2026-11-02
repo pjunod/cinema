@@ -2,6 +2,7 @@
 import base64
 import copy
 from pathlib import Path
+import subprocess
 import unittest
 from unittest.mock import patch
 from validation import promotion_unit_retention as retention
@@ -12,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def source(commit, path):
-    return (ROOT / path).read_bytes()
+    # This fixture represents the immutable capture and an unchanged candidate.
+    # New working-tree cases must not become declarations in the old CI log.
+    return subprocess.check_output(['git', 'show', f'{web.SOURCE}:{path}'], cwd=ROOT)
 
 
 def capture():

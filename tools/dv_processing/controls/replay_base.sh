@@ -12,7 +12,7 @@ cp "$source_dir/../"*.c "$source_dir/../"*.h "$source_dir/../build.sh" "$work/to
 cp "$source_dir/make_movie.c" "$source_dir/run_base_controls.py" \
   "$source_dir/compare_yuv420p10_export.py" "$source_dir/"*.mkv "$work/"
 cp "$source_dir/generator/Cargo.toml" "$source_dir/generator/Cargo.lock" "$work/generator/"
-cp "$source_dir/generator/src/main.rs" "$source_dir/generator/src/base_profiles.rs" "$work/generator/src/"
+cp "$source_dir/generator/src/"*.rs "$work/generator/src/"
 cp "$source_dir/tags/"*.nal "$work/tags/"
 image=${DV_TEST_IMAGE:-sha256:96951921bc396f9fb96e579d9c15b83abe8b488390f8a7851c3754b2d96114c9}
 arch=${DV_TEST_ARCH_LIB:-aarch64-linux-gnu}

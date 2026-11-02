@@ -83,6 +83,7 @@ def prepare(archive, output, jobs, dependency_source=None):
     end = text.index("\n./configure", start)
     text = text[:start] + text[end:]
     text = text.replace("--prefix=/ffbuild/prefix", '--prefix="$FFBUILD_PREFIX"')
+    text = text.replace("\n./configure", '\npython3 "$PLURX_BUILD_ROOT/extraction-helpers/build-macos-vulkan" --prepared-build "$PLURX_BUILD_ROOT" --jobs "$(nproc)"\nFF_CONFIGURE="${FF_CONFIGURE//--disable-libplacebo/} --enable-vulkan --enable-vulkan-static --enable-libshaderc --enable-libplacebo"\n./configure')
     builder.write_text(text)
     # GNU libtool is an autotools dependency, but this recipe requires Apple's
     # archive combiner. A PATH-selected GNU tool leaves a Main-only archive.
@@ -153,7 +154,7 @@ def prepare(archive, output, jobs, dependency_source=None):
         upstream.chmod(0o755)
     retained_helpers = output / "extraction-helpers"
     retained_helpers.mkdir(exist_ok=True)
-    for name in ("build-macos-video-ffmpeg", "macos-video-dependency-sources.json"):
+    for name in ("build-macos-video-ffmpeg", "macos-video-dependency-sources.json", "build-macos-vulkan", "macos-vulkan-sources.json"):
         shutil.copyfile(Path(__file__).with_name(name), retained_helpers / name)
     entry = output / "build.sh"
     entry.write_text('#!/bin/bash\nset -euo pipefail\nPLURX_BUILD_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexport PLURX_BUILD_ROOT\nexport PATH="$PLURX_BUILD_ROOT/bin:$PATH"\nexport ACLOCAL_PATH="$PLURX_BUILD_ROOT/prefix/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}"\nfor tool in wget git cmake meson ninja pkg-config autoconf automake libtoolize glibtoolize nasm timeout shuf makeinfo gsed svn; do\n    command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }\ndone\nxcrun -sdk macosx metal -v\n/bin/bash "$PLURX_BUILD_ROOT/source/builder/buildmac.sh"\npython3 "$PLURX_BUILD_ROOT/extraction-helpers/build-macos-video-ffmpeg" --font-tools-build "$PLURX_BUILD_ROOT" --jobs "$(nproc)"\n')
@@ -166,7 +167,9 @@ def prepare(archive, output, jobs, dependency_source=None):
                           "color": "P5 IPT-PQ-C2; no generic default color",
                           "bwdif": "Metal shader parameter buffer index 0"},
              "qualification": "source-prepared-only", "jobs": jobs,
-             "font_tools_builder_sha256": package.digest(retained_helpers / "build-macos-video-ffmpeg")}
+             "font_tools_builder_sha256": package.digest(retained_helpers / "build-macos-video-ffmpeg"),
+             "vulkan_builder_sha256": package.digest(retained_helpers / "build-macos-vulkan"),
+             "vulkan_source_lock_sha256": package.digest(retained_helpers / "macos-vulkan-sources.json")}
     if dependency_facts is not None:
         facts["dependency_source_inputs"] = dependency_facts
     (output / "prepared-source.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")

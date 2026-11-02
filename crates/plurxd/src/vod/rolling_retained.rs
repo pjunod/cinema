@@ -86,6 +86,16 @@ impl RollingCollection {
             self.refuse();
             return;
         }
+        let (source_pin, destination_pin) = match (
+            crate::playback_cache::pin(&source),
+            crate::playback_cache::pin(&self.artifact.directory),
+        ) {
+            (Ok(source), Ok(destination)) => (source, destination),
+            _ => {
+                self.refuse();
+                return;
+            }
+        };
         let Ok(gate) = Arc::clone(&self.gate).try_lock_owned() else {
             self.refuse();
             return;
@@ -134,6 +144,7 @@ impl RollingCollection {
         // ordinary publisher never waits for filesystem proof collection.
         tokio::task::spawn_blocking(move || {
             let _gate = gate;
+            let _cache_pins = (source_pin, destination_pin);
             #[cfg(test)]
             owner.pause_before_link_for_test();
             let result = (|| {
@@ -937,6 +948,48 @@ async fn attachment_facts_current(
     // Source verification can yield. Sample irreversible refusal afterwards,
     // so a concurrent integrity transfer cannot be hidden by that await.
     input_current.await && !refused.load(Acquire)
+}
+
+impl RetainedArtifactRegistry {
+    pub(super) async fn pressure_evict_rolling(&self, path: &Path) -> io::Result<bool> {
+        let artifact = {
+            let mut state = self.state.lock().expect("retained registry lock");
+            let identity = state.rolling.iter().find_map(|(identity, entry)| {
+                (entry.artifact.directory == path && Arc::strong_count(&entry.artifact) == 1)
+                    .then_some(*identity)
+            });
+            if let Some(identity) = identity {
+                let entry = state
+                    .rolling
+                    .remove(&identity)
+                    .expect("selected rolling entry");
+                state.rolling_retired.push_back(entry.artifact);
+            }
+            state
+                .rolling_retired
+                .iter()
+                .find(|artifact| artifact.directory == path && Arc::strong_count(artifact) == 1)
+                .cloned()
+        };
+        let Some(artifact) = artifact else {
+            return Ok(false);
+        };
+        if !artifact.deletable()
+            || !remove_artifact_within(path, Instant::now() + RETAINED_GC_TICK_BUDGET).await?
+        {
+            return Ok(false);
+        }
+        let mut state = self.state.lock().expect("retained registry lock");
+        if let Some(index) = state
+            .rolling_retired
+            .iter()
+            .position(|entry| Arc::ptr_eq(entry, &artifact))
+        {
+            state.rolling_retired.remove(index);
+            state.bytes = state.bytes.saturating_sub(artifact.accounted.load(Acquire));
+        }
+        Ok(true)
+    }
 }
 
 #[cfg(test)]

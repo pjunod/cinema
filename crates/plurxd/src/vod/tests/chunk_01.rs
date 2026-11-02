@@ -466,6 +466,7 @@ fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds,
         audio_index: None,
@@ -754,7 +755,7 @@ async fn insert_control_session(
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
-                processed_probes: Vec::new(),
+                processed_reuse_seed: None,
             preferred_start_ms: None,
             passive_grant: None,
             rendition: Some(rendition),
@@ -811,7 +812,7 @@ async fn insert_terminal_session(
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
-                processed_probes: Vec::new(),
+                processed_reuse_seed: None,
             preferred_start_ms: None,
             passive_grant: None,
             rendition: None,
@@ -1248,6 +1249,7 @@ async fn stored_marker_prewarm_is_subordinate_and_hits_only_its_own_production()
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         hit,
     );
@@ -2153,6 +2155,7 @@ async fn marker_prewarm_placeholder_correlates_without_a_client_session_id() {
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
     }
 

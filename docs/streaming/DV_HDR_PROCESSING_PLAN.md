@@ -1,8 +1,13 @@
 # Dolby Vision processing — preserve FEL and measure the result
 
-**Status:** open — proposal for gated feasibility work; no production behavior
-changed · **Updated:** 2026-10-08 · **Inspected base:**
+**Status:** open — historical proposal; implementation and acceptance are
+tracked in the processing ledger · **Updated:** 2026-10-21 · **Inspected base:**
 `a3158eadc9a4f26d2d8293b4a91f23a94c9012b6`
+
+For current selection rules, use [DV selection paths](DV-SELECTION-PATHS.md);
+for implementation and remaining acceptance, use the
+[processing ledger](DV_HDR_PROCESSING_STATUS.md). The proposal below describes
+its inspected base rather than current production behavior.
 
 This proposal answers how Plurx can use more of a Dolby Vision source for
 HDR10 output and Profile 7 to 8.1 delivery. The

@@ -37,11 +37,13 @@ mod dv_disk;
 mod dv_segment;
 mod dvpipe;
 mod ffmpeg;
+mod ffmpeg_support;
 mod fontenv;
 mod fragindex;
 mod fragment_index_cluster;
 mod hevc_census;
 mod http;
+mod https;
 mod job_lease;
 mod library_search;
 mod live_tv;
@@ -52,11 +54,13 @@ mod manifest_cache;
 mod media_pool;
 mod media_sessions;
 mod meter;
+mod mkv_sparse;
 mod offline;
 mod online_subtitles;
 mod panics;
 mod pgs_overlay;
 mod pipeprobe;
+mod playback_cache;
 mod playback_control;
 mod playstart;
 mod process_control;
@@ -82,6 +86,9 @@ mod shared_cache;
 mod sharing;
 mod sharing_client;
 mod sharing_connection_custody;
+mod sharing_diagnosis;
+mod sharing_host;
+mod sharing_network;
 #[cfg(test)]
 mod sharing_protocol_fixture;
 mod source_probe;
@@ -92,6 +99,7 @@ mod subtitle_models;
 mod subtitle_ranges;
 mod subtitle_ride_along;
 mod subtitle_source;
+mod subtitle_text_translation;
 mod subtitle_transcription;
 mod subtitle_translation;
 mod subtitles;
@@ -205,41 +213,117 @@ mod test_executable_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    /// The race `write_test_executable` exists for, run on purpose: other
-    /// threads fork continuously while fixtures are written and executed at
-    /// once. Written in-process (`std::fs::write` then `set_permissions`),
-    /// this fails with `ETXTBSY` within a few hundred iterations on a busy
-    /// host; written by the helper, no descriptor of this process is ever
-    /// writable on the fixture, so every exec succeeds.
+    /// Four real fork/exec attempts accompany each of 300 fixture rounds.
+    /// Per-round barriers bound the work to 1200 forker children; a slow
+    /// writer cannot turn this race control into an unbounded exec storm.
     #[test]
     fn a_fixture_executes_at_once_while_other_threads_fork() {
+        use std::os::unix::process::CommandExt;
+        use std::sync::{mpsc, Barrier};
+
         let root = crate::test_tempdir().expect("root");
         let stop = Arc::new(AtomicBool::new(false));
-        let forkers: Vec<_> = (0..4)
-            .map(|_| {
-                let stop = Arc::clone(&stop);
-                std::thread::spawn(move || {
-                    while !stop.load(Ordering::Acquire) {
-                        let _ = std::process::Command::new("/bin/true").status();
+        let start = Arc::new(Barrier::new(5));
+        let done = Arc::new(Barrier::new(5));
+        let (results, completed) = mpsc::channel();
+        let mut forkers: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        let mut armed = Vec::new();
+        for _ in 0..4 {
+            let (arm, ready) = mpsc::channel::<()>();
+            let stop = Arc::clone(&stop);
+            let start = Arc::clone(&start);
+            let done = Arc::clone(&done);
+            let results = results.clone();
+            let forker = std::thread::Builder::new().spawn(move || {
+                // Partial thread creation must not strand a fixed-size barrier.
+                if ready.recv().is_err() {
+                    return;
+                }
+                loop {
+                    start.wait();
+                    if stop.load(Ordering::Acquire) {
+                        break;
                     }
-                })
-            })
-            .collect();
+                    let outcome = std::panic::catch_unwind(|| {
+                        let mut command = std::process::Command::new("/usr/bin/true");
+                        // SAFETY: pre_exec forces fork, so CLOEXEC descriptors
+                        // remain inherited until exec. poll with no descriptors
+                        // is a bounded, POSIX async-signal-safe 1ms hold. The
+                        // callback neither allocates nor takes a Rust lock.
+                        unsafe {
+                            command.pre_exec(|| {
+                                if libc::poll(std::ptr::null_mut(), 0, 1) < 0 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
+                                Ok(())
+                            });
+                        }
+                        let status = command.status().expect("forker child must execute");
+                        assert!(status.success(), "forker child failed: {status}");
+                    });
+                    // The receiver remains alive until every worker is joined.
+                    let _ = results.send(outcome);
+                    done.wait();
+                }
+            });
+            match forker {
+                Ok(forker) => {
+                    forkers.push(forker);
+                    armed.push(arm);
+                }
+                Err(error) => {
+                    drop(armed);
+                    for forker in forkers {
+                        let _ = forker.join();
+                    }
+                    panic!("start all four forkers: {error}");
+                }
+            }
+        }
+        for arm in armed {
+            arm.send(()).expect("arm an owned forker");
+        }
+        drop(results);
         let outcome = std::panic::catch_unwind(|| {
             for index in 0..300 {
-                let path = root.path().join(format!("fixture-{index}"));
-                crate::write_test_executable(&path, "#!/bin/sh\nexit 7\n", 0o700);
-                let status = std::process::Command::new(&path)
-                    .status()
-                    .unwrap_or_else(|error| panic!("fixture {index} did not execute: {error}"));
-                assert_eq!(status.code(), Some(7), "fixture {index} ran its own body");
+                start.wait();
+                let fixture = std::panic::catch_unwind(|| {
+                    let path = root.path().join(format!("fixture-{index}"));
+                    crate::write_test_executable(&path, "#!/bin/sh\nexit 7\n", 0o700);
+                    let status = std::process::Command::new(&path)
+                        .status()
+                        .unwrap_or_else(|error| panic!("fixture {index} did not execute: {error}"));
+                    assert_eq!(status.code(), Some(7), "fixture {index} ran its own body");
+                });
+                // Every worker reaches this even when its child failed. Release
+                // it and drain all four outcomes before propagating any panic.
+                done.wait();
+                let mut fork_failure = None;
+                for _ in 0..4 {
+                    if let Err(panic) = completed.recv().expect("each forker reports its round") {
+                        fork_failure.get_or_insert(panic);
+                    }
+                }
+                if let Err(panic) = fixture {
+                    std::panic::resume_unwind(panic);
+                }
+                if let Some(panic) = fork_failure {
+                    std::panic::resume_unwind(panic);
+                }
             }
         });
         stop.store(true, Ordering::Release);
+        start.wait();
+        let mut join_failure = None;
         for forker in forkers {
-            forker.join().expect("forker");
+            if let Err(panic) = forker.join() {
+                join_failure.get_or_insert(panic);
+            }
         }
         if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        if let Some(panic) = join_failure {
             std::panic::resume_unwind(panic);
         }
     }
@@ -422,6 +506,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SharingCommand {
+    /// Fixed host-installer compatibility probe; no credentials or mutations.
+    HostCapabilities,
     /// Create an owner-only node key and certificate; refuse existing identity files.
     InitTls {
         #[arg(long)]
@@ -605,6 +691,12 @@ async fn dispatch(
     }
     match command {
         Command::Run => run(config).await,
+        Command::Sharing {
+            command: SharingCommand::HostCapabilities,
+        } => {
+            println!("{{\"schema_version\":1,\"managed_host_egress_guard\":true}}");
+            Ok(())
+        }
         Command::Sharing {
             command: SharingCommand::InitTls { key_directory },
         } => {
@@ -1925,6 +2017,8 @@ struct Boot {
 /// cannot retain the pending router after activation.
 struct StartupObservationHttp {
     bind: SocketAddr,
+    #[cfg(test)]
+    prebound: tokio::sync::Mutex<Option<tokio::net::TcpListener>>,
     router: Arc<std::sync::RwLock<axum::Router>>,
     tasks: tokio::sync::Mutex<Option<StartupObservationTasks>>,
     stop: tokio_util::sync::CancellationToken,
@@ -1941,10 +2035,19 @@ impl StartupObservationHttp {
     fn new(bind: SocketAddr) -> Self {
         Self {
             bind,
+            #[cfg(test)]
+            prebound: tokio::sync::Mutex::new(None),
             router: Arc::new(std::sync::RwLock::new(axum::Router::new())),
             tasks: tokio::sync::Mutex::new(None),
             stop: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    #[cfg(test)]
+    fn from_listener(listener: tokio::net::TcpListener) -> std::io::Result<Self> {
+        let mut owner = Self::new(listener.local_addr()?);
+        owner.prebound = tokio::sync::Mutex::new(Some(listener));
+        Ok(owner)
     }
 
     async fn stop_probe(&self) {
@@ -2130,9 +2233,16 @@ impl StartupClockObserver for StartupObservationHttp {
                     "clock observation socket already owned".into(),
                 ));
             }
-            let listener = bind_listener(self.bind)
-                .await
-                .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?;
+            #[cfg(test)]
+            let prebound = self.prebound.lock().await.take();
+            #[cfg(not(test))]
+            let prebound: Option<tokio::net::TcpListener> = None;
+            let listener = match prebound {
+                Some(listener) => listener,
+                None => bind_listener(self.bind)
+                    .await
+                    .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?,
+            };
             let observer = crate::clock_offset::ClockObserver::new(membership.clone());
             let pending = axum::Router::new()
                 .route(
@@ -2166,7 +2276,8 @@ impl StartupClockObserver for StartupObservationHttp {
                 },
             ));
             let stop = self.stop.clone();
-            let server = tokio::spawn(serve_http(
+            let server = tokio::spawn(serve_http_listener(
+                "startup_observation",
                 listener,
                 dispatch,
                 async move { stop.cancelled().await },
@@ -2227,6 +2338,7 @@ async fn boot_observing(
         Some(owner) if owner.tasks.lock().await.is_some() => Some(owner),
         _ => None,
     };
+    let prepared_https = https::Prepared::open(&config).await?;
     let Boot {
         source_activation_at_boot,
         store,
@@ -2276,6 +2388,13 @@ async fn boot_observing(
         system,
         logs,
     );
+    state.https = Some(Arc::new(https::Control::new(
+        node_id.clone(),
+        config.clone(),
+        prepared_https
+            .as_ref()
+            .map(|prepared| prepared.identity.clone()),
+    )?));
     state
         .sharing
         .observe_source_activation_at_boot(source_activation_at_boot);
@@ -2345,6 +2464,19 @@ async fn boot_observing(
         .await;
     let plex_census = Arc::clone(&state.plex_census);
     let background_loops = BackgroundLoopGuard::new();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let native_managed = desktop.is_some();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let native_managed = false;
+    tokio::spawn(sharing_host::run(
+        state.clone(),
+        background_loops.token(),
+        native_managed,
+    ));
+    tokio::spawn(sharing_network::run(
+        state.clone(),
+        background_loops.token(),
+    ));
     spawn_background_loops(&state, background_loops.token());
 
     let progress = Arc::clone(&state.progress);
@@ -2387,6 +2519,13 @@ async fn boot_observing(
     } else {
         None
     };
+    let public_listener_stop = tokio_util::sync::CancellationToken::new();
+    let https_serving = https::Serving::start(
+        prepared_https,
+        app.clone(),
+        public_listener_stop.clone(),
+        leave_shutdown.clone(),
+    );
     #[cfg(windows)]
     crate::windows_service::report_listener_ready()?;
     trigger_shutdown_registration_failpoint("after-listener-bind");
@@ -2432,21 +2571,26 @@ async fn boot_observing(
         }
         // The main listener stops accepting when this future completes;
         // the Jellyfin standard port stops at the same moment.
+        public_listener_stop.cancel();
         jellyfin_stop.cancel();
     };
     let served = if let Some(owner) = observation {
-        match owner.serve_normal(app, shutdown).await {
-            Ok(drain) => {
-                let drain = drain.and(jellyfin.drain().await);
-                drain_serving_state(progress, mdns).await.map(|()| drain)
-            }
-            Err(error) => Err(error),
-        }
+        serve_observed(
+            owner,
+            app,
+            jellyfin,
+            https_serving,
+            progress,
+            mdns,
+            shutdown,
+        )
+        .await
     } else {
         serve(
             listener.expect("normal startup owns its listener"),
             app,
             jellyfin,
+            https_serving,
             progress,
             mdns,
             shutdown,
@@ -2632,6 +2776,11 @@ where
         .with(
             logbuf::BufferLayer(Arc::clone(&logs.cluster)).with_filter(filter_fn(|metadata| {
                 logbuf::is_cluster_target(metadata.target())
+            })),
+        )
+        .with(
+            logbuf::BufferLayer(Arc::clone(&logs.sharing)).with_filter(filter_fn(|metadata| {
+                logbuf::is_sharing_target(metadata.target())
             })),
         )
 }
@@ -2999,6 +3148,16 @@ async fn probe_system(
     for (codec, backend, decoder) in measured_decoders.measured_paths() {
         tracing::info!(%codec, backend = backend.name(), %decoder, "measured the decoder this ffmpeg selects");
     }
+    // The Dolby Vision renderer's CPU debit reads this. Warm it off the boot
+    // path: until it is proved, a play is debited the software shape, and a
+    // failure is retried on later need (`has_hevc_main10_vaapi_decode`).
+    drop(tokio::spawn(async {
+        let hevc_main10_vaapi_decode = crate::ffmpeg::has_hevc_main10_vaapi_decode().await;
+        tracing::info!(
+            hevc_main10_vaapi_decode,
+            "measured VA-API HEVC Main10 decode"
+        );
+    }));
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
     let hwaccel_override = store
@@ -3006,23 +3165,14 @@ async fn probe_system(
         .await?;
     let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
-    let optimization = match tokio::time::timeout(
-        std::time::Duration::from_secs(180),
-        transcoder_optimization::measure(&ffmpeg, &encoder_caps),
-    )
-    .await
+    // Representative comparisons run only on an explicit idle-node request.
+    // A saved receipt is reusable only for this executable/fixture/driver set.
+    let optimization = match transcoder_optimization::load(store, node_id, &ffmpeg, &encoder_caps)
+        .await
     {
-        Ok(Ok(report)) => {
-            if let Err(error) = transcoder_optimization::save(store, node_id, &report).await {
-                tracing::warn!(%error, "could not persist transcoder benchmark");
-            }
-            Some(report)
-        }
-        result => {
-            tracing::warn!(
-                ?result,
-                "transcoder benchmark unavailable; using validated encoder order"
-            );
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, "could not load representative transcode comparison; using validated hardware order");
             None
         }
     };
@@ -3092,6 +3242,17 @@ async fn probe_system(
     );
     system.hwaccel_override = hwaccel_override;
     system.transcoder_optimization = optimization;
+    let support = crate::ffmpeg_support::report(&system).await;
+    if !support.package_problems.is_empty()
+        || support.rows.iter().any(|row| row.required && !row.included)
+    {
+        tracing::error!(
+            executable = %support.executable,
+            package_problems = ?support.package_problems,
+            missing = ?support.rows.iter().filter(|row| row.required && !row.included).map(|row| (&row.label, &row.missing)).collect::<Vec<_>>(),
+            "FFmpeg does not satisfy this node's media support contract; see Settings > System"
+        );
+    }
     Ok((encoder_caps, system))
 }
 
@@ -3398,6 +3559,10 @@ fn spawn_background_loops(
         state.clone(),
         background_shutdown.clone(),
     ));
+    tokio::spawn(http::playback_handoffs::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(subtitle_transcription::run(
         state.clone(),
         background_shutdown.clone(),
@@ -3447,6 +3612,7 @@ fn spawn_background_loops(
             .root_readability_loop(std::sync::Arc::clone(&state.store)),
     );
     tokio::spawn(std::sync::Arc::clone(&state.shared_cache).run(background_shutdown.clone()));
+    tokio::spawn(std::sync::Arc::clone(&state.playback_cache).run(background_shutdown.clone()));
     // Fragment indexes are node-local for both storage backends. Validate one
     // bounded page here on every node; cluster leadership is neither required
     // nor sufficient to cover another node's sidecar.
@@ -3652,17 +3818,38 @@ async fn serve(
     listener: tokio::net::TcpListener,
     app: axum::Router,
     jellyfin: JellyfinStandardListener,
+    https: https::Serving,
     progress: Arc<crate::progress::ProgressCoalescer>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<HttpDrain> {
     // The shutdown future stops both listeners at once; the standard port
     // finishes draining before progress is flushed, like the main one.
-    let drain = serve_http(listener, app, shutdown, HTTP_TIMEOUTS)
-        .await?
-        .and(jellyfin.drain().await);
-    drain_serving_state(progress, mdns).await?;
-    Ok(drain)
+    let main = serve_http_listener("main", listener, app, shutdown, HTTP_TIMEOUTS).await;
+    let tls = https.drain().await;
+    let jellyfin = jellyfin.drain().await;
+    let cleanup = drain_serving_state(progress, mdns).await;
+    main.and_then(|main| tls.map(|tls| main.and(tls).and(jellyfin)))
+        .and_then(|drain| cleanup.map(|()| drain))
+}
+
+/// The observation socket transfers its router per request, but shares the
+/// same TLS/Jellyfin/progress ownership order as ordinary startup.
+async fn serve_observed(
+    owner: Arc<StartupObservationHttp>,
+    app: axum::Router,
+    jellyfin: JellyfinStandardListener,
+    https: https::Serving,
+    progress: Arc<crate::progress::ProgressCoalescer>,
+    mdns: Option<mdns_sd::ServiceDaemon>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<HttpDrain> {
+    let main = owner.serve_normal(app, shutdown).await;
+    let tls = https.drain().await;
+    let jellyfin = jellyfin.drain().await;
+    let cleanup = drain_serving_state(progress, mdns).await;
+    main.and_then(|main| tls.map(|tls| main.and(tls).and(jellyfin)))
+        .and_then(|drain| cleanup.map(|()| drain))
 }
 
 /// How `serve_http`'s shutdown drain ended. Only `Complete` proves that no
@@ -3721,7 +3908,8 @@ impl JellyfinStandardListener {
                 tracing::info!(addr = %bound, "listening for Jellyfin clients at the server root");
                 status.record(http::JellyfinStandardPort::Listening(bound));
                 let stop = listener.stop.clone();
-                listener.task = Some(tokio::spawn(serve_http(
+                listener.task = Some(tokio::spawn(serve_http_listener(
+                    "jellyfin_standard",
                     socket,
                     http::jellyfin_standard_port_app(app.clone()),
                     async move { stop.cancelled().await },
@@ -3961,7 +4149,22 @@ impl SharingConnectionCancellation {
     }
 }
 
+/// [`serve_http_listener`] for tests, which run one anonymous listener each.
+#[cfg(test)]
 async fn serve_http<A: HttpAcceptor>(
+    listener: A,
+    app: axum::Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    timeouts: HttpTimeouts,
+) -> anyhow::Result<HttpDrain> {
+    serve_http_listener("test", listener, app, shutdown, timeouts).await
+}
+
+/// Serve one HTTP listener until `shutdown`, then drain it. `name` says
+/// which of the daemon's listeners this is in every line it logs, so a
+/// drain on one listener is never read as the daemon shutting down.
+async fn serve_http_listener<A: HttpAcceptor>(
+    name: &'static str,
     listener: A,
     app: axum::Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -3999,7 +4202,7 @@ async fn serve_http<A: HttpAcceptor>(
                 // descriptor and buffer exhaustion are expected to clear.
                 // Backing off keeps a persistent condition from turning the
                 // loop into a CPU/log spinner while preserving availability.
-                tracing::error!(%error, "HTTP listener accept failed; retrying");
+                tracing::error!(%error, listener = name, "HTTP listener accept failed; retrying");
                 tokio::select! {
                     () = &mut shutdown => break,
                     () = tokio::time::sleep(timeouts.accept_error_backoff) => continue,
@@ -4058,13 +4261,16 @@ async fn serve_http<A: HttpAcceptor>(
         });
     }
 
+    // Cancel owned pending TLS handshakes before waiting on active bodies.
+    // This also releases the listening socket immediately on shutdown.
+    drop(listener);
     let _ = drain_started.send(());
     connection_shutdown.cancel();
     let connections_drained = async { while connections.join_next().await.is_some() {} };
     tokio::pin!(connections_drained);
     let drain = tokio::select! {
         () = &mut connections_drained => {
-            tracing::info!("shutdown complete");
+            tracing::info!(listener = name, "shutdown complete");
             HttpDrain::Complete
         }
         // Only starts counting once the signal has actually arrived: if the
@@ -4074,6 +4280,7 @@ async fn serve_http<A: HttpAcceptor>(
             tokio::time::sleep(timeouts.shutdown_drain).await;
         } => {
             tracing::warn!(
+                listener = name,
                 after = ?timeouts.shutdown_drain,
                 "drain timed out with connections still open; exiting anyway"
             );

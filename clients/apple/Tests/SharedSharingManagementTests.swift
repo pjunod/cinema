@@ -1,5 +1,9 @@
 import Foundation
 import XCTest
+import UIKit
+#if os(iOS)
+import AVFoundation
+#endif
 @testable import plurx
 
 private final class SharedManagementHTTP: URLProtocol {
@@ -40,6 +44,100 @@ final class SharedSharingManagementTests: XCTestCase {
     private func exportWire() -> String { """
         {"exports":[{"grant":{"id":"\(uuid)","recipient_server_id":"\(server)","state":"pending","scope_generation":1,"credential_generation":1,"catalogue_generation":1,"mutation_generation":\(precise),"pending_expires_at_ms":1},"recipient_name":"Recipient B","invitation_id":"\(uuid)","claim_id":"\(epoch)","library_ids":["\(precise)"],"pairing_code":"1234567890abcdef"}],"next":null}
         """ }
+    func testSavedInvitationQRCodeRoundTripsExactPayload() throws {
+        let invitation = "cinema-share-v1:" + String(repeating: "Ab09_-", count: 120)
+        let image = try XCTUnwrap(SharedSharingInvitationQR.image(for: invitation))
+        let png = try XCTUnwrap(image.pngData())
+        XCTAssertEqual(try SharedSharingInvitationQR.decode(png), invitation)
+        XCTAssertEqual(image.scale, 1)
+        XCTAssertGreaterThan(image.size.width, 256)
+    }
+    func testInvitationQRRejectsUnrelatedOrAmbiguousImagesAndOversizedPayloads() throws {
+        XCTAssertNil(SharedSharingInvitationQR.image(for: "https://example.test/invitation"))
+        for whitespace in ["\n", "\r", "\r\n", "\t", " "] {
+            XCTAssertThrowsError(try SharedSharingInvitationQR.invitation("cinema-share-v1:abc123" + whitespace))
+            XCTAssertNil(SharedSharingInvitationQR.image(for: "cinema-share-v1:abc123" + whitespace))
+        }
+        let largest = "cinema-share-v1:" + String(repeating: "a", count: SharedSharingInvitationQR.maximumQRBytes - 16)
+        XCTAssertNotNil(SharedSharingInvitationQR.image(for: largest))
+        XCTAssertNil(SharedSharingInvitationQR.image(for: largest + "a"))
+        XCTAssertThrowsError(try SharedSharingInvitationQR.decode(Data("not an image".utf8)))
+        XCTAssertThrowsError(try SharedSharingInvitationQR.decode(Data(repeating: 0, count: SharedSharingInvitationQR.maximumImageBytes + 1)))
+        let first = try XCTUnwrap(SharedSharingInvitationQR.image(for: "cinema-share-v1:abc123"))
+        let second = try XCTUnwrap(SharedSharingInvitationQR.image(for: "cinema-share-v1:def456"))
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let composite = UIGraphicsImageRenderer(size: CGSize(width: first.size.width + second.size.width, height: first.size.height), format: format).image { _ in
+            first.draw(at: .zero); second.draw(at: CGPoint(x: first.size.width, y: 0))
+        }
+        XCTAssertThrowsError(try SharedSharingInvitationQR.decode(XCTUnwrap(composite.pngData())))
+    }
+    func testDelayedQRReadCannotReplaceNewerEditOrRetiredAccountDraft() throws {
+        Session.shared.setCredentials(origin: "https://b.test", token: "b-token")
+        let draft = SharedSharingSecretDraft()
+        let request = try XCTUnwrap(draft.snapshot())
+        draft.edit(invitation: "newer text")
+        XCTAssertFalse(draft.acceptInvitation("cinema-share-v1:old", ifRevision: request.revision))
+        XCTAssertEqual(draft.snapshot()?.invitation, "newer text")
+        let current = try XCTUnwrap(draft.snapshot())
+        XCTAssertTrue(draft.acceptInvitation("cinema-share-v1:ready", ifRevision: current.revision))
+        let accountRequest = try XCTUnwrap(draft.snapshot())
+        Session.shared.setCredentials(origin: "https://other.test", token: "other-token")
+        XCTAssertFalse(draft.acceptInvitation("cinema-share-v1:late", ifRevision: accountRequest.revision))
+        XCTAssertNil(draft.snapshot())
+        let left = SharedSharingSecretDraft(); let leaveRequest = try XCTUnwrap(left.snapshot()); left.leave()
+        XCTAssertFalse(left.acceptInvitation("cinema-share-v1:late", ifRevision: leaveRequest.revision))
+    }
+    #if os(iOS)
+    @MainActor
+    func testInvitationQRScanRequestsFirstCameraPermissionBeforeAvailability() async {
+        var events: [String] = []
+        let firstUse = await SharedSharingQRCameraPermission.prepare(status: .notDetermined,
+            request: { events.append("request"); return true }, isCurrent: { true },
+            available: { events.append("available"); return true })
+        XCTAssertEqual(firstUse, .ready); XCTAssertEqual(events, ["request", "available"])
+        let authorized = await SharedSharingQRCameraPermission.prepare(status: .authorized,
+            request: { XCTFail("Already authorized camera must not request again"); return false },
+            isCurrent: { true }, available: { true })
+        XCTAssertEqual(authorized, .ready)
+        for status in [AVAuthorizationStatus.denied, .restricted] {
+            let denied = await SharedSharingQRCameraPermission.prepare(status: status,
+                request: { XCTFail("Denied camera must not request again"); return true }, isCurrent: { true },
+                available: { XCTFail("Denied camera must not consult scanner availability"); return true })
+            XCTAssertEqual(denied, .denied)
+        }
+        let firstDenial = await SharedSharingQRCameraPermission.prepare(status: .notDetermined,
+            request: { false }, isCurrent: { true },
+            available: { XCTFail("Declined camera must not consult scanner availability"); return true })
+        XCTAssertEqual(firstDenial, .denied)
+        let unavailable = await SharedSharingQRCameraPermission.prepare(status: .authorized,
+            isCurrent: { true }, available: { false })
+        XCTAssertEqual(unavailable, .unavailable)
+    }
+    @MainActor
+    func testInvitationQRCameraPermissionDiscardsStaleGrantAndDenial() async throws {
+        for allowed in [true, false] {
+            for mutation in 0..<4 {
+                Session.shared.setCredentials(origin: "https://b.test", token: "b-token")
+                let draft = SharedSharingSecretDraft()
+                let requested = try XCTUnwrap(draft.snapshot())
+                let requestId = UUID(); var currentId = requestId
+                let outcome = await SharedSharingQRCameraPermission.prepare(status: .notDetermined,
+                    request: {
+                        switch mutation {
+                        case 0: draft.edit(invitation: "newer text")
+                        case 1: draft.leave()
+                        case 2: Session.shared.setCredentials(origin: "https://other.test", token: "other-token")
+                        default: currentId = UUID()
+                        }
+                        return allowed
+                    }, isCurrent: { currentId == requestId && draft.accepts(requested.revision) },
+                    available: { XCTFail("Stale permission result must not present a scanner"); return true })
+                XCTAssertNil(outcome)
+                draft.leave()
+            }
+        }
+    }
+    #endif
     func testActualApprovalAndScopeBodiesPreserveExactIdsAndRequireEnteredCode() async throws {
         let client = try client(); SharedManagementHTTP.body = Data(exportWire().utf8)
         let page = try await client.exports(); let row = page.rows[0]

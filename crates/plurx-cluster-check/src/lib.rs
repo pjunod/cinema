@@ -324,6 +324,8 @@ pub(crate) const BACKGROUND_SQL_CLASSES: [BackgroundSqlClass; 2] = [
 
 /// `main` passes `std::env::args()` straight through, so the argument
 /// contract — including every rejection — is exercised by the crate's tests.
+/// `membership` isolates remote follower removal; `leader-leave` isolates the
+/// existing healthy/degraded self-leave cases. The default still runs all three.
 pub async fn run(args: Vec<String>) -> Result<()> {
     install_crypto_provider();
     hiqlite::validation_register_applied_sql_classes(
@@ -335,6 +337,13 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             controller().await
         }
         Some("membership") => run_membership_lifecycle_case().await,
+        Some("leader-leave") => {
+            if args.get(2).is_some() {
+                bail!("leader-leave accepts no arguments");
+            }
+            run_leader_self_leave_case().await?;
+            run_degraded_four_voter_leader_self_leave_case().await
+        }
         Some("learner") => run_learner_membership_case().await.map(|_| ()),
         Some("proxy-fixture") => failure_drills::run_proxy_fixture_command().await,
         Some("singleton") => run_singleton_takeover_case().await,
@@ -4503,6 +4512,9 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     // commits, so a package created after the plan was drawn is real; a
     // removal that resolved only its opening snapshot would commit and leave
     // this one owned by a node that no longer exists.
+    // The live worker started after the explicit write-budget controls keeps
+    // publishing the target's post-fence route role/applied index. Manual
+    // pre-fence heartbeats cannot prove the later removal barrier.
     let late_package = format!("{LATE_PACKAGE}-{target_node}");
     cluster
         .request(
@@ -5642,28 +5654,31 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
 
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("learner membership data root")?;
-    let (mut cluster, specs, cluster_root) = with_port_retry(|attempt| {
-        let executable = executable.clone();
-        let attempt_root = root.path().join(format!("attempt-{attempt}"));
-        async move {
-            // Five addresses, three processes: both learner port sets are
-            // allocated with the voters so their specs stay stable, and each
-            // process starts only after the cluster has admitted it.
-            let (listeners, all_specs) = allocate_nodes(5)?.into_inner();
-            let cluster = ClusterProcesses::start_with_pre_learner_heartbeat(
-                &executable,
-                &attempt_root,
-                PortReservation {
-                    listeners,
-                    specs: all_specs[..3].to_vec(),
-                },
-                OLD_BINARY_VOTER,
-            )
-            .await?;
-            Ok((cluster, all_specs, attempt_root))
-        }
-    })
-    .await?;
+    let (mut cluster, specs, cluster_root, learner_ports, promoted_ports) =
+        with_port_retry(|attempt| {
+            let executable = executable.clone();
+            let attempt_root = root.path().join(format!("attempt-{attempt}"));
+            async move {
+                // Five addresses, three processes: both learner port sets are
+                // allocated with the voters so their specs stay stable, and each
+                // process starts only after the cluster has admitted it.
+                let LearnerMembershipPorts {
+                    voters,
+                    learner,
+                    promoted,
+                    specs,
+                } = allocate_learner_membership_ports()?;
+                let cluster = ClusterProcesses::start_with_pre_learner_heartbeat(
+                    &executable,
+                    &attempt_root,
+                    voters,
+                    OLD_BINARY_VOTER,
+                )
+                .await?;
+                Ok((cluster, specs, attempt_root, learner, promoted))
+            }
+        })
+        .await?;
     cluster.request(1, Request::Bootstrap).await?.require_ok()?;
     for node_id in 2..=3 {
         cluster
@@ -5780,11 +5795,14 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .require_ok()?;
 
     // A real fourth process, started with Hiqlite's `learner_only` hint set
-    // from its admitted role — the same thing the daemon does.
+    // from its admitted role — the same thing the daemon does. Node 5 stays
+    // reserved and is not advertised to this learner before it can serve.
+    let learner_specs = specs[..4].to_vec();
+    drop(learner_ports);
     cluster
         .spawn_node(
             &executable,
-            NodeLaunch::voter(LEARNER, cluster_root.clone(), specs.clone()).as_learner(),
+            NodeLaunch::voter(LEARNER, cluster_root.clone(), learner_specs.clone()).as_learner(),
         )
         .await?;
     cluster
@@ -5960,7 +5978,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .spawn_node(
             &executable,
-            NodeLaunch::voter(LEARNER, cluster_root.clone(), specs.clone()).as_learner(),
+            NodeLaunch::voter(LEARNER, cluster_root.clone(), learner_specs.clone()).as_learner(),
         )
         .await?;
     // Watch target-local Raft progress while SQLite is restoring. Querying the
@@ -6377,6 +6395,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         )
         .await?
         .require_ok()?;
+    drop(promoted_ports);
     cluster
         .spawn_node(
             &executable,
@@ -9753,6 +9772,8 @@ struct NodeMutableState {
     catalogue: Option<CatalogueReader>,
     membership: Option<MembershipManager>,
     singleton_probe: Option<SingletonProbe>,
+    /// Exactly one real heartbeat worker; abort and join it before node exit.
+    heartbeat_task: Option<tokio::task::JoinHandle<()>>,
     /// A cluster-wide job lease this process won through the production
     /// acquisition path, kept alive so its renewal loop keeps running.
     cluster_job: Option<ActiveJobLease>,
@@ -9838,24 +9859,38 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
     let mut state = NodeMutableState::default();
     let stdin = tokio::io::stdin();
     let mut input = BufReader::new(stdin).lines();
-    while let Some(line) = input.next_line().await? {
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => handle_request(request, &request_context, &mut state).await,
-            Err(error) => Err(error.into()),
-        };
-        match response {
-            Ok(response) => write_response(&response).await?,
-            Err(error) => {
-                write_response(&Response::Error {
-                    message: format!("{error:#}"),
-                })
-                .await?
+    // Read/write failures must take the same worker cleanup path as EOF.
+    let requests: Result<()> = async {
+        while let Some(line) = input.next_line().await? {
+            let response = match serde_json::from_str::<Request>(&line) {
+                Ok(request) => handle_request(request, &request_context, &mut state).await,
+                Err(error) => Err(error.into()),
+            };
+            match response {
+                Ok(response) => write_response(&response).await?,
+                Err(error) => {
+                    write_response(&Response::Error {
+                        message: format!("{error:#}"),
+                    })
+                    .await?
+                }
             }
+        }
+        Ok(())
+    }
+    .await;
+    let mut heartbeat_result = Ok(());
+    if let Some(task) = state.heartbeat_task.take() {
+        task.abort();
+        match task.await {
+            Err(error) if !error.is_cancelled() => heartbeat_result = Err(error.into()),
+            _ => {}
         }
     }
     let _ = passive_shutdown.send(());
     serving_shutdown.cancel();
-    Ok(())
+    requests?;
+    heartbeat_result
 }
 
 struct NodeRequestContext<'a> {
@@ -9886,6 +9921,7 @@ async fn handle_request(
         catalogue,
         membership,
         singleton_probe,
+        heartbeat_task,
         cluster_job,
     } = state;
     match request {
@@ -10069,8 +10105,11 @@ async fn handle_request(
             Ok(Response::Ok)
         }
         Request::StartHeartbeatLoop => {
+            if heartbeat_task.is_some() {
+                bail!("this voter already owns a heartbeat worker");
+            }
             let membership = membership_ref(membership)?.clone();
-            tokio::spawn(membership.heartbeat_loop());
+            *heartbeat_task = Some(tokio::spawn(membership.heartbeat_loop()));
             Ok(Response::Ok)
         }
         Request::AcquireClusterJob { ref resource } => {
@@ -13347,6 +13386,8 @@ async fn run_preflight(
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
+/// Use the same nested active directory as membership's target-local snapshot
+/// preflight. The node root still owns telemetry and durable membership files.
 fn node_hiqlite_dir(root: &Path, node_id: u64) -> PathBuf {
     root.join(format!("node-{node_id}"))
         .join(HIQLITE_ACTIVE_DIRNAME)
@@ -13455,9 +13496,40 @@ impl PortReservation {
     }
 }
 
+struct LearnerMembershipPorts {
+    voters: PortReservation,
+    learner: PortReservation,
+    promoted: PortReservation,
+    specs: Vec<NodeSpec>,
+}
+
+fn allocate_learner_membership_ports() -> Result<LearnerMembershipPorts> {
+    let (mut listeners, specs) = allocate_nodes(5)?.into_inner();
+    let promoted = listeners.split_off(8);
+    let learner = listeners.split_off(6);
+    Ok(LearnerMembershipPorts {
+        voters: PortReservation {
+            listeners,
+            specs: specs[..3].to_vec(),
+        },
+        learner: PortReservation {
+            listeners: learner,
+            specs: specs[3..4].to_vec(),
+        },
+        promoted: PortReservation {
+            listeners: promoted,
+            specs: specs[4..].to_vec(),
+        },
+        specs,
+    })
+}
+
 /// Stable protocol identities for harness voters; paths and Raft IDs stay numeric.
 /// Every u64 maps to a distinct canonical UUID, including IDs above u32::MAX.
-fn harness_node_identity(raft_id: u64) -> String {
+/// These are disposable fixture identities, not credentials or production
+/// node IDs; the integration harness shares them, so they are exported.
+#[must_use]
+pub fn harness_node_identity(raft_id: u64) -> String {
     format!(
         "{:08x}-0000-4000-8000-0000{:08x}",
         raft_id >> 32,

@@ -34,6 +34,7 @@ quality_catalog: None,
                 aac: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: convert,
+                dual_layer_as_copied: false,
             },
             automatic: false,
             subtitle_burn: None,
@@ -59,6 +60,47 @@ quality_catalog: None,
             plain.intent_fingerprint("paul")
         );
         assert!(!plain.intent_fingerprint("paul").contains("p81"));
+
+        // A dual-layer source handed over as copied is different bytes from
+        // the base layer an unflagged copy narrows it to.
+        let mut dual_layer = copy(false);
+        if let SessionKind::Copy { dual_layer_as_copied, .. } = &mut dual_layer.kind {
+            *dual_layer_as_copied = true;
+        }
+        assert!(dual_layer.intent_fingerprint("paul").contains("c0d1+dl"));
+        assert_ne!(
+            plain.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }),
+            dual_layer.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 })
+        );
+        assert!(!plain.intent_fingerprint("paul").contains("+dl"));
+    }
+
+    /// `SessionKind` is `deny_unknown_fields` and crosses the cluster relay
+    /// and takeover: a copy without the dual-layer bit must serialise to
+    /// exactly the bytes an older binary wrote, and their bytes must parse.
+    #[test]
+    fn a_copy_without_the_dual_layer_bit_keeps_its_old_wire_form() {
+        let old = r#"{"kind":"copy","aac":false,"preserve_dolby_vision":true,"convert_dolby_vision":false}"#;
+        let parsed: SessionKind = serde_json::from_str(old).expect("an older binary's copy");
+        assert_eq!(
+            parsed,
+            SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: true,
+                convert_dolby_vision: false,
+                dual_layer_as_copied: false,
+            }
+        );
+        assert_eq!(serde_json::to_string(&parsed).expect("serialise"), old);
+        let dual = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: false,
+            dual_layer_as_copied: true,
+        };
+        let text = serde_json::to_string(&dual).expect("serialise");
+        assert!(text.contains(r#""dual_layer_as_copied":true"#));
+        assert_eq!(serde_json::from_str::<SessionKind>(&text).expect("round trip"), dual);
     }
 
     #[test]
@@ -84,7 +126,7 @@ quality_catalog: None,
             .find(|(key, _)| *key == "XDG_CACHE_HOME")
             .and_then(|(_, value)| value)
             .expect("XDG_CACHE_HOME");
-        assert_eq!(inherited, expected.as_os_str());
+        assert_eq!(inherited, expected.join("gpu-cache").as_os_str());
     }
 
     #[test]

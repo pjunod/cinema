@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+"""Provision or resolve the pinned TLC/JDK used by formal verification."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_MANIFEST = ROOT / "verification/durable-jobs/toolchain.json"
+DEFAULT_CACHE = ROOT / "target/formal-toolchain"
+JDK_MAX_BYTES = 512 * 1024 * 1024
+TLC_MAX_BYTES = 16 * 1024 * 1024
+TAR_MAX_EXPANDED = 2 * 1024 * 1024 * 1024
+TAR_MAX_MEMBERS = 100_000
+
+
+class ToolchainError(Exception):
+    """An expected provisioning or resolution failure."""
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_stream(source: Any) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _require_sha256(path: Path, expected: str, label: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ToolchainError(f"{label} is missing or is not a regular file: {path}")
+    actual = _sha256_file(path)
+    if actual != expected:
+        raise ToolchainError(
+            f"{label} SHA256 mismatch: expected {expected}, got {actual}: {path}"
+        )
+
+
+def _load_manifest(path: Path) -> tuple[dict[str, Any], str]:
+    try:
+        raw = path.read_bytes()
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ToolchainError(f"cannot read toolchain manifest {path}: {exc}") from exc
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise ToolchainError(f"unsupported toolchain manifest schema: {path}")
+    tlc = data.get("tlc")
+    jdks = data.get("jdks")
+    if not isinstance(tlc, dict) or not isinstance(jdks, list):
+        raise ToolchainError("manifest must contain a TLC record and JDK list")
+    _validate_artifact(tlc, "TLC")
+    for jdk in jdks:
+        if not isinstance(jdk, dict):
+            raise ToolchainError("each JDK manifest entry must be an object")
+        _validate_artifact(jdk, "JDK")
+    return data, hashlib.sha256(raw).hexdigest()
+
+
+def _validate_artifact(record: dict[str, Any], label: str) -> None:
+    for key in ("version", "filename", "url", "sha256"):
+        if not isinstance(record.get(key), str) or not record[key]:
+            raise ToolchainError(f"{label} manifest entry is missing {key}")
+    if Path(record["filename"]).name != record["filename"]:
+        raise ToolchainError(f"{label} filename must be a plain file name")
+    if not re.fullmatch(r"[0-9a-f]{64}", record["sha256"]):
+        raise ToolchainError(f"{label} SHA256 must be 64 lowercase hex characters")
+    parsed = urllib.parse.urlsplit(record["url"])
+    if parsed.scheme != "https" or parsed.hostname != "github.com":
+        raise ToolchainError(f"{label} URL must use the official HTTPS GitHub host")
+
+
+def _current_platform() -> tuple[str, str]:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    arch = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}.get(machine)
+    os_name = {"linux": "linux", "darwin": "macos"}.get(system)
+    if os_name is None or arch is None:
+        raise ToolchainError(
+            f"unsupported toolchain platform: {platform.system()} {platform.machine()}"
+        )
+    if (os_name, arch) not in {("linux", "x64"), ("macos", "arm64")}:
+        raise ToolchainError(
+            f"supported platforms are Linux x64 and macOS arm64; got {os_name} {arch}"
+        )
+    return os_name, arch
+
+
+def _select_jdk(manifest: dict[str, Any], os_name: str, arch: str) -> dict[str, Any]:
+    matches = [
+        item for item in manifest["jdks"]
+        if item.get("os") == os_name and item.get("arch") == arch
+    ]
+    if len(matches) != 1:
+        raise ToolchainError(f"manifest has no unique JDK pin for {os_name} {arch}")
+    return matches[0]
+
+
+def _durable_cache(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    forbidden = [Path("/tmp").resolve(), Path("/var/tmp").resolve()]
+    tmpdir = os.environ.get("TMPDIR")
+    if tmpdir:
+        forbidden.append(Path(tmpdir).expanduser().resolve())
+    for temporary in forbidden:
+        if resolved == temporary or temporary in resolved.parents:
+            raise ToolchainError(f"cache directory must be durable, not temporary: {resolved}")
+    return resolved
+
+
+class _HTTPSRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            raise ToolchainError(f"refusing non-HTTPS download redirect: {newurl}")
+        return super().redirect_request(request, fp, code, message, headers, newurl)
+
+
+def _copy_seed(seed_dir: Path | None, filename: str, destination: Path, expected: str) -> bool:
+    if seed_dir is None:
+        return False
+    source = seed_dir / filename
+    if source.is_symlink() or not source.is_file():
+        return False
+    _require_sha256(source, expected, f"seed artifact {filename}")
+    part = destination.with_name(destination.name + ".part")
+    try:
+        os.link(source, part)
+    except OSError:
+        shutil.copyfile(source, part)
+    os.replace(part, destination)
+    return True
+
+
+def _download(record: dict[str, Any], cache: Path, max_bytes: int, seed_dir: Path | None) -> Path:
+    destination = cache / record["filename"]
+    if destination.exists() and not destination.is_symlink():
+        try:
+            _require_sha256(destination, record["sha256"], record["filename"])
+            return destination
+        except ToolchainError:
+            destination.unlink(missing_ok=True)
+    if _copy_seed(seed_dir, record["filename"], destination, record["sha256"]):
+        return destination
+    part = destination.with_name(destination.name + ".part")
+    part.unlink(missing_ok=True)
+    opener = urllib.request.build_opener(_HTTPSRedirect())
+    request = urllib.request.Request(record["url"], headers={"User-Agent": "plurx-formal-toolchain/1"})
+    try:
+        with opener.open(request, timeout=60) as response, part.open("xb") as output:
+            length = response.headers.get("Content-Length")
+            if length and int(length) > max_bytes:
+                raise ToolchainError(f"download exceeds {max_bytes} byte limit: {record['filename']}")
+            total = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ToolchainError(f"download exceeds {max_bytes} byte limit: {record['filename']}")
+                output.write(chunk)
+    except ToolchainError:
+        part.unlink(missing_ok=True)
+        raise
+    except (OSError, urllib.error.URLError, ValueError) as exc:
+        part.unlink(missing_ok=True)
+        raise ToolchainError(f"download failed for {record['filename']}: {exc}") from exc
+    try:
+        _require_sha256(part, record["sha256"], record["filename"])
+        os.replace(part, destination)
+    except Exception:
+        part.unlink(missing_ok=True)
+        raise
+    return destination
+
+
+def _member_path(name: str) -> PurePosixPath:
+    if "\\" in name or "\x00" in name:
+        raise ToolchainError(f"unsafe archive member path: {name!r}")
+    path = PurePosixPath(name)
+    if path.is_absolute() or any(part == ".." for part in path.parts):
+        raise ToolchainError(f"unsafe archive member path: {name!r}")
+    return PurePosixPath(*(part for part in path.parts if part not in ("", ".")))
+
+
+def _safe_extract_tar(archive: Path, destination: Path) -> None:
+    if destination.exists() or destination.is_symlink():
+        raise ToolchainError(f"extraction destination already exists: {destination}")
+    destination.mkdir(parents=True)
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            members = tar.getmembers()
+            if len(members) > TAR_MAX_MEMBERS:
+                raise ToolchainError("JDK archive contains too many entries")
+            entries: dict[str, tuple[tarfile.TarInfo, PurePosixPath]] = {}
+            expanded = 0
+            for member in members:
+                relative = _member_path(member.name)
+                if not relative.parts:
+                    continue
+                if not (member.isdir() or member.isfile() or member.issym() or member.islnk()):
+                    raise ToolchainError(f"JDK archive contains unsupported special entry: {member.name}")
+                key = relative.as_posix()
+                if key in entries:
+                    prior = entries[key][0]
+                    if prior.isdir() and member.isdir():
+                        continue
+                    raise ToolchainError(f"JDK archive repeats a non-directory path: {member.name}")
+                expanded += member.size
+                if expanded > TAR_MAX_EXPANDED:
+                    raise ToolchainError("JDK archive expands beyond the configured size limit")
+                entries[key] = (member, relative)
+            links = {
+                key: (member, relative)
+                for key, (member, relative) in entries.items()
+                if member.issym() or member.islnk()
+            }
+            paths = set(entries)
+            for key, (member, relative) in entries.items():
+                for parent in relative.parents:
+                    parent_key = parent.as_posix()
+                    if parent_key in links:
+                        raise ToolchainError(f"archive entry is nested under a link: {member.name}")
+                if key in links and any(name.startswith(key + "/") for name in paths):
+                    raise ToolchainError(f"archive link is also used as a directory: {member.name}")
+            link_targets: dict[str, str] = {}
+            for key, (member, relative) in links.items():
+                raw_target = PurePosixPath(member.linkname)
+                if "\\" in member.linkname or raw_target.is_absolute() or not raw_target.parts:
+                    raise ToolchainError(f"unsafe archive link target: {member.name} -> {member.linkname}")
+                if member.issym():
+                    combined = os.path.normpath(str(relative.parent / raw_target))
+                    if combined in ("..", ".") or combined.startswith("../") or os.path.isabs(combined):
+                        raise ToolchainError(f"archive link escapes extraction root: {member.name} -> {member.linkname}")
+                    target_key = PurePosixPath(combined).as_posix()
+                else:
+                    target_key = _member_path(member.linkname).as_posix()
+                target_entry = entries.get(target_key)
+                if target_entry is None or target_entry[0].issym() or target_entry[0].islnk():
+                    raise ToolchainError(f"archive link target is not an archived file or directory: {member.name} -> {member.linkname}")
+                if member.islnk() and not target_entry[0].isfile():
+                    raise ToolchainError(f"archive hard link target is not a regular file: {member.name}")
+                link_targets[key] = target_key
+            for member, relative in entries.values():
+                if member.isdir():
+                    target = destination.joinpath(*relative.parts)
+                    target.mkdir(parents=True, exist_ok=True)
+                    target.chmod(0o755)
+            for member, relative in entries.values():
+                if not member.isfile():
+                    continue
+                target = destination.joinpath(*relative.parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = tar.extractfile(member)
+                if source is None:
+                    raise ToolchainError(f"cannot read archive member: {member.name}")
+                with source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output, 1024 * 1024)
+                target.chmod(0o755 if member.mode & 0o111 else 0o644)
+            for key, (member, relative) in links.items():
+                if not member.islnk():
+                    continue
+                target = destination.joinpath(*relative.parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.link(destination.joinpath(*PurePosixPath(link_targets[key]).parts), target)
+            for member, relative in links.values():
+                if member.issym():
+                    target = destination.joinpath(*relative.parts)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(member.linkname, target)
+    except (OSError, tarfile.TarError) as exc:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise ToolchainError(f"cannot safely extract JDK archive: {exc}") from exc
+    except ToolchainError:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+
+def _java_relative_path(root: Path, os_name: str) -> Path:
+    candidates = [
+        path for path in root.rglob("java")
+        if path.name == "java" and path.parent.name == "bin" and path.is_file()
+    ]
+    if os_name == "macos":
+        candidates = [p for p in candidates if p.parts[-4:-2] == ("Contents", "Home")]
+    if len(candidates) != 1:
+        raise ToolchainError(f"expected one JDK java executable, found {len(candidates)}")
+    return candidates[0].relative_to(root)
+
+
+def _java_version(java: Path, expected: str) -> str:
+    try:
+        result = subprocess.run(
+            [str(java), "-version"], capture_output=True, text=True, timeout=20, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ToolchainError(f"cannot run pinned Java executable {java}: {exc}") from exc
+    output = (result.stdout + result.stderr).strip()
+    lines = output.splitlines()
+    base, build = expected.split("+", 1)
+    if result.returncode != 0 or len(lines) < 2 or f'"{base}"' not in lines[0] or f"{base}+{build}" not in output:
+        raise ToolchainError(f"Java identity mismatch for {expected}: {output[:500]}")
+    return " | ".join(lines[:2])
+
+
+def _archive_java_sha256(archive: Path, relative: Path) -> str:
+    wanted = PurePosixPath(*relative.parts)
+    with tarfile.open(archive, "r:gz") as tar:
+        matches = [m for m in tar.getmembers() if _member_path(m.name) == wanted]
+        if len(matches) != 1 or not matches[0].isfile():
+            raise ToolchainError(f"JDK archive lacks expected regular executable: {relative}")
+        source = tar.extractfile(matches[0])
+        if source is None:
+            raise ToolchainError(f"cannot read Java executable from JDK archive: {relative}")
+        with source:
+            return _sha256_stream(source)
+
+
+def _read_receipt(path: Path) -> dict[str, Any]:
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ToolchainError(f"missing or invalid JDK installation receipt {path}: {exc}") from exc
+    if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
+        raise ToolchainError(f"unsupported JDK installation receipt: {path}")
+    return receipt
+
+
+def _verify_runtime(
+    runtime: Path, archive: Path, jdk: dict[str, Any], os_name: str, arch: str
+) -> tuple[Path, str, str]:
+    if runtime.is_symlink() or not runtime.is_dir():
+        raise ToolchainError(f"pinned JDK is not installed: {runtime}")
+    receipt = _read_receipt(runtime / "install-receipt.json")
+    expected_archive_sha = jdk["sha256"]
+    if (
+        receipt.get("os") != os_name
+        or receipt.get("arch") != arch
+        or receipt.get("version") != jdk["version"]
+        or receipt.get("archive_sha256") != expected_archive_sha
+    ):
+        raise ToolchainError("JDK installation receipt does not match the pinned archive")
+    relative = Path(receipt.get("java_relative_path", ""))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ToolchainError("JDK receipt contains an unsafe executable path")
+    java = runtime.joinpath(relative)
+    if java.is_symlink() or not java.is_file():
+        raise ToolchainError(f"pinned Java executable is missing: {java}")
+    archive_java_sha = _archive_java_sha256(archive, relative)
+    actual_java_sha = _sha256_file(java)
+    if receipt.get("java_sha256") != archive_java_sha or actual_java_sha != archive_java_sha:
+        raise ToolchainError("installed Java executable differs from the checksum-verified archive")
+    identity = _java_version(java, jdk["version"])
+    if receipt.get("java_identity") != identity:
+        raise ToolchainError("JDK version identity differs from its installation receipt")
+    return java, identity, actual_java_sha
+
+
+def _remove_owned_tree(path: Path) -> None:
+    if path.is_symlink():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _install_jdk(
+    archive: Path, cache: Path, jdk: dict[str, Any], os_name: str, arch: str
+) -> Path:
+    runtime = cache / f"temurin-{jdk['version']}-{os_name}-{arch}"
+    try:
+        _verify_runtime(runtime, archive, jdk, os_name, arch)
+        return runtime
+    except ToolchainError:
+        _remove_owned_tree(runtime)
+    staging = runtime.with_name(runtime.name + ".installing")
+    _remove_owned_tree(staging)
+    _safe_extract_tar(archive, staging)
+    try:
+        relative = _java_relative_path(staging, os_name)
+        java = staging / relative
+        identity = _java_version(java, jdk["version"])
+        java_sha = _sha256_file(java)
+        archive_java_sha = _archive_java_sha256(archive, relative)
+        if java_sha != archive_java_sha:
+            raise ToolchainError("extracted Java executable differs from its verified archive")
+        receipt = {
+            "schema_version": 1,
+            "os": os_name,
+            "arch": arch,
+            "version": jdk["version"],
+            "archive_sha256": jdk["sha256"],
+            "java_relative_path": relative.as_posix(),
+            "java_sha256": java_sha,
+            "java_identity": identity,
+            "verification_scope": "verified archive plus installed java executable; other extracted files are not rehashed",
+        }
+        (staging / "install-receipt.json").write_text(
+            json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
+        os.replace(staging, runtime)
+    except Exception:
+        _remove_owned_tree(staging)
+        raise
+    return runtime
+
+
+def _tlc_identity(java: Path, jar: Path) -> str:
+    try:
+        result = subprocess.run(
+            [str(java), "-jar", str(jar), "-help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ToolchainError(f"cannot run pinned TLC jar: {exc}") from exc
+    output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr).strip()
+    identity = next((line.strip() for line in output.splitlines() if "TLC -" in line and "Version" in line), None)
+    if identity is None:
+        raise ToolchainError(f"pinned TLC help omitted version identity: {output[:500]}")
+    return identity
+
+
+def _resolve(
+    manifest_path: Path, cache: Path, manifest: dict[str, Any], manifest_sha: str
+) -> dict[str, Any]:
+    os_name, arch = _current_platform()
+    jdk = _select_jdk(manifest, os_name, arch)
+    tlc = manifest["tlc"]
+    tlc_path = cache / tlc["filename"]
+    archive = cache / jdk["filename"]
+    _require_sha256(tlc_path, tlc["sha256"], "TLC jar")
+    _require_sha256(archive, jdk["sha256"], "JDK archive")
+    runtime = cache / f"temurin-{jdk['version']}-{os_name}-{arch}"
+    java, java_identity, java_sha = _verify_runtime(runtime, archive, jdk, os_name, arch)
+    tlc_identity = _tlc_identity(java, tlc_path)
+    return {
+        "schema_version": 1,
+        "manifest": str(manifest_path.resolve()),
+        "manifest_sha256": manifest_sha,
+        "platform": {"os": os_name, "arch": arch},
+        "java": {"path": str(java.resolve()), "version": jdk["version"], "identity": java_identity, "sha256": java_sha, "verification_scope": "verified archive plus installed java executable; other extracted files are not rehashed"},
+        "tlc": {"path": str(tlc_path.resolve()), "version": tlc["version"], "identity": tlc_identity, "sha256": tlc["sha256"]},
+    }
+
+
+def _fetch(
+    manifest: dict[str, Any], cache: Path, seed_dir: Path | None
+) -> None:
+    os_name, arch = _current_platform()
+    jdk = _select_jdk(manifest, os_name, arch)
+    cache.mkdir(parents=True, exist_ok=True)
+    tlc = manifest["tlc"]
+    _download(tlc, cache, TLC_MAX_BYTES, seed_dir)
+    archive = _download(jdk, cache, JDK_MAX_BYTES, seed_dir)
+    _require_sha256(archive, jdk["sha256"], "JDK archive")
+    _install_jdk(archive, cache, jdk, os_name, arch)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("fetch", "resolve"), help="fetch downloads explicitly; resolve is offline")
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE)
+    parser.add_argument("--seed-dir", type=Path, help="verified local artifacts to reuse during fetch")
+    args = parser.parse_args(argv)
+    try:
+        manifest_path = args.manifest.expanduser().resolve()
+        manifest, manifest_sha = _load_manifest(manifest_path)
+        cache = _durable_cache(args.cache_dir)
+        if args.command == "fetch":
+            seed_dir = args.seed_dir.expanduser().resolve() if args.seed_dir else None
+            _fetch(manifest, cache, seed_dir)
+        result = _resolve(manifest_path, cache, manifest, manifest_sha)
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except ToolchainError as exc:
+        print(f"bootstrap-formal-toolchain: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"bootstrap-formal-toolchain: filesystem operation failed: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

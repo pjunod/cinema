@@ -109,3 +109,42 @@ owner = "subtitles"
 reason = "Actual managed child execution requires a qualified packaged engine, matching self-test fixture, catalog model bytes and packaged FFmpeg; ordinary test runners do not install those assets."
 requires = "PLURX_SUBTITLE_ENGINE, PLURX_TEST_SUBTITLE_MODEL and absolute packaged PLURX_FFMPEG"
 command = "PLURX_SUBTITLE_ENGINE=/path/to/package/bin/subtitle-engine/whisper-cli PLURX_TEST_SUBTITLE_MODEL=/path/to/ggml-base.en.bin PLURX_FFMPEG=/path/to/package/bin/ffmpeg cargo test --locked -p plurxd --bin plurxd subtitle_transcription::tests::managed_real_engine_held_fd_clean_environment_recognizes_fixture -- --ignored --exact --nocapture"
+
+# Representative performance is an explicit hardware qualification, not known-red debt.
+[[fixtures]]
+test = "crates/plurxd/src/transcoder_optimization/comparison.rs::transcoder_optimization::comparison::tests::real_media_production_tools_comparison"
+owner = "transcoding"
+reason = "requires the node's production media tools and actual GPU"
+requires = "explicit PLURX_FFMPEG and PLURX_FFPROBE; actual target GPU; PLURX_COMPARISON_MACOS_PROCESSING=1 for native Mac processing"
+command = "PLURX_FFMPEG=/path/to/runtime/ffmpeg PLURX_FFPROBE=/path/to/runtime/ffprobe PLURX_COMPARISON_MACOS_PROCESSING=1 cargo test --locked -p plurxd --bin plurxd transcoder_optimization::comparison::tests::real_media_production_tools_comparison -- --ignored --exact --nocapture --test-threads=1"
+
+# Subtitle completion runtime qualifications are explicit owned fixtures,
+# not failing product tests or blanket additions to the unadmitted budget.
+
+[[fixtures]]
+test = "crates/plurxd/src/subtitle_text_translation/engine.rs::subtitle_text_translation::engine::qualification::pinned_publisher_bundle_passes_production_multilingual_self_test"
+owner = "subtitles"
+reason = "Real multilingual Marian inference downloads and verifies the immutable publisher bundle and needs an owned persistent cache; it has passed the recorded production fixture."
+requires = "PLURX_TEXT_QUALIFICATION_ROOT and an owned TMPDIR; network access to the pinned publisher artifacts"
+command = "PLURX_TEXT_QUALIFICATION_ROOT=/path/to/owned/text TMPDIR=/path/to/owned/text/tmp cargo test --locked -p plurxd --bin plurxd subtitle_text_translation::engine::qualification::pinned_publisher_bundle_passes_production_multilingual_self_test -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/subtitle_translation/installer.rs::subtitle_translation::installer::qualification::pinned_whisper_install_and_verify_qualify_both_speech_tasks"
+owner = "subtitles"
+reason = "Real durable Install and Verify exercise decoding, task-specific recognition and receipt publication using explicit packaged assets."
+requires = "PLURX_SPEECH_QUALIFICATION_ROOT, PLURX_SUBTITLE_ENGINE, PLURX_FFMPEG and an owned TMPDIR"
+command = "PLURX_SPEECH_QUALIFICATION_ROOT=/path/to/owned/speech TMPDIR=/path/to/owned/speech/tmp PLURX_SUBTITLE_ENGINE=/path/to/package/subtitle-engine/whisper-cli PLURX_FFMPEG=/path/to/package/ffmpeg cargo test --locked -p plurxd --bin plurxd subtitle_translation::installer::qualification::pinned_whisper_install_and_verify_qualify_both_speech_tasks -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/subtitle_translation/installer.rs::subtitle_translation::installer::qualification::pinned_progressive_worker_commits_both_tasks_for_selected_audio_two"
+owner = "subtitles"
+reason = "Real legacy Small inference qualifies selected audio, durable progressive publication and canonical readback with a finite source; it is explicitly invoked rather than ordinary unit-suite work."
+requires = "Owned speech qualification root/cache/TMPDIR, pinned engine and packaged FFmpeg/FFprobe"
+command = "PLURX_SPEECH_QUALIFICATION_ROOT=/path/to/owned/speech TMPDIR=/path/to/owned/speech/tmp PLURX_SUBTITLE_ENGINE=/path/to/package/subtitle-engine/whisper-cli PLURX_FFMPEG=/path/to/package/ffmpeg PLURX_FFPROBE=/path/to/package/ffprobe cargo test --locked -p plurxd --bin plurxd subtitle_translation::installer::qualification::pinned_progressive_worker_commits_both_tasks_for_selected_audio_two -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/src/subtitle_translation/installer.rs::subtitle_translation::installer::qualification::pinned_progressive_worker_covers_advancing_playback_for_both_tasks"
+owner = "subtitles"
+reason = "Real 1x playback qualification requires useful current-position captions across core boundaries and complete source coverage under the supplied hardware budget; its recorded invocation passed both Small tasks."
+requires = "Owned speech qualification root/cache/TMPDIR, pinned CPU engine and FFmpeg/FFprobe, hardware meeting the declared 1x throughput assertions"
+command = "PLURX_SPEECH_QUALIFICATION_ROOT=/path/to/owned/speech TMPDIR=/path/to/owned/speech/tmp PLURX_SUBTITLE_ENGINE=/path/to/package/subtitle-engine/whisper-cli PLURX_FFMPEG=/path/to/package/ffmpeg PLURX_FFPROBE=/path/to/package/ffprobe cargo test --locked -p plurxd --bin plurxd subtitle_translation::installer::qualification::pinned_progressive_worker_covers_advancing_playback_for_both_tasks -- --ignored --exact --nocapture"

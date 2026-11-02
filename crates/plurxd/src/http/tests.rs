@@ -12,6 +12,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use super::*;
 
+mod playback_handoffs;
 mod public_copy_wire;
 mod subtitle_generation;
 
@@ -2033,7 +2034,7 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
     let coverage = compact_handler(
         browse,
         "pub(crate) async fn vod_index_coverage",
-        "pub(super) fn index_refusal_summary",
+        "pub(crate) fn index_refusal_summary",
     );
     assert!(coverage.contains(".cluster_index_availability(&state.catalogue,&lookups)"));
     // Its two display settings are one bounded read, not two Authority
@@ -2435,6 +2436,337 @@ async fn macos_processing_reprobe_requires_admin_and_preserves_saved_choice() {
             .as_deref(),
         Some("1")
     );
+}
+
+#[test]
+fn local_https_route_matrix_is_exact_for_learner_and_maintenance() {
+    for method in [Method::GET, Method::PUT] {
+        assert!(learner_route_eligible(&method, https_admin::PATH));
+        assert!(maintenance_route_eligible(&method, https_admin::PATH));
+    }
+    assert!(learner_route_eligible(
+        &Method::GET,
+        https_admin::CERTIFICATE_PATH
+    ));
+    assert!(maintenance_route_eligible(
+        &Method::GET,
+        https_admin::CERTIFICATE_PATH
+    ));
+    for (method, path) in [
+        (Method::POST, https_admin::PATH),
+        (Method::DELETE, https_admin::PATH),
+        (Method::PATCH, https_admin::PATH),
+        (Method::HEAD, https_admin::PATH),
+        (Method::PUT, https_admin::CERTIFICATE_PATH),
+        (Method::HEAD, https_admin::CERTIFICATE_PATH),
+        (Method::GET, "/api/v1/system/https/other"),
+        (Method::PUT, "/api/v1/system/https/"),
+        (Method::GET, "/api/v1/system/https-other"),
+    ] {
+        assert!(!learner_route_eligible(&method, path), "{method} {path}");
+        assert!(
+            !maintenance_route_eligible(&method, path),
+            "{method} {path}"
+        );
+    }
+}
+
+fn local_https_state(root: &std::path::Path, enabled: bool) -> AppState {
+    let mut state = test_state_without_router();
+    let mut config = plurx_core::config::Config::default();
+    config.storage.data_dir = root.to_path_buf();
+    config.server.https.enabled = enabled;
+    config
+        .resolve_https(Default::default())
+        .expect("local intent");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    let identity = crate::https::Identity::load(&config.server.https, root, now, true)
+        .expect("identity")
+        .map(Arc::new);
+    state.https = Some(Arc::new(
+        crate::https::Control::new(state.node_id.clone(), config, identity).expect("control"),
+    ));
+    state
+}
+
+#[tokio::test]
+async fn local_https_api_requires_admin_and_guards_node_revision_and_input() {
+    let root = crate::test_tempdir().expect("tempdir");
+    let state = local_https_state(root.path(), false);
+    let app = router(state.clone());
+    for path in [https_admin::PATH, https_admin::CERTIFICATE_PATH] {
+        assert_eq!(
+            call(&app, get(path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        call(&app, put(https_admin::PATH, None, json!({}))).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let admin = setup_admin(&app).await;
+    let response = app
+        .clone()
+        .oneshot(get(https_admin::PATH, Some(&admin)))
+        .await
+        .expect("response");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let (status, before) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(before["revision"], "0");
+    let request = json!({"node_id":before["node_id"],"revision":before["revision"],"desired":before["desired"]});
+    for (field, value, code) in [
+        ("node_id", json!("another-node"), "https_node_conflict"),
+        ("revision", json!("1"), "https_revision_conflict"),
+    ] {
+        let mut wrong = request.clone();
+        wrong[field] = value;
+        let (status, body) = call(&app, put(https_admin::PATH, Some(&admin), wrong)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], code);
+    }
+    for body in [
+        json!({"PRIVATE-PEM-MARKER":true}),
+        json!({"node_id":"x","revision":{"PRIVATE-PEM-MARKER":true},"desired":{}}),
+    ] {
+        let (status, body) = call(&app, put(https_admin::PATH, Some(&admin), body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.to_string().contains("PRIVATE-PEM-MARKER"));
+    }
+    let (status, body) = call(
+        &app,
+        put(
+            https_admin::PATH,
+            Some(&admin),
+            json!({"padding":"PRIVATE-PEM-MARKER".repeat(2000)}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(!body.to_string().contains("PRIVATE-PEM-MARKER"));
+    let mut invalid = request.clone();
+    invalid["desired"]["port"] = json!(0);
+    assert_eq!(
+        call(&app, put(https_admin::PATH, Some(&admin), invalid))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut enable = request.clone();
+    enable["desired"]["enabled"] = json!(true);
+    let ((a, one), (b, two)) = tokio::join!(
+        call(&app, put(https_admin::PATH, Some(&admin), enable.clone())),
+        call(&app, put(https_admin::PATH, Some(&admin), enable))
+    );
+    assert!(
+        (a == StatusCode::OK && b == StatusCode::CONFLICT)
+            || (b == StatusCode::OK && a == StatusCode::CONFLICT),
+        "{a} {one} / {b} {two}"
+    );
+    let (_, after) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(after["revision"], "1");
+    assert_eq!(after["active"]["enabled"], false);
+    assert_eq!(after["desired"]["enabled"], true);
+    assert_eq!(after["restart_required"], true);
+    assert!(!root.path().join("https").exists());
+    assert_eq!(
+        call(&app, get(https_admin::CERTIFICATE_PATH, Some(&admin)))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        state
+            .store
+            .get_setting("https")
+            .await
+            .expect("no Store setting"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn local_https_certificate_exports_only_loaded_public_chain_even_after_disk_replacement() {
+    use rustls::pki_types::pem::PemObject;
+    use sha2::Digest;
+    let root = crate::test_tempdir().expect("tempdir");
+    let state = local_https_state(root.path(), true);
+    let app = router(state);
+    let admin = setup_admin(&app).await;
+    let (_, snapshot) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    let source = root
+        .path()
+        .join("https")
+        .join(crate::https::MANAGED_IDENTITY_FILE);
+    std::fs::write(source, "invalid replacement PRIVATE-PEM-MARKER")
+        .expect("replace source after startup");
+    let response = app
+        .clone()
+        .oneshot(get(https_admin::CERTIFICATE_PATH, Some(&admin)))
+        .await
+        .expect("download");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/x-pem-file"
+    );
+    assert!(response.headers()[header::CONTENT_DISPOSITION]
+        .to_str()
+        .expect("attachment")
+        .starts_with("attachment;"));
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let text = std::str::from_utf8(&bytes).expect("PEM");
+    assert!(!text.contains("PRIVATE") && !text.contains("invalid replacement"));
+    let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(&bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("public certificates");
+    assert_eq!(certificates.len(), 1);
+    assert_eq!(
+        hex::encode(sha2::Sha256::digest(&certificates[0])),
+        snapshot["certificate"]["sha256"]
+    );
+    let (_, again) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(again["certificate"], snapshot["certificate"]);
+    let mut desired = snapshot["desired"].clone();
+    desired["enabled"] = json!(false);
+    let (status,disabled)=call(&app,put(https_admin::PATH,Some(&admin),json!({"node_id":snapshot["node_id"],"revision":snapshot["revision"],"desired":desired}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(disabled["saved"]["enabled"], false);
+    assert_eq!(disabled["desired"]["enabled"], false);
+    assert_eq!(disabled["active"]["enabled"], true);
+    assert_eq!(disabled["restart_required"], true);
+    assert_eq!(disabled["certificate"], snapshot["certificate"]);
+    desired["enabled"] = json!(true);
+    assert_eq!(call(&app,put(https_admin::PATH,Some(&admin),json!({"node_id":disabled["node_id"],"revision":disabled["revision"],"desired":desired}))).await.0,StatusCode::BAD_REQUEST);
+    let (_, after) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(after["revision"], disabled["revision"]);
+    assert_eq!(after["certificate"], snapshot["certificate"]);
+}
+
+#[tokio::test]
+async fn local_https_admin_auth_survives_exact_learner_and_maintenance_admission() {
+    let root = crate::test_tempdir().expect("tempdir");
+    let state = local_https_state(root.path(), false);
+    let app = router(state.clone());
+    let admin = setup_admin(&app).await;
+    assert_eq!(
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"https-reader","password":"longenough"})
+            )
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, login) = call(
+        &app,
+        post(
+            "/api/v1/auth/login",
+            None,
+            json!({"username":"https-reader","password":"longenough"}),
+        ),
+    )
+    .await;
+    let reader = login["token"].as_str().expect("reader token");
+    // Inject facts at the same shared decision boundary as the production
+    // gate. No second Hiqlite cluster or alternate authorization is used.
+    for (role, maintenance) in [
+        (LocalServingRole::Unclustered, false),
+        (LocalServingRole::Learner, false),
+        (LocalServingRole::Voter, true),
+    ] {
+        let admitted = app.clone().layer(axum::middleware::from_fn(
+            move |request: Request<Body>, next: Next| async move {
+                if let Some(response) = capacity_maintenance_refusal(
+                    maintenance,
+                    request.method(),
+                    request.uri().path(),
+                ) {
+                    return response;
+                }
+                if let Some(response) =
+                    capacity_role_refusal(Some(role), request.method(), request.uri().path())
+                {
+                    return response;
+                }
+                next.run(request).await
+            },
+        ));
+        for path in [https_admin::PATH, https_admin::CERTIFICATE_PATH] {
+            assert_eq!(
+                call(&admitted, get(path, None)).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                call(&admitted, get(path, Some(reader))).await.0,
+                StatusCode::FORBIDDEN
+            );
+            let expected = if path == https_admin::PATH {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            assert_eq!(call(&admitted, get(path, Some(&admin))).await.0, expected);
+        }
+        let (_, snapshot) = call(&admitted, get(https_admin::PATH, Some(&admin))).await;
+        let request = json!({"node_id":snapshot["node_id"],"revision":snapshot["revision"],"desired":snapshot["desired"]});
+        assert_eq!(
+            call(&admitted, put(https_admin::PATH, None, request.clone()))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &admitted,
+                put(https_admin::PATH, Some(reader), request.clone())
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&admitted, put(https_admin::PATH, Some(&admin), request))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        if maintenance || matches!(role, LocalServingRole::Learner) {
+            assert_eq!(
+                call(&admitted, get("/api/v1/settings", Some(&admin)))
+                    .await
+                    .0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+    }
+    // The exception grants nothing to fenced/unknown nodes.
+    for role in [Some(LocalServingRole::Fenced), None] {
+        let response =
+            capacity_role_refusal(role, &Method::GET, https_admin::PATH).expect("fenced");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(body.as_ref(), NODE_REMOVAL_FENCED_JSON.as_bytes());
+    }
 }
 
 fn test_app() -> Router {
@@ -8335,6 +8667,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "chapter_thumbnails",
             "dolby_vision_convert",
             "dolby_vision_hdr_processing",
+            "dolby_vision_display_target",
             "dolby_vision_fel_reencode",
             "source_probe_comparison",
             "output_preparation",
@@ -8382,6 +8715,8 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
     // which a ride-along test in this binary may have driven either way.
     // The local-cache row depends on the host filesystem and whether its
     // classifier is implemented on this platform.
+    // The live FEL slot is reported only on Linux workers. This idle fixture
+    // owns no reconstruction, so its single slot must be available there.
     let green = seen
         .iter()
         .filter(|(_, status)| status.as_str() == "met")
@@ -8396,6 +8731,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
                     | "probe_reporter_named"
                     | "sources_match_their_scan_whole"
                     | "stored_source_self_test"
+                    | "dv_fel_live_slot"
                     | "stored_source_local_cache"
                     | "stored_source_free_space"
                     | "local_cache"
@@ -8407,6 +8743,26 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             )
         })
         .collect::<Vec<_>>();
+    let live_slot = items
+        .iter()
+        .find(|item| item["id"] == "dolby_vision_fel_reencode")
+        .expect("live FEL card")["requirements"]
+        .as_array()
+        .expect("live FEL requirements")
+        .iter()
+        .find(|row| row["id"] == "dv_fel_live_slot")
+        .expect("live FEL slot requirement");
+    let slot_evidence = live_slot["evidence"].as_str().expect("slot evidence");
+    if cfg!(target_os = "linux") {
+        assert_eq!(live_slot["status"], "met");
+        assert!(
+            slot_evidence.starts_with("0 of 1 live FEL reconstruction slot"),
+            "the idle fixture has its live reconstruction slot: {slot_evidence}"
+        );
+    } else {
+        assert_eq!(live_slot["status"], "unavailable");
+        assert!(slot_evidence.contains("Linux playback workers only"));
+    }
     // Startup inventory may settle between the two readiness requests.
     // Its status must report the same snapshot as its evidence; this
     // empty fixture owns no preparation media or pending cleanup.
@@ -8465,6 +8821,13 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
         ),
         "the reporter row never claims a build it did not read: {seen:?}"
     );
+    // Live FEL occupancy is a process observation on Linux; other platforms
+    // cannot read it. Its exact verdict is covered by the facts helper tests.
+    let live_slot = seen.get("dv_fel_live_slot").map(String::as_str);
+    #[cfg(target_os = "linux")]
+    assert!(matches!(live_slot, Some("met" | "unmet")));
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(live_slot, Some("unavailable"));
     assert_eq!(
         green,
         vec![
@@ -8483,6 +8846,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "coverage",
             "durable_queue",
             "durable_role",
+            "dv_target_cache",
             // Display-aware Auto on a single node owns every session.
             "local_session_owner",
             // Output preparation and rolling retention: the budget is the
@@ -8993,6 +9357,14 @@ async fn dv_processing_preferences_roundtrip_without_qualification_or_conversion
         );
     }
     assert_eq!(initial["dolby_vision_convert"], true);
+    #[cfg(target_os = "linux")]
+    let fel_helper_installed = crate::vodencode::dv_runtime::ToolSet::capture()
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    #[cfg(not(target_os = "linux"))]
+    let fel_helper_installed = false;
     // Each new preference can be on or off with either conversion permission.
     // Missing backend evidence never changes the saved choices or permission.
     for convert in [false, true] {
@@ -9038,9 +9410,26 @@ async fn dv_processing_preferences_roundtrip_without_qualification_or_conversion
                     let requirements = item["requirements"]
                         .as_array()
                         .expect("readiness requirements");
-                    assert_eq!(requirements.len(), 4);
-                    assert_eq!(requirements[0]["status"], "unmet");
-                    assert!(requirements.iter().all(|row| row["status"] != "met"));
+                    if field == "dolby_vision_fel_reencode" {
+                        // Computed from this node: the helper and the conversion
+                        // permission decide the backend row, never the saved choice.
+                        assert_eq!(requirements.len(), 6);
+                        assert_eq!(
+                            requirements[0]["status"],
+                            if convert && fel_helper_installed {
+                                "met"
+                            } else {
+                                "unmet"
+                            },
+                            "{requirements:?}"
+                        );
+                        assert_eq!(requirements[1]["id"], "dv_fel_worker_budget");
+                        assert_eq!(requirements[2]["id"], "dv_fel_live_slot");
+                    } else {
+                        assert_eq!(requirements.len(), 4);
+                        assert_eq!(requirements[0]["status"], "unmet");
+                        assert!(requirements.iter().all(|row| row["status"] != "met"));
+                    }
                 }
                 assert_eq!(read["dolby_vision_convert"], convert);
                 assert_eq!(state.transcode.dv_convert_enabled().await, convert);
@@ -11072,6 +11461,93 @@ async fn home_previews_are_authenticated_fixed_and_match_library_pages() {
     );
 }
 
+#[tokio::test]
+async fn sharing_connection_probe_reports_failure_preserves_consent_and_does_not_import() {
+    use plurx_core::{
+        config::SharingNetworkConfig,
+        sharing::{ConnectionInvitation, Endpoint, Invitation, NetworkShare, SharingIdentity},
+    };
+    let (_, mut state) = test_app_with_state();
+    state.sharing = Arc::new(crate::sharing::SharingManager::new(
+        state.sharing.key.clone(),
+        crate::test_temp_path(format!("sharing-probe-{}", uuid::Uuid::new_v4())),
+        SharingNetworkConfig {
+            // Missing host custody must fail closed rather than using an
+            // ordinary network route, on every test host.
+            require_host_egress_guard: true,
+            ..Default::default()
+        },
+    ));
+    let app = router(state.clone());
+    let admin = setup_admin(&app).await;
+    let invitation = Invitation {
+        identity: SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: crate::state::clock_ms(),
+        },
+        name: "Synthetic source".into(),
+        endpoints: vec![Endpoint {
+            ipv4: "100.101.102.103"
+                .parse()
+                .expect("synthetic tailnet address"),
+            ipv6: None,
+            ts_fqdn: "source.fixture.ts.net".into(),
+            port: 32443,
+            spki_sha256: "a".repeat(64),
+        }],
+        id: uuid::Uuid::new_v4(),
+        secret: plurx_core::sharing::new_secret().expect("synthetic invitation secret"),
+        expires_at_ms: crate::state::clock_ms() + 60_000,
+    };
+    let consent = "https://login.tailscale.com/admin/invite/synthetic_consent";
+    let combined = ConnectionInvitation {
+        invitation: invitation.encode().expect("synthetic invitation"),
+        network: vec![NetworkShare {
+            ts_fqdn: "source.fixture.ts.net".into(),
+            invite_url: consent.into(),
+        }],
+    }
+    .encode()
+    .expect("synthetic combined invitation");
+    for probe in [false, true] {
+        let (status, response) = call(
+            &app,
+            post(
+                "/api/v1/sharing/connection",
+                Some(&admin),
+                json!({"invitation":combined.expose(),"probe":probe}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["name"], "Synthetic source");
+        assert_eq!(response["connected"], false);
+        assert_eq!(response["network"][0]["invite_url"], consent);
+        assert_eq!(
+            response["connection_error"],
+            if probe {
+                json!("sharing_peer_unavailable")
+            } else {
+                Value::Null
+            },
+            "an attempted connection must distinguish failure from an unchecked invitation"
+        );
+        assert!(state
+            .store
+            .sharing_imports()
+            .await
+            .expect("imports")
+            .is_empty());
+        assert!(state
+            .store
+            .sharing_exports(None)
+            .await
+            .expect("exports")
+            .is_empty());
+    }
+}
+
 /// Runs only in a disposable namespace with an assigned CGNAT fixture IP.
 /// The production endpoint validator, DNS, pinned dialer and both routers
 /// remain in the path. This proves protocol recovery, not Tailscale topology.
@@ -11132,7 +11608,8 @@ async fn sharing_pinned_transport_recovers_committed_claim_and_rotation_after_re
         post(
             "/api/v1/sharing/invitations",
             Some(&source_admin),
-            json!({"library_ids":[seeded.lib.to_string()]}),
+            // CGNAT/TLS connectivity is owned by this fixture, not a provider invitation.
+            json!({"library_ids":[seeded.lib.to_string()],"include_network":false}),
         ),
     )
     .await;
@@ -11719,7 +12196,9 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1["code"], "sharing_invalid_request");
     }
-    let (status, created) = call(
+    // Combined external invitations are the production default. This owned
+    // fixture has no provider authorization and must retain that refusal.
+    let (status, denied) = call(
         &app,
         post(
             "/api/v1/sharing/invitations",
@@ -11728,7 +12207,28 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        denied,
+        json!({"code":"sharing_network_authorization_required","message":"sharing network authorization required"})
+    );
+    // The claim/approval/rotation contract below owns its endpoint manifest;
+    // request the supported Cinema-only invitation without an external share.
+    let (status, created) = call(
+        &app,
+        post(
+            "/api/v1/sharing/invitations",
+            Some(&admin),
+            json!({"library_ids":[seeded.lib.to_string()],"include_network":false}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected invitation code: {:?}",
+        created.get("code")
+    );
     let invitation = Invitation::parse(&Secret::from_cleartext(
         created["invitation"]
             .as_str()
@@ -20414,4 +20914,50 @@ async fn desktop_drain_accounts_internal_proxy_and_post_relay_bodies() {
     drop(read);
     drop(relay);
     assert!(fence.commit_desktop_shutdown(token, 0).await);
+}
+
+#[tokio::test]
+async fn display_target_setting_defaults_off_and_saves_despite_unmet_advice() {
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let (_, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+    assert_eq!(initial["dolby_vision_display_target"], false);
+    for enabled in [true, false] {
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"dolby_vision_display_target": enabled}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["dolby_vision_display_target"], enabled);
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::DV_DISPLAY_TARGET)
+                .await
+                .expect("stored"),
+            Some(if enabled { "1" } else { "0" }.into())
+        );
+        let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+        let item = readiness["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .find(|item| item["id"] == "dolby_vision_display_target")
+            .expect("target item");
+        assert_eq!(item["enabled"], enabled);
+        assert!(item["requirements"]
+            .as_array()
+            .expect("requirements")
+            .iter()
+            .any(|row| row["status"] != "met"));
+        assert_eq!(
+            saved["dolby_vision_hdr_processing"], false,
+            "targeting never silently enables HDR10-E"
+        );
+    }
 }

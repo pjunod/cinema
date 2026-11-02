@@ -1,0 +1,98 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: plurx-player
+Comment: The launcher is part of plurx; see LICENSE and NOTICE at the
+ repository root. The package also carries private builds of libplacebo
+ and mpv, whose pinned upstream sources (packaging/upstream.lock) are the
+ libplacebo and mpv components of this source package;
+ /usr/share/doc/plurx-player/private-build.txt names the exact versions
+ and patches.
+
+Files: *
+Copyright: 2026 plurx contributors
+License: Apache-2.0
+
+Files: libplacebo/*
+Copyright: 2017-2026 Niklas Haas and the libplacebo contributors
+License: LGPL-2.1+
+Comment: libplacebo is linked statically into /usr/lib/plurx-player/bin/mpv,
+ and it statically embeds glslang and
+ SPIRV-Tools from the build environment (the package's Built-Using field
+ names their exact versions). glslang is under BSD-3-clause, MIT,
+ Apple-MIT-license and, for its Bison-generated parser, GPL-3 with the
+ Bison exception; SPIRV-Tools is under Apache-2.0. Their full Debian
+ copyright files are installed as
+ /usr/share/doc/plurx-player/copyright.glslang and copyright.spirv-tools.
+
+Files: mpv/*
+Copyright: 2000-2025 the MPlayer, mplayer2 and mpv contributors
+License: GPL-2+
+Comment: mpv is built with -Dgpl=true and compiles plurx's Apache-2.0
+ display management (dm/*), so /usr/lib/plurx-player/bin/mpv as a whole is
+ distributed under GPL-3.0-or-later (mpv's GPL-2.0-or-later allows that, and
+ Apache-2.0 is compatible with GPL-3.0). Some of its source files are also
+ available under LGPL-2.1-or-later; see upstream's Copyright file.
+
+Files: dm/*
+Copyright: 2026 Paul Junod
+License: Apache-2.0
+Comment: plurx's closed-form Dolby Vision display management
+ (tools/dv_processing in the plurx repository; see its LICENSE and NOTICE),
+ compiled into the private mpv.
+
+Files: packaging/libdovi/rpu_parser.h
+Copyright: 2021-2026 quietvoid and the dovi_tool contributors
+License: MIT
+Comment: The libdovi C API header (dolby_vision 3.2.0), the copy plurx's
+ processing helper pins. mpv links the distribution's libdovi.
+
+Files: mpv/etc/mpv.metainfo.xml
+Copyright: 2000-2025 the MPlayer, mplayer2 and mpv contributors
+License: CC0-1.0
+
+License: Apache-2.0
+ On Debian systems the full text is in /usr/share/common-licenses/Apache-2.0.
+
+License: LGPL-2.1+
+ This library is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation; either version 2.1 of the License, or (at
+ your option) any later version.
+ .
+ On Debian systems the full text is in
+ /usr/share/common-licenses/LGPL-2.1.
+
+License: GPL-2+
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation; either version 2 of the License, or (at your option)
+ any later version.
+ .
+ On Debian systems the full text is in /usr/share/common-licenses/GPL-2.
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a
+ copy of this software and associated documentation files (the "Software"),
+ to deal in the Software without restriction, including without limitation
+ the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ and/or sell copies of the Software, and to permit persons to whom the
+ Software is furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ DEALINGS IN THE SOFTWARE.
+
+License: CC0-1.0
+ To the extent possible under law, the author(s) have dedicated all
+ copyright and related and neighboring rights to this software to the
+ public domain worldwide. This software is distributed without any
+ warranty.
+ .
+ On Debian systems the full text is in
+ /usr/share/common-licenses/CC0-1.0.

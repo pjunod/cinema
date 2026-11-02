@@ -14,8 +14,8 @@ license notices are identified below. ffmpeg is invoked rather than linked
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 627 source-bearing crates in the root workspace · license fields
-verified 2026-10-19; the graph itself re-checked against `Cargo.lock`
+the work. 624 source-bearing crates in the root workspace · license fields
+verified 2026-10-29; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
 resolution, and on 2026-09-24, when `ring` became the only rustls provider
@@ -29,7 +29,9 @@ the counts and the full list to one another. The graph and declared SPDX
 expressions were rechecked with pinned, locked `cargo metadata` on 2026-10-12
 for the independent support service dependencies. The desktop controller and
 Linux GTK tray dependencies were rechecked against the combined locked
-workspace metadata on 2026-10-19.
+workspace metadata on 2026-10-19. The Wasmtime 50.0.0 / Cranelift
+0.137.0 graph and declared license fields were rechecked against locked
+workspace metadata on 2026-10-29.
 
 ---
 
@@ -71,6 +73,16 @@ binaries, not for plurx. Two ways to stay clean:
 ffmpeg *next to* plurx is aggregation and leaves plurx's license alone;
 shipping it *inside* plurx's address space would not, which is why the
 subprocess boundary is load-bearing and should stay that way.
+
+**macOS native Vulkan media builds.** libplacebo uses the header-only
+[fast_float](https://github.com/fastfloat/fast_float) library, pinned to
+`97b54ca9e75f5303507699d27c6b4f4efe4641a1`, for floating-point parsing on older
+macOS deployment targets. Copyright (c) 2021 The fast_float authors. plurx
+uses its MIT license option; the [full text](licenses/fast_float-MIT.txt)
+retains that notice. The exact source archive, including its upstream license
+texts, travels with the media package's native Vulkan source offer. These
+headers are compiled into libplacebo inside the FFmpeg subprocess, separately
+from the Rust dependency graph.
 
 ---
 
@@ -119,7 +131,7 @@ changed — only which file to open.
 
 ## 3. Vendored Rust crates — upstream sources, locally modified
 
-Seven crates are vendored under `vendor/` rather than pulled from crates.io.
+Eight crates are vendored under `vendor/` rather than pulled from crates.io.
 Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 
 | Crate | Version | License | Upstream | Changes |
@@ -131,8 +143,10 @@ Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 | `rust_decimal` | 1.42.1 | MIT | Paul Mason · [paupino/rust-decimal](https://github.com/paupino/rust-decimal) | [rkyv 0.7 removal for RUSTSEC-2026-0235](vendor/rust_decimal/PLURX-PATCH.md) |
 | `dolby_vision` | 3.4.0 | MIT | quietvoid · [quietvoid/dovi_tool](https://github.com/quietvoid/dovi_tool/tree/main/dolby_vision) | [five refusals where a malformed RPU allocated or panicked](vendor/dolby_vision/PLURX-PATCH.md) |
 | `bitvec_helpers` | 4.0.2 | MIT | quietvoid · [quietvoid/bitvec_helpers](https://github.com/quietvoid/bitvec_helpers) | [two Exp-Golomb overflows refused](vendor/bitvec_helpers/PLURX-PATCH.md) |
+| `ksni` | 0.3.6 | Unlicense | iovxw · [iovxw/ksni](https://github.com/iovxw/ksni) | [consistent D-Bus menu item IDs](vendor/ksni/PLURX-PATCH.md) |
 
-Each directory carries its upstream license at `vendor/<crate>/LICENSE`.
+Each directory retains its upstream license text; `ksni` uses
+[UNLICENSE](vendor/ksni/UNLICENSE).
 
 `s3-simple` is vendored but is not part of the default resolution: plurx
 builds hiqlite without `backup`/`s3`, so it reaches no shipped binary and
@@ -150,7 +164,7 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-627 source-bearing crates resolve into a plurx build, excluding the ten
+624 source-bearing crates resolve into a plurx build, excluding the ten
 first-party crates and the vendored ones above (`s3-simple` resolves only in
 the fork's optional backup graph, never in this one). The independently built support service adds five MPL-2.0 libraries for
 passkey validation; the other selected license terms are permissive:
@@ -172,7 +186,7 @@ binding crates and are not bundled in `plurx-desktop`. See the
 | `MIT/Apache-2.0` | 22 |
 | `Unicode-3.0` | 18 |
 | `Apache-2.0` | 12 |
-| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 12 |
+| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 10 |
 | `MPL-2.0` | 5 |
 | `Unlicense OR MIT` | 5 |
 | `Unlicense/MIT` | 4 |
@@ -198,7 +212,6 @@ binding crates and are not bundled in `plurx-desktop`. See the
 | `MIT OR BSD-3-Clause` | 1 |
 | `MIT OR Zlib OR Apache-2.0` | 1 |
 | `MIT-0` | 1 |
-| `Unlicense` | 1 |
 | `Zlib` | 1 |
 
 `r-efi` also offers a copyleft license option (`MIT OR Apache-2.0 OR LGPL-2.1-or-later`). It is a disjunction, so
@@ -239,7 +252,7 @@ workspaces ships in any artifact, so they are out of scope for distribution,
 but they are not covered by the table above.
 
 <details>
-<summary>Full crate list (627)</summary>
+<summary>Full crate list (624)</summary>
 
 | Crate | Version | License |
 |---|---|---|
@@ -340,19 +353,19 @@ but they are not covered by the table above.
 | `cpp_demangle` | 0.5.1 | MIT OR Apache-2.0 |
 | `cpufeatures` | 0.2.17 | MIT OR Apache-2.0 |
 | `cpufeatures` | 0.3.0 | MIT OR Apache-2.0 |
-| `cranelift-assembler-x64` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-assembler-x64-meta` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-bforest` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-bitset` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-codegen` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-codegen-meta` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-codegen-shared` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-control` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-entity` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-frontend` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-isle` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-native` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
-| `cranelift-srcgen` | 0.136.2 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-assembler-x64` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-assembler-x64-meta` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-bforest` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-bitset` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-codegen` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-codegen-meta` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-codegen-shared` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-control` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-entity` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-frontend` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-isle` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-native` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
+| `cranelift-srcgen` | 0.137.0 | Apache-2.0 WITH LLVM-exception |
 | `crc` | 3.4.0 | MIT OR Apache-2.0 |
 | `crc-catalog` | 2.5.0 | MIT OR Apache-2.0 |
 | `crc32fast` | 1.5.0 | MIT OR Apache-2.0 |
@@ -515,7 +528,6 @@ but they are not covered by the table above.
 | `jsonschema-regex` | 0.50.1 | MIT |
 | `jsonschema-value` | 0.50.1 | MIT |
 | `kamadak-exif` | 0.6.1 | BSD-2-Clause |
-| `ksni` | 0.3.6 | Unlicense |
 | `lazy_static` | 1.5.0 | MIT OR Apache-2.0 |
 | `leb128fmt` | 0.1.0 | MIT OR Apache-2.0 |
 | `libc` | 0.2.189 | MIT OR Apache-2.0 |
@@ -602,8 +614,8 @@ but they are not covered by the table above.
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 |
 | `proc-macro-crate` | 3.5.0 | MIT OR Apache-2.0 |
 | `proc-macro2` | 1.0.107 | MIT OR Apache-2.0 |
-| `pulley-interpreter` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `pulley-macros` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `pulley-interpreter` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `pulley-macros` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
 | `pulp` | 0.22.3 | MIT |
 | `pulp-wasm-simd-flag` | 0.1.1 | MIT |
 | `qrcode` | 0.14.1 | MIT OR Apache-2.0 |
@@ -704,7 +716,7 @@ but they are not covered by the table above.
 | `strum_macros` | 0.28.0 | MIT |
 | `subtle` | 2.6.1 | BSD-3-Clause |
 | `syn` | 2.0.119 | MIT OR Apache-2.0 |
-| `syn` | 3.0.3 | MIT OR Apache-2.0 |
+| `syn` | 3.0.9 | MIT OR Apache-2.0 |
 | `sync_wrapper` | 1.0.2 | Apache-2.0 |
 | `synstructure` | 0.13.2 | MIT |
 | `sysctl` | 0.6.0 | MIT |
@@ -791,22 +803,20 @@ but they are not covered by the table above.
 | `wasm-bindgen-macro` | 0.2.126 | MIT OR Apache-2.0 |
 | `wasm-bindgen-macro-support` | 0.2.126 | MIT OR Apache-2.0 |
 | `wasm-bindgen-shared` | 0.2.126 | MIT OR Apache-2.0 |
-| `wasm-encoder` | 0.258.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `wasm-encoder` | 0.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `wasm-streams` | 0.4.2 | MIT OR Apache-2.0 |
-| `wasmparser` | 0.258.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `wasmparser` | 0.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
-| `wasmprinter` | 0.258.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
-| `wasmtime` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-environ` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-component-util` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-core` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-cranelift` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-fiber` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-jit-debug` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-jit-icache-coherence` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-unwinder` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
-| `wasmtime-internal-versioned-export-macros` | 49.0.2 | Apache-2.0 WITH LLVM-exception |
+| `wasmprinter` | 0.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| `wasmtime` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-environ` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-component-util` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-core` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-cranelift` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-fiber` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-jit-debug` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-jit-icache-coherence` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-unwinder` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
+| `wasmtime-internal-versioned-export-macros` | 50.0.0 | Apache-2.0 WITH LLVM-exception |
 | `wast` | 261.0.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `wat` | 1.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `web-sys` | 0.3.103 | MIT OR Apache-2.0 |
@@ -1010,6 +1020,23 @@ and package identity contracts together.
 
 ---
 
+## 9. Embedded representative media
+
+The daemon embeds three ten-second adaptations of *Sol Levante* (2020), by
+Netflix and Production I.G, from the [official Netflix Open Content collection](https://opencontent.netflix.com/).
+The content is available under [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/);
+the complete terms are in [licenses/CC-BY-4.0.txt](licenses/CC-BY-4.0.txt).
+No endorsement is implied.
+
+The adaptations select source frames 1440–1679, remove audio, re-encode HEVC,
+and derive BT.709 SDR/H.264 versions using zscale/Hable tone mapping and
+resizing. They are throughput fixtures, not unmodified HDR masters. Exact
+source, attribution, changes, frame metadata and SHA-256 hashes are recorded in
+the [fixture manifest](crates/plurxd/src/transcoder_optimization/fixtures/manifest.json)
+and the [preparation recipe](crates/plurxd/src/transcoder_optimization/fixtures/README.md).
+
+---
+
 ## Keeping this file honest
 
 This document is a claim about what is in the dependency graph, so it goes
@@ -1020,5 +1047,5 @@ allow-list, so a new copyleft dependency cannot land quietly. Run it with
 
 `cargo deny` cannot see the parts that are not crates — the web UI bundle,
 the fonts, the client dependencies, the Dockerfile's ffmpeg, the source checked
-into the tree. Update §1, §2, §5, §6, §7 and §8 by hand when those move, in the
+into the tree. Update §1, §2, §5, §6, §7, §8 and §9 by hand when those move, in the
 same commit that moves them.

@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "scope": "descriptive effect correspondence; not a Rust-to-TLA refinement theorem",
+  "production_step": "plurx_worker_control::library_lifecycle::step",
+  "driver": "crates/plurxd/src/library_work.rs::work_library_queue",
+  "model": "verification/worker-refinement/WorkerRefinement.tla",
+  "model_sha256": "abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0",
+  "effects": [
+    {
+      "effect": "AcquireDomain",
+      "existing_model_actions": [
+        "DomainSend",
+        "StoreApply",
+        "StoreReply",
+        "CallerReturn"
+      ],
+      "driver_operation": "self.acquire_job(format!(\"scan:library:{library_id}\"))",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "Domain acquisition outcome is an environmental input; the controller does not implement Store/Raft."
+    },
+    {
+      "effect": "Bind",
+      "existing_model_actions": [
+        "WorkerTokenIntent",
+        "WorkerTokenGrant",
+        "AuthorityReturn",
+        "WorkerPubIntent",
+        "WorkerPubGrant",
+        "BindSend"
+      ],
+      "driver_operation": "fence.bind_library(...)",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "Existing binder retains token-mutex then publication-read-lock ordering and SQL authority checks outside the controller."
+    },
+    {
+      "effect": "Process",
+      "existing_model_actions": [
+        "ScanStart",
+        "WalkReturn",
+        "ScanFinish",
+        "ItemSend",
+        "CompleteSend",
+        "Reconcile"
+      ],
+      "driver_operation": "self.process_library_requests(...)",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "A single effect invokes a complete asynchronous processing path; internal publication and durable completion are not local controller theorems."
+    },
+    {
+      "effect": "RevokeDomain",
+      "existing_model_actions": [
+        "Cancel",
+        "QueueLoss",
+        "ReleaseJoin"
+      ],
+      "driver_operation": "lease.revoke()",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "Related model actions coarsen several causes; there is no one-to-one action simulation."
+    },
+    {
+      "effect": "CancelWork",
+      "existing_model_actions": [
+        "Cancel",
+        "QueueLoss"
+      ],
+      "driver_operation": "cancellation.cancel()",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "Cancellation requests do not establish future termination."
+    },
+    {
+      "effect": "AwaitWorkJoin",
+      "existing_model_actions": [
+        "WalkReturn",
+        "ScanFinish"
+      ],
+      "driver_operation": "work.as_mut().await or selected completed result",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "The real join stays inside the work future lexical scope; eventual filesystem/process return remains assumed."
+    },
+    {
+      "effect": "DropPublisher",
+      "existing_model_actions": [],
+      "driver_operation": "drop(publisher.take()...)",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "No dedicated model action represents this Rust handle drop. Do not equate it with the publication RwLock guard."
+    },
+    {
+      "effect": "ReleaseDomain",
+      "existing_model_actions": [
+        "ReleaseJoin",
+        "ReleaseSend",
+        "ReleaseFailure",
+        "ReleaseRetry",
+        "CallerReturn"
+      ],
+      "driver_operation": "lease.take().release().await",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "Consumes the local lease handle after the release attempt returns; ambiguous failure does not establish durable lease disappearance."
+    },
+    {
+      "effect": "Settle",
+      "existing_model_actions": [
+        "SettleSend",
+        "CallerReturn"
+      ],
+      "driver_operation": "settle_library(...)",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "Yield/retry policy and signed saturation are local controller decisions. Store acceptance remains environmental."
+    },
+    {
+      "effect": "RetireQueue",
+      "existing_model_actions": [
+        "FinishJoin",
+        "FinishRetire"
+      ],
+      "driver_operation": "active.take().finish().await",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "Queue-heartbeat join and retirement internals are delegated; their completion is not proved by the controller."
+    },
+    {
+      "effect": "DropAdmission",
+      "existing_model_actions": [
+        "DropAdmission"
+      ],
+      "driver_operation": "drop(admission.take()...)",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
+      "boundary": "The controller orders this last; the driver performs the actual physical guard drop."
+    }
+  ]
+}

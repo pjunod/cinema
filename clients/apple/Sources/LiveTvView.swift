@@ -1740,34 +1740,42 @@ struct LiveTvGuideGrid: View {
         .onPreferenceChange(LiveTvGuideScrollOriginKey.self) { scrollOrigin = $0 }
         #endif
         .safeAreaInset(edge: .top, spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                Palette.bg.frame(height: headerHeight)
-                HStack(spacing: 0) {
-                    ForEach(slots, id: \.self) { at in
-                        Text(liveTvTime(at))
-                            .font(LiveTvType.tertiary).foregroundStyle(Palette.muted)
-                            .padding(.leading, 6)
-                            .frame(width: dimensions.slotWidth, height: headerHeight,
-                                   alignment: .leading)
-                            .overlay(alignment: .leading) {
-                                Rectangle().fill(Palette.outline).frame(width: 1)
-                            }
+            // The time strip is wider than a phone. Measure the viewport
+            // instead of letting its intrinsic width push the scroll view
+            // (and every station row) off the side of the screen.
+            GeometryReader { geometry in
+                ZStack(alignment: .topLeading) {
+                    Palette.bg.frame(height: headerHeight)
+                    HStack(spacing: 0) {
+                        ForEach(slots, id: \.self) { at in
+                            Text(liveTvTime(at))
+                                .font(LiveTvType.tertiary).foregroundStyle(Palette.muted)
+                                .padding(.leading, 6)
+                                .frame(width: dimensions.slotWidth, height: headerHeight,
+                                       alignment: .leading)
+                                .overlay(alignment: .leading) {
+                                    Rectangle().fill(Palette.outline).frame(width: 1)
+                                }
+                        }
+                    }
+                    .offset(x: dimensions.channelColumnWidth + 8 + scrollOrigin.x)
+                    .frame(height: headerHeight)
+                    .clipped()
+                    if let paging {
+                        HStack(spacing: 6) {
+                            pagingChip("‹", index: 0, enabled: paging.canEarlier, action: paging.earlier)
+                            pagingChip("Now", index: 1, enabled: true, action: paging.now)
+                            pagingChip("›", index: 2, enabled: paging.canLater, action: paging.later)
+                        }
+                        .padding(.leading, 8)
+                        .frame(width: dimensions.channelColumnWidth + 8, height: headerHeight,
+                               alignment: .leading)
                     }
                 }
-                .offset(x: dimensions.channelColumnWidth + 8 + scrollOrigin.x)
-                .frame(height: headerHeight)
+                .frame(width: geometry.size.width, height: headerHeight, alignment: .topLeading)
                 .clipped()
-                if let paging {
-                    HStack(spacing: 6) {
-                        pagingChip("‹", index: 0, enabled: paging.canEarlier, action: paging.earlier)
-                        pagingChip("Now", index: 1, enabled: true, action: paging.now)
-                        pagingChip("›", index: 2, enabled: paging.canLater, action: paging.later)
-                    }
-                    .padding(.leading, 8)
-                    .frame(width: dimensions.channelColumnWidth + 8, height: headerHeight,
-                           alignment: .leading)
-                }
             }
+            .frame(height: headerHeight)
         }
         #if os(tvOS)
         .onChange(of: focusedCell) { _, target in
@@ -2125,8 +2133,6 @@ struct LiveTvView: View {
     @State private var showingReminderActions = false
     @FocusState private var morePanelFocus: String?
     @State private var showingLayout = false
-    @State private var mobileGuideGrid = SettingsStore().liveTvMobileGuideUsesGrid
-    @State private var scheduleChannelId: String?
     @State private var guideWindowStart = {
         let current = Int(Date().timeIntervalSince1970)
         return current - current % LiveTvGridMetrics.slotSeconds
@@ -3253,20 +3259,7 @@ struct LiveTvView: View {
         case .list:
             touchChannelList
         case .guide:
-            if verticalSizeClass == .regular && horizontalSizeClass == .compact && !mobileGuideGrid {
-                mobileSchedule
-            } else {
-                VStack(spacing: 8) {
-                    if verticalSizeClass == .regular && horizontalSizeClass == .compact {
-                        Button("Selected channel schedule") {
-                            mobileGuideGrid = false
-                            SettingsStore().liveTvMobileGuideUsesGrid = false
-                        }
-                        .font(.system(size: 13, weight: .semibold))
-                    }
-                    guideGrid
-                }
-            }
+            guideGrid
         }
     }
 
@@ -3395,70 +3388,6 @@ struct LiveTvView: View {
         }
     }
 
-    private var mobileSchedule: some View {
-        let channel = scheduleChannelId.flatMap { id in visibleChannels.first { $0.id == id } }
-            ?? live.watching
-            ?? visibleChannels.first
-        let programmes = channel.flatMap { selected in
-            live.guide?.channels.first { $0.id == selected.id }?.programmes
-        } ?? []
-        return VStack(spacing: 0) {
-            HStack {
-                Picker("Channel", selection: Binding(
-                    get: { channel?.id ?? "" },
-                    set: { scheduleChannelId = $0 }
-                )) {
-                    ForEach(visibleChannels) { Text($0.title).tag($0.id) }
-                }
-                Spacer()
-                Button("Grid") {
-                    mobileGuideGrid = true
-                    SettingsStore().liveTvMobileGuideUsesGrid = true
-                }
-                .font(.system(size: 13, weight: .semibold))
-            }
-            .frame(height: 44)
-            .padding(.horizontal, 12)
-            if programmes.isEmpty, let channel {
-                Button("No programme information · Watch live") {
-                    if channel.watchable { selectAiring(channel) }
-                }
-                .disabled(!channel.watchable)
-            }
-            List(programmes) { programme in
-                Button {
-                    // The same rule as the grid: every row opens the sheet,
-                    // because the sheet is where a programme's actions live on
-                    // the phone and Watch is the first of them.
-                    guard let channel else { return }
-                    detailChannel = channel
-                    detail = programme
-                } label: {
-                    HStack(spacing: 10) {
-                        Text(liveTvTime(programme.start))
-                            .font(.system(size: 12)).foregroundStyle(Palette.muted)
-                            .frame(width: 62, alignment: .leading)
-                        Text(programme.title).font(.system(size: 14)).lineLimit(1)
-                        Spacer(minLength: 4)
-                        if let mark = channel.flatMap({
-                            dvr.marks.mark(channelId: $0.id, airingStart: programme.start)
-                        }) {
-                            DvrCellMarkView(mark: mark)
-                        }
-                        if programme.start <= now && programme.end > now {
-                            Text("NOW").font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(Palette.accent)
-                        }
-                    }
-                    .frame(height: 44)
-                }
-                .buttonStyle(.plain)
-                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
-            }
-            .listStyle(.plain)
-        }
-        .onAppear { if scheduleChannelId == nil { scheduleChannelId = channel?.id } }
-    }
     #endif
 
     #if os(tvOS)

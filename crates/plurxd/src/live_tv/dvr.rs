@@ -4163,4 +4163,6 @@ async fn ensure_recordings_library(
 }
 
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
 mod tests;

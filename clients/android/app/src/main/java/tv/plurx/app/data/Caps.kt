@@ -19,6 +19,7 @@ import androidx.media3.exoplayer.audio.AudioCapabilities
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
 import tv.plurx.app.BuildConfig
 
 internal data class CapabilitySnapshot(
@@ -76,9 +77,11 @@ object Caps {
     /** One probe, two equivalent wire spellings. Re-run for every decision:
      * the active audio sink can change while the app remains open. */
     internal suspend fun snapshot(context: Context): CapabilitySnapshot =
-        withContext(Dispatchers.IO) { probe(context) }
+        withContext(Dispatchers.IO) {
+            probe(context, SettingsStore(context.applicationContext).flow.first().preferences.hdrDisplayPeak)
+        }
 
-    private fun probe(context: Context): CapabilitySnapshot {
+    private fun probe(context: Context, peakOverride: HdrDisplayPeak = HdrDisplayPeak.Auto): CapabilitySnapshot {
         val codecs = try {
             MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
         } catch (_: Exception) {
@@ -149,6 +152,7 @@ object Caps {
                 displayAwareAuto = Session.displayAwareAuto,
                 audio = audio,
                 hdrTypes = hdrTypes,
+                peak = displayPeak(displayDesiredMaxLuminance(context), peakOverride),
                 decoderDolbyVisionProfiles = dolbyVisionProfiles,
                 client = ClientInfo(
                     kind = "android",
@@ -467,6 +471,19 @@ object Caps {
         emptySet()
     }
 
+    @Suppress("DEPRECATION")
+    internal fun displayDesiredMaxLuminance(context: Context): Float? = try {
+        currentDisplay(context)?.hdrCapabilities?.desiredMaxLuminance
+    } catch (_: Exception) { null }
+
+    private fun currentDisplay(context: Context): Display? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { context.display }.getOrNull()?.let { return it }
+        }
+        return (context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
+            ?.getDisplay(Display.DEFAULT_DISPLAY)
+    }
+
     /**
      * Which grades *this display* can show, as `Display.HdrCapabilities`
      * constants. The caps probe only ever needed the boolean ([displayIsHdr]),
@@ -480,8 +497,7 @@ object Caps {
     internal fun displayHdrTypes(context: Context): Set<Int> {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return emptySet()
         return try {
-            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-            val display = dm.getDisplay(Display.DEFAULT_DISPLAY)
+            val display = currentDisplay(context)
             display?.hdrCapabilities?.supportedHdrTypes?.toSet().orEmpty()
         } catch (_: Exception) {
             emptySet()

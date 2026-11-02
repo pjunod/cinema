@@ -1,0 +1,909 @@
+{
+  "schema_version": 1,
+  "model_file": "verification/operation-progress/OperationProgress.tla",
+  "model_sha256": "5afb443975ec202d60eda641bdb2b0d29c7355111a43f96cf1529a82675fae99",
+  "source_mapping": {
+    "status": "reviewed",
+    "tables": [
+      {
+        "table": "01 candidate admission",
+        "source": "crates/plurxd/src/background_jobs.rs",
+        "anchor": "pub(crate) async fn claim_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      {
+        "table": "02 claim ambiguity deadline",
+        "source": "crates/plurxd/src/background_jobs.rs",
+        "anchor": "async fn claim_with_resolution_inner(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      {
+        "table": "03 queue heartbeat lock",
+        "source": "crates/plurxd/src/background_jobs.rs",
+        "anchor": "async fn renew(&self) -> Result<bool, StoreError> {",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      {
+        "table": "04 bind queue owner",
+        "source": "crates/plurxd/src/background_jobs.rs",
+        "anchor": "pub(crate) async fn bind_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      {
+        "table": "05 complete queue owner",
+        "source": "crates/plurxd/src/background_jobs.rs",
+        "anchor": "pub(crate) async fn complete_library(",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      {
+        "table": "06 queue heartbeat retirement",
+        "source": "crates/plurxd/src/background_jobs.rs",
+        "anchor": "pub(crate) async fn finish(mut self) {",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      {
+        "table": "07 queue retirement lock",
+        "source": "crates/plurxd/src/background_jobs.rs",
+        "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6"
+      },
+      {
+        "table": "08 worker acquisition and cleanup",
+        "source": "crates/plurxd/src/library_work.rs",
+        "anchor": "pub(super) async fn work_library_queue(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      {
+        "table": "09 domain lease acquisition",
+        "source": "crates/plurxd/src/library_work.rs",
+        "anchor": "Effect::AcquireDomain => {",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      {
+        "table": "10 work iteration bound",
+        "source": "crates/plurxd/src/library_work.rs",
+        "anchor": "for _ in 0..8 {",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      {
+        "table": "11 lost reply resolution",
+        "source": "crates/plurxd/src/library_work.rs",
+        "anchor": "// A lost completion acknowledgement must not rerun a published result.",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+      },
+      {
+        "table": "12 domain lease ttl heartbeat",
+        "source": "crates/plurxd/src/job_lease.rs",
+        "anchor": "pub(crate) const JOB_LEASE_TTL: Duration = Duration::from_secs(90);",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      {
+        "table": "13 expiry still drains renewal",
+        "source": "crates/plurxd/src/job_lease.rs",
+        "anchor": "_ = &mut expiry => {\n                        // Revocation and loss notification are synchronous,\n                        // but the already-dispatched renewal must still be\n                        // drained. TimedClient bounds that request; awaiting\n                        // it prevents a late Raft write after release returns.\n                        heartbeat_fence.revoke();\n                        heartbeat_lost.cancel();\n                        renewal.await?;",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      {
+        "table": "14 domain release join and retries",
+        "source": "crates/plurxd/src/job_lease.rs",
+        "anchor": "pub(crate) async fn release(mut self) -> Result<(), StoreError> {",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      {
+        "table": "15 domain drop abort",
+        "source": "crates/plurxd/src/job_lease.rs",
+        "anchor": "impl Drop for ActiveJobLease {",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
+      },
+      {
+        "table": "16 publication renewal lock",
+        "source": "crates/plurx-core/src/store/publication.rs",
+        "anchor": "pub async fn renew(\n        &self,\n        coordinator: &StoreCoordinator,\n        ttl: Duration,\n    ) -> Result<bool, StoreError> {\n        let mut state = self.state.write().await;",
+        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d"
+      },
+      {
+        "table": "17 fenced call lock held over backend",
+        "source": "crates/plurx-core/src/store/publication.rs",
+        "anchor": "async fn fenced_call<'call, T, F>(&'call self, operation: F) -> Result<T, StoreError>",
+        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d"
+      },
+      {
+        "table": "18 item publication boundary",
+        "source": "crates/plurx-core/src/store/publication.rs",
+        "anchor": "pub async fn insert_item(&self, item: &NewItem) -> Result<i64, StoreError> {",
+        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d"
+      },
+      {
+        "table": "19 atomic publication transaction",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "anchor": "pub(super) async fn atomic_publication(",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a"
+      },
+      {
+        "table": "20 fenced insert collision loop",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "anchor": "for attempt in 0..4 {",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a"
+      },
+      {
+        "table": "21 timed client transaction",
+        "source": "crates/plurx-core/src/store/hiqlite.rs",
+        "anchor": "pub(super) async fn txn<C, Q>(",
+        "sha256": "f248a8b74a9478c771c2f327de49d558ba8b66a9fa3cb395deabf5db74880afc"
+      },
+      {
+        "table": "22 store timeout constant",
+        "source": "crates/plurx-core/src/store/hiqlite.rs",
+        "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
+        "sha256": "f248a8b74a9478c771c2f327de49d558ba8b66a9fa3cb395deabf5db74880afc"
+      },
+      {
+        "table": "23 timeout drops operation future",
+        "source": "crates/plurx-core/src/store/hiqlite.rs",
+        "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
+        "sha256": "f248a8b74a9478c771c2f327de49d558ba8b66a9fa3cb395deabf5db74880afc"
+      },
+      {
+        "table": "24 vendor transaction rate limit",
+        "source": "vendor/hiqlite/src/client/transaction.rs",
+        "anchor": "self.rate_limit_db().await?;",
+        "sha256": "c0a7cd7e4cd3ee5e70144e2cc3a44e6d5acf2336a29a0d7f042429146f56e0f2"
+      },
+      {
+        "table": "25 vendor leader transaction write",
+        "source": "vendor/hiqlite/src/client/transaction.rs",
+        "anchor": ".client_write(QueryWrite::Transaction(queries))",
+        "sha256": "c0a7cd7e4cd3ee5e70144e2cc3a44e6d5acf2336a29a0d7f042429146f56e0f2"
+      },
+      {
+        "table": "26 vendor follower transaction reply",
+        "source": "vendor/hiqlite/src/client/transaction.rs",
+        "anchor": ".send_async(ClientStreamReq::Transaction(ClientTransactionPayload {",
+        "sha256": "c0a7cd7e4cd3ee5e70144e2cc3a44e6d5acf2336a29a0d7f042429146f56e0f2"
+      },
+      {
+        "table": "27 vendor serial SQLite transaction",
+        "source": "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs",
+        "anchor": "Query::Transaction(req) => {",
+        "sha256": "1ab742f0eb9354d5a83d83a526f7d76184e7e94dbd421b44a11639d451b21440"
+      },
+      {
+        "table": "28 library completion conditional update",
+        "source": "crates/plurx-core/src/store/background_jobs_library.rs",
+        "anchor": "UPDATE background_library_requests SET result_json = json_extract($1, '$.result'),",
+        "sha256": "107b004d328e655edcb0841aa52d866d01522203cf02eef584e7584e5c32903c"
+      },
+      {
+        "table": "29 library completion backend wrapper",
+        "source": "crates/plurx-core/src/store/background_jobs_library.rs",
+        "anchor": "pub(super) async fn complete<T: QueueSql>(",
+        "sha256": "107b004d328e655edcb0841aa52d866d01522203cf02eef584e7584e5c32903c"
+      },
+      {
+        "table": "30 authority job-kind boundary",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
+        "sha256": "e83bd0777415bab7bf6287362fcc22ad50433460ef05e969e5cb422d801b6fa1"
+      },
+      {
+        "table": "31 authority implementation",
+        "source": "crates/plurx-core/src/cluster/membership.rs",
+        "anchor": "impl ClusterJobAuthority for MembershipManager {",
+        "sha256": "61a3d16b8161a547c86fbfceaa2f033a753db89ccf066d980f3d30a1bdc45e84"
+      },
+      {
+        "table": "32 voter authority read",
+        "source": "crates/plurx-core/src/cluster/membership.rs",
+        "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
+        "sha256": "61a3d16b8161a547c86fbfceaa2f033a753db89ccf066d980f3d30a1bdc45e84"
+      },
+      {
+        "table": "33 local raft metrics authority",
+        "source": "vendor/hiqlite/src/client/mgmt.rs",
+        "anchor": "pub async fn metrics_db(&self) -> Result<RaftMetrics<NodeId, Node>, Error> {",
+        "sha256": "57692b5030198b18825d7be9c9641dfb2f9e353cdafd22a9ea6673c5a2a16298"
+      },
+      {
+        "table": "34 scanner page capacity",
+        "source": "crates/plurx-core/src/scan/mod.rs",
+        "anchor": "const WALK_PAGES_IN_FLIGHT: usize = 4;",
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c"
+      },
+      {
+        "table": "35 blocking walk cancellation",
+        "source": "crates/plurx-core/src/scan/mod.rs",
+        "anchor": "if tx.is_closed()",
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c"
+      },
+      {
+        "table": "36 blocking page send",
+        "source": "crates/plurx-core/src/scan/mod.rs",
+        "anchor": ".blocking_send(std::mem::replace(&mut page, next))",
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c"
+      },
+      {
+        "table": "37 scanner joins walker",
+        "source": "crates/plurx-core/src/scan/mod.rs",
+        "anchor": "walker\n        .await",
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c"
+      },
+      {
+        "table": "38 per-file I/O loop",
+        "source": "crates/plurx-core/src/scan/mod.rs",
+        "anchor": "async fn record_candidates(",
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c"
+      },
+      {
+        "table": "39 bounded process cancellation",
+        "source": "crates/plurx-core/src/process/bounded.rs",
+        "anchor": "pub async fn cancellable<T>(",
+        "sha256": "ac3cda174c534cbaee683793b8642c9244493606ac82b5337e850eaeed71ab92"
+      },
+      {
+        "table": "40 provider item deadline",
+        "source": "crates/plurx-core/src/metadata/mod.rs",
+        "anchor": "pub(crate) const ITEM_ENRICH_DEADLINE: Duration = Duration::from_secs(120);",
+        "sha256": "357dd388111ab259eb082427f6ac7848f9e813bb8a211a21c3e5581f38f5003a"
+      },
+      {
+        "table": "41 fragment admission try-only",
+        "source": "crates/plurxd/src/transcode/manager/construct.rs",
+        "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
+        "sha256": "e0a4e7a71fcbbf9ea7e1db3975d0d619d9dcd48ed892bf3e7fe6133b0f0af0d4"
+      },
+      {
+        "table": "42 daemon schedule loop no token",
+        "source": "crates/plurxd/src/state.rs",
+        "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
+        "sha256": "6b085f822cba95e223b62158fa3ba38145044fe91026da7f1ee056f332346208"
+      },
+      {
+        "table": "43 daemon worker loop no token",
+        "source": "crates/plurxd/src/state.rs",
+        "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
+        "sha256": "6b085f822cba95e223b62158fa3ba38145044fe91026da7f1ee056f332346208"
+      },
+      {
+        "table": "44 main worker spawn no shutdown arg",
+        "source": "crates/plurxd/src/main.rs",
+        "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
+        "sha256": "ee68d7467f4e9985252d022639a12525d280149eea8012377e4d0987baeaa3a8"
+      },
+      {
+        "table": "45 completion trigger updates waiter and parent job",
+        "source": "crates/plurx-core/src/store/background_jobs_library.sql",
+        "anchor": "CREATE TRIGGER IF NOT EXISTS background_library_request_completed",
+        "sha256": "0fe89737a0dea0c72c4de8cf4280da9a53e07e054d5621174072f734e6ea7f3b"
+      },
+      {
+        "table": "FIFO lock contract pinned Tokio dependency",
+        "source": "Cargo.lock",
+        "anchor": "name = \"tokio\"\nversion = \"1.53.1\"",
+        "sha256": "189b5736b7cb472c0b50176fbc112d275c8db11fc5f455f84cb895b41bb974dc"
+      },
+      {
+        "table": "production-consumed post-claim lifecycle controller; local safety only",
+        "source": "crates/plurx-worker-control/src/library_lifecycle.rs",
+        "anchor": "pub fn step(state: State, event: Event)",
+        "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
+      },
+      {
+        "table": "caption migration exact-shape recognizer outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_schema.rs",
+        "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2.",
+        "sha256": "08d669aaeb759b7bdb93484a459747aa99c13425cbffc934d2140a3639b1a0b0"
+      },
+      {
+        "table": "caption retarget queue effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_retarget.sql",
+        "anchor": "last_error_code='producer_retargeted'",
+        "sha256": "775b12add23c672d863292db2b0b6c266a243d337c0eda437a316b67812831bf"
+      },
+      {
+        "table": "caption claim-continuity effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_continuity.sql",
+        "anchor": "WHEN NEW.kind='subtitle_translation_range' AND NEW.state='running' AND NEW.fence>OLD.fence",
+        "sha256": "fdd2ba41bacde0935f63499b197e944a0b59358b15901e528e0f71a13346807f"
+      },
+      {
+        "table": "caption demand revocation affects only captured caption grants outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_continuity.sql",
+        "anchor": "CREATE TRIGGER subtitle_translation_revoke_continuity BEFORE UPDATE ON subtitle_translation_demands",
+        "sha256": "fdd2ba41bacde0935f63499b197e944a0b59358b15901e528e0f71a13346807f"
+      },
+      {
+        "anchor": "WHERE job.kind NOT IN ('semantic_embedding','subtitle_model_operation','subtitle_text_model_operation')",
+        "sha256": "64a7dd25f29f1bcc668542a2f5b478c9aa09997bd7f3637d7e130da134129a65",
+        "source": "crates/plurx-core/src/store/subtitle_managed_resources_v2.sql",
+        "table": "subtitle admission 2026-10-28 historical v2 source-reader exclusions"
+      },
+      {
+        "anchor": "SELECT id, 'provider:tmdb' FROM background_jobs WHERE kind IN ('library_scan','metadata_refresh')",
+        "sha256": "64a7dd25f29f1bcc668542a2f5b478c9aa09997bd7f3637d7e130da134129a65",
+        "source": "crates/plurx-core/src/store/subtitle_managed_resources_v2.sql",
+        "table": "subtitle admission 2026-10-28 preserved selected provider resources"
+      },
+      {
+        "anchor": "WHERE job.kind NOT IN ('semantic_embedding','subtitle_model_operation','subtitle_text_model_operation','subtitle_text_translate_artifact')",
+        "sha256": "105a0278a732761a3e67b6fd89775781150ffd9bb3f38691905e2e48a4087894",
+        "source": "crates/plurx-core/src/store/subtitle_managed_resources_v3.sql",
+        "table": "artifact caption 2026-10-28 rolling-upgrade-safe v3 source-reader exclusions"
+      },
+      {
+        "anchor": "SELECT id, 'provider:tmdb' FROM background_jobs WHERE kind IN ('library_scan','metadata_refresh')",
+        "sha256": "105a0278a732761a3e67b6fd89775781150ffd9bb3f38691905e2e48a4087894",
+        "source": "crates/plurx-core/src/store/subtitle_managed_resources_v3.sql",
+        "table": "artifact caption 2026-10-28 unchanged selected provider resources"
+      },
+      {
+        "anchor": "WHERE job.kind NOT IN ('semantic_embedding','subtitle_model_operation','subtitle_text_model_operation')",
+        "sha256": "64a7dd25f29f1bcc668542a2f5b478c9aa09997bd7f3637d7e130da134129a65",
+        "source": "crates/plurx-core/src/store/subtitle_managed_resources_v2.sql",
+        "table": "subtitle admission 2026-10-28 active v2 source-reader exclusions"
+      }
+    ],
+    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. Construction correspondence reconciliation on 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: selected library candidate/claim, queue heartbeat, bind/complete, heartbeat join and local retirement paths are unchanged. BackgroundJobStore adds separately kind-scoped text-caption methods; Hiqlite adds independent schema installation without changing the mapped transaction timeout. main.rs only declares the text-translation module at this boundary. admit_fragment remains try-only and retains its existing source-work helper. Two-thread speech work shares the background-heavy gate, while one-thread read attestation uses ordinary speculative CPU admission; their competition is outside this selected-worker model and supplies no new fairness guarantee. The obsolete unused queued-fragment wrapper is removed; speech qualification uses its own cancellable FIFO path. This authored construction mapping refresh is not the pending final adversarial review, test execution or TLC qualification; model/configuration bytes, fairness premises and prior receipts retain their identities. Final construction rustfmt refresh on 2026-10-26 changes only line wrapping in read_shared_captions trait/adapter arguments and module declaration ordering; mapped selected-worker behavior, anchors, model/configuration bytes and pending evidence boundaries are unchanged. Independent final adversarial correspondence review on 2026-10-26 of the frozen completion/retarget delta atop be9ee45ae: shared queue changes add producer-node/preparation-incarnation predicates only for subtitle_translation_prepare/range and a legacy-defaulted subtitle range payload field. Selected library_scan/metadata_refresh enqueue/claim, binding, renewal, cancellation, publication and cleanup behavior is unchanged. The exact legacy-caption trigger migration and its shared-queue effects were inspected: only caption jobs for the same operation are cancelled; library kinds are excluded. SQLite v117 and Hiqlite recognize the complete old shape before the transactional trigger replacement and reject unknown shapes. Added store-contract module wiring is test-only. New mapping dependencies pin the migration recognizer and replacement trigger so their isolation cannot drift silently. This supersedes the earlier construction-only correspondence status for these changes; source hashes and unchanged anchors do not establish Rust test execution, TLC qualification, remote-worker liveness or new modeled caption guarantees. Model/configuration/fairness bytes and historical receipts remain unchanged. Independent bounded moving-playback correspondence review on 2026-10-26 atop 352137f764d8cf87d530352222d5948a77275d4f: Hiqlite only chains exact recognized caption extensions and SQLite adds caption migration118; selected library transaction/publication/timeout paths are unchanged. The exact original0/retarget1/continuity2 recognizer and new continuity SQL were inspected. Capture/retirement triggers select only subtitle_translation_range; demand revocation deletes only matching caption grant rows; the replacement mutation trigger retains the previously reviewed caption-only job effects. New dependency anchors pin those isolation boundaries. Selected library enqueue/claim/renewal/binding/settlement semantics, model/configuration bytes, fairness premises and historical receipts remain unchanged. This is source correspondence, not runtime execution, TLC qualification, caption liveness proof or a refinement theorem. Incoming main correspondence record: Codex reviewed HTTPS completion source f18c39e66954b71fcedcf8f463914f112498a518 against main 9bcfa9ca1f792d214122762981c84c85ba5b3e64 on 2026-10-25; the parent coordinator approved this scoped disposition. Fragment enqueue receipt guards move before Existing only when fragment/analysis fields are present; ordinary selected library inputs omit those fields. Claim replay, binding, renewal, cancellation, settlement and fenced publication remain unchanged. Managed-schema bootstrap preserves the validated resource view and the QueueSql implementation is unchanged. AppState adds a public HTTPS control field; main adds separate TLS listener ownership without changing the selected worker spawn or wait/lock order. Tokio 1.53.1 and Hiqlite 0.14.0 remain pinned. This refresh covers whole-file source correspondence only: general fragment admission, bootstrap/startup and public TLS lifecycle remain outside the selected library-worker models. Model/configuration/toolchain bytes, exact anchors and rejection rules are unchanged; no new formal guarantee or execution evidence is claimed by this review. See the scoped contract/wait-map notes. Codex and the parent coordinator reviewed completion source 5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9 on 2026-10-25. Only identity-repair result classification changes in the shared publication file: the optional guarded annotation set-copy accepts zero-to-many rows, while complete-vector and all other exact-one checks remain. Identity repair is outside the selected library-worker progress model and is not proved here. atomic_publication renewal, authority binding, wait/lock order, selected publication SQL/anchors and worker cancellation/settlement are unchanged. Two whole-file pins are refreshed for source correspondence only. Model/configuration/source-anchor/validator/scope bytes are unchanged; this adds no liveness, runtime, theorem, physical or qualification guarantee. Integration of HTTPS 67b09d29c with main 167af4616 preserves the selected library-worker protocol. Upstream adds three FEL trait/delegation methods outside the selected library scope and an off-boot VAAPI probe plus independent handoff-pruning loop; HTTPS retains fragment-only receipt fencing, publication result classification and TLS ownership. The Store parent composes strict historical fixtures and source-backed inventory; formal_publication remains unchanged. Only reviewed whole-file correspondence pins change; no model, configuration, exact anchor, validator or governed scope changes. FEL, handoffs, identity repair, historical migrations and public TLS remain excluded; no new theorem or qualification is claimed. The integration platform repair gates only extend_fragment_admission to Linux, matching its FEL-only consumers. The selected admit_fragment body and try-only admission order are unchanged; row 41 is a whole-file correspondence refresh, not proof of the FEL extension. Codex scoped source correspondence review on 2026-10-28 compares PR #1301 runtime source 7d2d4a9c777d42f6f3cb28db8e2a7d5be6f46a37 with main 77e9858277813456bb94e855ec62ed3e9fd65af8. New title-only trait/delegation methods, local index-wait bookkeeping, stale-FEL selection and analysis publication do not change selected library_scan/metadata_refresh claim, binding, renewal, cancellation, settlement, insert_item_fenced or token/publication lock ordering. The analysis publisher validates source/scanner/generation and invokes the existing title trigger with job_id NULL, matching no queue/waiter settlement rows; its title binding and probe JSON remain outside the selected models. Formal-publication parent registration and selected examples are unchanged. Only reviewed whole-file pins are refreshed; existing anchors, model/configuration/toolchain bytes, bounds, properties, scope and historical receipt identities are preserved. This source review supplies no new execution, formal guarantee or qualification claim; fresh affected smoke receipts are separate. Scoped author/source correspondence audit on 2026-10-28 compares immutable 24d1bad72bed328b6de9a568a3537f375f9c206f with runtime/test source d03c8abdf17dea7147e112a32fec274834151fca. Codex agent /root/diagnose_core_failures authored the core fixture and membership SQL changes and performed this source audit; this is not an independent review of its own implementation. Independent Codex agent coverage_review reviewed the implementation diff and this metadata disposition on 2026-10-28, finding no blockers. That review ran no builds, tests or TLC checks and supplies no new qualification claim. Whole-file hashes at the immutable base exactly match the previous pins; changed mapped-file hashes below identify the current source, and every retained exact anchor remains unique. Membership repairs Hiqlite first-appearance parameter binding in maintenance lease consumption, heartbeat acknowledgment and status capability/active-session projection. Exact node/claim/lease, maintenance and current-session predicates are preserved; values now bind to their intended predicates. The mapped ClusterJobAuthority implementation and may_run_cluster_jobs body are byte-identical and still fail closed for local maintenance or unreadable/non-voter authority. Membership lifecycle, status projection and maintenance drain are outside this selected library-worker progress model. State adds only a cfg(test) backfill module declaration; mapped scheduler/worker bodies and token/publication wait and lock ordering are unchanged. Four whole-file row pins are refreshed. See WAIT-MAP.md for the scoped disposition. No model, configuration, bounds, properties, fairness premises, toolchain, exact anchor, historical source-anchor snapshot, validator or scope changes are made. This source-mapping consistency refresh supplies no new runtime evidence, TLC execution, refinement theorem, liveness guarantee, physical acceptance or qualification; earlier receipts retain only their recorded source identities. Fresh affected smoke/full execution, when performed, is separate evidence. Integration author audit 2026-10-29 against main66a33d723: retain its schema120/resource-admission mapping and exact anchors; combine the strict historical caption/managed rewind and test registrations, updating the Store parent/state whole-file pins. Independent Codex coverage_review verified the combined pins, anchors, model inputs and ownership census with no findings; that review ran no builds, tests or TLC. No new TLC or runtime qualification is claimed. Scoped source correspondence review on 2026-10-29 compares main 66a33d723096ee931ce2e05e860f51f8f3671513 with incoming main 10f45ae5f2619ab3e807b5576bf6ffb39ade6e86 and the repair worktree. main.rs adds a read-only Sharing HostCapabilities command and separate sharing_host/sharing_network loops using the existing background shutdown token. The mapped background_work_loop call, selected library scheduler/worker bodies and token/publication wait and lock order are unchanged. Sharing host reconciliation and invitation-network lifecycle, including their child work and shutdown, remain outside this selected-worker model; this refresh does not prove their resource contention or liveness. subtitle_translation_schema.rs changes only a cfg(test) upgraded-version expectation from 119 to 120; its production recognizer and upgrade guards are unchanged. Two whole-file row pins follow the inspected bytes, with retained exact anchors still unique. Codex agent coverage_review inspected the source and authored this mapping refresh; parent and independent Codex diagnose_core_failures metadata review found no issues. Model/configuration/toolchain bytes, bounds, fairness premises, properties, scope, validators and historical receipt/source-anchor identities are unchanged. This review ran no builds, tests or TLC and supplies no new runtime, refinement, liveness or qualification evidence. Scoped artifact-caption source review on 2026-10-28: managed v3/SQLite v121 removes the media-reader row only for the new closed subtitle_text_translate_artifact kind; legacy extraction-capable subtitle_text_translate stays conservative. The worker reads pinned verified materialized input without extraction fallback, and explicit Retry reacquires before enqueue. Exact v2 predecessor guards preserve active owners and reservations and refuse stale installers. Selected library_scan/metadata_refresh resource/provider rows, binding, renewal, publication, settlement and physical admission remain unchanged. Existing anchors and all model/configuration/property/bound/toolchain inputs remain unchanged. New v3 view/guard anchors record runtime correspondence only; online upgrades and caption progress remain outside the selected models. No new execution or qualification is claimed. Integration source correspondence on 2026-10-29 retains both parent audits and exact v121/v3 anchors. Current whole-file hashes identify the merged source; fixture/schema evolution and caption/runtime changes remain outside the selected finite library-worker models. No model, configuration, property, fairness premise, scope, historical receipt or validator is changed, and this metadata reconciliation supplies no new execution or qualification. Fixture-only integration audit on 2026-10-29 updates current upgrade assertions from SQLite120 to121 and counts both accepted text-translation job kinds before historical caption rewinds. Exact managed v1/v2/v3 witnesses preserve strict schema/marker pairing, owned work and receipts; the selected formal_publication registration, production recognizer and finite library-worker protocol remain unchanged. Whole-file pins track these test/fixture changes only; no new formal execution, theorem, liveness or qualification is claimed. Additional incoming-parent source audit (historical source identities retained): Scoped review on 2026-10-29 against d5cd47353689c94cd896633f25d5d5dfc900f5f3: subtitle_translation_schema.rs changes only its historical-v115 migration test, expecting the current composed schema and verifying managed v2. The exact original/retarget/continuity recognizer and all production migration SQL are unchanged. SQLite historical fixtures now validate the exact empty v120 tail before their existing guarded rewind; unknown layouts, markers and retained work refuse before mutation. The reviewed consistent-read census adds no runtime read and retains its unannotated ceiling. Refresh the one caption-recognizer whole-file pin; selected library authority/progress behavior, models, configurations, historical anchors and qualification identities remain unchanged. This source review supplies no execution evidence. Scoped review on 2026-10-29 of the startup test listener seam: the test-only constructor retains a prebound socket through startup; non-test binding and the selected background_work_loop spawn/argument are unchanged. Refresh only live Table44 correspondence. No selected-worker scheduling, shutdown, model, configuration, anchor or historical qualification identity changes; this source review is not execution evidence. Scoped lock correspondence review on 2026-10-29: the macOS-only Wasmtime runtime moves from49.0.2 to50.0.0 with its required Cranelift/internal dependencies, removing the upstream Mach receiver interrupt bug. Default native traps and parser epoch/memory/stack/import restrictions remain. Tokio1.53.1 and Hiqlite0.14.0 are unchanged; selected library-worker code, exact anchors, models/configurations/toolchain and historical qualification identities are unchanged. Refresh only the Cargo.lock whole-file correspondence. This is not formal execution or a new progress guarantee. Scoped test correspondence review on 2026-10-29: the native executable fixture regression keeps four forkers and300 immediate fixture executions, but bounds their work to1200 actual fork/exec attempts with per-round synchronization, checks every outcome and joins all workers on failure. The test-only pre_exec callback holds inherited descriptors briefly using async-signal-safe poll. The production executable helper and selected background_work_loop spawn/argument are unchanged. Refresh only live Table44 whole-file correspondence; historical anchors, models/configurations/toolchain and qualification identities remain unchanged. This source review supplies no runtime or formal execution evidence. Integration source review on 2026-10-29 combines explicit inherited native helper environment with main selected-stderr capture. Existing ordinary callers retain their environment and cancellation/reap owner; new selected-stderr callers use the clean environment and same fully draining reader owner. Selected library cancellation semantics and exact anchors remain unchanged. Refresh only the live bounded.rs correspondence; no model, configuration, historical anchor, toolchain, execution or qualification identity is changed. Local integration source correspondence on 2026-10-29 combines repair59c648db with main5ac9d8f25. Both parent audits and exact anchors remain; live Cargo.lock/main.rs pins retain incoming macOS runtime and bounded test-only fork-stress changes. Resolved Store-conformance and caption-schema fixture hashes follow their combined, stronger closed-tail/marker/data checks and the schema121/managed-v3 witness. Selected formal-publication and library-worker bodies retain their exact anchors. This metadata update changes no model, configuration, fairness premise, property, validator or historical qualification identity, and supplies no new runtime or TLC evidence. The frozen59c measurement and the current integration candidate are separate source identities. Scoped source correspondence review on 2026-11-01 (Claude, claude-opus-5-5) of PR #1339 against main df27550d1: state.rs adds only an AppState sharing_logs ring field and its constructor wiring; main.rs adds a sharing_diagnosis module declaration and a third filtered log BufferLayer in the subscriber. Mapped scheduler/worker bodies, background_work_loop spawn/arguments, token/publication wait and lock order and every exact anchor are unchanged and unique. Only the whole-file pins for those two sources are refreshed; model/configuration/toolchain bytes, bounds, properties, scope and historical receipts are unchanged. This source review supplies no execution, TLC or qualification evidence."
+  },
+  "configs": {
+    "progress.cfg": {
+      "sha256": "f0d67cfeff477420a154232b1b42c6fcf7827154c4d9e70103c30f5d71380f44",
+      "verdict": "pass",
+      "purpose": "liveness",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 120,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "selected_requests": 1,
+          "selected_full_workers": 1,
+          "abstract_domain_contenders": 0,
+          "domains": 1,
+          "ordinary_worker_backend_slots": 1,
+          "detached_completion_slots": 1,
+          "token_intents": 2,
+          "publication_intents": 2,
+          "FaultBudget": 1,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "modeled_release_attempt_limit": 5
+        },
+        "properties": [
+          "TypeOK",
+          "ResultAtomicity",
+          "AdmissionUntilJoined",
+          "NoFictitiousRelease",
+          "UsefulProgress",
+          "AttemptProgress",
+          "AttemptCleanup"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one selected valid library_scan/metadata_refresh request with a capable surviving worker; finite scan/item abstraction, not a refinement theorem",
+          "PRM-fs: initial probe and selected blocking filesystem work eventually return; external_stall mutation removes only WalkReturn fairness",
+          "PRM-admission and PRM-authority: sufficient selected physical capacity and eventual authority-check return; production admission is try-only",
+          "PRM-backend: stable quorum, communication, rate limiting, forwarding, normal application/reply and fair independent runtime steps after finite modeled faults",
+          "FIFO token/publication intent queues rely on pinned Tokio1.53.1; fairness applies to grant actions, never unconditional lock release",
+          "finite fault budget restricts combinations; no event horizon, claim/renewal lifetime counter, constraints, symmetry or VIEW",
+          "one ordinary backend slot plus one detached completion: caller timeout permits optional late apply, not lower-write cancellation or eventual commit",
+          "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
+          "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
+          "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
+        ]
+      },
+      "minimum_trace_states": null
+    },
+    "contention.cfg": {
+      "sha256": "16b80e54db634fca18dadacf2dea095d7d4a4545cccc02b9b08cce5276a8aea2",
+      "verdict": "pass",
+      "purpose": "liveness",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 120,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "selected_requests": 1,
+          "selected_full_workers": 1,
+          "abstract_domain_contenders": 1,
+          "domains": 1,
+          "ordinary_worker_backend_slots": 1,
+          "detached_completion_slots": 1,
+          "token_intents": 2,
+          "publication_intents": 2,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "modeled_release_attempt_limit": 5
+        },
+        "properties": [
+          "TypeOK",
+          "ResultAtomicity",
+          "AdmissionUntilJoined",
+          "NoFictitiousRelease",
+          "AttemptProgress",
+          "AttemptCleanup"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one selected valid library_scan/metadata_refresh request with a capable surviving worker; finite scan/item abstraction, not a refinement theorem",
+          "PRM-fs: initial probe and selected blocking filesystem work eventually return; external_stall mutation removes only WalkReturn fairness",
+          "PRM-admission and PRM-authority: sufficient selected physical capacity and eventual authority-check return; production admission is try-only",
+          "PRM-backend: stable quorum, communication, rate limiting, forwarding, normal application/reply and fair independent runtime steps after finite modeled faults",
+          "FIFO token/publication intent queues rely on pinned Tokio1.53.1; fairness applies to grant actions, never unconditional lock release",
+          "finite fault budget restricts combinations; no event horizon, claim/renewal lifetime counter, constraints, symmetry or VIEW",
+          "one ordinary backend slot plus one detached completion: caller timeout permits optional late apply, not lower-write cancellation or eventual commit",
+          "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
+          "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
+          "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
+        ]
+      },
+      "minimum_trace_states": null
+    },
+    "control-lock-cycle.cfg": {
+      "sha256": "88fce3c5cbcfa89dd26a182305c44cda95f4f4c5ea728f7624c0562fa311c4ee",
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "AttemptCleanup",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Temporal properties were violated.",
+        "attribution": "sole_property",
+        "allowed_error_lines": [
+          "The following behavior constitutes a counter-example:"
+        ]
+      },
+      "timeout_seconds": 120,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "selected_requests": 1,
+          "selected_full_workers": 1,
+          "abstract_domain_contenders": 0,
+          "domains": 1,
+          "ordinary_worker_backend_slots": 1,
+          "detached_completion_slots": 1,
+          "token_intents": 2,
+          "publication_intents": 2,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "lock_cycle"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "modeled_release_attempt_limit": 5
+        },
+        "properties": [
+          "AttemptCleanup"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one selected valid library_scan/metadata_refresh request with a capable surviving worker; finite scan/item abstraction, not a refinement theorem",
+          "PRM-fs: initial probe and selected blocking filesystem work eventually return; external_stall mutation removes only WalkReturn fairness",
+          "PRM-admission and PRM-authority: sufficient selected physical capacity and eventual authority-check return; production admission is try-only",
+          "PRM-backend: stable quorum, communication, rate limiting, forwarding, normal application/reply and fair independent runtime steps after finite modeled faults",
+          "FIFO token/publication intent queues rely on pinned Tokio1.53.1; fairness applies to grant actions, never unconditional lock release",
+          "finite fault budget restricts combinations; no event horizon, claim/renewal lifetime counter, constraints, symmetry or VIEW",
+          "one ordinary backend slot plus one detached completion: caller timeout permits optional late apply, not lower-write cancellation or eventual commit",
+          "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
+          "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
+          "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "control-renewal-livelock.cfg": {
+      "sha256": "1b6687ab2ceca77f23cc6a286ae61c7d4b41bc75283f4c9db0748bbc1e165c79",
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "AttemptCleanup",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Temporal properties were violated.",
+        "attribution": "sole_property",
+        "allowed_error_lines": [
+          "The following behavior constitutes a counter-example:"
+        ]
+      },
+      "timeout_seconds": 120,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "selected_requests": 1,
+          "selected_full_workers": 1,
+          "abstract_domain_contenders": 0,
+          "domains": 1,
+          "ordinary_worker_backend_slots": 1,
+          "detached_completion_slots": 1,
+          "token_intents": 2,
+          "publication_intents": 2,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "renewal_livelock"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "modeled_release_attempt_limit": 5
+        },
+        "properties": [
+          "AttemptCleanup"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one selected valid library_scan/metadata_refresh request with a capable surviving worker; finite scan/item abstraction, not a refinement theorem",
+          "PRM-fs: initial probe and selected blocking filesystem work eventually return; external_stall mutation removes only WalkReturn fairness",
+          "PRM-admission and PRM-authority: sufficient selected physical capacity and eventual authority-check return; production admission is try-only",
+          "PRM-backend: stable quorum, communication, rate limiting, forwarding, normal application/reply and fair independent runtime steps after finite modeled faults",
+          "FIFO token/publication intent queues rely on pinned Tokio1.53.1; fairness applies to grant actions, never unconditional lock release",
+          "finite fault budget restricts combinations; no event horizon, claim/renewal lifetime counter, constraints, symmetry or VIEW",
+          "one ordinary backend slot plus one detached completion: caller timeout permits optional late apply, not lower-write cancellation or eventual commit",
+          "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
+          "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
+          "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "control-external-stall.cfg": {
+      "sha256": "7b51232f6a6f79c3dd1757e9f1b1e3b123d49c32989147b953700daf2baf4fca",
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "AttemptCleanup",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Temporal properties were violated.",
+        "attribution": "sole_property",
+        "allowed_error_lines": [
+          "The following behavior constitutes a counter-example:"
+        ]
+      },
+      "timeout_seconds": 120,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "selected_requests": 1,
+          "selected_full_workers": 1,
+          "abstract_domain_contenders": 0,
+          "domains": 1,
+          "ordinary_worker_backend_slots": 1,
+          "detached_completion_slots": 1,
+          "token_intents": 2,
+          "publication_intents": 2,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "external_stall"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "modeled_release_attempt_limit": 5
+        },
+        "properties": [
+          "AttemptCleanup"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one selected valid library_scan/metadata_refresh request with a capable surviving worker; finite scan/item abstraction, not a refinement theorem",
+          "PRM-fs: initial probe and selected blocking filesystem work eventually return; external_stall mutation removes only WalkReturn fairness",
+          "PRM-admission and PRM-authority: sufficient selected physical capacity and eventual authority-check return; production admission is try-only",
+          "PRM-backend: stable quorum, communication, rate limiting, forwarding, normal application/reply and fair independent runtime steps after finite modeled faults",
+          "FIFO token/publication intent queues rely on pinned Tokio1.53.1; fairness applies to grant actions, never unconditional lock release",
+          "finite fault budget restricts combinations; no event horizon, claim/renewal lifetime counter, constraints, symmetry or VIEW",
+          "one ordinary backend slot plus one detached completion: caller timeout permits optional late apply, not lower-write cancellation or eventual commit",
+          "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
+          "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
+          "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "control-lost-settlement.cfg": {
+      "sha256": "46609e1f915d7bd1c1a6331912cd42ace8b4e131b9c4d2541363aba2fe789b87",
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "AttemptProgress",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Temporal properties were violated.",
+        "attribution": "sole_property",
+        "allowed_error_lines": [
+          "The following behavior constitutes a counter-example:"
+        ]
+      },
+      "timeout_seconds": 120,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "selected_requests": 1,
+          "selected_full_workers": 1,
+          "abstract_domain_contenders": 0,
+          "domains": 1,
+          "ordinary_worker_backend_slots": 1,
+          "detached_completion_slots": 1,
+          "token_intents": 2,
+          "publication_intents": 2,
+          "FaultBudget": 1,
+          "RetryLimit": 2,
+          "Mutation": [
+            "lost_settlement"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "modeled_release_attempt_limit": 5
+        },
+        "properties": [
+          "AttemptProgress"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one selected valid library_scan/metadata_refresh request with a capable surviving worker; finite scan/item abstraction, not a refinement theorem",
+          "PRM-fs: initial probe and selected blocking filesystem work eventually return; external_stall mutation removes only WalkReturn fairness",
+          "PRM-admission and PRM-authority: sufficient selected physical capacity and eventual authority-check return; production admission is try-only",
+          "PRM-backend: stable quorum, communication, rate limiting, forwarding, normal application/reply and fair independent runtime steps after finite modeled faults",
+          "FIFO token/publication intent queues rely on pinned Tokio1.53.1; fairness applies to grant actions, never unconditional lock release",
+          "finite fault budget restricts combinations; no event horizon, claim/renewal lifetime counter, constraints, symmetry or VIEW",
+          "one ordinary backend slot plus one detached completion: caller timeout permits optional late apply, not lower-write cancellation or eventual commit",
+          "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
+          "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
+          "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "witness-success.cfg": {
+      "sha256": "4a0e511aa529bac382e5d08e392ac11862504153d3e95b3f645c4d63597d080b",
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "NoSuccessWitness",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant NoSuccessWitness is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 120,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "selected_requests": 1,
+          "selected_full_workers": 1,
+          "abstract_domain_contenders": 0,
+          "domains": 1,
+          "ordinary_worker_backend_slots": 1,
+          "detached_completion_slots": 1,
+          "token_intents": 2,
+          "publication_intents": 2,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "modeled_release_attempt_limit": 5
+        },
+        "properties": [
+          "TypeOK",
+          "ResultAtomicity",
+          "AdmissionUntilJoined",
+          "NoFictitiousRelease",
+          "NoSuccessWitness"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one selected valid library_scan/metadata_refresh request with a capable surviving worker; finite scan/item abstraction, not a refinement theorem",
+          "PRM-fs: initial probe and selected blocking filesystem work eventually return; external_stall mutation removes only WalkReturn fairness",
+          "PRM-admission and PRM-authority: sufficient selected physical capacity and eventual authority-check return; production admission is try-only",
+          "PRM-backend: stable quorum, communication, rate limiting, forwarding, normal application/reply and fair independent runtime steps after finite modeled faults",
+          "FIFO token/publication intent queues rely on pinned Tokio1.53.1; fairness applies to grant actions, never unconditional lock release",
+          "finite fault budget restricts combinations; no event horizon, claim/renewal lifetime counter, constraints, symmetry or VIEW",
+          "one ordinary backend slot plus one detached completion: caller timeout permits optional late apply, not lower-write cancellation or eventual commit",
+          "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
+          "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
+          "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "witness-reconcile.cfg": {
+      "sha256": "04cf7058605c991ed61044aed63ab6508997ba0f8529a3460a2e2cb2e949ffc1",
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "NoReconcileWitness",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant NoReconcileWitness is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 120,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "selected_requests": 1,
+          "selected_full_workers": 1,
+          "abstract_domain_contenders": 0,
+          "domains": 1,
+          "ordinary_worker_backend_slots": 1,
+          "detached_completion_slots": 1,
+          "token_intents": 2,
+          "publication_intents": 2,
+          "FaultBudget": 1,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "modeled_release_attempt_limit": 5
+        },
+        "properties": [
+          "TypeOK",
+          "ResultAtomicity",
+          "AdmissionUntilJoined",
+          "NoFictitiousRelease",
+          "NoReconcileWitness"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one selected valid library_scan/metadata_refresh request with a capable surviving worker; finite scan/item abstraction, not a refinement theorem",
+          "PRM-fs: initial probe and selected blocking filesystem work eventually return; external_stall mutation removes only WalkReturn fairness",
+          "PRM-admission and PRM-authority: sufficient selected physical capacity and eventual authority-check return; production admission is try-only",
+          "PRM-backend: stable quorum, communication, rate limiting, forwarding, normal application/reply and fair independent runtime steps after finite modeled faults",
+          "FIFO token/publication intent queues rely on pinned Tokio1.53.1; fairness applies to grant actions, never unconditional lock release",
+          "finite fault budget restricts combinations; no event horizon, claim/renewal lifetime counter, constraints, symmetry or VIEW",
+          "one ordinary backend slot plus one detached completion: caller timeout permits optional late apply, not lower-write cancellation or eventual commit",
+          "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
+          "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
+          "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "witness-cancel-cleanup.cfg": {
+      "sha256": "aa1358818514322d50d31b90db9f01a4eb4c3cc095acd14260bc06c55b161532",
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "NoCancelCleanupWitness",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant NoCancelCleanupWitness is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 120,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "selected_requests": 1,
+          "selected_full_workers": 1,
+          "abstract_domain_contenders": 0,
+          "domains": 1,
+          "ordinary_worker_backend_slots": 1,
+          "detached_completion_slots": 1,
+          "token_intents": 2,
+          "publication_intents": 2,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "cancel"
+          ],
+          "modeled_release_attempt_limit": 5
+        },
+        "properties": [
+          "TypeOK",
+          "ResultAtomicity",
+          "AdmissionUntilJoined",
+          "NoFictitiousRelease",
+          "NoCancelCleanupWitness"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one selected valid library_scan/metadata_refresh request with a capable surviving worker; finite scan/item abstraction, not a refinement theorem",
+          "PRM-fs: initial probe and selected blocking filesystem work eventually return; external_stall mutation removes only WalkReturn fairness",
+          "PRM-admission and PRM-authority: sufficient selected physical capacity and eventual authority-check return; production admission is try-only",
+          "PRM-backend: stable quorum, communication, rate limiting, forwarding, normal application/reply and fair independent runtime steps after finite modeled faults",
+          "FIFO token/publication intent queues rely on pinned Tokio1.53.1; fairness applies to grant actions, never unconditional lock release",
+          "finite fault budget restricts combinations; no event horizon, claim/renewal lifetime counter, constraints, symmetry or VIEW",
+          "one ordinary backend slot plus one detached completion: caller timeout permits optional late apply, not lower-write cancellation or eventual commit",
+          "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
+          "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
+          "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
+        ]
+      },
+      "minimum_trace_states": 2
+    }
+  }
+}

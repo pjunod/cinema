@@ -155,8 +155,15 @@ impl CompletedReconstructedOutputContract {
     pub fn input_contract(self) -> super::pipeline::ReconstructedPqInput {
         self.input
     }
+    pub(super) fn with_sdr(mut self) -> Self {
+        self.input = super::pipeline::ReconstructedPqInput::Yuv420p10Bt709Gamma24;
+        self
+    }
     pub fn grade(self) -> OutputGrade {
-        OutputGrade::Hdr10
+        match self.input {
+            super::pipeline::ReconstructedPqInput::Yuv420p10Bt709Gamma24 => OutputGrade::Sdr,
+            _ => OutputGrade::Hdr10,
+        }
     }
     pub fn codec(self) -> VideoCodec {
         VideoCodec::Hevc
@@ -175,6 +182,18 @@ impl CompletedReconstructedOutputContract {
         }
     }
     pub fn encode_args(
+        self,
+        bitrate_kbps: u32,
+        force_idr: bool,
+        software_threads: Option<u32>,
+    ) -> Vec<String> {
+        let mut args = self.pq_encode_args(bitrate_kbps, force_idr, software_threads);
+        if self.grade() == OutputGrade::Sdr {
+            normalize_reconstructed_sdr_args(&mut args);
+        }
+        args
+    }
+    fn pq_encode_args(
         self,
         bitrate_kbps: u32,
         force_idr: bool,
@@ -224,6 +243,37 @@ impl CompletedReconstructedOutputContract {
     }
 }
 
+/// Normalize both inherited recipe flags and the actual completed encoder.
+pub(super) fn normalize_reconstructed_sdr_args(args: &mut [String]) {
+    for index in 0..args.len().saturating_sub(1) {
+        match args[index].as_str() {
+            "-color_primaries" | "-color_trc" | "-colorspace" => args[index + 1] = "bt709".into(),
+            "-x265-params" => {
+                let mut params: Vec<_> = args[index + 1]
+                    .split(':')
+                    .filter(|p| {
+                        !p.starts_with("hdr10=")
+                            && !p.starts_with("master-display=")
+                            && !p.starts_with("max-cll=")
+                            && !p.starts_with("transfer=")
+                            && !p.starts_with("colorprim=")
+                            && !p.starts_with("colormatrix=")
+                    })
+                    .map(str::to_owned)
+                    .collect();
+                params.extend([
+                    "hdr10=0".into(),
+                    "transfer=bt709".into(),
+                    "colorprim=bt709".into(),
+                    "colormatrix=bt709".into(),
+                ]);
+                args[index + 1] = params.join(":");
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod output_codec_contract_tests {
     use super::*;
@@ -237,6 +287,28 @@ mod output_codec_contract_tests {
         Encoder::VideoToolbox,
     ];
 
+    #[test]
+    fn reconstructed_sdr_encoders_declare_main10_bt709_without_hdr_hints() {
+        for encoder in [Encoder::Software, Encoder::Nvenc, Encoder::Vaapi] {
+            let output = CompletedReconstructedOutputContract::resolve(encoder)
+                .expect("supported encoder")
+                .with_sdr();
+            assert_eq!(output.grade(), OutputGrade::Sdr);
+            assert_eq!(output.bit_depth(), 10);
+            assert_eq!(output.input_contract().transfer(), "bt709");
+            let args = output.encode_args(4000, true, Some(1));
+            assert!(!args.iter().any(|arg| arg.contains("smpte2084")
+                || arg.contains("hdr10=1")
+                || arg.contains("bt2020")));
+            for field in ["-color_primaries", "-color_trc", "-colorspace"] {
+                let at = args
+                    .iter()
+                    .position(|arg| arg == field)
+                    .expect("explicit color field");
+                assert_eq!(args[at + 1], "bt709");
+            }
+        }
+    }
     #[test]
     fn reconstructed_nvenc_contract_preserves_ordinary_hdr_refusal_and_bounds() {
         assert!(OutputCodecContract::resolve(
@@ -458,7 +530,8 @@ mod output_codec_contract_tests {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputGrade {
-    /// BT.709 8-bit, the only grade that existed before M5.
+    /// BT.709 SDR. Ordinary encoders use 8-bit output; the separately proved
+    /// completed reconstruction contract can deliver SDR as HEVC Main10.
     #[default]
     Sdr,
     /// HEVC Main10, PQ transfer, BT.2020 primaries, limited range. The rung
@@ -1224,15 +1297,7 @@ impl VaapiHdrPolicy {
     }
 
     fn from_probe_stderr(stderr: &str) -> Option<Self> {
-        let mut drivers = stderr.lines().filter_map(|line| {
-            line.split_once("VAAPI driver: ")
-                .map(|(_, driver)| driver.trim())
-        });
-        let first = drivers.next()?;
-        if drivers.any(|driver| driver != first) {
-            return None;
-        }
-        Self::from_driver_description(first)
+        Self::from_driver_description(&probe_vaapi_driver(stderr)?)
     }
 
     pub fn flags(self) -> [&'static str; 2] {
@@ -1246,11 +1311,260 @@ impl VaapiHdrPolicy {
             Self::MesaRadeonsiVbaq => "mesa-radeonsi-balanced-vbaq-no-preanalysis-v1",
         }
     }
+
+    /// The reconstructed Profile 8.1 route only: VBAQ off. At the route's
+    /// rate it costs nothing measurable, and at low rates it moves bits out of
+    /// the flat and dark areas where Delta E ITP is steepest (p99 13.4 vs 11.7
+    /// on the grainy control title at 18 Mb/s). No `-qmax`: radeonsi obeys
+    /// `-qmax` over `-maxrate`, and `-qmax 14` drove 2 s segments to 151 Mb/s
+    /// against a 90 Mb/s ceiling (docs/streaming/FEL-P81-RECONSTRUCTION.md).
+    pub fn reconstructed_profile81_flags(self) -> [&'static str; 2] {
+        match self {
+            Self::MesaRadeonsiVbaq => ["-compression_level", "0"],
+        }
+    }
+}
+
+/// The reconstructed Profile 8.1's video rate ceiling. The route replaces a
+/// copy of the disc's base layer at full source rate, so it gets a delivery
+/// rate near that, not the 2160p transcode rung (20 Mb/s).
+pub const RECONSTRUCTED_P81_MAX_VIDEO_KBPS: u32 = 60_000;
+
+/// Identity of the route's encode recipe; part of every per-title FEL
+/// qualification verdict, so changing it re-qualifies every title.
+pub const RECONSTRUCTED_P81_RECIPE: &str =
+    "p81-vbr:b=min(source,60000k):maxrate=1.5b:bufsize=2b:bf=0:radeonsi-compression_level=0:v1";
+
+/// The route's VA-API encode of one sample window for the per-title FEL
+/// qualification: the same Main10 contract arguments and route flags as
+/// [`super::vod_completed_reconstructed_pipe_args`] with
+/// [`super::CompletedReconstructedOutputPlan::with_reconstructed_profile81`],
+/// the level of the window's own raster and cadence, and the VOD window GOP.
+/// Input and output arguments are the caller's.
+pub fn reconstructed_p81_window_encode_args(
+    policy: VaapiHdrPolicy,
+    bitrate_kbps: u32,
+    width: u32,
+    height: u32,
+    rate: (u32, u32),
+    frames: u32,
+) -> Option<Vec<String>> {
+    let contract = CompletedReconstructedOutputContract::resolve(Encoder::Vaapi)?;
+    let mut args = contract.encode_args(bitrate_kbps, true, Some(1));
+    args.extend(policy.reconstructed_profile81_flags().map(str::to_owned));
+    let level = hevc_level_for(width, height, rate.0, rate.1)?;
+    let at = args.iter().position(|arg| arg == "-level:v")?;
+    args[at + 1] = level.to_owned();
+    let gop = frames.to_string();
+    args.extend(
+        [
+            "-flags",
+            "+cgop",
+            "-g",
+            &gop,
+            "-keyint_min",
+            &gop,
+            "-sc_threshold",
+            "0",
+        ]
+        .map(str::to_owned),
+    );
+    Some(args)
+}
+
+/// The reconstructed Profile 8.1's target video rate: the source's average
+/// bitrate (the whole file's, so an upper bound on its video's), capped at
+/// [`RECONSTRUCTED_P81_MAX_VIDEO_KBPS`]. VBR at this target with the ordinary
+/// VBV (`-maxrate` 1.5x, `-bufsize` 2x) kept every measured 2 s segment
+/// under the advertised peak (worst 58 Mb/s at a 60 Mb/s target).
+pub fn reconstructed_p81_video_kbps(source: &crate::domain::MediaFile) -> u32 {
+    let measured = source
+        .bitrate
+        .filter(|bps| *bps > 0)
+        .map(|bps| bps / 1000)
+        .or_else(|| {
+            source
+                .duration_ms
+                .filter(|ms| *ms > 0)
+                .map(|ms| source.size.saturating_mul(8) / ms)
+        });
+    measured
+        .and_then(|kbps| u32::try_from(kbps).ok())
+        .map_or(RECONSTRUCTED_P81_MAX_VIDEO_KBPS, |kbps| {
+            kbps.min(RECONSTRUCTED_P81_MAX_VIDEO_KBPS)
+        })
+        .max(1_000)
+}
+
+/// Physical inventory, independent of whether an encoder initialized successfully.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GraphicsDevice {
+    /// Stable PCI address (or a platform identity), never a synthesized GPU index.
+    pub id: String,
+    pub vendor: String,
+    pub vendor_id: String,
+    pub device_id: String,
+    pub model: Option<String>,
+    pub render_node: Option<String>,
+}
+
+/// What production arguments bind. Inventory alone never proves a default device.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EncoderDeviceBinding {
+    pub backend: String,
+    pub device_ids: Vec<String>,
+    pub binding: String,
+    pub detail: String,
+}
+
+fn pci_model(database: &str, vendor: &str, device: &str) -> Option<String> {
+    let mut in_vendor = false;
+    for line in database.lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if !line.starts_with(char::is_whitespace) {
+            in_vendor = line.split_whitespace().next() == Some(vendor);
+        } else if in_vendor && line.starts_with('\t') && !line.starts_with("\t\t") {
+            let line = line.trim();
+            if line.split_whitespace().next() == Some(device) {
+                return Some(line.get(device.len()..)?.trim().to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn linux_graphics_devices(pci_root: &std::path::Path, database: &str) -> Vec<GraphicsDevice> {
+    let Ok(entries) = std::fs::read_dir(pci_root) else {
+        return Vec::new();
+    };
+    let mut devices = Vec::new();
+    for entry in entries.take(4096).flatten() {
+        let path = entry.path();
+        if !std::fs::read_to_string(path.join("class")).is_ok_and(|class| class.starts_with("0x03"))
+        {
+            continue;
+        }
+        let read = |name: &str| {
+            std::fs::read_to_string(path.join(name))
+                .ok()
+                .map(|value| value.trim().to_ascii_lowercase())
+        };
+        let (Some(vendor_id), Some(device_id)) = (read("vendor"), read("device")) else {
+            continue;
+        };
+        let vendor = match vendor_id.as_str() {
+            "0x8086" => "Intel",
+            "0x10de" => "NVIDIA",
+            "0x1002" => "AMD",
+            "0x106b" => "Apple",
+            _ => "Unknown vendor",
+        }
+        .to_owned();
+        let model = std::fs::read_to_string(path.join("label"))
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                pci_model(
+                    database,
+                    vendor_id.trim_start_matches("0x"),
+                    device_id.trim_start_matches("0x"),
+                )
+            });
+        let render_node = std::fs::read_dir(path.join("drm"))
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        name.starts_with("renderD")
+                            .then(|| format!("/dev/dri/{name}"))
+                    })
+                    .min()
+            });
+        devices.push(GraphicsDevice {
+            id: entry.file_name().to_string_lossy().into_owned(),
+            vendor,
+            vendor_id,
+            device_id,
+            model,
+            render_node,
+        });
+    }
+    devices.sort_by(|left, right| left.id.cmp(&right.id));
+    devices
+}
+
+fn graphics_devices() -> Vec<GraphicsDevice> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    let database = ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids"]
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    linux_graphics_devices(std::path::Path::new("/sys/bus/pci/devices"), &database)
+}
+
+fn encoder_device_bindings(
+    devices: &[GraphicsDevice],
+    caps: &EncoderCaps,
+    vaapi: &str,
+) -> Vec<EncoderDeviceBinding> {
+    [
+        Encoder::Nvenc,
+        Encoder::Qsv,
+        Encoder::Vaapi,
+        Encoder::VideoToolbox,
+    ]
+    .into_iter()
+    .filter(|encoder| caps.available(*encoder))
+    .map(|encoder| {
+        let device_ids: Vec<String> = if encoder == Encoder::Vaapi {
+            devices
+                .iter()
+                .filter(|device| device.render_node.as_deref() == Some(vaapi))
+                .map(|device| device.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let bound = device_ids.len() == 1;
+        EncoderDeviceBinding {
+            backend: encoder.family_name().to_owned(),
+            device_ids,
+            binding: if bound { "configured" } else { "unresolved" }.to_owned(),
+            detail: if encoder == Encoder::Vaapi {
+                format!(
+                    "VA-API render node: {vaapi}{}",
+                    if bound {
+                        ""
+                    } else {
+                        "; physical device identity unavailable"
+                    }
+                )
+            } else if encoder == Encoder::VideoToolbox {
+                "VideoToolbox selects Apple video hardware; no physical device index is bound"
+                    .to_owned()
+            } else {
+                format!(
+                    "{} uses the driver's default device; physical device binding is unverified",
+                    encoder.label()
+                )
+            },
+        }
+    })
+    .collect()
 }
 
 /// Which encoders this ffmpeg build exposes.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EncoderCaps {
+    pub graphics_devices: Vec<GraphicsDevice>,
+    pub device_bindings: Vec<EncoderDeviceBinding>,
     pub nvenc: bool,
     pub qsv: bool,
     pub vaapi: bool,
@@ -1264,6 +1578,12 @@ pub struct EncoderCaps {
     pub sdr_avc: Vec<super::QualifiedSdrAvc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vaapi_hdr_policy: Option<VaapiHdrPolicy>,
+    /// The VA driver's own description from the successful VA-API probe
+    /// ("Mesa Gallium driver 26.0.8 for AMD Radeon 780M (radeonsi, ...)"):
+    /// vendor, driver version and GPU. Part of the identity of anything
+    /// measured on this encoder, such as a FEL qualification verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vaapi_driver: Option<String>,
 }
 
 impl EncoderCaps {
@@ -1318,6 +1638,8 @@ impl EncoderCaps {
 /// *compiled into* this build (not whether the hardware actually works).
 pub fn parse_encoder_list(output: &str) -> EncoderCaps {
     EncoderCaps {
+        graphics_devices: Vec::new(),
+        device_bindings: Vec::new(),
         nvenc: output.contains("h264_nvenc"),
         qsv: output.contains("h264_qsv"),
         vaapi: output.contains("h264_vaapi"),
@@ -1328,6 +1650,7 @@ pub fn parse_encoder_list(output: &str) -> EncoderCaps {
         quality_rc: QualityRc::default(),
         sdr_avc: Vec::new(),
         vaapi_hdr_policy: None,
+        vaapi_driver: None,
     }
 }
 
@@ -1504,10 +1827,32 @@ fn benchmark_completed(output: &[u8]) -> bool {
             == Some(240)
 }
 
+/// The one VA driver a verbose VA-API probe loaded; `None` when it named none
+/// or more than one.
+fn probe_vaapi_driver(stderr: &str) -> Option<String> {
+    let mut drivers = stderr.lines().filter_map(|line| {
+        line.split_once("VAAPI driver: ")
+            .map(|(_, driver)| driver.trim())
+    });
+    let first = drivers.next()?;
+    if drivers.any(|driver| driver != first) {
+        return None;
+    }
+    Some(first.to_owned())
+}
+
+/// What a successful VA-API probe observed of the loaded driver.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct VaapiObservation {
+    policy: Option<VaapiHdrPolicy>,
+    driver: Option<String>,
+}
+
 /// What one family's probe concluded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Verdict {
     vaapi_hdr_policy: Option<VaapiHdrPolicy>,
+    vaapi_driver: Option<String>,
     usable: bool,
     /// The build accepted [`Encoder::forced_idr_flag`]. Meaningless for the
     /// families that do not need one.
@@ -1544,7 +1889,7 @@ async fn try_encode(
     encoder: Encoder,
     rate_control: EffectiveRateControl,
     force_idr: bool,
-) -> Result<Option<VaapiHdrPolicy>, String> {
+) -> Result<VaapiObservation, String> {
     let mut args = validation_args(encoder, rate_control, force_idr);
     if encoder == Encoder::Vaapi {
         // Reuse the existing encode; verbose initialization identifies the
@@ -1560,9 +1905,13 @@ async fn try_encode(
     .await
     {
         Ok(out) if out.status.success() => Ok(if encoder == Encoder::Vaapi {
-            VaapiHdrPolicy::from_probe_stderr(&String::from_utf8_lossy(&out.stderr))
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            VaapiObservation {
+                policy: VaapiHdrPolicy::from_probe_stderr(&stderr),
+                driver: probe_vaapi_driver(&stderr),
+            }
         } else {
-            None
+            VaapiObservation::default()
         }),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
         Err(e) => Err(e.to_string()),
@@ -1701,7 +2050,8 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
                 "hardware encoder validated"
             );
             Verdict {
-                vaapi_hdr_policy,
+                vaapi_hdr_policy: vaapi_hdr_policy.policy,
+                vaapi_driver: vaapi_hdr_policy.driver,
                 usable: true,
                 forced_idr: wants_idr,
             }
@@ -1722,7 +2072,8 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
                          playback will start slower than it should"
                     );
                     Verdict {
-                        vaapi_hdr_policy,
+                        vaapi_hdr_policy: vaapi_hdr_policy.policy,
+                        vaapi_driver: vaapi_hdr_policy.driver,
                         usable: true,
                         forced_idr: false,
                     }
@@ -1735,6 +2086,7 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
                     );
                     Verdict {
                         vaapi_hdr_policy: None,
+                        vaapi_driver: None,
                         usable: false,
                         forced_idr: false,
                     }
@@ -1753,6 +2105,7 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
             );
             Verdict {
                 vaapi_hdr_policy: None,
+                vaapi_driver: None,
                 usable: false,
                 forced_idr: false,
             }
@@ -1867,16 +2220,23 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
         crate::process::ChildWork::background("ffmpeg encoder list"),
     )
     .await;
+    let devices = graphics_devices();
     let compiled = match output {
         Ok(out) => parse_encoder_list(&String::from_utf8_lossy(&out.stdout)),
         Err(e) => {
             tracing::warn!(error = %e, "could not run ffmpeg -encoders; software only");
-            return EncoderCaps::default();
+            return EncoderCaps {
+                graphics_devices: devices,
+                ..EncoderCaps::default()
+            };
         }
     };
 
     // Validate each compiled-in hardware encoder against real hardware.
-    let mut caps = EncoderCaps::default();
+    let mut caps = EncoderCaps {
+        graphics_devices: devices,
+        ..EncoderCaps::default()
+    };
     for (compiled_in, encoder) in [
         (compiled.nvenc, Encoder::Nvenc),
         (compiled.qsv, Encoder::Qsv),
@@ -1888,6 +2248,7 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
         } else {
             Verdict {
                 vaapi_hdr_policy: None,
+                vaapi_driver: None,
                 usable: false,
                 forced_idr: false,
             }
@@ -1895,6 +2256,7 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
         caps.set(encoder, verdict.usable);
         if encoder == Encoder::Vaapi {
             caps.vaapi_hdr_policy = verdict.vaapi_hdr_policy;
+            caps.vaapi_driver = verdict.vaapi_driver.clone();
         }
         if verdict.forced_idr {
             caps.forced_idr.set(encoder);
@@ -1914,6 +2276,7 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
         validate_quality_rate_control(ffmpeg_bin, Encoder::Software, software_quality, false).await;
     caps.quality_rc
         .set_supported(Encoder::Software, software_quality_rc);
+    caps.device_bindings = encoder_device_bindings(&caps.graphics_devices, &caps, &vaapi_device());
     caps.sdr_avc = super::avc_qualification::qualify(ffmpeg_bin, &caps).await;
     tracing::info!(
         nvenc = caps.nvenc,
@@ -1932,6 +2295,66 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inventory_keeps_actual_pci_identity_and_never_binds_implicit_defaults() {
+        let temporary = tempfile::tempdir().expect("PCI fixture");
+        for (id, vendor, device, render) in [
+            ("0000:01:00.0", "0x10de", "0x1234", "renderD129"),
+            ("0000:00:02.0", "0x8086", "0x5678", "renderD128"),
+        ] {
+            let path = temporary.path().join(id);
+            std::fs::create_dir_all(path.join("drm").join(render)).expect("render node");
+            for (name, value) in [
+                ("class", "0x030000"),
+                ("vendor", vendor),
+                ("device", device),
+            ] {
+                std::fs::write(path.join(name), value).expect("PCI fact");
+            }
+        }
+        let devices = linux_graphics_devices(temporary.path(), "10de  NVIDIA\n\t1234  Actual model from PCI database\n8086  Intel\n\t5678  Integrated fixture\n");
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].id, "0000:00:02.0");
+        assert_eq!(devices[0].vendor, "Intel");
+        assert_eq!(
+            devices[1].model.as_deref(),
+            Some("Actual model from PCI database")
+        );
+        let caps = EncoderCaps {
+            nvenc: true,
+            qsv: true,
+            vaapi: true,
+            ..EncoderCaps::default()
+        };
+        let bindings = encoder_device_bindings(&devices, &caps, "/dev/dri/renderD128");
+        let vaapi = bindings
+            .iter()
+            .find(|binding| binding.backend == "vaapi")
+            .expect("VAAPI");
+        assert_eq!(vaapi.device_ids, vec!["0000:00:02.0"]);
+        assert_eq!(vaapi.binding, "configured");
+        for backend in ["nvenc", "qsv"] {
+            let binding = bindings
+                .iter()
+                .find(|binding| binding.backend == backend)
+                .expect("binding");
+            assert_eq!(binding.binding, "unresolved");
+            assert!(binding.device_ids.is_empty());
+        }
+        let unknown = encoder_device_bindings(&devices, &caps, "/dev/dri/renderD999");
+        assert!(unknown.iter().all(|binding| binding.device_ids.is_empty()));
+    }
+
+    #[test]
+    fn pci_model_lookup_respects_vendor_and_unknown_devices_remain_unnamed() {
+        let database = "10de  NVIDIA\n\t1234  NVIDIA fixture\n8086  Intel\n\t1234  Intel fixture\n";
+        assert_eq!(
+            pci_model(database, "8086", "1234").as_deref(),
+            Some("Intel fixture")
+        );
+        assert!(pci_model(database, "8086", "9999").is_none());
+    }
+
     use super::*;
 
     #[test]
@@ -1982,8 +2405,17 @@ mod tests {
         assert_eq!(
             try_encode(fixture, Encoder::Vaapi, EffectiveRateControl::Vbr, false)
                 .await
-                .expect("successful encode"),
+                .expect("successful encode")
+                .policy,
             Some(VaapiHdrPolicy::MesaRadeonsiVbaq)
+        );
+        // The driver's own description is kept for encoder-bound identities.
+        assert!(
+            try_encode(fixture, Encoder::Vaapi, EffectiveRateControl::Vbr, false)
+                .await
+                .expect("successful encode")
+                .driver
+                .is_some_and(|driver| driver.contains("radeonsi"))
         );
         assert!(try_encode(
             fixture,

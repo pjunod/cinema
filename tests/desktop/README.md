@@ -66,7 +66,11 @@ passing receipt because a timeout or process returned zero.
 
 ## Build an isolated local trust fixture
 
-Production roots and candidate release archives stay unchanged. Positive local
+Production roots and candidate release archives stay unchanged. Empty and
+provisioned candidate root documents are validated before the isolated snapshot
+is changed. The overlay receipt retains the original public document and its
+SHA-256, so replacing it with a distinct disposable qualification key stays
+auditable. The production private key is never used. Positive local
 update testing uses separate, committed **test-build** overlays, an ephemeral
 public root and two application version identities. No shipping trust override,
 local feed URL or private signing key is added to the product.

@@ -262,9 +262,22 @@ class RequestGatePublicationTest(unittest.TestCase):
         gate = GATE.read_text(encoding="utf-8")
         body = function_body(gate, "async fn cluster_capacity_gate(")
         self.assertIn("local_maintenance_active()", body)
-        self.assertIn("LocalServingRole::Fenced", body)
-        self.assertIn("StatusCode::SERVICE_UNAVAILABLE", body)
-        self.assertIn('"/healthz" | "/metrics"', body)
+        # The decision is shared with HTTP authorization regressions; the
+        # production gate must retain its early maintenance return and consult
+        # the exact same fail-closed role decision after reading the slot.
+        self.assertLess(body.index("capacity_maintenance_refusal("),
+                        body.index("local_serving_role().await"))
+        self.assertIn("return refusal", body[:body.index("local_serving_role().await")])
+        self.assertIn("capacity_role_refusal(role,", body)
+        decision = function_body(gate, "fn capacity_role_refusal(")
+        self.assertIn("Some(LocalServingRole::Fenced) | None", decision)
+        self.assertIn("StatusCode::SERVICE_UNAVAILABLE", decision)
+        self.assertIn('"/healthz" | "/metrics"', decision)
+        self.assertIn("NODE_REMOVAL_FENCED_JSON", decision)
+        maintenance = function_body(gate, "fn capacity_maintenance_refusal(")
+        self.assertIn("!maintenance_route_eligible(method, path)", maintenance)
+        self.assertIn("StatusCode::SERVICE_UNAVAILABLE", maintenance)
+        self.assertIn("NODE_MAINTENANCE_JSON", maintenance)
 
 
 if __name__ == "__main__":

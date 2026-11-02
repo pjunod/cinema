@@ -822,6 +822,82 @@ impl SecureDirectory {
         .map_err(io::Error::other)?
     }
 
+    /// Remove only the captured child inode, retaining parent authority across
+    /// path replacement. Descendants are traversed relative to held handles.
+    pub async fn remove_child_tree_checked(
+        &self,
+        name: &str,
+        expected: FileIdentity,
+        max_entries: usize,
+        max_depth: usize,
+    ) -> io::Result<()> {
+        if max_entries == 0 || max_entries > 120_100 || max_depth == 0 || max_depth > 32 {
+            return Err(invalid_path("invalid checked cache-tree removal bound"));
+        }
+        let parent = Arc::clone(&self.file);
+        let name = name.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let name = child_name(&name)?;
+            let directory = File::from(openat_owned(
+                parent.as_raw_fd(),
+                &name,
+                libc::O_RDONLY
+                    | libc::O_DIRECTORY
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+            )?);
+            if !file_identity(&directory)?.same_inode(expected) {
+                return Err(io::Error::other("cache directory identity changed"));
+            }
+            let mut counted = 0;
+            count_directory_capability(&directory, &mut counted, max_entries, 0, max_depth)?;
+            let mut removed = 0;
+            clear_directory_capability(&directory, &mut removed, max_entries, 0, max_depth)?;
+            // No recursive path operation follows the final name: even a name
+            // swap here cannot delete contents of its replacement.
+            if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            parent.sync_all()
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    /// Finalize a flat, held-directory cleanup without traversing any child.
+    pub async fn remove_empty_child_directory(
+        &self,
+        name: &str,
+        expected: FileIdentity,
+    ) -> io::Result<()> {
+        let parent = Arc::clone(&self.file);
+        let name = name.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let name = child_name(&name)?;
+            let directory = File::from(openat_owned(
+                parent.as_raw_fd(),
+                &name,
+                libc::O_RDONLY
+                    | libc::O_DIRECTORY
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+            )?);
+            if !file_identity(&directory)?.same_inode(expected) {
+                return Err(io::Error::other("cache directory identity changed"));
+            }
+            if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            parent.sync_all()
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     pub async fn rename_child_to(
         &self,
         from: &str,
@@ -2834,6 +2910,85 @@ pub fn clear_scratch_with_protected_blocking(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn checked_directory_removal_refuses_replaced_child_and_preserves_nonempty_data() {
+        use super::*;
+        let temporary =
+            std::fs::canonicalize(std::env::temp_dir()).expect("canonical temporary root");
+        let root = tempfile::tempdir_in(temporary).expect("root");
+        let path = root.path().join("cache");
+        std::fs::create_dir(&path).expect("cache");
+        std::fs::write(path.join("segment"), b"owned").expect("owned");
+        let parent = SecureDirectory::open(root.path()).await.expect("parent");
+        let child = parent.open_child_directory("cache").await.expect("child");
+        let identity = child.identity().await.expect("identity");
+        std::fs::rename(&path, root.path().join("original")).expect("move owned");
+        std::fs::create_dir(&path).expect("replacement");
+        std::fs::write(path.join("keep"), b"unowned").expect("replacement data");
+        assert!(parent
+            .remove_child_tree_checked("cache", identity, 16, 2)
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read(path.join("keep")).expect("preserved"),
+            b"unowned"
+        );
+        let replacement = parent
+            .open_child_directory("cache")
+            .await
+            .expect("replacement");
+        let replacement_identity = replacement.identity().await.expect("identity");
+        assert!(parent
+            .remove_empty_child_directory("cache", replacement_identity)
+            .await
+            .is_err());
+        assert!(path.join("keep").exists());
+        replacement
+            .unlink_child("keep")
+            .await
+            .expect("unlink authorized child");
+        parent
+            .remove_empty_child_directory("cache", replacement_identity)
+            .await
+            .expect("empty removal");
+        assert!(!path.exists());
+        assert!(root.path().join("original/segment").exists());
+    }
+
+    #[tokio::test]
+    async fn checked_tree_removal_keeps_held_parent_when_its_path_becomes_a_symlink() {
+        use super::*;
+        let temporary =
+            std::fs::canonicalize(std::env::temp_dir()).expect("canonical temporary root");
+        let root = tempfile::tempdir_in(temporary).expect("root");
+        let base = root.path().join("base");
+        let outside = root.path().join("outside");
+        for path in [base.join("cache"), outside.join("cache")] {
+            std::fs::create_dir_all(path).expect("tree");
+        }
+        std::fs::write(base.join("cache/owned"), b"owned").expect("owned");
+        std::fs::write(outside.join("cache/keep"), b"keep").expect("outside");
+        let parent = SecureDirectory::open(&base).await.expect("parent");
+        let identity = parent
+            .open_child_directory("cache")
+            .await
+            .expect("child")
+            .identity()
+            .await
+            .expect("identity");
+        std::fs::rename(&base, root.path().join("held")).expect("move parent");
+        std::os::unix::fs::symlink(&outside, &base).expect("substitute");
+        parent
+            .remove_child_tree_checked("cache", identity, 16, 2)
+            .await
+            .expect("held cleanup");
+        assert_eq!(
+            std::fs::read(outside.join("cache/keep")).expect("preserved"),
+            b"keep"
+        );
+        assert!(!root.path().join("held/cache").exists());
+    }
+
     #[tokio::test]
     async fn owned_atomic_writer_retains_allocation_until_blocking_settlement_after_cancel() {
         use std::sync::{

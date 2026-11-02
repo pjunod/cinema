@@ -196,9 +196,58 @@ static bool dv_yuv10_dispatch_fused(pl_tex rgb) {
       .dispatch_size = {(bw + gx - 1) / gx, (bh + gy - 1) / gy, 1}));
 }
 
-static bool dv_yuv10_export(pl_renderer renderer, pl_gpu gpu, pl_tex rgb) {
-  (void)renderer;
-  if (dv_yuv10_fused) {
+// Convert the already L1-mapped absolute-PQ native picture using the public
+// library primaries/EOTF implementation. This is also used by the native SDR
+// qualification adapter, so that adapter exercises the production conversion.
+static inline bool dv_yuv10_convert_sdr_rgb(pl_renderer renderer, struct pl_frame native, pl_tex output) {
+  native.color.hdr = (struct pl_hdr_metadata){.max_luma = 100, .min_luma = PL_COLOR_HDR_BLACK};
+  struct pl_frame target = native;
+  target.planes[0].texture = output;
+  target.color = (struct pl_color_space){.primaries = PL_COLOR_PRIM_BT_709,
+    .transfer = PL_COLOR_TRC_GAMMA24,
+    .hdr = {.max_luma = 100, .min_luma = PL_COLOR_HDR_BLACK}};
+  struct pl_color_map_params cmap = pl_color_map_default_params;
+  cmap.tone_mapping_function = &pl_tone_map_clip;
+  cmap.gamut_mapping = &pl_gamut_map_clip;
+  cmap.metadata = PL_HDR_METADATA_NONE;
+  struct pl_render_params params = pl_render_fast_params;
+  params.upscaler = params.downscaler = &pl_filter_bilinear;
+  params.skip_anti_aliasing = true; params.disable_linear_scaling = true;
+  params.dither_params = NULL; params.peak_detect_params = NULL;
+  params.color_adjustment = NULL; params.sigmoid_params = NULL;
+  params.color_map_params = &cmap;
+  return pl_render_image(renderer, &native, &target, &params);
+}
+
+static bool dv_yuv10_export_color(pl_renderer renderer, pl_gpu gpu, pl_tex rgb, bool sdr) {
+  if (sdr) {
+    // Let libplacebo encode the BT.709 matrix and limited 10-bit planes;
+    // the optimized BT.2020 shader below remains byte-identical for HDR.
+    struct pl_color_space color = {.primaries = PL_COLOR_PRIM_BT_709,
+      .transfer = PL_COLOR_TRC_GAMMA24,
+      .hdr = {.max_luma = 100, .min_luma = PL_COLOR_HDR_BLACK}};
+    struct pl_frame source = {.num_planes = 1,
+      .planes = {{.texture = rgb, .components = 4, .component_mapping = {0, 1, 2, -1}}},
+      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL}, .color = color};
+    struct pl_frame target = {.num_planes = 3,
+      .repr = {.sys = PL_COLOR_SYSTEM_BT_709, .levels = PL_COLOR_LEVELS_LIMITED,
+               .bits = {.sample_depth = 16, .color_depth = 10}}, .color = color};
+    for (int c = 0; c < 3; c++)
+      target.planes[c] = (struct pl_plane){.texture = dv_yuv10_context.planes[c],
+        .components = 1, .component_mapping = {c}};
+    pl_frame_set_chroma_location(&target, PL_CHROMA_LEFT);
+    struct pl_render_params params = pl_render_fast_params;
+    params.upscaler = params.downscaler = &pl_filter_bilinear;
+    params.skip_anti_aliasing = true;
+    params.disable_linear_scaling = true;
+    params.dither_params = NULL;
+    params.peak_detect_params = NULL;
+    params.color_adjustment = NULL;
+    params.sigmoid_params = NULL;
+    if (!pl_render_image(renderer, &source, &target, &params)) return false;
+    struct pl_render_errors errors = pl_renderer_get_errors(renderer);
+    if (errors.errors || errors.num_disabled_hooks) return false;
+  } else if (dv_yuv10_fused) {
     if (!dv_yuv10_dispatch_fused(rgb))
       return false;
   } else
@@ -249,6 +298,10 @@ static bool dv_yuv10_export(pl_renderer renderer, pl_gpu gpu, pl_tex rgb) {
   dv_yuv10_context.frame = frame;
   dv_yuv10_context.frame_buf = buf;
   return true;
+}
+
+static inline bool dv_yuv10_export(pl_renderer renderer, pl_gpu gpu, pl_tex rgb) {
+  return dv_yuv10_export_color(renderer, gpu, rgb, false);
 }
 
 // Blocks until a queued download has landed in its mapped buffer. Called by

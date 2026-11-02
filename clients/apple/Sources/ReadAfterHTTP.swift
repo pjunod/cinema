@@ -98,6 +98,27 @@ final class ReadAfterHTTP: @unchecked Sendable {
         return result
     }
 
+    /// Stream caption pages and immutable segments under their byte ceiling.
+    func boundedData(for original: URLRequest, using session: URLSession, maximumBytes: Int) async throws -> (Data, URLResponse) {
+        guard (1...65_536).contains(maximumBytes) else { throw CaptionProtocolError.budget }
+        let exchange = prepare(for: original)
+        let redirect = ReadAfterRedirect(refuse: true)
+        do {
+            let (bytes, response) = try await session.bytes(for: exchange.request, delegate: redirect)
+            guard response.expectedContentLength <= Int64(maximumBytes) else {
+                bytes.task.cancel()
+                throw CaptionProtocolError.budget
+            }
+            var data = Data()
+            for try await byte in bytes {
+                if data.count >= maximumBytes { bytes.task.cancel(); throw CaptionProtocolError.budget }
+                data.append(byte)
+            }
+            received(response, data: data, exchange: exchange, redirected: redirect.wasRedirected)
+            return (data, response)
+        } catch { failed(exchange); throw error }
+    }
+
     private struct Ingress: Decodable { let node_urls: [String] }
 
     private static func isAccountAPI(_ url: URL, authorization: Authorization) -> Bool {

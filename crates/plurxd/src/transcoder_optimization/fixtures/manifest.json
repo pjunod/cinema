@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "title": "Sol Levante (2020)",
+  "attribution": "Netflix and Production I.G",
+  "license": "CC-BY-4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "source_page": "https://opencontent.netflix.com/",
+  "source_url": "https://s3.amazonaws.com/download.opencontent.netflix.com/SolLevante/hdr10/SolLevante_HDR10_r2020_ST2084_UHD_24fps_1000nit.mov",
+  "source_start_seconds": 60,
+  "source_first_frame": 1440,
+  "source_last_frame_inclusive": 1679,
+  "frame_count": 240,
+  "fps_num": 24,
+  "fps_den": 1,
+  "duration_seconds": 10,
+  "prepared_at": "2026-10-20",
+  "preparation_tools": {
+    "source_and_final_encodes": "FFmpeg 9.0.2 (Homebrew)",
+    "SDR_derivation": "8.1.3-Jellyfin"
+  },
+  "changes": [
+    "Ten-second excerpt selected from official HDR master",
+    "Audio removed",
+    "Lossy HEVC re-encoding with bounded bitrate",
+    "SDR variants tone-mapped using zscale/Hable; 1080p variant resized and encoded as H.264",
+    "No fabricated mastering-display or content-light metadata"
+  ],
+  "files": [
+    {
+      "path": "1080p-h264-sdr.mkv",
+      "bytes": 2624329,
+      "sha256": "57080dc61080bf3f7656672eb2fa797da61e5ff978be7b9a7fee2b92497aabf2",
+      "width": 1920,
+      "height": 1080,
+      "codec": "h264",
+      "pixel_format": "yuv420p",
+      "color_primaries": "bt709",
+      "color_transfer": "bt709",
+      "color_space": "bt709"
+    },
+    {
+      "path": "4k-hevc-sdr.mkv",
+      "bytes": 12543496,
+      "sha256": "15989d076f12ff5cb7adf68dc3187c68ba2f5bfc00bafd79d13afabc88e39bda",
+      "width": 3840,
+      "height": 2160,
+      "codec": "hevc",
+      "pixel_format": "yuv420p10le",
+      "color_primaries": "bt709",
+      "color_transfer": "bt709",
+      "color_space": "bt709"
+    },
+    {
+      "path": "4k-hevc-hdr10.mkv",
+      "bytes": 11200134,
+      "sha256": "f68118cb5c89e5522292a904a66ee00e221d5a27945b6735831a291e66f3ab64",
+      "width": 3840,
+      "height": 2160,
+      "codec": "hevc",
+      "pixel_format": "yuv420p10le",
+      "color_primaries": "bt2020",
+      "color_transfer": "smpte2084",
+      "color_space": "bt2020nc"
+    }
+  ]
+}

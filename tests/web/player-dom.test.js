@@ -160,6 +160,75 @@ function shipped(name) {
   return ends.length ? rest.slice(0, Math.min(...ends)) : rest;
 }
 
+test("quality controls describe presented frames and announce only completed quality changes",()=>{
+  const nodes=Object.fromEntries(["pbqualitymode","pbqualitycurrent","pqualitynotice","pbquality"]
+    .map(id=>[id,{textContent:"",hidden:true,setAttribute(name,value){this[name]=value;}}]));
+  const v={videoWidth:1920,videoHeight:800,seeking:false};
+  let now=0,mode="auto",video=v,owns=true;
+  const p={mediaAttachment:{id:1},deliveredRange:"sdr",qualityCandidateId:"original"};
+  const surface={surface:{kind:"none"}};
+  const update=new Function("PLAYER","document","performance","playQuality","playbackOwnsAttachedMedia","PLAYBACK_SURFACE",
+    [shipped("playbackQualityResolution"),shipped("updatePlaybackQualityChrome"),"return updatePlaybackQualityChrome;"].join("\n"))(
+      p,{getElementById:id=>id==="video"?video:nodes[id]}, {now:()=>now},()=>mode,()=>owns,surface);
+  const present=()=>{p.presentationAdvancedAt=(p.presentationAdvancedAt||0)+1;
+    p.transportPresentation={attachment:p.mediaAttachment,element:video};update(video,p);};
+  update(null,p);
+  update(v,p);
+  assert.equal(nodes.pbqualitycurrent.textContent,"—","metadata alone cannot claim a picture");
+  present();
+  assert.equal(nodes.pbqualitymode.textContent,"Auto");
+  assert.equal(nodes.pbqualitycurrent.textContent,"1920×800","a cropped original is never labelled 800p");
+  assert.equal(nodes.pqualitynotice.hidden,true,"initial playback has no quality-change popup");
+  v.videoWidth=1728;v.videoHeight=720;
+  update(v,p);
+  assert.equal(nodes.pbqualitycurrent.textContent,"1920×800","a changed intrinsic size needs fresh presentation proof");
+  p.preparedCommitting={};present();
+  assert.equal(nodes.pbqualitycurrent.textContent,"1920×800","an unproven exposed successor remains under rollback");
+  delete p.preparedCommitting;
+  v.videoWidth=1920;v.videoHeight=800;present();
+  assert.equal(nodes.pqualitynotice.hidden,true,"a failed staging and rollback announce nothing");
+  v.videoWidth=1728;v.videoHeight=720;p.qualityCandidateId="encode-720";present();
+  assert.equal(nodes.pbqualitycurrent.textContent,"720p");
+  assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 1920×800 → 720p");
+  assert.equal(nodes.pqualitynotice.hidden,false);
+  assert.match(nodes.pbquality.title,/1728×720/);
+  now=4000;present();
+  assert.equal(nodes.pqualitynotice.hidden,true,"the notice expires on the existing sampling tick");
+  p.mediaAttachment={id:2};present();
+  assert.equal(nodes.pqualitynotice.hidden,true,"a same-quality seek or reopen is quiet");
+  mode="1080";present();
+  assert.equal(nodes.pbqualitymode.textContent,"Manual");
+  assert.equal(nodes.pbqualitycurrent.textContent,"720p","the requested rung never replaces observed dimensions");
+  assert.equal(nodes.pqualitynotice.hidden,true,"a menu choice alone cannot announce a quality change");
+  p.qualityCandidateId="encode-720-new-audio";present();
+  assert.equal(nodes.pqualitynotice.hidden,true,"an audio-only candidate change is not a video-quality change");
+  p.deliveredRange="hdr10";p.qualityCandidateId="encode-720-hdr";present();
+  assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 720p · HDR10");
+  surface.surface={kind:"blocking"};update(v,p);
+  assert.equal(nodes.pqualitynotice.hidden,true,"a quality notice cannot compete with the playback failure surface");
+  surface.surface={kind:"none"};present();
+  assert.equal(nodes.pqualitynotice.hidden,true,"dismissed notices do not reappear after recovery");
+  p.qualityCandidates=[{id:"codec-before",planned_codec:"h264"},{id:"codec-after",planned_codec:"hevc"}];
+  p.qualityCandidateId="codec-before";present();
+  p.qualityCandidateId="codec-after";present();
+  assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 720p · HDR10 · HEVC",
+    "a confirmed codec change is visible even when dimensions stay the same");
+  owns=false;v.videoWidth=1152;v.videoHeight=480;present();
+  assert.equal(nodes.pbqualitycurrent.textContent,"720p","a requested destination cannot report predecessor dimensions");
+  owns=true;video={videoWidth:1152,videoHeight:480,seeking:false};
+  update(video,p);
+  assert.equal(nodes.pbqualitycurrent.textContent,"720p","an element swap needs its own presentation proof");
+  p.mediaAttachment={id:3};p.qualityCandidateId="encode-480";present();
+  assert.equal(nodes.pbqualitycurrent.textContent,"480p");
+  assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 720p → 480p");
+});
+
+test("quality notice stays inside the fullscreen player without adding a transport stop",()=>{
+  assert.match(playerLine,/<button class="picon" id="pbquality"[^>]*>[^]*?id="pbqualitymode"[^]*?id="pbqualitycurrent"/);
+  assert.match(playerLine,/<div class="pquality-notice" id="pqualitynotice" role="status" aria-live="polite" aria-atomic="true" hidden>/);
+  assert.ok(playerLine.indexOf('id="pqualitynotice"')>playerLine.indexOf('id="player"'));
+});
+
 // A television's Back button. Escape is a keyboard's answer and no remote
 // sends it; each TV platform has its own, and until these landed the page
 // navigated away from the player — on a TV, out of the app.

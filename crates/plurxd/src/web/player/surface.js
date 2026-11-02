@@ -148,7 +148,8 @@ function retireHlsTerminalAttempt(p){
     episode.cancelledReason='owner_stopped';
     episode.establishedSuspension=null;
     clearTimeout(episode.retry.timer);episode.retry.timer=null;
-    abortHlsStartupLoaders(episode);
+    clearTimeout(episode.native?.deadlineTimer);
+    abortHlsStartupLoaders(episode,true);
   }
   try{if(p.hls)p.hls.stopLoad();}catch(e){}
 }

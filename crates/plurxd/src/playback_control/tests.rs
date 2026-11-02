@@ -1398,7 +1398,7 @@ fn every_hold_reason_has_its_own_counter_slot() {
     // The withheld exposition indexes the same discriminant, so it moves
     // with the same variants and is pinned by the same assertion.
     assert_eq!(CONTROL_RECOVERY_WITHHELD.len(), 7);
-    assert_eq!(CONTROL_RECOVERY_WITHHELD[0].len(), 3);
+    assert_eq!(CONTROL_RECOVERY_WITHHELD[0].len(), CLIENT_PLATFORMS);
 }
 
 #[test]
@@ -9163,7 +9163,7 @@ fn the_shadow_decision_metric_publishes_every_axis_and_outcome() {
         "plurx_playback_preparation_decisions_total",
         "plurx_playback_preparation_counterfactual_total",
     ] {
-        for platform in ["web", "apple", "android"] {
+        for platform in CLIENT_PLATFORM_LABELS {
             for axis in [
                 PreparationAxis::ResolutionOrBitrate,
                 PreparationAxis::AudioTrackOrOffset,
@@ -9194,7 +9194,12 @@ fn the_shadow_decision_metric_publishes_every_axis_and_outcome() {
             .filter(|(_, line)| line.starts_with(&format!("{name}{{")))
             .map(|(index, _)| index)
             .collect();
-        assert_eq!(samples.len(), 30, "{name}");
+        // Every platform × five axes × two outcomes.
+        assert_eq!(
+            samples.len(),
+            CLIENT_PLATFORM_LABELS.len() * 5 * 2,
+            "{name}"
+        );
         assert_eq!(
             samples.last().expect("samples") - samples[0],
             samples.len() - 1,
@@ -9456,7 +9461,7 @@ fn metrics_expose_bounded_platform_and_relay_dimensions() {
         "working_set",
         "no_room",
     ] {
-        for platform in ["web", "apple", "android"] {
+        for platform in CLIENT_PLATFORM_LABELS {
             assert!(
                 metrics.contains(&format!(
                     "plurx_playback_control_recovery_withheld_total{{reason=\"{reason}\",platform=\"{platform}\"}}"
@@ -10040,6 +10045,7 @@ fn converting_copy() -> crate::transcode::SessionRequest {
         aac: false,
         preserve_dolby_vision: true,
         convert_dolby_vision: true,
+        dual_layer_as_copied: false,
     })
 }
 
@@ -10282,6 +10288,7 @@ fn a_rung_a_copy_cannot_serve_becomes_a_transcode() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     });
     let plain_candidate = candidate_request(
         &plain,
@@ -10665,6 +10672,7 @@ fn a_grade_intent_comes_off_the_request() {
                 aac: true,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: true,
+                dual_layer_as_copied: false,
             },
             false,
         )),
@@ -10683,6 +10691,7 @@ fn a_grade_intent_comes_off_the_request() {
                 aac: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             false,
         )),
@@ -10691,6 +10700,7 @@ fn a_grade_intent_comes_off_the_request() {
                 aac: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: true,
+                dual_layer_as_copied: false,
             },
             false,
         )),
@@ -17442,5 +17452,184 @@ fn accept_step_retires_outstanding_fences_only_on_adoption() {
     assert!(
         !latest.still_live(),
         "the fence is still attached to the adopted state's token"
+    );
+}
+
+/// plurx Player's first control exchange, as its own test suite pins it
+/// (`clients/linux-player/tests/test_launcher.py::ControlContract`). The
+/// launcher once sent no capabilities: the server answered its first exchange
+/// 400 and every later one 409, so the control plane never saw it play.
+#[test]
+fn the_linux_player_first_exchange_is_a_valid_v1_request() {
+    let request: ControlRequestV1 = serde_json::from_str(include_str!(
+        "../../../../clients/linux-player/tests/fixtures/control-request-v1.json"
+    ))
+    .expect("the launcher's control body parses as a v1 request");
+    assert_eq!(request.sequence, 1);
+    assert_eq!(
+        request.capabilities.as_ref().map(|caps| caps.platform),
+        Some(ClientPlatform::Linux)
+    );
+    assert_eq!(request.validate(Some(7_200_000), 6_000), Ok(()));
+}
+
+/// C5 (M5): a failure of the current attempt before first-media publication
+/// fails a wait bound to that attempt, with the retained decision's reason.
+#[test]
+fn a_prepublication_failure_fails_a_wait_bound_to_that_exact_attempt() {
+    let started = Instant::now();
+    let mut actor = registered_prepublication_actor(started);
+    assert_eq!(
+        actor.begin_initial_producer_attempt_at(
+            started,
+            hardware_policy("presentation-c5", "recipe-c5"),
+        ),
+        Ok(1)
+    );
+    let running = actor.producer_operational_snapshot_at(started);
+    assert_eq!(
+        classify_prepublication_attempt(&running, 1, 1),
+        PrepublicationAttemptOutcome::Waiting,
+        "a running attempt keeps its waiters"
+    );
+    actor.mark_executor_lost(started + Duration::from_secs(1));
+    let failed = actor.producer_operational_snapshot_at(started + Duration::from_secs(1));
+    assert_eq!(
+        failed.failed_attempt_decision,
+        Some(FailedAttemptDecision {
+            failed_attempt: 1,
+            retry: false,
+            reason: "executor_lost",
+        })
+    );
+    assert_eq!(
+        failed.terminal_prepublication_failure,
+        Some("executor_lost")
+    );
+    assert_eq!(
+        classify_prepublication_attempt(&failed, 1, 1),
+        PrepublicationAttemptOutcome::Failed("executor_lost".to_owned())
+    );
+}
+
+/// C5 (M5), Fable's re-check condition 1: an executor loss while a retry is
+/// retained leaves only a Retry decision, yet the attempt can never be
+/// retried. The terminal flag alone has to fail the wait.
+#[test]
+fn an_executor_loss_with_only_a_retry_retained_still_fails_the_wait() {
+    let started = Instant::now();
+    let mut actor = registered_prepublication_actor(started);
+    assert_eq!(
+        actor.begin_initial_producer_attempt_at(
+            started,
+            hardware_policy("presentation-c5-lost", "recipe-c5-lost"),
+        ),
+        Ok(1)
+    );
+    let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+    assert!(actor.settle_due_deadlines_at(deadline).is_some());
+    actor.mark_executor_lost(deadline + Duration::from_nanos(1));
+    let snapshot = actor.producer_operational_snapshot_at(deadline + Duration::from_nanos(1));
+    assert!(
+        snapshot
+            .failed_attempt_decision
+            .is_some_and(|decision| decision.retry && decision.failed_attempt == 1),
+        "only the retry is retained: {:?}",
+        snapshot.failed_attempt_decision
+    );
+    assert_eq!(
+        snapshot.terminal_prepublication_failure,
+        Some("executor_lost")
+    );
+    assert_eq!(
+        classify_prepublication_attempt(&snapshot, 1, 1),
+        PrepublicationAttemptOutcome::Failed("executor_lost".to_owned())
+    );
+}
+
+/// C5 (M5): a retry keeps the predecessor-bound wait alive, the installed
+/// replacement is waited for normally, and the predecessor's decision never
+/// fails a wait bound to the successor.
+#[test]
+fn a_retry_keeps_waiting_and_a_predecessor_never_fails_its_successor() {
+    let started = Instant::now();
+    let mut actor = registered_prepublication_actor(started);
+    assert_eq!(
+        actor.begin_initial_producer_attempt_at(
+            started,
+            hardware_policy("presentation-c5-retry", "recipe-c5-retry"),
+        ),
+        Ok(1)
+    );
+    let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+    assert!(actor.settle_due_deadlines_at(deadline).is_some());
+    let decided = actor.producer_operational_snapshot_at(deadline);
+    assert_eq!(
+        classify_prepublication_attempt(&decided, 1, 1),
+        PrepublicationAttemptOutcome::Waiting,
+        "a retry means a successor is coming"
+    );
+    let decision = actor
+        .pending_decision
+        .clone()
+        .expect("the hardware deadline retains a retry");
+    let installed = actor
+        .admit_producer_retry_at(
+            deadline + Duration::from_millis(1),
+            decision.decision_sequence(),
+            "recipe-c5-retry",
+        )
+        .expect("the retry is admitted");
+    assert!(installed > 1);
+    let replaced = actor.producer_operational_snapshot_at(deadline + Duration::from_millis(1));
+    assert_eq!(
+        classify_prepublication_attempt(&replaced, installed, 1),
+        PrepublicationAttemptOutcome::Superseded,
+        "the predecessor-bound request is left to the owner transition"
+    );
+    assert_eq!(
+        classify_prepublication_attempt(&replaced, installed, installed),
+        PrepublicationAttemptOutcome::Waiting,
+        "the healthy replacement is waited for"
+    );
+    // Even a Fail decision naming the predecessor does not touch the
+    // successor's waiters.
+    let mut predecessor_failed = replaced.clone();
+    predecessor_failed.failed_attempt_decision = Some(FailedAttemptDecision {
+        failed_attempt: 1,
+        retry: false,
+        reason: "startup_deadline",
+    });
+    assert_eq!(
+        classify_prepublication_attempt(&predecessor_failed, installed, installed),
+        PrepublicationAttemptOutcome::Waiting
+    );
+}
+
+/// C5 (M5): once first media has been published the pre-publication flag is
+/// clear, so this check leaves already-published objects to their existing
+/// serving rules.
+#[test]
+fn a_published_attempt_is_not_failed_by_the_prepublication_check() {
+    let started = Instant::now();
+    let mut actor = registered_prepublication_actor(started);
+    assert_eq!(
+        actor.begin_initial_producer_attempt_at(
+            started,
+            hardware_policy("presentation-c5-pub", "recipe-c5-pub"),
+        ),
+        Ok(1)
+    );
+    actor
+        .prepublication
+        .as_mut()
+        .expect("pre-publication state")
+        .producer_media_published = true;
+    actor.executor_lost = true;
+    let snapshot = actor.producer_operational_snapshot_at(started);
+    assert_eq!(snapshot.terminal_prepublication_failure, None);
+    assert_eq!(
+        classify_prepublication_attempt(&snapshot, 1, 1),
+        PrepublicationAttemptOutcome::Waiting
     );
 }

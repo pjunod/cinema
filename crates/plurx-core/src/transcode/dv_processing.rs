@@ -11,6 +11,12 @@ use sha2::{Digest, Sha256};
 use super::{DecodeBackend, DecodeCacheIdentity, DecodeSourceIdentity, Encoder, PlanSourceBinding};
 use crate::domain::DolbyVisionFacts;
 
+mod display_target;
+pub use display_target::{
+    DvDisplayManagement, DvDisplayTarget, DvDisplayTargetChoice, DvDisplayTargetDecline,
+    DvSourceMastering, DISPLAY_TARGET_BUCKETS, DISPLAY_TARGET_METHOD,
+};
+
 fn encoder_token(encoder: Encoder) -> &'static str {
     match encoder {
         Encoder::Software => "software",
@@ -82,6 +88,16 @@ pub fn dv_playback_generation_digest(generation: &str) -> Result<DvDigest, DvCon
 pub struct DvEffectiveProcessingReport {
     generation: String,
     hdr10_enhanced: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    sdr_processed: bool,
+    /// The served picture is the reconstructed Profile 8.1: the composed
+    /// picture re-encoded with a rewritten 8.1 RPU. Neither HDR10-E nor SDR.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    profile81_reconstructed: bool,
+    creative_trims_applied: bool,
+    /// Some, but not every, served frame's display mapping applied creative trims.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    creative_trims_partial: bool,
     fel_contributed: bool,
     applied_operations: Vec<DvOperation>,
     /// The source pictures were decoded on the GPU (VA-API). Omitted when
@@ -91,8 +107,37 @@ pub struct DvEffectiveProcessingReport {
 }
 impl DvEffectiveProcessingReport {
     /// Whether the full enhancement layer's residual is in the served picture.
+    pub fn sdr_processed(&self) -> bool {
+        self.sdr_processed
+    }
+    /// Whether the served picture is the reconstructed Profile 8.1.
+    pub fn profile81_reconstructed(&self) -> bool {
+        self.profile81_reconstructed
+    }
     pub fn fel_contributed(&self) -> bool {
         self.fel_contributed
+    }
+    /// Only an observed operation in the current published receipt enables DYN.
+    pub fn display_target_nits(&self) -> Option<u32> {
+        self.applied_operations
+            .iter()
+            .find_map(|operation| match operation {
+                DvOperation::DisplayTargetMapping { nits } => Some(*nits),
+                _ => None,
+            })
+    }
+    /// Whether every served frame's display mapping applied the title's creative trims.
+    pub fn creative_trims_applied(&self) -> bool {
+        self.creative_trims_applied
+    }
+    /// How many served frames' display mappings applied the title's creative trims.
+    pub fn creative_trims(&self) -> crate::playback::enhancement::CreativeTrims {
+        use crate::playback::enhancement::CreativeTrims;
+        match (self.creative_trims_applied, self.creative_trims_partial) {
+            (true, _) => CreativeTrims::All,
+            (false, true) => CreativeTrims::Partial,
+            (false, false) => CreativeTrims::None,
+        }
     }
     /// Whether the served window's source pictures were decoded on the GPU.
     pub fn gpu_decoded(&self) -> bool {
@@ -110,13 +155,21 @@ impl DvEffectiveProcessingReport {
         struct Wire {
             generation: String,
             hdr10_enhanced: bool,
+            #[serde(default)]
+            sdr_processed: bool,
+            #[serde(default)]
+            profile81_reconstructed: bool,
+            #[serde(default)]
+            creative_trims_applied: bool,
+            #[serde(default)]
+            creative_trims_partial: bool,
             fel_contributed: bool,
             applied_operations: Vec<DvOperation>,
             #[serde(default)]
             gpu_decoded: bool,
         }
         if bytes.len() > 4096
-            || delivered != Some("hdr10")
+            || !matches!(delivered, Some("hdr10" | "sdr" | "dolby_vision"))
             || dv_playback_generation_digest(generation).is_err()
         {
             return None;
@@ -124,18 +177,34 @@ impl DvEffectiveProcessingReport {
         let wire: Wire = serde_json::from_slice(bytes).ok()?;
         let operations: BTreeSet<_> = wire.applied_operations.iter().copied().collect();
         if wire.generation != generation
-            || !wire.hdr10_enhanced
+            || wire.creative_trims_applied != operations.contains(&DvOperation::CreativeTrimApplication)
+            || (wire.creative_trims_applied || wire.creative_trims_partial)
+                && !operations.iter().any(|op| matches!(op, DvOperation::DisplayTargetMapping { .. }))
+            || wire.creative_trims_applied && wire.creative_trims_partial
+            || wire.hdr10_enhanced != (delivered == Some("hdr10"))
+            || wire.sdr_processed != (delivered == Some("sdr"))
+            || wire.profile81_reconstructed != (delivered == Some("dolby_vision"))
+            // A Dolby Vision carrier is never display targeted.
+            || wire.profile81_reconstructed
+                && operations.iter().any(|op| matches!(op, DvOperation::DisplayTargetMapping { .. }))
+            || wire.sdr_processed && (!operations.contains(&DvOperation::Bt709Gamma24Conversion) || !operations.contains(&DvOperation::DisplayTargetMapping { nits: 100 }))
             || wire.applied_operations.len() > 16
             || operations.len() != wire.applied_operations.len()
             || !operations.contains(&DvOperation::RpuColorConversion)
             || !operations.contains(&DvOperation::TargetMapping)
+            || operations.iter().filter(|op| matches!(op, DvOperation::DisplayTargetMapping { .. })).count() > 1
+            || operations.iter().any(|op| matches!(op, DvOperation::DisplayTargetMapping { nits } if !(wire.sdr_processed && *nits == 100 || !wire.sdr_processed && DISPLAY_TARGET_BUCKETS.contains(nits))))
             || wire.fel_contributed && !operations.contains(&DvOperation::LinearNlqResidual)
         {
             return None;
         }
         Some(Self {
             generation: wire.generation,
-            hdr10_enhanced: true,
+            hdr10_enhanced: wire.hdr10_enhanced,
+            sdr_processed: wire.sdr_processed,
+            profile81_reconstructed: wire.profile81_reconstructed,
+            creative_trims_applied: wire.creative_trims_applied,
+            creative_trims_partial: wire.creative_trims_partial,
             fel_contributed: wire.fel_contributed,
             applied_operations: wire.applied_operations,
             gpu_decoded: wire.gpu_decoded,
@@ -147,6 +216,7 @@ impl DvEffectiveProcessingReport {
 #[serde(rename_all = "snake_case")]
 pub enum DvDestination {
     Hdr10,
+    Sdr,
     Profile81,
 }
 
@@ -220,6 +290,93 @@ impl DvTimestamp {
         })
     }
 }
+/// Exact common demux origin observed in both the held selected-video probe
+/// and its FORMAT clock. Producer-default zero is not an observation. Keeping
+/// this typed prevents a seek window's first picture becoming a new origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DvSourceOrigin {
+    value: DvTimestamp,
+}
+impl DvSourceOrigin {
+    pub fn observed_common(
+        selected_video: DvTimestamp,
+        format: super::VodSourceClock,
+    ) -> Result<Self, DvContractError> {
+        let super::VodSourceClock::ReportedOrigin(micros) = format else {
+            return Err(DvContractError::Invalid(
+                "DV common source origin is unobserved",
+            ));
+        };
+        if selected_video.numerator < 0 || micros < 0 {
+            return Err(DvContractError::Invalid(
+                "negative DV source origin is unsupported",
+            ));
+        }
+        if selected_video != DvTimestamp::new(micros, 1_000_000)? {
+            return Err(DvContractError::Invalid(
+                "DV selected-video/FORMAT source origins differ",
+            ));
+        }
+        Ok(Self {
+            value: selected_video,
+        })
+    }
+
+    pub fn timestamp(self) -> DvTimestamp {
+        self.value
+    }
+
+    /// Exact frozen origin for the private helper protocol, never a sampled PTS.
+    pub fn exact(self) -> (i64, u32) {
+        (self.value.numerator, self.value.denominator)
+    }
+
+    /// O + max(0, film boundary - source tick), in the untouched source clock.
+    pub fn source_boundary(
+        self,
+        film_ticks: u64,
+        grid: u32,
+        tick: (u32, u32),
+    ) -> Result<(i64, u32), DvContractError> {
+        if grid == 0 || tick.0 == 0 || tick.1 == 0 {
+            return Err(DvContractError::Invalid("source boundary clock"));
+        }
+        let film = DvTimestamp::new(
+            i64::try_from(film_ticks).map_err(|_| DvContractError::Capacity)?,
+            grid,
+        )?;
+        let tick = DvTimestamp::new(i64::from(tick.0), tick.1)?;
+        let before = timestamp_difference(film, tick)?;
+        let before = if before.numerator < 0 {
+            DvTimestamp::new(0, 1)?
+        } else {
+            before
+        };
+        let negative_origin = DvTimestamp::new(-self.value.numerator, self.value.denominator)?;
+        let absolute = timestamp_difference(before, negative_origin)?;
+        Ok((absolute.numerator, absolute.denominator))
+    }
+}
+
+fn timestamp_difference(
+    left: DvTimestamp,
+    right: DvTimestamp,
+) -> Result<DvTimestamp, DvContractError> {
+    let numerator = i128::from(left.numerator) * i128::from(right.denominator)
+        - i128::from(right.numerator) * i128::from(left.denominator);
+    let denominator = u64::from(left.denominator) * u64::from(right.denominator);
+    let mut a = numerator.unsigned_abs();
+    let mut b = u128::from(denominator);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let divisor = a.max(1);
+    DvTimestamp::new(
+        i64::try_from(numerator / divisor as i128).map_err(|_| DvContractError::Capacity)?,
+        u32::try_from(u128::from(denominator) / divisor).map_err(|_| DvContractError::Capacity)?,
+    )
+}
+
 impl Ord for DvTimestamp {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (i128::from(self.numerator) * i128::from(other.denominator))
@@ -315,6 +472,7 @@ pub struct DvFrameGridMapping {
 pub fn dv_map_source_to_output_grid(
     source: &[DvFrameKey],
     source_tick: (u32, u32),
+    source_origin: DvSourceOrigin,
     grid: super::VodFrameGrid,
     first_output_frame: u64,
     expected_frames: usize,
@@ -346,12 +504,15 @@ pub fn dv_map_source_to_output_grid(
             .and_then(|ticks| i64::try_from(ticks).ok())
             .ok_or(DvContractError::Capacity)?;
         let output_pts = DvTimestamp::new(output_ticks, grid.numerator)?;
-        let error = (i128::from(key.pts.numerator) * i128::from(output_pts.denominator)
-            - i128::from(output_pts.numerator) * i128::from(key.pts.denominator))
+        let film_pts = timestamp_difference(key.pts, source_origin.timestamp())?;
+        let error = (i128::from(film_pts.numerator) * i128::from(output_pts.denominator)
+            - i128::from(output_pts.numerator) * i128::from(film_pts.denominator))
         .unsigned_abs();
-        if error * u128::from(source_tick.1)
+        if error
+            .checked_mul(u128::from(source_tick.1))
+            .ok_or(DvContractError::Capacity)?
             > u128::from(source_tick.0)
-                * u128::from(key.pts.denominator)
+                * u128::from(film_pts.denominator)
                 * u128::from(output_pts.denominator)
         {
             return Err(DvContractError::Invalid(
@@ -503,9 +664,11 @@ pub enum DvOperation {
     LinearNlqResidual,
     RpuColorConversion,
     TargetMapping,
+    DisplayTargetMapping { nits: u32 },
     CreativeTrimApplication,
     MetadataAdaptation,
     Bt2020NclConversion,
+    Bt709Gamma24Conversion,
     Main10Encoding,
     P81ContainerSignaling,
 }
@@ -519,6 +682,7 @@ pub enum DvIntermediateDomain {
     ReconstructedBt2020PqRgb,
     TargetMappedBt2020PqRgb,
     LimitedBt2020NclYuv420P10,
+    LimitedBt709Gamma24Yuv420P10,
     EncodedMain10,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -746,6 +910,8 @@ pub struct DvTargetPolicy {
     revision: u32,
     peak_millinit: u32,
     black_millinit: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    black_1e4_nits: Option<u32>,
     parameters: DvDigest,
 }
 impl DvTargetPolicy {
@@ -763,6 +929,7 @@ impl DvTargetPolicy {
             revision,
             peak_millinit,
             black_millinit,
+            black_1e4_nits: None,
             parameters,
         })
     }
@@ -834,6 +1001,10 @@ pub struct DvProcessingPlan {
     destination: DvDestination,
     graph: DvGraph,
     capability: DvCapabilityEvidence,
+    /// A completed window's frozen display target: its title mastering peak decides the CM v2.9
+    /// trim interpolation. Outside the semantic digest; the window's export policy carries it.
+    #[serde(skip)]
+    display_target: Option<DvDisplayTarget>,
 }
 impl DvProcessingPlan {
     pub fn destination(&self) -> DvDestination {
@@ -947,7 +1118,7 @@ pub fn dv_validate_encoded_window(
             "encoded DV window: output does not begin with an init segment",
         ));
     };
-    let facts = fmp4::hevc_hdr10_sample_entry_facts(&init)
+    let facts = fmp4::hevc_processed_sample_entry_facts(&init, destination == DvDestination::Sdr)
         .map_err(|_| invalid("encoded DV window: sample entry is not HEVC HDR10"))?;
     if (u32::from(facts.width), u32::from(facts.height)) != raster {
         return Err(invalid(
@@ -957,7 +1128,7 @@ pub fn dv_validate_encoded_window(
     let config = fmp4::dolby_vision_record(&init)
         .map_err(|_| invalid("encoded DV window: unreadable Dolby Vision record"))?;
     match destination {
-        DvDestination::Hdr10 if config.is_some() => {
+        DvDestination::Hdr10 | DvDestination::Sdr if config.is_some() => {
             return Err(invalid(
                 "encoded DV window: HDR10 output carries a Dolby Vision record",
             ))
@@ -1076,7 +1247,7 @@ pub fn dv_validate_encoded_window(
                     ));
                 }
                 match destination {
-                    DvDestination::Hdr10 if rpu.is_some() => {
+                    DvDestination::Hdr10 | DvDestination::Sdr if rpu.is_some() => {
                         return Err(invalid("encoded DV window: HDR10 output carries an RPU"))
                     }
                     DvDestination::Profile81 => {
@@ -1220,6 +1391,90 @@ pub fn dv_author_profile81_window(
     Ok(output)
 }
 
+/// Author the completed explicit target after encoding, independent of encoder
+/// family. The caller validates the resulting complete window before publication.
+/// Init and in-band declarations are derived from exactly the same payloads.
+pub fn dv_author_hdr10_window(
+    bytes: &[u8],
+    metadata: crate::fmp4::Hdr10OutputMetadata,
+) -> Result<Vec<u8>, DvContractError> {
+    use crate::fmp4::{FragmentReader, Unit};
+    let invalid = || DvContractError::Invalid("post-encode targeted HDR10 metadata authoring");
+    if bytes.is_empty() || bytes.len() > 64 * 1024 * 1024 {
+        return Err(invalid());
+    }
+    let mut reader = FragmentReader::new();
+    reader.push(bytes);
+    let Some(Unit::Init(mut init)) = reader.next_unit().map_err(|_| invalid())? else {
+        return Err(invalid());
+    };
+    metadata.write_init(&mut init).map_err(|_| invalid())?;
+    let mut output = init.bytes.clone();
+    let mut fragments = 0;
+    while let Some(unit) = reader.next_unit().map_err(|_| invalid())? {
+        let mut fragment = match unit {
+            Unit::Fragment(fragment) => fragment,
+            Unit::Trailer => continue,
+            Unit::Init(_) => return Err(invalid()),
+        };
+        metadata
+            .write_fragment(&mut fragment, &init)
+            .map_err(|_| invalid())?;
+        fragments += 1;
+        output.extend_from_slice(&fragment.bytes);
+        if output.len() > 64 * 1024 * 1024 {
+            return Err(DvContractError::Capacity);
+        }
+    }
+    if fragments == 0 || !reader.saw_trailer() || reader.buffered() != 0 {
+        return Err(invalid());
+    }
+    // Init/sample growth invalidates encoder-authored random-access offsets.
+    output.extend_from_slice(&completed_window_trailer(&init));
+    if output.len() > 64 * 1024 * 1024 {
+        return Err(DvContractError::Capacity);
+    }
+    Ok(output)
+}
+
+pub fn dv_author_sdr_window(bytes: &[u8]) -> Result<Vec<u8>, DvContractError> {
+    use crate::fmp4::{FragmentReader, Unit};
+    let invalid = || DvContractError::Invalid("post-encode SDR HDR metadata removal");
+    if bytes.is_empty() || bytes.len() > 64 * 1024 * 1024 {
+        return Err(invalid());
+    }
+    let mut reader = FragmentReader::new();
+    reader.push(bytes);
+    let Some(Unit::Init(mut init)) = reader.next_unit().map_err(|_| invalid())? else {
+        return Err(invalid());
+    };
+    crate::fmp4::strip_sdr_hdr_init(&mut init).map_err(|_| invalid())?;
+    let mut output = init.bytes.clone();
+    let mut fragments = 0;
+    while let Some(unit) = reader.next_unit().map_err(|_| invalid())? {
+        let mut fragment = match unit {
+            Unit::Fragment(fragment) => fragment,
+            Unit::Trailer => continue,
+            Unit::Init(_) => return Err(invalid()),
+        };
+        crate::fmp4::strip_sdr_hdr_fragment(&mut fragment, &init).map_err(|_| invalid())?;
+        fragments += 1;
+        output.extend_from_slice(&fragment.bytes);
+        if output.len() > 64 * 1024 * 1024 {
+            return Err(DvContractError::Capacity);
+        }
+    }
+    if fragments == 0 || !reader.saw_trailer() || reader.buffered() != 0 {
+        return Err(invalid());
+    }
+    // Init/sample growth invalidates encoder-authored random-access offsets.
+    output.extend_from_slice(&completed_window_trailer(&init));
+    if output.len() > 64 * 1024 * 1024 {
+        return Err(DvContractError::Capacity);
+    }
+    Ok(output)
+}
+
 fn completed_window_trailer(init: &crate::fmp4::Init) -> Vec<u8> {
     let size = 24 + 24 * init.tracks.len() as u32;
     let mut trailer = Vec::with_capacity(size as usize);
@@ -1240,6 +1495,28 @@ fn completed_window_trailer(init: &crate::fmp4::Init) -> Vec<u8> {
     trailer
 }
 
+fn completed_target_policy(export: DvExportPolicy) -> Result<DvTargetPolicy, DvContractError> {
+    if let Some(display) = export.display_target() {
+        // Refuse an unresolved proposal before it can become a completed plan.
+        if display.is_sdr() {
+            display.resolved_sdr_floor()?;
+        } else {
+            display.output_metadata()?;
+        }
+        let floor = display.mastering().min_1e4_nits;
+        let mut target = DvTargetPolicy::new(
+            2,
+            display.nits() * 1000,
+            floor / 10,
+            export.target_parameters(),
+        )?;
+        target.black_1e4_nits = Some(floor);
+        Ok(target)
+    } else {
+        DvTargetPolicy::new(1, 10_000_000, 5, export.target_parameters())
+    }
+}
+
 /// Inputs are collected by the daemon from its held source and completed
 /// private processes. This type is intentionally neither deserializable nor
 /// a helper receipt. Every byte-changing output fact is rechecked below.
@@ -1253,12 +1530,44 @@ pub enum DvExportPolicy {
     PqBilinearYuv420p10V1 {
         raster: (u32, u32),
     },
+    DisplayTargetYuv420p10V1 {
+        raster: (u32, u32),
+        target: DvDisplayTarget,
+    },
 }
 impl DvExportPolicy {
+    pub fn display_target(self) -> Option<DvDisplayTarget> {
+        match self {
+            Self::DisplayTargetYuv420p10V1 { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+    pub fn output_policy(self) -> String {
+        self.display_target().map_or_else(
+            || "bt2020-pq-master-clip".into(),
+            DvDisplayTarget::output_policy,
+        )
+    }
+    /// Elision returns the original master variant, including its exact digest.
+    pub fn for_display_target(
+        raster: (u32, u32),
+        nits: u32,
+        stats: Option<crate::scan::dv_title::DvTitleStats>,
+    ) -> Result<(Self, Option<DvDisplayTargetDecline>), DvContractError> {
+        Ok(match DvDisplayTarget::for_title(nits, stats)? {
+            DvDisplayTargetChoice::Target(target) => {
+                (Self::DisplayTargetYuv420p10V1 { raster, target }, None)
+            }
+            DvDisplayTargetChoice::Master { reason } => {
+                (Self::PqBilinearYuv420p10V1 { raster }, Some(reason))
+            }
+        })
+    }
     pub fn raster(self, native: (u32, u32)) -> Result<(u32, u32), DvContractError> {
         let raster = match self {
             Self::NativeRgb48V1 => native,
-            Self::PqBilinearYuv420p10V1 { raster } => raster,
+            Self::PqBilinearYuv420p10V1 { raster }
+            | Self::DisplayTargetYuv420p10V1 { raster, .. } => raster,
         };
         if raster.0 < 32
             || raster.1 < 32
@@ -1279,6 +1588,10 @@ impl DvExportPolicy {
                 serde_json::to_vec(&("bt2020-pq-master-clip-export-v3", self))
                     .expect("bounded export policy serializes")
             }
+            Self::DisplayTargetYuv420p10V1 { .. } => {
+                serde_json::to_vec(&(DISPLAY_TARGET_METHOD, self))
+                    .expect("bounded targeted export policy serializes")
+            }
         };
         DvDigest(hex::encode(Sha256::digest(bytes)))
     }
@@ -1294,6 +1607,7 @@ pub struct DvCompletedWindowInput<'a> {
     pub source_keys: &'a [DvFrameKey],
     pub source_rpus: &'a [Vec<u8>],
     pub source_tick: (u32, u32),
+    pub source_origin: DvSourceOrigin,
     pub grid: super::VodFrameGrid,
     pub first_global_frame: u64,
     pub encoded: &'a [u8],
@@ -1327,7 +1641,18 @@ pub fn dv_plan_completed_window(
         ));
     }
     let full_fel = input.mode == DvProcessingMode::Fel;
-    if !full_fel && input.destination != DvDestination::Hdr10 {
+    if input
+        .export_policy
+        .display_target()
+        .is_some_and(|target| target.is_sdr() != (input.destination == DvDestination::Sdr))
+        || input.destination == DvDestination::Profile81
+            && input.export_policy.display_target().is_some()
+    {
+        return Err(invalid(
+            "display targeting cannot change native/P8.1 delivery",
+        ));
+    }
+    if !full_fel && input.destination == DvDestination::Profile81 {
         return Err(invalid(
             "completed DV window: base-RPU mode has no Profile 8.1 destination",
         ));
@@ -1347,7 +1672,7 @@ pub fn dv_plan_completed_window(
     }
     if input.destination == DvDestination::Profile81 && !preferences.conversion_permitted
         || !(match input.destination {
-            DvDestination::Hdr10 => preferences.hdr_processing,
+            DvDestination::Hdr10 | DvDestination::Sdr => preferences.hdr_processing,
             DvDestination::Profile81 => preferences.fel_reencode,
         })
         || full_fel && input.source.catalog.profile != Some(7)
@@ -1375,6 +1700,7 @@ pub fn dv_plan_completed_window(
     if matches!(
         input.export_policy,
         DvExportPolicy::PqBilinearYuv420p10V1 { .. }
+            | DvExportPolicy::DisplayTargetYuv420p10V1 { .. }
     ) && export_raster != input.raster
     {
         return Err(invalid(
@@ -1412,13 +1738,19 @@ pub fn dv_plan_completed_window(
     dv_map_source_to_output_grid(
         input.source_keys,
         input.source_tick,
+        input.source_origin,
         input.grid,
         input.first_global_frame,
         input.source_rpus.len(),
     )?;
     for raw in input.source_rpus {
+        if let Some(target) = input.export_policy.display_target() {
+            target.validate_rpu(raw)?;
+        }
         if full_fel {
-            if !DvParsedMetadata::from_raw_rpu(raw)?.runtime_supported() {
+            if matches!(input.destination, DvDestination::Hdr10 | DvDestination::Sdr) {
+                DvFelMetadata::from_raw_rpu(raw, (bl_shape.width, bl_shape.height))?;
+            } else if !DvParsedMetadata::from_raw_rpu(raw)?.runtime_supported() {
                 return Err(invalid(
                     "completed DV window: RPU outside the renderer's supported subset",
                 ));
@@ -1445,12 +1777,12 @@ pub fn dv_plan_completed_window(
         input.destination,
     )?;
     let strategy = match input.destination {
-        DvDestination::Hdr10 if !full_fel => DvStrategy::BaseRpuToHdr10,
-        DvDestination::Hdr10 => DvStrategy::FelRpuToHdr10,
+        DvDestination::Hdr10 | DvDestination::Sdr if !full_fel => DvStrategy::BaseRpuToHdr10,
+        DvDestination::Hdr10 | DvDestination::Sdr => DvStrategy::FelRpuToHdr10,
         DvDestination::Profile81 => DvStrategy::ReconstructedProfile81,
     };
     let mut pixels = DvGraph::expected(strategy);
-    if !full_fel {
+    if !full_fel || matches!(input.destination, DvDestination::Hdr10 | DvDestination::Sdr) {
         // The graph identifies the supported conditional renderer policy,
         // independent of which curve methods occur in this window. Actual
         // operations and segment counts belong to each fresh frame receipt.
@@ -1487,12 +1819,46 @@ pub fn dv_plan_completed_window(
             output: DvIntermediateDomain::TargetMappedBt2020PqRgb,
         },
     );
+    if let Some(display) = input.export_policy.display_target() {
+        pixels.insert(
+            index + 1,
+            DvGraphEdge {
+                operation: DvOperation::DisplayTargetMapping {
+                    nits: display.nits(),
+                },
+                input: DvIntermediateDomain::TargetMappedBt2020PqRgb,
+                output: DvIntermediateDomain::TargetMappedBt2020PqRgb,
+            },
+        );
+    }
+    let target = completed_target_policy(input.export_policy)?;
+    if input.destination == DvDestination::Sdr {
+        if !input
+            .export_policy
+            .display_target()
+            .is_some_and(DvDisplayTarget::is_sdr)
+        {
+            return Err(invalid(
+                "SDR output requires an explicit title-qualified SDR export",
+            ));
+        }
+        for edge in &mut pixels {
+            if edge.operation == DvOperation::Bt2020NclConversion {
+                edge.operation = DvOperation::Bt709Gamma24Conversion;
+            }
+            if edge.input == DvIntermediateDomain::LimitedBt2020NclYuv420P10 {
+                edge.input = DvIntermediateDomain::LimitedBt709Gamma24Yuv420P10;
+            }
+            if edge.output == DvIntermediateDomain::LimitedBt2020NclYuv420P10 {
+                edge.output = DvIntermediateDomain::LimitedBt709Gamma24Yuv420P10;
+            }
+        }
+    }
     let graph = DvGraph {
         strategy,
         pixels,
         adapt_metadata_to_reconstructed_base: input.destination == DvDestination::Profile81,
     };
-    let target = DvTargetPolicy::new(1, 10_000_000, 5, input.export_policy.target_parameters())?;
     let capability = DvCapabilityEvidence {
         scope: DvEvidenceScope::ProductionRoute,
         completed_window_checked: true,
@@ -1519,6 +1885,7 @@ pub fn dv_plan_completed_window(
         )?,
     };
     Ok(DvProcessingPlan {
+        display_target: input.export_policy.display_target(),
         source: input.source,
         preferences,
         destination: input.destination,
@@ -1547,7 +1914,7 @@ pub fn dv_processing_preflight(
         return Ok(Some(R::ExistingDeliveryConstraint));
     }
     match destination {
-        DvDestination::Hdr10 if !prefs.hdr_processing => {
+        DvDestination::Hdr10 | DvDestination::Sdr if !prefs.hdr_processing => {
             return Ok(Some(R::PreferenceDisabled));
         }
         DvDestination::Profile81 if !prefs.conversion_permitted => {
@@ -1560,8 +1927,8 @@ pub fn dv_processing_preflight(
     }
     let supported = matches!(
         (destination, catalog.profile, catalog.bl_compat_id),
-        (DvDestination::Hdr10, Some(5), Some(0))
-            | (DvDestination::Hdr10, Some(8), Some(1))
+        (DvDestination::Hdr10 | DvDestination::Sdr, Some(5), Some(0))
+            | (DvDestination::Hdr10 | DvDestination::Sdr, Some(8), Some(1))
             | (_, Some(7), Some(1 | 6))
     );
     if !supported
@@ -1649,8 +2016,10 @@ fn resolve_inner(
             return unchanged(R::UnknownElKind)
         }
         DvDestination::Profile81 => DvStrategy::ReconstructedProfile81,
-        DvDestination::Hdr10 if source.el_kind == DvElKind::Fel => DvStrategy::FelRpuToHdr10,
-        DvDestination::Hdr10 => DvStrategy::BaseRpuToHdr10,
+        DvDestination::Hdr10 | DvDestination::Sdr if source.el_kind == DvElKind::Fel => {
+            DvStrategy::FelRpuToHdr10
+        }
+        DvDestination::Hdr10 | DvDestination::Sdr => DvStrategy::BaseRpuToHdr10,
     };
     let graph = DvGraph::new(
         strategy,
@@ -1663,6 +2032,7 @@ fn resolve_inner(
         destination: input.destination,
         graph,
         capability: cap.clone(),
+        display_target: None,
     })))
 }
 
@@ -1836,6 +2206,132 @@ impl DvBaseMetadata {
             polynomial_segments,
             mmr_segments,
             metadata_levels: levels,
+        })
+    }
+}
+
+/// Fresh raw-RPU predicate for the bounded public P7/FEL HDR10 and SDR renderer.
+/// Synthetic scalar evidence and P8.1 authoring retain their narrower types.
+#[derive(Debug, Clone)]
+pub struct DvFelMetadata {
+    pub polynomial_segments: u32,
+    pub mmr_segments: u32,
+    pub applied_operations: Vec<DvOperation>,
+    pub metadata_levels: BTreeSet<u8>,
+}
+impl DvFelMetadata {
+    pub fn from_raw_rpu(raw: &[u8], raster: (u32, u32)) -> Result<Self, DvContractError> {
+        use dolby_vision::rpu::{
+            dovi_rpu::DoviRpu,
+            rpu_data_mapping::{DoviMappingMethod, DoviNlqMethod},
+        };
+        let invalid = || DvContractError::Invalid("unsupported fresh FEL RPU");
+        // Reuse general curves, normalization, representation and active area.
+        // This projection cannot award a completed-renderer capability.
+        let base = DvBaseMetadata::from_raw_rpu(raw, raster)?;
+        if base.profile != 7 || base.source_el_kind != DvElKind::Fel {
+            return Err(invalid());
+        }
+        let rpu = DoviRpu::parse_unspec62_nalu(raw).map_err(|_| invalid())?;
+        let h = &rpu.header;
+        let mapping = rpu.rpu_data_mapping.as_ref().ok_or_else(invalid)?;
+        if h.el_bit_depth_minus8 != 2
+            || h.disable_residual_flag
+            || h.reserved_zero_3bits != 0
+            || !h.el_spatial_resampling_filter_flag
+            || mapping.nlq_method_idc != Some(DoviNlqMethod::LinearDeadzone)
+            || mapping.nlq_num_pivots_minus2 != Some(0)
+        {
+            return Err(invalid());
+        }
+        fn coefficients(integer: &[i64], fraction: &[u64], count: usize) -> bool {
+            integer.len() == count
+                && fraction.len() == count
+                && integer
+                    .iter()
+                    .all(|value| (-(1_i64 << 31)..(1_i64 << 31)).contains(value))
+                && fraction.iter().all(|value| *value < 8_388_608)
+        }
+        for curve in &mapping.curves {
+            let segments = curve.pivots.len() - 1;
+            match curve.mapping_idc {
+                DoviMappingMethod::Polynomial => {
+                    let p = curve.polynomial.as_ref().ok_or_else(invalid)?;
+                    if p.poly_coef_int.len() != segments || p.poly_coef.len() != segments {
+                        return Err(invalid());
+                    }
+                    for piece in 0..segments {
+                        let count =
+                            usize::try_from(p.poly_order_minus1[piece]).map_err(|_| invalid())? + 2;
+                        if !coefficients(&p.poly_coef_int[piece], &p.poly_coef[piece], count) {
+                            return Err(invalid());
+                        }
+                    }
+                }
+                DoviMappingMethod::MMR => {
+                    let m = curve.mmr.as_ref().ok_or_else(invalid)?;
+                    if !coefficients(&m.mmr_constant_int, &m.mmr_constant, segments)
+                        || m.mmr_coef_int.len() != segments
+                        || m.mmr_coef.len() != segments
+                    {
+                        return Err(invalid());
+                    }
+                    for piece in 0..segments {
+                        let orders = usize::from(m.mmr_order_minus1[piece]) + 1;
+                        if m.mmr_coef_int[piece].len() != orders
+                            || m.mmr_coef[piece].len() != orders
+                        {
+                            return Err(invalid());
+                        }
+                        for order in 0..orders {
+                            if !coefficients(
+                                &m.mmr_coef_int[piece][order],
+                                &m.mmr_coef[piece][order],
+                                7,
+                            ) {
+                                return Err(invalid());
+                            }
+                        }
+                    }
+                }
+                _ => return Err(invalid()),
+            }
+        }
+        let nlq = mapping.nlq.as_ref().ok_or_else(invalid)?;
+        for comp in 0..3 {
+            let offset = u64::from(nlq.nlq_offset[comp]);
+            let slope = nlq.linear_deadzone_slope[comp];
+            let threshold = nlq.linear_deadzone_threshold[comp];
+            let maximum_integer = nlq.vdr_in_max_int[comp];
+            let maximum_fraction = nlq.vdr_in_max[comp];
+            if nlq.linear_deadzone_slope_int[comp] != 0
+                || nlq.linear_deadzone_threshold_int[comp] != 0
+                || offset > 1023
+                || slope >= 8_388_608
+                || threshold >= 8_388_608
+                || maximum_integer > 1
+                || maximum_fraction >= 8_388_608
+            {
+                return Err(invalid());
+            }
+            let worst = (2 * offset.max(1023 - offset) - 1) * slope + 2 * threshold;
+            let maximum = maximum_integer * 8_388_608 + maximum_fraction;
+            // Same all-code bound and binary32 rounding reserve as C NLQ.
+            if worst > 2 * 8_388_608 || worst != 0 && worst + 256 > 2 * maximum {
+                return Err(invalid());
+            }
+        }
+        let mut operations = base.applied_operations;
+        let color = operations
+            .iter()
+            .position(|op| *op == DvOperation::RpuColorConversion)
+            .ok_or_else(invalid)?;
+        operations.insert(color, DvOperation::LinearNlqResidual);
+        Ok(Self {
+            polynomial_segments: base.polynomial_segments,
+            mmr_segments: base.mmr_segments,
+            applied_operations: operations,
+            metadata_levels: base.metadata_levels,
         })
     }
 }
@@ -2237,7 +2733,7 @@ impl DvProcessingReceipt {
     }
     /// Project actual served-frame evidence onto the existing playback identity.
     /// M1's empty registry keeps every shipping response unchanged and omitted.
-    pub fn hdr10_effective_report(
+    pub fn effective_report(
         &self,
         registry: &DvProductionRegistry,
         plan: &DvProcessingPlan,
@@ -2245,7 +2741,7 @@ impl DvProcessingReceipt {
         object_shape: &DvDigest,
     ) -> Result<Option<DvEffectiveProcessingReport>, DvContractError> {
         let generation = dv_playback_generation_digest(active_playback_generation)?;
-        if !self.reports_hdr10_enhanced(registry, plan, &generation, object_shape) {
+        if !self.reports_processed(registry, plan, &generation, object_shape) {
             return Ok(None);
         }
         let mut common: BTreeSet<_> = self.served_frames[0]
@@ -2256,6 +2752,11 @@ impl DvProcessingReceipt {
         for frame in &self.served_frames[1..] {
             common.retain(|operation| frame.applied_operations.contains(operation));
         }
+        let trimmed = self.served_frames.iter().any(|frame| {
+            frame
+                .applied_operations
+                .contains(&DvOperation::CreativeTrimApplication)
+        });
         let fel_contributed = self.served_frames.iter().all(|frame| {
             frame.el_bound
                 && frame
@@ -2264,15 +2765,44 @@ impl DvProcessingReceipt {
         });
         Ok(Some(DvEffectiveProcessingReport {
             generation: active_playback_generation.to_owned(),
-            hdr10_enhanced: true,
+            hdr10_enhanced: plan.destination == DvDestination::Hdr10,
+            sdr_processed: plan.destination == DvDestination::Sdr,
+            profile81_reconstructed: plan.destination == DvDestination::Profile81,
+            // Only when every served frame's display mapping applied creative trims; "partial"
+            // when some did.
+            creative_trims_applied: common.contains(&DvOperation::CreativeTrimApplication),
+            creative_trims_partial: trimmed
+                && !common.contains(&DvOperation::CreativeTrimApplication),
             fel_contributed,
             applied_operations: common.into_iter().collect(),
             gpu_decoded: self.decoder != DecodeBackend::Software,
         }))
     }
 
+    pub fn hdr10_effective_report(
+        &self,
+        registry: &DvProductionRegistry,
+        plan: &DvProcessingPlan,
+        active_playback_generation: &str,
+        object_shape: &DvDigest,
+    ) -> Result<Option<DvEffectiveProcessingReport>, DvContractError> {
+        if plan.destination != DvDestination::Hdr10 {
+            return Ok(None);
+        }
+        self.effective_report(registry, plan, active_playback_generation, object_shape)
+    }
     /// Only completed daemon-checked runtime windows can award HDR10-E.
     pub fn reports_hdr10_enhanced(
+        &self,
+        registry: &DvProductionRegistry,
+        plan: &DvProcessingPlan,
+        active_generation: &DvDigest,
+        object_shape: &DvDigest,
+    ) -> bool {
+        plan.destination == DvDestination::Hdr10
+            && self.reports_processed(registry, plan, active_generation, object_shape)
+    }
+    fn reports_processed(
         &self,
         registry: &DvProductionRegistry,
         plan: &DvProcessingPlan,
@@ -2288,7 +2818,6 @@ impl DvProcessingReceipt {
             && self.observation_complete
             && self.terminal_failure.is_none()
             && !self.served_frames.is_empty()
-            && plan.destination == DvDestination::Hdr10
     }
 }
 
@@ -2324,7 +2853,16 @@ pub fn dv_receipt_completed_window(
         {
             return Err(invalid());
         }
-        let (operations, retained_levels) = if requires_el {
+        let (mut operations, retained_levels) = if requires_el
+            && matches!(plan.destination, DvDestination::Hdr10 | DvDestination::Sdr)
+        {
+            if plan.source.el_kind != DvElKind::Fel {
+                return Err(invalid());
+            }
+            let shape = plan.capability.bl_shape;
+            let parsed = DvFelMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
+            (parsed.applied_operations, parsed.metadata_levels)
+        } else if requires_el {
             let parsed = DvParsedMetadata::from_raw_rpu(raw)?;
             if !parsed.runtime_supported() || parsed.source_el_kind != plan.source.el_kind {
                 return Err(invalid());
@@ -2348,6 +2886,36 @@ pub fn dv_receipt_completed_window(
             }
             (parsed.applied_operations, parsed.metadata_levels)
         };
+        if plan.destination == DvDestination::Sdr {
+            operations.retain(|op| *op != DvOperation::Bt2020NclConversion);
+            operations.push(DvOperation::Bt709Gamma24Conversion);
+        }
+        if !requires_el || matches!(plan.destination, DvDestination::Hdr10 | DvDestination::Sdr) {
+            // Source metadata determines conditional reshaping, not the
+            // post-reconstruction export already verified by the daemon.
+            operations.extend(
+                plan.graph
+                    .required_operations()
+                    .into_iter()
+                    .filter(|operation| {
+                        matches!(operation, DvOperation::DisplayTargetMapping { .. })
+                    }),
+            );
+            // The frame's own RPU decides whether the display mapping applied creative trims.
+            let nits = operations.iter().find_map(|operation| match operation {
+                DvOperation::DisplayTargetMapping { nits } => Some(*nits),
+                _ => None,
+            });
+            if let Some(nits) = nits {
+                let target = plan
+                    .display_target
+                    .filter(|target| target.nits() == nits)
+                    .ok_or_else(invalid)?;
+                if target.display_management(raw)?.creative_trims() {
+                    operations.push(DvOperation::CreativeTrimApplication);
+                }
+            }
+        }
         for operation in &operations {
             let value = operations_applied.entry(*operation).or_insert(0);
             bump(value)?;

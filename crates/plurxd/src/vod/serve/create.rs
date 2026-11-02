@@ -626,6 +626,7 @@ impl VodServe {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
             _ if prepared.encoding.is_some() => (
                 true,
@@ -835,12 +836,20 @@ impl VodServe {
                     None => "this process has no cluster index identity".to_owned(),
                 }
             } else {
-                // The node-local pass builds this index; a viewer asking for
-                // it is the strongest reason to build it next.
-                self.shared.demand_local_index(file.id);
-                unavailable_reason.unwrap_or_else(|| {
-                    "shared preparation is disabled; no matching local index exists".to_owned()
-                })
+                // The node-local pass builds this index; what its last
+                // attempt found decides the refusal (`local_index_refusal`).
+                let (code, reason) = self
+                    .shared
+                    .local_index_refusal(
+                        file.id,
+                        &identity,
+                        unavailable_reason.unwrap_or_else(|| {
+                            "shared preparation is disabled; no matching local index exists"
+                                .to_owned()
+                        }),
+                    )
+                    .await;
+                return Err(crate::transcode::vod_refusal_error(code, reason));
             };
             // This is a prerequisite refusal, not a claim that a worker is
             // active. The durable analysis row and reason carry its actual
@@ -1367,6 +1376,10 @@ impl VodServe {
             .root_admission
             .as_ref()
             .and_then(|root| root.reuse_scope);
+        let attachment_owner = fences
+            .release_fence
+            .as_ref()
+            .and_then(|fence| fence.attachment_owner);
         let mut reused_parent = None;
         let root_admission = prepared
             .root_admission
@@ -1467,7 +1480,8 @@ impl VodServe {
             children: Vec::new(),
             root_admission,
             processed_reuse_scope,
-            processed_probes: Vec::new(),
+            processed_reuse_seed: processed_reuse_scope
+                .and_then(|_| ProcessedReuseSeed::from_request(req)),
             preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
                 req.start_seconds,
                 duration_ms,
@@ -1598,29 +1612,11 @@ impl VodServe {
                     .as_ref()
                     .is_some_and(|permit| reuse.matches(previous, permit))
             });
-            #[cfg(any(target_os = "linux", test))]
-            let production_current = replacement.root_admission.as_ref().is_some_and(|permit| {
-                rendition
-                    .recipe
-                    .encoding
-                    .as_ref()
-                    .and_then(|encoding| reuse.production_evidence(encoding, permit))
-                    .is_some_and(|proof| {
-                        proof.milli_realtime >= 1150
-                            && proof.active_ms >= 2000
-                            && proof.completed_segments >= 2
-                    })
-            });
-            #[cfg(not(any(target_os = "linux", test)))]
-            let production_current = false;
-            if !valid || !production_current {
+            if !valid {
                 return Err(crate::transcode::vod_refusal_error(
                     "vod_preparation_changed",
                     "the exact processing predecessor ended or changed",
                 ));
-            }
-            if let Some(lease) = reuse.probe.as_ref() {
-                lease.probe.revoke();
             }
         }
         if let Some(previous_readers) = previous_readers.as_mut() {
@@ -1707,6 +1703,9 @@ impl VodServe {
             .get_mut(&session_id)
             .map(|session| std::mem::take(&mut session.children))
             .unwrap_or_default();
+        if let Some(sink) = attachment_owner {
+            *sink.lock().expect("first preparation owner") = Some(replacement.response_owner());
+        }
         sessions.insert(session_id.clone(), replacement);
         {
             let mut observation = self
@@ -1887,6 +1886,7 @@ impl ReservedSourceVodRendition {
                     .as_ref()
                     .and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
+                processing_note: None,
                 session_id: session_id.into(),
                 playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
                 duration_ms: Some(plan_duration_ms(&self.rendition.plan)),
@@ -1913,7 +1913,7 @@ impl ReservedSourceVodRendition {
                     .encoding
                     .as_ref()
                     .map_or(plurx_core::transcode::OutputGrade::Sdr, |encoding| {
-                        encoding.options.pipeline.output_grade()
+                        encoding.delivered_output_grade()
                     }),
                 vod: true,
                 retained_output: None,
@@ -2324,7 +2324,7 @@ impl VodServe {
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
-            processed_probes: Vec::new(),
+            processed_reuse_seed: None,
             preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
                 req.start_seconds,
                 duration_ms,
@@ -2539,6 +2539,7 @@ impl VodServe {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
             _ if prepared.encoding.is_some() => (
                 true,
@@ -2767,12 +2768,20 @@ impl VodServe {
                     None => "this process has no cluster index identity".to_owned(),
                 }
             } else {
-                // The node-local pass builds this index; a viewer asking for
-                // it is the strongest reason to build it next.
-                self.shared.demand_local_index(file.id);
-                unavailable_reason.unwrap_or_else(|| {
-                    "shared preparation is disabled; no matching local index exists".to_owned()
-                })
+                // The node-local pass builds this index; what its last
+                // attempt found decides the refusal (`local_index_refusal`).
+                let (code, reason) = self
+                    .shared
+                    .local_index_refusal(
+                        file.id,
+                        &identity,
+                        unavailable_reason.unwrap_or_else(|| {
+                            "shared preparation is disabled; no matching local index exists"
+                                .to_owned()
+                        }),
+                    )
+                    .await;
+                return Err(crate::transcode::vod_refusal_error(code, reason));
             };
             // This is a prerequisite refusal, not a claim that a worker is
             // active. The durable analysis row and reason carry its actual
@@ -2984,6 +2993,7 @@ mod principal_demand_tests {
                 aac: true,
                 preserve_dolby_vision: false,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             start_seconds: 0.0,
             audio_index: None,

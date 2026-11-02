@@ -1,7 +1,11 @@
 # Bounded reconstructed P7 → P8.1 authoring
 
-**Status:** built offline helper; serving admission and physical Dolby Vision
-acceptance remain open. Source reconstruction admission belongs to the renderer.
+**Status:** built offline helper. Playback serves the reconstructed P8.1
+through the daemon's in-process authoring (`dv_author_profile81_window`), not
+this tool; serving admission, the served-window check and the composition
+proof are in [FEL-P81-RECONSTRUCTION.md](../../docs/streaming/FEL-P81-RECONSTRUCTION.md).
+Physical Dolby Vision acceptance remains open. Source reconstruction
+admission belongs to the renderer.
 
 `author_p81.c` accepts a video-only encoded HEVC container, the successful
 renderer generation's rational `timing.tsv`, and its `rpus/frame-NNN.nal` files.

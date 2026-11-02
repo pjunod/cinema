@@ -28,13 +28,25 @@ class PublishBadgeCase(unittest.TestCase):
             subprocess.run(["git", "init", "-q", source], check=True)
             subprocess.run(["git", "-C", source, "remote", "add", "origin", remote], check=True)
             (source / "scripts").symlink_to(ROOT / "scripts", target_is_directory=True)
+            env.update(GITHUB_WORKSPACE=str(source), GITHUB_RUN_ID="publication", GITHUB_RUN_ATTEMPT="1")
+            receipt = source / "target/unit-coverage-publication-1/receipt.json"
+            receipt.parent.mkdir(parents=True)
 
             def git(*args):
                 return subprocess.check_output(
                     ["git", f"--git-dir={remote}", *args], text=True
                 ).strip()
 
-            def publish(value):
+            def publish(value, measured_at=None):
+                # Real workflow input shape, using fixture identities and exact
+                # integer counters; the publisher sanitizes the linked receipt.
+                if type(value) in (int, float) and 0 <= value <= 100:
+                    receipt.write_text(json.dumps({
+                        "schema": 1, "status": "passed", "source_commit": "a" * 40,
+                        "source_sha256": "b" * 64, "report_sha256": "c" * 64,
+                        "measured_at_utc": measured_at or datetime.now(timezone.utc).isoformat(),
+                        "line_coverage": {"count": 10000, "covered": round(value * 100)},
+                    }))
                 (source / "cov.json").write_text(json.dumps({
                     "data": [{"totals": {"lines": {"percent": value}}}]
                 }))
@@ -57,9 +69,21 @@ class PublishBadgeCase(unittest.TestCase):
                         f"{percent:.1f}% · {after} UTC",
                     })
                     self.assertEqual(endpoint["color"], color)
+                    provenance = json.loads(git("show", "badges:coverage-receipt.json"))
+                    self.assertEqual(provenance["source_commit"], "a" * 40)
+                    self.assertEqual(provenance["line_coverage"]["covered"], round(percent * 100))
                     svg = git("show", "badges:coverage.svg")
                     self.assertIn(endpoint["message"], svg)
                     self.assertEqual(git("rev-parse", "badges"), git("rev-parse", "codex/badges"))
+
+            # A timezone offset crossing midnight must label the same UTC
+            # day as the sanitized provenance committed beside the badge.
+            shifted = publish(85, "2026-10-29T00:30:00+02:00")
+            self.assertEqual(shifted.returncode, 0, shifted.stderr)
+            endpoint = json.loads(git("show", "badges:coverage.json"))
+            provenance = json.loads(git("show", "badges:coverage-receipt.json"))
+            self.assertEqual(endpoint["message"], "85.0% · 2026-10-28 UTC")
+            self.assertTrue(provenance["measured_at_utc"].startswith("2026-10-28T22:30:00"))
 
             last_good = git("rev-parse", "badges")
             for invalid in (None, "83.6", -1, 101):

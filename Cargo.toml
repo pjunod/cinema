@@ -11,6 +11,7 @@ members = [
     "crates/plurxd",
     "crates/plurx-notification-broker",
     "crates/plurx-support",
+    "crates/plurx-worker-control",
 ]
 exclude = [
     "vendor/bitvec_helpers",
@@ -195,3 +196,7 @@ bitvec_helpers = { path = "vendor/bitvec_helpers" }
 hiqlite = { path = "vendor/hiqlite" }
 hiqlite-wal = { path = "vendor/hiqlite-wal" }
 rust_decimal = { path = "vendor/rust_decimal" }
+
+# Keep GetGroupProperties IDs consistent with layout/click IDs after refresh.
+# See vendor/ksni/PLURX-PATCH.md.
+ksni = { path = "vendor/ksni" }

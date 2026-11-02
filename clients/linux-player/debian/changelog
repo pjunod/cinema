@@ -1,0 +1,131 @@
+plurx-player (0.4.1+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Make both Cinema Info buttons show live playback diagnostics, including
+    decoded picture/color, renderer/decoder, sound and demuxer observations.
+    Report missing measurements as unavailable; retain title/episode metadata.
+  * Keep the private mpv/libplacebo pins and closed-form equations unchanged:
+    tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Wed, 28 Oct 2026 21:30:00 +0000
+
+plurx-player (0.4.0+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Replace mpv's stock on-screen controller with Cinema-style playback
+    chrome: full-film seeking, transport, stream track menus, playback
+    information, speed/audio sync, fullscreen and four-second auto-hide.
+    Keep the private mpv decoder, display management and session owner.
+  * Show scoped library title, episode identity and synopsis; resolve Next
+    on the server without granting general browsing access. Autoplay can be
+    disabled in Settings and its choice is saved locally.
+  * Auto, Original and advertised quality rungs use the existing server
+    decision/session path, retaining film position and paused state.
+  * Closed-form equations unchanged: tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Wed, 28 Oct 2026 16:00:00 +0000
+
+plurx-player (0.3.2+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Profile 7 titles from plurx now play with their full enhancement layer.
+    Everything plurx streams arrives through mpv's FFmpeg demuxer, which
+    keeps the stream's hvcC where the enhancement-layer split did not look,
+    so the split read the samples as Annex B, found no layer, and mpv
+    buffered about 150 MB waiting for one before showing the base layer
+    alone. Local Matroska files were unaffected.
+  * A title the server is still preparing (it streams a live presentation
+    from where playback started) shows the whole film on the seek bar, and
+    a seek anywhere in it works: mpv's OSC draws the film timeline the
+    launcher gives it (new mpv patch 0005), seeks inside what the stream
+    holds stay in mpv (--force-seekable), and one outside it starts the
+    stream again at that point.
+  * The package build keeps the pinned snapshot's apt indexes and packages
+    in a cache shared by its containers, and retries the snapshot service's
+    503s, so a rebuild does not depend on snapshot.ubuntu.com being up.
+  * Closed-form equations unchanged: tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Tue, 27 Oct 2026 05:00:00 +0000
+
+plurx-player (0.3.1+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * The player window no longer opens black and closes on an NVIDIA GPU.
+    The NVIDIA driver (615) gives an sRGB swapchain a Wayland colour
+    surface of its own and keeps it after that swapchain is gone, so mpv's
+    request for the window's colour surface, made when the HDR video
+    arrives, ended the Wayland connection. Wayland swapchains now start
+    pass-through, so mpv is the only one that describes the window.
+  * Opened from Chrome, the launcher finds the desktop's display even when
+    xdg-desktop-portal started it without one: it takes WAYLAND_DISPLAY,
+    DISPLAY, XAUTHORITY, XDG_SESSION_TYPE and XDG_CURRENT_DESKTOP from the
+    user session, and nothing else.
+  * A title with video that mpv cannot open a window for fails with a
+    dialog instead of playing its audio with no picture.
+  * Every control exchange carries the player's capabilities, as the
+    playback control protocol requires, and the server knows a Linux
+    client (it answered 400 and then 409 before).
+  * Profile 7 titles arrive with both layers once the server is on this
+    release's plurx: a copy used to narrow every dual-layer source to its
+    HDR10 base, even for a client that names Profile 7.
+  * Closed-form equations unchanged: tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 23:00:00 +0000
+
+plurx-player (0.3.0+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Profile 7 FEL titles play with their full enhancement layer, composed
+    on the laptop's GPU before the closed-form mapping: plurx sends the
+    original stream (the caps claim Dolby Vision profile 7), so nothing is
+    re-encoded.
+  * Private libplacebo 7.387.0 and mpv master e59d90c84 (2026-10-26),
+    the first with FEL composition, plus a split of the enhancement layer
+    that works with Ubuntu's FFmpeg 8.1, and no zero MaxCLL/MaxFALL in the
+    Wayland image description.
+  * dv-brightness=relative|absolute (mpv.conf): follow the desktop's HDR
+    brightness setting (default), or map for the panel's real luminance.
+  * libplacebo is linked into mpv statically, its symbols renamed
+    plurx_pl_* and hidden, because the system FFmpeg's libavfilter loads
+    the system libplacebo
+    (another major version) into the same process and a private shared
+    libplacebo would take over its unversioned pl_* calls.
+  * Closed-form equations: tools/dv_processing dm 193c40343ebf (sha256 of
+    dm_closed_form.h then dv_dm.h, first 12 hex digits). CM v2.9 evaluates
+    its output lattice once per frame, and each method's passes are their
+    own shaders: a 4K CM v2.9 frame's mapping takes 19 ms instead of 34 ms
+    on an Intel Arc iGPU.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 18:00:00 +0000
+
+plurx-player (0.2.0+lp7.360.1.mpv0.41.0-1) stonking; urgency=medium
+
+  * mpv maps Dolby Vision profile 5 and 8 with plurx's closed-form CM v4.0
+    and CM v2.9 display management (tools/dv_processing/dv_dm.h, the
+    server's own code), for the compositor's preferred luminance and the
+    largest named gamut inside the panel's primaries, and logs one
+    "plurx mapper:" line per configuration.
+  * Build-Depends on libdovi-dev for the RPU parser; its C API header is
+    the pinned copy in packaging/libdovi.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 12:00:00 +0000
+
+plurx-player (0.1.1+lp7.360.1.mpv0.41.0-1) stonking; urgency=medium
+
+  * Launcher (milestone M4): redeem, decide, play in mpv, heartbeat,
+    progress, seek re-creation, teardown.
+  * Package a private libplacebo 7.360.1 and mpv 0.41.0, the versions
+    Ubuntu 26.10 ships, under /usr/lib/plurx-player (milestone M5
+    packaging). mpv is linked with DT_RPATH $ORIGIN/../lib and leaves no
+    build path behind.
+  * Build from a Debian source package (3.0 (quilt)): the launcher is the
+    main orig tarball and the pinned libplacebo and mpv tarballs are its
+    component orig tarballs, so the corresponding source of the GPL mpv and
+    LGPL libplacebo binaries is published beside the .deb.
+  * Apply the patch series from packaging/patches/<name>/series, exactly.
+    It is empty until the Dolby Vision closed-form patches land.
+  * Run mpv with plurx Player's own --config-dir
+    ($XDG_CONFIG_HOME/plurx-player/mpv), never the general ~/.config/mpv,
+    with --ytdl=no, and without LD_LIBRARY_PATH, LD_PRELOAD or LD_AUDIT.
+  * Byte-compile the launcher with dh_python3, whose prerm removes every
+    .pyc, so removal leaves nothing behind.
+  * Add the plurx-player(1) manual page. Recommend desktop-file-utils and a
+    Vulkan driver; record the statically linked glslang and SPIRV-Tools in
+    Built-Using and debian/copyright.
+
+ -- plurx maintainers <noreply@plurx.invalid>  Mon, 26 Oct 2026 03:00:00 +0000

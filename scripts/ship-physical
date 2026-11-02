@@ -437,7 +437,8 @@ if [[ $DO_ANDROID -eq 1 ]]; then
   SERIALS="$("$ADB" devices | awk -F '\t' '$2=="device" {print $1}')"
   [[ -n "$SERIALS" ]] || warn "no reachable Android devices — nothing installed on the Android side"
 
-  while IFS= read -r serial; do
+  # Keep the inventory off stdin: adb shell may read stdin while querying a device.
+  while IFS= read -r serial <&3; do
     [[ -n "$serial" ]] || continue
     # Emulators are not the physical fleet.
     if [[ "$serial" == emulator-* ]]; then
@@ -492,7 +493,7 @@ if [[ $DO_ANDROID -eq 1 ]]; then
       fi
       record_failed "$model [$serial]"
     fi
-  done <<< "$SERIALS"
+  done 3<<< "$SERIALS"
 fi
 
 # --------------------------------------------------------------------------

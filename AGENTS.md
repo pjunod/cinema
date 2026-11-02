@@ -80,6 +80,20 @@ Substantial proposals and unfinished projects also need a row in
 the canonical project ledger when work is claimed, built, qualified, deferred
 or superseded; distinguish missing implementation from missing acceptance.
 
+## Engineering knowledge pilot
+
+For the six selected routing rules and the Python receipt boundary, use the
+[repository knowledge skill](.agents/skills/engineering-knowledge/SKILL.md).
+Start investigations with `scripts/knowledge context --path <file>`; changes
+and reviews also use `scripts/knowledge obligations --base origin/main --worktree`.
+Inspect returned coverage, source identity and unresolved claims. Maintain
+source-backed decisions and obligations in the same change. The
+[pilot status](docs/features/ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md) records
+actual implementation and evidence; an empty answer proves no absence.
+PR acknowledgment remains advisory during the observation window, while
+invalid supplied IDs fail. This is scoped engineering metadata, not a blanket
+requirement to link every file or a substitute for existing receipt validators.
+
 ## Where the web app is
 
 `crates/plurxd/src/web/index.html` is a 97-line shell of markup and tags. The
@@ -141,6 +155,12 @@ shape for an agent here — use the source-only loop in
   evidence for a branch whose base moved.
 - Verify `rustc --version` (pinned 1.97.1) rather than trusting the default
   `cargo`. Remove stale source extractions when disk gets tight.
+- **Never build uncapped on a Raft voter.** Use a learner or lab host; on a
+  voter, a build container goes through `scripts/voter-build` (8 GiB, no
+  swap, four CPUs, `-j4`). An uncapped build on a voter cost the cluster its
+  leader on 2026-11-01
+  ([docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md](docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md));
+  `scripts/voter-isolation-check` shows whether a voter is isolated.
 
 ## Large efforts
 

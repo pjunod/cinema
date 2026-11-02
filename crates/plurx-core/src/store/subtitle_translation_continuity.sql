@@ -1,0 +1,96 @@
+-- Explicit playback traversal authority; old clients retain current-window-only semantics.
+ALTER TABLE subtitle_translation_demands ADD COLUMN continuity_id TEXT CHECK(continuity_id IS NULL OR length(continuity_id)=36);
+-- next statement
+CREATE TABLE subtitle_translation_range_continuities (
+ job_id TEXT NOT NULL REFERENCES background_jobs(id) ON DELETE CASCADE,
+ fence INTEGER NOT NULL CHECK(fence>0),
+ demand_id TEXT NOT NULL REFERENCES subtitle_translation_demands(id) ON DELETE CASCADE,
+ continuity_id TEXT NOT NULL CHECK(length(continuity_id)=36),
+ PRIMARY KEY(job_id,fence,demand_id)
+) STRICT;
+-- next statement
+CREATE INDEX subtitle_translation_continuity_demand ON subtitle_translation_range_continuities(demand_id);
+-- next statement
+-- Once withdrawn, a captured traversal grant cannot be revived by a late
+-- heartbeat/upsert or by reusing an earlier UUID. The demand itself may renew.
+CREATE TRIGGER subtitle_translation_revoke_continuity BEFORE UPDATE ON subtitle_translation_demands
+WHEN OLD.expires_at_ms<=NEW.updated_at_ms OR OLD.continuity_id IS NOT NEW.continuity_id OR NEW.released!=0
+BEGIN
+ DELETE FROM subtitle_translation_range_continuities WHERE demand_id=OLD.id;
+END;
+-- next statement
+CREATE TRIGGER subtitle_translation_capture_continuity AFTER UPDATE ON background_jobs
+WHEN NEW.kind='subtitle_translation_range' AND NEW.state='running' AND NEW.fence>OLD.fence
+BEGIN
+ DELETE FROM subtitle_translation_range_continuities WHERE job_id=NEW.id;
+ INSERT INTO subtitle_translation_range_continuities(job_id,fence,demand_id,continuity_id)
+ SELECT NEW.id,NEW.fence,d.id,d.continuity_id FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id
+ WHERE d.operation_id=json_extract(NEW.payload_json,'$.recipe.operation_id')
+ AND d.operation_epoch=json_extract(NEW.payload_json,'$.recipe.operation_epoch')
+ AND d.released=0 AND d.expires_at_ms>NEW.updated_at_ms AND u.is_admin=1 AND d.continuity_id IS NOT NULL
+ AND json_extract(NEW.payload_json,'$.recipe.core_index') BETWEEN CAST(d.position_ms/json_extract(NEW.payload_json,'$.recipe.profile.core_ms') AS INTEGER)
+ AND CAST(d.position_ms/json_extract(NEW.payload_json,'$.recipe.profile.core_ms') AS INTEGER)+min(2,CAST(d.playback_rate AS INTEGER)+1)
+ ORDER BY d.user_id,d.id LIMIT 16;
+END;
+-- next statement
+CREATE TRIGGER subtitle_translation_retire_continuity AFTER UPDATE OF state ON background_jobs
+WHEN NEW.kind='subtitle_translation_range' AND NEW.state!='running'
+BEGIN
+ DELETE FROM subtitle_translation_range_continuities WHERE job_id=NEW.id;
+END;
+-- next statement
+DROP TRIGGER subtitle_translation_mutate;
+-- next statement
+CREATE TRIGGER subtitle_translation_mutate AFTER INSERT ON subtitle_translation_commands
+WHEN NEW.operation='mutate' AND json_extract(NEW.result_json,'$.outcome')='accepted'
+AND NOT EXISTS(SELECT 1 FROM subtitle_translation_requests WHERE user_id=json_extract(NEW.request_json,'$.user_id') AND request_id=json_extract(NEW.request_json,'$.request_id'))
+BEGIN
+ INSERT INTO subtitle_translation_operations(id,recipe_key,file_id,source_json,profile_json,audio_index,spoken_language,duration_ms,target_node_id,operation_epoch,view_revision,state,stopped,preparation_job_id,created_at_ms,updated_at_ms)
+ SELECT json_extract(NEW.result_json,'$.operation_id'),json_extract(NEW.request_json,'$.recipe_key'),json_extract(NEW.request_json,'$.action.source.file_id'),json(json_extract(NEW.request_json,'$.action.source')),json(json_extract(NEW.request_json,'$.action.profile')),json_extract(NEW.request_json,'$.action.audio_index'),json_extract(NEW.request_json,'$.action.spoken_language'),json_extract(NEW.request_json,'$.action.duration_ms'),json_extract(NEW.request_json,'$.action.target_node_id'),1,1,'checking_source',0,json_extract(NEW.request_json,'$.allocated_job_id'),json_extract(NEW.request_json,'$.now_ms'),json_extract(NEW.request_json,'$.now_ms')
+ WHERE json_extract(NEW.request_json,'$.action.action')='create' ON CONFLICT(recipe_key) DO NOTHING;
+ UPDATE subtitle_translation_operations SET preparation_job_id=json_extract(NEW.request_json,'$.allocated_job_id'),state='checking_source',updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE id=json_extract(NEW.result_json,'$.operation_id') AND json_extract(NEW.request_json,'$.action.action')='create'
+ AND state!='complete' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_assets a WHERE a.id=subtitle_translation_operations.asset_id AND a.operation_id=subtitle_translation_operations.id AND a.retired_at_ms IS NULL AND a.source_json=subtitle_translation_operations.source_json AND a.profile_json=subtitle_translation_operations.profile_json AND a.audio_index=subtitle_translation_operations.audio_index AND a.spoken_language=subtitle_translation_operations.spoken_language AND a.duration_ms=subtitle_translation_operations.duration_ms AND a.core_count=(a.duration_ms+json_extract(a.profile_json,'$.core_ms')-1)/json_extract(a.profile_json,'$.core_ms') AND a.core_count=(SELECT count(*) FROM subtitle_translation_segments s WHERE s.asset_id=a.id AND s.core_index>=0 AND s.core_index<a.core_count AND s.start_ms=s.core_index*json_extract(a.profile_json,'$.core_ms') AND s.end_ms=min((s.core_index+1)*json_extract(a.profile_json,'$.core_ms'),a.duration_ms) AND s.accepted_revision>0 AND s.accepted_revision<=a.manifest_revision)) AND (state='suspended' OR NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.id=subtitle_translation_operations.preparation_job_id AND j.state IN ('queued','running','succeeded')));
+ -- Replace the incarnation first: old preparation cancellation projections cannot alter this successor.
+ UPDATE subtitle_translation_operations SET target_node_id=json_extract(NEW.request_json,'$.action.target_node_id'),preparation_job_id=json_extract(NEW.request_json,'$.allocated_job_id'),state='checking_source',reason=NULL,retryable=0,view_revision=view_revision+1,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE id=json_extract(NEW.result_json,'$.operation_id') AND json_extract(NEW.request_json,'$.action.action')='retarget';
+ UPDATE background_jobs SET state=CASE state WHEN 'queued' THEN 'cancelled' ELSE 'cancelling' END,revision=revision+1,last_error_code='producer_retargeted',updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE kind IN ('subtitle_translation_prepare','subtitle_translation_range') AND state IN ('queued','running') AND revision<9223372036854775807
+ AND COALESCE(json_extract(payload_json,'$.operation_id'),json_extract(payload_json,'$.recipe.operation_id'))=json_extract(NEW.result_json,'$.operation_id') AND json_extract(NEW.request_json,'$.action.action')='retarget';
+ UPDATE subtitle_translation_ranges SET state='cancelled',range_revision=range_revision+1,reason='producer_retargeted',retryable=0,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE operation_id=json_extract(NEW.result_json,'$.operation_id') AND operation_epoch=json_extract(NEW.request_json,'$.action.expected_operation_epoch') AND state IN ('queued','running') AND range_revision<9223372036854775807 AND json_extract(NEW.request_json,'$.action.action')='retarget';
+ UPDATE subtitle_translation_operations SET operation_epoch=operation_epoch+1,view_revision=view_revision+1,stopped=1,state='stopped',reason=NULL,retryable=0,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE id=json_extract(NEW.result_json,'$.operation_id') AND json_extract(NEW.request_json,'$.action.action')='stop';
+ UPDATE subtitle_translation_demands SET released=1,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE operation_id=json_extract(NEW.result_json,'$.operation_id') AND json_extract(NEW.request_json,'$.action.action') IN ('stop','retry_operation');
+ UPDATE background_jobs SET state=CASE state WHEN 'queued' THEN 'cancelled' ELSE 'cancelling' END,revision=revision+1,last_error_code='translation_stopped',updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE kind IN ('subtitle_translation_prepare','subtitle_translation_range') AND state IN ('queued','running') AND revision<9223372036854775807
+ AND COALESCE(json_extract(payload_json,'$.operation_id'),json_extract(payload_json,'$.recipe.operation_id'))=json_extract(NEW.result_json,'$.operation_id')
+ AND json_extract(NEW.request_json,'$.action.action') IN ('stop','retry_operation');
+ UPDATE subtitle_translation_operations SET operation_epoch=operation_epoch+1,view_revision=view_revision+1,stopped=0,state='checking_source',asset_id=NULL,preparation_job_id=json_extract(NEW.request_json,'$.allocated_job_id'),reason=NULL,retryable=0,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE id=json_extract(NEW.result_json,'$.operation_id') AND json_extract(NEW.request_json,'$.action.action')='retry_operation';
+ UPDATE subtitle_translation_ranges SET range_revision=range_revision+1,state='queued',job_id=json_extract(NEW.request_json,'$.allocated_job_id'),reason=NULL,retryable=0,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE operation_id=json_extract(NEW.result_json,'$.operation_id') AND operation_epoch=json_extract(NEW.request_json,'$.action.expected_operation_epoch') AND core_index=json_extract(NEW.request_json,'$.action.core_index')
+ AND json_extract(NEW.request_json,'$.action.action')='retry_range';
+ INSERT INTO subtitle_translation_demands(id,operation_id,operation_epoch,user_id,playback_id,generation,position_ms,playback_rate,paused,continuity_id,expires_at_ms,created_at_ms,updated_at_ms)
+ SELECT json_extract(NEW.request_json,'$.allocated_demand_id'),op.id,op.operation_epoch,json_extract(NEW.request_json,'$.user_id'),json_extract(NEW.request_json,'$.action.playback_id'),1,json_extract(NEW.request_json,'$.action.position_ms'),json_extract(NEW.request_json,'$.action.playback_rate'),json_extract(NEW.request_json,'$.action.paused'),json_extract(NEW.request_json,'$.action.continuity_id'),json_extract(NEW.request_json,'$.now_ms')+15000,json_extract(NEW.request_json,'$.now_ms'),json_extract(NEW.request_json,'$.now_ms')
+ FROM subtitle_translation_operations op WHERE op.id=json_extract(NEW.result_json,'$.operation_id') AND json_extract(NEW.request_json,'$.action.action') IN ('create','retry_operation','retry_range')
+ ON CONFLICT(operation_id,operation_epoch,user_id,playback_id) DO UPDATE SET generation=generation+1,position_ms=excluded.position_ms,playback_rate=excluded.playback_rate,paused=excluded.paused,continuity_id=excluded.continuity_id,released=0,expires_at_ms=excluded.expires_at_ms,updated_at_ms=excluded.updated_at_ms;
+ UPDATE subtitle_translation_demands SET generation=generation+1,position_ms=CASE WHEN json_extract(NEW.request_json,'$.action.action')='demand' THEN json_extract(NEW.request_json,'$.action.position_ms') ELSE position_ms END,
+ playback_rate=CASE WHEN json_extract(NEW.request_json,'$.action.action')='demand' THEN json_extract(NEW.request_json,'$.action.playback_rate') ELSE playback_rate END,
+ continuity_id=CASE WHEN json_extract(NEW.request_json,'$.action.action')='demand' THEN json_extract(NEW.request_json,'$.action.continuity_id') ELSE continuity_id END,
+ paused=CASE WHEN json_extract(NEW.request_json,'$.action.action')='demand' THEN json_extract(NEW.request_json,'$.action.paused') ELSE paused END,
+ released=CASE WHEN json_extract(NEW.request_json,'$.action.action')='release' THEN 1 ELSE 0 END,expires_at_ms=json_extract(NEW.request_json,'$.now_ms')+15000,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE id=json_extract(NEW.request_json,'$.action.demand_id') AND json_extract(NEW.request_json,'$.action.action') IN ('demand','release');
+ UPDATE subtitle_translation_operations SET view_revision=view_revision+1,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE id=json_extract(NEW.result_json,'$.operation_id') AND json_extract(NEW.request_json,'$.action.action') IN ('create','demand','release','retry_range');
+ UPDATE subtitle_translation_commands SET result_json=(SELECT json_object('outcome','accepted','operation_id',op.id,'operation_epoch',CAST(op.operation_epoch AS TEXT),'view_revision',CAST(op.view_revision AS TEXT),'state',op.state,'asset_id',op.asset_id,'job_id',CASE WHEN json_extract(NEW.request_json,'$.action.action')='retry_range' THEN r.job_id WHEN op.state='checking_source' THEN op.preparation_job_id ELSE NULL END,'core_index',r.core_index,'range_revision',CASE WHEN r.range_revision IS NULL THEN NULL ELSE CAST(r.range_revision AS TEXT) END,
+ 'demand_id',d.id,'continuity_id',d.continuity_id,'demand_generation',CASE WHEN d.generation IS NULL THEN NULL ELSE CAST(d.generation AS TEXT) END,'expires_at_ms',d.expires_at_ms,'intent_expires_at_ms',json_extract(NEW.request_json,'$.intent_expires_at_ms'),'server_now_ms',json_extract(NEW.request_json,'$.now_ms'))
+ FROM subtitle_translation_operations op LEFT JOIN subtitle_translation_demands d ON d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.user_id=json_extract(NEW.request_json,'$.user_id') AND d.playback_id=json_extract(NEW.request_json,'$.action.playback_id')
+ LEFT JOIN subtitle_translation_ranges r ON r.operation_id=op.id AND r.operation_epoch=op.operation_epoch AND r.core_index=json_extract(NEW.request_json,'$.action.core_index')
+ WHERE op.id=json_extract(NEW.result_json,'$.operation_id')) WHERE id=NEW.id;
+ INSERT INTO subtitle_translation_requests(user_id,request_id,body_digest,outcome_json,created_at_ms,expires_at_ms)
+ SELECT json_extract(NEW.request_json,'$.user_id'),json_extract(NEW.request_json,'$.request_id'),json_extract(NEW.request_json,'$.body_digest'),result_json,json_extract(NEW.request_json,'$.now_ms'),
+ CASE WHEN json_extract(NEW.request_json,'$.action.action') IN ('demand','release') THEN max(json_extract(NEW.request_json,'$.intent_expires_at_ms'),json_extract(NEW.request_json,'$.now_ms'))+60000 ELSE json_extract(NEW.request_json,'$.now_ms')+604800000 END
+ FROM subtitle_translation_commands WHERE id=NEW.id;
+END;

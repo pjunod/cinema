@@ -912,6 +912,7 @@ fn raft_exposition_is_fixed_and_privacy_safe() {
 fn beacon(event: &str, ms: i64) -> ClientLog {
     ClientLog {
         transport: None,
+        frame_drop: None,
         level: "warn".into(),
         event: event.into(),
         message: "x".into(),
@@ -1494,6 +1495,8 @@ async fn client_event_joins_and_persists_every_live_session_measurement() {
                 completion_attempt: None,
                 completion_final_segment: None,
                 completion_final_end_ms: None,
+                failed_attempt_decision: None,
+                terminal_prepublication_failure: None,
             },
         ),
         producer_state: "held",

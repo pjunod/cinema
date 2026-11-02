@@ -290,7 +290,7 @@ pub(crate) fn wait_ready(
         std::thread::sleep(Duration::from_millis(250));
     }
 }
-fn record_failure(store: &TransactionStore, j: &mut JournalV1, e: &Error) -> Result<()> {
+pub(crate) fn record_failure(store: &TransactionStore, j: &mut JournalV1, e: &Error) -> Result<()> {
     j.detail = Some(e.message.clone());
     // Preserve the write-ahead phase so recovery can distinguish an unchanged
     // installation from a partial package or native promotion.
@@ -731,6 +731,63 @@ pub fn recover(i: &InstallationV1, id: &str) -> Result<()> {
     require_owner(i)?;
     let store = TransactionStore::locked(i)?;
     let mut j = store.load(id)?;
+    if j.installation_id != i.installation_id
+        || store
+            .active()?
+            .as_ref()
+            .map(|active| active.transaction_id.as_str())
+            != Some(id)
+    {
+        return Err(Error::new(
+            ErrorCode::RecoveryRequired,
+            "recovery requires the active transaction for this installation",
+        ));
+    }
+    if j.phase == Phase::ShutdownCommitted {
+        if i.current_version != j.old_version {
+            return Err(Error::new(
+                ErrorCode::RecoveryRequired,
+                "old binary identity changed; explicit repair required",
+            ));
+        }
+        let retained: InstallationV1 = store.dir(id)?.json("installation-before.json")?;
+        retained.validate()?;
+        if retained.installation_id != i.installation_id
+            || retained.current_commit != i.current_commit
+            || retained.current_version != j.old_version
+            || retained.owner_uid != i.owner_uid
+            || retained.service_uid != i.service_uid
+        {
+            return Err(Error::new(
+                ErrorCode::RecoveryRequired,
+                "retained installation identity changed; explicit repair required",
+            ));
+        }
+        transaction::revalidate_policy(i, &j)?;
+        let receipt: ShutdownReceiptV1 = i
+            .receipt_dir()?
+            .json(&format!("{}.json", j.transaction_id))?;
+        let expected = j.process.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorCode::UnsafeShutdown,
+                "committed shutdown has no bound process identity",
+            )
+        })?;
+        if expected.uid != i.service_uid {
+            return Err(Error::new(
+                ErrorCode::UnsafeShutdown,
+                "committed process does not belong to the installed service UID",
+            ));
+        }
+        let process_gone = !process::still_same(&process::KernelProcess {
+            pid: expected.pid,
+            uid: expected.uid,
+            generation: expected.start_generation.clone(),
+        })?;
+        let observed = transaction::revalidate_policy(i, &j)?;
+        j.complete_clean_shutdown(receipt, process_gone, observed.stopped())?;
+        store.save(&j)?;
+    }
     match j.phase {
         Phase::Committed | Phase::Cancelled => Ok(()),
         Phase::Prepared => { j.transition(Phase::Cancelled)?; store.save(&j) },
@@ -740,6 +797,26 @@ pub fn recover(i: &InstallationV1, id: &str) -> Result<()> {
             j.transition(Phase::Restoring)?;
             if j.initial_running && j.operation != Operation::Stop { authorize_start(&store, &mut j)?; supervisor::start(i)?; wait_ready(i, &j, None)?; }
             j.transition(Phase::Committed)?; j.start_permit_expires = None; store.save(&j)
+        }
+        Phase::Restoring if i.method == InstallMethod::MacosNative && j.operation == Operation::Upgrade => {
+            native::verify_promoted_installation(i, &store, &j)?;
+            let observed = transaction::revalidate_policy(i, &j)?;
+            if !j.initial_running {
+                if !observed.stopped() {
+                    return Err(Error::new(ErrorCode::RecoveryRequired, "candidate must preserve the originally stopped state; recovery held"));
+                }
+            } else {
+                let bound = BoundDaemon::connect(i)?;
+                if !readiness_matches(i, &j, &bound.identity, Some(&i.current_commit)) {
+                    return Err(Error::new(ErrorCode::RecoveryRequired, "candidate did not prove expected build/node/readiness; recovery held"));
+                }
+                bound.revalidate()?;
+            }
+            transaction::revalidate_policy(i, &j)?;
+            j.transition(Phase::Committed)?;
+            j.start_permit_expires = None;
+            j.detail = None;
+            store.save(&j)
         }
         Phase::Installing if i.method == InstallMethod::MacosNative && j.rollback == update::Rollback::BinaryCompatible => {
             let _install_lock = crate::launch_lock::acquire(i, true)?;

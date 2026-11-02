@@ -124,6 +124,126 @@ fn publication_row_id() -> i64 {
     (u64::from_be_bytes(prefix) & i64::MAX as u64).max(1) as i64
 }
 
+/// Deterministic observation points for the formal-verification pilot's
+/// backend conformance bridge (`tests/store_contract/formal_publication.rs`).
+///
+/// The bridge must show, against a real three-voter backend, that a committed
+/// `insert_item_fenced` survives a lost acknowledgement and that the
+/// allocator-conflict retry guard resubmits with the same predecessor and
+/// successor. Neither trace is reachable deterministically from outside the
+/// store: the ordering between candidate selection and submission, and the
+/// moment between a real commit and its reply, are internal to this method.
+/// This seam exposes exactly those two boundaries and nothing else.
+///
+/// - Compiled only with `hiqlite-contract-tests`, which the daemon never
+///   enables; production code carries no toggle, no counter and no branch.
+/// - A seam can only observe a submission or lose a real `Ok` reply as the
+///   replicated timeout. It cannot fabricate success, skip the backend, alter
+///   statements or choose an error, so it cannot verify a different
+///   implementation than the one shipped.
+/// - A seam belongs to one store handle. The slot is a field of
+///   `HiqliteAuthStore`, shared by clones of that handle (they share the one
+///   client whose submissions the seam observes) and invisible to any other
+///   store opened on the same cluster. Installation is scoped by an RAII
+///   guard that clears only the slot it filled.
+#[cfg(feature = "hiqlite-contract-tests")]
+pub mod conformance {
+    use std::sync::{Arc, Mutex};
+
+    use super::HiqliteAuthStore;
+    use crate::cluster::coordination::Lease;
+    use crate::error::StoreError;
+
+    /// A submission attempt of the chosen insertion, numbered from zero.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct InsertionAttempt {
+        pub attempt: usize,
+        pub candidate_id: i64,
+        pub predecessor: Lease,
+        pub successor: Lease,
+    }
+
+    #[async_trait::async_trait]
+    pub trait InsertionSeam: Send + Sync {
+        /// Runs after the candidate identity is selected and before this
+        /// attempt's transaction is submitted. The seam may perform real
+        /// backend writes here to make an allocator conflict certain.
+        async fn before_submission(&self, attempt: &InsertionAttempt);
+
+        /// Runs only after the backend returned a real successful
+        /// transaction result and decides whether that acknowledgement
+        /// reaches the caller. The commit itself has already happened and is
+        /// not undone. A seam may also act on local state here (for example
+        /// revoke a `PublicationFence`) and still deliver.
+        fn acknowledgement(&self, attempt: &InsertionAttempt) -> Acknowledgement;
+    }
+
+    /// What a seam does with a real successful transaction result. `Lose`
+    /// surfaces the one replicated transport timeout error production
+    /// reports for an unanswered request; no other error is expressible, so
+    /// a seam cannot steer the caller into the identity-conflict retry
+    /// branch or any other classification.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Acknowledgement {
+        Deliver,
+        Lose,
+    }
+
+    impl Acknowledgement {
+        pub(super) fn apply<T>(self, delivered: T) -> Result<T, StoreError> {
+            match self {
+                Self::Deliver => Ok(delivered),
+                Self::Lose => Err(StoreError::Database(
+                    super::super::hiqlite::REPLICATED_STORE_TIMEOUT.to_owned(),
+                )),
+            }
+        }
+    }
+
+    /// The per-store seam slot. Clones of a store share the slot; a store
+    /// opened separately gets its own empty one.
+    #[derive(Clone, Default)]
+    pub(crate) struct InsertionSeamSlot(Arc<Mutex<Option<Arc<dyn InsertionSeam>>>>);
+
+    impl InsertionSeamSlot {
+        fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<dyn InsertionSeam>>> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        pub(super) fn installed(&self) -> Option<Arc<dyn InsertionSeam>> {
+            self.lock().clone()
+        }
+    }
+
+    /// Keeps a seam installed in one store's slot until dropped.
+    pub struct InstalledSeam(InsertionSeamSlot);
+
+    impl Drop for InstalledSeam {
+        fn drop(&mut self) {
+            *self.0.lock() = None;
+        }
+    }
+
+    /// Install `seam` on `store` for the chosen insertion. Panics if that
+    /// store already has one: overlapping seams on one handle would make the
+    /// observed trace ambiguous, which is a test bug rather than a race to
+    /// tolerate.
+    pub fn install(store: &HiqliteAuthStore, seam: Arc<dyn InsertionSeam>) -> InstalledSeam {
+        let slot = store.insertion_seam.clone();
+        {
+            let mut installed = slot.lock();
+            assert!(
+                installed.is_none(),
+                "an insertion conformance seam is already installed on this store"
+            );
+            *installed = Some(seam);
+        }
+        InstalledSeam(slot)
+    }
+}
+
 struct ItemIdentityValue {
     value: i64,
 }
@@ -573,6 +693,9 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 statement_params,
             ));
         }
+        // This set-copy can affect zero, one or many user/list pairs. The
+        // remaining mutations, guards and final acknowledgement are single-row.
+        let annotation_copy_index = statements.len();
         {
             // A person's watchlist and favorites follow a retired duplicate show
             // onto its survivor (the later add time wins), before the retired
@@ -731,11 +854,18 @@ impl FencedPublicationStore for HiqliteAuthStore {
             ack_params,
         ));
 
+        let mutation_count = statements.len();
         let result = self
             .atomic_publication(lease, replacement, statements)
             .await;
         match result {
-            Ok(counts) if counts.iter().all(|count| *count == 1) => {
+            Ok(counts)
+                if counts.len() == mutation_count
+                    && counts
+                        .iter()
+                        .enumerate()
+                        .all(|(index, count)| index == annotation_copy_index || *count == 1) =>
+            {
                 Ok(IdentityRepairOutcome::Applied)
             }
             Ok(_) if self.identity_repair_mapping_applied(plan).await? => {
@@ -915,14 +1045,29 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let now = self.now()?;
         // authority: current allocator installation selects the identity-fenced write path.
         let allocated = self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT count(*) AS value FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",params!()).await.map_err(database_error)?.first().is_some_and(|r|r.value==1);
-        for _ in 0..4 {
+        #[cfg(feature = "hiqlite-contract-tests")]
+        let seam = self.insertion_seam.installed();
+        for attempt in 0..4 {
             let id = if allocated {
                 // authority: select the next candidate against the committed monotonic watermark.
                 self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT high_water+1 AS value FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807",params!()).await.map_err(database_error)?.first().map(|r|r.value).ok_or_else(||StoreError::Database("item identity allocation unavailable".into()))?
             } else {
                 publication_row_id()
             };
-            let attempt = self
+            #[cfg(feature = "hiqlite-contract-tests")]
+            let observed = conformance::InsertionAttempt {
+                attempt,
+                candidate_id: id,
+                predecessor: lease.clone(),
+                successor: replacement.clone(),
+            };
+            #[cfg(feature = "hiqlite-contract-tests")]
+            if let Some(seam) = &seam {
+                seam.before_submission(&observed).await;
+            }
+            #[cfg(not(feature = "hiqlite-contract-tests"))]
+            let _ = attempt;
+            let submission = self
                 .atomic_publication(
                     lease,
                     replacement,
@@ -955,7 +1100,16 @@ impl FencedPublicationStore for HiqliteAuthStore {
                     )],
                 )
                 .await;
-            let results = match attempt {
+            // A lost reply is a transport outcome after a real result. The
+            // seam may only deliver or lose a genuine `Ok`; losing it yields
+            // the replicated timeout error, which the identity-conflict retry
+            // branch below never matches.
+            #[cfg(feature = "hiqlite-contract-tests")]
+            let submission = match (submission, &seam) {
+                (Ok(results), Some(seam)) => seam.acknowledgement(&observed).apply(results),
+                (submission, _) => submission,
+            };
+            let results = match submission {
                 Ok(results) => results,
                 Err(error)
                     if allocated

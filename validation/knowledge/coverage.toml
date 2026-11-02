@@ -1,0 +1,34 @@
+schema_version = 1
+repository = "plurx"
+
+[[scopes]]
+id = "plurx:coverage:routing-family"
+scope = ["crates/plurx-core/src/playback/caps.rs", "crates/plurx-core/src/playback/mod.rs", "crates/plurxd/src/http/stream.rs"]
+level = "curated"
+owner = "Codex integrator"
+reviewed_revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+cohort = "routing"
+boundaries = ["server.capability-profile", "server.learned-decode-limit", "server.learned-decode-limit-expiry", "server.verdict", "server.manual-quality", "server.execution-plan", "Only the six selected routing rules, not every function or route in these files.", "Reference and plan sections reviewed; separate design, review-finding and build-ledger roles not recorded.", "Check definitions are imported; execution evidence not recorded."]
+[scopes.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.capability-profile"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[scopes]]
+id = "plurx:coverage:receipt-boundary"
+scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
+level = "curated"
+owner = "Codex integrator"
+reviewed_revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+cohort = "receipt"
+boundaries = ["Only check-vs-execution, origin/applicability/input closure, and nonblocking history fallback boundaries.", "No private CI artifacts, credentials, full evidence directories or product-runtime acceptance are indexed.", "Policy decision and source are reviewed; separate design/review/build-ledger roles not recorded.", "Real execution/authentication unavailable without existing validator evidence."]
+[scopes.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"

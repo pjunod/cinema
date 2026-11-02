@@ -331,6 +331,7 @@ impl HlsDeliveryFixture {
                 aac: true,
                 preserve_dolby_vision: false,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             };
             raw_session.method = crate::delivery::Method::HlsCopy;
             raw_session.encoder_label = Mutex::new("copy");

@@ -198,6 +198,73 @@ final class TrayControllerTests: XCTestCase {
         controller = TrayController(control: control, environment: environment, appVersion: "0.7.0", appBuild: "b")
     }
 
+    func testErrorDetailsShowFullFailureWithoutControllerCalls() async {
+        let failure = ControlFailure.launch(String(repeating: "signing configuration detail ", count: 20))
+        for fromStatus in [false, true] {
+            let control = FakeControl()
+            let environment = RecordingEnvironment()
+            let controller = TrayController(control: control, environment: environment, appVersion: "0.7.0", appBuild: "test")
+            if fromStatus {
+                control.on(.status, .failure(failure))
+                await controller.refresh()
+            } else {
+                control.on(.updatesCheck, .failure(failure))
+                await controller.perform(.checkForUpdates)
+            }
+            environment.errors.removeAll()
+            let before = control.commands
+            XCTAssertEqual(entry(buildMenu(controller.snapshot), .showErrorDetails)?.title, "View error details…")
+            await controller.perform(.showErrorDetails)
+            XCTAssertEqual(environment.errors, [failure.message])
+            XCTAssertEqual(control.commands, before)
+        }
+    }
+
+    func testImmediateUpgradeAndCancellationFinishQuietly() async {
+        for cancel in [false, true] {
+            let control = FakeControl()
+            let environment = RecordingEnvironment()
+            let controller = TrayController(control: control, environment: environment, appVersion: "0.7.0", appBuild: "test")
+            control.on(.status, .success(status(.running)))
+            control.on(.updatesPrepare(version: "0.7.1"), .success(.update(UpdateResult(state: .prepared, version: "0.7.1", transactionId: txn, detail: nil))))
+            control.on(.updatesApply(transaction: txn), .success(.update(UpdateResult(state: cancel ? .waitingForIdle : .complete, version: "0.7.1", transactionId: txn, detail: nil))))
+            control.on(.updatesStatus(transaction: txn), .success(.update(UpdateResult(state: .waitingForIdle, version: "0.7.1", transactionId: txn, detail: nil))))
+            control.on(.updatesCancel(transaction: txn), .success(.update(UpdateResult(state: .cancelled, version: "0.7.1", transactionId: txn, detail: nil))))
+            await controller.refresh()
+            await controller.perform(.upgrade(version: "0.7.1"))
+            if cancel {
+                let windows = environment.upgrades.count
+                await controller.cancelUpgrade()
+                XCTAssertEqual(environment.upgrades.count, windows)
+                XCTAssertEqual(controller.snapshot.update?.state, .cancelled)
+            } else {
+                XCTAssertTrue(environment.upgrades.isEmpty)
+                XCTAssertEqual(controller.snapshot.update?.state, .complete)
+            }
+        }
+    }
+
+    func testUpgradeResultsOnlyRequestAttentionForFailures() async {
+        for result in [UpdateState.complete, .cancelled, .failed, .recoveryRequired] {
+            let control = FakeControl()
+            let environment = RecordingEnvironment()
+            let controller = TrayController(control: control, environment: environment, appVersion: "0.7.0", appBuild: "test")
+            control.on(.status, .success(status(.running, transaction: txn)))
+            control.on(.updatesStatus(transaction: txn),
+                       .success(.update(UpdateResult(state: .installing, version: "0.7.1", transactionId: txn, detail: nil))),
+                       .success(.update(UpdateResult(state: result, version: "0.7.1", transactionId: txn, detail: nil))))
+            await controller.refresh()
+            await controller.refresh()
+            XCTAssertEqual(controller.snapshot.update?.state, result)
+            XCTAssertEqual(environment.upgrades.count, result == .failed || result == .recoveryRequired ? 1 : 0)
+            if result == .complete {
+                // An explicit request for the last result still opens details.
+                await controller.perform(.showUpgradeProgress)
+                XCTAssertEqual(environment.upgrades.last??.state, .complete)
+            }
+        }
+    }
+
     func testRefreshObservesStatusAndTrayLogin() async {
         control.on(.status, .success(status(.running)))
         environment.login = .requiresApproval

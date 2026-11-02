@@ -66,6 +66,16 @@ services:
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-}
     image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurxd
+    # On a Raft voter plurxd must not be starved by another container
+    # (docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md §4.6). It runs in its own
+    # slice, and carries its own memory.low: a slice's MemoryLow only reaches
+    # the container through it. Both are mitigation on a host without the
+    # slices from deploy/voter-isolation/; `scripts/voter-isolation-check`
+    # reports what a voter actually enforces. `PLURX_CGROUP_PARENT=` (set,
+    # empty) runs plurxd under dockerd's default parent instead, for a host
+    # that refuses a cgroup parent (rootless docker); unset means plurx.slice.
+    cgroup_parent: ${PLURX_CGROUP_PARENT-plurx.slice}
+    mem_reservation: ${PLURX_MEM_RESERVATION:-3g}
     restart: "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"
     # This must cover the effective snapshot deadline plus the three startup
     # allowances (135s total). Keeping that pair in step used to be an
@@ -102,6 +112,9 @@ services:
     # Keep the base service on ordinary Docker networking. Host-specific
     # overrides commonly attach plurxd to an external media network, and
     # Compose forbids combining `networks` with `network_mode: host`.
+    # Optional native HTTPS is published only when enabled, by the temporary
+    # overlay generated for make docker-up / docker-image-up. No always-open
+    # HTTPS mapping belongs here; saved settings select its container port.
     ports:
       # Keep the container port stable for peer containers. Move only the host
       # side when another service (usually Plex) still owns TCP 32400.

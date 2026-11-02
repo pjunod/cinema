@@ -42,6 +42,15 @@ pub struct PlaybackEnhancement {
     pub requires_effective_processing: bool,
 }
 
+/// How many of the served frames' display mappings applied the title's creative trims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CreativeTrims {
+    #[default]
+    None,
+    Partial,
+    All,
+}
+
 /// How the picture reaches the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnhancementRoute {
@@ -52,7 +61,19 @@ pub enum EnhancementRoute {
     /// The reconstructed picture re-encoded as 8.1 with the FEL baked in.
     ReconstructedProfile81 { fel_contributed: bool },
     /// Server-processed HDR10 (HDR10-E).
-    ProcessedHdr10 { fel_contributed: bool },
+    ProcessedHdr10 {
+        fel_contributed: bool,
+        display_target: Option<u32>,
+        /// How many served frames' display mappings applied the title's creative trims.
+        creative_trims: CreativeTrims,
+    },
+    /// Server reconstructed SDR, awarded only from its current processing report.
+    ProcessedSdr {
+        fel_contributed: bool,
+        display_target: Option<u32>,
+        /// How many served frames' display mappings applied the title's creative trims.
+        creative_trims: CreativeTrims,
+    },
     /// The HDR10 base layer with the Dolby Vision metadata removed.
     Hdr10Base,
     /// Tone-mapped to SDR for an SDR display: nothing of Dolby Vision reaches
@@ -154,7 +175,10 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
                 if *fel_contributed {
                     "FEL: full enhancement layer reconstructed into the picture"
                 } else {
-                    "FEL: no enhancement-layer detail in this window"
+                    // Only the selected plan or its served-window receipt can
+                    // say the base layer came from composition; neither did.
+                    "FEL: not confirmed for this play — the processing receipt does not \
+                     report the enhancement layer composed into the picture"
                 },
             ));
             details.push(detail(
@@ -169,7 +193,11 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
                 "DYN: L1/L2/L8 dynamic metadata carried to the display",
             ));
         }
-        EnhancementRoute::ProcessedHdr10 { fel_contributed } => {
+        EnhancementRoute::ProcessedHdr10 {
+            fel_contributed,
+            display_target,
+            creative_trims,
+        } => {
             requires_effective_processing = true;
             if has_el {
                 details.push(detail(
@@ -189,8 +217,48 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             ));
             details.push(detail(
                 Dyn,
-                false,
-                "DYN: not carried — HDR10 has no Dolby Vision dynamic metadata",
+                display_target.is_some(),
+                display_target.map_or_else(
+                    || "DYN: not carried — HDR10 has no Dolby Vision dynamic metadata".into(),
+                    |nits| match creative_trims {
+                        CreativeTrims::All => format!("DYN: per-shot Dolby display mapping for a {nits}-nit display by the server, with the colourist's creative trims"),
+                        CreativeTrims::Partial => format!("DYN: per-shot Dolby display mapping for a {nits}-nit display by the server, with the colourist's creative trims on some shots"),
+                        CreativeTrims::None => format!("DYN: per-shot L1 metadata mapped for a {nits}-nit display by the server (L1 only; creative trims are not applied)"),
+                    },
+                ),
+            ));
+        }
+        EnhancementRoute::ProcessedSdr {
+            fel_contributed,
+            display_target,
+            creative_trims,
+        } => {
+            requires_effective_processing = true;
+            if has_el {
+                details.push(detail(
+                    Fel,
+                    *fel_contributed,
+                    if *fel_contributed {
+                        "FEL: full enhancement layer reconstructed into the SDR picture"
+                    } else {
+                        "FEL: no enhancement-layer detail in this window"
+                    },
+                ));
+            }
+            details.push(detail(
+                Rpu,
+                true,
+                "RPU: base reshaping applied by the server before SDR conversion",
+            ));
+            details.push(detail(
+                Dyn,
+                *display_target == Some(100),
+                match (*display_target == Some(100), creative_trims) {
+                    (true, CreativeTrims::All) => "DYN: per-shot Dolby display mapping for 100-nit BT.709 SDR by the server, with the colourist's creative trims",
+                    (true, CreativeTrims::Partial) => "DYN: per-shot Dolby display mapping for 100-nit BT.709 SDR by the server, with the colourist's creative trims on some shots",
+                    (true, CreativeTrims::None) => "DYN: per-shot L1 mapped for 100-nit BT.709 SDR by the server (L1 only; creative trims are not applied)",
+                    (false, _) => "DYN: no current per-shot L1 mapping receipt",
+                },
             ));
         }
         EnhancementRoute::Hdr10Base => {
@@ -248,14 +316,83 @@ mod tests {
     }
 
     #[test]
+    fn processed_sdr_dyn_requires_the_actual_100_nit_mapping() {
+        for target in [None, Some(100)] {
+            let enhancement = playback_enhancement(&EnhancementFacts {
+                source_profile: Some(7),
+                source_el_present: Some(true),
+                route: EnhancementRoute::ProcessedSdr {
+                    fel_contributed: true,
+                    display_target: target,
+                    creative_trims: CreativeTrims::None,
+                },
+                hdr_processing_enabled: Some(true),
+                fel_reencode_enabled: None,
+                decline_reason: None,
+            })
+            .expect("DV source");
+            assert!(enhancement.requires_effective_processing);
+            assert_eq!(enhancement.active.contains(&Dyn), target == Some(100));
+            assert!(enhancement.active.contains(&Fel));
+            assert!(enhancement.active.contains(&Rpu));
+            assert!(!enhancement
+                .details
+                .iter()
+                .any(|detail| detail.text.contains("trims applied")));
+        }
+    }
+    #[test]
     fn processed_hdr10_with_fel_shows_fel_and_rpu_only() {
         let shown = playback_enhancement(&facts(EnhancementRoute::ProcessedHdr10 {
             fel_contributed: true,
+            display_target: None,
+            creative_trims: CreativeTrims::None,
         }))
         .expect("DV source");
         assert_eq!(shown.active, [Fel, Rpu]);
         assert!(shown.requires_effective_processing);
         assert!(shown.details.iter().any(|d| d.badge == Dyn && !d.active));
+    }
+
+    #[test]
+    fn targeted_hdr10_dyn_names_bucket_and_l1_limit() {
+        let shown = playback_enhancement(&facts(EnhancementRoute::ProcessedHdr10 {
+            fel_contributed: true,
+            display_target: Some(1600),
+            creative_trims: CreativeTrims::None,
+        }))
+        .expect("DV source");
+        assert_eq!(shown.active, [Fel, Rpu, Dyn]);
+        let dyn_detail = shown.details.iter().find(|d| d.badge == Dyn).expect("DYN");
+        assert!(dyn_detail.text.contains("1600-nit"));
+        assert!(dyn_detail.text.contains("L1 only"));
+        assert!(shown.requires_effective_processing);
+        let trimmed = playback_enhancement(&facts(EnhancementRoute::ProcessedHdr10 {
+            fel_contributed: true,
+            display_target: Some(1600),
+            creative_trims: CreativeTrims::All,
+        }))
+        .expect("DV source");
+        let dyn_detail = trimmed
+            .details
+            .iter()
+            .find(|d| d.badge == Dyn)
+            .expect("DYN");
+        assert!(dyn_detail.text.contains("1600-nit") && dyn_detail.text.contains("creative trims"));
+        assert!(!dyn_detail.text.contains("L1 only") && !dyn_detail.text.contains("some shots"));
+        let partial = playback_enhancement(&facts(EnhancementRoute::ProcessedHdr10 {
+            fel_contributed: true,
+            display_target: Some(1600),
+            creative_trims: CreativeTrims::Partial,
+        }))
+        .expect("DV source");
+        let dyn_detail = partial
+            .details
+            .iter()
+            .find(|d| d.badge == Dyn)
+            .expect("DYN");
+        assert!(dyn_detail.text.contains("creative trims on some shots"));
+        assert!(!dyn_detail.text.contains("L1 only"));
     }
 
     #[test]
@@ -282,6 +419,22 @@ mod tests {
         // applies the rewritten RPU's dynamic metadata.
         assert_eq!(shown.active, [Fel, Rpu, Dyn]);
         assert!(!shown.requires_effective_processing);
+        // Without the plan or receipt confirming composition, FEL is not claimed.
+        let unconfirmed = playback_enhancement(&facts(EnhancementRoute::ReconstructedProfile81 {
+            fel_contributed: false,
+        }))
+        .expect("DV source");
+        assert_eq!(unconfirmed.active, [Rpu, Dyn]);
+        let fel = unconfirmed
+            .details
+            .iter()
+            .find(|d| d.badge == Fel)
+            .expect("FEL row");
+        assert!(
+            !fel.active && fel.text.contains("not confirmed"),
+            "{}",
+            fel.text
+        );
     }
 
     #[test]

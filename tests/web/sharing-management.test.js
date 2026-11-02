@@ -1,6 +1,7 @@
 "use strict";
 const fs=require("node:fs"),vm=require("node:vm"),assert=require("node:assert/strict"),{test}=require("node:test");
 const source=fs.readFileSync("crates/plurxd/src/web/pages/sharing-management.js","utf8"),catalogue=fs.readFileSync("crates/plurxd/src/web/pages/shared-libraries.js","utf8");
+const qrSource=fs.readFileSync("crates/plurxd/src/web/pages/sharing-qr.js","utf8"),encoder=fs.readFileSync("crates/plurxd/src/web/vendor/qrcodegen.js","utf8"),decoder=fs.readFileSync("crates/plurxd/src/web/vendor/jsQR.js","utf8");
 const id="11111111-1111-4111-8111-111111111111",server="22222222-2222-4222-8222-222222222222",epoch="33333333-3333-4333-8333-333333333333",claim="44444444-4444-4444-8444-444444444444",grant="55555555-5555-4555-8555-555555555555",large=9007199254740993n;
 const endpoint={ipv4:"100.127.255.254",ipv6:"fd7a:115c:a1e0::1",ts_fqdn:"source.private.ts.net",port:8443n,spki_sha256:"a".repeat(64)};
 function imported(){return {import:{id,source_server_id:server,catalogue_epoch:epoch,claim_id:claim,remote_grant_id:grant,source_name:"Source",state:"active",assignment_generation:large,lifecycle_generation:large,endpoint_generation:large,endpoints:[{...endpoint}]},pairing_code:"0123456789abcdef"};}
@@ -8,14 +9,22 @@ function exported(){return {grant:{id:grant,recipient_server_id:server,state:"pe
 function stringify(v){return JSON.stringify(v,(_,x)=>typeof x==="bigint"?"__INTEGER"+x:x).replace(/"__INTEGER([0-9]+)"/g,"$1");}
 function reply(v,status=200){return new Response(stringify(v),{status,headers:{"content-type":"application/json"}});}
 function harness(fetcher=async()=>reply({updated:true})){
- const requests=[],element={innerHTML:"",replaceChildren(){this.innerHTML="";}};
- const c=vm.createContext({TextDecoder,TextEncoder,Uint8Array,URL,URLSearchParams,Response,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/settings/sharing",origin:"https://b.example"},PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+ const requests=[],element={innerHTML:"",replaceChildren(){this.innerHTML="";}},connectionElement={innerHTML:""};
+ const c=vm.createContext({TextDecoder,TextEncoder,Uint8Array,URL,URLSearchParams,Response,AbortController,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/settings/sharing",origin:"https://b.example"},PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   SETTINGS_DATA:{},SETTINGS_LOADED:new Set(),readAfterRequest:()=>({index:"",generation:1,epoch:0}),observeReadAfter(){},forgetReadAfter(){},clearLocalSession(){c.AUTH_GENERATION++;c.TOKEN=null;},
-  esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),setHead:()=>"",setCard:v=>v,cardHead:()=>"",document:{getElementById(){return element;}},fetch:async(path,options)=>{requests.push({path,options});return fetcher(path,options,c);}});
- vm.runInContext(catalogue+"\n"+source+"\nthis.m={parse:sharingJSON,stringify:sharingJSONString,endpoint:sharingEndpoint,endpoints:sharingEndpoints,recovery:sharingRecoveryHTML,mainReload:sharingReload,matrix:sharingMatrix,assignments:sharingAssignments,cancel:sharingCancelInvitation,copyInvitation:sharingCopyInvitation,endpointEdit:sharingEndpointEdit,endpointCount:sharingEndpointCount,request:sharingRequest,read:sharingManagementRead,panel:sharingManagementPanel,capture:sharingCapture,retire:sharingRetire,route:sharingRouteChanged,open:sharingOpen,save:sharingSave,reload:sharingEditorReload,configure:sharingConfigureAddresses,back:sharingCloseEditor,select:sharingSelect,edit:sharingEdit,matrixEdit:sharingMatrixEdit,removeOutside:sharingRemoveOutside,work:sharingWork,state:()=>SHARING_MANAGEMENT};",c);
- const data={sharingImports:{imports:[imported()]},sharingExports:{exports:[exported()],next:null},sharingStatus:{listener:"ready"}};
- c.m.panel(data);return {c,m:c.m,requests,element,data};
+  esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),setHead:()=>"",setCard:v=>v,cardHead:()=>"",document:{getElementById(id){return id==="sharing-connection"?connectionElement:element;}},fetch:async(path,options)=>{requests.push({path,options});return fetcher(path,options,c);}});
+ c.window=c;c.self=c;
+ vm.runInContext(encoder+"\n"+decoder+"\n"+qrSource+"\n"+catalogue+"\n"+source+"\nthis.m={parse:sharingJSON,stringify:sharingJSONString,endpoint:sharingEndpoint,endpoints:sharingEndpoints,recovery:sharingRecoveryHTML,mainReload:sharingReload,matrix:sharingMatrix,assignments:sharingAssignments,cancel:sharingCancelInvitation,copyInvitation:sharingCopyInvitation,endpointEdit:sharingEndpointEdit,endpointCount:sharingEndpointCount,request:sharingRequest,read:sharingManagementRead,panel:sharingManagementPanel,capture:sharingCapture,retire:sharingRetire,route:sharingRouteChanged,open:sharingOpen,save:sharingSave,reload:sharingEditorReload,configure:sharingConfigureAddresses,back:sharingCloseEditor,select:sharingSelect,edit:sharingEdit,matrixEdit:sharingMatrixEdit,removeOutside:sharingRemoveOutside,work:sharingWork,paint:sharingPaint,qrMatrix:sharingQRMatrix,qrBegin:sharingQRBegin,qrFinish:sharingQRFinish,qrUpload:sharingQRUpload,qrExport:sharingQRExport,qrScan:sharingQRScan,state:()=>SHARING_MANAGEMENT};",c);
+ const data={sharingImports:{imports:[imported()]},sharingExports:{exports:[exported()],next:null},sharingStatus:{listener:"ready",node_id:"node-a"}};
+ c.m.panel(data);return {c,m:c.m,requests,element,connectionElement,data};
 }
+function ownedTimers(context){
+ const pending=new Map();let next=0;
+ context.setTimeout=(fn,delay)=>{const id=++next;pending.set(id,{fn,delay});return id;};context.clearTimeout=id=>pending.delete(id);
+ return {pending,async run(id){const timer=pending.get(id);assert.ok(timer,"owned timer exists");pending.delete(id);return timer.fn();}};
+}
+function readyStatus(now=Date.now()){return {node_id:"node-a",listener:"listening",host_setup:{state:"ready",tailscale_online:true,checked_at_ms:now},network_authorization:{configured:false,node_id:"node-a"}};}
+
 test("sharing management parses and serializes exact wire integers without rounding Local or Source identities",()=>{
  const {m}=harness();const value=m.parse('{"generation":9007199254740993,"user":9223372036854775807,"library":"9007199254740993","zero":0,"ignored":1.5}');
  assert.equal(value.generation,large);assert.equal(value.user,9223372036854775807n);assert.equal(value.library,large.toString());
@@ -23,9 +32,9 @@ test("sharing management parses and serializes exact wire integers without round
  for(const text of ['{"id":1,"id":2}','[01]','1 trailing','[1e999]','{"x":'+"[".repeat(34)+'0'+"]".repeat(34)+'}'])assert.throws(()=>m.parse(text));
  assert.throws(()=>m.stringify({id:9007199254740992}));assert.throws(()=>m.stringify({id:9223372036854775808n}));
 });
-test("sharing initial settings budget remains four reads including address setup and editor lookups are lazy",async()=>{
+test("sharing initial settings uses five bounded reads for connection and saved authorization while editors stay lazy",async()=>{
  const {m,requests}=harness(async(path)=>reply(path.endsWith("imports")?{imports:[imported()]}:path.endsWith("exports")?{exports:[exported()],next:null}:{}));
- await Promise.all([m.read("/sharing/status"),m.read("/sharing/imports"),m.read("/sharing/exports")]);assert.deepEqual(requests.map(r=>r.path),["/api/v1/sharing/status","/api/v1/sharing/imports","/api/v1/sharing/exports","/api/v1/sharing/endpoints"]);
+ await Promise.all([m.read("/sharing/status"),m.read("/sharing/imports"),m.read("/sharing/exports")]);assert.deepEqual(requests.map(r=>r.path),["/api/v1/sharing/status","/api/v1/sharing/imports","/api/v1/sharing/exports","/api/v1/sharing/endpoints","/api/v1/sharing/network-authorization"]);
  const settings=fs.readFileSync("crates/plurxd/src/web/pages/settings.js","utf8");assert.match(settings,/sharing:\{required:\["sharingStatus","sharingImports","sharingExports"\],secondary:\[\]/);
 });
 test("pair approval requires an explicitly entered matching code and keeps exact mutation generation with no409 retry",async()=>{
@@ -131,8 +140,8 @@ test("missing-manifest invitation conflict offers setup without replay or losing
 test("Sharing requirements distinguish missing addresses and observed TLS from unverified host network",async()=>{
  const h=harness(async(path)=>reply(path==="/api/v1/sharing/endpoints"?{manifest:null}:{listener:"listening",certificate:{spki_sha256:endpoint.spki_sha256,expires_at_ms:large},serve:"unknown"}));
  const status=await h.m.read("/sharing/status");const html=h.m.panel({...h.data,sharingStatus:status});
- assert.match(html,/This Cinema’s addresses: Missing/);assert.match(html,/Listening on this serving node/);assert.match(html,/Sharing certificate: Observed/);assert.match(html,/Not verified by this Cinema/);assert.doesNotMatch(html,/Tailscale is installed|Network ready/);assert.equal(h.requests.some(r=>r.options.method!=="GET"),false);
- const unavailable=harness(async(path)=>reply(path==="/api/v1/sharing/endpoints"?{message:"unavailable"}:{listener:"listening"},path==="/api/v1/sharing/endpoints"?503:200));const unknown=await unavailable.m.read("/sharing/status");assert.match(unavailable.m.panel({...unavailable.data,sharingStatus:unknown}),/address information could not be read/);assert.doesNotMatch(unavailable.element.innerHTML,/This Cinema’s addresses: Missing/);
+ assert.match(html,/Cinema gateway addresses: Missing/);assert.match(html,/Listening on this serving node/);assert.match(html,/This node’s sharing certificate: Observed/);assert.match(html,/Not verified by this Cinema/);assert.doesNotMatch(html,/Tailscale is installed|Network ready/);assert.equal(h.requests.some(r=>r.options.method!=="GET"),false);
+ const unavailable=harness(async(path)=>reply(path==="/api/v1/sharing/endpoints"?{message:"unavailable"}:{listener:"listening"},path==="/api/v1/sharing/endpoints"?503:200));const unknown=await unavailable.m.read("/sharing/status");assert.match(unavailable.m.panel({...unavailable.data,sharingStatus:unknown}),/address information could not be read/);assert.doesNotMatch(unavailable.element.innerHTML,/Cinema gateway addresses: Missing/);
 });
 
 test("confirmed Cinema address save refreshes requirements and failed latest read becomes unknown without replay",async()=>{
@@ -143,9 +152,9 @@ test("confirmed Cinema address save refreshes requirements and failed latest rea
   }
   return reply(path.endsWith("imports")?{imports:[imported()]}:path.endsWith("exports")?{exports:[exported()],next:null}:{listener:"listening"});
  });
- await h.m.mainReload();assert.match(h.element.innerHTML,/This Cinema’s addresses: Missing/);
- await h.m.open("manifest");for(const [key,value] of Object.entries(endpoint))h.m.endpointEdit(0,key,typeof value==="bigint"?value.toString():value);await h.m.save();await h.m.back();assert.match(h.element.innerHTML,/This Cinema’s addresses: Configured/);
- failRead=true;await h.m.mainReload();assert.match(h.element.innerHTML,/address information could not be read/);assert.doesNotMatch(h.element.innerHTML,/This Cinema’s addresses: Configured/);assert.equal(h.requests.filter(r=>r.options.method==="PUT").length,1);
+ await h.m.mainReload();assert.match(h.element.innerHTML,/Cinema gateway addresses: Missing/);
+ await h.m.open("manifest");for(const [key,value] of Object.entries(endpoint))h.m.endpointEdit(0,key,typeof value==="bigint"?value.toString():value);await h.m.save();await h.m.back();assert.match(h.element.innerHTML,/Cinema gateway addresses: Configured/);
+ failRead=true;await h.m.mainReload();assert.match(h.element.innerHTML,/address information could not be read/);assert.doesNotMatch(h.element.innerHTML,/Cinema gateway addresses: Configured/);assert.equal(h.requests.filter(r=>r.options.method==="PUT").length,1);
  failRead=false;await h.m.open("manifest");failRead=true;await h.m.save();assert.equal(h.m.state().editor.saved,true);assert.match(h.m.state().editor.error,/Addresses were saved/);await h.m.save();assert.equal(h.requests.filter(r=>r.options.method==="PUT").length,2);await h.m.back();assert.match(h.element.innerHTML,/address information could not be read/);
 });
 
@@ -335,4 +344,395 @@ test("invitation copy confirms the exact secret or offers manual selection witho
  h.c.navigator={};await h.m.copyInvitation();assert.match(h.element.innerHTML,/Automatic copy is unavailable/);assert.equal(selected,1);
  let release;const gate=new Promise(resolve=>release=resolve);h.c.navigator={clipboard:{writeText:async()=>gate}};
  const pending=h.m.copyInvitation();h.m.retire();release();await pending;assert.equal(h.element.innerHTML,"");assert.equal(h.m.state(),null);
+});
+
+test("sharing QR codes round trip the exact invitation including maximum capacity and retain a quiet zone",()=>{
+ const h=harness();
+ for(const prefix of ["cinema-share-v1:","cinema-connect-v1:"]){
+  for(const length of [120,1300,2331]){
+   const text=prefix+"a".repeat(length-prefix.length),qr=h.m.qrMatrix(text),scale=4,width=(qr.size+8)*scale,pixels=new Uint8ClampedArray(width*width*4).fill(255);
+   for(let y=0;y<qr.size;y++)for(let x=0;x<qr.size;x++)if(qr.getModule(x,y))for(let dy=0;dy<scale;dy++)for(let dx=0;dx<scale;dx++){
+    const offset=(((y+4)*scale+dy)*width+(x+4)*scale+dx)*4;pixels[offset]=pixels[offset+1]=pixels[offset+2]=0;
+   }
+   assert.equal(h.c.jsQR(pixels,width,width).data,text);
+  }
+  assert.throws(()=>h.m.qrMatrix(prefix+"x".repeat(2331)),/too large/);
+  assert.throws(()=>h.m.qrMatrix(prefix+"abc\n"),/valid Cinema invitation/);
+ }
+ assert.throws(()=>h.m.qrMatrix("https://other.example/"),/valid Cinema invitation/);
+});
+test("sharing QR result defaults to the image with collapsed text and PNG export",async()=>{
+ const h=harness();const invitation={id,invitation:"cinema-share-v1:secret",qrImage:"data:image/png;base64,cG5n"};h.m.state().invitation=invitation;
+ h.m.paint();assert.match(h.element.innerHTML,/sharing-qr-image/);assert.match(h.element.innerHTML,/<details id="sharing-invitation-details">/);assert.match(h.element.innerHTML,/Save QR code/);
+ let clicked=0,removed=0,link;h.c.document.createElement=()=>link={click(){clicked++;},remove(){removed++;}};h.c.document.body={appendChild(){}};
+ await h.m.qrExport(false);assert.equal(link.href,invitation.qrImage);assert.equal(link.download,"cinema-sharing-invitation.png");assert.equal(clicked,1);assert.equal(removed,1);assert.equal(h.requests.length,0);
+ h.c.File=File;h.c.atob=atob;let shared;h.c.navigator={canShare:()=>true,share:async data=>{shared=data;}};
+ await h.m.qrExport(true);assert.equal(shared.files[0].type,"image/png");assert.equal(await shared.files[0].text(),"png");
+ h.c.navigator.canShare=()=>false;await h.m.qrExport(true);assert.match(h.element.innerHTML,/Use Save QR code/);
+});
+test("QR scan only fills a current draft and rejects stale editor account and explicit edits",async()=>{
+ const h=harness();await h.m.open("import");const job=h.m.qrBegin();h.m.qrFinish(job,"cinema-share-v1:scanned");
+ assert.equal(h.m.state().editor.text,"cinema-share-v1:scanned");assert.match(h.element.innerHTML,/Choose Import invitation/);assert.equal(h.requests.length,0);
+ const invalid=h.m.qrBegin();h.m.qrFinish(invalid,"https://other.example");assert.match(h.m.state().editor.error,/not a Cinema/);assert.equal(h.m.state().editor.text,"cinema-share-v1:scanned");
+ const edited=h.m.qrBegin();h.m.edit("text","cinema-share-v1:manual");h.m.qrFinish(edited,"cinema-share-v1:old");assert.equal(h.m.state().editor.text,"cinema-share-v1:manual");
+ const closed=h.m.qrBegin();h.m.back();await h.m.open("import");h.m.qrFinish(closed,"cinema-share-v1:old");assert.equal(h.m.state().editor.text,"");
+ const retired=h.m.qrBegin();h.m.retire();h.m.qrFinish(retired,"cinema-share-v1:old");assert.equal(h.m.state(),null);
+});
+test("QR upload bounds images and closes a late bitmap without restoring a retired draft",async()=>{
+ const h=harness();await h.m.open("import");const input={files:[{type:"image/png",size:10485761}],value:"selected"};await h.m.qrUpload(input);assert.equal(input.value,"");assert.match(h.m.state().editor.error,/10 MiB/);assert.equal(h.requests.length,0);
+ let release,closed=0;h.c.createImageBitmap=()=>new Promise(resolve=>release=resolve);input.files=[{type:"image/png",size:100}];
+ const pending=h.m.qrUpload(input);h.m.back();await h.m.open("import");release({width:20,height:20,close(){closed++;}});await pending;
+ assert.equal(closed,1);assert.equal(h.m.state().editor.text,"");assert.equal(h.requests.length,0);
+});
+test("QR camera permission arriving after page retirement stops every camera track",async()=>{
+ const h=harness();await h.m.open("import");let release,stopped=0;h.c.navigator={mediaDevices:{getUserMedia:()=>new Promise(resolve=>release=resolve)}};
+ const pending=h.m.qrScan();h.m.retire();release({getTracks:()=>[{stop(){stopped++;}},{stop(){stopped++;}}]});await pending;
+ assert.equal(stopped,2);assert.equal(h.m.state(),null);assert.equal(h.requests.length,0);
+});
+
+test("automatic host setup reports required action without claiming peer reachability",()=>{
+ const h=harness();
+ const status={listener:"listening",certificate:{spki_sha256:endpoint.spki_sha256},address_manifest:null,host_setup:{state:"sign_in_required",message:"Open Tailscale on this host and sign in."}};
+ const html=h.m.panel({...h.data,sharingStatus:status});
+ assert.match(html,/Open Tailscale on this host and sign in/);assert.match(html,/No router configuration is needed/);assert.match(html,/Advanced addresses/);assert.match(html,/Cinema is preparing this host/);assert.doesNotMatch(html,/Host setup is configured/);
+ const ready=h.m.panel({...h.data,sharingStatus:{...status,address_manifest:{revision:1n,endpoints:[endpoint]},host_setup:{state:"ready",message:"Private host setup is configured."}}});
+ assert.match(ready,/Pair another Cinema to verify its access and certificate/);assert.doesNotMatch(ready,/set up Tailscale and TCP Serve on each serving host first/);
+});
+
+test("setup polling continues after readiness and observes a later disconnect without replaying writes",async()=>{
+ let disconnected=false;
+ const h=harness(async(path)=>reply(path.endsWith("endpoints")?{manifest:{revision:1n,endpoints:[endpoint]}}:path.endsWith("network-authorization")?{configured:true,node_id:"node-a"}:{listener:"listening",node_id:"node-a",host_setup:{state:"ready",tailscale_online:!disconnected,message:"Private host setup is configured.",checked_at_ms:Date.now()}}));
+ const timers=ownedTimers(h.c);
+ h.m.panel({...h.data,sharingStatus:{node_id:"node-a",listener:"listening",host_setup:{state:"pending",message:"Setting up…",checked_at_ms:Date.now()}}});
+ await timers.run(h.m.state().setupTimer);assert.equal(h.m.state().status.host_setup.state,"ready");assert.match(h.element.innerHTML,/Tailscale on this node: Connected/);
+ disconnected=true;await timers.run(h.m.state().setupTimer);assert.equal(h.m.state().status.host_setup.state,"ready");assert.match(h.element.innerHTML,/Tailscale on this node: Disconnected/);assert.match(h.element.innerHTML,/API key saved on this node/);assert.ok(h.requests.every(r=>r.options.method==="GET"));
+ h.m.retire();assert.equal(timers.pending.size,0);assert.equal(h.m.state(),null);
+});
+
+test("unavailable peer explains setup and stale invitations without replaying the import",async()=>{
+ const h=harness(async()=>reply({code:"sharing_peer_unavailable",error:"sharing peer unavailable"},502));
+ await assert.rejects(h.m.request("/sharing/imports",{method:"POST",body:{invitation:"test"}}),error=>error.code==="sharing_peer_unavailable"&&/Check both Cinemas/.test(error.message)&&/fresh invitation/.test(error.message));
+ assert.equal(h.requests.length,1);assert.equal(h.requests[0].options.method,"POST");
+});
+
+test("combined invitation waits for private consent then imports once automatically",async()=>{
+ const timers=[];let probes=0;
+ const {c,m,requests}=harness(async(path)=>path.endsWith("/sharing/connection")?reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:++probes>1}):reply(imported()));
+ c.setTimeout=fn=>{timers.push(fn);return timers.length;};c.clearTimeout=()=>{};
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
+ assert.equal(requests.filter(r=>r.path.endsWith("/sharing/imports")).length,0);
+ assert.match(String(c.document.getElementById().innerHTML),/Authorize connection to source/);
+ assert.equal(m.state().editor.waitingConnection,true);
+ await timers.shift()();
+ assert.equal(requests.filter(r=>r.path.endsWith("/sharing/imports")).length,1);
+ assert.equal(m.state().editor.text,"");
+});
+test("combined invitation never resumes after authorization changes",async()=>{
+ const timers=[];
+ const {c,m,requests}=harness(async()=>reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:false}));
+ c.setTimeout=fn=>{timers.push(fn);return timers.length;};c.clearTimeout=()=>{};
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();m.retire();
+ for(const fn of timers)await fn();
+ assert.equal(requests.filter(r=>r.path.endsWith("/sharing/imports")).length,0);
+});
+test("combined invitation rejects arbitrary consent destinations before publishing links",async()=>{
+ const {m,requests,element}=harness(async()=>reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://evil.invalid/admin/invite/token"}],connected:false}));
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
+ assert.match(m.state().editor.error,/Invalid private connection/);assert.doesNotMatch(element.innerHTML,/href="https:\/\/evil/);
+ assert.equal(requests.length,1);
+});
+test("connected combined invitation imports directly without a second consent action",async()=>{
+ const {m,requests}=harness(async(path)=>path.endsWith("/sharing/connection")?reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:true}):reply(imported()));
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
+ assert.deepEqual(requests.map(r=>r.path),["/api/v1/sharing/connection","/api/v1/sharing/imports"]);
+ assert.equal(JSON.parse(requests[0].options.body).probe,true);
+});
+test("revoked recipients are hidden by default while current actions keep their original row identity",async()=>{
+ const h=harness(),old=exported(),current=exported();old.recipient_name="Old recipient";old.grant.state="revoked";current.recipient_name="Current recipient";current.grant.id="66666666-6666-4666-8666-666666666666";
+ h.m.state().exports=[old,current];h.m.paint();
+ assert.doesNotMatch(h.element.innerHTML,/Old recipient/);assert.match(h.element.innerHTML,/Current recipient/);assert.match(h.element.innerHTML,/sharingOpen\('approve',1\)/);assert.match(h.element.innerHTML,/Show revoked connections \(1\)/);
+ vm.runInContext("sharingShowRevoked(true)",h.c);assert.match(h.element.innerHTML,/Old recipient/);assert.doesNotMatch(h.element.innerHTML,/sharingOpen\('revoke',0\)/);
+ vm.runInContext("sharingShowRevoked(false)",h.c);assert.doesNotMatch(h.element.innerHTML,/Old recipient/);
+ await h.m.open("approve",1);assert.equal(h.m.state().editor.row.grant.id,current.grant.id);
+});
+test("failed combined connection is actionable, bounded, retryable, and never saves an unverified import",async()=>{
+ const timers=[],h=harness(async()=>reply({name:"Owner Cinema",network:[],connected:false,connection_error:"sharing_identity_mismatch"}));
+ h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=()=>{};
+ await h.m.open("import");h.m.edit("text","cinema-connect-v1:AAAA");await h.m.save();
+ assert.match(h.element.innerHTML,/different Cinema identity/);assert.match(h.element.innerHTML,/has not been imported yet/);assert.match(h.element.innerHTML,/Leaving this form cancels/);
+ for(let i=0;i<10;i++)await timers.shift()();
+ assert.equal(h.m.state().editor.waitingConnection,false);assert.match(h.element.innerHTML,/Automatic checks paused/);assert.match(h.element.innerHTML,/Try connection again/);assert.equal(timers.length,0);
+ assert.ok(h.requests.every(r=>r.path.endsWith("/sharing/connection")));assert.ok(h.requests.every(r=>JSON.parse(r.options.body).probe===true));
+ await h.m.save();assert.equal(h.m.state().editor.waitingConnection,true);assert.equal(timers.length,1);
+});
+test("editing a waiting invitation cancels its old timer and schedules checks for the new draft",async()=>{
+ const timers=[],cleared=[],h=harness(async()=>reply({network:[],connected:false,connection_error:"sharing_peer_unavailable"}));
+ h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=id=>cleared.push(id);
+ await h.m.open("import");h.m.edit("text","cinema-connect-v1:AAAA");await h.m.save();
+ h.m.edit("text","cinema-connect-v1:BBBB");assert.deepEqual(cleared,[1]);await h.m.save();assert.equal(timers.length,2);
+ const before=h.requests.length;await timers[0]();assert.equal(h.requests.length,before);
+ await timers[1]();assert.equal(h.requests.length,before+1);assert.equal(JSON.parse(h.requests.at(-1).options.body).invitation,"cinema-connect-v1:BBBB");
+});
+test("QR replacement of a waiting invitation clears consent and timer state before the new import",async()=>{
+ const timers=[],cleared=[],h=harness(async()=>reply({network:[],connected:false,connection_error:"sharing_peer_unavailable"}));
+ h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=id=>cleared.push(id);
+ await h.m.open("import");h.m.edit("text","cinema-connect-v1:AAAA");await h.m.save();
+ h.m.qrFinish(h.m.qrBegin(),"cinema-connect-v1:BBBB");
+ assert.deepEqual(cleared,[1]);assert.equal(h.m.state().editor.waitingConnection,false);assert.equal(h.m.state().editor.connection,null);assert.equal(h.m.state().editor.connectionVerified,false);
+ await h.m.save();assert.equal(timers.length,2);assert.equal(JSON.parse(h.requests.at(-1).options.body).invitation,"cinema-connect-v1:BBBB");
+});
+test("connection list observes a new pairing request automatically and stops after account retirement",async()=>{
+ const fresh=exported();fresh.recipient_name="New pairing request";
+ const h=harness(async path=>reply(path.endsWith("/imports")?{imports:[imported()]}:{exports:[fresh],next:null})),timers=[];
+ h.m.state().exports=[];h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=()=>{};h.m.paint();
+ await timers.shift()();assert.match(h.element.innerHTML,/New pairing request/);assert.match(h.element.innerHTML,/Approval needed/);assert.ok(h.requests.every(r=>r.options.method==="GET"));
+ const before=h.requests.length;h.m.retire();for(const fn of timers)await fn();assert.equal(h.requests.length,before);
+});
+test("revoked history pages cannot hide a new pending recipient from initial reads or automatic refresh",async()=>{
+ const revoked=Array.from({length:32},(_,i)=>{const row=exported();row.grant.id=(i+1).toString(16).padStart(8,"0")+"-1111-4111-8111-111111111111";row.grant.state="revoked";row.recipient_name="Old recipient "+i;return row;}),cursor=revoked.at(-1).grant.id;
+ const pending=exported();pending.recipient_name="Newest request";
+ const h=harness(async path=>reply(path.endsWith("/imports")?{imports:[]}:path.includes("?after=")?{exports:[pending],next:null}:{exports:revoked,next:cursor}));
+ const list=await h.m.read("/sharing/exports");assert.equal(list.exports.length,33);assert.equal(list.next,null);
+ h.m.state().exports=list.exports;h.m.paint();assert.match(h.element.innerHTML,/Newest request/);assert.doesNotMatch(h.element.innerHTML,/Old recipient/);
+ h.m.state().exports=[];const timers=[];h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=()=>{};h.m.paint();await timers.shift()();
+ assert.match(h.element.innerHTML,/Newest request/);assert.match(h.element.innerHTML,/Show revoked connections \(32\)/);
+});
+test("network authorization refreshes saved status after clearing the transient API key",async()=>{
+ let configured=false;
+ const {c,m,requests,element}=harness(async(path,options)=>{if(options.method==="PUT")configured=true;return reply({configured,node_id:"node-a"});});ownedTimers(c);
+ await m.open("network");assert.equal(m.state().editor.networkStatus.configured,false);m.edit("text","tskey-api-fixture");await m.save();
+ assert.equal(m.state().editor.text,"");assert.equal(m.state().editor.saved,true);assert.equal(m.state().editor.networkStatus.configured,true);assert.equal(m.state().status.network_authorization.configured,true);assert.equal(requests.length,3);
+ assert.equal(requests[0].options.body,null);assert.equal(requests[2].options.method,"GET");
+ assert.equal(requests[1].path,"/api/v1/sharing/network-authorization");
+ assert.deepEqual(JSON.parse(requests[1].options.body),{token:"tskey-api-fixture"});
+ assert.match(element.innerHTML,/API key saved on this node/);assert.doesNotMatch(element.innerHTML,/tskey-api-fixture|not connected|not saved on this node/);
+ m.back();assert.match(element.innerHTML,/Update Tailscale account/);
+});
+
+test("automatic endpoint discovery refreshes an open invitation without losing library choices",async()=>{
+ const timers=[];let reads=0;
+ const {c,m,requests}=harness(async(path)=>{
+  if(path.endsWith("/libraries"))return reply([{id:1n,name:"Movies",kind:"movies"}]);
+  if(path.endsWith("/sharing/status"))return reply({host_setup:{state:"ready",message:"Private connection ready"}});
+  if(path.endsWith("/sharing/endpoints"))return reply({manifest:++reads===1?null:{revision:1n,endpoints:[endpoint]}});
+  throw new Error("No mutation should be sent");
+ });
+ c.setTimeout=fn=>{timers.push(fn);return timers.length;};c.clearTimeout=()=>{};
+ m.state().status.host_setup={state:"pending",message:"Discovering private connection"};
+ await m.open("invite");m.select(0,true);
+ assert.equal(m.state().editor.needsEndpoints,true);
+ assert.deepEqual([...m.state().editor.selected],["1"]);
+ await timers.shift()();
+ assert.equal(m.state().editor.needsEndpoints,false);
+ assert.deepEqual([...m.state().editor.selected],["1"]);
+ assert.equal(requests.filter(r=>r.options.method!=="GET").length,0);
+});
+
+
+test("Tailscale setup and account action are visible before advanced details and distinguish cluster scope",()=>{
+ const h=harness();h.c.SERVER={cluster_enabled:true};
+ const html=h.m.panel({...h.data,sharingStatus:{listener:"listening",host_setup:{state:"ready",tailscale_online:true,checked_at_ms:Date.now()},network_authorization:{configured:false}}});
+ const front=html.split('<details class="sharing-advanced">')[0];
+ assert.match(front,/Connect Tailscale account/);assert.match(front,/Tailscale on this node: Connected/);assert.doesNotMatch(front,/Private forwarding:|Cinema listener:/);assert.match(front,/no API key saved on this node/);
+ assert.match(front,/Cluster-wide libraries and gateways · connection checks for this node/);
+ assert.doesNotMatch(front,/public-key pin|Playback recovery/);assert.match(front,/<p><button[^>]+>Connect Tailscale account<\/button><\/p>/);assert.doesNotMatch(html,/Connection setup needs attention/);
+});
+
+test("a saved API key never substitutes for host connectivity or a live provider check",()=>{
+ const h=harness();const html=h.m.panel({...h.data,sharingStatus:{listener:"not_started",host_setup:{state:"sign_in_required",checked_at_ms:Date.now()},network_authorization:{configured:true}}});
+ assert.match(html,/Tailscale on this node: Not connected/);assert.match(html,/API key saved on this node/);assert.doesNotMatch(html.split('<details class="sharing-advanced">')[0],/current account authorization/);assert.doesNotMatch(html,/Tailscale on this node: Connected/);
+ const stale=h.m.panel({...h.data,sharingStatus:{listener:"listening",host_setup:{state:"ready",tailscale_online:true,checked_at_ms:Date.now()-60000},network_authorization:{configured:true}}});
+ assert.match(stale,/Tailscale on this node: Status unavailable/);assert.doesNotMatch(stale,/Tailscale on this node: Connected/);
+ const future=h.m.panel({...h.data,sharingStatus:{host_setup:{state:"ready",tailscale_online:true,checked_at_ms:Date.now()+60000},network_authorization:{configured:true}}});assert.match(future,/Tailscale on this node: Status unavailable/);
+});
+
+test("failed saved-status read after a confirmed key save preserves confirmation without repeating the write",async()=>{
+ let reads=0;
+ const h=harness(async(path,options)=>options.method==="PUT"?reply({configured:true}):++reads===1?reply({configured:false,node_id:"node-a"}):reply({message:"status unavailable"},503));
+ ownedTimers(h.c);await h.m.open("network");h.m.edit("text","tskey-api-fixture");await h.m.save();
+ assert.equal(h.m.state().editor.saved,true);assert.equal(h.m.state().editor.text,"");assert.equal(h.m.state().editor.networkStatus,null);
+ assert.match(h.element.innerHTML,/API key was saved, but its saved status could not be refreshed/);assert.match(h.element.innerHTML,/saved authorization could not be checked/);assert.doesNotMatch(h.element.innerHTML,/tskey-api-fixture/);
+ assert.equal(h.requests.filter(r=>r.options.method==="PUT").length,1);await h.m.save();assert.equal(h.requests.filter(r=>r.options.method==="PUT").length,1);
+});
+
+test("failed connection status refresh clears the connected claim and never publishes after retirement",async()=>{
+ const h=harness(async()=>reply({message:"status unavailable"},503)),timers=ownedTimers(h.c);
+ h.m.panel({...h.data,sharingStatus:{node_id:"node-a",listener:"listening",host_setup:{state:"ready",tailscale_online:true,checked_at_ms:Date.now()},network_authorization:{configured:true}}});h.m.paint();
+ assert.match(h.element.innerHTML,/Tailscale on this node: Connected/);await timers.run(h.m.state().setupTimer);assert.match(h.element.innerHTML,/Tailscale on this node: Status unavailable/);assert.doesNotMatch(h.element.innerHTML,/Tailscale on this node: Connected/);
+ const count=h.requests.length;h.m.retire();assert.equal(timers.pending.size,0);assert.equal(h.requests.length,count);
+});
+
+
+test("a confirmed key save with missing readback reports this node's missing authorization",async()=>{
+ const h=harness(async(path,options)=>reply({configured:options.method==="PUT",node_id:"node-a"}));
+ ownedTimers(h.c);await h.m.open("network");h.m.edit("text","tskey-api-fixture");await h.m.save();
+ assert.equal(h.m.state().editor.saved,true);assert.equal(h.m.state().editor.text,"");assert.equal(h.m.state().status.network_authorization.configured,false);
+ assert.match(h.element.innerHTML,/no API key is available on this node/);assert.match(h.element.innerHTML,/no API key saved on this node/);assert.equal(h.requests.filter(r=>r.options.method==="PUT").length,1);
+});
+
+test("a deferred status observation started before Save cannot overwrite confirmed authorization",async()=>{
+ let releaseOld,reads=0,configured=false;
+ const old=new Promise(resolve=>releaseOld=resolve);
+ const h=harness(async(path,options)=>{
+  if(path.endsWith("/status"))return reply(readyStatus());
+  if(path.endsWith("/endpoints"))return reply({manifest:{revision:1n,endpoints:[endpoint]}});
+  if(options.method==="PUT"){configured=true;return reply({configured:true});}
+  if(path.endsWith("/network-authorization")){if(++reads===2)return old;return reply({configured,node_id:"node-a"});}
+  throw new Error("unexpected request");
+ }),timers=ownedTimers(h.c);
+ h.m.panel({...h.data,sharingStatus:readyStatus()});await h.m.open("network");
+ const observed=timers.run(h.m.state().setupTimer);await new Promise(setImmediate);
+ const oldRequest=h.requests.filter(r=>r.path.endsWith("/network-authorization")).at(-1);assert.equal(h.m.state().setupInFlight,true);
+ h.m.edit("text","tskey-api-fixture");await h.m.save();assert.equal(oldRequest.options.signal.aborted,true);
+ assert.equal(h.m.state().editor.networkStatus.configured,true);assert.equal(h.m.state().status.network_authorization.configured,true);
+ releaseOld(reply({configured:false,node_id:"node-a"}));await observed;await new Promise(setImmediate);
+ assert.equal(h.m.state().editor.networkStatus.configured,true);assert.equal(h.m.state().status.network_authorization.configured,true);assert.match(h.element.innerHTML,/API key saved on this node/);
+ assert.equal(h.requests.filter(r=>r.options.method==="PUT").length,1);h.m.retire();assert.equal(timers.pending.size,0);
+});
+
+test("account observations and Save readback refuse another node's authorization",async()=>{
+ const mismatch=harness(async path=>reply(path.endsWith("/status")?readyStatus():path.endsWith("/endpoints")?{manifest:{revision:1n,endpoints:[endpoint]}}:{configured:true,node_id:"node-b"}));
+ const status=await mismatch.m.read("/sharing/status");assert.equal(status.network_authorization,null);assert.match(status.network_authorization_error,/different or unidentified node/);
+ const html=mismatch.m.panel({...mismatch.data,sharingStatus:status});assert.match(html,/saved authorization could not be checked/);assert.doesNotMatch(html,/API key saved on this node/);
+ ownedTimers(mismatch.c);await mismatch.m.open("network");assert.equal(mismatch.m.state().editor.ready,false);mismatch.m.edit("text","tskey-api-fixture");await mismatch.m.save();assert.equal(mismatch.requests.some(r=>r.options.method==="PUT"),false);
+ let reads=0;
+ const changed=harness(async(path,options)=>reply(options.method==="PUT"?{configured:true}:{configured:++reads>1,node_id:reads===1?"node-a":"node-b"}));
+ ownedTimers(changed.c);await changed.m.open("network");changed.m.edit("text","tskey-api-fixture");await changed.m.save();
+ assert.equal(changed.m.state().editor.saved,true);assert.equal(changed.m.state().editor.networkStatus,null);assert.equal(changed.m.state().status.network_authorization,null);
+ assert.match(changed.element.innerHTML,/saved authorization could not be checked/);assert.doesNotMatch(changed.element.innerHTML,/API key saved on this node/);assert.equal(changed.requests.filter(r=>r.options.method==="PUT").length,1);
+});
+
+test("a detected serving-node change prevents a key write before Save",async()=>{
+ const h=harness(async()=>reply({configured:false,node_id:"node-a"}));ownedTimers(h.c);await h.m.open("network");h.m.edit("text","tskey-api-fixture");h.m.state().status.node_id="node-b";await h.m.save();
+ assert.equal(h.requests.some(r=>r.options.method==="PUT"),false);assert.match(h.element.innerHTML,/serving node changed/);
+});
+
+test("a hung status or account refresh expires visibly, aborts once and cannot publish after retirement",async()=>{
+ for(const hangingPath of ["/status","/network-authorization"]){
+  let release,clock=Date.now();const hung=new Promise(resolve=>release=resolve);
+  const h=harness(async(path)=>path.endsWith(hangingPath)?hung:path.endsWith("/endpoints")?reply({manifest:{revision:1n,endpoints:[endpoint]}}):path.endsWith("/status")?reply(readyStatus(clock)):reply({configured:false,node_id:"node-a"})),timers=ownedTimers(h.c);
+  h.c.Date=class extends Date{static now(){return clock;}};
+  h.m.panel({...h.data,sharingStatus:readyStatus(clock)});h.m.paint();
+  const pending=timers.run(h.m.state().setupTimer);await new Promise(setImmediate);
+  const request=h.requests.find(r=>r.path.endsWith(hangingPath));assert.ok(request);assert.equal(h.m.state().setupInFlight,true);
+  h.m.paint();assert.equal(h.m.state().setupTimer,null);assert.equal(h.requests.filter(r=>r.path.endsWith("/status")).length,1);
+  clock+=31000;await timers.run(h.m.state().freshnessTimer);assert.match(h.element.innerHTML,/Tailscale on this node: Status unavailable/);
+  await timers.run(h.m.state().setupDeadlineTimer);await pending;assert.equal(request.options.signal.aborted,true);assert.equal(h.m.state().setupInFlight,false);assert.equal(h.m.state().setupController,null);assert.equal(h.m.state().setupDeadlineTimer,null);assert.ok(h.m.state().setupTimer);
+  const count=h.requests.length;h.m.retire();assert.equal(timers.pending.size,0);release(reply(readyStatus(clock)));await new Promise(setImmediate);assert.equal(h.m.state(),null);assert.equal(h.element.innerHTML,"");assert.equal(h.requests.length,count);
+ }
+});
+
+test("retiring a hung observation aborts and settles its owner without waiting for a fetch reply",async()=>{
+ let release;const hung=new Promise(resolve=>release=resolve);
+ const h=harness(async()=>hung),timers=ownedTimers(h.c);h.m.panel({...h.data,sharingStatus:readyStatus()});
+ const pending=timers.run(h.m.state().setupTimer);await new Promise(setImmediate);const request=h.requests[0];assert.equal(request.options.signal.aborted,false);
+ h.m.retire();await pending;assert.equal(request.options.signal.aborted,true);assert.equal(timers.pending.size,0);release(reply(readyStatus()));await new Promise(setImmediate);assert.equal(h.element.innerHTML,"");
+});
+
+test("background connection observations preserve the key editor's input and selection",async()=>{
+ const h=harness(async(path)=>reply(path.endsWith("/status")?readyStatus():path.endsWith("/endpoints")?{manifest:{revision:1n,endpoints:[endpoint]}}:{configured:false,node_id:"node-a"})),timers=ownedTimers(h.c);
+ h.m.panel({...h.data,sharingStatus:readyStatus()});await h.m.open("network");h.m.edit("text","tskey-api-draft");
+ const input={value:"tskey-api-draft",selectionStart:7,selectionEnd:9};h.c.document.activeElement=input;
+ const editorHTML=h.element.innerHTML,editor=h.m.state().editor;
+ await timers.run(h.m.state().setupTimer);
+ assert.equal(h.element.innerHTML,editorHTML);assert.equal(h.c.document.activeElement,input);assert.equal(input.selectionStart,7);assert.equal(input.selectionEnd,9);assert.equal(h.m.state().editor,editor);assert.equal(editor.text,"tskey-api-draft");assert.match(h.connectionElement.innerHTML,/Tailscale on this node: Connected/);h.m.retire();assert.equal(timers.pending.size,0);
+});
+
+test("a hung post-save authorization readback preserves confirmed Save, aborts and never repeats PUT",async()=>{
+ for(const finish of ["timeout","retire"]){
+  let release,reads=0,writes=0;const hung=new Promise(resolve=>release=resolve);
+  const h=harness(async(path,options)=>{
+   if(options.method==="PUT"){writes++;return reply({configured:true});}
+   if(++reads===1)return reply({configured:false,node_id:"node-a"});
+   return hung;
+  }),timers=ownedTimers(h.c);
+  await h.m.open("network");h.m.edit("text","tskey-api-fixture");const saving=h.m.save();await new Promise(setImmediate);
+  const editor=h.m.state().editor,request=h.requests.at(-1);assert.equal(editor.saved,true);assert.equal(editor.text,"");assert.equal(h.m.state().busy,true);assert.match(h.element.innerHTML,/Saved\./);assert.doesNotMatch(h.element.innerHTML,/Saving…/);assert.equal(request.options.signal.aborted,false);
+  if(finish==="timeout"){
+   await timers.run(h.m.state().networkReadDeadlineTimer);await saving;
+   assert.equal(h.m.state().busy,false);assert.equal(editor.busy,false);assert.equal(editor.saved,true);assert.equal(h.m.state().networkReadController,null);assert.equal(h.m.state().networkReadDeadlineTimer,null);
+   assert.match(h.element.innerHTML,/API key was saved, but its saved status could not be refreshed/);assert.match(h.element.innerHTML,/saved authorization could not be checked/);
+   await h.m.save();assert.equal(writes,1);
+  }else{h.m.retire();await saving;assert.equal(h.m.state(),null);assert.equal(h.element.innerHTML,"");}
+  assert.equal(request.options.signal.aborted,true);assert.equal(writes,1);release(reply({configured:true,node_id:"node-a"}));await new Promise(setImmediate);
+  if(finish==="timeout"){assert.equal(h.m.state().status.network_authorization,null);assert.equal(editor.saved,true);h.m.retire();}
+  else assert.equal(h.m.state(),null);
+  assert.equal(timers.pending.size,0);
+ }
+});
+
+test("a hung initial account read is bounded and cannot restore authorization after timeout",async()=>{
+ let release;const hung=new Promise(resolve=>release=resolve),h=harness(async()=>hung),timers=ownedTimers(h.c);
+ const opening=h.m.open("network");await new Promise(setImmediate);const request=h.requests[0];assert.equal(h.m.state().busy,true);
+ await timers.run(h.m.state().networkReadDeadlineTimer);await opening;
+ assert.equal(h.m.state().busy,false);assert.equal(h.m.state().editor.ready,false);assert.match(h.m.state().editor.error,/timed out/);assert.equal(request.options.signal.aborted,true);assert.equal(h.m.state().networkReadController,null);assert.equal(h.m.state().networkReadDeadlineTimer,null);
+ h.m.retire();release(reply({configured:true,node_id:"node-a"}));await new Promise(setImmediate);assert.equal(h.m.state(),null);assert.equal(h.element.innerHTML,"");assert.equal(timers.pending.size,0);
+});
+
+
+test("configured forwarding alone never claims a live Tailscale connection",()=>{
+ const h=harness();
+ for(const online of [false,undefined,"true"]){
+  const status=readyStatus();status.host_setup.tailscale_online=online;
+  const html=h.m.panel({...h.data,sharingStatus:status}).split('<details class="sharing-advanced">')[0];
+  assert.doesNotMatch(html,/Tailscale on this node: Connected/);
+  assert.match(html,online===false?/Tailscale on this node: Disconnected/:/Running — connection not confirmed/);
+ }
+ const untimed=readyStatus();untimed.host_setup.checked_at_ms=null;
+ assert.doesNotMatch(h.m.panel({...h.data,sharingStatus:untimed}),/Tailscale on this node: Connected/);
+ const attention=readyStatus();attention.host_setup.state="port_conflict";attention.host_setup.message="Resolve this host's private forwarding conflict.";
+ const html=h.m.panel({...h.data,sharingStatus:attention}).split('<details class="sharing-advanced">')[0];
+ assert.match(html,/Tailscale on this node: Connected/);assert.match(html,/private forwarding conflict/);
+});
+
+function diagnosis(over={}){return {connected:false,outcome:"not_shared",summary:"source.private.ts.net is not in this Cinema's Tailscale network, so this Cinema cannot reach it.",next_step:"Open the invitation's Tailscale link and accept it while signed in to the Tailscale account owner-b@example.com.",checked_at_ms:BigInt(Date.now()),elapsed_ms:5001n,attempts:[{ts_fqdn:"source.private.ts.net",address:"100.127.255.254:8443",result:"timed_out",elapsed_ms:5001n,visible:false}],...over};}
+test("connection status names this host's Tailscale account and the failing setup step",()=>{
+ const h=harness(),status=readyStatus();status.host_setup.tailscale={login_name:"owner-b@example.com",tailnet:"owner-b@example.com",dns_name:"cinema-b.tail222.ts.net",ipv4:"100.64.2.2"};
+ const html=h.m.panel({...h.data,sharingStatus:status}).split('<details class="sharing-advanced">')[0];
+ assert.match(html,/Tailscale on this node: Connected · signed in as owner-b@example.com · cinema-b.tail222.ts.net \(100.64.2.2\)/);
+ assert.match(html,/Other Cinemas can reach this server: Ready/);
+ const broken={...readyStatus(),host_setup:{state:"unavailable",message:"Private host setup could not be verified.",detail:"`tailscale status --json --peers=false` did not answer with status information. It printed: The Tailscale GUI failed to start",checked_at_ms:Date.now()}};
+ const failing=h.m.panel({...h.data,sharingStatus:broken}).split('<details class="sharing-advanced">')[0];
+ assert.match(failing,/Tailscale on this node: Could not be checked/);assert.match(failing,/The Tailscale GUI failed to start/);assert.match(failing,/sharing-check-bad/);
+});
+test("an unreachable saved import is explained once automatically and on demand",async()=>{
+ const h=harness(async(path)=>path.endsWith("/connection")?reply({import_id:id,node_id:"node-a",diagnosis:diagnosis()}):reply({}));
+ const status={...readyStatus(),imports:[{import_id:id,lifecycle_generation:large,endpoint_generation:large,checked_at_ms:BigInt(Date.now()),connection:"unavailable"}]};
+ h.m.panel({...h.data,sharingStatus:status});
+ await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(h.requests.map(r=>r.path),["/api/v1/sharing/imports/"+id+"/connection"]);assert.equal(h.requests[0].options.method,"GET");
+ assert.match(h.element.innerHTML,/Connection: Not reachable/);assert.match(h.element.innerHTML,/is not in this Cinema&#39;s Tailscale network|is not in this Cinema's Tailscale network/);assert.match(h.element.innerHTML,/owner-b@example.com/);assert.match(h.element.innerHTML,/not in this server&#39;s Tailscale network|not in this server's Tailscale network/);
+ h.m.paint();await new Promise(resolve=>setImmediate(resolve));assert.equal(h.requests.length,1,"automatic explanation runs once per page");
+ await vm.runInContext("sharingCheckImport(0)",h.c);assert.equal(h.requests.length,2);
+ const healthy=harness(),html=healthy.m.panel({...healthy.data,sharingStatus:{...readyStatus(),imports:[{import_id:id,lifecycle_generation:large,endpoint_generation:large,checked_at_ms:BigInt(Date.now()),connection:"responding"}]}});
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(healthy.requests.length,0);assert.match(html,/Connection: Reachable/);
+});
+test("recipients and unused invitations show whether their Tailscale share was accepted",()=>{
+ const h=harness(),row=exported(),status=readyStatus();
+ status.network_authorization={configured:true,node_id:"node-a",tailnet:"tail111.ts.net",shares:[{invitation_id:row.invitation_id,created_at_ms:1n,shares:[{device:"cinema-a.tail111.ts.net",accepted:true,accepted_by:"owner-b@example.com"}]},{invitation_id:"77777777-7777-4777-8777-777777777777",created_at_ms:1n,shares:[{device:"cinema-a.tail111.ts.net",accepted:false}]}]};
+ const html=h.m.panel({...h.data,sharingStatus:status});
+ assert.match(html,/Tailscale account linked \(tailnet tail111.ts.net\)/);
+ assert.match(html,/Tailscale share of cinema-a.tail111.ts.net accepted by owner-b@example.com/);
+ assert.match(html,/Invitations not yet used/);assert.match(html,/not accepted yet/);
+});
+test("the import form names the account that must accept the share and shows why it is waiting",async()=>{
+ const timers=[],h=harness(async()=>reply({name:"Owner Cinema",network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:false,connection_error:"sharing_peer_unavailable",diagnosis:diagnosis()}));
+ h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=()=>{};
+ h.m.state().status={...readyStatus(),host_setup:{...readyStatus().host_setup,tailscale:{login_name:"owner-b@example.com",dns_name:"cinema-b.tail222.ts.net",ipv4:"100.64.2.2"}}};
+ await h.m.open("import");h.m.edit("text","cinema-connect-v1:AAAA");await h.m.save();
+ assert.match(h.element.innerHTML,/while signed in to the Tailscale account owner-b@example.com/);assert.match(h.element.innerHTML,/sign out of Tailscale first or open the link in a private window/);
+ assert.match(h.element.innerHTML,/Tailscale network, so this Cinema cannot reach it/);assert.match(h.element.innerHTML,/Technical details/);
+ assert.equal(h.requests.filter(r=>r.path.endsWith("/sharing/imports")).length,0);
+});
+test("refused imports report the server's diagnosis instead of a generic failure",async()=>{
+ const h=harness(async()=>reply({code:"sharing_peer_unavailable",message:"x",diagnosis:diagnosis({outcome:"refused",summary:"source.private.ts.net is reachable over Tailscale, but nothing accepts Cinema connections on its sharing port.",next_step:"Check the other Cinema."})},502));
+ await assert.rejects(h.m.request("/sharing/imports",{method:"POST",body:{invitation:"test"}}),error=>/nothing accepts Cinema connections/.test(error.message)&&error.diagnosis.outcome==="refused");
+});
+test("the sharing activity log reads only its own bounded ring, newest first",async()=>{
+ const h=harness(async()=>reply([{ts_ms:1000n,level:"INFO",target:"plurxd::sharing_host",message:"event-alpha"},{ts_ms:2000n,level:"WARN",target:"plurxd::sharing_diagnosis",message:"event-beta"}]));
+ await vm.runInContext("sharingLoadLog()",h.c);
+ assert.deepEqual(h.requests.map(r=>r.path),["/api/v1/system/logs?scope=sharing&level=info&limit=300"]);
+ const html=h.element.innerHTML;assert.ok(html.indexOf("event-beta")>0&&html.indexOf("event-beta")<html.indexOf("event-alpha"));assert.match(html,/Refresh log/);
+ await assert.rejects(h.m.request("/system/logs?scope=general&level=trace&limit=2000"),/Invalid management route/);
+ await assert.rejects(h.m.request("/system/logs?scope=sharing&level=info&limit=300",{method:"POST",body:{}}),/Invalid management route/);
 });

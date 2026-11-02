@@ -735,6 +735,7 @@ async fn channel_playback_repair_validates_distinct_init_before_publication() {
         aac: true,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     session.frozen_presentation = Some(FrozenHlsPresentation::new(
         execution_file_for_retry(),
@@ -2272,6 +2273,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds: 0.0,
         audio_index: None,
@@ -2340,6 +2342,7 @@ fn snapshot_probe_request() -> SessionRequest {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds: 0.0,
         audio_index: None,
@@ -2819,6 +2822,7 @@ fn frozen_codec_evidence_changes_identity_without_rewriting_the_legacy_shape() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     let legacy_identity = serde_json::json!({
         "version": 2, "file": &file, "kind": &kind,
@@ -2907,6 +2911,7 @@ fn an_fmp4_avc_master_is_attempt_media_not_generation_metadata() {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
     );
     let mpeg_ts =
@@ -3113,6 +3118,7 @@ fn a_copy_session_keeps_the_source_geometry() {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
     );
 

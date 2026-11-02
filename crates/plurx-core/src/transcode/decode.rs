@@ -2634,8 +2634,21 @@ pub struct CompletedReconstructedOutputPlan<'a> {
     source: &'a ResolvedTranscode,
     codec: super::encoder::CompletedReconstructedOutputContract,
     vaapi_hdr_policy: Option<super::VaapiHdrPolicy>,
+    reconstructed_profile81: bool,
 }
 impl<'a> CompletedReconstructedOutputPlan<'a> {
+    /// The reconstructed Profile 8.1 route's own encoder recipe
+    /// ([`super::RECONSTRUCTED_P81_RECIPE`]); every other encode keeps its policy.
+    pub fn with_reconstructed_profile81(mut self) -> Self {
+        self.reconstructed_profile81 = true;
+        self
+    }
+    /// The ordinary source plan remains unchanged; the completed GPU export
+    /// owns the final SDR transfer/gamut and encoder declaration.
+    pub fn with_sdr_output(mut self) -> Self {
+        self.codec = self.codec.with_sdr();
+        self
+    }
     pub fn source_plan(&self) -> &'a ResolvedTranscode {
         self.source
     }
@@ -2653,11 +2666,15 @@ impl<'a> CompletedReconstructedOutputPlan<'a> {
     }
     pub fn encode_args(&self, bitrate_kbps: u32, force_idr: bool) -> Vec<String> {
         let mut args = self.codec.encode_args(bitrate_kbps, force_idr, Some(1));
-        args.extend(
-            self.vaapi_hdr_policy
-                .into_iter()
-                .flat_map(|policy| policy.flags().into_iter().map(str::to_owned)),
-        );
+        args.extend(self.vaapi_hdr_policy.into_iter().flat_map(|policy| {
+            if self.reconstructed_profile81 {
+                policy.reconstructed_profile81_flags()
+            } else {
+                policy.flags()
+            }
+            .into_iter()
+            .map(str::to_owned)
+        }));
         args
     }
     /// The completed encoder can differ from its Software reconstruction plan.
@@ -2689,6 +2706,7 @@ impl ResolvedTranscode {
             source: self,
             codec,
             vaapi_hdr_policy: None,
+            reconstructed_profile81: false,
         })
     }
 

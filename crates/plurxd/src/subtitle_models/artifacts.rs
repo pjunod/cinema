@@ -92,7 +92,7 @@ mod local {
             "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
         ),
     ];
-    static DIGESTS: OnceLock<Mutex<Vec<(FileIdentity, String)>>> = OnceLock::new();
+    static DIGESTS: OnceLock<Mutex<Vec<(FileIdentity, String, bool)>>> = OnceLock::new();
     static INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn cancelled(cancel: &CancellationToken) -> Result<(), String> {
@@ -118,6 +118,32 @@ mod local {
             return Err("invalid_model_catalog_identity".into());
         }
         Ok(())
+    }
+
+    // Filesystems can coalesce ctime updates within a clock tick. A digest
+    // obtained during that window must be read again before metadata can
+    // qualify its reuse; otherwise an immediate same-length write is hidden.
+    fn identity_timestamp_has_settled(identity: FileIdentity) -> bool {
+        identity_timestamp_has_settled_at(identity, std::time::SystemTime::now())
+    }
+
+    fn identity_timestamp_has_settled_at(
+        identity: FileIdentity,
+        now: std::time::SystemTime,
+    ) -> bool {
+        let (Ok(seconds), Ok(nanoseconds)) = (
+            u64::try_from(identity.changed_seconds),
+            u32::try_from(identity.changed_nanoseconds),
+        ) else {
+            return false;
+        };
+        if nanoseconds >= 1_000_000_000 {
+            return false;
+        }
+        std::time::SystemTime::UNIX_EPOCH
+            .checked_add(Duration::new(seconds, nanoseconds))
+            .and_then(|stamp| now.duration_since(stamp).ok())
+            .is_some_and(|age| age >= Duration::from_secs(2))
     }
 
     fn hash_held(file: &mut File, expected: &str, size: u64) -> Result<FileIdentity, String> {
@@ -157,12 +183,15 @@ mod local {
         if before.size != size {
             return Err("artifact_length_mismatch".into());
         }
+        let settled_before_read = identity_timestamp_has_settled(before);
         let cache = DIGESTS.get_or_init(|| Mutex::new(Vec::new()));
         let cached = cache
             .lock()
             .map_err(|_| "artifact_verification_unavailable")?
             .iter()
-            .any(|(identity, digest)| *identity == before && digest == expected);
+            .any(|(identity, digest, settled)| {
+                *settled && *identity == before && digest == expected
+            });
         if !cached {
             check()?;
             file.seek(SeekFrom::Start(0))
@@ -196,7 +225,7 @@ mod local {
             if entries.len() >= 64 {
                 entries.remove(0);
             }
-            entries.push((before, expected.into()));
+            entries.push((before, expected.into(), settled_before_read));
         }
         file.seek(SeekFrom::Start(0))
             .map_err(|_| "artifact_read_failed")?;
@@ -207,7 +236,132 @@ mod local {
         Ok(before)
     }
 
+    // Static executables keep the held-FD trust boundary and do not introduce
+    // a runtime plugin search path. CPU detection includes OS AVX state support.
+    fn supports_avx2_engine() -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::is_x86_feature_detected!("sse4.2")
+                && std::is_x86_feature_detected!("avx")
+                && std::is_x86_feature_detected!("avx2")
+                && std::is_x86_feature_detected!("f16c")
+                && std::is_x86_feature_detected!("fma")
+                && std::is_x86_feature_detected!("bmi2")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    fn engine_dependencies(facts: &Value, platform: &str) -> Result<(), String> {
+        let dependencies = facts["runtime_dependencies"]
+            .as_array()
+            .filter(|items| !items.is_empty() && items.len() <= 16)
+            .ok_or("packaged_engine_dependencies_invalid")?;
+        for dependency in dependencies {
+            let dependency = dependency
+                .as_str()
+                .filter(|value| value.len() <= 512)
+                .ok_or("packaged_engine_dependencies_invalid")?;
+            let lower = dependency.to_ascii_lowercase();
+            if [
+                "not found",
+                "libggml",
+                "libwhisper",
+                "libomp",
+                "libgomp",
+                "homebrew",
+                "@rpath",
+            ]
+            .iter()
+            .any(|bad| lower.contains(bad))
+            {
+                return Err("packaged_engine_dependencies_unqualified".into());
+            }
+            let qualified = if platform.starts_with("macos-") {
+                dependency.trim().starts_with("/usr/lib/")
+                    || dependency.trim().starts_with("/System/Library/")
+            } else {
+                let name = dependency.split_whitespace().next().unwrap_or("");
+                [
+                    "linux-vdso.so.1",
+                    "libstdc++.so.6",
+                    "libm.so.6",
+                    "libgcc_s.so.1",
+                    "libc.so.6",
+                ]
+                .contains(&name)
+                    || name.starts_with("/lib/ld-linux-")
+                    || name.starts_with("/lib64/ld-linux-")
+            };
+            if !qualified {
+                return Err("packaged_engine_dependencies_unqualified".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn engine_cpu_variant<'a>(
+        manifest: &'a Value,
+        pin: &Value,
+        platform: &str,
+        avx2: bool,
+    ) -> Result<Option<&'a Value>, String> {
+        // Baseline-only packages remain valid across upgrades.
+        let Some(variants) = manifest.get("cpu_variants") else {
+            return Ok(None);
+        };
+        let variants = variants
+            .as_object()
+            .ok_or("packaged_engine_variants_invalid")?;
+        if variants.is_empty() {
+            return Ok(None);
+        }
+        if ![
+            "linux-x86_64",
+            "linux-amd64",
+            "macos-x86_64",
+            "macos-universal",
+        ]
+        .contains(&platform)
+        {
+            return Err("packaged_engine_variants_unqualified".into());
+        }
+        if variants.len() != 1 {
+            return Err("packaged_engine_variants_invalid".into());
+        }
+        let fact = variants
+            .get("x86_64-avx2")
+            .ok_or("packaged_engine_variants_unqualified")?;
+        if fact.as_object().is_none_or(|fields| fields.len() != 6) {
+            return Err("packaged_engine_variants_invalid".into());
+        }
+        let expected = &pin["cpu_variants"]["x86_64-avx2"];
+        for key in ["filename", "required_features", "build_options"] {
+            if expected.get(key).is_none() || fact.get(key) != expected.get(key) {
+                return Err("packaged_engine_variants_unqualified".into());
+            }
+        }
+        if expected["filename"] != "whisper-cli-avx2" {
+            return Err("packaged_engine_pin_invalid".into());
+        }
+        if !fact["binary_sha256"].as_str().is_some_and(valid_digest)
+            || !fact["binary_bytes"]
+                .as_u64()
+                .is_some_and(|bytes| bytes > 0 && bytes <= MAX_ENGINE_BYTES)
+        {
+            return Err("packaged_engine_variants_invalid".into());
+        }
+        engine_dependencies(fact, platform)?;
+        Ok(avx2.then_some(fact))
+    }
+
     pub(super) async fn inspect_engine_at(path: PathBuf) -> Result<Engine, String> {
+        inspect_engine_at_with_cpu(path, supports_avx2_engine()).await
+    }
+
+    async fn inspect_engine_at_with_cpu(path: PathBuf, avx2: bool) -> Result<Engine, String> {
         tokio::task::spawn_blocking(move || {
             if !path.is_absolute() {
                 return Err("packaged_engine_path_not_absolute".into());
@@ -292,56 +446,18 @@ mod local {
                     fixture = Some((file, identity, sha.to_owned()));
                 }
             }
-            let dependencies = manifest["runtime_dependencies"]
-                .as_array()
-                .filter(|items| !items.is_empty() && items.len() <= 16)
-                .ok_or("packaged_engine_dependencies_invalid")?;
-            for dependency in dependencies {
-                let dependency = dependency
-                    .as_str()
-                    .filter(|value| value.len() <= 512)
-                    .ok_or("packaged_engine_dependencies_invalid")?;
-                let lower = dependency.to_ascii_lowercase();
-                if [
-                    "not found",
-                    "libggml",
-                    "libwhisper",
-                    "libomp",
-                    "libgomp",
-                    "homebrew",
-                    "@rpath",
-                ]
-                .iter()
-                .any(|bad| lower.contains(bad))
-                {
-                    return Err("packaged_engine_dependencies_unqualified".into());
-                }
-                let qualified = if platform.starts_with("macos-") {
-                    dependency.trim().starts_with("/usr/lib/")
-                        || dependency.trim().starts_with("/System/Library/")
-                } else {
-                    let name = dependency.split_whitespace().next().unwrap_or("");
-                    [
-                        "linux-vdso.so.1",
-                        "libstdc++.so.6",
-                        "libm.so.6",
-                        "libgcc_s.so.1",
-                        "libc.so.6",
-                    ]
-                    .contains(&name)
-                        || name.starts_with("/lib/ld-linux-")
-                        || name.starts_with("/lib64/ld-linux-")
-                };
-                if !qualified {
-                    return Err("packaged_engine_dependencies_unqualified".into());
-                }
-            }
-            let sha = manifest["binary_sha256"]
+            engine_dependencies(&manifest, &platform)?;
+            let variant = engine_cpu_variant(&manifest, &pin, &platform, avx2)?;
+            let (facts, path) = match variant {
+                Some(facts) => (facts, parent.join("whisper-cli-avx2")),
+                None => (&manifest, path),
+            };
+            let sha = facts["binary_sha256"]
                 .as_str()
                 .filter(|value| valid_digest(value))
                 .ok_or("packaged_engine_manifest_invalid")?
                 .to_owned();
-            let size = manifest["binary_bytes"]
+            let size = facts["binary_bytes"]
                 .as_u64()
                 .filter(|size| *size > 0 && *size <= MAX_ENGINE_BYTES)
                 .ok_or("packaged_engine_manifest_invalid")?;
@@ -656,20 +772,25 @@ mod local {
             )
     }
 
+    fn reviewed_initial_url(spec: &CatalogModel, url: &reqwest::Url) -> bool {
+        approved_url(url)
+            && url.host_str() == Some("huggingface.co")
+            && url.query().is_none()
+            && url.as_str() == spec.url
+            && (url.path()
+                == format!(
+                    "/ggerganov/whisper.cpp/resolve/{REVISION}/ggml-{}.bin",
+                    spec.id
+                )
+                || crate::subtitle_text_translation::artifacts::registered_file(spec))
+    }
+
     async fn response(
         spec: &CatalogModel,
         cancel: &CancellationToken,
     ) -> Result<reqwest::Response, String> {
         let mut url = reqwest::Url::parse(&spec.url).map_err(|_| "invalid_model_catalog_url")?;
-        if !approved_url(&url)
-            || url.host_str() != Some("huggingface.co")
-            || url.path()
-                != format!(
-                    "/ggerganov/whisper.cpp/resolve/{REVISION}/ggml-{}.bin",
-                    spec.id
-                )
-            || url.query().is_some()
-        {
+        if !reviewed_initial_url(spec, &url) {
             return Err("invalid_model_catalog_url".into());
         }
         let client = reqwest::Client::builder()
@@ -1041,6 +1162,45 @@ mod local {
             };
         }
 
+        #[test]
+        fn model_downloads_accept_only_reviewed_family_catalogs() {
+            let catalog: serde_json::Value =
+                serde_json::from_str(include_str!("../subtitle_text_translation/catalog.json"))
+                    .expect("pinned text catalog");
+            for entry in catalog["files"].as_array().expect("pinned parts") {
+                let mut entry = entry.clone();
+                entry.as_object_mut().expect("part object").remove("role");
+                let spec: CatalogModel =
+                    serde_json::from_value(entry).expect("pinned artifact identity");
+                let url = reqwest::Url::parse(&spec.url).expect("pinned artifact URL");
+                assert!(reviewed_initial_url(&spec, &url), "{}", spec.id);
+                let mut changed = spec.clone();
+                changed.sha256 = "0".repeat(64);
+                assert!(!reviewed_initial_url(&changed, &url));
+                changed = spec.clone();
+                changed.download_bytes += 1;
+                assert!(!reviewed_initial_url(&changed, &url));
+                changed = spec.clone();
+                changed.id.push_str("-other");
+                assert!(!reviewed_initial_url(&changed, &url));
+                changed = spec.clone();
+                changed.url =
+                    "https://huggingface.co/unreviewed/model/resolve/main/weights.bin".into();
+                assert!(!reviewed_initial_url(
+                    &changed,
+                    &reqwest::Url::parse(&changed.url).expect("other URL")
+                ));
+                assert!(!reviewed_initial_url(
+                    &spec,
+                    &reqwest::Url::parse("https://huggingface.co/other").expect("different URL")
+                ));
+            }
+            let legacy = crate::subtitle_translation::profile::model_spec();
+            assert!(reviewed_initial_url(
+                &legacy,
+                &reqwest::Url::parse(&legacy.url).expect("speech URL")
+            ));
+        }
         #[tokio::test]
         async fn model_root_and_artifacts_refuse_symlinks_and_world_writes() {
             let temporary = tempfile::tempdir().expect("test root");
@@ -1192,6 +1352,158 @@ mod local {
             assert_eq!(std::fs::read(&installed.path).expect("prior bytes"), bytes);
         }
 
+        fn variant_fact(pin: &Value, bytes: &[u8]) -> Value {
+            let mut fact = pin["cpu_variants"]["x86_64-avx2"].clone();
+            fact["binary_bytes"] = bytes.len().into();
+            fact["binary_sha256"] = format!("{:x}", Sha256::digest(bytes)).into();
+            fact["runtime_dependencies"] = serde_json::json!(["libc.so.6"]);
+            fact
+        }
+
+        #[test]
+        fn engine_cpu_variant_requires_exact_static_recipe_and_full_host_support() {
+            let pin: Value = serde_json::from_str(PIN).expect("pin");
+            let fact = variant_fact(&pin, b"optimized");
+            assert!(engine_cpu_variant(
+                &serde_json::json!({"cpu_variants":{}}),
+                &pin,
+                "linux-aarch64",
+                false
+            )
+            .expect("empty optional inventory")
+            .is_none());
+            assert!(engine_cpu_variant(
+                &serde_json::json!({"cpu_variants":[]}),
+                &pin,
+                "linux-x86_64",
+                false
+            )
+            .is_err());
+            let mut manifest = serde_json::json!({"cpu_variants":{"x86_64-avx2":fact}});
+            assert!(engine_cpu_variant(&manifest, &pin, "linux-x86_64", false)
+                .expect("baseline")
+                .is_none());
+            assert_eq!(
+                engine_cpu_variant(&manifest, &pin, "linux-x86_64", true).expect("optimized"),
+                Some(&manifest["cpu_variants"]["x86_64-avx2"])
+            );
+            let mut universal = manifest.clone();
+            universal["cpu_variants"]["x86_64-avx2"]["runtime_dependencies"] =
+                serde_json::json!(["/usr/lib/libSystem.B.dylib"]);
+            assert!(
+                engine_cpu_variant(&universal, &pin, "macos-universal", false)
+                    .expect("universal ARM")
+                    .is_none()
+            );
+            assert!(engine_cpu_variant(&manifest, &pin, "linux-aarch64", true).is_err());
+            assert!(
+                engine_cpu_variant(&serde_json::json!({}), &pin, "linux-x86_64", true)
+                    .expect("old package")
+                    .is_none()
+            );
+            for (key, value) in [
+                ("filename", serde_json::json!("../external")),
+                ("required_features", serde_json::json!(["avx2"])),
+                ("build_options", serde_json::json!({"GGML_NATIVE":"ON"})),
+                ("binary_sha256", serde_json::json!("not-a-digest")),
+                ("binary_bytes", serde_json::json!(0)),
+                ("runtime_dependencies", serde_json::json!(["libggml.so"])),
+            ] {
+                let mut changed = manifest.clone();
+                changed["cpu_variants"]["x86_64-avx2"][key] = value;
+                assert!(
+                    engine_cpu_variant(&changed, &pin, "linux-x86_64", true).is_err(),
+                    "{key}"
+                );
+                assert!(
+                    engine_cpu_variant(&changed, &pin, "linux-x86_64", false).is_err(),
+                    "unsupported hardware still checks {key}"
+                );
+            }
+            manifest["cpu_variants"]["unknown"] = serde_json::json!({});
+            assert!(engine_cpu_variant(&manifest, &pin, "linux-x86_64", true).is_err());
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[tokio::test]
+        async fn engine_cpu_variant_holds_selected_bytes_and_refuses_digest_or_symlink_replacement()
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let temporary_root = tempfile::tempdir().expect("root");
+            let root = temporary_root.path().canonicalize().expect("canonical");
+            let baseline = root.join("whisper-cli");
+            let variant = root.join("whisper-cli-avx2");
+            let baseline_bytes = b"baseline executable";
+            let variant_bytes = b"optimized executable";
+            for (path, bytes) in [
+                (&baseline, baseline_bytes.as_slice()),
+                (&variant, variant_bytes.as_slice()),
+            ] {
+                std::fs::write(path, bytes).expect("engine bytes");
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                    .expect("executable");
+            }
+            let pin: Value = serde_json::from_str(PIN).expect("pin");
+            let mut manifest = pin.clone();
+            manifest["binary_bytes"] = baseline_bytes.len().into();
+            manifest["binary_sha256"] = format!("{:x}", Sha256::digest(baseline_bytes)).into();
+            manifest["platform"] = if cfg!(target_os = "macos") {
+                "macos-x86_64"
+            } else {
+                "linux-x86_64"
+            }
+            .into();
+            engine_companions(&root, &mut manifest);
+            let mut fact = variant_fact(&pin, variant_bytes);
+            fact["runtime_dependencies"] = manifest["runtime_dependencies"].clone();
+            manifest["cpu_variants"]["x86_64-avx2"] = fact;
+            std::fs::write(
+                root.join("subtitle-engine.json"),
+                serde_json::to_vec(&manifest).expect("JSON"),
+            )
+            .expect("manifest");
+            let baseline_engine = inspect_engine_at_with_cpu(baseline.clone(), false)
+                .await
+                .expect("legacy CPU");
+            assert_eq!(baseline_engine.path, baseline);
+            let mut selected = inspect_engine_at_with_cpu(baseline.clone(), true)
+                .await
+                .expect("AVX2 CPU");
+            assert_eq!(selected.path, variant);
+            assert_eq!(
+                Some(selected.binary_sha256.as_str()),
+                manifest["cpu_variants"]["x86_64-avx2"]["binary_sha256"].as_str()
+            );
+            let moved = root.join("held-avx2");
+            std::fs::rename(&variant, &moved).expect("move original");
+            std::fs::write(&variant, b"unqualified changed executable").expect("replace");
+            std::fs::set_permissions(&variant, std::fs::Permissions::from_mode(0o700))
+                .expect("mode");
+            assert_eq!(
+                inspect_engine_at_with_cpu(baseline.clone(), true)
+                    .await
+                    .err()
+                    .as_deref(),
+                Some("packaged_engine_changed")
+            );
+            let mut held = Vec::new();
+            selected.handle.read_to_end(&mut held).expect("held bytes");
+            assert_eq!(held, variant_bytes);
+            std::fs::remove_file(&variant).expect("remove replacement");
+            symlink(&moved, &variant).expect("substituted symlink");
+            assert_eq!(
+                inspect_engine_at_with_cpu(baseline.clone(), true)
+                    .await
+                    .err()
+                    .as_deref(),
+                Some("packaged_engine_unavailable")
+            );
+            assert!(
+                inspect_engine_at_with_cpu(baseline, false).await.is_ok(),
+                "unsupported host never opens optimized inode"
+            );
+        }
+
         #[tokio::test]
         async fn engine_manifest_digest_options_and_symlink_are_enforced() {
             use std::os::unix::fs::PermissionsExt;
@@ -1203,6 +1515,10 @@ mod local {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
                 .expect("executable");
             let mut manifest: Value = serde_json::from_str(PIN).expect("pin");
+            manifest
+                .as_object_mut()
+                .expect("object")
+                .remove("cpu_variants");
             manifest["binary_bytes"] = bytes.len().into();
             manifest["binary_sha256"] = format!("{:x}", Sha256::digest(bytes)).into();
             manifest["platform"] = match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -1474,7 +1790,7 @@ mod local {
                 .lock()
                 .expect("digest cache")
                 .iter()
-                .any(|(cached, digest)| *cached == identity && digest == &spec.sha256));
+                .any(|(cached, digest, _)| *cached == identity && digest == &spec.sha256));
             let accepted = open_model_cancellable(&root, &spec, &CancellationToken::new())
                 .await
                 .expect("fresh uncancelled verification");
@@ -1502,7 +1818,12 @@ mod local {
                     .identity,
                 first
             );
-            std::fs::write(&path, b"other bytes").expect("same-length change");
+            // This metadata-only API detects replacement by inode. Byte
+            // integrity, including an in-place write in the same clock tick,
+            // is checked by open_model/hash_held below and in the cache test.
+            let replacement = root.join("replacement");
+            std::fs::write(&replacement, b"other bytes").expect("same-length change");
+            std::fs::rename(&replacement, &path).expect("replace model inode");
             let changed = model_identity(&root, &spec)
                 .await
                 .expect("presence does not hash");
@@ -1527,6 +1848,61 @@ mod local {
             assert_eq!(
                 model_identity(&root, &spec).await.err().as_deref(),
                 Some("model_store_not_service_owned")
+            );
+        }
+
+        #[test]
+        fn metadata_cache_grace_preserves_fractional_seconds_and_refuses_invalid_time() {
+            let identity = FileIdentity {
+                device: 1,
+                inode: 2,
+                size: 11,
+                changed_seconds: 1,
+                changed_nanoseconds: 999_000_000,
+            };
+            let at = |milliseconds| {
+                std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(milliseconds)
+            };
+            assert!(!identity_timestamp_has_settled_at(identity, at(3000)));
+            assert!(!identity_timestamp_has_settled_at(identity, at(3998)));
+            assert!(identity_timestamp_has_settled_at(identity, at(3999)));
+            assert!(!identity_timestamp_has_settled_at(identity, at(1000)));
+            assert!(!identity_timestamp_has_settled_at(
+                FileIdentity {
+                    changed_seconds: -1,
+                    ..identity
+                },
+                at(4000)
+            ));
+            assert!(!identity_timestamp_has_settled_at(
+                FileIdentity {
+                    changed_nanoseconds: 1_000_000_000,
+                    ..identity
+                },
+                at(4000)
+            ));
+        }
+
+        #[test]
+        fn unsettled_metadata_cache_never_substitutes_for_model_bytes() {
+            let root = tempfile::tempdir().expect("root");
+            let path = root.path().join("model");
+            std::fs::write(&path, b"other bytes").expect("changed model");
+            let expected = spec(b"model bytes");
+            let mut handle = File::open(&path).expect("handle");
+            let identity = std_file_identity(&handle).expect("identity");
+            // Model the same identity returned for two writes within one
+            // filesystem tick, independent of this host's timestamp precision.
+            DIGESTS
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+                .expect("cache")
+                .push((identity, expected.sha256.clone(), false));
+            assert_eq!(
+                hash_held(&mut handle, &expected.sha256, expected.download_bytes)
+                    .err()
+                    .as_deref(),
+                Some("artifact_digest_mismatch")
             );
         }
 

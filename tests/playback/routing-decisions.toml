@@ -196,6 +196,64 @@ source_anchor = "pub fn for_session("
 test = "crates/plurx-core/src/transcode/pipeline.rs"
 test_anchor = "a_session_can_be_sent_back_to_the_cpu_by_what_it_is_doing"
 
+# Enhanced delivery and graph selection are separate routing decisions.
+
+[[decisions]]
+id = "server.decoder-plan"
+source = "crates/plurx-core/src/transcode/decode.rs"
+source_anchor = "pub fn resolve_transcode("
+test = "crates/plurx-core/tests/decoder_selection.rs"
+test_anchor = "legacy_h264_preferences_match_existing_encoder_routes"
+
+[[decisions]]
+id = "server.hdr-encoder-grade"
+source = "crates/plurxd/src/transcode/manager/plan.rs"
+source_anchor = "pub(super) async fn encoder_and_grade_for_with_preference("
+test = "crates/plurxd/src/transcode/tests/chunk_01.rs"
+test_anchor = "the_hdr10_grade_is_refused_until_every_precondition_is_proved"
+
+[[decisions]]
+id = "server.macos-processing"
+source = "crates/plurx-core/src/transcode/decode.rs"
+source_anchor = "fn select_macos_processing("
+test = "crates/plurx-core/tests/decoder_selection.rs"
+test_anchor = "macos_processing_selects_only_proved_sdr_and_hdr10_surfaces"
+
+[[decisions]]
+id = "server.dv-processing-destination"
+source = "crates/plurxd/src/transcode/manager/candidates.rs"
+source_anchor = "pub(super) fn processed_qualification_destination("
+test = "crates/plurxd/src/http/hls/tests/chunk_06.rs"
+test_anchor = "reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection"
+
+[[decisions]]
+id = "server.dv-processing-preflight"
+source = "crates/plurx-core/src/transcode/dv_processing.rs"
+source_anchor = "pub fn dv_processing_preflight("
+test = "crates/plurx-core/src/transcode/dv_processing/tests.rs"
+test_anchor = "every_preference_combination_preserves_conversion_and_native_constraints"
+
+[[decisions]]
+id = "server.dv-reconstructed-encoder"
+source = "crates/plurxd/src/dv_runtime.rs"
+source_anchor = "pub(crate) fn completed_window_encoder("
+test = "crates/plurxd/src/dv_segment.rs"
+test_anchor = "reconstructed_intel_preferences_use_only_proved_vaapi_output"
+
+[[decisions]]
+id = "server.dv-completed-window"
+source = "crates/plurx-core/src/transcode/dv_processing.rs"
+source_anchor = "pub fn dv_plan_completed_window("
+test = "crates/plurx-core/src/transcode/dv_processing/tests.rs"
+test_anchor = "completed_window_report_binds_publication_without_pixel_checksum_authority"
+
+[[decisions]]
+id = "server.dv-failed-episode"
+source = "crates/plurxd/src/vodencode.rs"
+source_anchor = "pub(crate) fn failed(key: &DvDigest) -> bool"
+test = "crates/plurxd/src/vodencode.rs"
+test_anchor = "failed_later_window_excludes_fresh_create_without_predecessor_fields"
+
 [[decisions]]
 id = "web.initial-route"
 source = "crates/plurxd/src/web/playback-policy.js"

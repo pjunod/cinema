@@ -473,7 +473,8 @@ test("cockpit Settings makes the active tab and long System values distinct", as
   assert.match(SHIPPED_UI, /\.kvgrid dd\{[\s\S]*?text-transform:none;word-break:normal/);
   assert.match(SHIPPED_UI, /\.storage-table\{grid-template-columns:minmax\(0,1fr\) max-content/);
   assert.match(shippedSource("storageHtml"), /class="stgtable storage-table"/);
-  assert.match(shippedSource("systemPanel"), /class="kvgrid system-grid"/);
+  assert.match(shippedSource("systemVersionsCard"), /system-kv/);
+  assert.match(SHIPPED_UI, /\.system-kv>\*\{min-width:0\}/);
   // Watch-state durability is reported once, on the Cluster tab, and nowhere
   // else. Two readings of the same projection on two screens is how an
   // operator ends up comparing a stale copy against a fresh one.
@@ -869,11 +870,11 @@ test("Settings loads only the active tab manifest", () => {
     analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["settings", "users"], secondary: [] },
-    system: { required: ["sys"], secondary: ["playbackEvents"] },
+    system: { required: ["sys"], secondary: [] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
     sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
-    developer: { required: ["settings"], secondary: ["developerReadiness"] },
+    developer: { required: ["settings"], secondary: ["developerReadiness", "https"] },
   });
   const view = shippedSource("viewSettings");
   assert.doesNotMatch(view, /Promise\.all\(\[\s*api/,
@@ -1694,7 +1695,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     analysis:{required:["/settings","/analysis/summary"],secondary:["/developer/readiness"]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/settings","/users"],secondary:[]},
-    system:{required:["/system"],secondary:["playback-events","system-log"]},
+    system:{required:["/system"],secondary:[]},
     // The cluster settings cards fill their own mount when /settings lands; the
     // health board never waits for it.
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","/settings","cluster-log"]},
@@ -1702,7 +1703,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     // The switches paint from the settings snapshot; the advisory prerequisite
     // readings arrive behind them because one of them asks membership for the
     // local applied roster.
-    developer:{required:["/settings"],secondary:["/developer/readiness"]},
+    developer:{required:["/settings"],secondary:["/developer/readiness","/system/https"]},
     standalone:{tab:"cluster",clustered:false,required:[],secondary:[]},
     sqlite:{tab:"cluster",legacy:true,roster:{unavailable:true,code:"membership_unavailable"},required:["/cluster/nodes"],secondary:[]},
   };
@@ -1718,7 +1719,7 @@ test("Settings executes exact required and secondary waves for every tab", async
       "patchSettingsSecondary","patchSettingsSecondaryError","refreshLogs","refreshClusterLogs",
       "setPageFailure","setPagePhase","document",
       `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
-         SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
+         SETTINGS_HTTPS_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
          DV_SETTINGS_POLL_AT=0; const DV_PROGRESS_POLL_MS=10000;
        const SERVER={cluster_enabled:${expected.legacy?"undefined":expected.clustered!==false}};
        ${shippedSource("settingsClusterEnabled")};
@@ -1773,7 +1774,7 @@ test("Settings cannot paint an old tab after a tab switch", async () => {
     "patchSettingsSecondary","patchSettingsSecondaryError","refreshLogs","refreshClusterLogs",
     "setPageFailure","setPagePhase","document",
     `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
-       SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+       SETTINGS_HTTPS_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
      ${shippedSource("settingsCurrent")};${shippedSource("cacheSettings")};${shippedSource("cacheTrakt")};
      const SERVER={cluster_enabled:true};
      ${shippedSource("settingsClusterEnabled")};${shippedSource("settingsManifest")};
@@ -1796,7 +1797,7 @@ test("Settings coalesces shared transports while fencing each generation's commi
   const endpoints={settings:deferred,sys:deferred};
   const harness=new Function("SETTINGS_ENDPOINTS",
     `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
-       SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+       SETTINGS_HTTPS_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
      const cacheSettings=(value)=>{SETTINGS=value;SETTINGS_DATA.settings=value;SETTINGS_LOADED.add("settings");return value;};
      const cacheTrakt=(value)=>{TRAKT=value;SETTINGS_DATA.trakt=value;SETTINGS_LOADED.add("trakt");return value;};
      ${shippedSource("loadSettingsKey")};

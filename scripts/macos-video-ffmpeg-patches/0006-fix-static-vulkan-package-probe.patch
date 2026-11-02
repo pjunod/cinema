@@ -1,0 +1,11 @@
+--- a/configure
++++ b/configure
+@@ -7822,7 +7822,7 @@
+ 
+ # Check for the Vulkan headers
+ if enabled_all vulkan vulkan_static; then
+-    check_pkg_config vulkan "vulkan >= 1.3.277" "vulkan/vulkan.h" "defined VK_VERSION_1_3" ||
++    check_pkg_config vulkan "vulkan >= 1.3.277" "vulkan/vulkan.h" vkGetInstanceProcAddr ||
+         check_lib vulkan "vulkan/vulkan.h" vkGetInstanceProcAddr -lvulkan
+ elif enabled vulkan; then
+     check_pkg_config_header_only vulkan "vulkan >= 1.3.277" "vulkan/vulkan.h" "defined VK_VERSION_1_3" ||

@@ -189,6 +189,64 @@ async fn subtitle_model_install_routes_are_admin_only_and_return_per_member_refu
         plurx_core::store::background_jobs::JobState::Queued
     );
 }
+#[tokio::test]
+async fn translation_model_install_and_test_return_the_setup_operation_contract() {
+    use plurx_core::store::background_jobs::JobPayload;
+    use plurx_core::store::background_jobs_transcription::ModelAction;
+
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let profile = crate::subtitle_translation::profile::selected_profile();
+    let profile_id = profile.id().expect("profile identity");
+    for (route, action) in [
+        ("install", ModelAction::TranslationInstall),
+        ("verify", ModelAction::TranslationVerify),
+    ] {
+        let uri = format!("/api/v1/subtitle-transcription/models/small/{route}");
+        let request = json!({
+            "version":2, "purpose":"translation", "profile_id":profile_id,
+            "request_id":uuid::Uuid::new_v4().to_string(),
+            "intent_expires_at_ms":crate::state::clock_ms()+60000,
+            "node_ids":["test-node","other-node"]
+        });
+        let (status, result) = call(&app, post(&uri, Some(&admin), request.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        // These are the discriminators the shipped setup validates before it
+        // follows the returned durable jobs. A successful enqueue must not
+        // become an "Invalid model operation response" in the browser.
+        assert_eq!(result["version"], 2);
+        assert_eq!(result["purpose"], "translation");
+        assert_eq!(result["model_id"], "small");
+        assert_eq!(result["profile_id"], profile_id);
+        assert_eq!(
+            result["intent_expires_at_ms"],
+            request["intent_expires_at_ms"]
+        );
+        assert!(result["server_now_ms"].is_i64());
+        let rows = result["operations"].as_array().expect("operation rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["outcome"], "accepted");
+        assert_eq!(rows[0]["node_id"], "test-node");
+        assert_eq!(rows[1]["outcome"], "worker_not_current");
+        assert!(rows[1]["job_id"].is_null());
+        let job_id = rows[0]["job_id"].as_str().expect("durable job ID");
+        uuid::Uuid::parse_str(job_id).expect("browser-compatible job ID");
+        let job = state
+            .store
+            .background_job(job_id)
+            .await
+            .expect("read")
+            .expect("job");
+        assert!(matches!(job.supported_payload().expect("payload"),
+            JobPayload::SubtitleModelOperation { action: actual, translation_profile: Some(actual_profile), .. }
+            if actual == action && actual_profile == profile));
+        let (status, replayed) = call(&app, post(&uri, Some(&admin), request)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replayed["purpose"], "translation");
+        assert_eq!(replayed["operations"][0]["job_id"], job_id);
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn advanced_generation_preserves_empty_body_and_selected_v1_requests() {

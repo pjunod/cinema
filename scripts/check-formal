@@ -1,0 +1,1343 @@
+#!/usr/bin/env python3
+"""Run a pinned, mapped formal package and write receipts."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import math
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parent.parent
+BOOTSTRAP = ROOT / "scripts/bootstrap-formal-toolchain"
+CONFIG_ORDER = (
+    "smoke.cfg",
+    "baseline.cfg",
+    "lifecycle.cfg",
+    "control-binding-ignored.cfg",
+    "control-replay-fresh-fence.cfg",
+    "control-renewal-revives-cancel.cfg",
+    "recovery.cfg",
+    "control-retry-stalls.cfg",
+    "witness-three-samples.cfg",
+    "witness-four-submissions.cfg",
+    "witness-cancelled-renewal.cfg",
+    "witness-replay.cfg",
+    "witness-bind-refusal.cfg",
+    "witness-precommit-rollback.cfg",
+    "witness-displacement.cfg",
+    "control-bind-before-work.cfg",
+)
+SMOKE_CONFIGS = (
+    "smoke.cfg",
+    "recovery.cfg",
+    "witness-three-samples.cfg",
+    "witness-four-submissions.cfg",
+    "witness-cancelled-renewal.cfg",
+    "witness-replay.cfg",
+    "witness-bind-refusal.cfg",
+    "witness-precommit-rollback.cfg",
+    "witness-displacement.cfg",
+)
+SMOKE_WALL_BUDGET_SECONDS = 180
+SMOKE_CONFIG_TIMEOUTS = {
+    "smoke.cfg": 60,
+    "recovery.cfg": 30,
+    **{name: 30 for name in SMOKE_CONFIGS if name.startswith("witness-")},
+}
+PURPOSE_VERDICTS = {
+    "safety": "pass",
+    "liveness": "pass",
+    "defect_control": "violation",
+    "reachability_witness": "witness",
+}
+MAX_LOG_BYTES = 64 * 1024 * 1024
+MAX_HEAP_BYTES = 4 * 1024 * 1024 * 1024
+POLL_SECONDS = 0.2
+
+
+# CLI package selection is deliberately closed over reviewed source paths.
+PACKAGES: dict[str, dict[str, Any]] = {
+    "durable-jobs": {
+        "mapping": "verification/durable-jobs/mapping.json",
+        "model_dir": "verification/durable-jobs",
+        "model_file": "verification/durable-jobs/DurableJobs.tla",
+        "toolchain_manifest": "verification/durable-jobs/toolchain.json",
+        "output_dir": "target/verification/durable-jobs",
+        "config_order": CONFIG_ORDER,
+        "smoke_configs": SMOKE_CONFIGS,
+        "smoke_wall_budget_seconds": SMOKE_WALL_BUDGET_SECONDS,
+        "smoke_config_timeouts": SMOKE_CONFIG_TIMEOUTS,
+        "disable_deadlock_check": True,
+    },
+    "operation-progress": {
+        "mapping": "verification/operation-progress/mapping.json",
+        "model_dir": "verification/operation-progress",
+        "model_file": "verification/operation-progress/OperationProgress.tla",
+        "toolchain_manifest": "verification/durable-jobs/toolchain.json",
+        "output_dir": "target/verification/operation-progress",
+        "config_order": (
+            "progress.cfg", "contention.cfg", "control-lock-cycle.cfg",
+            "control-renewal-livelock.cfg", "control-external-stall.cfg",
+            "control-lost-settlement.cfg", "witness-success.cfg",
+            "witness-reconcile.cfg", "witness-cancel-cleanup.cfg",
+        ),
+        "smoke_configs": ("progress.cfg", "witness-success.cfg"),
+        "smoke_wall_budget_seconds": 180,
+        "smoke_config_timeouts": {"progress.cfg": 120, "witness-success.cfg": 120},
+        "config_timeout_cap_seconds": 120,
+        "disable_deadlock_check": False,
+    },
+    "worker-refinement": {
+        "mapping": "verification/worker-refinement/mapping.json",
+        "model_dir": "verification/worker-refinement",
+        "model_file": "verification/worker-refinement/WorkerRefinement.tla",
+        "toolchain_manifest": "verification/durable-jobs/toolchain.json",
+        "output_dir": "target/verification/worker-refinement",
+        "config_order": (
+            "progress.cfg", "contention.cfg", "control-lock-cycle.cfg",
+            "control-renewal-livelock.cfg", "control-external-stall.cfg",
+            "control-lost-settlement.cfg", "control-stale-commit.cfg",
+            "control-no-useful-progress.cfg", "witness-both-complete.cfg", "witness-overlap-reacquire.cfg",
+            "witness-detached-before-release.cfg", "witness-stale-after-release.cfg",
+            "witness-cancel.cfg", "witness-reconcile.cfg",
+        ),
+        "smoke_configs": ("witness-both-complete.cfg",),
+        "smoke_wall_budget_seconds": 300,
+        "smoke_config_timeouts": {"witness-both-complete.cfg": 300},
+        "config_timeout_cap_seconds": 1800,
+        "disable_deadlock_check": False,
+    },
+}
+
+
+def liveness_check_args(package: str, record: dict[str, Any]) -> list[str]:
+    """Defer liveness checking only for worker-refinement positive runs."""
+    return ["-lncheck", "final"] if package == "worker-refinement" and record.get("verdict") == "pass" else []
+
+
+def package_spec(name: str) -> dict[str, Any]:
+    try:
+        return copy.deepcopy(PACKAGES[name])
+    except KeyError as exc:
+        raise RunnerError(f"unknown formal package {name!r}; known packages: {', '.join(PACKAGES)}") from exc
+
+
+# Backward-compatible name used by existing runner contract tests.
+MAPPING_PATH = ROOT / PACKAGES["durable-jobs"]["mapping"]
+
+
+class RunnerError(Exception):
+    """A fail-closed runner or mapping error."""
+
+
+def valid_bound(value: Any) -> bool:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return math.isfinite(value) and value >= 0
+    if not isinstance(value, list) or not value:
+        return False
+    if all(isinstance(item, str) and item for item in value):
+        return len(set(value)) == len(value)
+    valid_numbers = all(
+        isinstance(item, (int, float))
+        and not isinstance(item, bool)
+        and math.isfinite(item)
+        and item >= 0
+        for item in value
+    )
+    return valid_numbers and len(set(value)) == len(value)
+
+
+def validate_feasibility_attempts(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return ["non-qualifying feasibility attempts must be a list"]
+    problems: list[str] = []
+    for index, attempt in enumerate(value):
+        prefix = f"feasibility attempt {index}"
+        if not isinstance(attempt, dict):
+            problems.append(f"{prefix} must be an object")
+            continue
+        if attempt.get("status") != "incomplete" or attempt.get("qualifying") is not False:
+            problems.append(f"{prefix} must remain explicitly incomplete and non-qualifying")
+        if not all(
+            isinstance(attempt.get(field), str)
+            and re.fullmatch(r"[0-9a-f]{64}", attempt[field])
+            for field in ("model_sha256", "config_sha256")
+        ):
+            problems.append(f"{prefix} must identify exact model and archived config hashes")
+        artifact = attempt.get("config_file")
+        if not isinstance(artifact, str) or not artifact.endswith(".cfg") or Path(artifact).is_absolute():
+            problems.append(f"{prefix} must use a portable archived config filename")
+        metrics = attempt.get("metrics")
+        if not isinstance(metrics, dict) or any(
+            isinstance(metrics.get(field), bool)
+            or not isinstance(metrics.get(field), int)
+            or metrics[field] < 0
+            for field in ("generated", "distinct", "queued", "depth", "child_maxrss_bytes")
+        ):
+            problems.append(f"{prefix} must preserve nonnegative observed incomplete metrics")
+        elapsed = attempt.get("wall_seconds")
+        if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or elapsed <= 0:
+            problems.append(f"{prefix} must preserve its positive elapsed time")
+    return problems
+
+
+def parse_config_contract(config_text: str) -> tuple[set[str], list[str]]:
+    """Read declared properties and explicit config-level reductions fail-closed."""
+    properties: set[str] = set()
+    reductions: list[str] = []
+    property_block = False
+    known = {
+        "SPECIFICATION", "INIT", "NEXT", "CONSTANT", "CONSTANTS",
+        "INVARIANT", "INVARIANTS", "PROPERTY", "PROPERTIES",
+        "CONSTRAINT", "CONSTRAINTS", "SYMMETRY", "VIEW",
+        "CHECK_DEADLOCK", "ALIAS", "POSTCONDITION",
+    }
+    identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+    for number, raw in enumerate(config_text.splitlines(), 1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(r"\*"):
+            continue
+        token_match = re.match(r"([A-Z][A-Z_]*)\b", stripped)
+        directive_token = token_match.group(1) if token_match else None
+        indented_directive = raw[0].isspace() and directive_token in known
+        if raw[0].isspace() and not indented_directive:
+            if property_block:
+                if directive_token and directive_token.isupper() and directive_token not in known:
+                    raise RunnerError(f"unknown TLC config directive at line {number}: {directive_token}")
+                if not identifier.fullmatch(stripped):
+                    raise RunnerError(f"malformed property declaration at config line {number}: {stripped}")
+                properties.add(stripped)
+            continue
+        property_block = False
+        match = re.fullmatch(r"([A-Z][A-Z_]*)\s*(.*?)\s*", stripped)
+        if not match:
+            raise RunnerError(f"unknown TLC config directive at line {number}: {stripped}")
+        directive, value = match.groups()
+        if directive not in known:
+            raise RunnerError(f"unknown TLC config directive at line {number}: {directive}")
+        if directive in ("INVARIANT", "PROPERTY"):
+            if not identifier.fullmatch(value):
+                raise RunnerError(f"malformed {directive} declaration at config line {number}")
+            properties.add(value)
+        elif directive in ("INVARIANTS", "PROPERTIES"):
+            if value:
+                raise RunnerError(f"plural {directive} block cannot have an inline value at line {number}")
+            property_block = True
+        elif directive in ("CONSTRAINT", "CONSTRAINTS", "SYMMETRY", "VIEW"):
+            if not identifier.fullmatch(value):
+                raise RunnerError(f"malformed {directive} declaration at config line {number}")
+            reductions.append(f"{directive} {value}")
+    return properties, reductions
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunnerError(f"cannot read {label} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RunnerError(f"{label} must be a JSON object: {path}")
+    return value
+
+
+def repo_file(relative: str, label: str) -> Path:
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise RunnerError(f"unsafe {label} path: {relative}")
+    path = ROOT / candidate
+    if path.is_symlink() or not path.is_file():
+        raise RunnerError(f"missing or unsafe {label}: {path}")
+    return path
+
+
+def next_action_names(model_text: str) -> set[str]:
+    """Return named operator calls in Next that are defined in the model."""
+    definitions = set(re.findall(
+        r"(?m)^([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^=\n]*\))?\s*==", model_text
+    ))
+    next_match = re.search(
+        r"(?ms)^Next\s*==\s*(.*?)(?=^[A-Za-z_][A-Za-z0-9_]*\s*(?:\([^=\n]*\))?\s*==|^====)",
+        model_text,
+    )
+    if next_match is None:
+        raise RunnerError("worker model has no parseable Next operator")
+    calls = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", next_match.group(1)))
+    actions = calls & definitions
+    if not actions:
+        raise RunnerError("worker model Next contains no named action operators")
+    return actions
+
+
+def worker_correspondence_inputs(
+    mapping: dict[str, Any], hashes: dict[str, str]
+) -> list[str]:
+    """Validate the worker model/source/test correspondence gap ledger."""
+    drift: list[str] = []
+    reference = mapping.get("correspondence")
+    if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
+        return ["worker-refinement mapping needs a path and SHA for correspondence.json"]
+    relative = reference.get("path")
+    expected_file_hash = reference.get("sha256")
+    required_path = "verification/worker-refinement/correspondence.json"
+    if relative != required_path:
+        drift.append(f"correspondence path must be the reviewed package file: {required_path}")
+        relative = required_path
+    try:
+        path = repo_file(relative, "worker correspondence")
+        actual_file_hash = sha256(path)
+        hashes[relative] = actual_file_hash
+        if not isinstance(expected_file_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_file_hash):
+            drift.append("correspondence file hash is not reviewed")
+        elif expected_file_hash != actual_file_hash:
+            drift.append("correspondence source drift requires review")
+        correspondence = read_json(path, "worker correspondence")
+    except RunnerError as exc:
+        return [*drift, str(exc)]
+
+    allowed_top = {"schema_version", "status", "model_file", "model_sha256", "tests", "actions"}
+    if set(correspondence) != allowed_top:
+        drift.append("correspondence has missing or unknown schema fields")
+    if correspondence.get("schema_version") != 1 or correspondence.get("status") != "reviewed":
+        drift.append("correspondence schema/status is not reviewed version 1")
+    spec = package_spec("worker-refinement")
+    model_file = correspondence.get("model_file")
+    model_hash = correspondence.get("model_sha256")
+    if model_file != spec["model_file"]:
+        drift.append("correspondence model_file differs from the closed package registry")
+    if model_file != mapping.get("model_file") or model_hash != mapping.get("model_sha256"):
+        drift.append("correspondence model identity differs from the package mapping")
+
+    model_text = ""
+    try:
+        model_path = repo_file(spec["model_file"], "worker model")
+        model_text = model_path.read_text(encoding="utf-8")
+    except (RunnerError, UnicodeError) as exc:
+        drift.append(str(exc))
+    next_actions: set[str] = set()
+    if model_text:
+        try:
+            next_actions = next_action_names(model_text)
+        except RunnerError as exc:
+            drift.append(str(exc))
+
+    tests = correspondence.get("tests")
+    test_ids: set[str] = set()
+    test_names: set[tuple[str, str]] = set()
+    test_file_hashes: dict[str, str] = {}
+    if not isinstance(tests, list) or not tests:
+        drift.append("correspondence test inventory must be a non-empty list")
+        tests = []
+    for row in tests:
+        if not isinstance(row, dict) or set(row) != {"id", "file", "name"}:
+            drift.append("correspondence test rows need exactly id, file, and name")
+            continue
+        identity, file, name = row.get("id"), row.get("file"), row.get("name")
+        if not all(isinstance(value, str) and value for value in (identity, file, name)):
+            drift.append("correspondence test identity, file, and name must be non-empty strings")
+            continue
+        if identity in test_ids:
+            drift.append(f"duplicate conformance test ID: {identity}")
+        test_ids.add(identity)
+        if identity.rsplit("::", 1)[-1] != name or not identity.startswith(file + "::"):
+            drift.append(f"conformance test ID must name its exact file and function: {identity}")
+        if (file, name) in test_names:
+            drift.append(f"duplicate conformance test function: {file}::{name}")
+        test_names.add((file, name))
+        try:
+            test_path = repo_file(file, "conformance test source")
+            test_text = test_path.read_text(encoding="utf-8")
+            actual_hash = sha256(test_path)
+            test_file_hashes[file] = actual_hash
+            hashes[file] = actual_hash
+            if not re.search(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(name) + r"\s*\(", test_text):
+                drift.append(f"conformance test function is absent: {identity}")
+        except (RunnerError, UnicodeError) as exc:
+            drift.append(str(exc))
+
+    actions = correspondence.get("actions")
+    if not isinstance(actions, list) or not actions:
+        drift.append("correspondence action inventory must be a non-empty list")
+        actions = []
+    seen: set[tuple[str, str]] = set()
+    source_file_hashes: dict[str, str] = {}
+    seen_next: set[str] = set()
+    seen_boundaries: set[str] = set()
+    allowed_kinds = {"action", "boundary"}
+    required_boundaries = {
+        "select.queue_loss", "select.domain_loss", "select.admission_pressure", "select.work_returned",
+        "lock.acquire.queue_token_mutex", "lock.release.queue_token_mutex",
+        "lock.acquire.domain_fence", "lock.release.domain_fence",
+        "heartbeat.queue.deadline", "heartbeat.domain.deadline",
+        "heartbeat.queue.stop_join", "heartbeat.domain.stop_join",
+        "release.attempt", "release.retry", "release.ambiguous_fallback",
+        "retire.claim", "drop.admission", "sql.complete_library_work.trigger",
+    }
+    allowed_workers = {"w1", "w2", "both", "shared"}
+    allowed_trust = {
+        "code-fact", "PRM-fs", "PRM-admission", "PRM-authority", "PRM-backend",
+        "PRM-runtime", "PRM-time", "abstraction",
+    }
+    for row in actions:
+        fields = {"kind", "action", "worker", "source", "held_across_await", "completed_by", "trust", "schedules"}
+        if not isinstance(row, dict) or not fields <= set(row) or set(row) - (fields | {"gap"}):
+            drift.append("correspondence action rows have missing or unknown fields")
+            continue
+        kind, action, worker = row.get("kind"), row.get("action"), row.get("worker")
+        if not isinstance(kind, str) or kind not in allowed_kinds or not isinstance(action, str) or not action:
+            drift.append("correspondence action needs a valid kind and non-empty action name")
+            continue
+        key = (kind, action)
+        if key in seen:
+            drift.append(f"duplicate correspondence row: {kind} {action}")
+        seen.add(key)
+        if kind == "action":
+            if action not in next_actions:
+                drift.append(f"correspondence names an unknown Next action: {action}")
+            seen_next.add(action)
+        else:
+            if action not in required_boundaries:
+                drift.append(f"unknown worker correspondence boundary: {action}")
+            seen_boundaries.add(action)
+        if not isinstance(worker, str) or worker not in allowed_workers:
+            drift.append(f"invalid correspondence worker for {action}")
+        source = row.get("source")
+        if not isinstance(source, dict) or set(source) != {"file", "symbol", "anchor", "sha256"}:
+            drift.append(f"source correspondence needs file, symbol, anchor, and sha256: {action}")
+        else:
+            file, symbol, anchor, expected_hash = (source.get(k) for k in ("file", "symbol", "anchor", "sha256"))
+            if not all(isinstance(value, str) and value for value in (file, symbol, anchor)):
+                drift.append(f"source correspondence has an empty identity or anchor: {action}")
+            else:
+                try:
+                    source_path = repo_file(file, "worker source")
+                    source_text = source_path.read_text(encoding="utf-8")
+                    actual_hash = sha256(source_path)
+                    hashes[file] = actual_hash
+                    source_file_hashes[file] = actual_hash
+                    if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+                        drift.append(f"worker source hash is not reviewed: {file}")
+                    elif expected_hash != actual_hash:
+                        drift.append(f"worker source drift requires review: {file}")
+                    if source_text.count(anchor) != 1:
+                        drift.append(f"worker source anchor must occur exactly once: {action}")
+                except (RunnerError, UnicodeError) as exc:
+                    drift.append(str(exc))
+        held = row.get("held_across_await")
+        if not isinstance(held, list):
+            drift.append(f"held_across_await must be a lock/task list: {action}")
+        else:
+            held_seen: set[tuple[str, str]] = set()
+            for item in held:
+                if not isinstance(item, dict) or set(item) != {"lock", "holder_task"}:
+                    drift.append(f"held lock rows need lock and holder_task: {action}")
+                    continue
+                pair = (item.get("lock"), item.get("holder_task"))
+                if not all(isinstance(value, str) and value for value in pair):
+                    drift.append(f"held lock rows need non-empty names: {action}")
+                else:
+                    if pair in held_seen:
+                        drift.append(f"duplicate held lock/task pair: {action}")
+                    held_seen.add(pair)
+        if not isinstance(row.get("completed_by"), str) or not row["completed_by"]:
+            drift.append(f"correspondence completed_by is required: {action}")
+        trust = row.get("trust")
+        if not isinstance(trust, str) or trust not in allowed_trust:
+            drift.append(f"invalid correspondence trust class: {action}")
+        schedules = row.get("schedules")
+        if schedules == "unchecked":
+            if not isinstance(row.get("gap"), str) or not row["gap"].strip():
+                drift.append(f"unchecked correspondence needs an explicit gap: {action}")
+        elif isinstance(schedules, list) and schedules:
+            if any(not isinstance(item, str) or item not in test_ids for item in schedules):
+                drift.append(f"correspondence schedule references an unknown test ID: {action}")
+            valid_schedule_ids = [item for item in schedules if isinstance(item, str)]
+            if len(set(valid_schedule_ids)) != len(schedules):
+                drift.append(f"duplicate or malformed conformance schedule reference: {action}")
+            if trust == "abstraction" and (not isinstance(row.get("gap"), str) or not row["gap"].strip()):
+                drift.append(f"abstraction correspondence needs an explicit gap: {action}")
+        else:
+            drift.append(f"schedules must be test IDs or the literal unchecked: {action}")
+    if seen_next != next_actions:
+        missing = sorted(next_actions - seen_next)
+        extra = sorted(seen_next - next_actions)
+        drift.append(f"Next action coverage differs (missing={missing}, extra={extra})")
+    missing_boundaries = sorted(required_boundaries - seen_boundaries)
+    if missing_boundaries:
+        drift.append(f"correspondence lacks required Rust boundary rows: {missing_boundaries}")
+    referenced_tests = {
+        item
+        for row in actions
+        if isinstance(row, dict) and isinstance(row.get("schedules"), list)
+        for item in row["schedules"]
+        if isinstance(item, str)
+    }
+    if test_ids - referenced_tests:
+        drift.append(f"conformance tests are not referenced by any action: {sorted(test_ids - referenced_tests)}")
+    unpinned_test_files = sorted(set(test_file_hashes) - set(source_file_hashes))
+    if unpinned_test_files:
+        drift.append(f"conformance test files lack reviewed source hash pins: {unpinned_test_files}")
+    if not test_file_hashes:
+        drift.append("correspondence contains no hash-bound test source")
+    try:
+        manifest = repo_file(spec["toolchain_manifest"], "formal toolchain manifest")
+        hashes[spec["toolchain_manifest"]] = sha256(manifest)
+        bootstrap = repo_file("scripts/bootstrap-formal-toolchain", "formal toolchain bootstrap")
+        hashes["scripts/bootstrap-formal-toolchain"] = sha256(bootstrap)
+    except RunnerError as exc:
+        drift.append(str(exc))
+    return drift
+
+
+def mapping_inputs(mapping: dict[str, Any], package: str = "durable-jobs") -> tuple[list[str], dict[str, str]]:
+    """Return drift diagnostics and the exact reviewed hashes used by the check."""
+    spec = package_spec(package)
+    config_order = spec["config_order"]
+    config_dir = spec["model_dir"]
+    drift: list[str] = []
+    hashes: dict[str, str] = {}
+    drift.extend(validate_feasibility_attempts(mapping.get("feasibility_attempts", [])))
+    model = mapping.get("model_file")
+    if not isinstance(model, str):
+        drift.append("mapping has no model_file")
+    else:
+        if model != spec["model_file"]:
+            drift.append(f"mapping model_file must be the reviewed package model: {spec['model_file']}")
+        try:
+            path = repo_file(model, "model")
+            actual = sha256(path)
+            hashes[model] = actual
+            expected = mapping.get("model_sha256")
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                drift.append(f"model hash is not reviewed: {model}")
+            elif expected != actual:
+                drift.append(f"model source drift requires review: {model}")
+        except RunnerError as exc:
+            drift.append(str(exc))
+
+    configs = mapping.get("configs")
+    if not isinstance(configs, dict) or set(configs) != set(config_order):
+        drift.append(f"mapping config set differs from the reviewed {len(config_order)}-config {package} registry")
+        configs = configs if isinstance(configs, dict) else {}
+    for name in config_order:
+        record = configs.get(name)
+        if not isinstance(record, dict):
+            drift.append(f"mapping lacks config record: {name}")
+            continue
+        try:
+            path = repo_file(f"{config_dir}/{name}", "TLC config")
+            config_text = path.read_text(encoding="utf-8")
+            actual = sha256(path)
+            hashes[f"{config_dir}/{name}"] = actual
+            expected = record.get("sha256")
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                drift.append(f"config hash is not reviewed: {name}")
+            elif expected != actual:
+                drift.append(f"config source drift requires review: {name}")
+            verdict = record.get("verdict")
+            purpose = record.get("purpose")
+            error = record.get("expected_error")
+            if verdict not in ("pass", "violation", "witness"):
+                drift.append(f"invalid expected verdict for {name}")
+            if purpose not in PURPOSE_VERDICTS:
+                drift.append(f"configuration purpose is not reviewed: {name}")
+            elif PURPOSE_VERDICTS[purpose] != verdict:
+                drift.append(f"purpose and expected outcome disagree for {name}")
+            requires_trace = verdict in ("violation", "witness")
+            if requires_trace != (isinstance(error, str) and bool(error)):
+                drift.append(f"expected property does not agree with outcome for {name}")
+            minimum_trace_states = record.get("minimum_trace_states")
+            if requires_trace:
+                if (
+                    not isinstance(minimum_trace_states, int)
+                    or isinstance(minimum_trace_states, bool)
+                    or minimum_trace_states < 2
+                ):
+                    drift.append(f"counterexample/witness must require at least two trace states: {name}")
+            elif minimum_trace_states is not None:
+                drift.append(f"positive exhaustive configuration cannot set a trace minimum: {name}")
+            expected_exit = record.get("expected_exit")
+            if verdict == "pass":
+                if isinstance(expected_exit, bool) or expected_exit != 0:
+                    drift.append(f"positive configuration must pin successful exit 0: {name}")
+                if record.get("expected_error_match") is not None:
+                    drift.append(f"positive configuration cannot declare a violation error line: {name}")
+            elif verdict in ("violation", "witness"):
+                if not isinstance(expected_exit, int) or isinstance(expected_exit, bool) or not 1 <= expected_exit <= 255:
+                    drift.append(f"counterexample exit code is not reviewed: {name}")
+                if not isinstance(record.get("expected_error_match"), dict):
+                    drift.append(f"exact counterexample error mapping is pending observation: {name}")
+            if (
+                not isinstance(record.get("timeout_seconds"), int)
+                or isinstance(record.get("timeout_seconds"), bool)
+                or record["timeout_seconds"] < 1
+            ):
+                drift.append(f"invalid timeout for {name}")
+            cap = spec.get("config_timeout_cap_seconds")
+            if cap is not None and isinstance(record.get("timeout_seconds"), int) and record["timeout_seconds"] > cap:
+                drift.append(f"configuration timeout exceeds reviewed {cap}-second cap: {name}")
+            analysis = record.get("analysis")
+            if not isinstance(analysis, dict) or analysis.get("status") != "reviewed":
+                drift.append(f"configuration analysis metadata is pending review: {name}")
+            else:
+                bounds = analysis.get("bounds")
+                if not isinstance(bounds, dict) or not bounds:
+                    drift.append(f"configuration bounds must be a non-empty reviewed table: {name}")
+                else:
+                    for key, value in bounds.items():
+                        if not isinstance(key, str) or not key or not valid_bound(value):
+                            drift.append(f"invalid nonnegative numeric/model-value bound in {name}: {key}")
+                properties = analysis.get("properties")
+                if (
+                    not isinstance(properties, list)
+                    or not properties
+                    or any(not isinstance(item, str) or not item for item in properties)
+                    or len(set(properties)) != len(properties)
+                ):
+                    drift.append(f"configuration properties must be a non-empty unique name list: {name}")
+                else:
+                    declared, _ = parse_config_contract(config_text)
+                    if set(properties) != declared:
+                        drift.append(f"reviewed properties differ from config declarations: {name}")
+                    if package == "worker-refinement" and record.get("verdict") in ("violation", "witness"):
+                        if len(properties) != 1:
+                            drift.append(f"worker-refinement controls and witnesses must declare one intended property: {name}")
+                        error_match = record.get("expected_error_match")
+                        expected_error = record.get("expected_error")
+                        if isinstance(error_match, dict):
+                            line = error_match.get("line")
+                            attribution = error_match.get("attribution")
+                            if line == "Temporal properties were violated.":
+                                if attribution != "sole_property" or record.get("expected_exit") != 13:
+                                    drift.append(f"temporal worker control must pin sole-property exit 13: {name}")
+                            elif isinstance(expected_error, str) and line == f"Invariant {expected_error} is violated.":
+                                if attribution != "named_property" or record.get("expected_exit") != 12:
+                                    drift.append(f"worker invariant control/witness must pin its named property and exit 12: {name}")
+                            else:
+                                drift.append(f"worker control/witness has an unsupported exact error marker: {name}")
+                error_match = record.get("expected_error_match")
+                if record.get("verdict") in ("violation", "witness"):
+                    if isinstance(error_match, dict):
+                        line = error_match.get("line")
+                        attribution = error_match.get("attribution")
+                        allowed = error_match.get("allowed_error_lines")
+                        if not isinstance(line, str) or not line:
+                            drift.append(f"expected TLC error line must be exact and non-empty: {name}")
+                        if attribution not in ("named_property", "sole_property"):
+                            drift.append(f"expected TLC error attribution is not reviewed: {name}")
+                        if not isinstance(allowed, list) or any(not isinstance(item, str) or not item for item in allowed):
+                            drift.append(f"allowed TLC trace explanation lines must be listed: {name}")
+                        elif len(set(allowed)) != len(allowed) or line in allowed:
+                            drift.append(f"allowed TLC trace explanation lines are ambiguous: {name}")
+                        if isinstance(properties, list) and error not in properties:
+                            drift.append(f"expected control property is not declared by config: {name}")
+                        if isinstance(line, str) and isinstance(error, str):
+                            if attribution == "named_property" and error not in line:
+                                drift.append(f"named TLC error line does not identify expected property: {name}")
+                            if attribution == "sole_property" and properties != [error]:
+                                drift.append(f"generic TLC error needs exactly the configured property: {name}")
+                for field in ("reductions", "assumptions"):
+                    value = analysis.get(field)
+                    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+                        drift.append(f"{field} metadata must be a string list (possibly empty): {name}")
+                if isinstance(analysis.get("reductions"), list):
+                    try:
+                        _, declared_reductions = parse_config_contract(config_text)
+                        if analysis["reductions"] != declared_reductions:
+                            drift.append(f"reviewed reductions differ from config declarations: {name}")
+                    except RunnerError as exc:
+                        drift.append(f"invalid config contract for {name}: {exc}")
+        except RunnerError as exc:
+            drift.append(str(exc))
+
+    if package == "worker-refinement":
+        drift.extend(worker_correspondence_inputs(mapping, hashes))
+        return drift, hashes
+    source_mapping = mapping.get("source_mapping")
+    if not isinstance(source_mapping, dict) or source_mapping.get("status") != "reviewed":
+        drift.append("authority source mapping is pending review")
+        return drift, hashes
+    tables = source_mapping.get("tables")
+    if not isinstance(tables, list) or not tables:
+        drift.append("reviewed authority mapping has no table anchors")
+        return drift, hashes
+    seen_tables: set[str] = set()
+    for row in tables:
+        if not isinstance(row, dict):
+            drift.append("authority mapping contains a non-object table row")
+            continue
+        table = row.get("table")
+        source = row.get("source")
+        anchor = row.get("anchor")
+        expected = row.get("sha256")
+        if not all(isinstance(item, str) and item for item in (table, source, anchor)):
+            drift.append("authority mapping row needs table, source, and exact anchor")
+            continue
+        if table in seen_tables:
+            drift.append(f"duplicate authority table mapping: {table}")
+        seen_tables.add(table)
+        try:
+            source_path = repo_file(source, "authority source")
+            text = source_path.read_text(encoding="utf-8")
+            actual = sha256(source_path)
+            hashes[source] = actual
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                drift.append(f"authority source hash is not reviewed: {source}")
+            elif expected != actual:
+                drift.append(f"authority source drift requires review: {source}")
+            if text.count(anchor) != 1:
+                drift.append(f"authority anchor must occur exactly once: {table}")
+        except (RunnerError, UnicodeError) as exc:
+            drift.append(str(exc))
+    return drift, hashes
+
+
+def changed_paths(base: str | None) -> list[str]:
+    if base is None:
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{base}...HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RunnerError(f"cannot inspect changed paths against {base}: {exc}") from exc
+    if result.returncode:
+        raise RunnerError(f"cannot inspect changed paths against {base}: {result.stderr[-500:]}")
+    return sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
+
+
+def _git_output(*arguments: str, nul: bool = False) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["git", *arguments],
+            cwd=ROOT,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RunnerError(f"cannot identify source tree: {exc}") from exc
+    if result.returncode:
+        detail = result.stderr.decode(errors="replace")[-500:]
+        raise RunnerError(f"cannot identify source tree: {detail}")
+    raw = result.stdout
+    if nul:
+        return [entry.decode("utf-8", errors="replace") for entry in raw.split(b"\0") if entry]
+    return [line for line in raw.decode("utf-8", errors="replace").splitlines() if line]
+
+
+def source_git_identity(mapping: dict[str, Any], package: str = "durable-jobs") -> dict[str, Any]:
+    spec = package_spec(package)
+    commit = _git_output("rev-parse", "--verify", "HEAD")[0]
+    tree = _git_output("rev-parse", "--verify", "HEAD^{tree}")[0]
+    tracked_changes = set(_git_output("diff", "--name-only", "-z", "HEAD", "--", nul=True))
+    untracked = set(_git_output("ls-files", "--others", "--exclude-standard", "-z", nul=True))
+    dirty_paths = sorted(tracked_changes | untracked)
+    mapping_path = spec["mapping"]
+    model_dir = spec["model_dir"]
+    governed = {mapping_path, "verification/durable-jobs/toolchain.json", "scripts/bootstrap-formal-toolchain", "scripts/check-formal"}
+    if package == "durable-jobs":
+        governed.update({
+            "tests/operations/test_formal_runner.py",
+            "tests/operations/test_formal_ci.py",
+            "tests/operations/test_formal_toolchain.py",
+            "validation/points.toml",
+        })
+    model = mapping.get("model_file")
+    if isinstance(model, str):
+        governed.add(model)
+    configs = mapping.get("configs")
+    if isinstance(configs, dict):
+        governed.update(f"{model_dir}/{name}" for name in configs)
+    sources = mapping.get("source_mapping")
+    if isinstance(sources, dict) and isinstance(sources.get("tables"), list):
+        governed.update(
+            row["source"] for row in sources["tables"]
+            if isinstance(row, dict) and isinstance(row.get("source"), str)
+        )
+    package_dir = ROOT / model_dir
+    if package == "durable-jobs" and package_dir.is_dir():
+        governed.update(
+            path.relative_to(ROOT).as_posix()
+            for path in package_dir.rglob("*")
+            if path.is_file() or path.is_symlink()
+        )
+    governed_dirty = sorted(governed.intersection(dirty_paths))
+    dirty_hashes: dict[str, str | None] = {}
+    for relative in governed_dirty:
+        path = ROOT / relative
+        dirty_hashes[relative] = sha256(path) if path.is_file() and not path.is_symlink() else None
+    return {
+        "commit": commit,
+        "tree": tree,
+        "dirty": bool(dirty_paths),
+        "dirty_paths": dirty_paths,
+        "untracked_paths": sorted(untracked),
+        "governed_dirty_paths": governed_dirty,
+        "governed_dirty_sha256": dirty_hashes,
+    }
+
+
+def mapping_check(base: str | None, package: str = "durable-jobs") -> int:
+    spec = package_spec(package)
+    mapping_path = repo_file(spec["mapping"], "runner mapping")
+    mapping = read_json(mapping_path, "runner mapping")
+    drift, hashes = mapping_inputs(mapping, package)
+    changed = changed_paths(base)
+    config_map = mapping.get("configs")
+    config_names = config_map.keys() if isinstance(config_map, dict) else ()
+    governed = {
+        value
+        for value in (
+            mapping.get("model_file"),
+            spec["mapping"],
+            spec["toolchain_manifest"],
+            "scripts/bootstrap-formal-toolchain",
+            "scripts/check-formal",
+            *(f"{spec['model_dir']}/{name}" for name in config_names),
+        )
+        if isinstance(value, str)
+    }
+    if package == "durable-jobs":
+        governed.add("validation/points.toml")
+    source_mapping = mapping.get("source_mapping")
+    if isinstance(source_mapping, dict) and isinstance(source_mapping.get("tables"), list):
+        governed.update(
+            row["source"]
+            for row in source_mapping["tables"]
+            if isinstance(row, dict) and isinstance(row.get("source"), str)
+        )
+    if package == "worker-refinement":
+        reference = mapping.get("correspondence")
+        if isinstance(reference, dict) and isinstance(reference.get("path"), str):
+            governed.add(reference["path"])
+            try:
+                correspondence = read_json(repo_file(reference["path"], "worker correspondence"), "worker correspondence")
+            except RunnerError:
+                correspondence = {}
+            for row in correspondence.get("actions", []) if isinstance(correspondence.get("actions"), list) else []:
+                if (
+                    isinstance(row, dict)
+                    and isinstance(row.get("source"), dict)
+                    and isinstance(row["source"].get("file"), str)
+                ):
+                    governed.add(row["source"]["file"])
+            for row in correspondence.get("tests", []) if isinstance(correspondence.get("tests"), list) else []:
+                if isinstance(row, dict) and isinstance(row.get("file"), str):
+                    governed.add(row["file"])
+    affected = base is None or bool(governed.intersection(changed))
+    result = {
+        "schema_version": 1,
+        "package": package,
+        "affected": affected,
+        "changed_paths": changed,
+        "source_drift": drift,
+        "input_sha256": hashes,
+        "mapping_sha256": sha256(mapping_path),
+    }
+    print(json.dumps(result, sort_keys=True))
+    return 0 if not drift else 1
+
+
+def durable_output(path: Path) -> Path:
+    output = path.expanduser().resolve()
+    forbidden = [Path("/tmp").resolve(), Path("/var/tmp").resolve()]
+    tmpdir = os.environ.get("TMPDIR")
+    if tmpdir:
+        forbidden.append(Path(tmpdir).expanduser().resolve())
+    if any(output == item or item in output.parents for item in forbidden):
+        raise RunnerError(f"output directory must be durable: {output}")
+    if path.is_symlink():
+        raise RunnerError(f"output directory must not be a symlink: {path}")
+    return output
+
+
+def resolve_toolchain(cache: Path, package: str = "durable-jobs") -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            [sys.executable, str(BOOTSTRAP), "resolve", "--cache-dir", str(cache), "--manifest", str(ROOT / package_spec(package)["toolchain_manifest"])],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RunnerError(f"pinned toolchain resolve failed: {exc}") from exc
+    if result.returncode:
+        raise RunnerError(f"pinned toolchain resolve failed: {result.stderr[-1200:]}")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RunnerError("toolchain resolver returned invalid JSON") from exc
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise RunnerError("toolchain resolver returned unsupported data")
+    manifest = repo_file(package_spec(package)["toolchain_manifest"], "formal toolchain manifest")
+    if data.get("manifest_sha256") != sha256(manifest):
+        raise RunnerError("resolved toolchain manifest hash differs from repository pin")
+    for key in ("java", "tlc"):
+        record = data.get(key)
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            raise RunnerError(f"toolchain resolver omitted {key} identity")
+        path = Path(record["path"])
+        if path.is_symlink() or not path.is_file() or sha256(path) != record.get("sha256"):
+            raise RunnerError(f"resolved {key} executable/artifact changed after verification")
+    return data
+
+
+def _rss_bytes(pid: int) -> int | None:
+    try:
+        if platform.system() == "Linux":
+            for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+        result = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        value = result.stdout.strip()
+        if result.returncode == 0 and value.isdigit():
+            return int(value) * 1024
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return None
+
+
+def execute(argv: list[str], cwd: Path, log_path: Path, timeout: float) -> dict[str, Any]:
+    start = time.monotonic()
+    peak_rss: int | None = None
+    timed_out = False
+    with log_path.open("xb") as log:
+        try:
+            process = subprocess.Popen(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT)
+        except OSError as exc:
+            return {
+                "returncode": None,
+                "elapsed_seconds": round(time.monotonic() - start, 3),
+                "peak_rss_bytes": None,
+                "timed_out": False,
+                "output": "",
+                "log_problem": f"TLC process launch failed: {exc}",
+            }
+        while process.poll() is None:
+            sample = _rss_bytes(process.pid)
+            if sample is not None:
+                peak_rss = max(peak_rss or 0, sample)
+            if log_path.stat().st_size > MAX_LOG_BYTES:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                break
+            if time.monotonic() - start > timeout:
+                timed_out = True
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                break
+            time.sleep(min(POLL_SECONDS, max(0.0, timeout - (time.monotonic() - start))))
+        try:
+            returncode = process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            returncode = process.wait(timeout=10)
+    elapsed = time.monotonic() - start
+    size = log_path.stat().st_size if log_path.exists() else 0
+    if size > MAX_LOG_BYTES:
+        output = ""
+        log_problem = f"TLC log exceeds {MAX_LOG_BYTES} byte limit"
+    else:
+        output = log_path.read_text(encoding="utf-8", errors="replace")
+        log_problem = None
+    return {
+        "returncode": returncode,
+        "elapsed_seconds": round(elapsed, 3),
+        "peak_rss_bytes": peak_rss,
+        "timed_out": timed_out,
+        "output": output,
+        "log_problem": log_problem,
+    }
+
+
+def cleanup_metadir(out_dir: Path, metadir: Path) -> dict[str, Any]:
+    """Remove only the fresh, direct per-config metadata directory after TLC exits."""
+    expected = out_dir / "metadir"
+    if metadir != expected or out_dir.is_symlink() or metadir.is_symlink() or not metadir.is_dir():
+        raise RunnerError(f"refusing unsafe TLC metadata cleanup path: {metadir}")
+    try:
+        resolved_out = out_dir.resolve(strict=True)
+        resolved_meta = metadir.resolve(strict=True)
+    except OSError as exc:
+        raise RunnerError(f"cannot validate TLC metadata cleanup path: {exc}") from exc
+    if resolved_meta.parent != resolved_out or resolved_meta.name != "metadir":
+        raise RunnerError(f"TLC metadata directory escaped its config output directory: {metadir}")
+    shutil.rmtree(metadir)
+    return {"path": str(metadir), "removed": True}
+
+
+STATE_RE = re.compile(
+    r"(?P<generated>\d+) states? generated,\s+(?P<distinct>\d+) distinct states? found,\s+(?P<queued>\d+) states? left on queue",
+    re.IGNORECASE,
+)
+DEPTH_RE = re.compile(r"depth of the complete state graph search is\s+(\d+)", re.IGNORECASE)
+COMPLETE_RE = re.compile(r"Model checking completed\. No error has been found\.", re.IGNORECASE)
+TEMPORAL_FINISHED_RE = re.compile(r"^Finished checking temporal properties in\s+\S+", re.MULTILINE)
+TEMPORAL_TRACE_END_RE = re.compile(
+    r"^(?:State\s+\d+:\s+Stuttering|Back to state\s+\d+(?:: "
+    r"<[A-Za-z_][A-Za-z0-9_!']* line [1-9]\d*, col [1-9]\d* to "
+    r"line [1-9]\d*, col [1-9]\d* of module [A-Za-z_][A-Za-z0-9_]*>)?)[ \t]*$",
+    re.MULTILINE,
+)
+ERROR_RE = re.compile(r"^Error:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
+FATAL_RE = re.compile(
+    r"(?:Parsing Error|Semantic Error|OutOfMemoryError|Exception in thread|TLC encountered an error|No such file|cannot find module)",
+    re.IGNORECASE,
+)
+
+
+def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: bool, log_problem: str | None) -> dict[str, Any]:
+    state_match = STATE_RE.search(output)
+    depth_match = DEPTH_RE.search(output)
+    errors = ERROR_RE.findall(output)
+    states = (
+        {key: int(value) for key, value in state_match.groupdict().items()}
+        if state_match
+        else None
+    )
+    depth = int(depth_match.group(1)) if depth_match else None
+    trace_states = len(re.findall(r"^State\s+\d+:", output, re.MULTILINE))
+    reason = None
+    actual = "incomplete"
+    complete = False
+    exploration_complete = False
+    counterexample_found = False
+    completion_kind = "incomplete"
+    if timed_out:
+        reason = "TLC timed out"
+    elif log_problem:
+        reason = log_problem
+    elif FATAL_RE.search(output):
+        reason = "TLC reported a parse, runtime, or fatal error"
+    elif states is None:
+        reason = "TLC output lacks terminal state counts"
+    elif expected["verdict"] == "pass":
+        if depth is None:
+            reason = "positive TLC exploration lacks graph depth"
+        elif returncode != 0:
+            reason = f"expected successful TLC exit 0, got {returncode}"
+        elif errors:
+            reason = "unexpected TLC error marker in positive configuration"
+        elif not COMPLETE_RE.search(output):
+            reason = "TLC completion marker is missing"
+        elif states["queued"] != 0:
+            reason = f"positive exploration ended with {states['queued']} states still queued"
+        else:
+            actual = "pass"
+            complete = True
+            exploration_complete = True
+            completion_kind = "state_space_exhausted"
+    else:
+        wanted = expected["expected_error"]
+        expected_exit = expected.get("expected_exit")
+        error_match = expected.get("expected_error_match")
+        temporal_violation = (
+            isinstance(error_match, dict)
+            and error_match.get("attribution") == "sole_property"
+            and error_match.get("line") == "Temporal properties were violated."
+        )
+        if not isinstance(expected_exit, int) or isinstance(expected_exit, bool):
+            reason = "expected TLC violation exit code has not been reviewed"
+        elif not isinstance(error_match, dict):
+            reason = "exact TLC violation output mapping has not been reviewed"
+        elif depth is None and not temporal_violation:
+            reason = "TLC output lacks graph depth for this non-temporal counterexample"
+        elif returncode != expected_exit:
+            reason = f"expected reviewed TLC violation exit {expected_exit}, got {returncode}"
+        elif not errors or errors[0] != error_match.get("line"):
+            reason = f"expected exact TLC error line was not first: {error_match.get('line')}"
+        elif any(line not in error_match.get("allowed_error_lines", []) for line in errors[1:]):
+            reason = "TLC emitted an unreviewed additional error line"
+        elif error_match.get("attribution") == "named_property" and wanted not in errors[0]:
+            reason = f"TLC error line does not identify expected property {wanted}"
+        elif error_match.get("attribution") == "sole_property" and expected.get("analysis", {}).get("properties") != [wanted]:
+            reason = f"generic TLC error cannot be attributed to exactly property {wanted}"
+        elif temporal_violation and not TEMPORAL_FINISHED_RE.search(output):
+            reason = "temporal counterexample lacks the TLC temporal-check completion marker"
+        elif temporal_violation and states["queued"] != 0:
+            reason = "temporal counterexample ended with states still queued"
+        elif temporal_violation and not TEMPORAL_TRACE_END_RE.search(output):
+            reason = "temporal counterexample lacks a stuttering or back-edge trace terminator"
+        elif trace_states < expected.get("minimum_trace_states", 2):
+            reason = f"expected trace has {trace_states} states; requires {expected.get('minimum_trace_states', 2)}"
+        else:
+            actual = expected["verdict"]
+            complete = True
+            counterexample_found = actual == "violation"
+            completion_kind = (
+                "normal_reachability_witness_detected" if actual == "witness"
+                else "temporal_counterexample_detected" if temporal_violation
+                else "expected_defect_counterexample_detected"
+            )
+    return {
+        "actual_verdict": actual,
+        "complete": complete,
+        "exploration_complete": exploration_complete,
+        "counterexample_found": counterexample_found,
+        "completion_kind": completion_kind,
+        "reason": reason,
+        "exit_code": returncode,
+        "state_counts": states,
+        "depth": depth,
+        "trace_states": trace_states,
+    }
+
+
+def write_json(path: Path, value: dict[str, Any]) -> None:
+    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+def select_configs(mode: str, config: str | None, package: str = "durable-jobs") -> list[str]:
+    spec = package_spec(package)
+    config_order = spec["config_order"]
+    if config is not None:
+        if config not in config_order:
+            raise RunnerError(f"unknown config {config!r}; known configs: {', '.join(config_order)}")
+        return [config]
+    return list(spec["smoke_configs"]) if mode == "smoke" else list(config_order)
+
+
+def config_timeout(mode: str, name: str, configured: int, remaining: float | None, package: str = "durable-jobs") -> float:
+    profile = package_spec(package)
+    profile_limit = profile["smoke_config_timeouts"].get(name, configured) if mode == "smoke" else configured
+    profile_limit = min(configured, profile_limit, profile.get("config_timeout_cap_seconds", configured))
+    return float(profile_limit if remaining is None else min(profile_limit, max(0.01, remaining)))
+
+
+def run(args: argparse.Namespace) -> int:
+    package = args.package
+    spec = package_spec(package)
+    mapping_path = repo_file(spec["mapping"], "runner mapping")
+    mapping = read_json(mapping_path, "runner mapping")
+    drift, input_hashes = mapping_inputs(mapping, package)
+    if drift:
+        raise RunnerError("mapping check failed: " + "; ".join(drift))
+    selected = select_configs(args.mode, args.config, package)
+
+    output_root = durable_output(args.output_dir or ROOT / spec["output_dir"])
+    output_root.mkdir(parents=True, exist_ok=True)
+    model_file = mapping["model_file"]
+    model_path = repo_file(model_file, "model")
+    source_git = source_git_identity(mapping, package)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    run_dir = output_root / run_id
+    run_dir.mkdir(mode=0o700)
+    runner_hash = sha256(Path(__file__))
+    aggregate: dict[str, Any] = {
+        "schema_version": 1,
+        "package": package,
+        "run_id": run_id,
+        "mode": args.mode,
+        "status": "in_progress",
+        "mapping_sha256": sha256(mapping_path),
+        "model_sha256": input_hashes[model_file],
+        "source_git": source_git,
+        "input_sha256": input_hashes,
+        "resource_policy": {
+            "heap_bytes": MAX_HEAP_BYTES,
+            "heap_arg": "-Xmx4g",
+            "heap_scope": "Java heap; process RSS may exceed this bound",
+            "wall_timeout_seconds": {
+                name: mapping["configs"][name]["timeout_seconds"] for name in selected
+            },
+        },
+        "toolchain": None,
+        "runner_sha256": runner_hash,
+        "configs": [],
+    }
+    receipt_path = run_dir / "receipt.json"
+    write_json(receipt_path, aggregate)
+    full_qualification = args.mode == "full" and args.config is None
+    if full_qualification and source_git["governed_dirty_paths"]:
+        aggregate["status"] = "failed"
+        aggregate["failure"] = "full qualification requires clean governed inputs"
+        write_json(receipt_path, aggregate)
+        print(json.dumps({"receipt": str(receipt_path), "status": "failed", "reason": aggregate["failure"]}, sort_keys=True))
+        return 1
+    cache = args.cache_dir.expanduser().resolve()
+    try:
+        toolchain = resolve_toolchain(cache, args.package)
+    except RunnerError as exc:
+        aggregate["status"] = "failed"
+        aggregate["failure"] = str(exc)
+        write_json(receipt_path, aggregate)
+        print(json.dumps({"receipt": str(receipt_path), "status": "failed", "reason": str(exc)}, sort_keys=True))
+        return 1
+    aggregate["toolchain"] = {
+        "manifest_sha256": toolchain["manifest_sha256"],
+        "java": toolchain["java"],
+        "tlc": toolchain["tlc"],
+    }
+    write_json(receipt_path, aggregate)
+    model_started = time.monotonic()
+    profile_deadline = (
+        model_started + spec["smoke_wall_budget_seconds"]
+        if args.mode == "smoke" and args.config is None
+        else None
+    )
+    aggregate["resource_policy"]["profile_wall_timeout_seconds"] = (
+        spec["smoke_wall_budget_seconds"] if profile_deadline is not None else None
+    )
+    write_json(receipt_path, aggregate)
+    java = toolchain["java"]["path"]
+    jar = toolchain["tlc"]["path"]
+    config_dir = ROOT / spec["model_dir"]
+    for name in selected:
+        record = mapping["configs"][name]
+        remaining = None if profile_deadline is None else profile_deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            aggregate["status"] = "failed"
+            aggregate["failure"] = f"smoke profile exhausted its {spec['smoke_wall_budget_seconds']}-second aggregate model budget"
+            aggregate["remaining_configs"] = selected[len(aggregate["configs"]):]
+            write_json(receipt_path, aggregate)
+            print(json.dumps({"receipt": str(receipt_path), "status": "failed", "reason": aggregate["failure"]}, sort_keys=True))
+            return 1
+        cfg = repo_file(f"{spec['model_dir']}/{name}", "TLC config")
+        out_dir = run_dir / name.removesuffix(".cfg")
+        out_dir.mkdir(mode=0o700)
+        metadir = out_dir / "metadir"
+        metadir.mkdir(mode=0o700)
+        raw_log = out_dir / "tlc.log"
+        argv = [
+            java,
+            f"-Djava.io.tmpdir={metadir}",
+            aggregate["resource_policy"]["heap_arg"],
+            "-XX:+UseParallelGC",
+            "-cp",
+            jar,
+            "tlc2.TLC",
+            *liveness_check_args(package, record),
+            "-config",
+            name,
+            "-workers",
+            "auto",
+            *(["-deadlock"] if spec["disable_deadlock_check"] else []),
+            "-metadir",
+            str(metadir),
+            "-cleanup",
+            model_path.name,
+        ]
+        configured_timeout = record["timeout_seconds"]
+        effective_timeout = config_timeout(args.mode, name, configured_timeout, remaining, package)
+        execution = execute(argv, config_dir, raw_log, effective_timeout)
+        try:
+            scratch_cleanup = cleanup_metadir(out_dir, metadir)
+        except RunnerError as exc:
+            scratch_cleanup = {"path": str(metadir), "removed": False, "error": str(exc)}
+        verdict = classify(
+            execution["output"],
+            execution["returncode"],
+            record,
+            execution["timed_out"],
+            execution["log_problem"],
+        )
+        if not scratch_cleanup["removed"]:
+            verdict.update(
+                actual_verdict="incomplete",
+                complete=False,
+                exploration_complete=False,
+                counterexample_found=False,
+                completion_kind="incomplete",
+                reason=f"TLC scratch cleanup failed: {scratch_cleanup['error']}",
+            )
+        config_receipt = {
+            "config": name,
+            "expected_verdict": record["verdict"],
+            "purpose": record["purpose"],
+            "expected_error": record["expected_error"],
+            "expected_exit": record["expected_exit"],
+            "analysis": record["analysis"],
+            **verdict,
+            "config_sha256": input_hashes[f"{spec['model_dir']}/{name}"],
+            "source_hashes": {k: v for k, v in input_hashes.items() if k != model_file and not k.endswith(".cfg")},
+            "argv": argv,
+            "timeout_seconds": effective_timeout,
+            "configured_timeout_seconds": configured_timeout,
+            "elapsed_seconds": execution["elapsed_seconds"],
+            "peak_rss_bytes": execution["peak_rss_bytes"],
+            "raw_log": {"path": str(raw_log), "sha256": sha256(raw_log)},
+            "scratch_cleanup": scratch_cleanup,
+        }
+        aggregate["configs"].append(config_receipt)
+        if not verdict["complete"]:
+            aggregate["status"] = "failed"
+            aggregate["failure"] = verdict["reason"]
+            write_json(receipt_path, aggregate)
+            print(json.dumps({"receipt": str(receipt_path), "status": "failed", "config": name, "reason": verdict["reason"]}, sort_keys=True))
+            return 1
+        write_json(receipt_path, aggregate)
+    aggregate["status"] = "complete"
+    aggregate["qualification"] = "full" if full_qualification else "smoke_or_single_config"
+    write_json(receipt_path, aggregate)
+    print(json.dumps({"receipt": str(receipt_path), "status": "complete", "qualification": aggregate["qualification"]}, sort_keys=True))
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description=__doc__)
+    commands = result.add_subparsers(dest="command", required=True)
+    check = commands.add_parser("check-mapping", help="offline source and input drift check")
+    check.add_argument("--affected-base", help="base commit for changed-path impact reporting")
+    check.add_argument("--package", choices=tuple(PACKAGES), default="durable-jobs")
+    smoke = commands.add_parser("smoke", help="run the bounded smoke, recovery, and witness profile")
+    full = commands.add_parser("full", help="run all mapped TLC configurations")
+    for command, mode in ((smoke, "smoke"), (full, "full")):
+        command.add_argument("--package", choices=tuple(PACKAGES), default="durable-jobs")
+        command.add_argument("--cache-dir", type=Path, default=ROOT / "target/formal-toolchain")
+        command.add_argument("--output-dir", type=Path, help="durable receipt directory; defaults by package")
+        command.add_argument("--config", help="run only one mapped config (for targeted reruns)")
+        command.set_defaults(mode=mode)
+    return result
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        if args.command == "check-mapping":
+            return mapping_check(args.affected_base, args.package)
+        return run(args)
+    except RunnerError as exc:
+        print(f"check-formal: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

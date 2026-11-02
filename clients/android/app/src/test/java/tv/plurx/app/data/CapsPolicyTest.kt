@@ -11,6 +11,41 @@ import org.junit.Test
 class CapsPolicyTest {
 
     @Test
+    fun displayPeakRejectsUnknownPlatformReportsAndPreservesProvenance() {
+        for (raw in listOf<Float?>(null, 0f, -1f, 5000f, 10000f, Float.NaN,
+            Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY)) {
+            assertNull(displayPeak(raw, HdrDisplayPeak.Auto))
+        }
+        assertEquals(DisplayPeak(1600, DisplayPeakSource.Platform), displayPeak(1600.9f, HdrDisplayPeak.Auto))
+        assertEquals(DisplayPeak(4999, DisplayPeakSource.Platform), displayPeak(4999f, HdrDisplayPeak.Auto))
+        assertEquals(DisplayPeak(1000, DisplayPeakSource.Viewer), displayPeak(1600f, HdrDisplayPeak.N1000))
+        assertEquals(DisplayPeak(600, DisplayPeakSource.Viewer), displayPeak(null, HdrDisplayPeak.N600))
+        assertEquals(HdrDisplayPeak.Auto, HdrDisplayPeak.fromStorage("corrupt"))
+    }
+
+    @Test
+    fun peakWireIsExplicitAndSnapshotDoesNotFollowLaterPreferences() {
+        fun document(peak: DisplayPeak?) = capsDocument(
+            videoCodecCaps(listOf(VideoDecoderLimit("hevc", 2160))), listOf("aac"),
+            setOf(HdrType.HDR10), emptyList(), ClientInfo("android", "fixture", "fixture"), peak = peak)
+        val admitted = document(displayPeak(1600f, HdrDisplayPeak.Auto))
+        val next = document(displayPeak(600f, HdrDisplayPeak.N1000))
+        val successor = next.copy(display = next.display.withPeakFrom(admitted.display)
+            .copy(presentation_target = PresentationTarget(1920, 1080, 2)))
+        val unknown = next.display.withPeakFrom(document(null).display)
+        assertNull(unknown.max_nits)
+        assertNull(unknown.peak_source)
+        assertEquals(1600, successor.display.max_nits)
+        assertEquals(DisplayPeakSource.Platform, successor.display.peak_source)
+        assertEquals(1000, next.display.max_nits)
+        assertTrue(Json.encodeToString(admitted).contains("\"peak_source\":\"platform\""))
+        assertTrue(Json.encodeToString(next).contains("\"peak_source\":\"viewer\""))
+        assertFalse(Json.encodeToString(document(null)).contains("max_nits"))
+        assertFalse(Json.encodeToString(document(null)).contains("peak_source"))
+    }
+
+
+    @Test
     fun hlsHevcClaimIsIndependentAndCannotFallBackToUnrestrictedLegacy() {
         val unknown = capsDocument(videoCodecCaps(listOf(VideoDecoderLimit("hevc", 1080))),
             listOf("aac"), emptySet(), emptyList(), ClientInfo("android", "fixture", "fixture"))

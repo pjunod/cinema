@@ -80,7 +80,7 @@ def stop_build(process, grace=10):
 
 def build_stage(argv):
     """Long native staging lifecycle; Docker inspections retain output()'s 30s bound."""
-    print("Building the native host tray; compiler and package-manager progress follows.", file=sys.stderr, flush=True)
+    print("Preparing the host tray; download or explicit developer-build progress follows.", file=sys.stderr, flush=True)
     previous = {}
     process = None
     with tempfile.TemporaryFile() as receipt:
@@ -144,16 +144,35 @@ def deployment_mode(args, record):
     return mode, reference
 
 
+_PERMISSION_POLICY = None
+
+
+def permission_policy():
+    global _PERMISSION_POLICY
+    if _PERMISSION_POLICY is None:
+        loader = importlib.machinery.SourceFileLoader("compose_permission_policy", str(ROOT / "scripts/plurx-compose-control"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        _PERMISSION_POLICY = module
+    return _PERMISSION_POLICY
+
+
 def safe_path(path):
+    # User-owned source and desktop directories may intentionally be group editable.
+    # Private state and executable file modes are checked separately.
     if not path.is_absolute() or ".." in path.parts or any(character in str(path) for character in ["\n", "\r", "\x00"]):
         raise ValueError("desktop paths must be normalized absolute paths")
     for candidate in [path, *path.parents]:
         if candidate.is_symlink():
-            raise ValueError("desktop paths must not contain symlinks")
+            raise ValueError(f"desktop paths must not contain symlinks: {candidate}")
         if candidate.exists():
             info = candidate.stat()
-            if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX)):
-                raise ValueError("desktop path is writable by another user")
+            if info.st_uid not in (0, os.getuid()):
+                raise ValueError(f"desktop path belongs to another user: {candidate} (uid={info.st_uid}, expected={os.getuid()} or root)")
+            unsafe_write = permission_policy().unsafe_source_mode(info)
+            if unsafe_write and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX):
+                raise ValueError(f"desktop path is writable by another user or shared group: {candidate} (uid={info.st_uid}, gid={info.st_gid}, mode={stat.S_IMODE(info.st_mode):04o})")
     return path
 
 
@@ -252,6 +271,12 @@ def select_deployment(checkout):
         facts.append(fact)
     if facts[0]["project"] != facts[1]["project"]:
         raise ValueError("selected server and discovery containers belong to different projects")
+    # Reject unsupported/unsafe Compose inputs before compiling or replacing the tray.
+    policy = permission_policy()
+    try:
+        policy.compose_environment(str(checkout), facts[0]["project"])
+    except policy.ControlError as error:
+        raise ValueError(error.message) from error
     return {"docker": str(docker), "endpoint": endpoint, "project": facts[0]["project"],
             "server_id": server, "discovery_id": discovery, "browser_origin": loopback_origin(facts[0].get("ports")),
             "checkout": str(checkout)}
@@ -274,7 +299,9 @@ def install(args):
     update_mode, image_reference = deployment_mode(args, record)
     tray, control = cohort / "plurx-tray", cohort / "plurx-compose-control"
     autostart = config / "autostart" / ENTRY
-    for path in [state, cohort, config, autostart]:
+    data = Path(os.environ.get("XDG_DATA_HOME", home / ".local/share"))
+    for path in [state, cohort, config, autostart, data / "applications",
+                 data / "icons/hicolor/scalable/apps", data / "icons/hicolor/symbolic/apps"]:
         safe_path(path)
     if autostart.exists():
         if not record.exists() or record.is_symlink() or record.stat().st_uid != os.getuid() or record.stat().st_mode & 0o077:
@@ -285,20 +312,25 @@ def install(args):
             raise ValueError("a different installation owns this user's tray login entry")
     if args.dry_run:
         print(json.dumps({"project": identity["project"], "browser_origin": identity["browser_origin"],
-                          "tray": str(tray), "record": str(record), "build": "native GTK tray only; no host server packages", "update_mode": update_mode}))
+                          "tray": str(tray), "record": str(record), "build": "source" if getattr(args, "build_tray", False) else "GitHub prebuilt tray; runtime dependencies only", "update_mode": update_mode}))
         return
     private_dir(state.parent)
     private_dir(state)
     private_dir(cohort.parent)
     with tempfile.TemporaryDirectory(prefix=".compose-tray-build-", dir=cohort.parent) as work:
         staged = Path(work) / "tray"
-        facts = build_stage([sys.executable, ROOT / "scripts/install-linux-source-runtime", "--stage-tray", staged])
+        command = [sys.executable, ROOT / "scripts/install-linux-source-runtime", "--stage-tray", staged]
+        if getattr(args, "build_tray", False):
+            command.append("--build-tray")
+        if getattr(args, "tray_release", None):
+            command.extend(["--tray-release", args.tray_release])
+        facts = build_stage(command)
         built = Path(facts["tray"])
         if built != staged / "plurx-tray" or built.is_symlink() or not built.is_file():
             raise ValueError("native tray builder returned an unexpected staged executable")
         shutil.copyfile(ROOT / "scripts/plurx-compose-control", staged / "plurx-compose-control")
         (staged / "plurx-compose-control").chmod(0o755)
-        atomic_text(staged / "source-install.json", json.dumps({"schema_version": 1, "owner_uid": os.getuid(), "project": identity["project"], "checkout": str(checkout), "source_commit": facts["source_commit"]}) + "\n")
+        atomic_text(staged / "source-install.json", json.dumps({"schema_version": 1, "owner_uid": os.getuid(), "project": identity["project"], "checkout": str(checkout), "source_commit": facts["source_commit"], "tray_version": facts.get("version"), "tray_origin": facts.get("origin", "source"), "tray_release": facts.get("release_tag"), "tray_sha256": facts.get("sha256")}) + "\n")
         if cohort.exists():
             marker = cohort / "source-install.json"
             if not marker.is_file() or marker.is_symlink():
@@ -324,7 +356,6 @@ def install(args):
         if record.exists():
             register.append("--refresh")
         run(register)
-    data = Path(os.environ.get("XDG_DATA_HOME", home / ".local/share"))
     launcher = data / "applications" / ("tv.plurx.Compose-" + key + ".desktop")
     atomic_text(launcher, desktop(tray, control, record, autostart=False), mode=0o644)
     for icon in (cohort / "icons").glob("*.svg"):
@@ -343,12 +374,16 @@ def install(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--build-tray", action="store_true", help="developer option: compile the tray locally")
+    parser.add_argument("--tray-release", help="stable GitHub tray release tag; default: latest stable")
     parser.add_argument("--checkout", type=Path, default=ROOT)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-autostart", action="store_true")
     parser.add_argument("--update-mode", choices=("source", "published"), help="explicit deployment owner; retained on refresh")
     parser.add_argument("--image-reference", help="operator-selected published image reference; no signature verification is inferred")
     args = parser.parse_args(argv)
+    if args.build_tray and args.tray_release:
+        parser.error("--build-tray and --tray-release are mutually exclusive")
     try:
         install(args)
         return 0

@@ -1010,6 +1010,7 @@
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         serve
             .try_create(
@@ -1280,6 +1281,7 @@
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         serve
             .try_create(
@@ -2672,7 +2674,7 @@
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
-                processed_probes: Vec::new(),
+                processed_reuse_seed: None,
                 preferred_start_ms: None,
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
@@ -2815,7 +2817,7 @@
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
-                processed_probes: Vec::new(),
+                processed_reuse_seed: None,
                 preferred_start_ms: None,
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),

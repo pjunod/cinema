@@ -2,6 +2,7 @@ package tv.plurx.app.data
 
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerialName
 import tv.plurx.app.player.PGS_OVERLAY_PROTOCOL
 
 /**
@@ -84,7 +85,29 @@ data class DisplayCaps(
     val hdr: Boolean,
     val dolby_vision: Boolean,
     val presentation_target: PresentationTarget? = null,
+    val max_nits: Int? = null,
+    val peak_source: DisplayPeakSource? = null,
 )
+
+/** A live playback retains even Unknown while other display facts refresh. */
+internal fun DisplayCaps.withPeakFrom(retained: DisplayCaps?): DisplayCaps =
+    if (retained == null) this else copy(max_nits = retained.max_nits, peak_source = retained.peak_source)
+
+@Serializable
+enum class DisplayPeakSource {
+    @SerialName("platform") Platform,
+    @SerialName("viewer") Viewer,
+}
+
+internal data class DisplayPeak(val nits: Int, val source: DisplayPeakSource)
+
+/** EDID desired content maximum is a hint, never a measured optical result. */
+internal fun displayPeak(platformNits: Float?, preference: HdrDisplayPeak): DisplayPeak? {
+    preference.nits?.let { return DisplayPeak(it, DisplayPeakSource.Viewer) }
+    val raw = platformNits?.takeIf { it.isFinite() && it > 0f && it < 5000f } ?: return null
+    val nits = raw.toInt().takeIf { it > 0 } ?: return null
+    return DisplayPeak(nits, DisplayPeakSource.Platform)
+}
 
 /** Native learned limits are M6 work; native documents send none today. */
 @Serializable
@@ -254,6 +277,7 @@ internal fun capsDocument(
     audioSinks: List<AudioSinkClaim> = emptyList(),
     hlsHevcSampleEntries: List<String>? = null,
     displayAwareAuto: Boolean = true,
+    peak: DisplayPeak? = null,
 ): DeviceCaps {
     val dvProfiles = decoderDolbyVisionProfiles.takeIf {
         HdrType.DOLBY_VISION in hdrTypes
@@ -278,6 +302,8 @@ internal fun capsDocument(
         display = DisplayCaps(
             hdr = displayIsHdr(hdrTypes),
             dolby_vision = HdrType.DOLBY_VISION in hdrTypes,
+            max_nits = peak?.nits,
+            peak_source = peak?.source,
         ),
         audio_sinks = audioSinks,
     )

@@ -452,10 +452,9 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   if(kind==="presentation"&&p.waitNudgedAt!==began){
     p.waitNudgedAt=began;
     nativeReevaluated=true;
-    try{
-      const nudge=v.play();
-      if(nudge&&typeof nudge.catch==="function") nudge.catch(()=>{});
-    }catch(e){}
+    // The reevaluation is still a Play command. Its rejection belongs to the
+    // same transport owner as initial attach and explicit Resume.
+    applyPlaybackTransportIntent(v,p);
   }
   // Both the initial ask and any extension share the absolute stall deadline.
   // A callback near the boundary gets only the remaining control budget.
@@ -511,10 +510,17 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   // so spend that harmless step now before observing the remaining deadline.
   if(kind==="presentation"&&p.waitNudgedAt!==began){
     p.waitNudgedAt=began;
-    try{
-      const nudge=v.play();
-      if(nudge&&typeof nudge.catch==="function") nudge.catch(()=>{});
-    }catch(e){}
+    const attachment=p.mediaAttachment;
+    applyPlaybackTransportIntent(v,p);
+    // Let an immediate promise rejection retire the owner before this same
+    // turn can execute the control verdict. Never wait on a Play promise that
+    // may itself need presentation progress to settle.
+    await Promise.resolve();
+    if(!playbackOwnsAttachedMedia(p)||p.mediaAttachment!==attachment||p.waitAt!==began||
+       (p._seekToken||0)!==generation||
+       (p.controlIntentGeneration||0)!==actionGeneration||p.wantsPlayback===false||
+       (p.wantsPlayback==null&&v.paused)||
+       (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
     clientLog({level:"info",event:"stall_recovery",detail:"native_reevaluation:refill",
       message:"media refilled during control — native playback reevaluated before recovery",
       control_trigger:controlTrigger,wait_started_runway:startedRunway,

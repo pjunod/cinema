@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Serve the shipping Cinema shell/assets with labelled System API fixtures.
+
+This is a local-only rendering harness. No production server is contacted and
+no FFmpeg process is launched. GET /?fixture=macos|linux|unavailable|macos-measured selects the
+API fixture. Rendering is entirely the app's normal auth/router/settings code.
+"""
+
+import argparse
+import json
+import mimetypes
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+ROOT = Path(__file__).resolve().parents[1]
+WEB = ROOT / "crates/plurxd/src/web"
+FIXTURES = ROOT / "tests/web/fixtures/system-settings"
+
+
+class Preview(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def reply(self, value, status=200, content_type="application/json", headers=None):
+        raw = value if isinstance(value, bytes) else json.dumps(value).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        for key, val in (headers or {}).items():
+            self.send_header(key, val)
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def fixture(self):
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        name = cookie["system-fixture"].value if "system-fixture" in cookie else "macos"
+        return name if name in ("macos", "linux", "unavailable", "macos-measured") else "macos"
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/":
+            query = parse_qs(parsed.query)
+            fixture = query.get("fixture", [self.fixture()])[0]
+            if fixture not in ("macos", "linux", "unavailable", "macos-measured"):
+                return self.reply({"error": "Unknown fixture"}, 404)
+            theme = query.get("theme", ["classic"])[0]
+            appearance = query.get("appearance", ["dark"])[0]
+            layout = query.get("layout", ["classic"])[0]
+            setup = "<script>" + ";".join(
+                f"localStorage.setItem({json.dumps(key)},{json.dumps(value)})"
+                for key, value in {
+                    "plurx_token": "local-rendering-fixture",
+                    "plurx_layout": layout,
+                    "plurx_theme": theme,
+                    "plurx_appearance": appearance,
+                }.items()
+            ) + ";location.hash=location.hash||'#/settings/system';</script>"
+            html = (WEB / "index.html").read_text().replace("<head>", "<head>" + setup)
+            html = html.replace("<title>Noirr Cinema</title>", f"<title>Cinema System · {fixture} API fixture</title>")
+            return self.reply(html.encode(), content_type="text/html; charset=utf-8", headers={"Set-Cookie": f"system-fixture={fixture}; Path=/; SameSite=Strict"})
+        if path.startswith("/assets/"):
+            asset = (WEB / path.removeprefix("/assets/")).resolve()
+            if not asset.is_relative_to(WEB.resolve()) or not asset.is_file():
+                return self.reply({}, 404)
+            return self.reply(asset.read_bytes(), content_type=mimetypes.guess_type(asset)[0] or "application/octet-stream")
+        if path == "/api/v1/server":
+            return self.reply({"name": "System rendering fixture", "version": "0.7.0", "build": "source-bound-preview", "setup_required": False})
+        if path == "/api/v1/me":
+            return self.reply({"id": 1, "username": "preview", "is_admin": True})
+        if path == "/api/v1/features":
+            return self.reply({"live_tv": False, "recordings": False, "library_channels": False, "shared_libraries": True})
+        if path == "/api/v1/system":
+            name=self.fixture()
+            if name == "macos-measured":
+                receipt=self.server.comparison_receipt
+                if not receipt.is_file():
+                    return self.reply({"error":"The actual local macOS comparison receipt has not been generated."},409)
+                actual=json.loads(receipt.read_text())
+                system=json.loads((FIXTURES / "macos.json").read_text())
+                system["transcoder_optimization"]={"running":False,"error":actual.get("error"),"comparison":actual,"report":{"results":[],"comparison":actual}}
+                return self.reply(system)
+            return self.reply(json.loads((FIXTURES / f"{name}.json").read_text()))
+        if path == "/api/v1/system/logs":
+            return self.reply([{"ts_ms": 1792497600000, "level": "info", "target": "preview", "message": "Illustrative log entry · local API fixture"}])
+        if path in ("/api/v1/activity", "/api/v1/live-tv/dvr/reminders/due"):
+            return self.reply([])
+        if path == "/manifest.webmanifest":
+            return self.reply({"name": "Cinema System preview", "short_name": "Cinema", "icons": []})
+        return self.reply({"error": "Not supplied by the local rendering fixture"}, 404)
+
+    def do_POST(self):
+        return self.reply({"error": "Rendering fixture only: use a local daemon to run the comparison."}, 409)
+
+    def do_PUT(self):
+        return self.reply({"error": "Rendering fixture only: preferences are not saved."}, 409)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--comparison-receipt",type=Path,default=ROOT / "target/system-settings-macos-comparison.json")
+    args = parser.parse_args()
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Preview)
+    server.comparison_receipt=args.comparison_receipt
+    print(f"Shipping System UI + API fixtures: http://127.0.0.1:{server.server_port}/?fixture=macos#/settings/system", flush=True)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

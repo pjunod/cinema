@@ -8,6 +8,10 @@ a document to this folder.
 | File | Answers | |
 |---|---|---|
 | [PROJECT-BACKLOG.md](PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
+| [SUBTITLE-COMPLETION-STATUS.md](SUBTITLE-COMPLETION-STATUS.md) | Live ownership, implementation and acceptance ledger for completing progressive generation, translation, native delivery and existing-file translation. | built |
+| [ENGINEERING-KNOWLEDGE-GRAPH-REVIEW.md](ENGINEERING-KNOWLEDGE-GRAPH-REVIEW.md) | Independent Fable plan-review findings, author corrections, source answers and exact-candidate approval. | done |
+| [ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md](ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md) | Bounded graph pilot connecting code to governing intent, review obligations and scoped execution evidence; implementation, skill enforcement and comparative evaluation. | open |
+| [ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md) | Live M0–M5 owners, independent curation/sealing, evidence and batched PR progress. | open |
 | [DESKTOP-TRAY-IMPLEMENTATION.md](DESKTOP-TRAY-IMPLEMENTATION.md) | macOS/Linux desktop server controls, separate startup policies, signed GitHub release upgrades, task ownership and native/package acceptance. | open |
 | [DESKTOP-TRAY-QUALIFICATION.md](DESKTOP-TRAY-QUALIFICATION.md) | Complete tray cohort, retained focused evidence, native qualification, review and promotion gaps. | open |
 | [DESKTOP-UPGRADE-TRANSACTION.md](DESKTOP-UPGRADE-TRANSACTION.md) | Desktop tray plan §6: standalone/cluster shutdown, package lock/cohort rules, pre-start recovery and migration-aware rollback. | open |
@@ -18,6 +22,7 @@ a document to this folder.
 | [SHARED-LIBRARIES-IMPLEMENTATION.md](SHARED-LIBRARIES-IMPLEMENTATION.md) | Revised S0–S8 build contract, authority, deployment, playback integration and acceptance evidence. | open |
 | [SHARED-LIBRARIES-STATUS.md](SHARED-LIBRARIES-STATUS.md) | Shared-libraries integration, live promotion evidence, failed-only qualification and remaining acceptance. | open |
 | [SHARED-LIBRARIES-OPERATIONS.md](SHARED-LIBRARIES-OPERATIONS.md) | How to configure the implemented private listener, pair viewers, diagnose retirement and distinguish remaining Docker/cluster/device qualification. | open |
+| [SHARING-HOST-SETUP.md](SHARING-HOST-SETUP.md) | Automatic native private setup, explicit Docker host-component installation, process-bound host observations and qualification of the repaired import path. | open |
 | [SHARED-LIBRARIES-INGRESS-CUSTODY.md](SHARED-LIBRARIES-INGRESS-CUSTODY.md) | Why cluster forwarding needs durable ingress obligations and exact outer-writer closure acknowledgements, with schema and retry boundaries. | open |
 | [SHARED-LIBRARIES-HANDOFF.md](SHARED-LIBRARIES-HANDOFF.md) | Dated integration and agent snapshot, all remaining S2–S8 implementation/qualification work, compiler commands and promotion requirements. | open |
 | [SHARED-LIBRARIES-RE-REVIEW.md](SHARED-LIBRARIES-RE-REVIEW.md) | Opus re-review of the revised contract; SL-18–24 and links to their corrections. | open |
@@ -34,6 +39,7 @@ a document to this folder.
 | [SUBTITLE-RECOGNITION-QUALIFICATION.md](SUBTITLE-RECOGNITION-QUALIFICATION.md) | Which pinned speech, noise, silence and open-film cases measure recognition and CPU throughput, what failed, and which human/movie/service evidence remains missing. | open |
 | [PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md) | Foreign-speech-to-English captions during playback. First route built and accepted 2026-10-17 (web direct, one audio stream, Settings → Playback setup, packaged first cue/Stop/seek/Off evidence in the [completion record](PROGRESSIVE-SUBTITLE-TRANSLATION-LEDGER.md)); native, multi-audio, encoded, long-film and broader human quality stay open. | built |
 | [PROGRESSIVE-SUBTITLE-TRANSLATION-LEDGER.md](PROGRESSIVE-SUBTITLE-TRANSLATION-LEDGER.md) | The translation review ledger, integration checkpoints and the 2026-10-17 completion record: packaged acceptance evidence, review fixes and open follow-ups. | built |
+| [SUBTITLE-SETUP-REPAIR-STATUS.md](SUBTITLE-SETUP-REPAIR-STATUS.md) | Current owner, implementation state, evidence limits and merge path for the progressive subtitle setup repair. | live |
 | [STATUS-HISTORY.md](STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md](DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md) | Implementation plan from the 2026-09-20 architecture review: why a series rule missed an airing ten days out and why one slow recording disk stalls the shared tuner; the scheduler's full-guide view and per-sink owned writers behind bounded queues. | open |
 | [LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START.md](LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START.md) | Implementation plan from the 2026-09-20 architecture review: one graced settings observation per node instead of a consistent read per session per second, one shared `PeerTransport`, warm start without the serial prefix wait, and a retry owner for failed cleanup. | open |

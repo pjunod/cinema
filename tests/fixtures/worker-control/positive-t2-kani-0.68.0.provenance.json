@@ -1,0 +1,120 @@
+{
+  "acceptance": false,
+  "candidate": "ecb9de29ffaa2b293c41168369a26a701335bacb",
+  "command": [
+    "cargo-kani",
+    "--harness",
+    "proofs::t2_every_reachable_prefix_gates_process",
+    "--exact",
+    "--output-format",
+    "regular",
+    "--manifest-path",
+    "~/worker-control-evidence/evidence/parser-calibration-ecb9de29ffaa/source/Cargo.toml",
+    "--target-dir",
+    "~/worker-control-evidence/evidence/parser-calibration-ecb9de29ffaa/build"
+  ],
+  "date": "2026-10-22",
+  "execution_evidence": "Original raw log, source archive, rejected case and append-only parser reparse receipt are preserved in owned evidence/parser-calibration-ecb9de29ffaa and its reparse directory; no solver was rerun for the parser correction.",
+  "fixture_sha256": "0feab27774289ed70432aed7448844e53e3f9f34b928bb8abd4baf3d044940c4",
+  "format_guard": {
+    "description": "attempt to shift left with overflow",
+    "location_suffix": "library/core/src/fmt/mod.rs:820:38 in function core::fmt::Arguments::<'_>::from_str",
+    "name": "core::fmt::Arguments::<'_>::from_str.assertion.1",
+    "source_sha256": "54596bb5eb43b6f24c4815543c486c997ccac39f9b6dadefb4c98ddd106317c3"
+  },
+  "harness": "proofs::t2_every_reachable_prefix_gates_process",
+  "original_solver_tools": {
+    "archive_sha256": "a5d39a5d5e748253a553aa62f295c6c397287927a28e5e32691d7ff2eda0c398",
+    "cbmc_sha256": "db1a99dc5187df6f67be351555aa7951d10f37700eccc7ea726d441594675e77",
+    "compiler_sha256": "810c21d31c80aaf16d19821282dc075bac26afec59a60d0404a6da6f89862694",
+    "driver_sha256": "14192396d9e4b5c0d7f9197130692a44bbcb3d2509283ee2bb8e0befad9e12d2",
+    "platform": "Darwin-arm64",
+    "rustc": "rustc 1.100.0-nightly (8925ea358 2026-08-20)",
+    "version": "Kani Rust Verifier 0.68.0 (cargo plugin)\nCBMC 6.11.0"
+  },
+  "other_content_changes": false,
+  "parse_result": {
+    "exit_code": 0,
+    "failures": [],
+    "harness": "proofs::t2_every_reachable_prefix_gates_process",
+    "outcome": "proved",
+    "property_count": 247,
+    "reachability_policy": "T1-T6 assertions must be SUCCESS; unreachable only nonmarker panic/expect guards or exact source-pinned panic-format guard",
+    "specification_assertions": 5,
+    "status_counts": {
+      "FAILURE": 0,
+      "SUCCESS": 246,
+      "UNREACHABLE": 1
+    }
+  },
+  "path_redactions": [
+    {
+      "occurrences": 2,
+      "replacement": "~/worker-control-evidence",
+      "source_kind": "owned workspace root"
+    },
+    {
+      "occurrences": 40,
+      "replacement": "~",
+      "source_kind": "official release builder absolute home"
+    },
+    {
+      "occurrences": 114,
+      "replacement": "~",
+      "source_kind": "official release builder relative home"
+    }
+  ],
+  "purpose": "Representative real pinned positive log for parser calibration; not full package qualification",
+  "raw_log_sha256": "49de1f27032977f3e0bfad1abc38287c9d81057eafe50d4574e1c0e5beabe84e",
+  "reparse_parser_sha256": "9d7ed23e2c12f9df052e5366ec7db8499e4a25fd0b0a2d837dd137b902f74443",
+  "reparse_tools": {
+    "archive_sha256": "a5d39a5d5e748253a553aa62f295c6c397287927a28e5e32691d7ff2eda0c398",
+    "cbmc_sha256": "db1a99dc5187df6f67be351555aa7951d10f37700eccc7ea726d441594675e77",
+    "compiler_sha256": "810c21d31c80aaf16d19821282dc075bac26afec59a60d0404a6da6f89862694",
+    "driver_sha256": "14192396d9e4b5c0d7f9197130692a44bbcb3d2509283ee2bb8e0befad9e12d2",
+    "fmt_stdlib_sha256": "54596bb5eb43b6f24c4815543c486c997ccac39f9b6dadefb4c98ddd106317c3",
+    "platform": "Darwin-arm64",
+    "rustc": "rustc 1.100.0-nightly (8925ea358 2026-08-20)",
+    "version": "Kani Rust Verifier 0.68.0 (cargo plugin)\nCBMC 6.11.0"
+  },
+  "schema_version": 1,
+  "source_binding": {
+    "files": {
+      "Cargo.lock": "89a14d94492150e41b3975c189657f4e13949a0be285831258742087bf7820bb",
+      "Cargo.toml": "72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f",
+      "crates/plurx-worker-control/Cargo.toml": "0610d4b5df0dde808013087addcebef08c02142e6157234f2bc319c9d6b063f1",
+      "crates/plurx-worker-control/src/lib.rs": "adefc7e5cdf50c943443f70801f89fd2cddad8d6cc30297c69007b2e2a4b1cf0",
+      "crates/plurx-worker-control/src/library_lifecycle.rs": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0",
+      "crates/plurx-worker-control/src/proofs.rs": "0f600a92153bdc208f6075c9059bb571a474cfa730f74f544e86827754be8d5e",
+      "crates/plurxd/Cargo.toml": "c7175268be409c769f4c4557e022164034c5f6902a1fe846426f27663acc66e9",
+      "crates/plurxd/src/library_work.rs": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429",
+      "rust-toolchain.toml": "03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4",
+      "scripts/check-worker-control": "f608c807df3599fb69fc832f57462e5ead9745b7bf5b21640fe4a701b24e798b",
+      "tests/operations/test_worker_control_runner.py": "b23d99e3fa9183b85515436c531b0bdd5fcc5e30bde37782fd9b8d8e4432bf8a",
+      "verification/worker-control/controls.json": "0fea54531200bb1b60c7d95fa09911f6220b490e7dda3681a1e61e0776ae55fb",
+      "verification/worker-control/toolchain.json": "4a2235e195b35412bb4bd4b749c4ff6dcee5452e7bd69b4d8f3c9ce281974a7e"
+    },
+    "head": "ecb9de29ffaa2b293c41168369a26a701335bacb",
+    "source_set_sha256": "ce2e2a143f9cd416a4dd15133cfc503f2ce3769f4b1af55c0a4ae15c2e4393ee",
+    "staging": {
+      "boundary": "standalone dependency-free packaging; all Rust source bytes unchanged",
+      "manifest_bytes": "[package]\nname=\"plurx-worker-control\"\nversion=\"0.7.0\"\nedition=\"2021\"\n[workspace]\n[lints.rust]\nunexpected_cfgs={level=\"warn\",check-cfg=[\"cfg(kani)\"]}\n",
+      "manifest_sha256": "bd476886c18d7afd63e9ba08b6189f5bb565dec42704b6c73c7f5432a2b615a7",
+      "original_manifest_sha256": "0610d4b5df0dde808013087addcebef08c02142e6157234f2bc319c9d6b063f1",
+      "source_files": {
+        "lib.rs": "adefc7e5cdf50c943443f70801f89fd2cddad8d6cc30297c69007b2e2a4b1cf0",
+        "library_lifecycle.rs": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0",
+        "proofs.rs": "0f600a92153bdc208f6075c9059bb571a474cfa730f74f544e86827754be8d5e"
+      },
+      "workspace_manifest_sha256": "72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f"
+    },
+    "tree": "4646a529228269ee7d5518605cede9100fe4f537"
+  },
+  "timings": {
+    "elapsed_seconds": 12.080243,
+    "solver_verification_seconds": [
+      "7.391047"
+    ],
+    "target_wall_seconds": 8.352224
+  }
+}

@@ -28,7 +28,8 @@ class ComposeTraySelectionTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         (self.root / "deploy").mkdir()
-        (self.root / "deploy/docker-compose.yml").write_text('restart: "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"\n' * 2)
+        (self.root / "deploy/docker-compose.yml").write_text('name: selected\nservices:\n  plurxd:\n    restart: "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"\n  plurx-discovery:\n    restart: "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"\n')
+        (self.root / "deploy/.env").write_text('')
         self.calls = []
         self.server_ids = SERVER
         self.foreign = False
@@ -113,7 +114,7 @@ class ComposeTrayDesktopTests(unittest.TestCase):
                     "server_id": SERVER, "discovery_id": DISCOVERY, "browser_origin": "http://127.0.0.1:32400", "checkout": str(ROOT)}
         helper = types.SimpleNamespace(eligible_session=mock.Mock())
         args = argparse.Namespace(checkout=ROOT, dry_run=True, no_autostart=False, update_mode="source", image_reference=None)
-        with tempfile.TemporaryDirectory() as work, mock.patch.dict(os.environ, {"XDG_STATE_HOME": work + "/state", "XDG_DATA_HOME": work + "/data", "XDG_CONFIG_HOME": work + "/config"}), mock.patch.object(installer.sys, "platform", "linux"), mock.patch.object(installer.os, "getuid", return_value=os.getuid() or 1000), mock.patch.object(installer, "native_helper", return_value=helper), mock.patch.object(installer, "select_deployment", return_value=identity), mock.patch.object(installer, "safe_path", side_effect=lambda path: path), mock.patch.object(installer, "private_dir") as private, mock.patch.object(installer, "run") as run, mock.patch.object(installer.subprocess, "Popen") as launch:
+        with tempfile.TemporaryDirectory() as work, mock.patch.dict(os.environ, {"XDG_STATE_HOME": work + "/state", "XDG_DATA_HOME": work + "/data", "XDG_CONFIG_HOME": work + "/config"}), mock.patch.object(installer.sys, "platform", "linux"), mock.patch.object(installer.os, "getuid", return_value=os.getuid() or 1000), mock.patch.object(installer, "native_helper", return_value=helper), mock.patch.object(installer, "select_deployment", return_value=identity), mock.patch.object(installer, "safe_path", side_effect=lambda path, **_kwargs: path), mock.patch.object(installer, "private_dir") as private, mock.patch.object(installer, "run") as run, mock.patch.object(installer.subprocess, "Popen") as launch:
             installer.install(args)
             helper.eligible_session.assert_called_once()
             private.assert_not_called()
@@ -162,7 +163,7 @@ class ComposeTrayDesktopTests(unittest.TestCase):
             args = argparse.Namespace(checkout=ROOT, dry_run=False, no_autostart=False, update_mode="source", image_reference=None)
             environment = {"XDG_STATE_HOME": str(home / "state"), "XDG_DATA_HOME": str(home / "data"), "XDG_CONFIG_HOME": str(home / "config")}
             helper = types.SimpleNamespace(eligible_session=mock.Mock())
-            with mock.patch.dict(os.environ, environment), mock.patch.object(installer.sys, "platform", "linux"), mock.patch.object(installer.os, "getuid", return_value=uid), mock.patch.object(installer.Path, "home", return_value=home), mock.patch.object(installer, "safe_path", side_effect=lambda path: path), mock.patch.object(installer, "private_dir", side_effect=private), mock.patch.object(installer, "atomic_text", side_effect=write), mock.patch.object(installer, "native_helper", return_value=helper), mock.patch.object(installer, "select_deployment", return_value=identity), mock.patch.object(installer, "build_stage", side_effect=stage), mock.patch.object(installer, "deployment_mode", return_value=("source", None)), mock.patch.object(installer, "run", side_effect=register), mock.patch.object(installer.subprocess, "Popen") as launch:
+            with mock.patch.dict(os.environ, environment), mock.patch.object(installer.sys, "platform", "linux"), mock.patch.object(installer.os, "getuid", return_value=uid), mock.patch.object(installer.Path, "home", return_value=home), mock.patch.object(installer, "safe_path", side_effect=lambda path, **_kwargs: path), mock.patch.object(installer, "private_dir", side_effect=private), mock.patch.object(installer, "atomic_text", side_effect=write), mock.patch.object(installer, "native_helper", return_value=helper), mock.patch.object(installer, "select_deployment", return_value=identity), mock.patch.object(installer, "build_stage", side_effect=stage), mock.patch.object(installer, "deployment_mode", return_value=("source", None)), mock.patch.object(installer, "run", side_effect=register), mock.patch.object(installer.subprocess, "Popen") as launch:
                 installer.install(args)
                 autostart = home / "config/autostart" / installer.ENTRY
                 self.assertTrue(autostart.is_file())

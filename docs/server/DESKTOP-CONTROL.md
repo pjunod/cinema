@@ -195,6 +195,21 @@ The command examples use the Linux PATH entry. On macOS invoke
 `~/Applications/Plurx Server.app/Contents/MacOS/plurx-control` with the full
 path quoted.
 
+If an install reports an unresolved transaction, read `updates status` and run
+explicit recovery with the transaction ID from the error:
+
+```bash
+"$HOME/Library/Application Support/plurx/runtime/control/plurx-recovery" --transaction <UUID>
+```
+
+A macOS upgrade interrupted at `restoring` can finish after its exact promoted
+runtime, app and controllers, installed commit, original node, readiness and
+unchanged startup/configuration policy pass verification. Recovery preserves a
+running daemon or an originally stopped installation. A mismatch leaves the
+transaction unresolved for explicit repair. Source-install failures retain their
+cause in the journal; failures before shutdown commitment cancel the unchanged
+preparation so a retry can proceed.
+
 The CLI emits a bounded versioned JSON envelope, with a machine-readable error
 code on failure; stderr carries diagnostics. A successful HTTP response alone
 cannot authorize a process stop or upgrade. The controller uses a local Unix
