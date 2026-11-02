@@ -53,6 +53,23 @@ class AppleRunnerStandbyTests(unittest.TestCase):
             self.controller.step(True)
         self.assertEqual(self.started, [])
 
+    def test_an_operator_pause_drains_the_backup_and_offers_no_slot_until_resume(self):
+        with tempfile.TemporaryDirectory() as folder:
+            marker = Path(folder) / "paused"
+            self.config["pause_marker"] = str(marker)
+            self.outage()
+            child = self.started[0]
+            marker.write_text("{}")
+            self.controller.step(False)
+            self.assertEqual(child.signals, 1)
+            child.returncode = 0
+            for _ in range(5):
+                self.controller.step(False)
+            self.assertEqual(len(self.started), 1)
+            marker.unlink()
+            self.outage()
+            self.assertEqual(len(self.started), 2)
+
     def test_one_failed_probe_cannot_enable_backup(self):
         self.controller.step(False)
         self.controller.step(False)

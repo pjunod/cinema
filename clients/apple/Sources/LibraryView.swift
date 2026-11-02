@@ -147,7 +147,7 @@ struct LibraryView: View {
             }
             .onChange(of: rows) { _, _ in updateRemoteOrder() }
             .onChange(of: gridColumns) { _, _ in updateRemoteOrder() }
-            .onChange(of: remoteNavigation.focusRevision) { _, _ in
+            .onRemoteFocusChange(remoteNavigation) {
                 guard remoteNavigation.activeScope == remoteScope,
                       let key = remoteNavigation.focusedKey else { return }
                 contentOwnedFocus = key.hasPrefix("item:")
@@ -571,7 +571,7 @@ private struct LibraryGroupView: View {
             }
             #endif
         }
-        .onChange(of: navigation.focusRevision) { _, _ in
+        .onRemoteFocusChange(navigation) {
             guard navigation.activeScope == remoteScope, let key = navigation.focusedKey else { return }
             contentOwnedFocus = key.hasPrefix("item:")
             if key == "group:tools" { toolsOwnedFocus = true }

@@ -89,7 +89,7 @@ struct RemoteDeviceSettingsView: View {
         .navigationTitle("Remotes & devices")
         .remoteRestricted()
         .remotePhysicalDirections()
-        .onChange(of: navigation.physicalInputRevision) { _, value in
+        .onRemotePhysicalInput(navigation) { value in
             if value != restorationRevision { restoreTarget = nil }
         }
         .task { await remote.refreshGrants() }

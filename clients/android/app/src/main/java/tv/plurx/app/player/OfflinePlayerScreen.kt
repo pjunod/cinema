@@ -218,6 +218,10 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
             failure = "Download incomplete"
             return@LaunchedEffect
         }
+        // The package stream keys contain only the caption selected for this download.
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, record?.subtitleIndex == null)
+            .setSelectUndeterminedTextLanguage(record?.subtitleIndex != null).build()
         player.setMediaItem(request.toMediaItem(), record?.positionMs ?: 0)
         player.prepare()
         player.playWhenReady = true
@@ -225,6 +229,18 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
 
     DisposableEffect(player, record?.id) {
         val listener = object : Player.Listener {
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                if (record?.subtitleIndex == null) return
+                val text = tracks.groups.filter { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT }
+                    .flatMap { group -> (0 until group.length).filter { group.isTrackSupported(it) }.map { group.mediaTrackGroup to it } }
+                // No ordinal inference: the offline package carries exactly the chosen rendition.
+                text.singleOrNull()?.let { (group, index) ->
+                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                        .setOverrideForType(androidx.media3.common.TrackSelectionOverride(group, index))
+                        .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false).build()
+                }
+            }
+
             override fun onPlayerError(error: PlaybackException) {
                 failure = "Download incomplete"
             }

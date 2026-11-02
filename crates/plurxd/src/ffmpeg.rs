@@ -636,7 +636,10 @@ impl EncodedExecutable {
     /// is also pumping media bodies — the exact stall the batch exists to
     /// remove.
     pub fn attestation_object(&self) -> (std::path::PathBuf, String) {
-        (self.path.clone(), self.object_version.clone())
+        (
+            self.path.clone(),
+            pinned_engine_object_version(&self.object_version, &self.digest),
+        )
     }
 }
 
@@ -1144,6 +1147,8 @@ fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
         // the source bytes changed. Keep all FFprobe-owned fields comparable.
         document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
         document.remove(plurx_core::store::CONTENT_ENCODING_PROBE_KEY);
+        document.remove(plurx_core::scan::dv_title::PROBE_FIELD);
+        document.remove(plurx_core::transcode::dv_fel_qualification::PROBE_KEY);
     }
     if let Some(format) = value
         .get_mut("format")
@@ -2019,6 +2024,26 @@ static HDR10_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::c
 static HDR10_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static HDR10_PASSTHROUGH_VAAPI: [tokio::sync::OnceCell<bool>; 2] =
     [const { tokio::sync::OnceCell::const_new() }; 2];
+/// What this process knows about the VA-API HEVC Main10 decode: proved (kept
+/// for the process), or failed `failures` times and next tried at `retry_at`.
+struct Main10DecodeProof {
+    proved: bool,
+    failures: u32,
+    retry_at: Option<std::time::Instant>,
+}
+static HEVC_MAIN10_VAAPI_DECODE: std::sync::Mutex<Main10DecodeProof> =
+    std::sync::Mutex::new(Main10DecodeProof {
+        proved: false,
+        failures: 0,
+        retry_at: None,
+    });
+/// One probe at a time; a caller that finds one running does not wait.
+static HEVC_MAIN10_VAAPI_PROBE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// A two-picture 256x144 HEVC Main10 clip (x265, `-bitexact`), so the probe
+/// needs no encoder of its own.
+const HEVC_MAIN10_PROBE_CLIP: &[u8] = include_bytes!("ffmpeg/hevc-main10-probe.mkv");
+/// Decoding two small pictures takes well under a second on a working device.
+const HEVC_MAIN10_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
 static ENCODED_PROCESS_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -2735,8 +2760,11 @@ impl EncodedEngine {
         let mut objects = Vec::new();
         for path in paths {
             let (object_digest, version) = hash_engine_object(path).await?;
+            objects.push((
+                path.clone(),
+                pinned_engine_object_version(&version, &hex::encode(&object_digest)),
+            ));
             digest.update(object_digest);
-            objects.push((path.clone(), version));
         }
         Ok(Self {
             digest: hex::encode(digest.finalize()),
@@ -2795,12 +2823,96 @@ async fn fragment_index_engine_snapshot_is_current(engine: &FragmentIndexEngine)
     current
 }
 
+fn pinned_engine_object_version(version: &str, digest: &str) -> String {
+    format!("{version}|sha256:{digest}")
+}
+
+#[cfg(unix)]
+fn engine_metadata_has_settled(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(seconds), Ok(nanoseconds)) = (
+        u64::try_from(metadata.ctime()),
+        u32::try_from(metadata.ctime_nsec()),
+    ) else {
+        return false;
+    };
+    if nanoseconds >= 1_000_000_000 {
+        return false;
+    }
+    std::time::SystemTime::UNIX_EPOCH
+        .checked_add(Duration::new(seconds, nanoseconds))
+        .and_then(|stamp| std::time::SystemTime::now().duration_since(stamp).ok())
+        .is_some_and(|age| age >= Duration::from_secs(2))
+}
+
+#[cfg(not(unix))]
+fn engine_metadata_has_settled(_: &std::fs::Metadata) -> bool {
+    true
+}
+
+fn engine_object_is_current(path: &std::path::Path, expected: &str) -> bool {
+    let (version, digest) = expected
+        .split_once("|sha256:")
+        .map_or((expected, None), |(version, digest)| {
+            (version, Some(digest))
+        });
+    if engine_path_version(path).ok().as_deref() != Some(version) {
+        return false;
+    }
+    let Some(expected_digest) = digest else {
+        return true;
+    };
+    if let Some(cached) = cached_engine_digest(path, version) {
+        return hex::encode(cached) == expected_digest;
+    }
+    // Timestamp updates can be coalesced for a newly written object. Until
+    // a hash was taken outside that window, publication checks its pinned
+    // bytes as well as metadata. Installed, settled binaries keep the cheap
+    // metadata-only path.
+    let verify = || -> Option<bool> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).ok()?;
+        let before = file.metadata().ok()?;
+        let settled_before_read = engine_metadata_has_settled(&before);
+        if before.len() > ENGINE_OBJECT_MAX_BYTES {
+            return Some(false);
+        }
+        let mut hash = Sha256::new();
+        let mut buffer = [0_u8; 256 * 1024];
+        let mut count = 0_u64;
+        loop {
+            let read = file.read(&mut buffer).ok()?;
+            if read == 0 {
+                break;
+            }
+            count += read as u64;
+            if count > ENGINE_OBJECT_MAX_BYTES {
+                return Some(false);
+            }
+            hash.update(&buffer[..read]);
+        }
+        let after = file.metadata().ok()?;
+        if engine_path_version(path).ok().as_deref() != Some(version) {
+            return Some(false);
+        }
+        #[cfg(unix)]
+        if engine_object_version(&after).ok().as_deref() != Some(version) {
+            return Some(false);
+        }
+        let actual = hash.finalize().to_vec();
+        if hex::encode(&actual) != expected_digest {
+            return Some(false);
+        }
+        remember_engine_digest(path, version, &actual, settled_before_read);
+        Some(true)
+    };
+    verify().unwrap_or(false)
+}
+
 fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool {
-    objects.iter().all(|(path, expected)| {
-        engine_path_version(path)
-            .ok()
-            .is_some_and(|current| &current == expected)
-    })
+    objects
+        .iter()
+        .all(|(path, expected)| engine_object_is_current(path, expected))
 }
 
 /// Run the same fail-closed identity comparison away from runtime workers.
@@ -2827,10 +2939,7 @@ async fn engine_objects_are_current_batch_with_linux(
     let started = Instant::now();
     let current = tokio::task::spawn_blocking(move || {
         if let Some((path, expected)) = extra {
-            if !engine_path_version(&path)
-                .ok()
-                .is_some_and(|current| current == expected)
-            {
+            if !engine_object_is_current(&path, &expected) {
                 return false;
             }
         }
@@ -2983,8 +3092,11 @@ async fn fragment_index_engine_with_source(
     for path in dependency_paths {
         match hash_engine_object(&path).await {
             Ok((object_digest, version)) => {
+                objects.push((
+                    path,
+                    pinned_engine_object_version(&version, &hex::encode(&object_digest)),
+                ));
                 object_digests.push(object_digest);
-                objects.push((path, version));
             }
             Err(error) => {
                 #[cfg(target_os = "macos")]
@@ -3381,12 +3493,12 @@ async fn read_bounded_with_limit(
 /// Digests of engine objects keyed by path and the cheap object version
 /// (`engine_object_version`: device, inode, size, mtime and ctime). The same
 /// version identity already decides whether a hash raced a replacement, so a
-/// matching version proves the bytes are the ones hashed. A replaced or
-/// touched object has a new version and is hashed again. The key set is the
+/// settled version can reuse the hash. A newly changed file is rehashed until
+/// timestamp coalescing can no longer hide an immediate write. The key set is the
 /// resolved encoder and its loaded dependencies, so it stays small.
 /// Digest per engine object path, tagged with the object version it was taken at.
 type EngineObjectDigests =
-    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>)>>;
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>, bool)>>;
 static ENGINE_OBJECT_DIGESTS: std::sync::LazyLock<EngineObjectDigests> =
     std::sync::LazyLock::new(Default::default);
 
@@ -3395,15 +3507,18 @@ fn cached_engine_digest(path: &std::path::Path, version: &str) -> Option<Vec<u8>
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(path)
-        .filter(|(cached, _)| cached == version)
-        .map(|(_, digest)| digest.clone())
+        .filter(|(cached, _, settled)| *settled && cached == version)
+        .map(|(_, digest, _)| digest.clone())
 }
 
-fn remember_engine_digest(path: &std::path::Path, version: &str, digest: &[u8]) {
+fn remember_engine_digest(path: &std::path::Path, version: &str, digest: &[u8], settled: bool) {
     ENGINE_OBJECT_DIGESTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(path.to_owned(), (version.to_owned(), digest.to_vec()));
+        .insert(
+            path.to_owned(),
+            (version.to_owned(), digest.to_vec(), settled),
+        );
 }
 
 /// SHA-256 of one engine object plus its object version. Only the first
@@ -3439,6 +3554,7 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
     let version = engine_object_version(&metadata)?;
     #[cfg(windows)]
     let version = windows_engine_object_version(&source)?;
+    let settled_before_read = engine_metadata_has_settled(&metadata);
     if let Some(digest) = cached_engine_digest(path, &version) {
         return Ok((digest, version));
     }
@@ -3480,7 +3596,7 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
         ));
     }
     let digest = object.finalize().to_vec();
-    remember_engine_digest(path, &version, &digest);
+    remember_engine_digest(path, &version, &digest, settled_before_read);
     Ok((digest, version))
 }
 
@@ -4166,6 +4282,115 @@ pub async fn has_hdr10_passthrough_vaapi(
             .is_ok_and(|result| result.is_ok_and(|status| status.success()))
         })
         .await
+}
+
+/// Does the VA-API render device decode HEVC Main10 into GPU surfaces?
+///
+/// The Dolby Vision renderer decodes its layers there when it can, and that
+/// decides the CPU it is debited (`dv_segment::RendererDecode`). The startup
+/// decoder inventory cannot answer it: it decodes an 8-bit clip and reads a
+/// `Reinit context` line FFmpeg's HEVC decoder never prints. Here a shipped
+/// Main10 clip is decoded with `-hwaccel_output_format vaapi` into
+/// `hwdownload`, which accepts only hardware frames, so success means the GPU
+/// decoded it.
+///
+/// A success is kept for the process. A failure is not: it may be a device
+/// still settling at boot, so the probe runs again on the next need after a
+/// backoff (30 s, doubling, at most an hour). Until proved, the answer is
+/// `false` and the renderer is debited its software shape. Warmed off the
+/// boot path at startup; the completed DV window stays the authority.
+pub async fn has_hevc_main10_vaapi_decode() -> bool {
+    let due = |proof: &Main10DecodeProof| {
+        !proof.proved
+            && proof
+                .retry_at
+                .is_none_or(|at| std::time::Instant::now() >= at)
+    };
+    {
+        let proof = HEVC_MAIN10_VAAPI_DECODE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if proof.proved || !due(&proof) {
+            return proof.proved;
+        }
+    }
+    let Ok(_probe) = HEVC_MAIN10_VAAPI_PROBE.try_lock() else {
+        return false;
+    };
+    {
+        let proof = HEVC_MAIN10_VAAPI_DECODE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !due(&proof) {
+            return proof.proved;
+        }
+    }
+    let proved = probe_hevc_main10_vaapi_decode().await;
+    let mut proof = HEVC_MAIN10_VAAPI_DECODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if proved {
+        proof.proved = true;
+        proof.retry_at = None;
+    } else {
+        proof.failures = proof.failures.saturating_add(1);
+        proof.retry_at = Some(std::time::Instant::now() + main10_probe_backoff(proof.failures));
+    }
+    proved
+}
+
+/// The wait before the `failures`th retry of a failed Main10 decode probe.
+fn main10_probe_backoff(failures: u32) -> Duration {
+    Duration::from_secs(30)
+        .saturating_mul(1 << failures.saturating_sub(1).min(7))
+        .min(Duration::from_secs(3600))
+}
+
+async fn probe_hevc_main10_vaapi_decode() -> bool {
+    let device = plurx_core::transcode::vaapi_device();
+    if !std::path::Path::new(&device).exists() {
+        return false;
+    }
+    let Ok(scratch) = tempfile::tempdir() else {
+        return false;
+    };
+    let clip = scratch.path().join("main10.mkv");
+    if tokio::fs::write(&clip, HEVC_MAIN10_PROBE_CLIP)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let mut decode = tokio::process::Command::new(ffmpeg_bin());
+    decode
+        .args(["-hide_banner", "-loglevel", "error", "-hwaccel", "vaapi"])
+        .args([
+            "-hwaccel_device",
+            &device,
+            "-hwaccel_output_format",
+            "vaapi",
+            "-i",
+        ])
+        .arg(&clip)
+        .args([
+            "-vf",
+            "hwdownload,format=p010le",
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ])
+        .kill_on_drop(true);
+    tokio::time::timeout(
+        HEVC_MAIN10_PROBE_DEADLINE,
+        crate::process_control::status_job_owned(
+            &mut decode,
+            crate::process_control::ChildWork::background("HEVC Main10 VA-API decode probe"),
+        ),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok_and(|status| status.success()))
 }
 
 /// Can this node accept the software Dolby renderer's 10-bit frames and run

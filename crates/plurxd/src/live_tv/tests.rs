@@ -1916,13 +1916,12 @@ async fn the_producer_answers_only_once_two_segments_are_listed() {
         r#"#!/bin/sh
 for output do playlist="$output"; done
 directory=${playlist%/*}
-root=${directory%/*}
-printf 'transport-stream' > "$directory/segment-000001.ts"
-printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n' > "$playlist"
+root="${0%/*}/live-tv"
+printf 'transport-stream' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/segment-000001.ts" > /dev/null
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$playlist" > /dev/null
 while [ ! -f "$root/release-second" ]; do sleep 0.01; done
-printf 'transport-stream-two' > "$directory/segment-000002.ts"
-printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' > "$playlist.tmp"
-mv "$playlist.tmp" "$playlist"
+printf 'transport-stream-two' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/segment-000002.ts" > /dev/null
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$playlist" > /dev/null
 exec /bin/cat >/dev/null
 "#,
         0o755,
@@ -2333,10 +2332,11 @@ fn publishing_ffmpeg(root: &Path, keep_input: bool) -> String {
         r#"echo "$$ $(/bin/date +%s%N)" >> '{spawns}'
 for output do playlist="$output"; done
 directory=${{playlist%/*}}
-printf 'transport-stream' > "$directory/segment-000001.ts"
-printf 'transport-stream-two' > "$directory/segment-000002.ts"
-printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' > "$playlist.tmp"
-mv "$playlist.tmp" "$playlist"
+(
+printf 'transport-stream' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/segment-000001.ts" > /dev/null
+printf 'transport-stream-two' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/segment-000002.ts" > /dev/null
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$playlist" > /dev/null
+) &
 exec /bin/cat > {sink}"#,
         spawns = root.join("ffmpeg.spawns").display(),
     )
@@ -2747,34 +2747,153 @@ async fn a_hung_inventory_does_not_stack_and_the_progress_timer_still_ends_the_s
     );
 }
 
-/// A scripted FFmpeg that keeps producing until its scratch is removed: a
-/// new one-second segment every 300 ms, a three-segment window, and the
-/// one deletion-lag segment kept behind it.
+/// The direct fixture child only drains tuner input. Publication is owned by
+/// `AdvancingPublisher`, rather than a detached shell grandchild that survives
+/// the production owner's SIGKILL and reap of this child.
 fn advancing_ffmpeg() -> String {
     r#"for output do playlist="$output"; done
-directory=${playlist%/*}
-(
-n=1
-while [ -d "$directory" ]; do
-  printf 'segment-%d' "$n" > "$directory/$(printf 'segment-%06d.ts' "$n")"
-  first=1
-  [ "$n" -gt 2 ] && first=$((n - 2))
-  {
-    printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:%d\n' "$first"
-    listed=$first
-    while [ "$listed" -le "$n" ]; do
-      printf '#EXTINF:1.000000,\nsegment-%06d.ts\n' "$listed"
-      listed=$((listed + 1))
-    done
-  } > "$playlist.tmp" && /bin/mv "$playlist.tmp" "$playlist"
-  stale=$((first - 2))
-  [ "$stale" -ge 1 ] && /bin/rm -f "$directory/$(printf 'segment-%06d.ts' "$stale")"
-  n=$((n + 1))
-  /bin/sleep 0.3
-done
-) &
+printf '%s\n%s\n' "$$" "$playlist" > "${0%/*}/publisher-target"
 exec /bin/cat > /dev/null"#
         .to_owned()
+}
+
+#[cfg(unix)]
+struct AdvancingPublisher {
+    task: Option<tokio::task::JoinHandle<()>>,
+    child_pid: Option<u32>,
+}
+
+#[cfg(unix)]
+impl Drop for AdvancingPublisher {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            // Also covers setup/assertion panics. This task owns no subprocesses.
+            task.abort();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl AdvancingPublisher {
+    fn start(root: PathBuf) -> Self {
+        let task = tokio::spawn(async move {
+            let target = root.join("publisher-target");
+            let deadline = tokio::time::Instant::now() + LIVE_TV_TEST_HANG_GUARD;
+            let (pid, playlist) = loop {
+                if let Ok(text) = std::fs::read_to_string(&target) {
+                    if text.ends_with('\n') {
+                        if let Some((pid, playlist)) = text.trim_end().split_once('\n') {
+                            break (
+                                pid.parse::<u32>().expect("actual fixture child PID"),
+                                playlist.to_owned(),
+                            );
+                        }
+                    }
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "fixture child never declared its upload target"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            assert!(
+                process_exists(pid),
+                "publisher starts for a live owned child"
+            );
+            let directory = playlist
+                .rsplit_once('/')
+                .expect("upload target directory")
+                .0;
+            let client = test_client();
+            let mut n = 1_u64;
+            while process_exists(pid) {
+                let first = n.saturating_sub(2).max(1);
+                let mut body = format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+                for listed in first..=n {
+                    body.push_str(&format!("#EXTINF:1.000000,\nsegment-{listed:06}.ts\n"));
+                }
+                let publish = async {
+                    client
+                        .put(format!("{directory}/segment-{n:06}.ts"))
+                        .timeout(Duration::from_secs(2))
+                        .body(format!("segment-{n}"))
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    client
+                        .put(&playlist)
+                        .timeout(Duration::from_secs(2))
+                        .body(body)
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    if first > 2 {
+                        client
+                            .delete(format!("{directory}/segment-{:06}.ts", first - 2))
+                            .timeout(Duration::from_secs(2))
+                            .send()
+                            .await?
+                            .error_for_status()?;
+                    }
+                    Ok::<(), reqwest::Error>(())
+                }
+                .await;
+                if let Err(error) = publish {
+                    assert!(
+                        !process_exists(pid),
+                        "publication failed while the owned child was still alive: {error}"
+                    );
+                    return;
+                }
+                n += 1;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        });
+        Self {
+            task: Some(task),
+            child_pid: None,
+        }
+    }
+
+    async fn assert_settled(mut self, session: &LiveTvSession) {
+        // Registry retirement alone precedes physical cleanup. Observe the real
+        // worker's cleanup result before asserting reap and publisher completion.
+        tokio::time::timeout(LIVE_TV_TEST_HANG_GUARD, async {
+            loop {
+                let cleanup = session.state.lock().expect("state").cleanup.clone();
+                match cleanup {
+                    Some(Ok(())) => break,
+                    Some(Err(error)) => panic!("fixture session cleanup failed: {error:?}"),
+                    None => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .expect("session physical cleanup settled");
+        let pid = self
+            .child_pid
+            .expect("actual child identity observed before retirement");
+        assert!(
+            !process_exists(pid),
+            "the actual fixture child must be reaped"
+        );
+        assert!(
+            session.process.lock().await.is_none(),
+            "the worker released its reaped process"
+        );
+        tokio::time::timeout(
+            LIVE_TV_TEST_HANG_GUARD,
+            self.task.as_mut().expect("owned publisher"),
+        )
+        .await
+        .expect("publisher stopped after actual child reap")
+        .expect("publisher task succeeded");
+        self.task = None;
+        assert!(
+            !session.directory.exists(),
+            "scratch cleanup preceded fixture retirement"
+        );
+    }
 }
 
 /// One playlist GET, bounded: before plan L-03 every GET took the
@@ -2807,7 +2926,9 @@ async fn session_with_a_hung_ledger_read(
     String,
     Arc<LiveTvSession>,
     u64,
+    AdvancingPublisher,
 ) {
+    let mut publisher = AdvancingPublisher::start(root.to_path_buf());
     let (manager, tuner) = start_path_fixture(root, &advancing_ffmpeg(), 1).await;
     std::fs::write(root.join("probe.json"), PROBED_480).expect("probe answer");
     let request = fixture_request(1);
@@ -2834,6 +2955,29 @@ async fn session_with_a_hung_ledger_read(
     let session = manager
         .session(&provisional.capability)
         .expect("registered session");
+    // During observation the production worker owns Child in a local variable;
+    // session.process is only its later terminal-cleanup transfer slot. The
+    // script's $$ is the same actual PID retained by exec /bin/cat.
+    let declared = std::fs::read_to_string(root.join("publisher-target")).expect("fixture target");
+    let child_pid = declared
+        .lines()
+        .next()
+        .expect("declared child PID")
+        .parse::<u32>()
+        .expect("child PID");
+    assert!(
+        child_pid > 0 && process_exists(child_pid),
+        "actual fixture child is running"
+    );
+    assert!(
+        !publisher
+            .task
+            .as_ref()
+            .expect("owned publisher")
+            .is_finished(),
+        "publisher is live before the ledger read is held"
+    );
+    publisher.child_pid = Some(child_pid);
     let before = manager.session_fence_reads_started.load(Ordering::Acquire);
     manager.hold_session_fence_reads.send_replace(true);
     let deadline = tokio::time::Instant::now() + LIVE_TV_TEST_HANG_GUARD;
@@ -2845,7 +2989,14 @@ async fn session_with_a_hung_ledger_read(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let held = manager.session_fence_reads_started.load(Ordering::Acquire);
-    (manager, tuner, provisional.capability, session, held)
+    (
+        manager,
+        tuner,
+        provisional.capability,
+        session,
+        held,
+        publisher,
+    )
 }
 
 /// Wait for the tuner's lease to renew (the ingest's revision moves on
@@ -2911,7 +3062,7 @@ async fn session_ended_within(
 #[tokio::test]
 async fn a_hung_ledger_read_keeps_the_playlist_advancing_and_its_refusal_still_ends_the_session() {
     let root = crate::test_tempdir().expect("root");
-    let (manager, _tuner, capability, session, held) =
+    let (manager, _tuner, capability, session, held, publisher) =
         session_with_a_hung_ledger_read(root.path()).await;
     let sequence_held = session.state.lock().expect("state").media_sequence;
     let playlist_held = served_playlist(&manager, &capability).await;
@@ -2957,6 +3108,7 @@ async fn a_hung_ledger_read_keeps_the_playlist_advancing_and_its_refusal_still_e
         matches!(&terminal, Some(LiveTvError::CapabilityExpired(message)) if message.contains("no longer authorizes")),
         "{terminal:?}"
     );
+    publisher.assert_settled(&session).await;
 }
 
 /// While the ledger read hangs, the rest of the running fence must not
@@ -2968,7 +3120,7 @@ async fn a_hung_ledger_read_keeps_the_playlist_advancing_and_its_refusal_still_e
 #[tokio::test]
 async fn a_settings_change_ends_a_session_whose_ledger_read_is_hung() {
     let root = crate::test_tempdir().expect("root");
-    let (manager, _tuner, capability, session, held) =
+    let (manager, _tuner, capability, session, held, publisher) =
         session_with_a_hung_ledger_read(root.path()).await;
     await_ingest_renewal(&manager).await;
     manager
@@ -2997,6 +3149,7 @@ async fn a_settings_change_ends_a_session_whose_ledger_read_is_hung() {
         "the session ended on the observation, not on a second ledger read"
     );
     assert!(*manager.hold_session_fence_reads.borrow());
+    publisher.assert_settled(&session).await;
 }
 
 #[test]
@@ -3965,6 +4118,7 @@ async fn a_fast_source_change_exit_is_classified_after_the_owned_stderr_reader_s
     });
     *session.process.lock().await = Some(LiveTvProcess {
         child,
+        sink: None,
         _job: job,
         _admission: None,
         stderr: Some(stderr),
@@ -4377,6 +4531,7 @@ async fn a_failed_cleanup_retires_the_session_and_keeps_the_child_until_reaped()
     let pid = child.id().expect("child pid");
     *session.process.lock().await = Some(LiveTvProcess {
         child,
+        sink: None,
         _job: job,
         _admission: Some(admission),
         stderr: None,
@@ -4957,6 +5112,8 @@ fn live_tv_software_hls_argument_baseline_is_stable() {
         "CUDA_VISIBLE_DEVICES",
         "NVIDIA_VISIBLE_DEVICES",
         "NVIDIA_DRIVER_CAPABILITIES",
+        "CUDA_CACHE_DISABLE",
+        "MESA_SHADER_CACHE_DISABLE",
     ];
     assert!(command
         .as_std()
@@ -4964,6 +5121,17 @@ fn live_tv_software_hls_argument_baseline_is_stable() {
         .all(|(name, _)| allowed_environment
             .iter()
             .any(|allowed| name == std::ffi::OsStr::new(allowed))));
+    for (key, value) in [
+        ("CUDA_CACHE_DISABLE", "1"),
+        ("MESA_SHADER_CACHE_DISABLE", "true"),
+    ] {
+        assert!(
+            command.as_std().get_envs().any(|(name, supplied)| {
+                name == std::ffi::OsStr::new(key) && supplied == Some(std::ffi::OsStr::new(value))
+            }),
+            "{key} must preserve the runtime cache contract"
+        );
+    }
     let actual = command
         .as_std()
         .get_args()
@@ -5077,6 +5245,18 @@ fn live_hls_cuts_uniform_one_second_segments_and_keeps_a_24_entry_window() {
     .expect("prepare live-TV plan");
     let command = live_ffmpeg_command(&system, &plan, Path::new("/fixture/live"))
         .expect("build live-TV command");
+    let environment = command
+        .as_std()
+        .get_envs()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("CUDA_CACHE_DISABLE")),
+        Some(&Some(std::ffi::OsStr::new("1")))
+    );
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("MESA_SHADER_CACHE_DISABLE")),
+        Some(&Some(std::ffi::OsStr::new("true")))
+    );
     let arguments = command
         .as_std()
         .get_args()
@@ -5714,6 +5894,188 @@ fn progress_is_the_newest_listed_segment_not_the_window_sliding() {
 }
 
 #[tokio::test]
+async fn live_scratch_keeps_playing_during_http_uploads_and_pending_playlist() {
+    for extension in ["ts", "m4s"] {
+        let temp = crate::test_tempdir().expect("scratch root");
+        let sink = crate::scratch_put::PutSink::bind_live_tv(temp.path().to_owned())
+            .expect("live upload sink");
+        let base = sink.base_url(0);
+        let client = reqwest::Client::new();
+        for sequence in 10..=12 {
+            client
+                .put(format!("{base}/segment-{sequence:06}.{extension}"))
+                .body("transport")
+                .send()
+                .await
+                .expect("segment upload")
+                .error_for_status()
+                .expect("segment committed");
+        }
+        let playlist = |first| {
+            let text = String::from_utf8(live_playlist(first, 3)).expect("playlist");
+            if extension == "m4s" {
+                text.replace(".ts", ".m4s").replace(
+                    "#EXT-X-VERSION:3",
+                    "#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"",
+                )
+            } else {
+                text
+            }
+        };
+        if extension == "m4s" {
+            client
+                .put(format!("{base}/init.mp4"))
+                .body("init")
+                .send()
+                .await
+                .expect("init upload")
+                .error_for_status()
+                .expect("init committed");
+        }
+        client
+            .put(format!("{base}/index.m3u8"))
+            .body(playlist(10))
+            .send()
+            .await
+            .expect("playlist upload")
+            .error_for_status()
+            .expect("published");
+
+        // Hold a real segment upload open while the next playlist arrives.
+        // The playlist remains pending until this segment commits, so the
+        // scanner must tolerate both receiver temporaries without publishing
+        // either unfinished resource.
+        let url = reqwest::Url::parse(&base).expect("upload URL");
+        let mut segment = tokio::net::TcpStream::connect((
+            url.host_str().expect("host"),
+            url.port().expect("port"),
+        ))
+        .await
+        .expect("connect");
+        segment.write_all(format!(
+            "PUT {}/segment-000013.{extension} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8\r\n\r\npart",
+            url.path()).as_bytes()).await.expect("partial segment");
+        let pending = client
+            .put(format!("{base}/index.m3u8"))
+            .body(playlist(11))
+            .send()
+            .await
+            .expect("next playlist");
+        assert_eq!(pending.status(), reqwest::StatusCode::ACCEPTED);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut entries = tokio::fs::read_dir(temp.path()).await.expect("directory");
+                let mut uploads = 0;
+                while let Some(entry) = entries.next_entry().await.expect("entry") {
+                    if entry.file_name().to_string_lossy().ends_with(".tmp") {
+                        uploads += 1;
+                    }
+                }
+                if uploads == 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("two overlapping uploads");
+        for _ in 0..3 {
+            let inventory = inspect_scratch(temp.path())
+                .await
+                .expect("live scan")
+                .expect("published window");
+            assert_eq!(inventory.media_sequence, 10);
+            assert_eq!(inventory.newest_listed(), Some(12));
+            assert_eq!(inventory.segments.len(), 3);
+        }
+        segment.write_all(b"done").await.expect("finish segment");
+        let mut response = Vec::new();
+        segment
+            .read_to_end(&mut response)
+            .await
+            .expect("upload response");
+        assert!(response.starts_with(b"HTTP/1.1 201"));
+        let inventory = inspect_scratch(temp.path())
+            .await
+            .expect("completed scan")
+            .expect("new published window");
+        assert_eq!(inventory.media_sequence, 11);
+        assert_eq!(inventory.newest_listed(), Some(13));
+        assert_eq!(inventory.segments.len(), 4);
+        assert!(sink.failure().is_none());
+    }
+}
+
+#[tokio::test]
+async fn live_scratch_upload_temporaries_keep_name_count_and_byte_limits() {
+    let temp = crate::test_tempdir().expect("scratch root");
+    for name in [
+        "index.m3u8.0.tmp",
+        "init.mp4.1.tmp",
+        "segment-000013.ts.2.tmp",
+        "segment-000014.m4s.18446744073709551615.tmp",
+    ] {
+        std::fs::write(temp.path().join(name), b"upload").expect("temporary");
+    }
+    assert!(scan_scratch_directory(temp.path())
+        .expect("valid uploads")
+        .is_some());
+    for name in [
+        "notes.txt.0.tmp",
+        "index.m3u8..tmp",
+        "init.mp4.-1.tmp",
+        "segment-000013.ts.no.tmp",
+        "segment-000013.ts.18446744073709551616.tmp",
+        "segment-000013.ts.1.2.tmp",
+        "segment-x.ts.1.tmp",
+    ] {
+        let path = temp.path().join(name);
+        std::fs::write(&path, b"stray").expect("invalid temporary");
+        assert!(
+            scan_scratch_directory(temp.path())
+                .err()
+                .expect("refused")
+                .to_string()
+                .contains("unexpected filename"),
+            "{name}"
+        );
+        std::fs::remove_file(path).expect("remove invalid temporary");
+    }
+    let large = temp.path().join("segment-000015.ts.3.tmp");
+    let file = std::fs::File::create(&large).expect("temporary");
+    file.set_len(MAX_SESSION_BYTES + 1).expect("sparse upload");
+    assert!(scan_scratch_directory(temp.path())
+        .err()
+        .expect("oversized upload")
+        .to_string()
+        .contains("128 MiB"));
+    drop(file);
+    std::fs::remove_file(&large).expect("remove oversized upload");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("index.m3u8.0.tmp", &large).expect("temporary symlink");
+        assert!(scan_scratch_directory(temp.path())
+            .err()
+            .expect("symlink refused")
+            .to_string()
+            .contains("non-regular"));
+        std::fs::remove_file(&large).expect("remove symlink");
+    }
+    for request in 4..=MAX_UPLOAD_TEMPORARIES {
+        std::fs::write(
+            temp.path().join(format!("segment-000015.ts.{request}.tmp")),
+            b"x",
+        )
+        .expect("upload temporary");
+    }
+    assert!(scan_scratch_directory(temp.path())
+        .err()
+        .expect("excess uploads")
+        .to_string()
+        .contains("too many temporary"));
+}
+
+#[tokio::test]
 async fn live_scratch_inventory_enforces_list_deletion_and_temp_budgets() {
     let temp = crate::test_tempdir().expect("scratch root");
     let directory = temp.path();
@@ -5747,6 +6109,58 @@ async fn live_scratch_inventory_enforces_list_deletion_and_temp_budgets() {
         .await
         .expect("sixth deletion lag");
     assert!(inspect_scratch(directory).await.is_err());
+}
+
+#[test]
+fn scratch_scan_accepts_bounded_put_staging_without_publishing_it() {
+    let root = crate::test_tempdir().expect("scratch root");
+    let directory = root.path();
+    std::fs::write(directory.join("segment-000001.ts"), b"published").expect("segment");
+    for name in [
+        "segment-000002.ts.0.tmp",
+        "index.m3u8.17.tmp",
+        "init.mp4.18446744073709551615.tmp",
+    ] {
+        let path = directory.join(name);
+        std::fs::write(&path, b"staging").expect("PUT staging");
+        let scan = scan_scratch_directory(directory)
+            .expect("owned PUT temporary is valid")
+            .expect("directory");
+        assert_eq!(scan.final_segments.len(), 1, "staging is not published");
+        assert!(scan.init.is_none(), "a staging init is not published");
+        let second = directory.join("segment-000003.ts.1.tmp");
+        std::fs::write(&second, b"second staging").expect("second staging");
+        let overlapping = scan_scratch_directory(directory)
+            .expect("concurrent PUT temporaries fit the bounded upload budget")
+            .expect("directory");
+        assert_eq!(overlapping.final_segments.len(), 1);
+        assert!(overlapping.final_segments.contains_key(&1));
+        assert!(overlapping.init.is_none(), "staging is not published");
+        std::fs::remove_file(second).expect("remove second staging");
+        std::fs::File::create(&path)
+            .expect("staging file")
+            .set_len(MAX_SESSION_BYTES + 1)
+            .expect("oversized staging");
+        assert!(
+            scan_scratch_directory(directory).is_err(),
+            "staging bytes count toward the scratch budget"
+        );
+        std::fs::remove_file(path).expect("remove staging");
+    }
+    for name in [
+        "notes.txt.1.tmp",
+        "segment-000002.ts..tmp",
+        "segment-000002.ts.-1.tmp",
+        "index.m3u8.18446744073709551616.tmp",
+    ] {
+        let path = directory.join(name);
+        std::fs::write(&path, b"unexpected").expect("stray file");
+        assert!(
+            scan_scratch_directory(directory).is_err(),
+            "unexpected filename: {name}"
+        );
+        std::fs::remove_file(path).expect("remove stray file");
+    }
 }
 
 /// Plan L-02 §5.4 / correction 13: the scan moved into one blocking walk
@@ -7519,4 +7933,209 @@ fn the_air_date_conversion_is_a_calendar_day_and_rejects_impossible_instants() {
     );
     assert_eq!(guide::unix_to_air_date(0).as_deref(), Some("1970-01-01"));
     assert_eq!(guide::unix_to_air_date(-1), None);
+}
+
+#[tokio::test]
+async fn live_tv_http_writer_preserves_ts_and_fmp4_sliding_windows() {
+    plurx_core::testfixtures::require_ffmpeg();
+    for packaging in [LivePackaging::Mpegts, LivePackaging::Fmp4] {
+        let root = crate::test_tempdir().expect("live HTTP output");
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let budget =
+            crate::playback_cache::PlaybackCacheBudget::new(store, vec![root.path().to_path_buf()]);
+        budget.configure_for_test(64 << 20);
+        let sink =
+            crate::scratch_put::PutSink::bind_live_tv(root.path().to_path_buf()).expect("receiver");
+        let system = SystemInfo {
+            ffmpeg: plurx_core::testfixtures::ffmpeg(),
+            ..SystemInfo::default()
+        };
+        let mut delivery = test_encode_delivery(180);
+        delivery.packaging = packaging;
+        if packaging == LivePackaging::Fmp4 {
+            delivery.output.container = "fmp4".into();
+        }
+        let plan = LiveTvTranscodePlan::new(&system, delivery, Some(Encoder::Software), Some(2))
+            .expect("plan");
+        let command = live_ffmpeg_command_for_output(
+            &system,
+            &plan,
+            root.path(),
+            LiveTvFfmpegInput::GraphProbe,
+            Some(&sink.base_url(0)),
+        )
+        .expect("HTTP graph");
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| match argument.to_str() {
+                Some("4.25") => std::ffi::OsString::from("36.25"),
+                Some("testsrc2=size=1920x1080:rate=30") => {
+                    std::ffi::OsString::from("testsrc2=size=320x180:rate=30")
+                }
+                _ => argument.to_os_string(),
+            })
+            .collect::<Vec<_>>();
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair[0] == "-method" && pair[1] == "PUT"));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair[0] == "-http_proxy" && pair[1].is_empty()));
+        assert!(arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "-hls_flags")
+            .all(|pair| !pair[1].to_string_lossy().contains("temp_file")));
+        // Rebuild only the synthetic duration/raster arguments; keep the
+        // production command's executable and explicit runtime environment.
+        // In particular, env_clear alone loses Homebrew's PATH on macOS.
+        let mut execution = tokio::process::Command::new(command.as_std().get_program());
+        execution.env_clear();
+        for (name, value) in command.as_std().get_envs() {
+            if let Some(value) = value {
+                execution.env(name, value);
+            }
+        }
+        let output = tokio::time::timeout(
+            Duration::from_secs(40),
+            execution.args(arguments).kill_on_drop(true).output(),
+        )
+        .await
+        .expect("bounded graph deadline")
+        .expect("FFmpeg graph");
+        sink.drain().await;
+        assert!(
+            output.status.success(),
+            "{}",
+            crate::scratch_put::redact(&String::from_utf8_lossy(&output.stderr))
+        );
+        assert!(sink.failure().is_none(), "{:?}", sink.failure());
+        let inventory = inspect_scratch(root.path())
+            .await
+            .unwrap_or_else(|error| {
+                let names = std::fs::read_dir(root.path())
+                    .expect("diagnostic inventory")
+                    .map(|entry| entry.expect("diagnostic entry").file_name())
+                    .collect::<Vec<_>>();
+                panic!(
+                    "{packaging:?}: {error:?}; files={names:?}; stderr={}",
+                    crate::scratch_put::redact(&String::from_utf8_lossy(&output.stderr))
+                );
+            })
+            .expect("published playlist");
+        assert_eq!(inventory.listed, MAX_LISTED_SEGMENTS);
+        let mut count = 0;
+        let mut entries = tokio::fs::read_dir(root.path())
+            .await
+            .expect("output directory");
+        while let Some(entry) = entries.next_entry().await.expect("entry") {
+            if parse_segment_name(&entry.file_name().to_string_lossy(), false).is_some() {
+                count += 1;
+            }
+        }
+        assert!(
+            count <= MAX_LISTED_SEGMENTS + MAX_DELETION_LAG_SEGMENTS,
+            "old segments must be deleted through the receiver"
+        );
+        assert!(
+            inventory.media_sequence > 0,
+            "playlist must advance beyond startup"
+        );
+        assert_eq!(inventory.init.is_some(), packaging == LivePackaging::Fmp4);
+    }
+}
+
+#[tokio::test]
+async fn live_tv_delete_defers_response_pins_and_retries_after_playlist_promotion() {
+    let root = crate::test_tempdir().expect("live delete");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let budget =
+        crate::playback_cache::PlaybackCacheBudget::new(store, vec![root.path().to_path_buf()]);
+    budget.configure_for_test(64 << 10);
+    let sink = crate::scratch_put::PutSink::bind_live_tv(root.path().to_path_buf()).expect("sink");
+    let base = sink.base_url(0);
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
+    for sequence in 0..3 {
+        assert!(client
+            .put(format!("{base}/segment-{sequence:06}.ts"))
+            .body(vec![sequence as u8; 128])
+            .send()
+            .await
+            .expect("upload")
+            .status()
+            .is_success());
+    }
+    let playlist = |sequence| {
+        format!("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n#EXTINF:1,\nsegment-{sequence:06}.ts\n")
+    };
+    assert!(client
+        .put(format!("{base}/index.m3u8"))
+        .body(playlist(1))
+        .send()
+        .await
+        .expect("playlist")
+        .status()
+        .is_success());
+    let opened = open_bounded_segment(&root.path().join("segment-000000.ts"), 128)
+        .await
+        .expect("response open");
+    let deletion = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.delete(format!("{base}/segment-000000.ts")).send(),
+    )
+    .await
+    .expect("DELETE must not stall the muxer")
+    .expect("delete");
+    assert_eq!(deletion.status(), reqwest::StatusCode::ACCEPTED);
+    assert!(root.path().join("segment-000000.ts").exists());
+    drop(opened);
+    assert!(client
+        .put(format!("{base}/index.m3u8"))
+        .body(playlist(1))
+        .send()
+        .await
+        .expect("retry promotion")
+        .status()
+        .is_success());
+    assert!(!root.path().join("segment-000000.ts").exists());
+    // A premature FFmpeg DELETE is remembered, since FFmpeg will not retry.
+    assert_eq!(
+        client
+            .delete(format!("{base}/segment-000001.ts"))
+            .send()
+            .await
+            .expect("early delete")
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    let opened = open_bounded_segment(&root.path().join("segment-000001.ts"), 128)
+        .await
+        .expect("response open");
+    assert!(client
+        .put(format!("{base}/index.m3u8"))
+        .body(playlist(2))
+        .send()
+        .await
+        .expect("advance")
+        .status()
+        .is_success());
+    assert!(
+        root.path().join("segment-000001.ts").exists(),
+        "promotion cannot unlink a pinned response"
+    );
+    drop(opened);
+    assert!(client
+        .put(format!("{base}/index.m3u8"))
+        .body(playlist(2))
+        .send()
+        .await
+        .expect("retry promotion")
+        .status()
+        .is_success());
+    assert!(!root.path().join("segment-000001.ts").exists());
 }

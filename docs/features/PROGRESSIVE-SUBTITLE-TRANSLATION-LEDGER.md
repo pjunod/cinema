@@ -1,6 +1,31 @@
 # Progressive subtitle translation — review ledger and completion record
 
+**Completion effort, 2026-10-26:** [current implementation and final qualification](SUBTITLE-COMPLETION-STATUS.md) extends the initial scope with progressive transcription, native clients, multiple audio tracks, additional delivery routes and existing-text translation. The evidence below retains its original candidate and scope. The user owns deployment after the new merge.
+
 **Status:** built — first route accepted on 2026-10-17; follow-ups are listed at the end of §2.
+
+**Setup repair — 2026-10-25; [implementation, qualification and landing](SUBTITLE-SETUP-REPAIR-STATUS.md).**
+The live web setup accepted an Install request, then displayed
+`Invalid model operation response`: the version 2 server response omitted
+`purpose: "translation"`, which the shipped client requires before it follows
+jobs. A later status refresh showed the model cached; Activity showed its test
+queued with `waiting_for_playback_capacity`. This reproduces a setup failure,
+not a broken download URL or successful model qualification. A separate earlier
+model operation on another worker failed with `output_invalid`; its cause remains
+unresolved. No translation enablement was saved and no application was deployed.
+
+The repair returns the missing response discriminator and tests the real HTTP
+Install/Test routes, their queued job payloads and receipt replay. Setup suggests
+the sole active profile without saving it, labels installation **Download and
+test**, shows trusted failure/wait reasons, prevents duplicate requests while a
+job is active, and recovers model/language choices after a failed catalog load.
+An old setup clock is refreshed before a new action; ambiguous retries retain
+their existing request identity. Model tests also retain a FIFO turn on the existing
+heavy-background semaphore and publish `waiting_for_capacity`; CPU resources
+are reserved after the shared gate, with foreground checks and cancellation
+intact. The current background job still finishes before the test starts. These changes do not add native playback,
+additional audio streams, remux/encode delivery or progressive same-language
+transcription. The earlier first-route acceptance retains its original limits.
 
 Companion to [the plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md): its review ledger, the
 integration checkpoints and the completion record with the packaged acceptance evidence,
@@ -171,13 +196,13 @@ demand has its own cadence, only acknowledged generations advance, and a
 lapsed demand is renewed by its next heartbeat); a retired player leaving a
 dead panel; and exhausted ranges still offered for retry.
 
-**Still open.** Native clients, multiple audio streams, remux/encoded routes,
-fleet placement, long-film completion and speed, and genuinely bilingual
-human quality review. Also open from review: an operation is pinned to the
-node that first prepared it (multi-node retargeting); deb/rpm packages do not
-install a readable notice file (the daemon embeds the attribution); nothing
-yet marks an operation `complete`; manifest refreshes re-add every cue rather
-than diffing; and whether rapid seeking can exhaust the per-user read-lease
-budget is unconfirmed. The P0 timing figures do not prove realtime on other
-hardware.
+**Current completion work.** [The completion ledger](SUBTITLE-COMPLETION-STATUS.md)
+now records native clients, actual selected audio ordinals, remux/encoded
+attachments and the three caption operations. Linux packages now stage the
+readable fixture notice, and manifest rendering applies cue changes without
+re-adding unchanged cues; their focused regressions passed. Atomic operation
+completion, durable producer reassignment and rapid-seek lease reuse now pass
+focused regression qualification in PR #1292. Fleet/device acceptance, long-film throughput and
+bilingual human quality remain distinct from implementation and fixture
+qualification. The P0 timing figures do not prove realtime on other hardware.
 

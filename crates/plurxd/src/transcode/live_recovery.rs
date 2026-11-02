@@ -20,10 +20,11 @@ pub(crate) enum LiveRecoveryReason {
     FrameCadenceUnknown,
     VideoGeometryUnknown,
     VodDisabled,
+    IndexUnavailable,
 }
 
 impl LiveRecoveryReason {
-    pub(crate) const COUNT: usize = 10;
+    pub(crate) const COUNT: usize = 11;
 
     pub(super) fn index(self) -> usize {
         match self {
@@ -37,6 +38,7 @@ impl LiveRecoveryReason {
             Self::FrameCadenceUnknown => 7,
             Self::VideoGeometryUnknown => 8,
             Self::VodDisabled => 9,
+            Self::IndexUnavailable => 10,
         }
     }
 
@@ -52,6 +54,7 @@ impl LiveRecoveryReason {
         "vod_frame_cadence_unknown",
         "vod_video_geometry_unknown",
         "vod_disabled",
+        "vod_index_unavailable",
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -102,6 +105,9 @@ pub(crate) const VOD_REFUSAL_CODES: &[(&str, VodRefusalClass)] = {
     &[
         // ---- Only VOD cannot build this: fall back to rolling. ----
         ("vod_index_pending", Live(R::IndexPending)),
+        // This node's indexer recorded that it cannot index this pipeline
+        // (the failure is terminal); rolling plays it regardless.
+        ("vod_index_unavailable", Live(R::IndexUnavailable)),
         ("vod_transcode_unavailable", Live(R::TranscodeUnavailable)),
         (
             "vod_subtitle_burn_unavailable",
@@ -147,6 +153,7 @@ pub(crate) const VOD_REFUSAL_CODES: &[(&str, VodRefusalClass)] = {
         ("vod_passive_capacity", Refuse),
         ("vod_passive_route_expired", Refuse),
         ("vod_output_budget_refused", Refuse),
+        ("vod_processed_contract_invalid", Refuse),
         ("vod_continuous_recipe_invalid", Refuse),
         ("vod_continuous_audio_invalid", Refuse),
         ("vod_family_invalid", Refuse),

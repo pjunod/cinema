@@ -1,7 +1,8 @@
 # Durable-job contract — connect finite authority transitions to source
 
 **Status:** reviewed source contract; bounded qualification complete ·
-**Checked source:** `663b3aa548` · **Scope:** bound `library_scan` and
+**Initial checked source:** `663b3aa548` · **Latest scoped source review:**
+`5ac9d8f25` combined with repair `59c648db` (scoped audits below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -10,6 +11,368 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+
+## Local main integration — source correspondence on 2026-10-29
+
+The repair source `59c648db` is combined locally with main `5ac9d8f25`.
+Both parent audits below retain their historical source identities. Incoming
+Cargo.lock and `main.rs` pins follow the reviewed macOS runtime update and
+bounded test-only fork stress. The merged Store and caption fixtures retain
+both parents' closed shape, marker, retained-data and atomic refusal checks,
+including schema 121 with managed v3. Their live whole-file hashes follow the
+resolved source; selected formal-publication and library-worker anchors remain.
+
+This reconciliation changes no model, configuration, property, fairness
+premise, validator or historical qualification receipt and supplies no new
+runtime or TLC evidence. The frozen `59c648db` measurement and this integration
+candidate are separate source identities; neither substitutes for the other's
+required validation.
+
+## Test-only schema expectation — scoped source review on 2026-10-29
+
+Against incoming main `10f45ae5f2619ab3e807b5576bf6ffb39ade6e86`, the
+repair changes only the upgraded-version expectation in
+[the translation schema tests](../../crates/plurx-core/src/store/subtitle_translation_schema.rs)
+from 119 to 120. The v115 starting fixture, retained handoff assertions and
+production shape recognizer and upgrade guards are unchanged. One whole-file
+row pin follows those inspected bytes; its exact anchor remains unique.
+
+Codex agent `coverage_review` inspected the source and authored this mapping
+refresh; parent and independent Codex diagnose_core_failures metadata review found no issues. Selected library-worker
+transitions, model/configuration/toolchain bytes, bounds, properties, scope
+and historical source receipts remain unchanged. This review ran no builds,
+tests or TLC and supplies no new execution or qualification evidence.
+
+## Combined-source integration — scoped author audit on 2026-10-29
+
+The repair is combined with main `66a33d723096ee931ce2e05e860f51f8f3671513`.
+Retain its reviewed resource-admission v2 schema and mapping inputs. The
+historical rewind now validates schema 119 with managed v1, or schema 120
+with managed v2, before any mutation; crossed pairs are refused atomically.
+The conformance parent retains the selected `formal_publication` module and
+combines the independently reviewed strict caption/continuity teardown with
+main's exact managed shape/data planner. Relative to this main, `state.rs`
+adds only the test-module declaration; mapped production bodies are unchanged.
+
+Only affected whole-file pins follow the combined source; anchors, models,
+configurations, properties, bounds and historical source receipts retain their
+identities. Independent Codex agent `coverage_review` reviewed the merged source pins, both parents' anchors and the combined ownership census, finding no blockers. That source review ran no builds, tests or TLC. This is a
+source correspondence audit and supplies no new runtime or TLC qualification.
+
+## Unit-coverage repair — scoped author audit on 2026-10-28
+
+Codex agent `/root/diagnose_core_failures` compared immutable base
+`24d1bad72bed328b6de9a568a3537f375f9c206f` with runtime/test source
+`d03c8abdf17dea7147e112a32fec274834151fca`. The base file hashes match the
+previous pins. This agent authored the core fixture repairs; this audit is
+source-author correspondence, not independent review of that implementation.
+Independent Codex agent `coverage_review` reviewed the implementation diff and this metadata disposition on 2026-10-28, finding no blockers. That review ran no builds, tests or TLC checks and supplies no new qualification claim.
+
+[State](../../crates/plurxd/src/state.rs) adds only a `cfg(test)` backfill
+module declaration; the five mapped production callers are byte-identical.
+The [Store parent](../../crates/plurx-core/tests/store_contract.rs) registers
+four existing caption methods, corrects the method inventory, and validates
+exact empty caption/handoff extensions before historical fixture teardown.
+Its `formal_publication` registration and selected examples are unchanged.
+The selected library claim, binding, renewal, cancellation, publication and
+cleanup transitions retain their existing correspondence. Caption methods
+and historical schema teardown remain outside this finite model.
+
+Six whole-file row pins follow the inspected source; exact anchors remain
+unique. Model/configuration/toolchain bytes, bounds, properties, scope,
+validators and historical source-anchor snapshots are unchanged. This audit
+supplies no new runtime or TLC execution, refinement theorem, liveness,
+physical acceptance or qualification. Historical receipts retain their
+recorded source identities; fresh affected execution is separate evidence.
+
+## macOS parser runtime — scoped lock refresh on 2026-10-29
+
+Wasmtime 50.0.0 includes the [upstream Mach receiver fix](https://github.com/bytecodealliance/wasmtime/pull/14414).
+The macOS-only runtime and required Cranelift dependencies change; native traps,
+epoch deadlines, memory/stack limits and import restrictions remain. Tokio
+1.53.1 and Hiqlite 0.14.0 remain pinned. Refresh only the live Cargo.lock
+whole-file hash. Selected library-worker behavior, historical anchors, models,
+configurations, toolchain and qualification identities are unchanged. This
+source correspondence adds no formal execution or progress claim.
+
+## Current validation fixtures — scoped refresh on 2026-10-29
+
+Scoped review on 2026-10-29 of conformance parent registration: the exact Store inventory records four existing text-caption methods with new typed dispatch/absence/refusal coverage on all backends. Formal-publication module registration and selected library positive examples are unchanged. Positive caption publication on Hiqlite is not claimed. Refresh only live M2 parent correspondence; historical anchors, model/configuration and qualification identities remain unchanged; source review is not execution evidence.
+
+The final replicated fixture review also checks the exact current tail and marker
+inventories before one child-first mutation transaction. Its refusal matrix and
+ordinary-bootstrap round trip are runtime checks, separate from this correspondence
+record. The selected formal-publication examples and historical identities stay
+unchanged.
+
+## Historical schema fixtures — scoped refresh on 2026-10-29
+
+Compared with `d5cd473536`, the caption schema source changes only the
+[v115 migration test](../../crates/plurx-core/src/store/subtitle_translation_schema.rs):
+it expects the current composed schema and verifies the managed v2 resources.
+The production recognizer and migration SQL remain unchanged. Refresh its one
+whole-file pin while retaining the exact anchor and historical source anchors.
+
+The [SQLite fixture rewind](../../crates/plurx-core/tests/support/queue_fixture.rs)
+now validates the exact empty v120 text/caption tail, continuity layout and
+managed v2 marker before planning any mutation. Unknown objects, marker drift
+and retained work refuse without changing DDL, versions or data. Historical
+SQLite layouts retain their legacy translation witness; the published
+replicated fixture witnesses remain separate. This closes the SQLite v115-only
+limitation recorded in the earlier scoped review, without claiming a general
+downgrade or complete replicated-schema qualification.
+
+The consistent-read census records existing committed-authority reads and keeps
+its unannotated ceiling at 237. No selected library claim, publication,
+reservation, lease or progress behavior changes. Models, configurations,
+properties and qualification identities retain their bytes; fresh mapping and
+smoke results are separate execution evidence.
+
+## Managed-v2 fixture follow-through — scoped refresh on 2026-10-28
+
+The test-only follow-through on `48e2acc2a` restores the current managed marker
+as v2 in the owned replicated refusal fixtures. Both backend rewind helpers use
+the canonical published v1/v2 DDL with a matching marker and reject populated,
+partial or drifted managed extensions before mutation. Historical v1 authority
+remains exact; a v1 marker cannot certify the v2 view. The v120 downgrade
+inventory entry names the new managed marker definition. At that historical reviewed snapshot, the separate baseline
+handoff rewind supported v115 only and its v116–v119 inventory gap remained;
+these focused managed-fixture checks do not qualify a complete current-schema
+historical downgrade.
+
+Only the whole-file pin for the conformance parent module changes. Its
+`formal_publication` registration remains unique and byte-identical, as does the
+selected conformance module. No production queue, reservation, lease, binding or
+publication transition changes. Model/configuration/property/toolchain inputs
+remain unchanged; this source review supplies no new execution qualification.
+
+## Artifact-only text translation — scoped source review on 2026-10-28
+
+Managed v3 / SQLite v121 exempts only the new closed
+`subtitle_text_translate_artifact` job kind. Its worker reads pinned, bounded,
+materialized VTT bytes, verifies the original input SHA, and retains source,
+model, configuration, administrative and publication authority checks. A miss
+fails explicitly; Retry reacquires input before enqueue. Legacy
+`subtitle_text_translate` remains source-fenced because old workers can extract
+media. Old candidate-kind filters cannot dispatch the new kind; queued and
+running legacy jobs are not rewritten. The upgrade requires exact v2 DDL and
+marker, commits atomically, and preserves existing owners and reservations.
+
+The selected `library_scan` / `metadata_refresh` source-domain and provider
+rows, claim identity, renewal, binding, publication and settlement remain
+unchanged, as do the two-reader and one-speculative-reader limits. The v3 view
+and upgrade guards are mapped correspondence inputs. Caption inference,
+rolling upgrades and input acquisition remain outside this finite model;
+model/configuration/property/bound/toolchain bytes are unchanged. This source
+review supplies no new runtime, formal-execution or qualification evidence.
+
+## Subtitle resource admission — scoped refresh on 2026-10-28
+
+Codex reviewed `c3d764a01` against `f2120bd9a`. The shared claim SQL adds
+qualified progressive caption preparation/range demand to the reserved live
+source-reader slot. A new claim requires the current operation, source,
+configuration and unexpired administrative demand; a held range can retain its
+exact claim-fence continuity grant while that demand remains valid. These
+branches require caption job and waiter kinds. Ordinary `library_scan` and
+`metadata_refresh` callers do not gain that authority. The existing two-reader
+ceiling and one-speculative-reader ceiling remain unchanged.
+
+The managed v2 resource view exempts artifact-only text model setup from
+`source_io`; both selected library kinds retain their existing source-domain
+and provider rows. SQLite v120 validates the exact v1 predecessor inside its
+migration transaction. The replicated installer checks the predecessor marker
+and exact view in one transaction, accepts a verified v2 winner after ambiguous
+acknowledgement, and preserves that view during bootstrap. Existing queue
+owners, leases, attempts and reservations are retained. Mapping now pins this
+active view, its historical predecessor and the shape/transaction guards;
+valid installed schema remains a premise, not a modeled migration theorem.
+
+The changed queue trait/token/adapter, renewal, expiry, resource-currentness,
+fenced SQLite transaction, replicated timeout and retention anchors remain
+unique and unchanged. Selected library claim identity, binding, publication,
+renewal and settlement authority is unchanged. Nineteen whole-file pins are
+refreshed after this review; model, configuration, property, bound and toolchain
+bytes retain their identities. Caption fairness, online upgrade correctness and
+physical playback are outside this model. Runtime regressions for model
+contention, upgrade preservation and demand-bound caption admission are separate
+source evidence; this mapping refresh claims no new execution or qualification.
+
+## Metadata-only title analysis — scoped refresh on 2026-10-28
+
+Codex compared PR #1301 source `7d2d4a9c7` with main `77e985827`.
+The two title-only trait/delegation additions expose stale-FEL selection and
+analysis publication. The latter validates source identity, scanner and demand
+generation, preserves another scanner's active job, and uses the existing
+`publish_dv_title` trigger with `job_id` NULL. Only title probe JSON receives
+the aggregate; no queue or waiter settlement row matches that NULL identity.
+Title demand binding and FEL requalification remain separate from the selected
+library-worker authority. The schema and trigger definitions are unchanged.
+
+`state.rs` adds bounded fresh-title timing, local-index mode and the analysis
+result offer. It changes no selected library claim, binding, renewal,
+cancellation, settlement, fenced item publication or token/publication lock
+order. Store-contract edits add title method names and examples; the exact
+`formal_publication` registration and selected examples are unchanged.
+
+Nineteen whole-file pins are refreshed after this source disposition; every
+existing anchor remains unique. Title scanning, local index waiting and both
+title publication paths remain excluded. Models, configurations, bounds,
+properties, toolchain pins and historical explanatory source anchors retain
+their identities. This review is source correspondence, not new execution or
+qualification; fresh affected smoke receipts are separate evidence.
+
+## HTTPS and Linux-player integration — 2026-10-26
+
+The merge of HTTPS `67b09d29c` with main `167af4616` retains both scoped
+source reviews below. The new FEL trait/delegation methods, off-boot VA-API
+probe and independent handoff-pruning loop do not alter selected library
+claim, renewal, binding, wait/lock, settlement or fenced-publication paths.
+The Store parent retains strict historical fixtures and inventories; its
+`formal_publication` module is unchanged. Reviewed whole-file pins follow
+the composed source; models, configurations, anchors and scope do not change.
+FEL, handoff lifecycle, identity repair, historical migrations and public TLS
+remain outside these guarantees. This is source correspondence, not new
+execution, physical acceptance or qualification. Other historical explanatory
+anchors in `source-anchors.json` retain their recorded historical identity.
+
+## Completion identity and fixture correspondence — 2026-10-25
+
+Source `5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9` changes only the identity-repair result
+classifier in the mapped publication file: the existing guarded annotation
+set-copy may affect zero-to-many rows; the full result vector and every other
+exact-one guard/mutation/postcondition/ack check remain required. Identity repair
+is outside this selected model and **is not proved by it**. The shared
+`atomic_publication` renewal, authority binding, wait/lock order and selected
+`insert_item_fenced` SQL/anchors are unchanged.
+
+The Store parent adds title-method inventory, strict historical empty-extension
+fixtures and rejection through an already consumed fragment-analysis claim.
+Its `formal_publication` registration and selected conformance examples are
+unchanged. General fragment admission, historical migrations and title jobs
+remain excluded; valid installed schema and selected payloads remain premises.
+The fourteen publication pins and one parent-module pin track whole-file
+correspondence only. Models, configurations, anchors, validators and scope are
+unchanged. This review supplies no new theorem, runtime, physical-acceptance or
+qualification claim; affected smoke receipts are separate source-bound evidence.
+
+## HTTPS integration — scoped refresh on 2026-10-25
+
+Codex reviewed source `f18c39e66954b71fcedcf8f463914f112498a518` against
+`9bcfa9ca1f792d214122762981c84c85ba5b3e64`; the parent coordinator approved
+the source disposition. Five drifted whole-file pins are refreshed; every
+existing exact anchor remains unique.
+
+The shared enqueue SQL moves fragment analysis/source guards before receipt
+reuse. `EnqueueJob` and ordinary library admission omit `analysis_request`
+and `fragment_domain`; only the fragment adapter adds them. The selected
+`library_scan` / `metadata_refresh` admission and claim-token replay guards
+are unchanged. General fragment enqueue receipts are outside this model's
+`ReplayClaim` / `ResolveClaim` transitions and S4 claim-token ledger property.
+The separate runtime receipt matrix passed replay, cancellation, reclaimed
+analysis and replaced-source cases on memory/pooled SQLite and three voters;
+that is runtime evidence, not a model result.
+
+Managed-schema bootstrap now validates/preserves the installed resource view;
+its mapped `QueueSql` implementation is byte-identical. Store-contract edits
+repair/add fixtures while retaining the exact formal-publication registration.
+`AppState` only gains the addressed-node HTTPS control field and initializer.
+The lockfile adds daemon dependency edges without changing Tokio 1.53.1 or
+Hiqlite 0.14.0. Valid installed schema and valid selected payloads remain
+premises; this refresh claims no bootstrap, fragment-admission or TLS theorem.
+Model/configuration/toolchain bytes, anchors, governed scope and rejection
+rules are unchanged. Prior qualification retains its original source binding;
+fresh affected smoke receipts are recorded separately.
+## FEL qualification review fixes — scoped refresh on 2026-10-26 (2)
+
+The PR #1290 review delta changes two mapped files. In
+[dv_title_jobs.rs](../../crates/plurx-core/src/store/dv_title_jobs.rs) the
+re-qualification request now selects the title demand only when no
+`dv_title_scan` job for that file is queued, running or cancelling, so it can
+no longer rotate the demand under (and cancel) an in-flight attempt; it still
+calls the existing reviewed `bind` command otherwise. The verdict counts walk
+`dv_title_jobs_demand` (one row per DV title, `file_id` UNIQUE) and read each
+`files` row by key instead of scanning the catalogue; a read. The store
+contract gains one assertion block in the FEL example (the no-op while a job
+runs). No queue, waiter, fence, lease, reservation or publication transition
+changed and every anchor string is unchanged. **Model decision:** unchanged;
+`DurableJobs.tla` still describes the selected library-worker scope, which
+these title-extension reads and the guarded `bind` call do not enter. Hashes
+rebound; no new qualification is claimed.
+
+## FEL qualification inside the DV title job — scoped refresh on 2026-10-26
+
+The `claude/lp-fel-p81` delta against `origin/effort/linux-player` (b75b81fa5)
+adds three `BackgroundJobStore` methods and their delegations
+(`put_dv_fel_verdict`, `request_dv_fel_requalification`,
+`dv_fel_verdict_counts`), their bodies in
+[dv_title_jobs.rs](../../crates/plurx-core/src/store/dv_title_jobs.rs), and one
+title contract example. Reviewed against the model: the verdict write is a
+guarded `json_set` of one application key in `files.probe_json` (same file id,
+size, mtime, Profile 7 with an EL); it touches no queue, waiter, reservation,
+fence or binding row and writes no `scanned_at`, so it rotates no title
+demand. Re-qualification calls the existing `bind` command (the reviewed title
+demand rotation) with a binding no scanner equals; the scan worker's existing
+discovery then rebinds and enqueues as before. The counts are a read. The
+qualification itself runs inside the `dv_title_scan` attempt between its scan
+and its existing `publish_dv_title`, under the same lease, fence and
+settlement paths; preempting it cancels only its own children. The selected
+library workers' bind-before-work path, claim CAS/replay, renewal and
+cancellation guards, counters, reservations and `insert_item_fenced` are
+untouched. All thirteen anchor strings are unchanged; the only change inside
+an anchored item is the three methods appended to the queue protocol trait and
+its shared adapter. The DV title extension stays excluded from this model. **Model
+decision:** `DurableJobs.tla`, its configurations and properties still
+describe the selected scope; nothing in them changes. Only the whole-file
+hashes are rebound; no new qualification is claimed.
+
+## Advisory title readiness — scoped refresh on 2026-10-23
+
+The source delta from A2923b2c to be610d647 adds only the
+`dv_title_readiness` trait/delegation and `TitleReadiness` helper in the two
+drifted files. The helper SELECTs title summary JSON and derives advisory
+counts; it does not enqueue, claim, renew, publish or cancel jobs. Existing
+queue and title-publication transitions and all eleven exact-string anchors
+are unchanged. Their whole-file mapping hashes are rebound to the inspected
+source. This read-only API remains outside the selected library-worker proof;
+no model/configuration change, model replay or new qualification is claimed.
+
+## DV-title additions preserve the selected authority boundary
+
+Codex reviewed the six drifted mapped files at
+`4b359f7923c47a1e8715e826a9b6581a08f60e05` against
+`1f30b4791476acb5d290c2f8e6ed38d07051f31d` on 2026-10-22. Their recorded
+hashes matched that base. The added module registrations, schema installers,
+queue kind/payload/delegates and `JobFence::publish_dv_title` leave the selected
+library workers' bind-before-work path, stable binding, claim CAS/replay,
+exact renewal/cancellation guards, fence/revision counters, reservation and
+receipt transitions, and fenced insertion transaction unchanged. The two
+new shared enqueue/claim predicates apply only to `dv_title_scan`.
+
+The added [title schema](../../crates/plurx-core/src/store/dv_title_jobs.sql)
+was also reviewed because its triggers run on shared files and queue tables.
+Its job/waiter invalidation selects title jobs; its terminal trigger selects
+the title kind. Ordinary file publication may rotate title demand and remove
+title JSON in the same existing transaction, but does not change the selected
+library job's authority or its binding. Both backends install the same
+extension and verify its shape through
+[dv_title_jobs_schema.rs](../../crates/plurx-core/src/store/dv_title_jobs_schema.rs).
+The mapping now tracks these dependencies so later drift requires review.
+
+The [job title publisher](../../crates/plurx-core/src/store/dv_title_jobs.rs)
+requires a `dv_title_scan` job and uses its own queue-fenced command, outside
+`insert_item_fenced`. The separate analysis publisher uses source, scanner and
+demand-generation checks with the existing title trigger and `job_id` NULL;
+it attaches title probe JSON without settling a queue job or waiter. Its source generations, JSON attachment, cancellation
+suppression, scheduling/preemption and replay/retry behavior are **excluded
+from this model**. The existing
+[title contract examples](../../crates/plurx-core/tests/store_contract/dv_title_jobs.rs)
+`title_publication_is_atomic_idempotent_and_never_self_enqueues` and
+`title_manual_cancel_wins_publication_and_does_not_become_scheduler_yield`
+are source-backed runtime regression anchors, not formal guarantees or claims
+that those tests ran in this review. No model, configuration or property was
+changed. This source-mapping review supplies no new execution or qualification
+receipt; the historical bounded result retains its stated scope.
 
 ## Publication checks two independent owners in one transaction
 
@@ -71,15 +434,15 @@ publication files would miss guards they depend on.
 
 | Predicate | Exact source comparison | Consequence at equality | Source anchor |
 |---|---|---|---|
-| Current queue/domain authority | stored expiry `> sample` | Rejected | [queue renewal:630](../../crates/plurx-core/src/store/background_jobs.rs#L630); [Hiqlite domain/bound checks:49](../../crates/plurx-core/src/store/hiqlite_publication.rs#L49) |
-| Expired queued takeover | stored queue expiry `<= caller now_ms` | Eligible subject to all other guards | [claim:532](../../crates/plurx-core/src/store/background_jobs.rs#L532) |
-| Reservation coverage | held expiry `>= job lease expiry` with same fence/key | Sufficient | [queue renewal:636](../../crates/plurx-core/src/store/background_jobs.rs#L636); [publication:61](../../crates/plurx-core/src/store/hiqlite_publication.rs#L61) |
-| Reservation occupancy | held expiry `> caller now_ms` | No longer occupies a slot | [claim:552](../../crates/plurx-core/src/store/background_jobs.rs#L552) |
-| Not-before | `not_before_ms <= caller now_ms` | Eligible | [claim:535](../../crates/plurx-core/src/store/background_jobs.rs#L535) |
-| Dispatch/resolution window | `now < dispatched` or `now-dispatched >= 120000` | Expired/pruned at upper boundary | [resolve:3465](../../crates/plurx-core/src/store/background_jobs.rs#L3465) |
+| Current queue/domain authority | stored expiry `> sample` | Rejected | [queue renewal:640](../../crates/plurx-core/src/store/background_jobs.rs#L640); [Hiqlite domain/bound checks:49](../../crates/plurx-core/src/store/hiqlite_publication.rs#L49) |
+| Expired queued takeover | stored queue expiry `<= caller now_ms` | Eligible subject to all other guards | [claim:542](../../crates/plurx-core/src/store/background_jobs.rs#L542) |
+| Reservation coverage | held expiry `>= job lease expiry` with same fence/key | Sufficient | [queue renewal:646](../../crates/plurx-core/src/store/background_jobs.rs#L646); [publication:61](../../crates/plurx-core/src/store/hiqlite_publication.rs#L61) |
+| Reservation occupancy | held expiry `> caller now_ms` | No longer occupies a slot | [claim:562](../../crates/plurx-core/src/store/background_jobs.rs#L562) |
+| Not-before | `not_before_ms <= caller now_ms` | Eligible | [claim:545](../../crates/plurx-core/src/store/background_jobs.rs#L545) |
+| Dispatch/resolution window | `now < dispatched` or `now-dispatched >= 120000` | Expired/pruned at upper boundary | [resolve:3548](../../crates/plurx-core/src/store/background_jobs.rs#L3548) |
 | Domain release | `min(stored expiry, caller now_ms)` | Does not extend lease | [SQLite:125](../../crates/plurx-core/src/store/sqlite/coordination.rs#L125); [Hiqlite:162](../../crates/plurx-core/src/store/hiqlite_coordination.rs#L162) |
 | Successor | same resource/owner/fence, revision+1, successor expiry `> predecessor expiry` | Equal successor expiry invalid | [successor construction:52](../../crates/plurx-core/src/cluster/coordination.rs#L52); [Hiqlite validation:34](../../crates/plurx-core/src/store/hiqlite_publication.rs#L34) |
-| SQLite replacement | additionally successor expiry `> backend sample` | Equal successor expiry invalid | [inside-transaction validation:1985](../../crates/plurx-core/src/store/sqlite/mod.rs#L1985) |
+| SQLite replacement | additionally successor expiry `> backend sample` | Equal successor expiry invalid | [inside-transaction validation:1988](../../crates/plurx-core/src/store/sqlite/mod.rs#L1988) |
 | Hiqlite acceptance | predecessor expiry `> backend sample` and successor expiry `> predecessor expiry` | Implies successor expiry `> sample`; no accepted-publication strength difference | [replacement validation:38](../../crates/plurx-core/src/store/hiqlite_publication.rs#L38); [predecessor UPDATE:49](../../crates/plurx-core/src/store/hiqlite_publication.rs#L49) |
 
 Facade precheck, successor-computation and each backend submission retain
@@ -122,6 +485,7 @@ compaction/removal/cancellation interference.
 | Genre backfill, `state.rs` `provider:genres` | Domain-only |
 | Transcode `manager/produce.rs` with publication_fence | Domain-only example, not a bindable library job kind |
 | `scan/mod.rs`, `metadata/mod.rs`, `metadata/{book,local,genres}.rs` convenience wrappers | Explicitly unfenced; outside the selected model |
+| `plurxd/background_jobs.rs::JobFence::publish_dv_title` → `store/dv_title_jobs.rs::publish` | Queue-fenced title JSON publication; outside the selected `insert_item_fenced` model |
 
 A control that ignores binding must be able to accept an insertion after the
 bound queue authority is invalidated. A control that bypasses bind-before-work
@@ -239,3 +603,73 @@ The abandoned two-job ten-event run is incomplete cost evidence, kept outside
 the required registry. README gives its observed counts and the precise
 eleven-action path. A predeclared single-job ten-event fallback would cover
 commit only and must be labeled explicitly if used; it is not yet selected.
+
+## Subtitle completion construction correspondence
+
+The 2026-10-26 source mapping is reconciled against `origin/main` at
+`087e836d369eb2b8f94ec1d0454ea6c157612df9`. Text-caption admission is scoped to
+its new job kinds. The selected library claim/binding/token/publication
+predicates retain their base behavior; the new schema extensions do not alter
+the mapped Hiqlite timeout or SQLite fenced-publication transaction. Text
+translation, speech tasks and audio ordinals, caption leases, and content
+read attestation are outside this finite model. The mapping notes identify
+the changed source files without expanding the modeled guarantees.
+
+This is authored construction correspondence. Final adversarial review and
+current-source qualification remain pending; refreshing hashes does not
+relabel historical model receipts or execute any runtime regression.
+
+## Subtitle producer recovery correspondence
+
+The independent final review on 2026-10-26 inspected the frozen completion
+and retargeting delta atop `be9ee45ae`. Shared queue changes add producer-node
+and preparation-incarnation checks only for `subtitle_translation_prepare`
+and `subtitle_translation_range`; legacy payloads remain inspectable but
+cannot acquire new authority. The selected library enqueue/claim, binding,
+renewal, cancellation, publication and cleanup paths retain their behavior.
+
+The [exact-shape migration recognizer](../../crates/plurx-core/src/store/subtitle_translation_schema.rs)
+and [replacement trigger](../../crates/plurx-core/src/store/subtitle_translation_retarget.sql)
+were also inspected because migration installs effects on the shared job
+table. They recognize the complete legacy caption shape, replace its trigger
+transactionally, preserve domain data and refuse unknown shapes. Queue
+updates select caption kinds for one operation; they do not cancel the
+selected library jobs. New mapping dependencies pin these two boundaries.
+SQLite v117, Hiqlite extension installation and added store-contract module
+wiring leave the selected publication transaction and timeout unchanged.
+
+This source review supersedes the earlier construction-only correspondence
+status for these changes. It does not extend the finite model to caption
+completion, producer recovery, remote-worker liveness or admission fairness.
+Model/configuration bytes, fairness premises and historical receipts remain
+unchanged. Offline mapping validation checks the reviewed inputs and anchors;
+it is not Rust test execution, TLC qualification or a refinement proof.
+
+The later 2026-10-26 formatter pass only moved the unchanged feature-gated
+`subtitle_translation_upgrade` test-module declaration into lexical order.
+Its visibility, feature condition and source path are unchanged. The one
+inspected `store_contract.rs` mapping hash was rebound; this adds no model
+semantics or execution evidence.
+
+## Moving-playback continuity correspondence
+
+The independent bounded review on 2026-10-26 inspected the frozen delta atop
+`352137f764d8cf87d530352222d5948a77275d4f`. Hiqlite changes only the
+recognized caption extension chain; SQLite adds caption migration118. The
+selected library transaction, publication and timeout paths are unchanged.
+
+The exact original0/retarget1/continuity2 recognizer refuses unknown shapes.
+The new [continuity triggers](../../crates/plurx-core/src/store/subtitle_translation_continuity.sql)
+capture and retire grants only for `subtitle_translation_range`; demand
+revocation deletes only matching captured caption grant rows. Comparing
+the replacement mutation trigger with the previous retarget trigger confirms
+that its shared-job effects retain their caption-kind/operation scope. New
+dependency anchors pin these isolation boundaries. The expiry/UUID-reuse
+review finding was fixed by atomic demand-trigger grant withdrawal.
+
+The selected library enqueue, claim, renewal, binding, settlement and cleanup
+semantics remain unchanged. This source correspondence does not extend the
+finite model to caption continuity, playback deadlines or remote-worker
+liveness. Model/configuration bytes, fairness premises and historical
+receipts retain their identities. Offline mapping validation is distinct
+from runtime tests, TLC qualification and a refinement proof.

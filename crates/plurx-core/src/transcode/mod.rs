@@ -16,6 +16,7 @@ mod avc_qualification;
 mod decode;
 pub mod decoder_inventory;
 mod dolby;
+pub mod dv_fel_qualification;
 pub mod dv_processing;
 pub mod dvconvert;
 mod encoder;
@@ -50,11 +51,13 @@ pub use dolby::{
     StrictDolbyImplementation, StrictDolbyPolicy,
 };
 pub use encoder::{
-    benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for, vaapi_device,
+    benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for,
+    reconstructed_p81_video_kbps, reconstructed_p81_window_encode_args, vaapi_device,
     validate_quality_rate_control, validate_quality_rate_control_yielding, vbv_maxrate_bps,
     vbv_maxrate_kbps, CompletedReconstructedOutputContract, EffectiveRateControl, Encoder,
     EncoderCaps, EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
     QualityRateControlValidation, QualityRc, RateMode, VaapiHdrPolicy, VideoCodec,
+    RECONSTRUCTED_P81_MAX_VIDEO_KBPS, RECONSTRUCTED_P81_RECIPE,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
@@ -2306,8 +2309,10 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
     let mut args: Vec<String> = Vec::new();
     args.push("-c:v".into());
     args.push("copy".into());
-    // Safari only decodes HEVC when the sample entry is tagged `hvc1`; MKV HEVC
-    // is commonly `hev1`, which renders black. Harmless if already hvc1.
+    // Keep the sample-entry contract shared by HLS admission and its CODECS
+    // declaration. Retaining source updates does not authorize hev1/dvhe on
+    // a client that only admits hvc1/dvh1; strict init validation still
+    // refuses a retaining stream that cannot satisfy this contract.
     if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         args.push("-tag:v".into());
         args.push(hevc_copy_tag_for_source(source, options.preserve_dolby_vision).into());

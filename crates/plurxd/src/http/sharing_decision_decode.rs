@@ -15,8 +15,19 @@ struct AudioTrackDto {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SubtitleTrackSource {
+    Embedded,
+    Downloaded,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SubTrackDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<SubtitleTrackSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    downloaded_subtitle_id: Option<String>,
     pub index: i64,
     pub codec: String,
     pub language: Option<String>,
@@ -83,7 +94,16 @@ struct DecisionSelection {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum DownmixMatrix {
-    RequiresLayoutMeasurement { source_channels: u8 },
+    RequiresLayoutMeasurement {
+        source_channels: u8,
+    },
+    #[serde(rename = "lo_ro_5_1")]
+    LoRo51,
+    #[serde(rename = "lo_ro_7_1")]
+    LoRo71,
+    LimitedDefault {
+        source_channels: u8,
+    },
 }
 
 #[derive(Serialize, Deserialize)]

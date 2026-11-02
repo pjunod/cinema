@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Run plurx's local engineering knowledge CLI."""
+from pathlib import Path
+import sys
+
+root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(root))
+from validation.knowledge.cli import main
+
+raise SystemExit(main(root=root))

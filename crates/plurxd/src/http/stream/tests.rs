@@ -677,6 +677,7 @@ fn android_dv_caps(transports: &[&str]) -> playback::DeviceCaps {
             hdr: true,
             dolby_vision: true,
             max_nits: None,
+            peak_source: None,
             presentation_target: None,
         }),
         ..Default::default()

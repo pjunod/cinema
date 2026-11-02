@@ -13,6 +13,20 @@
 /** hls.js, vendored at /assets/hls.min.js. */
 declare var Hls: any;
 
+/** Published QR codec bundles; their runtime behavior is checked by image round trips. */
+interface CinemaQRErrorCorrection { readonly ordinal: number; readonly formatBits: number }
+interface CinemaQRMatrix { readonly size: number; getModule(x: number, y: number): boolean }
+declare var qrcodegen: {
+  QrCode: {
+    Ecc: {readonly MEDIUM: CinemaQRErrorCorrection};
+    encodeBinary(data: readonly number[], level: CinemaQRErrorCorrection): CinemaQRMatrix;
+  };
+};
+declare var jsQR: (
+  pixels: Uint8ClampedArray, width: number, height: number,
+  options?: {inversionAttempts?: "dontInvert" | "onlyInvert" | "attemptBoth" | "invertFirst"}
+) => {data: string} | null;
+
 /** The UMD sidecars (`root.Plurx… = api`). */
 declare var PlurxClusterPanel: any;
 declare var PlurxPlaybackPolicy: any;

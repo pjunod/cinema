@@ -180,8 +180,7 @@ struct HomeView: View {
     private var viewerNavigationFocusRequested: Bool {
         #if os(tvOS)
         return model.layout == .meridian
-            && remoteNavigation.activeScope == remoteNavigation.rootScope
-            && remoteNavigation.requestedFocus == RemoteNavigationCoordinator.viewerNavigationOpener
+            && remoteNavigation.viewerNavigationFocusRequested
         #else
         return false
         #endif

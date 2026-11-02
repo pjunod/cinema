@@ -172,6 +172,29 @@ class SharedSharingManagementTest {
         assertEquals("new-account-secret", replacement?.snapshot()?.invitation); replacement?.leave()
     }
 
+    @Test fun qrResultsOnlyFillTheCurrentAccountDraftWithoutReplacingNewEdits() {
+        client()
+        val draft = SharedSharingSecretDraft()
+        val scanned = "cinema-share-v1:Zml4dHVyZQ"
+        val pending = draft.snapshot()!!.revision
+        draft.edit(invitation = "cinema-share-v1:newer")
+        assertFalse(draft.acceptInvitation(scanned, pending))
+        assertEquals("cinema-share-v1:newer", draft.snapshot()!!.invitation)
+        assertTrue(draft.acceptInvitation(scanned, draft.snapshot()!!.revision))
+        assertEquals(scanned, draft.snapshot()!!.invitation)
+        assertTrue(requests.isEmpty())
+        for (invalid in listOf("https://example.test", scanned + "\n", "cinema-share-v1:", "cinema-share-v1:" + "a".repeat(10924))) {
+            assertNotNull(runCatching { draft.acceptInvitation(invalid, draft.snapshot()!!.revision) }.exceptionOrNull())
+            assertEquals(scanned, draft.snapshot()!!.invitation)
+        }
+        val beforeLogout = draft.snapshot()!!.revision
+        Session.token = "replacement"
+        assertFalse(draft.acceptInvitation(scanned, beforeLogout)); assertNull(draft.snapshot())
+        val left = SharedSharingSecretDraft(); val beforeLeave = left.snapshot()!!.revision
+        left.leave(); assertFalse(left.acceptInvitation(scanned, beforeLeave)); assertNull(left.snapshot())
+        draft.leave()
+    }
+
     @After fun cleanup() { Session.origin = ""; Session.token = null }
     @Test fun actualInvitationImportRePairRotationAndExplicitDisconnectRoutes(): Unit = runBlocking {
         val client = client(); val token = "cinema-share-v1:Zml4dHVyZQ"

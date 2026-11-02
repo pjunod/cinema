@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://plurx.tv/schemas/cluster-topology-v2.json",
+  "$id": "https://plurx.tv/schemas/cluster-topology-v3.json",
   "title": "plurx three-versus-four-voter topology evidence",
   "$comment": "Draft 2020-12 validates the complete shape, topology cardinality, and evidence-scope resource contract. Cross-field hashes, percentile recomputation, timestamps, applied lag, and stable leader/term semantics require validate_topology_artifact in plurx-cluster-check.",
   "type": "object",
@@ -17,7 +17,7 @@
     "runs"
   ],
   "properties": {
-    "schema_version": { "const": 2 },
+    "schema_version": { "const": 3 },
     "evidence_scope": { "enum": ["semantic_ci", "named_runner"] },
     "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "runner_image_digest": {
@@ -134,7 +134,7 @@
         "index_unit"
       ],
       "properties": {
-        "id": { "const": "settings-put-and-local-catalogue-read-v2" },
+        "id": { "const": "settings-put-and-local-catalogue-read-v3" },
         "operation": { "const": "quorum_acknowledged_put_setting" },
         "operations": { "const": 64 },
         "concurrency": { "const": 1 },

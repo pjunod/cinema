@@ -14,6 +14,8 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [RUST-ADMISSION-REFINEMENT-STATUS.md](RUST-ADMISSION-REFINEMENT-STATUS.md) | Production admission/start refinement pilot: scope, ownership, verifier feasibility, proof obligations and current delivery state. | built |
+| [WORKER-REFINEMENT-STATUS.md](WORKER-REFINEMENT-STATUS.md) | Built source correspondence and two full workers; PR receipt tracks qualification, ownership and landing. | built |
 | [OPERATION-PROGRESS-IMPLEMENTATION.md](OPERATION-PROGRESS-IMPLEMENTATION.md) | Source wait-map, repeated-operation model, acceptance and delivery plan. | built |
 | [OPERATION-PROGRESS-STATUS.md](OPERATION-PROGRESS-STATUS.md) | Qualified progress scope, evidence, review and live PR delivery link. | built |
 | [FORMAL-VERIFICATION-PILOT-PROPOSAL.md](FORMAL-VERIFICATION-PILOT-PROPOSAL.md) | The bounded TLA+/TLC pilot contract, source anchors, verification limits, milestones and acceptance bar. | done |
@@ -55,4 +57,5 @@ failures.
 | [MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md) | Making admission an authorization decision. | open |
 | [LAB3_SNAPSHOT_CATCHUP_DIAGNOSIS.md](LAB3_SNAPSHOT_CATCHUP_DIAGNOSIS.md) | Why a live learner waited fifteen idle minutes. | open |
 | [ACTIVITY_PEER_READ_FIX_PLAN.md](ACTIVITY_PEER_READ_FIX_PLAN.md) | Coalescing peer-read bursts and reporting failures truthfully. | built |
+| [PLAYBACK-QUORUM-GAPS-RCA.md](PLAYBACK-QUORUM-GAPS-RCA.md) | Why playback died on brief quorum gaps (serving-fence lapses, fail-fast 503s, a leader-bound cache read, a dead producer polled for 55 s, an uncapped build on a voter), and the milestone plan that fixes each cause. | open |
 | [DVR-ACTIVITY-ZERO-GENERATION-STATUS.md](DVR-ACTIVITY-ZERO-GENERATION-STATUS.md) | Why remote Activity rejected a healthy recorder's initial serving epoch, and the repair's review and promotion state. | open |

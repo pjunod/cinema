@@ -371,7 +371,7 @@ function transcoderCard(sys){
   if(!sys.node_id)return "";
   const enc=sys.encoders||{}, active=sys.hwaccel_pref||"auto", requested=sys.hwaccel_requested||active;
   const names={nvenc:"NVIDIA · NVENC",qsv:"Intel · Quick Sync",vaapi:"VA-API",videotoolbox:"Apple VideoToolbox",software:"CPU (software)"};
-  const choices=[["auto","Auto"]];
+  const choices=[["auto",sys.encoder_selected?`Auto (${sys.encoder_selected})`:"Auto"]];
   for(const [value,label] of Object.entries(names))if(value==="software"||enc[value])choices.push([value,label]);
   const available=choices.some(([value])=>value===requested);
   const pending=sys.hwaccel_restart_required||requested!==active||sys.transcoder_optimization?.restart_required;

@@ -19,7 +19,7 @@ class DvBundleManifestTests(unittest.TestCase):
         self.bundle = Path(self.scratch.name) / "bundle"
         for folder in ("bin", "lib", "sources"):
             (self.bundle / folder).mkdir(parents=True)
-        for name in ("segment_decode_render", "mux_rgb", "author_p81"):
+        for name in ("segment_decode_render", "mux_rgb", "author_p81", "scan_title"):
             (self.bundle / "bin" / name).write_bytes(b"packaging-only synthetic artifact")
         (self.bundle / "lib/libplacebo.so.374").write_bytes(b"packaging-only library")
         (self.bundle / "sources/libdovi.a").write_bytes(b"packaging-only parser")
@@ -35,7 +35,7 @@ class DvBundleManifestTests(unittest.TestCase):
 
     def test_installed_renderer_and_library_hash_tampering_is_refused(self):
         self.verify()
-        for relative in ("bin/segment_decode_render", "lib/libplacebo.so.374"):
+        for relative in ("bin/segment_decode_render", "bin/scan_title", "lib/libplacebo.so.374"):
             artifact = self.bundle / relative
             original = artifact.read_bytes()
             artifact.write_bytes(original + b"tampered")

@@ -70,6 +70,8 @@ pub use invitations::InvitationStore;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_invitations;
 pub mod remote;
+pub mod shared_caption_read;
+mod shared_caption_schema;
 pub mod subtitle_translation;
 pub mod subtitle_translation_mutation;
 pub mod subtitle_translation_publication;
@@ -82,6 +84,14 @@ pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
 pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_playback_handoffs;
+pub mod playback_handoffs;
+pub use playback_handoffs::{
+    NewPlaybackHandoff, PlaybackHandoff, PlaybackHandoffRedeemOutcome, PlaybackHandoffRedemption,
+    PlaybackHandoffStore, PlaybackHandoffTokenScope, PLAYBACK_HANDOFF_CODE_TTL_SECS,
+    PLAYBACK_HANDOFF_TOKEN_TTL_SECS,
+};
 mod candidate_link;
 mod candidate_recovery;
 pub use candidate_recovery::{
@@ -254,11 +264,15 @@ mod background_jobs_tests;
 pub mod background_jobs_transcode;
 pub mod background_jobs_transcription;
 pub mod classification_schedule;
+pub mod dv_title_jobs;
+mod dv_title_jobs_schema;
 mod library_annotations_schema;
 pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
 mod subtitle_managed_schema;
+pub mod subtitle_text_translation;
+mod subtitle_text_translation_schema;
 mod subtitle_translation_schema;
 pub mod watched_drain;
 
@@ -356,17 +370,22 @@ pub struct TokenSummary {
 /// Which surface a login token was issued for. A Jellyfin compatibility
 /// login authenticates only the compatibility facade; native and Plex
 /// surfaces refuse it, so a token pulled off a shared TV is not a native
-/// account bearer.
+/// account bearer. A playback handoff token (redeemed from a one-time code,
+/// `playback_handoffs.rs`) is likewise refused by every native route; it
+/// authenticates only while unexpired and while the token that minted it
+/// still exists, and only the handoff routes accept it, for one file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenAudience {
     Native,
     JellyfinCompatibility,
+    PlaybackHandoff,
 }
 impl TokenAudience {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
             Self::JellyfinCompatibility => "jellyfin",
+            Self::PlaybackHandoff => "playback_handoff",
         }
     }
 }
@@ -2020,6 +2039,7 @@ pub mod keys {
     pub const DV_CONVERT: &str = "playback.dolby_vision_convert";
     /// Opt-in preference for qualified DV rendering to HDR output. Missing is
     /// off. Saving the preference does not establish a worker capability.
+    pub const DV_DISPLAY_TARGET: &str = "playback.dolby_vision_display_target";
     pub const DV_HDR_PROCESSING: &str = "playback.dolby_vision_hdr_processing";
     /// Opt-in preference for qualified FEL reconstruction and P8.1 encoding.
     /// Missing is off; this never overrides the separate DV_CONVERT permission.
@@ -5810,6 +5830,7 @@ pub trait Store:
     + PretranscodeJobStore
     + OfflinePackageStore
     + FileGrantStore
+    + PlaybackHandoffStore
     + RemoteStore
     + InvitationStore
     + PlaybackTelemetryStore
@@ -5870,6 +5891,7 @@ impl<T> Store for T where
         + PretranscodeJobStore
         + OfflinePackageStore
         + FileGrantStore
+        + PlaybackHandoffStore
         + RemoteStore
         + InvitationStore
         + PlaybackTelemetryStore

@@ -1,0 +1,215 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: plurx contributors <noreply@plurx.invalid>
+Date: Mon, 26 Oct 2026 12:00:00 +0000
+Subject: [PATCH 2/5] demux/dovi_split: split the enhancement layer without the
+ dovi_split BSF
+
+The dovi_split bitstream filter is new in FFmpeg 9.0, so with an older
+libavcodec a Profile 7 stream played its base layer only. Without the BSF,
+unwrap the UNSPEC63 NAL units directly: each carries one enhancement-layer
+NAL unit with its own header, and the EL's parameter sets travel the same
+way, so the EL stream is an Annex B HEVC stream that needs no extradata.
+The EL packet keeps the BL packet's timing for the pairing filter, as the
+BSF route does.
+---
+ demux/dovi_split.c | 139 ++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 118 insertions(+), 21 deletions(-)
+
+diff --git a/demux/dovi_split.c b/demux/dovi_split.c
+index cfe27185d..d3ea45daf 100644
+--- a/demux/dovi_split.c
++++ b/demux/dovi_split.c
+@@ -39,8 +39,48 @@ struct mp_dovi_split {
+     struct sh_stream *el;
+     AVBSFContext *bsf;
+     AVPacket *staging;
++    // Without the dovi_split BSF (FFmpeg before 9.0): unwrap the UNSPEC63
++    // NAL units here. nal_length is the BL's length-prefix size (1, 2 or
++    // 4), or 0 for Annex B.
++    bool unwrap;
++    int nal_length;
+ };
+ 
++// Length-prefix size of the BL's samples, from its hvcC (0: Annex B).
++// demux_lavf keeps the hvcC in lav_codecpar, not in extradata.
++static int hvcc_nal_length(const struct mp_codec_params *c)
++{
++    const uint8_t *x = (const uint8_t *)c->extradata;
++    int size = c->extradata_size;
++    if ((!x || size <= 0) && c->lav_codecpar) {
++        x = c->lav_codecpar->extradata;
++        size = c->lav_codecpar->extradata_size;
++    }
++    if (!x || size < 23 || x[0] != 1)
++        return 0;
++    return (x[21] & 3) + 1;
++}
++
++static struct sh_stream *add_el_stream(struct mp_dovi_split *s, int w, int h,
++                                       const uint8_t *extradata, int extradata_size)
++{
++    struct sh_stream *bl = s->bl;
++    struct sh_stream *el = demux_alloc_sh_stream(STREAM_VIDEO);
++    el->codec->codec = "hevc";
++    el->codec->native_tb_num = bl->codec->native_tb_num;
++    el->codec->native_tb_den = bl->codec->native_tb_den;
++    el->codec->fps = bl->codec->fps;
++    el->codec->disp_w = w;
++    el->codec->disp_h = h;
++    if (extradata_size > 0) {
++        el->codec->extradata = talloc_memdup(el->codec, (void *)extradata, extradata_size);
++        el->codec->extradata_size = extradata_size;
++    }
++    el->title = talloc_strdup(el, "Dolby Vision enhancement layer");
++    el->dependent_track = true;
++    return el;
++}
++
+ static void mp_dovi_split_destructor(void *p)
+ {
+     struct mp_dovi_split *s = p;
+@@ -56,17 +96,27 @@ struct mp_dovi_split *mp_dovi_split_create(struct demuxer *demuxer,
+         return NULL;
+ 
+     const AVBitStreamFilter *def = av_bsf_get_by_name("dovi_split");
+-    if (!def) {
+-        MP_WARN(demuxer, "Dolby Vision EL: 'dovi_split' BSF not available in "
+-                         "libavcodec; rendering base layer only.\n");
+-        return NULL;
+-    }
+ 
+     struct mp_dovi_split *s = talloc_zero(demuxer, struct mp_dovi_split);
+     talloc_set_destructor(s, mp_dovi_split_destructor);
+     s->log = demuxer->log;
+     s->demuxer = demuxer;
+     s->bl = bl;
++    struct sh_stream *el = NULL;
++
++    if (!def) {
++        // Each EL NAL travels as an UNSPEC63 NAL whose payload is the EL NAL
++        // itself (with its own header); its parameter sets are in band, so
++        // the EL stream needs no extradata and its decoder finds the size.
++        s->unwrap = true;
++        s->nal_length = hvcc_nal_length(bl->codec);
++        el = add_el_stream(s, 0, 0, NULL, 0);
++        el->codec->dovi = bl->codec->dovi;
++        el->codec->dv_profile = bl->codec->dv_profile;
++        el->codec->dv_level = bl->codec->dv_level;
++        el->codec->dv_el_present = bl->codec->dv_el_present;
++        goto group;
++    }
+ 
+     s->staging = av_packet_alloc();
+     if (!s->staging)
+@@ -91,18 +141,8 @@ struct mp_dovi_split *mp_dovi_split_create(struct demuxer *demuxer,
+     const AVCodecParameters *par_out = s->bsf->par_out;
+ 
+     // Allocate the virtual EL sh_stream.
+-    struct sh_stream *el = demux_alloc_sh_stream(STREAM_VIDEO);
+-    el->codec->codec = "hevc";
+-    el->codec->native_tb_num = bl->codec->native_tb_num;
+-    el->codec->native_tb_den = bl->codec->native_tb_den;
+-    el->codec->fps = bl->codec->fps;
+-    el->codec->disp_w = par_out->width;
+-    el->codec->disp_h = par_out->height;
+-    if (par_out->extradata_size > 0) {
+-        el->codec->extradata = talloc_memdup(el->codec, par_out->extradata,
+-                                             par_out->extradata_size);
+-        el->codec->extradata_size = par_out->extradata_size;
+-    }
++    el = add_el_stream(s, par_out->width, par_out->height,
++                                         par_out->extradata, par_out->extradata_size);
+     for (int i = 0; i < par_out->nb_coded_side_data; i++) {
+         const AVPacketSideData *sd = &par_out->coded_side_data[i];
+         if (sd->type != AV_PKT_DATA_DOVI_CONF)
+@@ -114,9 +154,8 @@ struct mp_dovi_split *mp_dovi_split_create(struct demuxer *demuxer,
+         el->codec->dv_el_present = cfg->el_present_flag;
+         break;
+     }
+-    el->title = talloc_strdup(el, "Dolby Vision enhancement layer");
+-    el->dependent_track = true;
+ 
++group:
+     demux_add_sh_stream(demuxer, el);
+     s->el = el;
+ 
+@@ -127,9 +166,9 @@ struct mp_dovi_split *mp_dovi_split_create(struct demuxer *demuxer,
+     bl->group = group;
+     el->group = group;
+ 
+-    MP_VERBOSE(demuxer, "Dolby Vision Profile 7 splitter: BL stream %d, "
++    MP_VERBOSE(demuxer, "Dolby Vision Profile 7 splitter (%s): BL stream %d, "
+                "virtual EL stream %d (dependent_track).\n",
+-               bl->index, el->index);
++               s->unwrap ? "built-in" : "dovi_split BSF", bl->index, el->index);
+     return s;
+ 
+ fail:
+@@ -149,9 +188,67 @@ struct sh_stream *mp_dovi_split_el_stream(struct mp_dovi_split *s)
+     return s ? s->el : NULL;
+ }
+ 
++// Collect the AU's UNSPEC63 payloads as an Annex B EL access unit.
++static struct demux_packet *unwrap_el(struct mp_dovi_split *s,
++                                      struct demux_packet *bl_dp)
++{
++    const uint8_t *p = bl_dp->buffer, *end = p + bl_dp->len;
++    uint8_t *out = NULL;
++    size_t out_len = 0;
++    while (p < end) {
++        const uint8_t *nal;
++        size_t len;
++        if (s->nal_length) {
++            if ((size_t)(end - p) < (size_t)s->nal_length)
++                break;
++            len = 0;
++            for (int i = 0; i < s->nal_length; i++)
++                len = (len << 8) | p[i];
++            p += s->nal_length;
++            if (len > (size_t)(end - p))
++                break;
++            nal = p;
++            p += len;
++        } else {
++            // Annex B: find this start code and the next.
++            while (end - p >= 3 && !(p[0] == 0 && p[1] == 0 && p[2] == 1))
++                p++;
++            if (end - p < 3)
++                break;
++            nal = p += 3;
++            while (end - p >= 3 && !(p[0] == 0 && p[1] == 0 && (p[2] == 0 || p[2] == 1)))
++                p++;
++            if (end - p < 3)
++                p = end;
++            len = p - nal;
++        }
++        // UNSPEC63 header (2 bytes), then the EL NAL with its own header.
++        if (len < 4 || ((nal[0] >> 1) & 0x3f) != 63)
++            continue;
++        MP_TARRAY_GROW(s, out, out_len + len + 2);
++        memcpy(out + out_len, (const uint8_t[]){0, 0, 0, 1}, 4);
++        memcpy(out + out_len + 4, nal + 2, len - 2);
++        out_len += len + 2;
++    }
++    struct demux_packet *dp = NULL;
++    if (out_len)
++        dp = new_demux_packet_from(s->demuxer->packet_pool, out, out_len);
++    talloc_free(out);
++    if (dp) {
++        dp->pts = bl_dp->pts;
++        dp->dts = bl_dp->dts;
++        dp->duration = bl_dp->duration;
++        dp->keyframe = bl_dp->keyframe;
++        dp->stream = s->el->index;
++    }
++    return dp;
++}
++
+ struct demux_packet *mp_dovi_split_dispatch(struct mp_dovi_split *s,
+                                             struct demux_packet *bl_dp)
+ {
++    if (s && s->unwrap && bl_dp && bl_dp->buffer && bl_dp->len > 0)
++        return unwrap_el(s, bl_dp);
+     if (!s || !s->bsf || !bl_dp || !bl_dp->buffer || bl_dp->len <= 0)
+         return NULL;
+ 

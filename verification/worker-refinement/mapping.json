@@ -1,0 +1,670 @@
+{
+  "schema_version": 1,
+  "model_file": "verification/worker-refinement/WorkerRefinement.tla",
+  "model_sha256": "abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0",
+  "correspondence": {
+    "path": "verification/worker-refinement/correspondence.json",
+    "sha256": "cfc357d5e768ce1a447d4527f8a7cbdc1983922a2d3bd531e9c5f02147263ca1"
+  },
+  "configs": {
+    "progress.cfg": {
+      "sha256": "1ebbb8bf45c7785d105ad7b31acd990ce1ed16c3dfd288fd04b9d9ac41414d86",
+      "verdict": "pass",
+      "purpose": "liveness",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 1800,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 1,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "Recurring": [
+            "TRUE"
+          ]
+        },
+        "properties": [
+          "AdmissionUntilJoined",
+          "AttemptProgress",
+          "EachWorkerCleanup",
+          "NoFictitiousRelease",
+          "NoStaleCommit",
+          "ResultAtomicity",
+          "TypeOK",
+          "UsefulProgress"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=none, Scenario=normal, Recurring=TRUE, and FaultBudget=1."
+        ]
+      },
+      "minimum_trace_states": null
+    },
+    "contention.cfg": {
+      "sha256": "c3421dfc44158305e632bdee54388e8daba6c0f370b4d9dabe2f05bde87995ca",
+      "verdict": "pass",
+      "purpose": "liveness",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "Recurring": [
+            "TRUE"
+          ]
+        },
+        "properties": [
+          "AdmissionUntilJoined",
+          "AttemptProgress",
+          "EachWorkerCleanup",
+          "NoFictitiousRelease",
+          "NoStaleCommit",
+          "ResultAtomicity",
+          "TypeOK"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=none, Scenario=normal, Recurring=TRUE, and FaultBudget=0."
+        ]
+      },
+      "minimum_trace_states": null
+    },
+    "control-lock-cycle.cfg": {
+      "sha256": "ea9cc4ddd06caa96d11a19679c16868fb1f83495a6e9430fa69134b2bb320d68",
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "SelectedCleanup",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Temporal properties were violated.",
+        "attribution": "sole_property",
+        "allowed_error_lines": [
+          "The following behavior constitutes a counter-example:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "lock_cycle"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "Recurring": [
+            "FALSE"
+          ]
+        },
+        "properties": [
+          "SelectedCleanup"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=lock_cycle, Scenario=normal, Recurring=FALSE, and FaultBudget=0."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "control-renewal-livelock.cfg": {
+      "sha256": "26b539dca21e773c65a3023be749bdd89c5cc677483816b37971e532389e5cde",
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "SelectedCleanup",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Temporal properties were violated.",
+        "attribution": "sole_property",
+        "allowed_error_lines": [
+          "The following behavior constitutes a counter-example:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "renewal_livelock"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "Recurring": [
+            "FALSE"
+          ]
+        },
+        "properties": [
+          "SelectedCleanup"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=renewal_livelock, Scenario=normal, Recurring=FALSE, and FaultBudget=0."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "control-external-stall.cfg": {
+      "sha256": "8ffc5507863ccbc12d20c1caba4c642b32817e67f3ec64b6b1c1e96a7ad68b0b",
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "SelectedCleanup",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Temporal properties were violated.",
+        "attribution": "sole_property",
+        "allowed_error_lines": [
+          "The following behavior constitutes a counter-example:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "external_stall"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "Recurring": [
+            "FALSE"
+          ]
+        },
+        "properties": [
+          "SelectedCleanup"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=external_stall, Scenario=normal, Recurring=FALSE, and FaultBudget=0."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "control-lost-settlement.cfg": {
+      "sha256": "09928be704380aa1ba8bf1211eb05636bf69f361bae600c32f74af80716be7eb",
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "AttemptProgress",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Temporal properties were violated.",
+        "attribution": "sole_property",
+        "allowed_error_lines": [
+          "The following behavior constitutes a counter-example:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 1,
+          "RetryLimit": 2,
+          "Mutation": [
+            "lost_settlement"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "Recurring": [
+            "FALSE"
+          ]
+        },
+        "properties": [
+          "AttemptProgress"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=lost_settlement, Scenario=normal, Recurring=FALSE, and FaultBudget=1."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "control-stale-commit.cfg": {
+      "sha256": "67d7a889dacc16d06e3c809ae41f0a9d22141d7b7eaed5cdb4785f4f3884efa2",
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "NoStaleCommit",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant NoStaleCommit is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 1,
+          "RetryLimit": 2,
+          "Mutation": [
+            "stale_commit"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "Recurring": [
+            "TRUE"
+          ]
+        },
+        "properties": [
+          "NoStaleCommit"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=stale_commit, Scenario=normal, Recurring=TRUE, and FaultBudget=1."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "control-no-useful-progress.cfg": {
+      "sha256": "67d23a217f9b39f2bf353603bb8d74a82689670162ce70db6085ec665c905877",
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "UsefulProgress",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Temporal properties were violated.",
+        "attribution": "sole_property",
+        "allowed_error_lines": [
+          "The following behavior constitutes a counter-example:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "no_useful_progress"
+          ],
+          "Scenario": [
+            "normal"
+          ],
+          "Recurring": [
+            "TRUE"
+          ]
+        },
+        "properties": [
+          "UsefulProgress"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=no_useful_progress, Scenario=normal, Recurring=TRUE, and FaultBudget=0."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "witness-both-complete.cfg": {
+      "sha256": "395779c1c0a05e5a9d054b4d716220c30be1a8873710e809a6eab79350288d2c",
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "NoBothCompleteWitness",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant NoBothCompleteWitness is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "both"
+          ],
+          "Recurring": [
+            "TRUE"
+          ]
+        },
+        "properties": [
+          "NoBothCompleteWitness"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=none, Scenario=both, Recurring=TRUE, and FaultBudget=0."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "witness-overlap-reacquire.cfg": {
+      "sha256": "eff82b016b623095386dfa524b2374e995aeb523436c0bc435dd64d42e76d2ed",
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "NoOverlapReacquireWitness",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant NoOverlapReacquireWitness is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "overlap"
+          ],
+          "Recurring": [
+            "TRUE"
+          ]
+        },
+        "properties": [
+          "NoOverlapReacquireWitness"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=none, Scenario=overlap, Recurring=TRUE, and FaultBudget=0."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "witness-detached-before-release.cfg": {
+      "sha256": "b6b3c919e84c5798e251d3429b428cb6d77d30420cf8d77f4f16d637b5016076",
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "NoDetachedBeforeReleaseWitness",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant NoDetachedBeforeReleaseWitness is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 1,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "late"
+          ],
+          "Recurring": [
+            "FALSE"
+          ]
+        },
+        "properties": [
+          "NoDetachedBeforeReleaseWitness"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=none, Scenario=late, Recurring=FALSE, and FaultBudget=1."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "witness-stale-after-release.cfg": {
+      "sha256": "d5ceb4e7a4e5333893f73c6e06a2c3d948a952cbacf3ac10ae301d1e0569927a",
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "NoStaleAfterReleaseWitness",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant NoStaleAfterReleaseWitness is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 1,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "stale"
+          ],
+          "Recurring": [
+            "TRUE"
+          ]
+        },
+        "properties": [
+          "NoStaleAfterReleaseWitness"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=none, Scenario=stale, Recurring=TRUE, and FaultBudget=1."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "witness-cancel.cfg": {
+      "sha256": "1721eeb67e58941f6077f6a8f989ea3a919209ac9c26ecd9cf0e8ced7af71bad",
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "NoCancelCleanupWitness",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant NoCancelCleanupWitness is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 0,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "cancel"
+          ],
+          "Recurring": [
+            "FALSE"
+          ]
+        },
+        "properties": [
+          "NoCancelCleanupWitness"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=none, Scenario=cancel, Recurring=FALSE, and FaultBudget=0."
+        ]
+      },
+      "minimum_trace_states": 2
+    },
+    "witness-reconcile.cfg": {
+      "sha256": "0e56a3f411976d6194c6756ed60a5dcf6ef6f7cc6d826e8e63f1e3570d40bb32",
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "NoReconcileWitness",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant NoReconcileWitness is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 300,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "workers": 2,
+          "distinct_queue_jobs": 2,
+          "shared_exclusive_domains": 1,
+          "item_milestones_per_worker": 1,
+          "FaultBudget": 1,
+          "RetryLimit": 2,
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "reconcile"
+          ],
+          "Recurring": [
+            "FALSE"
+          ]
+        },
+        "properties": [
+          "NoReconcileWitness"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
+          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
+          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
+          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
+          "Configuration uses Mutation=none, Scenario=reconcile, Recurring=FALSE, and FaultBudget=1."
+        ]
+      },
+      "minimum_trace_states": 2
+    }
+  }
+}

@@ -155,8 +155,15 @@ impl CompletedReconstructedOutputContract {
     pub fn input_contract(self) -> super::pipeline::ReconstructedPqInput {
         self.input
     }
+    pub(super) fn with_sdr(mut self) -> Self {
+        self.input = super::pipeline::ReconstructedPqInput::Yuv420p10Bt709Gamma24;
+        self
+    }
     pub fn grade(self) -> OutputGrade {
-        OutputGrade::Hdr10
+        match self.input {
+            super::pipeline::ReconstructedPqInput::Yuv420p10Bt709Gamma24 => OutputGrade::Sdr,
+            _ => OutputGrade::Hdr10,
+        }
     }
     pub fn codec(self) -> VideoCodec {
         VideoCodec::Hevc
@@ -175,6 +182,18 @@ impl CompletedReconstructedOutputContract {
         }
     }
     pub fn encode_args(
+        self,
+        bitrate_kbps: u32,
+        force_idr: bool,
+        software_threads: Option<u32>,
+    ) -> Vec<String> {
+        let mut args = self.pq_encode_args(bitrate_kbps, force_idr, software_threads);
+        if self.grade() == OutputGrade::Sdr {
+            normalize_reconstructed_sdr_args(&mut args);
+        }
+        args
+    }
+    fn pq_encode_args(
         self,
         bitrate_kbps: u32,
         force_idr: bool,
@@ -224,6 +243,37 @@ impl CompletedReconstructedOutputContract {
     }
 }
 
+/// Normalize both inherited recipe flags and the actual completed encoder.
+pub(super) fn normalize_reconstructed_sdr_args(args: &mut [String]) {
+    for index in 0..args.len().saturating_sub(1) {
+        match args[index].as_str() {
+            "-color_primaries" | "-color_trc" | "-colorspace" => args[index + 1] = "bt709".into(),
+            "-x265-params" => {
+                let mut params: Vec<_> = args[index + 1]
+                    .split(':')
+                    .filter(|p| {
+                        !p.starts_with("hdr10=")
+                            && !p.starts_with("master-display=")
+                            && !p.starts_with("max-cll=")
+                            && !p.starts_with("transfer=")
+                            && !p.starts_with("colorprim=")
+                            && !p.starts_with("colormatrix=")
+                    })
+                    .map(str::to_owned)
+                    .collect();
+                params.extend([
+                    "hdr10=0".into(),
+                    "transfer=bt709".into(),
+                    "colorprim=bt709".into(),
+                    "colormatrix=bt709".into(),
+                ]);
+                args[index + 1] = params.join(":");
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod output_codec_contract_tests {
     use super::*;
@@ -237,6 +287,28 @@ mod output_codec_contract_tests {
         Encoder::VideoToolbox,
     ];
 
+    #[test]
+    fn reconstructed_sdr_encoders_declare_main10_bt709_without_hdr_hints() {
+        for encoder in [Encoder::Software, Encoder::Nvenc, Encoder::Vaapi] {
+            let output = CompletedReconstructedOutputContract::resolve(encoder)
+                .expect("supported encoder")
+                .with_sdr();
+            assert_eq!(output.grade(), OutputGrade::Sdr);
+            assert_eq!(output.bit_depth(), 10);
+            assert_eq!(output.input_contract().transfer(), "bt709");
+            let args = output.encode_args(4000, true, Some(1));
+            assert!(!args.iter().any(|arg| arg.contains("smpte2084")
+                || arg.contains("hdr10=1")
+                || arg.contains("bt2020")));
+            for field in ["-color_primaries", "-color_trc", "-colorspace"] {
+                let at = args
+                    .iter()
+                    .position(|arg| arg == field)
+                    .expect("explicit color field");
+                assert_eq!(args[at + 1], "bt709");
+            }
+        }
+    }
     #[test]
     fn reconstructed_nvenc_contract_preserves_ordinary_hdr_refusal_and_bounds() {
         assert!(OutputCodecContract::resolve(
@@ -458,7 +530,8 @@ mod output_codec_contract_tests {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputGrade {
-    /// BT.709 8-bit, the only grade that existed before M5.
+    /// BT.709 SDR. Ordinary encoders use 8-bit output; the separately proved
+    /// completed reconstruction contract can deliver SDR as HEVC Main10.
     #[default]
     Sdr,
     /// HEVC Main10, PQ transfer, BT.2020 primaries, limited range. The rung
@@ -1224,15 +1297,7 @@ impl VaapiHdrPolicy {
     }
 
     fn from_probe_stderr(stderr: &str) -> Option<Self> {
-        let mut drivers = stderr.lines().filter_map(|line| {
-            line.split_once("VAAPI driver: ")
-                .map(|(_, driver)| driver.trim())
-        });
-        let first = drivers.next()?;
-        if drivers.any(|driver| driver != first) {
-            return None;
-        }
-        Self::from_driver_description(first)
+        Self::from_driver_description(&probe_vaapi_driver(stderr)?)
     }
 
     pub fn flags(self) -> [&'static str; 2] {
@@ -1246,6 +1311,89 @@ impl VaapiHdrPolicy {
             Self::MesaRadeonsiVbaq => "mesa-radeonsi-balanced-vbaq-no-preanalysis-v1",
         }
     }
+
+    /// The reconstructed Profile 8.1 route only: VBAQ off. At the route's
+    /// rate it costs nothing measurable, and at low rates it moves bits out of
+    /// the flat and dark areas where Delta E ITP is steepest (p99 13.4 vs 11.7
+    /// on the grainy control title at 18 Mb/s). No `-qmax`: radeonsi obeys
+    /// `-qmax` over `-maxrate`, and `-qmax 14` drove 2 s segments to 151 Mb/s
+    /// against a 90 Mb/s ceiling (docs/streaming/FEL-P81-RECONSTRUCTION.md).
+    pub fn reconstructed_profile81_flags(self) -> [&'static str; 2] {
+        match self {
+            Self::MesaRadeonsiVbaq => ["-compression_level", "0"],
+        }
+    }
+}
+
+/// The reconstructed Profile 8.1's video rate ceiling. The route replaces a
+/// copy of the disc's base layer at full source rate, so it gets a delivery
+/// rate near that, not the 2160p transcode rung (20 Mb/s).
+pub const RECONSTRUCTED_P81_MAX_VIDEO_KBPS: u32 = 60_000;
+
+/// Identity of the route's encode recipe; part of every per-title FEL
+/// qualification verdict, so changing it re-qualifies every title.
+pub const RECONSTRUCTED_P81_RECIPE: &str =
+    "p81-vbr:b=min(source,60000k):maxrate=1.5b:bufsize=2b:bf=0:radeonsi-compression_level=0:v1";
+
+/// The route's VA-API encode of one sample window for the per-title FEL
+/// qualification: the same Main10 contract arguments and route flags as
+/// [`super::vod_completed_reconstructed_pipe_args`] with
+/// [`super::CompletedReconstructedOutputPlan::with_reconstructed_profile81`],
+/// the level of the window's own raster and cadence, and the VOD window GOP.
+/// Input and output arguments are the caller's.
+pub fn reconstructed_p81_window_encode_args(
+    policy: VaapiHdrPolicy,
+    bitrate_kbps: u32,
+    width: u32,
+    height: u32,
+    rate: (u32, u32),
+    frames: u32,
+) -> Option<Vec<String>> {
+    let contract = CompletedReconstructedOutputContract::resolve(Encoder::Vaapi)?;
+    let mut args = contract.encode_args(bitrate_kbps, true, Some(1));
+    args.extend(policy.reconstructed_profile81_flags().map(str::to_owned));
+    let level = hevc_level_for(width, height, rate.0, rate.1)?;
+    let at = args.iter().position(|arg| arg == "-level:v")?;
+    args[at + 1] = level.to_owned();
+    let gop = frames.to_string();
+    args.extend(
+        [
+            "-flags",
+            "+cgop",
+            "-g",
+            &gop,
+            "-keyint_min",
+            &gop,
+            "-sc_threshold",
+            "0",
+        ]
+        .map(str::to_owned),
+    );
+    Some(args)
+}
+
+/// The reconstructed Profile 8.1's target video rate: the source's average
+/// bitrate (the whole file's, so an upper bound on its video's), capped at
+/// [`RECONSTRUCTED_P81_MAX_VIDEO_KBPS`]. VBR at this target with the ordinary
+/// VBV (`-maxrate` 1.5x, `-bufsize` 2x) kept every measured 2 s segment
+/// under the advertised peak (worst 58 Mb/s at a 60 Mb/s target).
+pub fn reconstructed_p81_video_kbps(source: &crate::domain::MediaFile) -> u32 {
+    let measured = source
+        .bitrate
+        .filter(|bps| *bps > 0)
+        .map(|bps| bps / 1000)
+        .or_else(|| {
+            source
+                .duration_ms
+                .filter(|ms| *ms > 0)
+                .map(|ms| source.size.saturating_mul(8) / ms)
+        });
+    measured
+        .and_then(|kbps| u32::try_from(kbps).ok())
+        .map_or(RECONSTRUCTED_P81_MAX_VIDEO_KBPS, |kbps| {
+            kbps.min(RECONSTRUCTED_P81_MAX_VIDEO_KBPS)
+        })
+        .max(1_000)
 }
 
 /// Physical inventory, independent of whether an encoder initialized successfully.
@@ -1430,6 +1578,12 @@ pub struct EncoderCaps {
     pub sdr_avc: Vec<super::QualifiedSdrAvc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vaapi_hdr_policy: Option<VaapiHdrPolicy>,
+    /// The VA driver's own description from the successful VA-API probe
+    /// ("Mesa Gallium driver 26.0.8 for AMD Radeon 780M (radeonsi, ...)"):
+    /// vendor, driver version and GPU. Part of the identity of anything
+    /// measured on this encoder, such as a FEL qualification verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vaapi_driver: Option<String>,
 }
 
 impl EncoderCaps {
@@ -1496,6 +1650,7 @@ pub fn parse_encoder_list(output: &str) -> EncoderCaps {
         quality_rc: QualityRc::default(),
         sdr_avc: Vec::new(),
         vaapi_hdr_policy: None,
+        vaapi_driver: None,
     }
 }
 
@@ -1672,10 +1827,32 @@ fn benchmark_completed(output: &[u8]) -> bool {
             == Some(240)
 }
 
+/// The one VA driver a verbose VA-API probe loaded; `None` when it named none
+/// or more than one.
+fn probe_vaapi_driver(stderr: &str) -> Option<String> {
+    let mut drivers = stderr.lines().filter_map(|line| {
+        line.split_once("VAAPI driver: ")
+            .map(|(_, driver)| driver.trim())
+    });
+    let first = drivers.next()?;
+    if drivers.any(|driver| driver != first) {
+        return None;
+    }
+    Some(first.to_owned())
+}
+
+/// What a successful VA-API probe observed of the loaded driver.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct VaapiObservation {
+    policy: Option<VaapiHdrPolicy>,
+    driver: Option<String>,
+}
+
 /// What one family's probe concluded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Verdict {
     vaapi_hdr_policy: Option<VaapiHdrPolicy>,
+    vaapi_driver: Option<String>,
     usable: bool,
     /// The build accepted [`Encoder::forced_idr_flag`]. Meaningless for the
     /// families that do not need one.
@@ -1712,7 +1889,7 @@ async fn try_encode(
     encoder: Encoder,
     rate_control: EffectiveRateControl,
     force_idr: bool,
-) -> Result<Option<VaapiHdrPolicy>, String> {
+) -> Result<VaapiObservation, String> {
     let mut args = validation_args(encoder, rate_control, force_idr);
     if encoder == Encoder::Vaapi {
         // Reuse the existing encode; verbose initialization identifies the
@@ -1728,9 +1905,13 @@ async fn try_encode(
     .await
     {
         Ok(out) if out.status.success() => Ok(if encoder == Encoder::Vaapi {
-            VaapiHdrPolicy::from_probe_stderr(&String::from_utf8_lossy(&out.stderr))
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            VaapiObservation {
+                policy: VaapiHdrPolicy::from_probe_stderr(&stderr),
+                driver: probe_vaapi_driver(&stderr),
+            }
         } else {
-            None
+            VaapiObservation::default()
         }),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
         Err(e) => Err(e.to_string()),
@@ -1869,7 +2050,8 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
                 "hardware encoder validated"
             );
             Verdict {
-                vaapi_hdr_policy,
+                vaapi_hdr_policy: vaapi_hdr_policy.policy,
+                vaapi_driver: vaapi_hdr_policy.driver,
                 usable: true,
                 forced_idr: wants_idr,
             }
@@ -1890,7 +2072,8 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
                          playback will start slower than it should"
                     );
                     Verdict {
-                        vaapi_hdr_policy,
+                        vaapi_hdr_policy: vaapi_hdr_policy.policy,
+                        vaapi_driver: vaapi_hdr_policy.driver,
                         usable: true,
                         forced_idr: false,
                     }
@@ -1903,6 +2086,7 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
                     );
                     Verdict {
                         vaapi_hdr_policy: None,
+                        vaapi_driver: None,
                         usable: false,
                         forced_idr: false,
                     }
@@ -1921,6 +2105,7 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
             );
             Verdict {
                 vaapi_hdr_policy: None,
+                vaapi_driver: None,
                 usable: false,
                 forced_idr: false,
             }
@@ -2063,6 +2248,7 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
         } else {
             Verdict {
                 vaapi_hdr_policy: None,
+                vaapi_driver: None,
                 usable: false,
                 forced_idr: false,
             }
@@ -2070,6 +2256,7 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
         caps.set(encoder, verdict.usable);
         if encoder == Encoder::Vaapi {
             caps.vaapi_hdr_policy = verdict.vaapi_hdr_policy;
+            caps.vaapi_driver = verdict.vaapi_driver.clone();
         }
         if verdict.forced_idr {
             caps.forced_idr.set(encoder);
@@ -2218,8 +2405,17 @@ mod tests {
         assert_eq!(
             try_encode(fixture, Encoder::Vaapi, EffectiveRateControl::Vbr, false)
                 .await
-                .expect("successful encode"),
+                .expect("successful encode")
+                .policy,
             Some(VaapiHdrPolicy::MesaRadeonsiVbaq)
+        );
+        // The driver's own description is kept for encoder-bound identities.
+        assert!(
+            try_encode(fixture, Encoder::Vaapi, EffectiveRateControl::Vbr, false)
+                .await
+                .expect("successful encode")
+                .driver
+                .is_some_and(|driver| driver.contains("radeonsi"))
         );
         assert!(try_encode(
             fixture,

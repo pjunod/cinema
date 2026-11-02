@@ -302,12 +302,34 @@ pub(super) async fn admitted_playlist_error(
     deadline: Instant,
 ) -> Result<ApiError, ()> {
     if let Some(owner) = err.owner.as_ref() {
-        match state
-            .transcode
-            .authorize_playlist_error_publication(session, owner, &err.error, deadline)
-            .await
-        {
+        fence::note_response_owner(owner);
+        let authorized = with_authority_recovery(state, session, deadline, || async {
+            match state
+                .transcode
+                .authorize_playlist_error_publication(session, owner, &err.error, deadline)
+                .await
+            {
+                Err(
+                    rejection
+                    @ crate::transcode::MediaResponsePublicationRejection::AuthorityLost {
+                        ..
+                    },
+                ) => Err(RawPublicationError::Rejected(rejection)),
+                other => Ok(other),
+            }
+        })
+        .await;
+        let authorized = match authorized {
+            Ok(authorized) => authorized,
+            // Lost authority and did not get it back inside the wait.
+            Err(fenced) => return Ok(fenced),
+        };
+        match authorized {
             Ok(()) => {}
+            // `with_authority_recovery` resolves every authority loss itself.
+            Err(crate::transcode::MediaResponsePublicationRejection::AuthorityLost { .. }) => {
+                return Ok(serving_fenced_error());
+            }
             Err(crate::transcode::MediaResponsePublicationRejection::StateChanged) => {
                 // The same generation changed attempt/publication/decision
                 // state during admission. Re-resolve instead of relabeling a

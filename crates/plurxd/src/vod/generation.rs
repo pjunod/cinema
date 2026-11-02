@@ -1216,6 +1216,10 @@ async fn run_generation(
 /// The identity half of a pre-read generation. `false` means the generation
 /// is over (drift handled or failure recorded) and the caller must return.
 async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result<(), Outcome> {
+    // Hold publication ownership while identity and init are written. The
+    // exact byte reservations below may evict other idle cache entries.
+    let _cache_pin = crate::playback_cache::pin(rendition.dir.path())
+        .map_err(|error| Outcome::Failed(Failure::Sink(error)))?;
     if !recipe_engine_is_current(&rendition.recipe).await {
         return Err(Outcome::Failed(Failure::EngineChanged(
             "the immutable media engine changed before init publication".to_owned(),
@@ -1965,6 +1969,33 @@ impl RenditionSink {
         }
     }
     async fn materialize_observed(&self, entry: u32, bytes: Vec<u8>) -> io::Result<bool> {
+        // Pin the exact entry before the optimistic presence check. A driver
+        // may otherwise evict it while engine validation awaits, turning a
+        // retained replay into a fresh write with no allocation grant.
+        let _entry_pin = crate::playback_cache::pin(
+            &self
+                .rendition
+                .dir
+                .path()
+                .join(segment_name(u64::from(entry))),
+        )?;
+        // Reserve before publication/dependency locks: making room can retire
+        // a different rendition through the same locking protocol.
+        let already_present = self
+            .publication_lock(self.rendition.manifest.lock())
+            .await?
+            .state(entry)
+            .is_some_and(|state| state.is_materialized());
+        self.shared
+            .hooks
+            .get()
+            .after_cache_presence_observed()
+            .await;
+        let reservation = if already_present {
+            None
+        } else {
+            crate::playback_cache::reserve(self.rendition.dir.path(), bytes.len() as u64).await?
+        };
         if self.rendition.closed.load(Relaxed) {
             // The quiet teardown: `NotFound` is how vodgen learns the session
             // ended normally rather than faulted.
@@ -2136,6 +2167,9 @@ impl RenditionSink {
                 .dir
                 .materialize(&mut manifest, entry, &bytes, now_ms())
                 .await?;
+            if let Some(reservation) = reservation {
+                reservation.commit(len);
+            }
             let publication =
                 credit_marker_prewarm_publication(&self.rendition, self.epoch, entry).await;
             if let Some(init) = init.as_ref() {
@@ -2201,6 +2235,65 @@ impl RenditionSink {
 
 #[cfg(test)]
 mod writer_supervision_tests {
+    #[tokio::test]
+    async fn retained_replay_pins_presence_across_working_set_pressure() {
+        use super::*;
+        let base = crate::test_tempdir().expect("replay race");
+        let serve = super::super::tests::bare_serve(base.path());
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(
+            Arc::clone(&serve.shared.store),
+            vec![base.path().to_path_buf()],
+        );
+        budget.configure_for_test(64 << 10);
+        let rendition = super::super::tests::synthetic_rendition(base.path()).await;
+        let sink = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: 0,
+            retirement: tokio_util::sync::CancellationToken::new(),
+        };
+        let original = b"immutable retained bytes";
+        assert!(sink
+            .materialize_observed(0, original.to_vec())
+            .await
+            .expect("fresh write"));
+        let pause = serve
+            .shared
+            .test_hooks()
+            .cache_presence
+            .arm("replay observed existing member");
+        let replay =
+            tokio::spawn(
+                async move { sink.materialize_observed(0, b"replacement".to_vec()).await },
+            );
+        let held = pause.reached().await;
+        let charged = serve.shared.working_set.load(Relaxed);
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            let freed = rendition
+                .dir
+                .make_room(&mut manifest, &[], original.len() as u64)
+                .await
+                .expect("pressure");
+            assert_eq!(
+                freed.bytes, 0,
+                "presence pin must defeat working-set eviction"
+            );
+        }
+        assert_eq!(
+            tokio::fs::read(rendition.dir.path().join(segment_name(0)))
+                .await
+                .expect("original"),
+            original
+        );
+        drop(held);
+        assert!(!replay
+            .await
+            .expect("replay task")
+            .expect("retained traversal"));
+        assert_eq!(serve.shared.working_set.load(Relaxed), charged);
+    }
+
     #[tokio::test]
     async fn deferred_replay_keeps_original_bytes_without_fresh_receipt_authority() {
         use super::*;

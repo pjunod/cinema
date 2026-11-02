@@ -844,10 +844,10 @@ pub async fn logs(
     State(state): State<AppState>,
     Query(q): Query<LogsQuery>,
 ) -> Json<Vec<crate::logbuf::LogEntry>> {
-    let buffer = if q.scope == "cluster" {
-        &state.cluster_logs
-    } else {
-        &state.logs
+    let buffer = match q.scope.as_str() {
+        "cluster" => &state.cluster_logs,
+        "sharing" => &state.sharing_logs,
+        _ => &state.logs,
     };
     Json(buffer.tail(&q.level, q.limit.min(2000)))
 }
@@ -2398,6 +2398,7 @@ pub struct SettingsDto {
     pub dolby_vision_convert: bool,
     /// Requested preferences, default off; neither reports effective processing.
     pub dolby_vision_hdr_processing: bool,
+    pub dolby_vision_display_target: bool,
     pub dolby_vision_fel_reencode: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
@@ -2474,10 +2475,9 @@ pub struct SettingsDto {
     /// nobody asked for. See `keys::ARTWORK_RETRY_DEFAULT_MINS`.
     pub artwork_retry_mins: i64,
     pub transcode_cleanup_mins: i64,
-    /// How often the pre-transcode producer looks for something worth making,
-    /// and how much disk what it makes may occupy. Both off/0 by default: the
-    /// producer competes with live playback for the encoder, so it is a thing
-    /// an operator turns on, not a thing an upgrade turns on for them.
+    /// How often the optional background pre-transcode producer looks for work.
+    /// The disk ceiling below is shared by every node-local playback cache;
+    /// its unset value is 50 GiB, independently of background production.
     pub cache_produce_mins: i64,
     pub cache_max_gb: i64,
     /// What the cache currently holds on this node, in bytes — the number that
@@ -2560,7 +2560,8 @@ async fn subtitle_store_diagnostics(
     state: &AppState,
     switch_on: bool,
 ) -> crate::subtitle_source::StoreDiagnostics {
-    let mut diagnostics = crate::subtitle_source::diagnostics(switch_on, &state.runtime_cache_dir);
+    let mut diagnostics =
+        crate::subtitle_source::diagnostics(switch_on, &state.runtime_cache_dir).await;
     let mut titles = HashMap::new();
     for ride in &mut diagnostics.riding {
         let Ok(Some(file)) = state.store.get_file(ride.file_id).await else {
@@ -2576,8 +2577,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     // This page renders the settings as one administrative snapshot. On the
     // clustered backend, reading each field independently turns one response
     // into dozens of leader barriers; it can also mix values from different
-    // commits. `cache_bytes` below is one additional authoritative aggregate
-    // for this node's cache ownership when a cache location is configured.
+    // commits. Cache usage below is the node-local physical inventory shared
+    // by all playback writers, including restart leftovers and reservations.
     let settings = state.store.settings_snapshot().await?;
     let setting = |key: &str| settings.get(key).cloned();
     let decoder_health_requested =
@@ -2665,10 +2666,11 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     // unset is the 50 GB default, `0` is off.
     let cache_max_gb = crate::cachekeep::cache_budget(setting(keys::CACHE_MAX_GB).as_deref())
         .map_or(0, |bytes| i64::try_from(bytes >> 30).unwrap_or(i64::MAX));
-    let cache_used_bytes = match state.transcode.cache_location() {
-        Some((_, node)) => state.store.cache_bytes(node).await.unwrap_or(0),
-        None => 0,
-    };
+    let cache_used_bytes =
+        i64::try_from(state.playback_cache.used_bytes().await.map_err(|error| {
+            ApiError::Internal(format!("reading playback cache usage: {error}"))
+        })?)
+        .unwrap_or(i64::MAX);
     let telemetry_retain_days = setting(keys::TELEMETRY_RETAIN_DAYS)
         .and_then(|value| value.trim().parse::<i64>().ok())
         .unwrap_or(keys::TELEMETRY_RETAIN_DEFAULT_DAYS)
@@ -2887,6 +2889,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         dolby_vision_convert: plurx_core::store::stored_switch(
             setting(keys::DV_CONVERT).as_deref(),
             true,
+        ),
+        dolby_vision_display_target: plurx_core::store::stored_switch(
+            setting(keys::DV_DISPLAY_TARGET).as_deref(),
+            false,
         ),
         dolby_vision_hdr_processing: plurx_core::store::stored_switch(
             setting(keys::DV_HDR_PROCESSING).as_deref(),
@@ -3184,6 +3190,7 @@ pub struct UpdateSettings {
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
     pub dolby_vision_hdr_processing: Option<bool>,
+    pub dolby_vision_display_target: Option<bool>,
     pub dolby_vision_fel_reencode: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
@@ -3359,6 +3366,7 @@ impl UpdateSettings {
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
             || self.dolby_vision_hdr_processing.is_some()
+            || self.dolby_vision_display_target.is_some()
             || self.dolby_vision_fel_reencode.is_some()
             || self.vod_working_set_bytes.is_some()
             || self.vod_block_budget_secs.is_some()
@@ -4391,6 +4399,12 @@ pub async fn update_settings(
     }
     // Persist requested preferences even while backend qualification is missing.
     // Runtime routing remains unchanged until a qualified implementation lands.
+    if let Some(on) = req.dolby_vision_display_target {
+        state
+            .store
+            .put_setting(keys::DV_DISPLAY_TARGET, if on { "1" } else { "0" })
+            .await?;
+    }
     if let Some(on) = req.dolby_vision_hdr_processing {
         state
             .store

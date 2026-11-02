@@ -185,6 +185,7 @@ impl TranscodeManager {
                     aac,
                     preserve_dolby_vision,
                     convert_dolby_vision,
+                    ..
                 } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
                 _ => None,
             },
@@ -202,7 +203,7 @@ impl TranscodeManager {
             subtitle_burn: request.subtitle_burn,
             subtitle_digest: encoding.subtitle_digest.clone(),
             hdr10_requested: request.hdr10,
-            grade: encoding.options.pipeline.output_grade(),
+            grade: encoding.delivered_output_grade(),
             normalized_geometry: context.is_some_and(|context| context.normalized_geometry),
             profile: context
                 .and_then(|context| context.profile)
@@ -382,6 +383,7 @@ impl TranscodeManager {
                     aac,
                     preserve_dolby_vision,
                     convert_dolby_vision,
+                    dual_layer_as_copied: false,
                 },
                 None => SessionKind::Transcode {
                     height: i64::from(
@@ -512,6 +514,7 @@ impl TranscodeManager {
             aac,
             preserve_dolby_vision,
             convert_dolby_vision,
+            ..
         } = request.kind
         else {
             return Ok(());
@@ -842,6 +845,7 @@ impl TranscodeManager {
                 aac: intent.aac,
                 preserve_dolby_vision: intent.preserve_dolby_vision,
                 convert_dolby_vision: intent.convert_dolby_vision,
+                dual_layer_as_copied: false,
             },
             start_seconds: 0.0,
             audio_index: intent.audio_index,
@@ -2064,6 +2068,13 @@ impl TranscodeManager {
                 |fence| cache.dir.join("tmp").join(format!("{hash}-f{fence}")),
             )
         };
+        // Generation manifests, playlists and bounded health receipts are
+        // small but still physical output outside the segment receiver.
+        // Keep their worst-case metadata allowance through final publication;
+        // dropping it invalidates inventory before any later admission.
+        let _metadata_capacity = crate::playback_cache::reserve(&temp, 8 * 1024 * 1024)
+            .await
+            .map_err(|error| format!("pretranscode metadata capacity: {error}"))?;
         let temp_parent = temp
             .parent()
             .ok_or("cache staging directory has no parent")?;
@@ -2154,7 +2165,13 @@ impl TranscodeManager {
         }
 
         let mut published = match self
-            .produce_into(&staging, &hash, &request, subtitle_handle.as_ref())
+            .produce_into_budgeted(
+                &staging,
+                Some(&temp),
+                &hash,
+                &request,
+                subtitle_handle.as_ref(),
+            )
             .await
         {
             Ok(ProductionProgress::Ready(published)) => published,
@@ -2573,9 +2590,22 @@ impl TranscodeManager {
 
     /// Encode into `temp` until finished, out of time, or out of patience with
     /// being preempted. A yield retains the cause observed when work stopped.
+    #[cfg(test)]
     pub(super) async fn produce_into(
         &self,
         temp: &plurx_core::fs_secure::SecureDirectory,
+        hash: &str,
+        request: &PortableProduction<'_>,
+        subtitle_handle: Option<&std::fs::File>,
+    ) -> Result<ProductionProgress, String> {
+        self.produce_into_budgeted(temp, None, hash, request, subtitle_handle)
+            .await
+    }
+
+    async fn produce_into_budgeted(
+        &self,
+        temp: &plurx_core::fs_secure::SecureDirectory,
+        accounting_path: Option<&std::path::Path>,
         hash: &str,
         request: &PortableProduction<'_>,
         subtitle_handle: Option<&std::fs::File>,
@@ -2719,6 +2749,28 @@ impl TranscodeManager {
             if macos_completion_sha256.is_some() {
                 invalidate_mac_part_completion(&part_dir).await?;
             }
+            // Every FFmpeg HLS byte, including background/offline parts,
+            // crosses the same pre-write capacity gate as foreground output.
+            // Tests without a configured playback layout retain their fixture
+            // file muxer; production never relies on an after-the-fact walk.
+            let upload = if let Some(path) =
+                accounting_path.filter(|path| crate::playback_cache::lookup(path).is_some())
+            {
+                #[cfg(unix)]
+                let directory = std::path::PathBuf::from(format!("/dev/fd/{}", part_dir.raw_fd()));
+                #[cfg(windows)]
+                let directory = part_dir.path().to_owned();
+                Some(
+                    crate::scratch_put::PutSink::bind_accounted(
+                        directory,
+                        path.join(&part_name),
+                        None,
+                    )
+                    .map_err(|error| format!("opening budgeted pretranscode sink: {error}"))?,
+                )
+            } else {
+                None
+            };
             let resume_ms = crate::produce::resume_at_ms(&parts);
             let part_opts = TranscodeOptions {
                 start_seconds: resume_ms as f64 / 1000.0,
@@ -2800,6 +2852,9 @@ impl TranscodeManager {
             };
             #[cfg(windows)]
             let output_directory = temp.path().join(&part_name).to_string_lossy().into_owned();
+            let output_directory = upload
+                .as_ref()
+                .map_or(output_directory, |sink| sink.base_url(0));
             let execution = TranscodeExecution::from_options(
                 ffmpeg_file,
                 &part_opts,
@@ -2871,9 +2926,20 @@ impl TranscodeManager {
             )?
             .into_parts();
 
-            let ended = self
+            let mut ended = self
                 .run_part(&mut child, deadline, yield_to_offline, cancelled)
                 .await;
+            if let Some(upload) = upload.as_ref() {
+                if tokio::time::timeout(Duration::from_secs(15), upload.drain())
+                    .await
+                    .is_err()
+                {
+                    ended = PartEnd::Failed("budgeted pretranscode uploads did not settle".into());
+                } else if let Some(error) = upload.failure() {
+                    ended = PartEnd::Failed(error);
+                }
+            }
+            drop(upload);
             drop(source_offset_permit);
             drop(slot); // before anything else: a viewer is probably waiting on it
             drop(sw_hold); // and the pool share with it

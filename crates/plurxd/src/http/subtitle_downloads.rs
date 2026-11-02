@@ -482,6 +482,7 @@ async fn save_candidate(
         .await
         .map_err(provider_error)?;
     let track = DownloadedSubtitle {
+        text_translation: None,
         source_size: file.size,
         source_mtime: file.mtime,
         provider_file_id: candidate.file_id,

@@ -159,7 +159,7 @@
     /// added to `http/hls/` without being listed here fails each scan instead
     /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
     /// production code as literals and are not product sources.
-    const HLS_PRODUCT_SOURCES: [(&str, &str); 21] = [
+    const HLS_PRODUCT_SOURCES: [(&str, &str); 22] = [
         ("../hls.rs", include_str!("../../hls.rs")),
         ("hooks.rs", include_str!("../hooks.rs")),
         ("session_guard.rs", include_str!("../session_guard.rs")),
@@ -187,6 +187,7 @@
         ),
         ("link_receipts.rs", include_str!("../link_receipts.rs")),
         ("prepared_link.rs", include_str!("../prepared_link.rs")),
+        ("fence.rs", include_str!("../fence.rs")),
     ];
 
     mod source_inventory {
@@ -325,12 +326,14 @@
             "the ordinary candidate's link binding is kept for a dispatch that degrades"
         );
         let degraded = source
-            .split_once("    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) =")
-            .expect("the dispatch result carries the worker's degrade reason")
+            .split_once("crate::media_pool::mark_create_phase(\"dispatch\");")
+            .expect("the completed dispatch phase")
             .1
             .split_once("    if owner_node_id == state.node_id {")
             .expect("the activation that follows dispatch")
             .0;
+        assert!(degraded.contains("(degraded_processing, processing_note)"), "the worker result carries its degrade reason and processing note");
+        assert!(degraded.contains("if let Some(reason) = degraded_processing {"));
         for restored in [
             "plan_notes.push(processing_declined_note(&reason));",
             "request = ordinary;",
@@ -826,6 +829,29 @@
         assert!(error.to_string().contains("body deadline expired"));
         assert!(body.frame().await.is_none());
         assert_eq!(accepted_bytes(), 0, "stale bytes must not be acknowledged");
+    }
+
+    /// Review of #1299: the local indexer's reason -- which can carry source
+    /// paths and ffmpeg's stderr -- reached the client in the refusal message.
+    #[test]
+    fn an_unindexable_title_tells_the_client_the_code_not_the_indexer_log() {
+        let error = crate::transcode::vod_refusal_error(
+            "vod_index_unavailable",
+            "this node cannot index this title: ffmpeg: /srv/media/Film.mkv: Invalid data",
+        );
+        match super::create::session_start_error(7, error) {
+            ApiError::Typed {
+                status,
+                code,
+                message,
+            } => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(code, "vod_index_pending");
+                assert!(!message.contains("/srv"), "{message}");
+                assert!(!message.contains("ffmpeg"), "{message}");
+            }
+            other => panic!("not a typed refusal: {other:?}"),
+        }
     }
 
     #[test]

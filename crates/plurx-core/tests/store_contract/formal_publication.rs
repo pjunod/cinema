@@ -37,6 +37,9 @@ use super::{acquired, for_each_backend, publication_successor};
 use plurx_core::domain::{ItemKind, ItemSort, LibraryKind, NewItem, NewLibrary};
 use plurx_core::error::StoreError;
 use plurx_core::store::background_jobs::*;
+use plurx_core::store::background_jobs_library::{
+    LibraryTrigger, LibraryWorkInput, LibraryWorkQuery, LibraryWorkResult, NewLibraryWork,
+};
 use plurx_core::store::background_jobs_resources::StorageDomainMapping;
 use plurx_core::store::Store;
 use std::path::PathBuf;
@@ -81,6 +84,23 @@ async fn titles(store: &dyn Store, library_id: i64) -> Vec<String> {
         .into_iter()
         .map(|item| item.title)
         .collect()
+}
+
+async fn request_record(
+    store: &dyn Store,
+    request_id: &str,
+) -> plurx_core::store::background_jobs_library::LibraryWorkRecord {
+    store
+        .library_work_requests(LibraryWorkQuery {
+            request_id: Some(request_id.to_owned()),
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("read library work request")
+        .into_iter()
+        .next()
+        .expect("library work request exists")
 }
 
 fn is_fence_rejected<T: std::fmt::Debug>(result: &Result<T, StoreError>) -> bool {
@@ -215,6 +235,115 @@ async fn claim_scan(
         lease,
         claim_time,
     }
+}
+
+struct UnboundLibraryWork {
+    library_id: i64,
+    job_id: String,
+    token: JobToken,
+    claim_time: i64,
+}
+
+async fn enqueue_and_claim_library_work(
+    store: &dyn Store,
+    backend: &str,
+    library_id: i64,
+    node: &str,
+    request_id: &str,
+    refresh: bool,
+    now: i64,
+) -> UnboundLibraryWork {
+    let outcome = store
+        .enqueue_library_work(NewLibraryWork {
+            request_id: request_id.to_owned(),
+            library_id,
+            input: LibraryWorkInput::Full {
+                refresh,
+                trigger: LibraryTrigger::Manual,
+            },
+            now_ms: now,
+        })
+        .await
+        .expect("enqueue real library request");
+    assert!(
+        matches!(outcome, EnqueueOutcome::Accepted { .. }),
+        "{backend}: {outcome:?}"
+    );
+    let request = store
+        .library_work_requests(LibraryWorkQuery {
+            request_id: Some(request_id.to_owned()),
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("read admitted request")
+        .into_iter()
+        .next()
+        .expect("request admitted");
+    let kind = if refresh {
+        JobKind::MetadataRefresh
+    } else {
+        JobKind::LibraryScan
+    };
+    let outcome = store
+        .claim_job(ClaimJob {
+            job_id: request.job_id.clone(),
+            expected_revision: 0,
+            node_id: node.to_owned(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind,
+            payload_version: 1,
+            now_ms: now,
+            dispatched_at_ms: now,
+        })
+        .await
+        .expect("claim admitted library job");
+    let job = match outcome {
+        ClaimOutcome::Claimed { job } => job,
+        refused => panic!("{backend}: library claim refused: {refused:?}"),
+    };
+    UnboundLibraryWork {
+        library_id,
+        job_id: request.job_id,
+        token: job.token.expect("claimed job token"),
+        claim_time: now,
+    }
+}
+
+async fn bind_library_work(
+    store: &dyn Store,
+    backend: &str,
+    work: UnboundLibraryWork,
+    node: &str,
+    now: i64,
+) -> Scan {
+    let lease = acquired(
+        store
+            .acquire_lease(
+                &Scan::resource(work.library_id),
+                node,
+                now,
+                now + DOMAIN_TTL_MS,
+            )
+            .await
+            .expect("acquire real library domain lease"),
+        backend,
+    );
+    let scan = Scan {
+        job_id: work.job_id,
+        token: work.token,
+        lease,
+        claim_time: work.claim_time,
+    };
+    assert!(
+        store
+            .bind_library_job(scan.binding())
+            .await
+            .expect("bind library job"),
+        "{backend}: bind real library worker"
+    );
+    scan
 }
 
 /// `claim_scan` followed by a successful bind of both authorities.
@@ -834,6 +963,229 @@ async fn formal_publication_resolved_claim_keeps_attempt_identity_through_insert
             "{backend}"
         );
         scan.retire(store.as_ref(), now).await;
+    })
+    .await;
+}
+
+/// S1: a captured completion token remains usable while both durable owners
+/// remain current.
+#[tokio::test]
+async fn formal_publication_library_captured_token_completes_while_durable_owners_current() {
+    for_each_backend(|store, backend| async move {
+        let now = unix_now_ms();
+        let library_id = create_library(store.as_ref(), "formal-late-completion").await;
+        let work = enqueue_and_claim_library_work(
+            store.as_ref(),
+            backend,
+            library_id,
+            "node-a",
+            "request-late",
+            false,
+            now,
+        )
+        .await;
+        let scan = bind_library_work(store.as_ref(), backend, work, "node-a", now).await;
+        // This direct Store call isolates the positive durable-authority
+        // predicate. It does not schedule local revocation or an in-flight
+        // production facade write.
+        assert!(
+            store
+                .complete_library_work(CompleteLibraryWork {
+                    token: scan.token.clone(),
+                    lease: scan.lease.clone(),
+                    request_id: "request-late".into(),
+                    result: LibraryWorkResult::Failed {
+                        error: "scheduled result".into()
+                    },
+                    now_ms: now + 1,
+                })
+                .await
+                .expect("detached completion"),
+            "{backend}: both durable owners still apply"
+        );
+        let record = store
+            .library_work_requests(LibraryWorkQuery {
+                request_id: Some("request-late".into()),
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .expect("read result")
+            .remove(0);
+        assert_eq!(record.state, "failed", "{backend}");
+        assert!(
+            matches!(
+                record.result,
+                Some(LibraryWorkResult::Failed { ref error })
+                    if error == "scheduled result"
+            ),
+            "{backend}: stored result matches the submitted failure"
+        );
+        scan.retire(store.as_ref(), now).await;
+    })
+    .await;
+}
+
+/// S2/S3: release or a new worker's higher-fence binding invalidates an old
+/// captured completion token.
+#[tokio::test]
+async fn formal_publication_library_completion_after_release_and_rebind_is_rejected() {
+    for_each_backend(|store, backend| async move {
+        let now = unix_now_ms();
+        let library_id = create_library(store.as_ref(), "formal-late-owner").await;
+        let first_work = enqueue_and_claim_library_work(
+            store.as_ref(),
+            backend,
+            library_id,
+            "node-a",
+            "request-old",
+            false,
+            now,
+        )
+        .await;
+        let first = bind_library_work(store.as_ref(), backend, first_work, "node-a", now).await;
+
+        // Releasing the exact lease closes the first detached completion.
+        assert!(
+            store
+                .release_lease(&first.lease, now + 1)
+                .await
+                .expect("release first owner"),
+            "{backend}"
+        );
+        let still_running = store
+            .background_job(&first.job_id)
+            .await
+            .expect("read queue owner after domain release")
+            .expect("old queue job retained");
+        assert_eq!(still_running.state, JobState::Running, "{backend}");
+        assert_eq!(
+            still_running.token.as_ref(),
+            Some(&first.token),
+            "{backend}"
+        );
+        assert!(first.token.lease_expires_ms > now + 2, "{backend}");
+        let after_release = store
+            .complete_library_work(CompleteLibraryWork {
+                token: first.token.clone(),
+                lease: first.lease.clone(),
+                request_id: "request-old".into(),
+                result: LibraryWorkResult::Failed {
+                    error: "stale after release".into(),
+                },
+                now_ms: now + 2,
+            })
+            .await
+            .expect("stale completion verdict");
+        assert!(
+            !after_release,
+            "{backend}: release linearized before the detached write"
+        );
+        assert_eq!(
+            request_record(store.as_ref(), "request-old").await.state,
+            "pending",
+            "{backend}"
+        );
+
+        // S2 isolates release of the domain owner while the old queue token
+        // is still valid. Follow the worker's real unavailable-domain policy:
+        // yield the current attempt without charging a failure, keep its
+        // request pending, and release its source_io reservation until retry.
+        assert!(
+            store
+                .settle_job(SettleJob {
+                    token: first.token.clone(),
+                    settlement: JobSettlement::Yield {
+                        error_code: None,
+                        checkpoint: None,
+                        not_before_ms: now + 5_000,
+                    },
+                    now_ms: now + 3,
+                })
+                .await
+                .expect("yield current queue attempt"),
+            "{backend}: real worker yield accepted"
+        );
+        assert_eq!(
+            request_record(store.as_ref(), "request-old").await.state,
+            "pending",
+            "{backend}: yield preserves pending request"
+        );
+        let yielded = store
+            .background_job(&first.job_id)
+            .await
+            .expect("read yielded queue owner")
+            .expect("old queue job retained");
+        assert_eq!(yielded.state, JobState::Queued, "{backend}");
+        assert_eq!(yielded.failed_attempts, 0, "{backend}");
+        assert!(yielded.token.is_none(), "{backend}");
+        assert_eq!(yielded.not_before_ms, now + 5_000, "{backend}");
+        // Claim the second job before the yielded attempt's retry is eligible,
+        // proving the real settlement released source_io capacity.
+        let replacement_time = now + 4;
+        let second_work = enqueue_and_claim_library_work(
+            store.as_ref(),
+            backend,
+            library_id,
+            "node-b",
+            "request-new",
+            true,
+            replacement_time,
+        )
+        .await;
+        assert_ne!(
+            first.job_id, second_work.job_id,
+            "{backend}: separate dedupe identities"
+        );
+        let second = bind_library_work(
+            store.as_ref(),
+            backend,
+            second_work,
+            "node-b",
+            replacement_time,
+        )
+        .await;
+        assert!(
+            second.lease.fence > first.lease.fence,
+            "{backend}: higher domain fence"
+        );
+        let after_rebind = store
+            .complete_library_work(CompleteLibraryWork {
+                token: first.token.clone(),
+                lease: first.lease.clone(),
+                request_id: "request-old".into(),
+                result: LibraryWorkResult::Failed {
+                    error: "stale after replacement".into(),
+                },
+                now_ms: replacement_time + 1,
+            })
+            .await
+            .expect("old owner verdict");
+        assert!(
+            !after_rebind,
+            "{backend}: replacement owner invalidates old completion"
+        );
+        assert_eq!(
+            request_record(store.as_ref(), "request-old").await.state,
+            "pending",
+            "{backend}"
+        );
+        assert!(
+            store
+                .complete_library_work(CompleteLibraryWork {
+                    token: second.token.clone(),
+                    lease: second.lease.clone(),
+                    request_id: "request-new".into(),
+                    result: LibraryWorkResult::Failed {
+                        error: "new owner result".into()
+                    },
+                    now_ms: replacement_time + 2,
+                })
+                .await
+                .expect("new owner completion"),
+            "{backend}: replacement may complete its request"
+        );
+        second.retire(store.as_ref(), replacement_time).await;
     })
     .await;
 }

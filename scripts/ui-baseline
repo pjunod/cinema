@@ -678,6 +678,28 @@ def default_server_bin():
     return target_dir / "debug" / "plurxd"
 
 
+def pin_fixture_software_encoder(base_url, token):
+    """Choose one real backend on this throwaway node before its next boot."""
+    system = api(base_url, "/system", token)
+    node_id = system.get("node_id") if isinstance(system, dict) else None
+    if not isinstance(node_id, str) or not node_id:
+        raise Fail("capture fixture cannot identify its transcoder node")
+    saved = api(base_url, "/system/transcoder", token, "PUT",
+                {"node_id": node_id, "preference": "software"})
+    if not isinstance(saved, dict) or saved.get("node_id") != node_id \
+            or saved.get("preference") != "software" \
+            or type(saved.get("restart_required")) is not bool:
+        raise Fail("capture fixture did not save Software on its own node")
+
+
+def require_fixture_software_encoder(base_url, token):
+    """Verify the restarted manager's actual observation, not the saved desire."""
+    settings = api(base_url, "/settings", token)
+    observation = settings.get("content_encoding_applicability") if isinstance(settings, dict) else None
+    if not isinstance(observation, dict) or observation.get("selected_encoder") != "software":
+        raise Fail("capture fixture Software preference did not become effective after restart")
+
+
 class SelfHost:
     """Boot, seed, freeze and serve a plurxd nobody else is using."""
 
@@ -693,7 +715,8 @@ class SelfHost:
         self.config = self.root / "plurx.toml"
         self.log = self.root / "plurxd.log"
         # The same four ports stay in the config across all three deliberate
-        # boots. A shared runner may already own the daemon defaults 32401/2.
+        # boots. Shared runners may own the cluster defaults or Jellyfin 8096;
+        # readiness must describe this fixture's own real listeners.
         self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports(args.port, 4)
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.proc = None
@@ -715,7 +738,6 @@ class SelfHost:
         return path
 
     def spawn(self):
-        self.boot_log_start = self.log.stat().st_size if self.log.exists() else 0
         handle = open(self.log, "a")
         # start_new_session so a Ctrl-C in the terminal does not race us to the
         # child: this script stops it explicitly, in `stop`.
@@ -785,16 +807,15 @@ class SelfHost:
         # A fresh process has no such memory, and reads the frozen database.
         self.stop()
         self.freeze_database()
+        probe_log_offset = self.log.stat().st_size
         self.spawn()
-        self.wait_for_capture_idle()
+        self.wait_for_caption_probe(probe_log_offset)
+        self.require_jellyfin_listener()
+        require_fixture_software_encoder(self.base_url, self.token)
         self.discover()
 
-    def wait_for_capture_idle(self):
-        # Health is published while the boot caption audit still owns children.
-        # Scope its terminal record to this boot; the prior seed boot is not proof.
-        def read_boot_log():
-            return read_current_boot_log(self.log, self.boot_log_start)
-
+    def wait_for_caption_probe(self, log_offset):
+        """Wait for this boot's audit retirement and a continuous idle interval."""
         def read_processes(timeout):
             detail = api(self.base_url, "/activity/detail", self.token, timeout=timeout)
             rows = detail.get("processes")
@@ -802,8 +823,14 @@ class SelfHost:
                 raise Fail("capture fixture returned no process inventory")
             return rows
 
-        wait_for_fixture_idle(read_processes, read_boot_log,
-                              lambda: self.proc.poll() is None)
+        wait_for_fixture_idle(
+            read_processes, lambda: read_current_boot_log(self.log, log_offset),
+            lambda: self.proc.poll() is None,
+            now=time.monotonic, sleep=time.sleep,
+        )
+
+    def require_jellyfin_listener(self):
+        """The fixture reserved a Jellyfin port; readiness must show it bound."""
         readiness = api(self.base_url, "/developer/readiness", self.token, timeout=5)
         ports = [requirement for item in readiness.get("items", [])
                  if item.get("id") == "jellyfin_compatibility"
@@ -874,6 +901,11 @@ class SelfHost:
         # account is a valid 200 response rather than a disabled-feature 503.
         api(self.base_url, "/settings", self.token, "PUT",
             {"vod_index_mins": 0, "cinema_remote_control": True})
+        # Auto selects VideoToolbox on some Macs and Software on Linux. Pin a
+        # real node-scoped choice, then apply it at the existing recovery boot;
+        # the browser still renders the unmodified settings/readiness APIs.
+        # This seed is reached only by --self-host, never a live --base-url.
+        pin_fixture_software_encoder(self.base_url, self.token)
         libs = []
         for name, kind, share in LIBRARIES:
             library = api(self.base_url, "/libraries", self.token, "POST", {
@@ -1507,6 +1539,106 @@ def counted_api_calls(name, route, api_calls):
     return dict(sorted(counted.items()))
 
 
+# Only these observations describe the capture host rather than a UI contract.
+# Keep the real response and its schema, including new cards/requirements. The
+# two physical delivery-qualification rows are deliberately NOT in this list.
+# Sources: http/developer.rs macos_video_processing, macos_hevc_output,
+# subtitle_cluster_sources, subtitle_stored_sources and chapter_thumbnails.
+READINESS_HOST_FACTS = {
+    "macos_video_processing": frozenset({
+        "effective_encoder", "sdr_scale", "hdr10_metal", "hlg_metal",
+        "subtitle_burns", "deinterlace", "dolby_vision", "live_upload",
+    }),
+    "macos_hevc_output": frozenset({
+        "hevc_effective_encoder", "hevc_sdr", "hevc_hdr10",
+    }),
+    "subtitle_cluster_sources": frozenset({"local_cache", "free_space"}),
+    "subtitle_stored_sources": frozenset({
+        "stored_source_local_cache", "stored_source_free_space",
+    }),
+    "chapter_thumbnails": frozenset({"chapter_thumbs_cache_space"}),
+}
+READINESS_FIXTURE_EVIDENCE = (
+    "UI layout fixture: this capture does not observe the host's runtime "
+    "encoder, processing graph or filesystem capacity. Runtime and physical "
+    "qualification remain outside this structural fixture."
+)
+
+
+def fixture_runtime_readiness(document):
+    """Validate the real response before pinning sixteen runtime observations.
+
+    A frozen whole response would conceal a removed requirement or a new card.
+    Retaining every identity, title, choice and unknown field keeps those changes
+    visible. Only host-dependent status/evidence are fixture inputs; warning
+    classes, DOM, focus order and request counts remain actual application output.
+    """
+    def reject(detail):
+        raise Fail("developer readiness fixture: " + detail)
+
+    def text_field(row, key):
+        return isinstance(row.get(key), str) and bool(row[key])
+
+    if not isinstance(document, dict) or type(document.get("observed_at_ms")) is not int:
+        reject("expected observed_at_ms integer")
+    if not isinstance(document.get("items"), list):
+        reject("expected items array")
+    statuses = {"met", "unmet", "unobservable", "unknown", "unavailable"}
+    seen_items, seen_facts = set(), set()
+    for item in document["items"]:
+        if not isinstance(item, dict) or not all(text_field(item, k) for k in ("id", "title")):
+            reject("item requires nonempty id/title")
+        if item["id"] in seen_items:
+            reject("duplicate item " + item["id"])
+        seen_items.add(item["id"])
+        if "enabled" in item and type(item["enabled"]) is not bool:
+            reject("enabled must be a boolean")
+        if "setting" in item and not text_field(item, "setting"):
+            reject("setting must be a nonempty string")
+        if not isinstance(item.get("requirements"), list):
+            reject("requirements must be an array")
+        seen_requirements = set()
+        for row in item["requirements"]:
+            if not isinstance(row, dict) or not all(text_field(row, k) for k in ("id", "title", "evidence")):
+                reject("requirement requires nonempty id/title/evidence")
+            if not isinstance(row.get("status"), str) or row["status"] not in statuses:
+                reject("unexpected requirement status")
+            if row["id"] in seen_requirements:
+                reject("duplicate requirement " + item["id"] + ":" + row["id"])
+            seen_requirements.add(row["id"])
+            seen_facts.add((item["id"], row["id"]))
+    expected = {(item, row) for item, rows in READINESS_HOST_FACTS.items() for row in rows}
+    missing = expected - seen_facts
+    if missing:
+        reject("missing runtime observations: " + repr(sorted(missing)))
+    # JSON round-trip copies unknown JSON fields without mutating the API result.
+    result = json.loads(json.dumps(document))
+    for item in result["items"]:
+        for row in item["requirements"]:
+            if row["id"] in READINESS_HOST_FACTS.get(item["id"], ()):
+                row["status"] = "unknown"
+                row["evidence"] = READINESS_FIXTURE_EVIDENCE
+    return result
+
+
+def capture_runtime_readiness(intercepted, problems):
+    """Fetch real HTTP/schema failures; never turn them into a fixture success."""
+    response = None
+    try:
+        response = intercepted.fetch()
+        if response.status != 200:
+            raise Fail("developer readiness fixture: HTTP " + str(response.status))
+        document = fixture_runtime_readiness(response.json())
+    except Exception as error:
+        problems.append(str(error))
+        if response is None:
+            intercepted.abort()
+        else:
+            intercepted.fulfill(response=response)
+        return
+    intercepted.fulfill(response=response, body=json.dumps(document))
+
+
 def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -1575,6 +1707,10 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     # /features with all four on so this sweep keeps pinning the complete
     # nav; hiding a switched-off section is covered by
     # tests/web/section-nav.test.js. The request itself is still logged.
+    # Inspect the actual readiness response, preserving API/schema failures and
+    # every unknown/new row. Only the bounded runtime host facts are pinned.
+    page.route("**/api/v1/developer/readiness",
+               lambda intercepted: capture_runtime_readiness(intercepted, problems))
     page.route("**/api/v1/features", lambda intercepted: intercepted.fulfill(
         status=200, content_type="application/json", body=json.dumps({
             "live_tv": True, "recordings": True,

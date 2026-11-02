@@ -53,6 +53,9 @@ pub(crate) fn viewer_router(state: AppState) -> Router<AppState> {
             "/shared/imports/{import}/files/{locator}/chapters/{index}/thumb",
             get(chapter_thumb),
         )
+        .route("/shared/imports/{import}/files/{locator}/captions",get(captions))
+        .route("/shared/imports/{import}/files/{locator}/captions/{asset}/manifest",get(caption_manifest))
+        .route("/shared/imports/{import}/files/{locator}/captions/{asset}/segments/{segment}",get(caption_segment))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             shared_library::receiver_content_guard,
@@ -103,6 +106,17 @@ fn binding_refused() -> ApiError {
 }
 fn source_failure(error: PeerError) -> ApiError {
     match error {
+        PeerError::Rejected(StatusCode::TOO_EARLY) => ApiError::TypedRetry {
+            status: StatusCode::TOO_EARLY,
+            code: "source_verifying",
+            message: "Checking the Source content before reading captions".into(),
+            retry_after_seconds: 1,
+        },
+        PeerError::Rejected(StatusCode::GONE) => ApiError::typed(
+            StatusCode::GONE,
+            "sharing_caption_snapshot_expired",
+            "Caption coverage changed; refresh this window",
+        ),
         PeerError::Rejected(StatusCode::NOT_FOUND) => ApiError::typed(
             StatusCode::NOT_FOUND,
             "sharing_asset_not_found",
@@ -127,6 +141,60 @@ fn capacity() -> ApiError {
         "sharing_asset_capacity",
         "Shared asset capacity is busy",
     )
+}
+
+fn caption_suffix(path: &str, query: Option<&str>) -> Result<(String, String), ApiError> {
+    let mut read = Vec::new();
+    let mut authority = Vec::new();
+    for pair in query
+        .unwrap_or("")
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+    {
+        let key = pair.split_once('=').ok_or_else(invalid)?.0;
+        match key {
+            "session" | "token" => authority.push(pair),
+            "after" | "position_ms" | "lease" => read.push(pair),
+            _ => return Err(invalid()),
+        }
+    }
+    let suffix = format!(
+        "{path}{}",
+        if read.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", read.join("&"))
+        }
+    );
+    SharingFileResource::parse(&suffix).map_err(|_| invalid())?;
+    Ok((suffix, authority.join("&")))
+}
+async fn captions(
+    State(state): State<AppState>,
+    Path((import, locator)): Path<(String, String)>,
+    parts: Parts,
+) -> Result<Response, ApiError> {
+    let (suffix, _) = caption_suffix("captions", parts.uri.query())?;
+    serve(state, parts, &import, &locator, &suffix).await
+}
+async fn caption_manifest(
+    State(state): State<AppState>,
+    Path((import, locator, asset)): Path<(String, String, String)>,
+    parts: Parts,
+) -> Result<Response, ApiError> {
+    let (suffix, _) = caption_suffix(&format!("captions/{asset}/manifest"), parts.uri.query())?;
+    serve(state, parts, &import, &locator, &suffix).await
+}
+async fn caption_segment(
+    State(state): State<AppState>,
+    Path((import, locator, asset, segment)): Path<(String, String, String, String)>,
+    parts: Parts,
+) -> Result<Response, ApiError> {
+    let (suffix, _) = caption_suffix(
+        &format!("captions/{asset}/segments/{segment}"),
+        parts.uri.query(),
+    )?;
+    serve(state, parts, &import, &locator, &suffix).await
 }
 
 async fn subtitle(
@@ -292,11 +360,31 @@ async fn serve(
         SharingFileResourceKind::SubtitleManifest { .. } => true,
         SharingFileResourceKind::Subtitle { .. }
         | SharingFileResourceKind::SubtitleObject { .. }
-        | SharingFileResourceKind::ChapterThumbnail { .. } => false,
+        | SharingFileResourceKind::ChapterThumbnail { .. }
+        | SharingFileResourceKind::Captions
+        | SharingFileResourceKind::CaptionManifest
+        | SharingFileResourceKind::CaptionSegment => false,
         _ => return Err(resource_unsupported().await),
     };
+    let caption = matches!(
+        resource.kind(),
+        SharingFileResourceKind::Captions
+            | SharingFileResourceKind::CaptionManifest
+            | SharingFileResourceKind::CaptionSegment
+    );
+    let authority_query = if caption {
+        Some(
+            caption_suffix(
+                suffix.split('?').next().ok_or_else(invalid)?,
+                parts.uri.query(),
+            )?
+            .1,
+        )
+    } else {
+        None
+    };
     let (session, revision) = asset_query(
-        parts.uri.query(),
+        authority_query.as_deref().or(parts.uri.query()),
         matches!(resource.kind(), SharingFileResourceKind::Subtitle { .. }),
     )?;
     let import_id = Uuid::parse_str(import).map_err(|_| invalid())?;
@@ -349,6 +437,8 @@ async fn serve(
         } => {
             let bytes = if manifest {
                 project_manifest(&bytes, &reference, &key)?.into()
+            } else if caption {
+                super::shared_captions::project(&resource, &bytes)?
             } else {
                 bytes
             };

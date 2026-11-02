@@ -44,6 +44,20 @@ for(const change of [
             cwd=ROOT, capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_authored_module_shape_allows_only_explicit_vendor_bundles(self):
+        self.node('''
+const acorn=require("./tests/vendor/acorn.js");
+const {analyze}=require("./tests/web/asset-graph.js");
+shape.authoredModuleShape(analyze().rows);
+for (const source of ["module.exports = {};", 'module["exports"] = {};']) {
+  const program=acorn.parse(source,{ecmaVersion:"latest",sourceType:"script"});
+  for (const path of ["hls.min.js","vendor/qrcodegen.js","vendor/jsQR.js"])
+    assert.doesNotThrow(()=>shape.authoredModuleShape([{path,program}]));
+  for (const path of ["pages/sharing-qr.js","vendor/unlisted.js","vendor/jsQR.js.extra"])
+    assert.throws(()=>shape.authoredModuleShape([{path,program}]),/not a CommonJS module/);
+}
+''')
+
     def test_table_rejects_unknown_kind_and_wrong_include_path(self):
         self.node('''
 const wrap=row=>'pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[\\n'+row+'\\n];';

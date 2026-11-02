@@ -4,15 +4,37 @@ import XCTest
 
 @MainActor
 final class AutoPreparedCandidateBindingTests: XCTestCase {
-    private func candidate(_ height: Int, recipe: UInt8, compatible: Bool = true, invalidDigest: Bool = false) -> QualityCandidate {
+    private func candidate(_ height: Int, recipe: UInt8, compatible: Bool = true, invalidDigest: Bool = false,
+                           route: String? = nil, grade: String = "sdr", processed: Bool = false,
+                           codec: String? = nil) -> QualityCandidate {
         let digest = Array(repeating: recipe, count: 32)
         var bytes = Data("plurx:auto-quality-candidate:v1\0".utf8)
         bytes.append(contentsOf: digest)
         let id = SHA256.hash(data: bytes).prefix(16).map { String(format: "%02x", $0) }.joined()
-        return QualityCandidate(id: id, recipeDigest: invalidDigest ? Array(repeating: 99, count: 32) : digest, route: height == 1080 ? "remux" : "encode",
+        return QualityCandidate(id: id, recipeDigest: invalidDigest ? Array(repeating: 99, count: 32) : digest,
+            route: route ?? (height == 1080 ? "remux" : "encode"),
             width: height * 16 / 9, height: height, targetHeight: height,
-            averageBps: 2_000_000, peakBps: 3_000_000, grade: "sdr", decoderCompatible: compatible,
-            completeCache: false, sustainable: false)
+            averageBps: 2_000_000, peakBps: 3_000_000, grade: grade, decoderCompatible: compatible,
+            completeCache: false, sustainable: false, plannedCodec: codec,
+            processedHdr10: processed ? true : nil)
+    }
+
+    func testProcessedSdrIdentityResolvesAutoWhileInvalidRouteCodecAndGradeDoNot() {
+        let processedSdr = candidate(720, recipe: 40, grade: "sdr", processed: true, codec: "hevc")
+        XCTAssertTrue(processedSdr.hasValidIdentity)
+        XCTAssertEqual(autoControlQualitySelection(desired: processedSdr, installedId: nil,
+            candidates: [processedSdr]), .autoCandidate(height: 720, candidateId: processedSdr.id))
+
+        let invalid = [
+            candidate(720, recipe: 41, route: "remux", grade: "sdr", processed: true, codec: "hevc"),
+            candidate(720, recipe: 42, grade: "sdr", processed: true, codec: "avc"),
+            candidate(720, recipe: 43, grade: "hlg", processed: true, codec: "hevc"),
+        ]
+        for candidate in invalid {
+            XCTAssertFalse(candidate.hasValidIdentity)
+            XCTAssertEqual(autoControlQualitySelection(desired: candidate, installedId: nil,
+                candidates: [candidate]), .auto)
+        }
     }
 
     private func action(_ candidate: QualityCandidate, id: String) -> PreparedReplacementAction {

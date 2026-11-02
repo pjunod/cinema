@@ -186,6 +186,7 @@ pub(crate) struct FontEnvironment {
     search_path: Option<std::ffi::OsString>,
     digest: String,
     objects: Arc<[(PathBuf, String)]>,
+    _cache_pin: Option<crate::playback_cache::CachePin>,
 }
 
 impl FontEnvironment {
@@ -264,20 +265,31 @@ fn release(dir: PathBuf) {
 struct Owned {
     dir: PathBuf,
     kept: bool,
+    cache_pin: Option<crate::playback_cache::CachePin>,
+    reservation: Option<crate::playback_cache::CacheReservation>,
 }
 
 impl Owned {
     fn new(dir: PathBuf) -> Self {
-        Self { dir, kept: false }
+        Self {
+            dir,
+            kept: false,
+            cache_pin: None,
+            reservation: None,
+        }
     }
 
     fn path(&self) -> &Path {
         &self.dir
     }
 
-    fn hand_over(mut self) -> PathBuf {
+    fn hand_over(mut self) -> (PathBuf, Option<crate::playback_cache::CachePin>) {
         self.kept = true;
-        std::mem::take(&mut self.dir)
+        // Many tiny files can allocate more blocks than their logical sum.
+        // Force physical reconciliation before the next grant instead of
+        // settling the whole tree with a single logical-byte estimate.
+        drop(self.reservation.take());
+        (std::mem::take(&mut self.dir), self.cache_pin.take())
     }
 }
 
@@ -412,11 +424,25 @@ async fn freeze_charged(
     // Owned before anything is written: a capture its caller abandons (a
     // resurrection's `timeout_at`) removes what it built instead of leaving
     // it for the next process.
-    let owned = Owned::new(runtime_cache.join(FONT_ENVIRONMENT_DIR).join(format!(
+    let mut owned = Owned::new(runtime_cache.join(FONT_ENVIRONMENT_DIR).join(format!(
         "{}-{}",
         &digest[..16],
         registry.next
     )));
+    let mut reserved_bytes = 32_u64 * 1024 * 1024;
+    for path in sources.rules.iter().chain(sources.fonts.iter()) {
+        reserved_bytes = reserved_bytes.saturating_add(
+            tokio::fs::metadata(path)
+                .await
+                .map_err(|error| error.to_string())?
+                .len(),
+        );
+    }
+    owned.reservation = crate::playback_cache::reserve(owned.path(), reserved_bytes)
+        .await
+        .map_err(|error| format!("font environment disk admission: {error}"))?;
+    owned.cache_pin = crate::playback_cache::pin(owned.path())
+        .map_err(|error| format!("font environment cache ownership: {error}"))?;
     let environment = Arc::new(
         build(
             &runtime_cache,
@@ -487,6 +513,7 @@ async fn build(
     let (owned, layout) = materialised?;
     #[cfg(test)]
     tests::hooks::paused(runtime_cache).await;
+    require_font_links(&layout, &frozen.fonts)?;
 
     let command = |program: &Path| {
         let mut command = tokio::process::Command::new(program);
@@ -597,8 +624,10 @@ async fn build(
     };
     cost.stat += started.elapsed();
     let (owned, (root, objects)) = attested?;
+    let (dir, cache_pin) = owned.hand_over();
     Ok(FontEnvironment {
-        dir: owned.hand_over(),
+        dir,
+        _cache_pin: cache_pin,
         root,
         config: frozen.config,
         search_path: frozen.search_path,
@@ -811,6 +840,22 @@ fn library_loads_match(root: &Path, live: &[PathBuf], trace: &str) -> Result<(),
     ))
 }
 
+/// Face listings may reuse original-path font metadata. The materialization
+/// contract independently requires every font entry to remain a link; regular
+/// configuration copies are a different role and remain valid.
+fn require_font_links(layout: &Layout, fonts: &[(PathBuf, String)]) -> Result<(), String> {
+    let expected: HashSet<&Path> = fonts.iter().map(|(path, _)| path.as_path()).collect();
+    for (entry, original) in &layout.entries {
+        if expected.contains(original.as_path()) && !entry.is_symlink() {
+            return Err(format!(
+                "the frozen font link for {} was replaced",
+                original.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 type Attested = (PathBuf, Vec<(PathBuf, String)>);
 
 fn attest(
@@ -821,6 +866,7 @@ fn attest(
     fonts: &[(PathBuf, String)],
     layout: Layout,
 ) -> Result<Attested, String> {
+    require_font_links(&layout, fonts)?;
     let version = crate::ffmpeg::engine_path_version;
     let mut objects = Vec::with_capacity(layout.entries.len() * 2);
     let mut parents = BTreeSet::new();

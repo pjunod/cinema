@@ -1,6 +1,19 @@
 use super::*;
 
 impl TranscodeManager {
+    /// Admit one publication against serving authority. A refusal here is
+    /// the fence's alone, so it carries the generation this node last held
+    /// authority under for a buffered response to wait after.
+    fn admit_publication(&self) -> Result<u64, MediaResponsePublicationRejection> {
+        self.serving_authority
+            .admit_or_outage_baseline()
+            .map_err(
+                |baseline| MediaResponsePublicationRejection::AuthorityLost {
+                    admitted_generation: baseline,
+                },
+            )
+    }
+
     /// Admit a fully prepared response against the exact owner that resolved
     /// its bytes. The registry identity is checked on both sides of actor
     /// admission so a replacement cannot take the reusable session id during
@@ -22,15 +35,17 @@ impl TranscodeManager {
         if release_gate.released.load(Acquire) {
             return Err(MediaResponsePublicationRejection::StateChanged);
         }
-        let admitted_serving_generation = self
-            .serving_authority
-            .admit()
-            .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+        let admitted_serving_generation = self.admit_publication()?;
+        // Two separate refusals: losing serving authority is the one a
+        // buffered response may wait out; a released session never is.
         macro_rules! require_publication_authority {
             () => {
-                if !self.publication_authority_is_current(admitted_serving_generation)
-                    || release_gate.released.load(Acquire)
-                {
+                if !self.publication_authority_is_current(admitted_serving_generation) {
+                    return Err(MediaResponsePublicationRejection::AuthorityLost {
+                        admitted_generation: admitted_serving_generation,
+                    });
+                }
+                if release_gate.released.load(Acquire) {
                     return Err(MediaResponsePublicationRejection::StateChanged);
                 }
             };
@@ -93,10 +108,10 @@ impl TranscodeManager {
             if !session.actor_managed_response_publication {
                 if session.control.current_producer_attempt() != *producer_attempt
                     || session.control.is_retired()
-                    || !self.publication_authority_is_current(admitted_serving_generation)
                 {
                     return Err(MediaResponsePublicationRejection::StateChanged);
                 }
+                require_publication_authority!();
                 return Ok(MediaResponseAuthorization {
                     session_id: session_id.to_owned(),
                     owner: owner.clone(),
@@ -366,9 +381,8 @@ impl TranscodeManager {
                 .await;
                 return Err(MediaResponsePublicationRejection::StateChanged);
             }
-            if !self.publication_authority_is_current(admitted_serving_generation)
-                || session.control.is_retired()
-            {
+            require_publication_authority!();
+            if session.control.is_retired() {
                 return Err(MediaResponsePublicationRejection::StateChanged);
             }
             if actor_authorization.first_producer_media_publication {
@@ -446,15 +460,15 @@ impl TranscodeManager {
         if self.session_release_is_active(session_id) {
             return Err(MediaResponsePublicationRejection::StateChanged);
         }
-        let admitted_serving_generation = self
-            .serving_authority
-            .admit()
-            .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+        let admitted_serving_generation = self.admit_publication()?;
         macro_rules! require_error_authority {
             () => {
-                if !self.publication_authority_is_current(admitted_serving_generation)
-                    || self.session_release_is_active(session_id)
-                {
+                if !self.publication_authority_is_current(admitted_serving_generation) {
+                    return Err(MediaResponsePublicationRejection::AuthorityLost {
+                        admitted_generation: admitted_serving_generation,
+                    });
+                }
+                if self.session_release_is_active(session_id) {
                     return Err(MediaResponsePublicationRejection::StateChanged);
                 }
             };
@@ -519,7 +533,22 @@ impl TranscodeManager {
                     matches!(actor_error, PlaylistError::ProducerEnded(actor_reason) if actor_reason == reason)
                 });
                 if !matches_actor {
-                    false
+                    // C5: no published media, so the published-producer
+                    // proof cannot exist. The exact attempt's own
+                    // pre-publication verdict, read from one coherent actor
+                    // snapshot, is the proof instead. The actor refuses every
+                    // response authorization once that verdict is terminal
+                    // (`DecisionCommitted`), so this bodyless 502 is the
+                    // verdict's own report, bound to the same attempt.
+                    let outcome = session
+                        .prepublication_attempt_outcome_before(*producer_attempt, deadline)
+                        .await;
+                    require_error_authority!();
+                    matches!(
+                        outcome,
+                        crate::playback_control::PrepublicationAttemptOutcome::Failed(actor_reason)
+                            if actor_reason == *reason
+                    )
                 } else {
                     session
                         .control
@@ -567,7 +596,9 @@ impl TranscodeManager {
         let retired_integrity_owner =
             current.is_none() && session.owns_retired_cache_integrity_failure(error);
         if !self.publication_authority_is_current(admitted_serving_generation) {
-            Err(MediaResponsePublicationRejection::StateChanged)
+            Err(MediaResponsePublicationRejection::AuthorityLost {
+                admitted_generation: admitted_serving_generation,
+            })
         } else if exact_current || retired_integrity_owner {
             Ok(())
         } else {
@@ -598,9 +629,18 @@ impl TranscodeManager {
         }
         let _serving_transition = self
             .serving_authority
-            .commit_guard_before(authorization.admitted_serving_generation, deadline)
+            .commit_guard_or_refusal_before(authorization.admitted_serving_generation, deadline)
             .await
-            .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+            .map_err(|refusal| match refusal {
+                crate::serving_fence::CommitGuardRefusal::AuthorityLost => {
+                    MediaResponsePublicationRejection::AuthorityLost {
+                        admitted_generation: authorization.admitted_serving_generation,
+                    }
+                }
+                crate::serving_fence::CommitGuardRefusal::DeadlinePassed => {
+                    MediaResponsePublicationRejection::StateChanged
+                }
+            })?;
         if let Some(presentation_contract_fingerprint) = authorization
             .rolling_generation_metadata_fingerprint
             .as_deref()
@@ -917,7 +957,7 @@ impl TranscodeManager {
                     });
             if let Some(encoding) = &facts.encoding {
                 let height = encoding.options.target_height;
-                let grade = encoding.options.pipeline.output_grade();
+                let grade = encoding.delivered_output_grade();
                 let file = encoded_vod_presentation_file(
                     facts.file,
                     height,
@@ -982,6 +1022,7 @@ impl TranscodeManager {
                     // while the source's own record says 7. Passing `false`
                     // here would advertise `dvh1.07.06` for that media.
                     convert_dolby_vision: facts.convert_dolby_vision,
+                    dual_layer_as_copied: false,
                 },
                 probe_json.as_deref(),
             );
@@ -1907,6 +1948,16 @@ impl TranscodeManager {
                     }
                     return Ok(SegmentPublication::Pending(current_owner()));
                 }
+                if let Some(failed) = prepublication_failure_before(
+                    &session,
+                    retired_owner,
+                    resolved_attempt,
+                    deadline,
+                )
+                .await
+                {
+                    return Ok(failed);
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             };
@@ -1967,6 +2018,16 @@ impl TranscodeManager {
                     }
                     if Instant::now() >= deadline {
                         return Ok(SegmentPublication::Pending(current_owner()));
+                    }
+                    if let Some(failed) = prepublication_failure_before(
+                        &session,
+                        retired_owner,
+                        resolved_attempt,
+                        deadline,
+                    )
+                    .await
+                    {
+                        return Ok(failed);
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -2223,5 +2284,75 @@ impl TranscodeManager {
                 | SegmentPublication::Pending(_)
                 | SegmentPublication::Failed(_) => None,
             })
+    }
+}
+
+/// C5: while waiting for an object of exact attempt `attempt` that has no
+/// served playlist yet, recognise that this attempt has ended. The producer
+/// is not coming back, so the wait answers its typed `ProducerEnded`
+/// stamped with *that* attempt instead of polling until the request
+/// deadline. A retry or a replacement in progress keeps waiting, and a
+/// superseded attempt is left to the existing owner-transition rejection.
+async fn prepublication_failure_before(
+    session: &Arc<Session>,
+    retired_owner: bool,
+    attempt: u64,
+    deadline: Instant,
+) -> Option<SegmentPublication> {
+    if retired_owner || session.cached {
+        return None;
+    }
+    match session
+        .prepublication_attempt_outcome_before(attempt, deadline)
+        .await
+    {
+        crate::playback_control::PrepublicationAttemptOutcome::Failed(reason) => Some(
+            SegmentPublication::Failed(PlaylistPublicationError::for_attempt(
+                PlaylistError::ProducerEnded(reason),
+                session,
+                attempt,
+            )),
+        ),
+        crate::playback_control::PrepublicationAttemptOutcome::Superseded
+        | crate::playback_control::PrepublicationAttemptOutcome::Waiting => None,
+    }
+}
+
+#[cfg(test)]
+mod prepublication_wait_tests {
+    /// C5 (M5): both 100 ms sleep branches of the init/segment wait classify
+    /// the exact attempt before sleeping again, so a producer that died
+    /// before its first served playlist ends the wait on the next poll
+    /// instead of at the request deadline (the 55 s master.m3u8).
+    #[test]
+    fn both_wait_branches_classify_the_exact_attempt_before_sleeping() {
+        let source = include_str!("publication.rs");
+        let wait = source
+            .split_once("pub(crate) async fn segment_for_publication_before(")
+            .expect("wait function")
+            .1
+            .split_once("let opened = if let Some(opened) = authenticated_cached_file.take()")
+            .expect("the wait before any object is opened")
+            .0;
+        // The two branches that wait before this attempt has a served
+        // snapshot: no coherent attempt yet, and no snapshot for it. The
+        // later sleep waits on an attempt that has published, whose ended
+        // producer `published_producer_ended_before` already recognises.
+        let sleeps = wait
+            .match_indices("tokio::time::sleep(Duration::from_millis(100)).await;")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(sleeps.len(), 2, "the two sleep branches");
+        for sleep in sleeps {
+            let before = &wait[..sleep];
+            let check = before
+                .rfind("prepublication_failure_before(")
+                .expect("a terminal check precedes every sleep");
+            assert!(
+                !before[check..].contains("continue;"),
+                "the check is in the same branch as the sleep it guards"
+            );
+            assert!(before[check..].contains("resolved_attempt"));
+        }
     }
 }

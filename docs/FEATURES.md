@@ -547,6 +547,11 @@ recordings library.
   never stops the stream and never refetches — it is a re-render of the browse
   region. A protected channel is dimmed rather than hidden, with a
   `Hide protected` filter for a lineup that is mostly DRM.
+- **The iPhone Guide shows the time grid.** In portrait and landscape, stations
+  occupy separate rows with logos and pinned channel labels, while programme
+  widths follow their durations. The old single-channel schedule preference
+  no longer changes Guide into a dropdown list; the current Live TV player and
+  programme/DVR actions stay in place.
 - **Station artwork comes from the guide.** Every client — the web list, grid
   and current-programme details; the Apple and Android list rows, grid
   headers, programme details, picture badge and fullscreen identity — draws
@@ -971,6 +976,19 @@ node; the cluster is the next phase. Detail: [ARCHITECTURE.md](ARCHITECTURE.md)
 §2, [PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md).
 
 ---
+
+### Optional native HTTPS
+
+An additional public HTTPS listener is off by default. Settings → Developer
+controls the addressed node's restart-only choice, using persistent generated
+self-signed identity or supplied server-side chain/key files. Saved, desired
+and actually active configuration stay distinct. Admins can download only the
+loaded public certificate chain and inspect its fingerprint; no private key
+is returned. Existing HTTP/discovery and internal cluster transports retain
+their addresses. Client trust and physical playback qualification remain open
+in [the HTTPS ledger](server/HTTPS-BUILD.md); the permanent switch moves to
+System after acceptance. [Operations](OPERATIONS.md#optional-https-and-persistent-identity)
+explains precedence, permissions and explicit identity replacement.
 
 ## 9. Trakt — "your history, everywhere"
 

@@ -2499,6 +2499,7 @@ async fn staging_route_with_incumbent_on(
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds: 0.0,
         audio_index: None,

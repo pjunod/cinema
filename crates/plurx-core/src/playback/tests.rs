@@ -2003,10 +2003,27 @@ fn a_converting_client_is_told_it_is_getting_dolby_vision() {
         converted
             .reasons
             .iter()
-            .any(|reason| reason.contains("Profile 7 converted to Profile 8.1")),
+            .any(|reason| reason.contains("Profile 7 is not supported directly")),
         "{:?}",
         converted.reasons
     );
+    // The session can replace the copy conversion with FEL reconstruction.
+    // Both automatic and Original decisions must explain compatibility without
+    // claiming what the later session did with the picture or enhancement layer.
+    let original = decide_forced(&p7, &client(vec![5, 8]), Force::Original, &node);
+    assert!(original.convert_dolby_vision);
+    for decision in [&converted, &original] {
+        let reason = decision
+            .reasons
+            .iter()
+            .find(|reason| reason.contains("Dolby Vision"))
+            .expect("the device's Dolby Vision compatibility is explained");
+        assert!(reason.contains("Profile 7 is not supported directly"));
+        assert!(reason.contains("Profile 8.1 is supported"));
+        assert!(!reason.contains("copied untouched"), "{reason}");
+        assert!(!reason.contains("is dropped"), "{reason}");
+        assert!(!reason.contains("converted to"), "{reason}");
+    }
 
     // A client that decodes Profile 7 takes the stream untouched:
     // converting would discard an enhancement layer it asked for.
@@ -2077,6 +2094,11 @@ fn a_transcode_never_claims_to_convert() {
     assert!(!decision.convert_dolby_vision);
     assert!(!decision.preserve_dolby_vision);
     assert_ne!(decision.delivered_dynamic_range, "dolby_vision");
+    for reason in &decision.reasons {
+        assert!(!reason.contains("converted to Profile 8.1"), "{reason}");
+        assert!(!reason.contains("copied untouched"), "{reason}");
+        assert!(!reason.contains("enhancement layer, which"), "{reason}");
+    }
 }
 
 /// The same exclusions, decided from the stored columns rather than the

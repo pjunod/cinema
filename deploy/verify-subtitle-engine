@@ -7,10 +7,37 @@ case ${2:-} in ''|--static-only) ;; *) exit 2 ;; esac
 manifest=$package/subtitle-engine.json
 die() { printf 'subtitle engine: %s\n' "$*" >&2; exit 1; }
 field() { /usr/bin/plutil -extract "$1" raw -o - "$manifest"; }
+keys() {
+  /usr/bin/plutil -extract "$1" xml1 -o - "$manifest" | /usr/bin/awk '/^\t<key>/{sub(/^\t<key>/, "");sub(/<\/key>$/, "");print}'
+}
+verify_binary() {
+  local name=$1 prefix=$2
+  [ -f "$package/$name" ] && [ ! -L "$package/$name" ] && [ -x "$package/$name" ] || die "missing executable $name"
+  [ "$(/usr/bin/stat -f %z "$package/$name")" = "$(field "${prefix}binary_bytes")" ] || die 'executable length mismatch'
+  [ "$(/usr/bin/shasum -a 256 "$package/$name" | /usr/bin/awk '{print $1}')" = "$(field "${prefix}binary_sha256")" ] || die 'executable digest mismatch'
+}
+verify_dependencies() {
+  local prefix=$1 count index dependency lower xml
+  xml=$(/usr/bin/plutil -extract "${prefix}runtime_dependencies" xml1 -o - "$manifest") || die 'missing runtime dependencies'
+  count=$(printf '%s\n' "$xml" | /usr/bin/awk '
+    /^<array>/ {array=1}
+    /^\t/ {if ($0 !~ /^\t<string>[^<>]*<\/string>$/) bad=1; else count++}
+    END {if (!array || bad || count<1 || count>16) exit 1;print count}') || die 'unqualified runtime dependency list'
+  index=0
+  while [ "$index" -lt "$count" ]; do
+    dependency=$(field "${prefix}runtime_dependencies.$index") || die 'invalid runtime dependency'
+    [ "${#dependency}" -le 512 ] || die 'runtime dependency too long'
+    case "$dependency" in *$'\n'*|*$'\r'*) die 'invalid runtime dependency' ;; esac
+    lower=$(printf '%s' "$dependency" | /usr/bin/tr '[:upper:]' '[:lower:]')
+    case "$lower" in *'not found'*|*libggml*|*libwhisper*|*libomp*|*libgomp*|*homebrew*|*'@rpath'*) die 'unbundled runtime library' ;; esac
+    case "$dependency" in /usr/lib/*|/System/Library/*) ;; *) die 'unqualified runtime library' ;; esac
+    index=$((index+1))
+  done
+}
 [ -d "$package" ] && [ ! -L "$package" ] || die 'package is not a real directory'
 for member in "$package"/* "$package"/.[!.]* "$package"/..?*; do
   [ -e "$member" ] || [ -L "$member" ] || continue
-  case ${member##*/} in whisper-cli|subtitle-engine.json|self-test.wav|whisper.cpp.LICENSE.txt|whisper-models.LICENSE.txt) ;;
+  case ${member##*/} in whisper-cli|whisper-cli-avx2|subtitle-engine.json|self-test.wav|whisper.cpp.LICENSE.txt|whisper-models.LICENSE.txt) ;;
     *) die 'package contains unexpected files' ;; esac
 done
 [ -f "$manifest" ] && [ ! -L "$manifest" ] || die 'missing regular package manifest'
@@ -22,9 +49,29 @@ done
 # pinned option dictionary, including unknown/extra options, without Python.
 [ "$(/usr/bin/plutil -extract build_options xml1 -o - "$manifest" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')" = 918636af5ba727d99000d9d1998acb8ffb1a157cc902bcfce8ba26fcb86671d1 ] || die 'unqualified build options'
 case $(field platform) in macos-arm64|macos-x86_64|macos-universal) ;; *) die 'package is not macOS' ;; esac
-[ -f "$package/whisper-cli" ] && [ ! -L "$package/whisper-cli" ] && [ -x "$package/whisper-cli" ] || die 'missing executable'
-[ "$(/usr/bin/stat -f %z "$package/whisper-cli")" = "$(field binary_bytes)" ] || die 'executable length mismatch'
-[ "$(/usr/bin/shasum -a 256 "$package/whisper-cli" | /usr/bin/awk '{print $1}')" = "$(field binary_sha256)" ] || die 'executable digest mismatch'
+variant=false
+if /usr/bin/plutil -extract cpu_variants json -o - "$manifest" >/dev/null 2>&1; then
+  variant_keys=$(keys cpu_variants) || die 'CPU variants must be a dictionary'
+  if [ -n "$variant_keys" ]; then
+    [ "$variant_keys" = x86_64-avx2 ] || die 'unqualified CPU variants'
+    case $(field platform) in macos-x86_64|macos-universal) ;; *) die 'CPU variant requires x86_64' ;; esac
+    prefix=cpu_variants.x86_64-avx2
+    [ "$(keys "$prefix")" = $'binary_bytes\nbinary_sha256\nbuild_options\nfilename\nrequired_features\nruntime_dependencies' ] || die 'unqualified CPU variant fields'
+    [ "$(field "$prefix.filename")" = whisper-cli-avx2 ] || die 'unqualified CPU variant filename'
+    [ "$(/usr/bin/plutil -extract "$prefix.build_options" xml1 -o - "$manifest" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')" = 477716cbe250749995538c96a0f9654086fa757add5a14529e3483b52d48ede9 ] || die 'unqualified CPU variant build options'
+    [ "$(/usr/bin/plutil -extract "$prefix.required_features" xml1 -o - "$manifest" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')" = 64e3473f6a55676de9ce3f63c02a13e89ef7b1c9f4ad4b9bd41c775c77b87d25 ] || die 'unqualified CPU variant features'
+    verify_binary whisper-cli-avx2 "$prefix."
+    verify_dependencies "$prefix."
+    variant=true
+  else
+    /usr/bin/plutil -extract cpu_variants xml1 -o - "$manifest" | /usr/bin/awk '/^<dict\/>/ {valid=1} END {exit !valid}' || die 'CPU variants must be a dictionary'
+  fi
+fi
+if [ "$variant" = false ]; then
+  [ ! -e "$package/whisper-cli-avx2" ] && [ ! -L "$package/whisper-cli-avx2" ] || die 'CPU variant is not described'
+fi
+verify_binary whisper-cli ""
+if /usr/bin/plutil -extract runtime_dependencies json -o - "$manifest" >/dev/null 2>&1; then verify_dependencies ""; fi
 for name in self-test.wav whisper.cpp.LICENSE.txt whisper-models.LICENSE.txt; do
   [ -f "$package/$name" ] && [ ! -L "$package/$name" ] || die "missing regular $name"
   # Dots are key-path separators in plutil. Extract the companion dictionary
@@ -34,5 +81,6 @@ for name in self-test.wav whisper.cpp.LICENSE.txt whisper-models.LICENSE.txt; do
   [ "$(/usr/bin/shasum -a 256 "$package/$name" | /usr/bin/awk '{print $1}')" = "$(field "companions.$key.sha256")" ] || die "$name digest mismatch"
 done
 /usr/bin/codesign --verify --strict "$package/whisper-cli"
+if [ "$variant" = true ]; then /usr/bin/codesign --verify --strict "$package/whisper-cli-avx2"; fi
 [ "${2:-}" != --static-only ] || exit 0
 [ "$(/usr/bin/env -i LC_ALL=C "$package/whisper-cli" --version)" = 'whisper.cpp version: 1.9.2' ] || die 'engine cannot run with cleared environment'

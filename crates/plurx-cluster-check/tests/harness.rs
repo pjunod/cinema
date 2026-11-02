@@ -22,12 +22,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use plurx_cluster_check::{
-    allocate_nodes, free_port, harness_executable, install_crypto_provider, is_port_collision,
-    node_config, prove_local_fts_rebuild, prove_local_telemetry_sidecars, require_dump_setting,
-    require_quorum_error, run, run_incompatible_preflight, start_cluster_with_port_retry,
-    start_cluster_with_port_retry_using, unix_now, validate_compacted_growth, validate_known_dump,
-    ClusterProcesses, CompactedGrowthReport, NodeLaunch, NodeProcess, NodeSpec, PortReservation,
-    Preflight, Request, Response, GROWTH_BYTES_PER_BEAT_BUDGET, INSTANCE_ID,
+    allocate_nodes, free_port, harness_executable, harness_node_identity, install_crypto_provider,
+    is_port_collision, node_config, prove_local_fts_rebuild, prove_local_telemetry_sidecars,
+    require_dump_setting, require_quorum_error, run, run_incompatible_preflight,
+    start_cluster_with_port_retry, start_cluster_with_port_retry_using, unix_now,
+    validate_compacted_growth, validate_known_dump, ClusterProcesses, CompactedGrowthReport,
+    NodeLaunch, NodeProcess, NodeSpec, PortReservation, Preflight, Request, Response,
+    GROWTH_BYTES_PER_BEAT_BUDGET, INSTANCE_ID,
 };
 use plurx_core::store::{
     ClusterCompatibility, AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION,
@@ -104,6 +105,330 @@ async fn a_one_voter_bootstrap_and_reopen_retain_local_membership_admission() {
         .await
         .expect("join actual voter shutdown");
     assert!(cluster.node_ids().is_empty());
+}
+
+/// The membership snapshot floor must inspect the running database, not an
+/// empty durability-probe directory that merely has free filesystem space.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_voter_publishes_storage_readiness_from_its_actual_snapshot_database() {
+    let root = tempfile::tempdir().expect("canonical storage voter root");
+    let (mut cluster, actual_root) = plurx_cluster_check::with_port_retry(|attempt| {
+        let attempt_root = root.path().join(format!("attempt-{attempt}"));
+        async move {
+            let cluster =
+                ClusterProcesses::start(&harness_binary(), &attempt_root, allocate_nodes(1)?)
+                    .await?;
+            Ok((cluster, attempt_root))
+        }
+    })
+    .await
+    .expect("start real storage-preflight voter");
+    let proof: anyhow::Result<()> = async {
+        cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+        cluster
+            .request(1, Request::ForceHeartbeat)
+            .await?
+            .require_ok()?;
+        let database = actual_root.join("node-1/hiqlite/state_machine/db/plurx.db");
+        let requirement = hiqlite::snapshot_admission::snapshot_storage_requirement(&database);
+        anyhow::ensure!(
+            requirement.is_ok(),
+            "production snapshot admission must measure the actual live image: {requirement:?}"
+        );
+        let status = match cluster.request(1, Request::MembershipStatus).await? {
+            Response::MembershipStatus { status } => status,
+            response => anyhow::bail!("unexpected real storage status: {response:?}"),
+        };
+        let local = status
+            .nodes
+            .iter()
+            .find(|node| node.raft_id == 1)
+            .ok_or_else(|| anyhow::anyhow!("real voter missing from its roster"))?;
+        anyhow::ensure!(
+            local.voter_storage_ready,
+            "real target-local preflight: {local:?}"
+        );
+        anyhow::ensure!(
+            local
+                .storage_headroom_bytes
+                .is_some_and(|available| available >= requirement.expect("known requirement")),
+            "storage proof must cover the live image and WAL"
+        );
+        cluster
+            .request(
+                1,
+                Request::ForceCompaction {
+                    phase: "canonical-storage-regression".to_owned(),
+                    background: Vec::new(),
+                },
+            )
+            .await?
+            .require_ok()?;
+        let snapshots = actual_root.join("node-1/hiqlite/state_machine/snapshots");
+        let current = std::fs::read_to_string(snapshots.join("current"))?;
+        let current = current.trim();
+        anyhow::ensure!(
+            !current.is_empty()
+                && !current.contains(['/', '\\'])
+                && current != "."
+                && current != "..",
+            "snapshot pointer must name one local image"
+        );
+        anyhow::ensure!(
+            std::fs::metadata(snapshots.join(current))?.len() > 0,
+            "actual snapshot proof must live beside the configured database"
+        );
+        Ok(())
+    }
+    .await;
+    cluster
+        .shutdown_all()
+        .await
+        .expect("settle real storage voter on success or failure");
+    proof.expect("real database, snapshot and membership storage proof must agree");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_heartbeat_worker_is_single_and_joined_at_node_shutdown() {
+    let root = tempfile::tempdir().expect("heartbeat worker root");
+    let (mut cluster, _) = start_cluster_with_port_retry(&harness_binary(), root.path(), 1)
+        .await
+        .expect("start real heartbeat voter");
+    for request in [
+        Request::Bootstrap,
+        Request::Open,
+        Request::StartHeartbeatLoop,
+    ] {
+        require_ok(
+            cluster
+                .request(1, request)
+                .await
+                .expect("start admitted worker"),
+            "worker setup",
+        );
+    }
+    assert!(matches!(
+        cluster.request(1, Request::StartHeartbeatLoop).await.expect("duplicate worker reply"),
+        Response::Error { message } if message.contains("already owns a heartbeat worker")
+    ));
+    require_ok(
+        cluster
+            .request(1, Request::Ping)
+            .await
+            .expect("retained owner"),
+        "retained owner",
+    );
+    cluster
+        .shutdown_all()
+        .await
+        .expect("abort/join heartbeat and reap voter");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_heartbeat_node_settles_after_its_reply_pipe_fails() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    let root = tempfile::tempdir().expect("reply failure root");
+    let (listeners, specs) = allocate_nodes(1)
+        .expect("reserve real node ports")
+        .into_inner();
+    drop(listeners);
+    let launch = NodeLaunch::voter(1, root.path().to_owned(), specs);
+    let mut child = tokio::process::Command::new(harness_binary())
+        .arg("node")
+        .arg(serde_json::to_string(&launch).expect("encode launch"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn reply failure voter");
+    let mut input = child.stdin.take().expect("request pipe");
+    let mut output = BufReader::new(child.stdout.take().expect("reply pipe")).lines();
+    let ready = output
+        .next_line()
+        .await
+        .expect("ready read")
+        .expect("ready reply");
+    assert!(matches!(
+        serde_json::from_str::<Response>(&ready).expect("decode ready"),
+        Response::Ready { node_id: 1 }
+    ));
+    for request in [
+        Request::Bootstrap,
+        Request::Open,
+        Request::StartHeartbeatLoop,
+    ] {
+        let mut bytes = serde_json::to_vec(&request).expect("encode request");
+        bytes.push(b'\n');
+        input.write_all(&bytes).await.expect("write setup");
+        let reply = output
+            .next_line()
+            .await
+            .expect("setup read")
+            .expect("setup reply");
+        require_ok(
+            serde_json::from_str(&reply).expect("decode setup"),
+            "worker setup",
+        );
+    }
+    // Keep stdin open: this exercises the fallible reply-write path, not EOF.
+    drop(output);
+    let mut bytes = serde_json::to_vec(&Request::Ping).expect("encode ping");
+    bytes.push(b'\n');
+    input
+        .write_all(&bytes)
+        .await
+        .expect("write ping after closing reader");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait_with_output())
+        .await
+        .expect("reply error must settle owned worker and process")
+        .expect("reap failed voter");
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("Broken pipe"),
+        "{:?}",
+        result
+    );
+    drop(input);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn artwork_claims_use_the_installed_owner_and_preserve_rejected_rosters() {
+    async fn claims(client: &hiqlite::Client) -> Vec<(String, String)> {
+        client
+            .query_consistent(
+                "SELECT node_id, public_http_url FROM cluster_node_http ORDER BY node_id",
+                hiqlite::macros::params!(),
+            )
+            .await
+            .expect("read actual replicated artwork claims")
+            .into_iter()
+            .map(|mut row| (row.get("node_id"), row.get("public_http_url")))
+            .collect()
+    }
+
+    let root = tempfile::tempdir().expect("artwork claim root");
+    let (mut cluster, specs) = start_cluster_with_port_retry(&harness_binary(), root.path(), 1)
+        .await
+        .expect("start real admitted voter");
+    for request in [Request::Bootstrap, Request::Open] {
+        require_ok(
+            cluster
+                .request(1, request)
+                .await
+                .expect("install membership once"),
+            "membership setup",
+        );
+    }
+    // The remote client only seeds namespace state in the real replicated DB;
+    // it installs no local admission and constructs no second manager.
+    let client = hiqlite::Client::remote(
+        specs.iter().map(|node| node.api.clone()).collect(),
+        true,
+        true,
+        "plurx-m1b-api-secret".to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture remote SQL client");
+    client.execute(
+        "INSERT INTO cluster_nodes(node_id,raft_id,raft_address,api_address,last_seen_at,removed_at,role) \
+         SELECT 'artwork-peer',99,'127.0.0.1:1','127.0.0.1:2',last_seen_at,NULL,'voter' \
+         FROM cluster_nodes WHERE node_id=$1",
+        hiqlite::macros::params!(harness_node_identity(1)),
+    ).await.expect("seed live namespace claimant without another startup owner");
+    let claimed = "http://127.0.0.1:33999".to_owned();
+    require_ok(
+        cluster
+            .request(
+                1,
+                Request::SeedHistoricalHttpDuplicate {
+                    node_id: "artwork-peer".to_owned(),
+                    public_http_url: claimed.clone(),
+                },
+            )
+            .await
+            .expect("seed peer origin"),
+        "seed peer origin",
+    );
+    let before = claims(&client).await;
+    let roster = match cluster
+        .request(1, Request::ArtworkPeerUrls)
+        .await
+        .expect("peer roster")
+    {
+        Response::ArtworkPeerUrls { urls } => urls,
+        other => panic!("unexpected peer roster: {other:?}"),
+    };
+    assert_eq!(roster, vec![claimed.clone()]);
+    match cluster
+        .request(
+            1,
+            Request::RejectDuplicateArtworkUrl {
+                public_http_url: claimed.clone(),
+            },
+        )
+        .await
+        .expect("exercise real publication conflict")
+    {
+        Response::MembershipError { code, message } => {
+            assert_eq!(code, "membership_internal");
+            assert!(
+                message.contains("conflicts with an existing node claim"),
+                "{message}"
+            );
+        }
+        other => panic!("duplicate claim was not refused: {other:?}"),
+    }
+    assert_eq!(
+        claims(&client).await,
+        before,
+        "rejection must leave both claims intact"
+    );
+    assert!(
+        matches!(cluster.request(1, Request::ArtworkPeerUrls).await.expect("unchanged roster"),
+        Response::ArtworkPeerUrls { urls } if urls == roster)
+    );
+    client
+        .execute(
+            "UPDATE cluster_nodes SET removed_at=1 WHERE node_id='artwork-peer'",
+            hiqlite::macros::params!(),
+        )
+        .await
+        .expect("tombstone namespace claimant");
+    require_ok(
+        cluster
+            .request(
+                1,
+                Request::ReuseRemovedArtworkUrl {
+                    removed_node_id: "artwork-peer".to_owned(),
+                    public_http_url: claimed,
+                },
+            )
+            .await
+            .expect("reuse and restore through installed owner"),
+        "removed origin reuse",
+    );
+    assert_eq!(
+        claims(&client).await,
+        before,
+        "successful probe must restore the observer origin"
+    );
+    for request in [Request::Bootstrap, Request::Open, Request::Heartbeat] {
+        require_ok(
+            cluster
+                .request(1, request)
+                .await
+                .expect("retained membership owner"),
+            "retained owner",
+        );
+    }
+    cluster
+        .shutdown_all()
+        .await
+        .expect("join real voter shutdown");
 }
 
 #[test]
@@ -813,6 +1138,10 @@ fn the_request_and_response_encoding_is_stable() {
 async fn every_argument_rejection_names_what_was_wrong() {
     let cases = [
         (vec!["harness", "bogus"], "unknown cluster-check mode bogus"),
+        (
+            vec!["harness", "leader-leave", "extra"],
+            "leader-leave accepts no arguments",
+        ),
         (
             vec!["harness", "node"],
             "node mode requires its launch JSON",

@@ -10,6 +10,10 @@ mod startup_observer {
 use super::*;
 
 #[cfg(feature = "hiqlite-store")]
+#[path = "membership_api.rs"]
+mod membership_api;
+
+#[cfg(feature = "hiqlite-store")]
 fn portable_snapshot_fixture(root: &Path, cluster_id: &str) -> PathBuf {
     let active = root.join(HIQLITE_ACTIVE_DIRNAME);
     std::fs::create_dir_all(&active).expect("active fixture");

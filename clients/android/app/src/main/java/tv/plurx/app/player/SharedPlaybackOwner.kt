@@ -137,6 +137,7 @@ internal class SharedPlaybackOwner(
     val statusSummary = MutableStateFlow<String?>(null)
     val selection = MutableStateFlow<SharedSelection?>(null)
     val direct = MutableStateFlow(false)
+    val captionReadBinding = MutableStateFlow<SharedCaptionReadBinding?>(null)
 
     private val job = SupervisorJob(parent.coroutineContext[Job])
     private val scope = CoroutineScope(parent.coroutineContext + job)
@@ -498,6 +499,7 @@ internal class SharedPlaybackOwner(
                 channel = SharedControlChannel(client, successor, clientInstanceId, sharedControlCapabilities(next.caps, true), prepared = true)
                 sessionEnded = false; directRestartEarned = false
                 selection.value = next.selection; direct.value = false
+                publishCaptionReadBinding(next, successor)
                 statusSummary.value = null; failure.value = null
                 renderer.releasePredecessor()
                 // No DELETE: B superseded the predecessor on this commit and
@@ -676,7 +678,16 @@ internal class SharedPlaybackOwner(
         plan = next; session = started; channel = control
         sessionEnded = false; directRestartEarned = false
         selection.value = next.selection; direct.value = started is SharedStartedDirect
+        publishCaptionReadBinding(next, started)
         statusSummary.value = null; failure.value = null
+    }
+
+    private fun publishCaptionReadBinding(plan: SharedPlaybackPlan, session: SharedBoundSession) {
+        session.validateBound()
+        val ordinal = plan.request.audio?.toLong() ?: plan.decision.presentation.delivery?.audio
+            ?: plan.decision.presentation.audio.singleOrNull { it.default }?.index
+            ?: plan.decision.presentation.audio.singleOrNull()?.index
+        captionReadBinding.value = SharedCaptionReadBinding(session.context, ordinal, plan.selection.subtitle != null)
     }
 
     /** Cancel and join every owned job, send the last ordered beat, release the
@@ -684,6 +695,7 @@ internal class SharedPlaybackOwner(
     fun beginStop(watched: Boolean = false): Job {
         cleanup?.let { return it }
         closing = true
+        captionReadBinding.value = null
         renderer.setPlaying(false)
         retireNetworkOperation()
         job.cancel()

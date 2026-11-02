@@ -909,6 +909,70 @@ impl SecureDirectory {
         .map_err(io::Error::other)?
     }
 
+    /// Bind cleanup to the inspected child and a held no-follow parent.
+    pub async fn remove_child_tree_checked(
+        &self,
+        name: &str,
+        expected: FileIdentity,
+        max_entries: usize,
+        max_depth: usize,
+    ) -> io::Result<()> {
+        if max_entries == 0 || max_entries > 120_100 || max_depth == 0 || max_depth > 32 {
+            return Err(invalid_path("invalid checked cache-tree removal bound"));
+        }
+        let parent = Arc::clone(&self.file);
+        let name = child_name(name)?;
+        tokio::task::spawn_blocking(move || {
+            let directory = open_relative(
+                &parent,
+                &name,
+                DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_OPEN,
+                FILE_DIRECTORY_FILE,
+                FILE_ATTRIBUTE_NORMAL,
+            )?;
+            if !file_identity(&directory)?.same_inode(expected) {
+                return Err(io::Error::other("cache directory identity changed"));
+            }
+            let mut count = 0;
+            count_tree(&directory, &mut count, max_entries, 0, max_depth)?;
+            let mut removed = 0;
+            remove_tree(&directory, &mut removed, max_entries, 0, max_depth)?;
+            set_disposition(&directory, false)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    /// Delete only the exact empty directory handle, never a replacement name.
+    pub async fn remove_empty_child_directory(
+        &self,
+        name: &str,
+        expected: FileIdentity,
+    ) -> io::Result<()> {
+        let parent = Arc::clone(&self.file);
+        let name = child_name(name)?;
+        tokio::task::spawn_blocking(move || {
+            let directory = open_relative(
+                &parent,
+                &name,
+                DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_OPEN,
+                FILE_DIRECTORY_FILE,
+                FILE_ATTRIBUTE_NORMAL,
+            )?;
+            if !file_identity(&directory)?.same_inode(expected) {
+                return Err(io::Error::other("cache directory identity changed"));
+            }
+            if !child_names_blocking(&directory, 1)?.is_empty() {
+                return Err(io::Error::other("cache directory is not empty"));
+            }
+            set_disposition(&directory, false)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     pub async fn rename_child_to(
         &self,
         from: &str,

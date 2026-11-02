@@ -489,7 +489,8 @@ const CAPS_DOCUMENT_PRELUDE = [
   `function capsDocument(){return ${JSON.stringify(USABLE_CAPS_DOCUMENT)};}`,
   "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
   "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
-      shippedSource("currentCapsDocument"),
+  shippedSource("hdrDisplayPeakCaps"),
+  shippedSource("currentCapsDocument"),
   shippedSource("capsDocumentIsUsable"),
 ].join("\n");
 function buildOpenSession(overrides) {
@@ -520,6 +521,7 @@ function buildOpenSession(overrides) {
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;} function qualityForce(){return 'auto';}",
       "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
+      shippedSource("hdrDisplayPeakCaps"),
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -629,6 +631,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
       "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
+      shippedSource("hdrDisplayPeakCaps"),
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("askDecision"),
@@ -676,6 +679,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
       "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
+      shippedSource("hdrDisplayPeakCaps"),
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -5986,6 +5990,13 @@ test("a session that lands on a different range repaints the badge", () => {
   assert.equal(player.deliveredRange, "sdr");
   assert.ok(repaints > before, "every attach repaints");
 
+  // Caption projection follows the actual attachment origin, including VOD
+  // zero and signed preroll, instead of the requested seek position.
+  for (const [origin, legacy, expected] of [[0, 90, 0], [81250, 90, 81.25], [-250, 0, -.25], [NaN, 12, 12], [undefined, NaN, 0]]) {
+    attachSession({}, player, {media_origin_ms:origin, start_seconds:legacy, playlist_url:"/x.m3u8"}, 90);
+    assert.equal(player.offset, expected, "the backend's finite media origin owns cue projection");
+  }
+
   // A superseded playback must not repaint over the live one.
   const stale = { deliveredRange: "hdr10" };
   const settled = repaints;
@@ -6581,13 +6592,14 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
   // Anchored inside the branch: `player.prepare()` appears at eight other
   // sites in that file, so asserting the bare call pinned nothing. What has to
   // be true is that the owner hands the recovery a seek target on the PLAYER's
-  // timeline and the player's own seek and prepare. This source inventory can
+  // timeline and the player's own seek and prepare. Caption ownership keeps
+  // recovery from becoming a viewer discontinuity. This source inventory can
   // establish ownership and call shape, but not frame continuity or
   // cancellation cleanup. BehindLiveWindowRecoveryTest drives `attached()`
   // behaviorally and proves that a spent budget gets exactly one fresh use.
   assert.match(
     androidController,
-    /seekTargetMs = \{ playerTimelinePositionMs\(filmPositionMs\) \},\s*\n\s*seekTo = \{ target -> player\.seekTo\(target\) \},\s*\n\s*prepare = \{ player\.prepare\(\) \},/,
+    /seekTargetMs = \{ playerTimelinePositionMs\(filmPositionMs\) \},\s*\n\s*seekTo = \{ target -> progressiveCaptions\.ownedMediaMutation \{ player\.seekTo\(target\) \} \},\s*\n\s*prepare = \{ player\.prepare\(\) \},/,
     "the recovery seeks on the player's timeline and prepares again",
   );
   assert.match(
@@ -7495,4 +7507,14 @@ test("completed video transfer evidence survives a full browser resource timing 
   timing.complete(xhr,url,{start:100,end:130},140,100000);
   assert.equal(timing.size(),128);
   assert.equal(timing.complete(xhr,url,{start:100,end:130},140,100000),undefined);
+});
+
+test('initial multi-audio selection binds audio even when the chosen ordinal is zero',()=>{
+ assert.equal(policy.initialRoute({method:'direct_play',selectedAudioIndex:0,audioTrackCount:2}),'progressive_remux');
+ assert.equal(policy.initialRoute({method:'direct_play',selectedAudioIndex:0,audioTrackCount:2,nativeHls:true}),'copy_hls');
+ assert.equal(policy.initialRoute({method:'direct_play',selectedAudioIndex:3,audioTrackCount:4,segmentedRemux:true}),'copy_hls');
+ assert.equal(policy.initialRoute({method:'direct_play',selectedAudioIndex:0,audioTrackCount:1}),'direct');
+ assert.equal(policy.initialRoute({method:'transcode',selectedAudioIndex:0,audioTrackCount:2}),'transcode_hls');
+ const choose=shippedSource('choosePlayRoute');assert.match(choose,/initialRoute==='direct'&&\(decision\.audio\?\.length\|\|0\)<=1/,'shared raw bytes need an unambiguous single audio stream');
+ const supplied=shippedSource('playbackInitialRoute');assert.match(supplied,/audioTrackCount:decision\.audio\?\.length\|\|1/);
 });

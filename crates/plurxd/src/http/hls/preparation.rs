@@ -2472,7 +2472,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
             grade,
             None,
             selected
-                .filter(|candidate| candidate.processed_hdr10)
+                .filter(|candidate| candidate.processed_dv)
                 .map(|_| {
                     source.dolby_vision.profile == Some(7)
                         && source.dolby_vision.el_present != Some(false)

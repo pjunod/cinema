@@ -24,6 +24,33 @@ class ContinuousVideoSelectionTest {
     private fun choice(rendition: String, revision: Long, automatic: Boolean = false) =
         ReservedVideoChoice(rendition, revision, "00000000-0000-4000-8000-${revision.toString().padStart(12, '0')}", automatic)
 
+    @Test fun processedSdrIdentityIsAdmittedOnlyForEncodedHevcCandidates() {
+        fun candidate(recipeSeed: Int, height: Int = 720, route: String = "encode", grade: String = "sdr", codec: String = "hevc"):
+            tv.plurx.app.data.QualityCandidate {
+            val recipe = List(32) { recipeSeed }
+            val hash = java.security.MessageDigest.getInstance("SHA-256")
+            hash.update("plurx:auto-quality-candidate:v1\u0000".toByteArray(Charsets.UTF_8))
+            val id = hash.digest(recipe.map { it.toByte() }.toByteArray()).take(16)
+                .joinToString("") { "%02x".format(it.toInt() and 255) }
+            return tv.plurx.app.data.QualityCandidate(id, recipe, route, height * 16 / 9, height, height,
+                peak_bps = 4_000_000, grade = grade, decoder_compatible = true,
+                complete_cache = false, sustainable = true, planned_codec = codec, processed_hdr10 = true)
+        }
+        val current = candidate(1, height = 1080)
+        val processedSdr = candidate(2)
+        assertTrue(processedSdr.hasValidIdentity)
+        assertSame(processedSdr, autoRecoveryCandidate(listOf(processedSdr), current, emptySet()))
+
+        for (invalid in listOf(
+            candidate(3, route = "remux"),
+            candidate(4, codec = "avc"),
+            candidate(5, grade = "hlg"),
+        )) {
+            assertFalse(invalid.hasValidIdentity)
+            assertNull(autoRecoveryCandidate(listOf(invalid), current, emptySet()))
+        }
+    }
+
     @Test fun reservedFutureChoiceUsesTheSameSelectionAfterMedia3ReordersFormats() {
         val group = TrackGroup(format(720, 1_000_000), format(1080, 2_000_000))
         val current = AtomicReference<ReservedVideoChoice?>(choice("720", 1))

@@ -8,7 +8,7 @@ const root=path.resolve(__dirname,'../../crates/plurxd/src/web');
 const generation='11111111-1111-4111-8111-111111111111';
 const source={hdr:'dolby_vision',hdr_format:'Dolby Vision · Profile 7'};
 function report(){return {generation,hdr10_enhanced:true,fel_contributed:true,
-  applied_operations:['PolynomialReshape','RpuColorConversion','TargetMapping']};}
+  applied_operations:['PolynomialReshape','LinearNlqResidual','RpuColorConversion','TargetMapping',{DisplayTargetMapping:{nits:1600}}]};}
 function setup(){
   const context=vm.createContext({PLAYER:{deliveredRange:'hdr10',effectiveProcessing:report(),
     controlReporter:{bootstrap:{generation}},reasons:[]},displayIsHdr:()=>true,renderPlayerInfo:()=>{},console});
@@ -94,7 +94,7 @@ const nativeEnhancement={active:['DYN'],details:[
 const processedEnhancement={active:['FEL','RPU','DYN'],requires_effective_processing:true,details:[
   {badge:'FEL',active:true,text:'FEL: full enhancement layer reconstructed into the picture'},
   {badge:'RPU',active:true,text:'RPU: polynomial reshaping applied by the server'},
-  {badge:'DYN',active:true,text:'DYN: L1/L2/L8 dynamic metadata carried as HDR10+'}]};
+  {badge:'DYN',active:true,text:'DYN: per-shot Dolby display mapping for a 1600-nit display by the server (L1 only)'}]};
 function enhancementSetup(wire){
   const context=setup();
   vm.runInContext(fs.readFileSync(path.join(root,'player/measurements.js'),'utf8')
@@ -204,4 +204,103 @@ test('a prepared successor adopts the enhancement on its action, null when absen
   const gated=enhancementSetup(processedEnhancement);
   gated.clearEffectiveProcessing(gated.PLAYER);
   assert.deepEqual(pills(gated),[],'FEL/RPU wait for a current effective_processing report');
+});
+
+
+test('current display-target mapping operation objects retain the accepted HDR10 report',()=>{
+  const context=setup();
+  context.PLAYER.effectiveProcessing.applied_operations.push({DisplayTargetMapping:{nits:1600}});
+  assert.equal(badge(context).arrow,'HDR10-E');
+  for(const operation of [{DisplayTargetMapping:{nits:100}}, {DisplayTargetMapping:{nits:'1600'}}, {DisplayTargetMapping:{nits:1600,other:1}}]) {
+    context.PLAYER.effectiveProcessing.applied_operations=[operation];
+    assert.equal(context.playerEffectiveProcessing(context.PLAYER),null);
+  }
+});
+
+
+test('SDR-E uses only the current typed 100-nit conversion report and clears on seek',()=>{
+  const context=setup(); const p=context.PLAYER;
+  p.deliveredRange='sdr'; p.effectiveProcessing={...report(),hdr10_enhanced:false,sdr_processed:true,
+    applied_operations:['RpuColorConversion','TargetMapping','Bt709Gamma24Conversion',{DisplayTargetMapping:{nits:100}}]};
+  assert.equal(badge(context).arrow,'SDR-E'); assert.match(badge(context).aria,/BT.709 gamma 2.4, L1 only/);
+  p.effectiveProcessing.creative_trims_applied=true; p.effectiveProcessing.applied_operations.splice(2,0,'CreativeTrimApplication');
+  assert.equal(badge(context).arrow,'SDR-E'); assert.match(badge(context).aria,/BT.709 gamma 2.4, creative trims applied/);
+  assert.doesNotMatch(badge(context).aria,/L1 only/);
+  p.effectiveProcessing.creative_trims_applied=false; p.effectiveProcessing.applied_operations.splice(2,1);
+  p.effectiveProcessing.creative_trims_partial=true;
+  assert.equal(badge(context).arrow,'SDR-E'); assert.match(badge(context).aria,/BT.709 gamma 2.4, creative trims on some shots/);
+  delete p.effectiveProcessing.creative_trims_partial;
+  p.effectiveProcessing.applied_operations.pop(); assert.equal(badge(context).arrow,'SDR');
+  p.effectiveProcessing.applied_operations.push({DisplayTargetMapping:{nits:100}});
+  context.clearEffectiveProcessing(p); assert.equal(badge(context).arrow,'SDR');
+});
+
+
+test('processed enhancement pills follow the current execution window, not the initial snapshot',()=>{
+  const context=enhancementSetup({...processedEnhancement,active:[],details:processedEnhancement.details.map(d=>({...d,active:false}))});
+  assert.deepEqual(pills(context),['FEL','RPU','DYN']);
+  let row=context.playerEnhancementRow(context.PLAYER);
+  assert.match(row.note,/polynomial reshaping, RPU color conversion applied by the server/);
+  assert.match(row.note,/per-shot Dolby display mapping for a 1600-nit display/);
+  assert.doesNotMatch(row.note,/carried as HDR10|HDR10 has no Dolby Vision/);
+  context.PLAYER.effectiveProcessing.fel_contributed=false;
+  context.PLAYER.effectiveProcessing.applied_operations=['MmrReshape','RpuColorConversion','TargetMapping'];
+  assert.deepEqual(pills(context),['RPU'],'inactive FEL and DYN from a later window cannot retain pills');
+  row=context.playerEnhancementRow(context.PLAYER);
+  assert.match(row.note,/no enhancement-layer detail/);
+  assert.match(row.note,/MMR reshaping/);
+  assert.match(row.note,/no per-shot Dolby display mapping applied/);
+});
+
+test('DYN details distinguish full, partial and absent creative trims on the current report',()=>{
+  const context=enhancementSetup(processedEnhancement),p=context.PLAYER;
+  assert.match(context.playerEnhancementRow(p).note,/L1 only/);
+  p.effectiveProcessing.creative_trims_partial=true;
+  assert.match(context.playerEnhancementRow(p).note,/creative trims on some shots/);
+  p.effectiveProcessing.applied_operations.push('CreativeTrimApplication');
+  const note=context.playerEnhancementRow(p).note;
+  assert.match(note,/with the colourist's creative trims/);
+  assert.doesNotMatch(note,/some shots|L1 only/);
+});
+
+for(const [mode,size] of [['slot','compact'],['slot','wide'],['full','wide']])test(`late processing refreshes the ${mode}/${size} watch facts and open dialog without replacing controls`,()=>{
+  const context=enhancementSetup(processedEnhancement),p=context.PLAYER;
+  const nodes=[{innerHTML:''},{innerHTML:''},{innerHTML:''}];
+  const focused={id:'subtitle-generation-language'},ledger={innerHTML:'retained ledger'},dialog={open:true};
+  let writes=0;
+  for(const node of nodes){let html='';Object.defineProperty(node,'innerHTML',{get:()=>html,set:value=>{writes++;html=value;}});}
+  Object.assign(context,{
+    WATCH:{mode,size,accepted:true,page:{item:{kind:'movie',title:'The Beekeeper'},meta:{}}},pbPosSec:()=>0,
+    document:{activeElement:focused,
+      getElementById:id=>id==='watch-ledger'?ledger:id==='watch-details'?dialog:null,
+      querySelectorAll:selector=>{
+        assert.equal(selector,'#watch-title [data-watch-facts], #watch-band-title [data-watch-facts], #watch-details [data-watch-facts]');
+        return nodes;
+      }}
+  });
+  vm.runInContext(fs.readFileSync(path.join(root,'detail/watch-browser.js'),'utf8'),context);
+  vm.runInContext(fs.readFileSync(path.join(root,'player/projection-chrome.js'),'utf8'),context);
+  assert.match(context.watchTitleHtml(),/data-watch-facts/,'every title mirror exposes the narrow update mount');
+  p.effectiveProcessing=null;
+  context.renderPlayerInfo();
+  nodes.forEach(node=>assert.doesNotMatch(node.innerHTML,/HDR10-E|vbadge enh/));
+  p.effectiveProcessing=report();
+  context.renderPlayerInfo();
+  nodes.forEach(node=>{
+    assert.match(node.innerHTML,/HDR10-E/);
+    assert.deepEqual([...node.innerHTML.matchAll(/class="vbadge enh"[^>]*>([^<]+)/g)].map(m=>m[1]),['FEL','RPU','DYN']);
+  });
+  p.controlReporter.bootstrap.generation='22222222-2222-4222-8222-222222222222';
+  context.renderPlayerInfo();
+  nodes.forEach(node=>assert.doesNotMatch(node.innerHTML,/HDR10-E|vbadge enh/,'stale generation clears every mirror'));
+  p.controlReporter.bootstrap.generation=generation;
+  context.renderPlayerInfo();
+  const previousWrites=writes;
+  context.renderPlayerInfo();
+  assert.equal(writes,previousWrites,'unchanged reports do not replace even the badge nodes');
+  context.clearEffectiveProcessing(p);
+  nodes.forEach(node=>assert.doesNotMatch(node.innerHTML,/HDR10-E|vbadge enh/));
+  assert.equal(context.document.activeElement,focused);
+  assert.equal(ledger.innerHTML,'retained ledger');
+  assert.equal(dialog.open,true);
 });
