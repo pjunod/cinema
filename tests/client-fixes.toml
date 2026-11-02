@@ -1,6 +1,23 @@
 version = 1
 enforce_after = "e8a910f"
 
+[[fixes]]
+id = "apple.tv-settings-category-entry"
+commits = ["ffcc6d5e63b935d3b18efec376849c21b0f7b104"]
+source = "clients/apple/Sources/SettingsView.swift"
+source_anchor = "focusedEntry = category"
+test = "clients/apple/UITests/TVSecondaryNavigationTests.swift"
+test_anchor = "func testSettingsPickerHelpReportAndExactReturn"
+
+[[fixes]]
+id = "apple.tv-settings-distinct-accessible-picker-controls"
+commits = []
+supplements = "apple.tv-settings-category-entry"
+source = "clients/apple/Sources/SettingsView.swift"
+source_anchor = "self.controlIdentifier = identifier ?? \"settings-control-\" + title"
+test = "clients/apple/UITests/TVSecondaryNavigationTests.swift"
+test_anchor = "func testSettingsPickerHelpReportAndExactReturn"
+
 # Issue #1352: private server identity is persisted, not a global TLS exception.
 [[fixes]]
 id = "apple.self-signed-server-identity"
