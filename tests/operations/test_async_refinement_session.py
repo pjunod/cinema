@@ -447,6 +447,32 @@ class AdmissionInstantTests(unittest.TestCase):
             self.assertEqual(s.admission_instant(SimpleNamespace(),[]),123.0)
 
 
+class DirectoryBytesTests(unittest.TestCase):
+    def test_a_file_removed_between_listing_and_stat_counts_as_nothing(self):
+        import tempfile
+        scratch=ROOT/'.agent-proof-fixtures/directory-bytes';scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as name:
+            root=Path(name);(root/'kept').write_bytes(b'x'*10000)
+            original=os.scandir
+            class Vanished:
+                """A listed entry the writing child removed before it could be stat-ed."""
+                path=str(root/'catalog.sqlite-journal');name='catalog.sqlite-journal'
+                def stat(self,follow_symlinks=True):raise FileNotFoundError(self.path)
+                def is_symlink(self):raise FileNotFoundError(self.path)
+                def is_file(self,follow_symlinks=True):raise FileNotFoundError(self.path)
+                def is_dir(self,follow_symlinks=True):raise FileNotFoundError(self.path)
+            class Listing:
+                def __init__(self,path):self.inner=original(path)
+                def __enter__(self):return [*self.inner,Vanished()] if Path(self.inner_path)==root else list(self.inner)
+                def __exit__(self,*exc):self.inner.close()
+            def racing(path):
+                listing=Listing(path);listing.inner_path=path;return listing
+            with patch.object(s.os,'scandir',side_effect=racing):
+                total=s.directory_bytes(root)
+            self.assertGreaterEqual(total,10000)
+            with self.assertRaises(FileNotFoundError):s.directory_bytes(root/'missing')
+
+
 class ActualRunnerTests(unittest.TestCase):
     """Forgejo exports no RUNNER_NAME; the task log preamble names the runner that took the task."""
     UUID='3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b'

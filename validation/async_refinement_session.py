@@ -4050,19 +4050,34 @@ def reserve_verifier(prepare, state, unit, final_checkpoint, source, output, pla
 
 
 def directory_bytes(directory, exclude=()):
-    """Allocated bytes below `directory`, skipping the named subtrees/files (exact paths)."""
+    """Allocated bytes below `directory`, skipping the named subtrees/files (exact paths).
+
+    The guard samples a tree a running child is writing: a file it removes between the
+    directory listing and the stat (an SQLite rollback journal, say) occupies nothing
+    any more and counts as zero; the root itself must exist.
+    """
     excluded={Path(item).absolute() for item in exclude}
     total=0
-    stack=[Path(directory)]
+    root=Path(directory)
+    stack=[root]
     while stack:
-        with os.scandir(stack.pop()) as entries:
+        current=stack.pop()
+        try:
+            listing=os.scandir(current)
+        except FileNotFoundError:
+            if current==root:raise
+            continue
+        with listing as entries:
             for entry in entries:
                 path=Path(entry.path)
                 if path.absolute() in excluded:continue
-                info=entry.stat(follow_symlinks=False)
+                try:
+                    info=entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
                 if entry.is_symlink():total+=info.st_blocks*512
-                elif entry.is_file(follow_symlinks=False):total+=max(info.st_size,info.st_blocks*512)
-                elif entry.is_dir(follow_symlinks=False):
+                elif stat.S_ISREG(info.st_mode):total+=max(info.st_size,info.st_blocks*512)
+                elif stat.S_ISDIR(info.st_mode):
                     total+=info.st_blocks*512
                     stack.append(path)
     return total

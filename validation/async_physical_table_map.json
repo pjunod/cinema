@@ -4,7 +4,7 @@
   "sources": {
     "verification/async-driver-refinement/paged-catalog.sql": "8095448d489d7a5b6488dcad1d08481967585ac654f71732d6cd2b5b5dd1c6bc",
     "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs": "20dfe6bfa16d2366d92f6da3faf9d81c1aa047c57f914f1773943cf5069ba807",
-    "crates/plurx-core/src/store/async_driver_catalog.rs": "884025b9271cdf59d5735109be9ba6d325bbc5f902ae7f10e207e6e8aa813c1b",
+    "crates/plurx-core/src/store/async_driver_catalog.rs": "80ebec57e8a0d9428d66e02a082f0b2a2dc9917173e4415a1e8ce1b66c6b99ad",
     "verification/async-driver-refinement/paged-verifier-state.sql": "598c28c51b90ce12fa81f9826c88cdcd496e691079f924b0c39fc61fe76530a6",
     "verification/async-driver-refinement/paged_codec.py": "02b7fddfd5bba1a1f6aa601e860a216b1596c097d609b2a2f293144effd14f16",
     "verification/async-driver-refinement/paged_checker.py": "ade6e9e6925f62760c8a6e7f02dd65b04a28d66162ff5d70f4ff05e05b0bf923",

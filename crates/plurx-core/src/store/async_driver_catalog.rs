@@ -2567,6 +2567,14 @@ fn count_kinds() -> [(&'static str, &'static str); 15] {
         ("boundaries", "BoundaryObservation"),
     ]
 }
+/// The manifest-closure scratch database is created fresh by every export, is never
+/// reopened, and is discarded with the child's scratch: durability buys nothing, while
+/// `synchronous=FULL` cost four fsyncs per closure row (about 2.7 s per expanded
+/// predecessor, measured on the proof runner). It keeps the rollback journal the export
+/// family's journal reservation covers; the catalog itself stays WAL + FULL.
+const EXPORT_SCRATCH_PRAGMAS: &str =
+    "PRAGMA journal_mode=DELETE; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE;";
+
 impl ReadSnapshot {
     pub fn export(
         &self,
@@ -2646,9 +2654,7 @@ impl ReadSnapshot {
             .create_new(true)
             .open(&scratch)?;
         let work = rusqlite::Connection::open(&scratch)?;
-        work.execute_batch(
-            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE;",
-        )?;
+        work.execute_batch(EXPORT_SCRATCH_PRAGMAS)?;
         work.pragma_update(
             None,
             "cache_size",
@@ -3724,6 +3730,15 @@ mod tests {
         let expansion = tx.expansion_id()?.get();
         tx.seal(json!({"id":expansion,"context":context,"predecessor":product.get(),"fifo_ticket":ticket.get(),"candidates":[candidate],"demands":[],"oracle_evidence":[],"product_edges":[edge.get()],"fair_pairs":[pair],"enabledness":enabled,"discovered_products":[],"capacity_only_stores":[],"unit_ordinal":unit,"complete":true}))?;
         Ok(())
+    }
+    #[test]
+    fn export_scratch_keeps_its_rollback_journal_without_per_statement_sync() {
+        let directory = tempfile::tempdir().expect("owned test scratch");
+        let work = rusqlite::Connection::open(directory.path().join("scratch.sqlite")).expect("scratch");
+        work.execute_batch(EXPORT_SCRATCH_PRAGMAS).expect("scratch pragmas");
+        let journal: String = work.query_row("PRAGMA journal_mode", [], |row| row.get(0)).expect("journal");
+        let synchronous: i64 = work.query_row("PRAGMA synchronous", [], |row| row.get(0)).expect("sync");
+        assert_eq!((journal.as_str(), synchronous), ("delete", 0));
     }
     #[test]
     fn catalog_reference_and_sqlite_atomic_fifo_snapshots_agree() {
