@@ -46,6 +46,46 @@ enum TVSettingsCategory: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// A menu picker on tvOS draws only its selected value. Keep its setting
+/// name outside the native control so both are visible before opening it.
+/// iPhone and iPad retain their ordinary Form picker presentation.
+struct SettingsPicker<Selection: Hashable, Content: View>: View {
+    private let title: String
+    private let selection: Binding<Selection>
+    private let value: String
+    private let identifier: String
+    private let content: Content
+
+    init(_ title: String, value: String, selection: Binding<Selection>, identifier: String? = nil,
+         @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.selection = selection
+        self.value = value
+        self.identifier = identifier ?? title
+        self.content = content()
+    }
+
+    @ViewBuilder var body: some View {
+        #if os(tvOS)
+        Menu {
+            Picker(title, selection: selection) { content }
+                .pickerStyle(.inline)
+        } label: {
+            HStack {
+                Text(title).accessibilityIdentifier(identifier + "-title")
+                Spacer(minLength: 24)
+                Text(value).foregroundStyle(Palette.muted)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .accessibilityIdentifier(identifier)
+        #else
+        Picker(title, selection: selection) { content }
+            .accessibilityIdentifier(identifier)
+        #endif
+    }
+}
+
 struct SettingsView: View {
     var category: TVSettingsCategory? = nil
     @FocusState private var focusedCategory: TVSettingsCategory?
@@ -128,22 +168,21 @@ struct SettingsView: View {
     private var settingsForm: some View {
         Form {
             Section {
-                Picker("Quality", selection: Binding(
+                SettingsPicker("Quality", value: model.playbackQuality.label, selection: Binding(
                     get: { model.playbackQuality },
                     set: { model.setPlaybackQuality($0) }
-                )) {
+                ), identifier: "settings-quality") {
                     ForEach(PlaybackQuality.allCases) { quality in
                         Text(quality.label).tag(quality)
                     }
                 }
-                .accessibilityIdentifier("settings-quality")
-                Picker("Audio language", selection: audioBinding) {
+                SettingsPicker("Audio language", value: languages.first { $0.id == model.audioLang }?.name ?? model.audioLang, selection: audioBinding) {
                     ForEach(languages) { Text($0.name).tag($0.id) }
                 }
-                Picker("Subtitle language", selection: subBinding) {
+                SettingsPicker("Subtitle language", value: subtitleLanguages.first { $0.id == model.subLang }?.name ?? model.subLang, selection: subBinding) {
                     ForEach(subtitleLanguages) { Text($0.name).tag($0.id) }
                 }
-                Picker("Subtitle switching", selection: Binding(
+                SettingsPicker("Subtitle switching", value: model.subtitleReadiness.label, selection: Binding(
                     get: { model.subtitleReadiness },
                     set: { model.setSubtitleReadiness($0) }
                 )) {
@@ -196,13 +235,12 @@ struct SettingsView: View {
             #endif
 
             Section {
-                Picker("Layout", selection: Binding(
+                SettingsPicker("Layout", value: model.layout.label, selection: Binding(
                     get: { model.layout }, set: { model.setLayout($0) }
-                )) {
+                ), identifier: "settings-viewer-layout") {
                     ForEach(ViewerLayout.allCases) { layout in Text(layout.label).tag(layout) }
                 }
-                .accessibilityIdentifier("settings-viewer-layout")
-                Picker("Theme", selection: Binding(
+                SettingsPicker("Theme", value: model.theme.label, selection: Binding(
                     get: { model.theme },
                     set: { model.setTheme($0) }
                 )) {
@@ -210,7 +248,7 @@ struct SettingsView: View {
                         Text(theme.label).tag(theme)
                     }
                 }
-                Picker("Appearance", selection: Binding(
+                SettingsPicker("Appearance", value: model.appearance.label, selection: Binding(
                     get: { model.appearance },
                     set: { model.setAppearance($0) }
                 )) {
@@ -218,7 +256,7 @@ struct SettingsView: View {
                         Text(appearance.label).tag(appearance)
                     }
                 }
-                Picker("Poster size", selection: Binding(
+                SettingsPicker("Poster size", value: model.posterSize.label, selection: Binding(
                     get: { model.posterSize },
                     set: { model.setPosterSize($0) }
                 )) {
@@ -228,21 +266,20 @@ struct SettingsView: View {
                 }
                 #if os(tvOS)
                 if model.layout == .standard {
-                Picker("Home layout", selection: Binding(
+                SettingsPicker("Home layout", value: (TvHomeLayout(rawValue: tvHomeLayoutRaw) ?? .classic).label, selection: Binding(
                     get: { TvHomeLayout(rawValue: tvHomeLayoutRaw) ?? .classic },
                     set: { tvHomeLayoutRaw = $0.rawValue }
-                )) {
+                ), identifier: "settings-tv-home-layout") {
                     ForEach(TvHomeLayout.allCases) { layout in
                         Text(layout.label).tag(layout)
                     }
                 }
-                .accessibilityIdentifier("settings-tv-home-layout")
                 } else {
                     Text("Meridian provides its own featured Home. Your Standard Home choice is remembered.")
                         .foregroundStyle(Palette.muted)
                 }
                 #endif
-                Picker(libraryGroupingLabel, selection: Binding(
+                SettingsPicker(libraryGroupingLabel, value: model.libraryGrouping.label, selection: Binding(
                     get: { model.libraryGrouping },
                     set: { model.setLibraryGrouping($0) }
                 )) {
@@ -267,7 +304,7 @@ struct SettingsView: View {
             // the way Developer is: one focusable row that pushes the screen.
             Section {
                 #if os(tvOS)
-                Picker("Live TV layout", selection: Binding(
+                SettingsPicker("Live TV layout", value: (TvLiveLayout(rawValue: liveTvLayoutRaw) ?? .guidePreview).label, selection: Binding(
                     get: { TvLiveLayout(rawValue: liveTvLayoutRaw) ?? .guidePreview },
                     set: { liveTvLayoutRaw = $0.rawValue }
                 )) {

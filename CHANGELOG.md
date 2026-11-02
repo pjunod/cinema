@@ -131,6 +131,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Apple TV settings keep each setting name visible beside its selected value,
+  including Playback, Appearance and Live TV choices.
+
 - Playback cache admission reconciles concurrent cancelled writes instead of
   failing a video producer as disk-full while capacity remains, preventing
   repeated Apple TV buffering and stream retries.
