@@ -285,16 +285,19 @@ class Standby:
 
 
 def probe(config):
+    expected = config.get("probe_expected_stdout")
     try:
         result = subprocess.run(
             config["probe_command"],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if expected is not None else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=config["probe_timeout_seconds"],
             check=False,
         )
-        return result.returncode == 0
+        return result.returncode == 0 and (
+            expected is None or result.stdout == expected.encode("utf-8")
+        )
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -310,6 +313,8 @@ def load_config(path):
     for key in ("interval_seconds", "probe_timeout_seconds", "failure_checks", "recovery_checks"):
         if not isinstance(config[key], int) or isinstance(config[key], bool) or config[key] <= 0:
             raise ValueError("%s must be a positive integer" % key)
+    if "probe_expected_stdout" in config and not isinstance(config["probe_expected_stdout"], str):
+        raise ValueError("probe_expected_stdout must be a string")
     if not Path(config["runner_directory"]).is_dir():
         raise ValueError("runner_directory must exist")
     configure_janitor(config)

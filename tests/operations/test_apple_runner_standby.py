@@ -119,6 +119,36 @@ class AppleRunnerStandbyTests(unittest.TestCase):
         }
         self.assertFalse(standby.probe(config))
 
+    def test_expected_probe_output_requires_exact_successful_response(self):
+        for command, expected, healthy in (
+            ('print("primary-ready")', "primary-ready\n", True),
+            ('print("wrong-primary")', "primary-ready\n", False),
+            ('print("primary-ready"); raise SystemExit(2)', "primary-ready\n", False),
+            ('print("primary-ready ")', "primary-ready\n", False),
+        ):
+            with self.subTest(command=command):
+                config = {"probe_command": [sys.executable, "-c", command],
+                          "probe_timeout_seconds": 2,
+                          "probe_expected_stdout": expected}
+                self.assertEqual(standby.probe(config), healthy)
+
+    def test_legacy_probe_without_expected_output_keeps_return_code_semantics(self):
+        for code, healthy in ((0, True), (2, False)):
+            config = {"probe_command": [sys.executable, "-c", "print('legacy'); raise SystemExit(%d)" % code],
+                      "probe_timeout_seconds": 2}
+            self.assertEqual(standby.probe(config), healthy)
+
+    def test_expected_probe_output_configuration_requires_string(self):
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            config = dict(self.config, probe_command=["true"], interval_seconds=20,
+                          probe_timeout_seconds=12, runner_directory=folder,
+                          probe_expected_stdout=7)
+            path = Path(folder) / "standby.json"
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, "probe_expected_stdout must be a string"):
+                standby.load_config(path)
+
     @unittest.skipUnless(Path("/usr/bin/pgrep").is_file(), "native pgrep is required")
     def test_installer_detects_bare_relative_absolute_and_versioned_daemons(self):
         import time

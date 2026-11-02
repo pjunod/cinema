@@ -435,7 +435,8 @@ two minutes.
 system LaunchDaemons, which cannot cover a user LaunchAgent. Upgrade the
 existing [`plurx-apple-standby`](../../deploy/apple-runner/plurx-apple-standby)
 while idle, preserving registration and supervision. Add this member to its
-existing JSON configuration:
+existing JSON configuration. Preserve any `probe_expected_stdout`: its response
+must match byte-for-byte.
 
 ```json
 "janitor": {}
