@@ -4642,6 +4642,26 @@ assert.equal(context.ACT_TIMER, null);
                 f"rust-audit:{name} does not provision the pinned Cargo toolchain",
             )
 
+    def test_native_arm_release_and_ci_have_separate_rostered_eligibility(self):
+        # Recovering the release VM must not silently admit it to CI packaging.
+        runners = rostered_runners()
+        common = {"self-hosted", "Linux", "ARM64", "lab"}
+        release = {name for name, labels in runners if common | {"release-arm64"} <= labels}
+        ci = {name for name, labels in runners if common | {"ci-arm64"} <= labels}
+        self.assertEqual(release, {"gha-maca-linux-arm-01"})
+        self.assertEqual(ci, {"gha-macb-linux-arm-01"})
+        self.assertFalse(release & ci, "CI fallback requires workload qualification")
+
+    def test_reserved_async_proof_label_has_one_existing_nonvoter_owner(self):
+        # The branch consumer is absent from main; retain its provisioned route
+        # without duplicating that branch's admission or qualification metadata.
+        roster = runner_fleet()
+        owners = [runner for runner in roster["runners"]
+                  if "async-proof-owned" in runner["labels"]]
+        self.assertEqual([runner["name"] for runner in owners], ["gha-lab5-general-03"])
+        self.assertNotIn(owners[0]["host"], roster["voter_hosts"])
+        self.assertTrue({"general", "high-cpu"} <= set(owners[0]["labels"]))
+
     def test_every_self_hosted_runs_on_is_satisfiable_by_a_rostered_runner(self):
         # A `runs-on` naming a label nothing carries is not an error GitHub
         # reports. The job queues, indefinitely, and is eventually cancelled

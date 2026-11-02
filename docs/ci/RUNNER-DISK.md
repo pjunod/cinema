@@ -1,6 +1,6 @@
 # Runner disk — what fills a CI runner, and what is bounded
 
-**Status:** live · **Reconciled:** 2026-10-26
+**Status:** live · **Reconciled:** 2026-11-02
 
 Companion to [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md)
 (how the lanes are meant to get faster) — this is *where the bytes go, who
@@ -8,6 +8,36 @@ deletes them, and what to do when a runner fills anyway*.
 
 Read this before adding a cache to any workflow, and before believing a
 `ld terminated with signal 7 [Bus error]` in a CI log.
+
+## Current runner roles and reserved labels
+
+The 2026-11-02 roster reconciliation records the existing Forgejo
+registrations. Neutral names in `validation/runner-fleet.toml` describe logical
+placements; the fleet collector maps live host names through its private alias
+configuration. Keep the existing registration IDs and UUIDs when reconciling
+names.
+
+The Linux ARM64 roles are separate. `gha-maca-linux-arm-01` carries
+`release-arm64` for the native release-image build;
+`gha-macb-linux-arm-01` carries `ci-arm64` for CI packaging. The release guest
+was recovered with its original registration and release-only labels. Its
+online state establishes availability, not a passing release build or permission
+to add CI fallback eligibility. This current placement supersedes the older
+two-runner `ci-arm64` description in the acceleration plan.
+
+Keep `async-proof-owned` on the existing `gha-lab5-general-03` slot.
+The owning `codex/async-store-refinement` branch records its target-only
+provisioning in commit `f14b400bc` (2026-10-29): one dedicated-label carrier,
+preserved registration identity and a private durable proof-storage binding.
+That branch owns the dispatch identity, resource admission and proof
+qualification rules. The main-branch roster records the observed label; it
+imports no proof workflow, activates no proof session and grants no proof
+credit. Removing the label because main has no requesting workflow would break
+its existing branch consumer.
+
+`unit-memory-12g`, `ci-coverage`, `primary` and `backup` also retain their
+documented compatibility, diagnostic or operational roles. A current workflow
+scan alone does not establish that a label is obsolete.
 
 ## Runner recovery and memory budgets
 
