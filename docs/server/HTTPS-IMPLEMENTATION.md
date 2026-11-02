@@ -16,14 +16,23 @@ Add native HTTPS with an explicit enable/disable switch, persistent generated
 self-signed certificate when none is supplied, and operator-provided PEM
 chain/key paths. Existing installations default to HTTPS off.
 
-HTTPS is an additional listener on port 32443, on the interface selected by
-`server.bind`. Existing HTTP, Jellyfin standard HTTP, cluster and sharing
-transports stay as configured. The UI explicitly says “HTTP remains
-available” and names both ports: enabling HTTPS does not enforce encryption.
-Operators may restrict HTTP with their firewall/proxy. No redirect or HSTS
-policy is added because HTTPS can be disabled and self-signed certificates
-need explicit trust. No ACME, certificate upload endpoint, client trust
-bypass, native pairing redesign or deployment is part of this request.
+**Owner amendment — 2026-10-28:** active HTTPS also forwards public HTTP
+app/API requests, so opening an HTTP app address reaches HTTPS automatically.
+This supersedes the original no-redirect policy of the initial implementation.
+
+HTTPS listens on port 32443 by default, on `server.bind`'s interface. The main
+plaintext router returns `307 Temporary Redirect` with `Cache-Control: no-store`
+while the boot-active HTTPS listener is enabled. Preserve hostname, path,
+query, method and body; use the published HTTPS port when Docker remaps it.
+No redirect remains after disabling HTTPS and restarting. Saving desired intent
+alone never changes the active redirect. TLS uses the unwrapped router.
+
+Health/readiness, metrics, discovery, internal cluster RPC and Plex/Jellyfin
+compatibility retain HTTP. The standalone Jellyfin listener is also unchanged.
+These protocols cannot generally follow redirects or trust generated public
+certificates. Forwarded scheme headers do not bypass the redirect; reverse
+proxies should use HTTPS upstream when native HTTPS is enabled. No HSTS, ACME,
+certificate upload, client trust bypass or deployment is added.
 
 Settings → Developer owns the control while acceptance is incomplete and
 names remaining evidence using `devGraduation`. Once acceptance is complete,
@@ -32,9 +41,9 @@ overrides saved enablement or blocks Save.
 
 ## 2. Architecture decisions
 
-1. **Add a listener.** Replacing HTTP would break existing discovery and
-   cluster ingress and remove the recovery path. Preserve truthful HTTP
-   Bonjour/GDM records; HTTPS is manually selected by URL in this increment.
+1. **Keep a separate listener.** HTTP forwards app navigation to active HTTPS
+   while machine/compatibility paths remain usable. HTTP Bonjour/GDM records
+   remain truthful; browser navigation follows the temporary HTTPS redirect.
 2. **Extend the existing connection driver.** `HttpAcceptor` and `serve_http`
    in [main.rs](../../crates/plurxd/src/main.rs) own timeouts, upgrades, peer
    address, cancellation and bounded drain. Keep those guarantees over TLS.

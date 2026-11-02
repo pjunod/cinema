@@ -3526,7 +3526,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # one per budget, restarted by the next writer only after its own drop
 # guard clears the started flag). The other 13 are test-only
 # (authority_recovery.rs +10, serving_fence.rs tests +2, chunk_06.rs +1).
-expected_occurrences = 1047
+# PR1308 HTTP-to-HTTPS regression: +2 test-only tokio::spawn owners in
+# https/transport.rs::plaintext_http_follows_active_https_without_a_redirect_loop.
+# Each serves one prebound ephemeral HTTP/TLS socket; both observe the same
+# cancellation token, and the fixture cancels it and awaits both JoinHandles.
+# No production task, child process or rolling-producer owner is added.
+expected_occurrences = 1049
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6421,7 +6426,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Merge of Main eb3229a65: the branch's Tailscale online-state regression
 # `SetupState::Ready.status()` (+1, Main c6fc870b2) is already inside Main's
 # count above, so the merged scanner count is Main's 848, not 848 + 1.
-expected_occurrences = 848
+# PR1308: +14 test-only HTTP status observations: twelve Axum Response::status()
+# reads in https/redirect.rs and two Reqwest Response::status() reads in
+# https/transport.rs::plaintext_http_follows_active_https_without_a_redirect_loop.
+# These assertions launch no process, task or producer. The prior 848 matches
+# are unchanged; the two joined fixture tasks are classified above separately.
+expected_occurrences = 862
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

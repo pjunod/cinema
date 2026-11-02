@@ -368,6 +368,7 @@ pub struct ImportSummary {
     pub id: Uuid,
     pub source_server_id: Uuid,
     pub catalogue_epoch: Uuid,
+    /// Recipient-owned display label, initialized from the verified Source name.
     pub source_name: String,
     pub claim_id: Uuid,
     pub remote_grant_id: Option<Uuid>,

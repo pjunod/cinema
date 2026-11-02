@@ -47,7 +47,9 @@ class DockerHttpsPortTests(unittest.TestCase):
         self.assertEqual(self.overlay(), self.port())
         self.saved({"enabled": True, "port": 33443})
         self.assertEqual(self.overlay(), self.port(33443))
-        self.assertEqual(self.overlay(PLURX_HTTPS_HOST_PORT="443"), self.port(33443, 443))
+        self.assertEqual(self.overlay(PLURX_HTTPS_HOST_PORT="443"), {
+            **self.port(33443, 443), "environment": {"PLURX_HTTPS_REDIRECT_PORT": "443"},
+        })
         self.saved({"enabled": False, "port": 33443})
         self.assertEqual(self.overlay(), {})
 
@@ -93,13 +95,43 @@ class DockerHttpsPortTests(unittest.TestCase):
     def test_manual_publication_and_host_network_are_preserved(self):
         self.saved({"enabled": True})
         self.service["ports"] = [{"target": 32443, "published": "443", "host_ip": "127.0.0.1", "protocol": "tcp"}]
-        self.assertEqual(self.overlay(), {})
+        self.assertEqual(self.overlay(), {"environment": {"PLURX_HTTPS_REDIRECT_PORT": "443"}})
         self.service["ports"][0].pop("published")
-        self.assertEqual(self.overlay(), {}, "a random host port remains an explicit publication")
+        with self.assertRaisesRegex(ValueError, "random HTTPS publications"):
+            self.overlay()
+        self.service["environment"]["PLURX_HTTPS_REDIRECT_PORT"] = "443"
+        self.assertEqual(self.overlay(), {}, "an explicit public port retains a random publication")
+        self.service["environment"].pop("PLURX_HTTPS_REDIRECT_PORT")
         self.service["ports"][0]["protocol"] = "udp"
         self.assertEqual(self.overlay(), self.port())
         self.service["network_mode"] = "host"
         self.assertEqual(self.overlay(), {})
+
+    def test_ambiguous_manual_publications_require_an_explicit_redirect_port(self):
+        self.saved({"enabled": True})
+        self.service["ports"] = [
+            {"target": 32443, "published": "443", "protocol": "tcp"},
+            {"target": 32443, "published": "8443", "protocol": "tcp"},
+        ]
+        with self.assertRaisesRegex(ValueError, "multiple HTTPS publications"):
+            self.overlay()
+        self.service["environment"]["PLURX_HTTPS_REDIRECT_PORT"] = "8443"
+        self.assertEqual(self.overlay(), {})
+
+    def test_redirect_port_metadata_preserves_gpu_environment(self):
+        self.saved({"enabled": True})
+        (self.root / "docker-compose.yml").touch()
+        output = self.root / "overlay.json"
+        with mock.patch("pathlib.Path.cwd", return_value=self.root), mock.patch.dict(
+            HARDWARE["prepare"].__globals__,
+            resolved_compose_inputs=lambda: ({"PLURX_HTTPS_HOST_PORT": "443"}, self.document),
+            local_linux_engine=lambda: True, gpu_selection=lambda *a: (True, False),
+            gpu_overlay=lambda *a, **kw: {"services": {"plurxd": {"environment": {"NVIDIA_DRIVER_CAPABILITIES": "video"}}}},
+        ):
+            HARDWARE["prepare"](output)
+        self.assertEqual(json.loads(output.read_text())["services"]["plurxd"]["environment"], {
+            "NVIDIA_DRIVER_CAPABILITIES": "video", "PLURX_HTTPS_REDIRECT_PORT": "443",
+        })
 
     def test_host_network_does_not_inspect_opaque_state(self):
         self.service["network_mode"] = "host"
@@ -186,3 +218,13 @@ class DockerHttpsPortTests(unittest.TestCase):
                     ports = json.loads(config.stdout)["services"]["plurxd"]["ports"]
                     targets = {(item["target"], item["protocol"]) for item in ports}
                     self.assertEqual(targets, {(32400, "tcp"), (8096, "tcp"), (32414, "udp")} | ({(port, "tcp")} if enabled else set()))
+            self.saved({"enabled": True, "port": 33443})
+            with mock.patch.dict(os.environ, PLURX_HTTPS_HOST_PORT="443"):
+                files = HARDWARE["prepare"](output)
+            config = subprocess.run(["docker", "compose", "config", "--format", "json"],
+                cwd=ROOT / "deploy", env=dict(environment, COMPOSE_FILE=files),
+                check=True, capture_output=True, text=True)
+            resolved = json.loads(config.stdout)["services"]["plurxd"]
+            self.assertEqual(resolved["environment"]["PLURX_HTTPS_REDIRECT_PORT"], "443")
+            self.assertEqual(resolved["environment"]["PLURX_DATA_DIR"], "/var/lib/plurx")
+            self.assertTrue(any(item["target"] == 33443 and item["published"] == "443" for item in resolved["ports"]))
