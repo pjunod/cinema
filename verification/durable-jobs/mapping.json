@@ -517,25 +517,25 @@
       },
       {
         "anchor": "async fn process_library_requests(",
-        "sha256": "5b7cc7b13a70e103f711f1fe7d80d490373510ef62d4f99ba869789302a00934",
+        "sha256": "31e94a41cc4a6522888a4b6c0829bd3b4e06a304fa2f7741eda80a74041ec41a",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "proposal \u00a74.1 library worker"
       },
       {
         "anchor": "            Request::Bind => {",
-        "sha256": "1cbc542622a0c81c4dfd05428cb2859b9857e30bcb82fe149e1661949905923d",
+        "sha256": "0cc743dec54f641e55e22203eb7eb1588d30a0aaca04a5908c31e6aadbd2bcd5",
         "source": "crates/plurxd/src/library_work/env.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:257"
       },
       {
         "anchor": "\"library publication binding refused\"",
-        "sha256": "1cbc542622a0c81c4dfd05428cb2859b9857e30bcb82fe149e1661949905923d",
+        "sha256": "0cc743dec54f641e55e22203eb7eb1588d30a0aaca04a5908c31e6aadbd2bcd5",
         "source": "crates/plurxd/src/library_work/env.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:260"
       },
       {
         "anchor": "                let scan = self",
-        "sha256": "5b7cc7b13a70e103f711f1fe7d80d490373510ef62d4f99ba869789302a00934",
+        "sha256": "31e94a41cc4a6522888a4b6c0829bd3b4e06a304fa2f7741eda80a74041ec41a",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:434"
       },

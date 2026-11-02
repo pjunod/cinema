@@ -12,18 +12,30 @@ type WorkResult<'a> = (PublicationStore<'a>, Result<(), StoreError>);
 type WorkFuture<'a> = Pin<Box<dyn Future<Output = WorkResult<'a>> + Send + 'a>>;
 
 pub(super) struct TokioEnvironment<'a> {
+    // Rust drops fields in declaration order, so the order below IS the release
+    // order when this environment is dropped without the driver finishing
+    // (task abort, runtime shutdown). It must stay the order the pre-driver
+    // worker released its stack locals: the live work future first, then its
+    // publisher, then the domain lease, then physical admission, and the queue
+    // fence (`active`, which cancels the loss tokens) last. Reordering this
+    // block changes what a cancelled worker releases while work is still
+    // running; `library_worker_abort_releases_in_the_original_order` pins it.
+    // There is deliberately no `Drop` impl asserting "joined": dropping with
+    // live work is the legitimate abort and shutdown path, and an assertion
+    // there is a double panic when the drop happens while unwinding.
+    work: Option<WorkFuture<'a>>,
+    completed: Option<WorkResult<'a>>,
+    publisher: Option<PublicationStore<'a>>,
+    cancellation: CancellationToken,
+    lease: Option<Arc<ActiveJobLease>>,
+    admission: Option<crate::transcode::FragmentAdmission>,
+    active: Option<crate::background_jobs::ActiveBackgroundJob>,
+    // Plain data and borrows: no release order to preserve.
     manager: &'a Arc<JobManager>,
     transcode: &'a TranscodeManager,
     job: plurx_core::store::background_jobs::BackgroundJob,
     library_id: i64,
     fence: crate::background_jobs::JobFence,
-    active: Option<crate::background_jobs::ActiveBackgroundJob>,
-    admission: Option<crate::transcode::FragmentAdmission>,
-    lease: Option<Arc<ActiveJobLease>>,
-    publisher: Option<PublicationStore<'a>>,
-    cancellation: CancellationToken,
-    work: Option<WorkFuture<'a>>,
-    completed: Option<WorkResult<'a>>,
     work_result: Option<Result<(), StoreError>>,
 }
 
@@ -347,14 +359,5 @@ impl Environment for TokioEnvironment<'_> {
                 Reply::Done
             }
         }
-    }
-}
-
-impl Drop for TokioEnvironment<'_> {
-    fn drop(&mut self) {
-        debug_assert!(
-            self.work.is_none() && self.completed.is_none(),
-            "library work must be cancelled and joined, never dropped"
-        );
     }
 }

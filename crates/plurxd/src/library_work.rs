@@ -998,4 +998,146 @@ mod tests {
             "committed completion survives lost acknowledgement"
         );
     }
+
+    /// One queued full-library request on a fresh store, ready to be claimed.
+    async fn queued_library(
+        request_id: &str,
+    ) -> (
+        Arc<dyn Store>,
+        tempfile::TempDir,
+        Arc<JobManager>,
+        Arc<TranscodeManager>,
+    ) {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Queued library".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        enqueue_full(store.as_ref(), library.id, request_id, false).await;
+        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+        let transcode = transcode_for(Arc::clone(&store), root.path());
+        (store, root, jobs, transcode)
+    }
+
+    /// What the environment still held at the instant its live work future was
+    /// dropped.
+    #[derive(Debug, Default)]
+    struct HeldWhenWorkDropped {
+        queue_released: bool,
+        domain_released: bool,
+        admission_released: bool,
+    }
+
+    /// Aborting a worker task mid-work drops its environment with the work
+    /// future alive. The work must go first, then its publisher and lease, then
+    /// physical admission, and the queue fence last, exactly as the pre-driver
+    /// worker's stack locals released. The previous field order released the
+    /// fence (cancelling its loss token) and admission (returning the transcode
+    /// permit and the heavy gate) while the work future could still run.
+    #[tokio::test]
+    async fn library_worker_abort_releases_in_the_original_order() {
+        let (_store, _root, jobs, transcode) = queued_library("abort-order").await;
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (task, scope, _resume) = spawn_worker(
+            "w1",
+            jobs,
+            Arc::clone(&transcode),
+            tx,
+            Some(WorkerPoint::BeforeScan),
+            false,
+            0,
+        );
+        let processing = next_worker_event(&mut events, "w1", WorkerPoint::Processing).await;
+        next_worker_event(&mut events, "w1", WorkerPoint::BeforeScan).await;
+        let signals = processing.signals.expect("worker loss tokens");
+        assert!(
+            transcode.background_worker_in_use(),
+            "the held scan holds physical admission"
+        );
+        assert!(!signals.queue_loss.is_cancelled() && !signals.domain_loss.is_cancelled());
+
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        crate::background_jobs::faults::worker::on_pause_end(&scope, {
+            let observed = Arc::clone(&observed);
+            let signals = signals.clone();
+            let transcode = Arc::clone(&transcode);
+            move || {
+                *observed.lock().expect("observation") = Some(HeldWhenWorkDropped {
+                    queue_released: signals.queue_loss.is_cancelled(),
+                    domain_released: signals.domain_loss.is_cancelled(),
+                    admission_released: !transcode.background_worker_in_use(),
+                });
+            }
+        });
+        task.abort();
+        let error = task.await.expect_err("aborted worker does not complete");
+        assert!(error.is_cancelled(), "abort must not panic: {error:?}");
+
+        let at_work_drop = observed
+            .lock()
+            .expect("observation")
+            .take()
+            .expect("the live work future was dropped by the abort");
+        assert!(
+            !at_work_drop.queue_released
+                && !at_work_drop.domain_released
+                && !at_work_drop.admission_released,
+            "nothing is released before the work future: {at_work_drop:?}"
+        );
+        assert!(
+            signals.queue_loss.is_cancelled() && signals.domain_loss.is_cancelled(),
+            "the fence and lease are released once the environment is gone"
+        );
+        assert!(
+            !transcode.background_worker_in_use(),
+            "admission is released with the environment"
+        );
+    }
+
+    /// A panic that unwinds through a worker drops its environment while
+    /// panicking. A `Drop` assertion there would be a double panic, which
+    /// aborts the whole process, so this test crashing the test binary is the
+    /// failure mode.
+    #[tokio::test]
+    async fn library_worker_environment_drops_quietly_while_unwinding() {
+        let (_store, _root, jobs, transcode) = queued_library("unwind-drop").await;
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (scope, _resume) = worker_scope("w1", tx, Some(WorkerPoint::BeforeScan), false);
+        let (unwind, unwinding) = oneshot::channel::<()>();
+        let task = {
+            let transcode = Arc::clone(&transcode);
+            tokio::spawn(async move {
+                crate::background_jobs::faults::worker::run(scope, async move {
+                    let mut unwinding = unwinding;
+                    let mut work = Box::pin(jobs.work_library_queue(&transcode, None));
+                    tokio::select! {
+                        biased;
+                        _ = &mut unwinding => panic!("injected unwind with live library work"),
+                        claimed = &mut work => claimed,
+                    }
+                })
+                .await
+            })
+        };
+        next_worker_event(&mut events, "w1", WorkerPoint::BeforeScan).await;
+        assert!(transcode.background_worker_in_use());
+        unwind.send(()).expect("start unwinding");
+        let error = task.await.expect_err("the injected panic ends the task");
+        assert!(error.is_panic(), "only the injected panic: {error:?}");
+        let payload = error.into_panic();
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("injected unwind with live library work")
+        );
+        assert!(
+            !transcode.background_worker_in_use(),
+            "unwinding still released admission"
+        );
+    }
 }
