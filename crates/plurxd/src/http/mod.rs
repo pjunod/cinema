@@ -54,6 +54,7 @@ pub(crate) mod peer_transport;
 mod pgs_overlay;
 mod photos;
 mod plex;
+pub(crate) use plex::looks_like_plex;
 pub(crate) mod plex_census;
 pub(crate) mod publication;
 mod reading;
