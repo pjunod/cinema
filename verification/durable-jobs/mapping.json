@@ -525,13 +525,13 @@
         "anchor": "            Request::Bind => {",
         "sha256": "96d8e60ad960296faa4b604923c774d4090b3b86da9091686d0709554bedbb37",
         "source": "crates/plurxd/src/library_work/env.rs",
-        "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:257"
+        "table": "review \u00a73 citation (was crates/plurxd/src/library_work.rs:257) now library_work/env.rs Request::Bind"
       },
       {
         "anchor": "\"library publication binding refused\"",
         "sha256": "96d8e60ad960296faa4b604923c774d4090b3b86da9091686d0709554bedbb37",
         "source": "crates/plurxd/src/library_work/env.rs",
-        "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:260"
+        "table": "review \u00a73 citation (was crates/plurxd/src/library_work.rs:260) now library_work/env.rs bind refusal warning"
       },
       {
         "anchor": "                let scan = self",
