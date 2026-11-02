@@ -279,7 +279,7 @@
         "table": "FIFO lock contract pinned Tokio dependency",
         "source": "Cargo.lock",
         "anchor": "name = \"tokio\"\nversion = \"1.53.1\"",
-        "sha256": "189b5736b7cb472c0b50176fbc112d275c8db11fc5f455f84cb895b41bb974dc"
+        "sha256": "c39e63b126a56a89cafb7c0ac4499fcaccb65130666c15de6f53dbc6de6a6905"
       },
       {
         "table": "production-consumed post-claim lifecycle controller; local safety only",
