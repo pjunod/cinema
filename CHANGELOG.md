@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Weekly release readiness validates the shipped Jellyfin FFmpeg runtime in
+  a candidate-built CI image instead of waiting for obsolete FFmpeg 6 runners.
+
 - Apple clients remember selected self-signed server identities and use them
   for HTTPS sign-in, artwork and playback without a manually installed certificate.
 - Apple TV Settings enters each category at its first setting and restores the

@@ -153,6 +153,17 @@ at 06:00 UTC and starts from `main`'s tip:
   there is `make release-check`; if not, the gate on the tip is the same
   `scripts/validate run --profile ci --all --strict` sweep, so every week
   answers "is `main` releasable" whether or not anything is waiting.
+- Both checks build the checked-out commit's CI tooling on the media assets
+  selected by release publication, then run the resulting immutable image ID.
+  On amd64 this includes exporting and installing the audited Dolby media
+  package through `runtime-assets-dolby-amd64`; older sources without that
+  contract use `runtime-assets`:
+  `PLURX_FFMPEG`, `PLURX_FFPROBE` and bare shell commands all use the shipped
+  Jellyfin FFmpeg 8 executables. The host needs Docker and the Rust-suite
+  memory pool, with no host FFmpeg requirement. The source is mounted at its
+  host path so Android's sibling containers read the same checkout; checks
+  run as the runner user and reuse the bounded Cargo cache. The current
+  execution helper is retained before checking out a historical release.
 - Only when that gate is green, on a scheduled run, for a pending release,
   does the `tag` job push the annotated tag, onto the release commit the gate
   passed. The tag starts `ci.yml`'s full sweep and the image publication in

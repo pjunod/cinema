@@ -1530,6 +1530,7 @@ paths = [
   "scripts/docker-https-ports.py",
   "scripts/registry-push",
   "scripts/release-cut",
+  "scripts/release-readiness",
   "scripts/sign-android-release",
   "tests/operations/**",
   "tests/desktop/**",

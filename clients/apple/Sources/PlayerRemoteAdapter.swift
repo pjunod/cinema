@@ -411,6 +411,22 @@ final class RemotePhysicalInputObserver: ObservableObject {
 #endif
 
 #if os(tvOS)
+/// Decode the category rail's Right at the adapter boundary, keeping the
+/// selected category and entry request in the settings view.
+private struct TVSettingsCategoryEntryAdapter: ViewModifier {
+    let enterContent: () -> Void
+    func body(content: Content) -> some View {
+        content.onMoveCommand { direction in
+            if direction == .right { enterContent() }
+        }
+    }
+}
+extension View {
+    func tvSettingsCategoryEntry(_ enterContent: @escaping () -> Void) -> some View {
+        modifier(TVSettingsCategoryEntryAdapter(enterContent: enterContent))
+    }
+}
+
 /// Only the settings content pane owns this Back. The category rail remains
 /// outside the adapter, retaining native root behavior and spatial movement.
 private struct TVSettingsContentExitAdapter: ViewModifier {

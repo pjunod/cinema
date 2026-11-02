@@ -4347,7 +4347,7 @@ assert.equal(context.ACT_TIMER, null);
         # job itself is pinned in tests/operations/test_release_cut.py.
         self.assertIn('  schedule:\n    - cron: "0 6 * * 1"\n', readiness)
         self.assertIn("workflow_dispatch:", readiness)
-        self.assertIn("run: make release-check", readiness)
+        self.assertIn('run: python3 "$RUNNER_TEMP/release-readiness" make release-check', readiness)
         self.assertIn("fetch-depth: 0", readiness)
 
     def test_effort_web_lints_source_without_provisioning_behavior_browser(self):
@@ -4522,6 +4522,8 @@ assert.equal(context.ACT_TIMER, null);
                     and name == "apple_compile"
                 ):
                     expected = apple
+                elif path == ".github/workflows/release-readiness.yml" and name == "release-check":
+                    expected = local("Linux", "X64", "lab", "unit-memory-16g")
                 elif path == ".github/workflows/ci.yml" and name == "check":
                     expected = local("Linux", "X64", "lab", "unit-memory-16g")
                 elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
