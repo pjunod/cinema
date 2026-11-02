@@ -431,6 +431,52 @@ whole safety mechanism rather than a courtesy, and it is stricter: the daemon
 must have no child processes **and** its work root must have been untouched for
 two minutes.
 
+**A user-owned Apple standby uses its controller.** The root macOS janitor
+only discovers system LaunchDaemons; installing it does not cover a runner
+supervised by a user LaunchAgent. Upgrade the existing
+[`plurx-apple-standby`](../../deploy/apple-runner/plurx-apple-standby)
+controller while idle, preserving its registration, user LaunchAgent and
+runner command. Add this optional member to its existing JSON configuration:
+
+```json
+"janitor": {}
+```
+
+The defaults are a 20 GiB cache budget, 25 GiB free-space reserve, hourly
+inspection, and at least 120 seconds of `_work` quiet. The runner YAML must
+explicitly set a nonzero `runner.shutdown_timeout` and `cache.dir` must be
+exactly `runner_directory/cache`. The runner directory must be canonical and
+owned by the controller's user; symlinked caches and directories without cache
+server markers are refused. The user janitor never deletes `_work`.
+
+Maintenance runs under the controller's existing lock, so a new runner cannot
+start between the idle check and cache deletion. Busy work is deferred. An idle
+runner receives one graceful SIGTERM; the controller waits for its exit,
+checks remaining job descendants and the quiet window again, then renames the
+complete index/blob directory to `cache.janitor-retired` before removing it.
+There is no `launchctl bootout`, forced kill or borrowed operator pause marker.
+A ci-fleet Resume cannot bypass maintenance, and an existing operator pause
+survives it.
+
+**Read the user receipt.** The default is
+`~/.local/state/plurx-ci-janitor/last-run.json`; set the ci-fleet agent's
+`janitor_state` to that absolute path. The optional `janitor.state_dir` changes
+the receipt directory. `instances: 1` identifies the covered standby; `state`
+distinguishes `healthy`, `waiting_for_idle`, `waiting_for_exit`, `reset`,
+`below_reserve_small_cache` and `error`. A small cache under disk pressure is
+reported without a useless reset. A deletion failure leaves the retired cache
+outside the active namespace, permits a fresh consistent cache, and keeps
+reporting the retained cleanup as an error until you inspect it. Preserve the
+new active cache when resolving that retired directory. The controller never
+promotes an unreadable process snapshot into idle evidence.
+
+The safety regressions are in
+[`test_apple_runner_standby.py`](../../tests/operations/test_apple_runner_standby.py):
+run `python3 -m unittest tests.operations.test_apple_runner_standby` before
+upgrading a controller. `janitor.budget_gb`, `reserve_gb`, `quiet_seconds` and
+`interval_seconds` may override the defaults; `quiet_seconds` cannot be below
+120. Omit `janitor` to leave maintenance to the existing system janitor.
+
 **What a pass does.** For every `forgejo-runner*.service` on the host it reads
 that runner's own `config.yml` for its `cache.dir`, and if the directory is
 over the 20 G budget *or* its filesystem is under the 20 % reserve, it resets
