@@ -34,12 +34,13 @@ rm -rf "$probe"
 
 test "$PLURX_FFMPEG" = /usr/lib/jellyfin-ffmpeg/ffmpeg
 test "$PLURX_FFPROBE" = /usr/lib/jellyfin-ffmpeg/ffprobe
+test -x "$PLURX_BOUND_FFPROBE"
 test "$(readlink -f "$(command -v ffmpeg)")" = "$PLURX_FFMPEG"
 test "$(readlink -f "$(command -v ffprobe)")" = "$PLURX_FFPROBE"
 ffmpeg -version | grep -E '^ffmpeg version n?8[.]'
 ffprobe -version | grep -E '^ffprobe version n?8[.]'
 dpkg-query -W jellyfin-ffmpeg8
-sha256sum "$PLURX_FFMPEG" "$PLURX_FFPROBE"
+sha256sum "$PLURX_FFMPEG" "$PLURX_FFPROBE" "$PLURX_BOUND_FFPROBE"
 if [ "$READINESS_MEDIA_TARGET" = runtime-assets-dolby-amd64 ]; then
   # CI build tools must not replace any of the audited runtime's ELF providers.
   sha256sum -c /usr/lib/jellyfin-ffmpeg/provenance/shipping-system-elf-sha256.txt
@@ -184,6 +185,9 @@ def container_command(image: str, command: list[str], name: str) -> list[str]:
         "READINESS_GROUPS": ",".join(str(g) for g in sorted({os.getgid(), *os.getgroups()})),
         "PLURX_FFMPEG": "/usr/lib/jellyfin-ffmpeg/ffmpeg",
         "PLURX_FFPROBE": "/usr/lib/jellyfin-ffmpeg/ffprobe",
+        "PLURX_BOUND_FFPROBE": "/usr/local/lib/plurx/ffprobe",
+        "PLURX_DOVI_TOOL": "/usr/local/bin/dovi_tool",
+        "PLURX_MKVMERGE": "/usr/bin/mkvmerge",
     }
     env.update({key: os.environ[key] for key in FORWARD_ENV if key in os.environ})
     for key, value in env.items():
