@@ -10,18 +10,19 @@ This document owns Apple runner preference, outage detection and installation.
 
 | Role | Forgejo runner | Host | Account | Toolchain |
 |---|---|---|---|---|
-| Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Xcode 27.0, `27A266a`; awaiting the 27.2 upgrade |
+| Primary | `gha-maca-apple-01` | M4 MacBook Air, `maca` | `githubrunner` | Xcode 27.2, `27B52`; two runner slots |
 | Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `pjunod` | Xcode 27.2, `27B52` |
 
 The toolchain pin is Xcode 27.2 (`27B52`). The standby's Xcode updated itself
 from 27.1 to 27.2 on 2026-10-30, which removed 27.1, so no runner matched the old
 pin and every Apple job failed its toolchain check. It was observed on 2026-11-01
 with the iOS 27.2 and tvOS 27.2 SDKs and the iOS 26.5 and tvOS 26.5 simulator
-runtimes (the navigation journeys use tvOS 26.5). The primary still reports
-27.0 and must match the pin before it can serve Apple jobs. A runner's
-labels live in its `server.connections` entry in
-`/opt/homebrew/etc/forgejo-runner/config.yaml`; there is no `.runner` file,
-and creating one makes the daemon refuse to start. The standby's
+runtimes (the navigation journeys use tvOS 26.5). The primary was brought to the same pin on 2026-11-01 and its idle daemon
+restarted with capacity two. Its v13.1 configuration uses `runner.labels` in
+the runner account's `~/forgejo-runner/config.yml` and keeps its existing
+registration file. The standby v13.2 labels live in its `server.connections`
+entry in `/opt/homebrew/etc/forgejo-runner/config.yaml`; creating a legacy
+`.runner` file there makes that daemon refuse to start. The standby's
 `xcode-27.1:host` label became `xcode-27.2:host` there on 2026-11-01, and its
 daemon was restarted while idle. This source change installs and restarts
 nothing.
@@ -33,8 +34,17 @@ contains absolute paths, while repeated Forgejo jobs have used different
 checkout roots. Path-specific keys would miss those jobs and still upload the
 cache. Existing Forgejo cache blobs, Rust caches and tool caches are unchanged.
 
+On 2026-11-01, Paul approved two concurrent fast-lane Apple jobs on the
+32 GiB M4 dedicated to CI, bounded by Forgejo runner capacity two. Fast-lane
+jobs have no repository-wide heavy-work lock: each owns its checkout,
+DerivedData, newly created simulator UUID and run/attempt evidence directory.
+The per-PR workflow lock still orders updates to the same pull request.
+Full CI and Lima ARM64 packaging retain `plurx-apple-silicon-heavy`; full Apple
+unit tests still use shared named simulator destinations. The source scheduling
+change neither updates runner services nor proves concurrent hardware execution.
+
 Generic iOS and tvOS simulator builds still cover arm64 and x86_64. Toolchain
-pins, concurrency and promotion gates are unchanged by this cache boundary. This
+pins and promotion gates are unchanged by this cache boundary. This
 cache boundary does not establish the cause of a compiler failure or qualify a new
 candidate; the existing build and native test checks remain required.
 The [workflow regression](../../tests/operations/test_apple_tv_navigation_gate.py)
@@ -58,9 +68,8 @@ The per-test 180/240-second limits and all unit/navigation gates remain.
 
 Both carry `self-hosted`, `macOS`, `ARM64`, `lab`, `apple`, and `xcode-27`.
 The primary also carries `primary`, and the backup carries `backup`.
-Apple workflows additionally require `xcode-27.2`. Only the backup currently
-provides that label; the primary must complete its Xcode upgrade before it
-can receive the label and resume Apple jobs. Forgejo matches labels; the role
+Apple workflows additionally require `xcode-27.2`. Both runners provide that label after the primary
+toolchain and runner-account checks on 2026-11-01. Forgejo matches labels; the role
 labels do not make its scheduler prefer one runner. The
 [standby controller](../../deploy/apple-runner/plurx-apple-standby) enforces
 preference by starting the backup daemon only during an outage. Apple jobs request the common labels plus the exact toolchain label.

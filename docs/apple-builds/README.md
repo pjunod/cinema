@@ -75,6 +75,14 @@ generated form of every surface, refuses to let per-build narrative move back
 into either status blockquote, and merges two branches cut from one base in
 sequence to prove they no longer collide.
 
+## Apple TV playback
+
+[Return playback to its title after sleep](1347-apple-tv-sleep-wake.md) records
+the tvOS background teardown, position handoff and pending physical acceptance.
+
+[Keep the timeline moving while a direction is held](1348-apple-tv-held-seek.md)
+records continuous directional previews and release/cancellation behavior.
+
 ## Notes moved from the docs index
 
 iPhone Live TV guide: [Restore the station-logo time grid](1273-iphone-guide-grid.md).

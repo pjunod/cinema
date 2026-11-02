@@ -253,7 +253,7 @@ name = "gha-maca-apple-01"
 host = "maca"
 os = "macOS"
 arch = "ARM64"
-labels = ["lab", "apple", "xcode-27", "primary"]
+labels = ["lab", "apple", "xcode-27", "primary", "xcode-27.2"]
 
 [[runners]]
 name = "gha-macb-apple-01"
