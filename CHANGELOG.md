@@ -129,6 +129,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **HTTP app addresses forward to HTTPS while it is active.** Temporary,
+  non-cached redirects preserve the requested path, query, method and body,
+  including remapped Docker HTTPS ports. Health, discovery, cluster RPC and
+  compatibility traffic keep working over their existing HTTP paths.
+
 - Shared libraries across Tailscale accounts: a Cinema running as the macOS
   LaunchAgent can now observe its own Tailscale, so it binds its private
   source address and can connect to other Cinemas (the Tailscale app answered

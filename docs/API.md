@@ -50,6 +50,12 @@ count above stops matching.
 
 ## 1. Surfaces — five things on one port
 
+When native HTTPS is active, public HTTP app/API requests return `307` with
+`Cache-Control: no-store` to the same hostname and reachable HTTPS port;
+path, query, method and body are preserved. HTTPS itself is not redirected.
+Health, discovery, cluster RPC and compatibility exceptions are described in
+[operations](OPERATIONS.md#optional-https-and-persistent-identity).
+
 ```
                          ┌────────────────────────────┐
    browsers, native      │        plurxd :32400       │

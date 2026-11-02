@@ -984,8 +984,10 @@ controls the addressed node's restart-only choice, using persistent generated
 self-signed identity or supplied server-side chain/key files. Saved, desired
 and actually active configuration stay distinct. Admins can download only the
 loaded public certificate chain and inspect its fingerprint; no private key
-is returned. Existing HTTP/discovery and internal cluster transports retain
-their addresses. Client trust and physical playback qualification remain open
+is returned. Active HTTPS temporarily redirects HTTP app/API requests to the
+same host and reachable HTTPS port, preserving path, query, method and body.
+Health, discovery, internal RPC and Plex/Jellyfin compatibility retain HTTP.
+Client trust and physical playback qualification remain open
 in [the HTTPS ledger](server/HTTPS-BUILD.md); the permanent switch moves to
 System after acceptance. [Operations](OPERATIONS.md#optional-https-and-persistent-identity)
 explains precedence, permissions and explicit identity replacement.
