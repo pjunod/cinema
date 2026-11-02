@@ -27,7 +27,7 @@ RUNTIME = {'node':'v22.23.4','npm':'10.9.9','git':'git version 2.55.0','typescri
 
 POLICY_VERSION = 3
 
-SCRIPTS_RESOLVER_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '48743b916c2a75d4e0e9531a52abff0b9f318d726be407f84d5fe1cc760e3a99', '087e836d369eb2b8f94ec1d0454ea6c157612df9': '72f0accba4f82129287fb12cb8b53c5739cf49f4dff530eb6d64bc464be6ec61', 'integrated-main-77e985-v1': '1ba18caa8750ee8b6f3a1b3aeaf5ed7954c531fd92faa7fb1ff548c2dca8caf2', 'integrated-main-28edf-v1': 'ca4337b7b6840903eba37aa11afec90ca10e59d7e34bf442346064cf0a80e945'}
+SCRIPTS_RESOLVER_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '48743b916c2a75d4e0e9531a52abff0b9f318d726be407f84d5fe1cc760e3a99', '087e836d369eb2b8f94ec1d0454ea6c157612df9': '72f0accba4f82129287fb12cb8b53c5739cf49f4dff530eb6d64bc464be6ec61', 'integrated-main-77e985-v1': '1ba18caa8750ee8b6f3a1b3aeaf5ed7954c531fd92faa7fb1ff548c2dca8caf2', 'integrated-main-28edf-v1': 'ca4337b7b6840903eba37aa11afec90ca10e59d7e34bf442346064cf0a80e945', 'integrated-main-eb322-v1': '2495b4cb1b33030d8a2a13da2f5752c484865c9dedfd168c2b29a2799710117b'}
 
 PYTHON_POLICY = 'python3 stdlib planning, summary and loopback HTTP fixtures v1'
 
