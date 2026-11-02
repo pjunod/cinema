@@ -485,6 +485,15 @@ ffmpeg 8; the gate was green by accident of whichever image `ubuntu-latest`
 resolved to that week, and a promotion past 24.04 would have turned `main` red
 in one silent step with no diff to blame.
 
+Weekly release readiness builds the candidate's CI tooling on the media
+stage selected by release publication and runs the strict CI catalog by the
+resulting immutable image ID. For amd64 sources with the audited package
+export, it builds that export and inherits `runtime-assets-dolby-amd64`;
+otherwise it inherits `runtime-assets`. The production Dockerfile is unchanged.
+The audited runtime's system ELF hashes must still match after adding CI tools.
+It checks both the daemon's explicit FFmpeg/ffprobe paths and bare shell resolution before executing any checks;
+a host's installed FFmpeg is never used as release-readiness evidence.
+
 The nightly `ffmpeg8-pacing` job remains a separate capability contract on
 Ubuntu 26.04's distro ffmpeg 8. It is not a substitute for the full-sweep
 jobs on the shipped Jellyfin build: the two builds can differ despite sharing
