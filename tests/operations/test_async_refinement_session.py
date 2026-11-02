@@ -428,6 +428,25 @@ class SourceImmutabilityTests(unittest.TestCase):
             sys.modules.pop('bytecode_probe',None)
 
 
+class AdmissionInstantTests(unittest.TestCase):
+    """The 300-second admission window is measured to the dispatch, not to the job's clock."""
+    class API:
+        def __init__(self,current):self.current_run=current
+        def get(self,path,query=None,limit=None):
+            assert path=='/actions/runs/7' and limit==s.RUN_RECORD_BYTES
+            return {'id':7,'event':'','trigger_event':'workflow_dispatch','created':'2026-11-02T03:00:00Z'}
+
+    def test_first_unit_job_admits_at_its_own_dispatch(self):
+        with patch.object(s.time,'time',return_value=s.utc('2026-11-02T03:04:00Z')):
+            self.assertEqual(s.admission_instant(self.API(7),[]),s.utc('2026-11-02T03:00:00Z'))
+
+    def test_later_attempts_and_the_controller(self):
+        prior=[{'run':{'created':'2026-11-02T02:58:00Z'}}]
+        self.assertEqual(s.admission_instant(self.API(7),prior),s.utc('2026-11-02T02:58:00Z'))
+        with patch.object(s.time,'time',return_value=123.0):
+            self.assertEqual(s.admission_instant(SimpleNamespace(),[]),123.0)
+
+
 class ActualRunnerTests(unittest.TestCase):
     """Forgejo exports no RUNNER_NAME; the task log preamble names the runner that took the task."""
     UUID='3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b'

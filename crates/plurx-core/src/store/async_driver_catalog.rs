@@ -3694,7 +3694,7 @@ mod tests {
         let bytes = serde_json::to_string(&json!({"rows":rows,"episode":episode}))?;
         let physical = catalog.intern_physical(&serde_json::to_string(&rows)?)?;
         let episode = catalog.intern_episode(&serde_json::to_string(&episode)?)?;
-        let boundary=catalog.append_checked_boundary(checked_boundary(json!({"physical_rows_id":physical.get(),"episode_id":episode.get(),"omitted_utf8":"{}","canonical_utf8":bytes,"phase":"initial","source":catalog.source(),"writer_epoch":1,"initial_image_id":"a".repeat(64)})))?;
+        let boundary=catalog.append_checked_boundary(checked_boundary(json!({"physical_rows_id":physical.get(),"episode_id":episode.get(),"omitted_utf8":"{}","canonical_utf8":bytes,"phase":"initial","source":catalog.source(),"writer_epoch":uuid::Uuid::from_u64_pair(0, 1).to_string(),"initial_image_id":"a".repeat(64)})))?;
         let store=catalog.intern_checked_store(checked_store(json!({"physical_rows_id":physical.get(),"episode_id":episode.get(),"canonical_utf8":bytes,"sha256":digest(bytes.as_bytes()),"initial_image_id":"a".repeat(64),"sqlite_schema_sha256":"b".repeat(64),"omitted_observation_id":boundary.get(),"certification":"actual_init_checked"})))?;
         let mut contexts = Vec::new();
         for context in CONTEXTS {

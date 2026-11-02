@@ -6,7 +6,7 @@
   "source_bindings": {
     "oracle": {
       "path": "crates/plurx-core/src/store/async_driver_refinement.rs",
-      "sha256": "e8bddbf56a37f4dcfecaf3922dd06bdca9b4c538589cab916d3a19448698831f",
+      "sha256": "54d2c3f74af9987144576785634f879350c2cfb935706e0d9b17e89e56f52e23",
       "anchors": [
         {
           "text": "pub(super) struct Episode {",

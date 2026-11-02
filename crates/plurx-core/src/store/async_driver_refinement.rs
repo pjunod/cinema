@@ -2276,7 +2276,10 @@ impl Oracle {
     ) -> paged::CatalogResult<(paged::RecordRef, u64, u64)> {
         let physical = catalog.intern_physical(&serde_json::to_string(&observed.rows)?)?;
         let episode = catalog.intern_episode(&serde_json::to_string(&observed.episode)?)?;
-        let boundary=catalog.append_checked_boundary(paged::checked_boundary(json!({"physical_rows_id":physical.get(),"episode_id":episode.get(),"omitted_utf8":paged::canonical(&observed.omitted_dv),"canonical_utf8":observed.canonical,"phase":phase,"source":catalog.source(),"writer_epoch":epoch,"initial_image_id":image})))?;
+        // The sealed schema types writer_epoch as a UUID; the epoch number is encoded
+        // one-to-one into it, and consumers compare epochs only for equality.
+        let writer_epoch = uuid::Uuid::from_u64_pair(0, epoch).to_string();
+        let boundary=catalog.append_checked_boundary(paged::checked_boundary(json!({"physical_rows_id":physical.get(),"episode_id":episode.get(),"omitted_utf8":paged::canonical(&observed.omitted_dv),"canonical_utf8":observed.canonical,"phase":phase,"source":catalog.source(),"writer_epoch":writer_epoch,"initial_image_id":image})))?;
         Ok((
             catalog
                 .get_id("BoundaryObservation", boundary.get())?

@@ -3294,6 +3294,24 @@ def intent_sha(pend):
     return pend['intent']['sha256']
 
 
+def admission_instant(api, inventory):
+    """When the session was admitted: the creation of its first dispatched attempt.
+
+    Inside a producer job the inventory excludes the job's own run, so for the first unit
+    the first attempt is the current run; its creation (the dispatch), not the job's clock
+    minutes later, is the instant the 300-second measurement window is checked against.
+    The controller before any dispatch admits now.
+    """
+    if inventory:
+        return utc(inventory[0]['run']['created'])
+    current = getattr(api, 'current_run', None)
+    if current is not None:
+        run = api.get('/actions/runs/' + str(receipts.positive(current)), limit=RUN_RECORD_BYTES)
+        p.require(type(run) is dict and run.get('id') == current and p.dispatched(run), 'current attempt record differs')
+        return utc(run['created'])
+    return time.time()
+
+
 def replay_control(api,control,root,work):
     p.closed(control,CONTROL_KEYS)
     p.require(type(control['schema_version']) is int and control['schema_version']==1 and type(control['unit_runs']) is list
@@ -3312,7 +3330,7 @@ def replay_control(api,control,root,work):
     work=Path(work);work.mkdir(parents=True,exist_ok=True)
     probe,measurement,_=authenticate_output(api,reg,control['probe_run']['success_run'],'unit',work/'probe',root)
     probe['finalizer_capability']=authenticate_probe_pair(api,reg,control['probe_run'])
-    admitted_at=utc(inventory[0]['run']['created']) if inventory else time.time()
+    admitted_at=admission_instant(api,inventory)
     state=admit(reg,control['resource_plan'],probe,measurement,root,admitted_at)
     controller_memory_limit(state['resource_plan'])
     p.require(control['session_id']==plan['session_id'],'control session UUID differs')
