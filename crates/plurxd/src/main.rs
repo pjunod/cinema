@@ -2339,6 +2339,14 @@ async fn boot_observing(
         _ => None,
     };
     let prepared_https = https::Prepared::open(&config).await?;
+    let https_redirect_port = https::redirect::port(
+        config
+            .server
+            .https
+            .enabled
+            .then_some(config.server.https.port),
+        std::env::var("PLURX_HTTPS_REDIRECT_PORT"),
+    )?;
     let Boot {
         source_activation_at_boot,
         store,
@@ -2539,6 +2547,9 @@ async fn boot_observing(
     )
     .await;
     let jellyfin_stop = jellyfin.stop_token();
+    // HTTPS and Jellyfin retain the original router. Only the public HTTP
+    // listener (including its startup-observation handoff) redirects.
+    let app = https::redirect::router(app, https_redirect_port);
 
     let shutdown = async move {
         tokio::select! {

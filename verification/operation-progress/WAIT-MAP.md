@@ -5,6 +5,24 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## HTTP-to-HTTPS redirect — scoped source audit on 2026-11-01
+
+Codex landing agent `/root/triage_ready_prs` compared PR #1308's integrated
+[startup source](../../crates/plurxd/src/main.rs) with main
+`eb3229a65bf056e54b9f76ae9b1bcd78acbf72cc`. The delta validates the
+boot-active redirect port and wraps only the public HTTP router after the
+separate HTTPS and Jellyfin listeners retain the original router. The mapped
+`background_work_loop` spawn and argument, selected worker bodies and shutdown
+consumers are unchanged. Redirect validation, public listener startup and
+HTTP request latency remain outside this finite library-worker guarantee.
+
+Only Table44's whole-file hash follows these inspected bytes. The exact anchor
+remains unique; model, configurations, toolchain, properties, bounds, fairness
+premises, scope and historical receipts retain their identities. This authored
+source audit is not a second independent adversarial review and supplies no
+runtime, TLC or qualification evidence. The PR's original independent review
+and focused HTTP-to-TLS regression remain separately scoped evidence.
+
 ## Local main integration — source correspondence on 2026-10-29
 
 The repair source `59c648db` is combined locally with main `5ac9d8f25`.

@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-28, plurx has 408 routes declared by the ordinary listener's
+As of 2026-10-28, plurx has 409 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 408 routes across the registered routers.
+plurx has 409 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -49,6 +49,12 @@ count above stops matching.
 ---
 
 ## 1. Surfaces — five things on one port
+
+When native HTTPS is active, public HTTP app/API requests return `307` with
+`Cache-Control: no-store` to the same hostname and reachable HTTPS port;
+path, query, method and body are preserved. HTTPS itself is not redirected.
+Health, discovery, cluster RPC and compatibility exceptions are described in
+[operations](OPERATIONS.md#optional-https-and-persistent-identity).
 
 ```
                          ┌────────────────────────────┐
@@ -4131,6 +4137,7 @@ including errors, carries `Cache-Control: no-store`.
 | PUT | `/api/v1/sharing/exports/{id}/libraries` | Replace the selected library scope using the expected generation. |
 | DELETE | `/api/v1/sharing/exports/{id}` | Revoke the source grant. |
 | GET / POST | `/api/v1/sharing/imports` | List imports or begin a pinned, identity-checked invitation claim. |
+| PUT | `/api/v1/sharing/imports/{id}/name` | Rename the recipient's local share label using the expected current name. |
 | POST | `/api/v1/sharing/imports/{id}/re-pair` | Explicitly pair a replacement invitation into the selected import. |
 | POST | `/api/v1/sharing/imports/{id}/rotate` | Persist a replacement credential before the recoverable upstream rotation. |
 | GET / PUT | `/api/v1/sharing/imports/{id}/assignments` | Read the complete assignment snapshot or replace individually assigned local viewers using assignment-generation CAS. |
@@ -4140,6 +4147,22 @@ including errors, carries `Cache-Control: no-store`.
 | DELETE | `/api/v1/sharing/imports/{id}` | Disconnect the import and advance its lifecycle. |
 | ANY | `/sharing` | Refuse peer traffic on the ordinary listener with `404 sharing_not_found`. |
 | ANY | `/sharing/{*path}` | Refuse every peer path on the ordinary listener with the same typed 404. |
+
+`POST /api/v1/sharing/imports` accepts an optional `name`. Omit it, pass
+`null`, or leave it blank to use the verified Source Cinema's name. A supplied
+name is trimmed and limited to 128 UTF-8 bytes without control characters.
+This label belongs to the importing household and appears in its shared
+library directory, history and management screens.
+
+`PUT /api/v1/sharing/imports/{id}/name` is administrator-only and accepts
+`{"expected_name":"Alex’s Cinema","name":"Alex’s Weekend Cinema"}`.
+The new name must be nonempty after trimming and meet the same byte and
+character limits. `expected_name` must exactly match the stored label;
+a stale value returns `409 sharing_generation_conflict`, a missing import
+returns `404 sharing_not_found`, and success returns `{"updated":true}`.
+Renaming changes only the local label and update timestamp: Source identity,
+credentials, assignments and authority generations are unchanged. Re-pairing
+preserves the local name.
 
 `POST /api/v1/sharing/connection` returns `name`, bounded `network` consent
 links, `connected`, and `connection_error`. With `probe: true`, a failed

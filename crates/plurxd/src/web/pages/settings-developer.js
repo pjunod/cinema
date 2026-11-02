@@ -713,18 +713,18 @@ function httpsSettingsMount(value,error){
 function httpsConnectionUrl(value,href=location.href){
   const url=new URL(href);
   if(!value?.active?.enabled) return null;
-  url.protocol="https:";url.port=String(value.active.port);
+  if(url.protocol!=="https:"){url.protocol="https:";url.port=String(value.active.port);}
   url.username="";url.password="";url.pathname="/";url.search="";url.hash="";
   return url.href;
 }
 function httpsSettingsCard(value,error){
-  if(!value) return setCard(`${cardHead("HTTPS","Connections to this node; HTTP remains available.","")}
+  if(!value) return setCard(`${cardHead("HTTPS","Connections to this node; HTTP app links forward to HTTPS while active.","")}
     <p>${error?`HTTPS settings are unavailable: ${esc(error)}`:"Loading this node’s HTTPS settings…"}</p>
     <button class="ghost sm" onclick="reloadHttpsSettings(this)">Reload this node</button>`);
   const desired=value.desired,active=value.active,cert=value.certificate;
   const fields=new Set(value.overrides||[]),locked=name=>fields.has(name)?" disabled":"";
   const link=httpsConnectionUrl(value);
-  return setCard(`${cardHead("HTTPS","Connections to this node; HTTP remains available.",`<span class="pill">${active.enabled?"Active":"Inactive"}</span>`)}
+  return setCard(`${cardHead("HTTPS","Connections to this node; HTTP app links forward to HTTPS while active.",`<span class="pill">${active.enabled?"Active":"Inactive"}</span>`)}
     <p>Addressed node: <code>${esc(value.node_id)}</code> · revision <code>${esc(value.revision)}</code></p>
     <p>${value.restart_required?"Saved changes require this node to restart.":"The desired configuration matches this process."} Save never restarts the server. For Docker, apply with <code>make docker-up</code> (source) or <code>make docker-image-up</code> (prebuilt) to update published ports; restarting an existing container cannot change its ports.</p>
     <details><summary>Saved, desired and active configuration</summary><table><thead><tr><th>State</th><th>Enabled / port</th><th>Identity files or generated names</th></tr></thead><tbody>${[["Saved before environment",value.saved],["Desired next boot",desired],["Active process",active]].map(([label,config])=>`<tr><td>${label}</td><td>${config.enabled?"On":"Off"} / ${esc(config.port)}</td><td>${config.cert_file?`${esc(config.cert_file)}<br>${esc(config.key_file)}`:`Self-signed: ${esc(config.sans.join(", "))}`}</td></tr>`).join("")}</tbody></table></details>
