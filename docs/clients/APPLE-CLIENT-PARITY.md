@@ -11,7 +11,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-10-13): source is v0.8.0, Apple build 284. Timer-only
+> Status (2026-10-13): source is v0.8.0, Apple build 285. Timer-only
 > presentation stalls stay explicitly unknown and use one bounded same-recipe
 > repair without a legacy quality-reduction ticket. The repair preserves the
 > selected quality, HDR, tracks, offset, film position and pause intent; actual
@@ -77,6 +77,7 @@ measurement rather than asserting that either surface switches modes.
 
 | Area | Web client | iOS / tvOS now | Remaining work |
 |---|---|---|---|
+| Settings choice labels | Setting names remain visible beside values | tvOS uses a named, full-width menu row for Playback, Appearance and Live TV choices; iPhone/iPad retain native Form pickers | Physical Apple TV acceptance pending |
 | Live TV delivery details | Source and delivered codecs appear separately | The preview and fullscreen overlay name the playback method from the server's start response: direct stream with no transcoding, audio transcoding, video transcoding, or both. Info separates copied/transcoded video and audio, output geometry, channel count, HLS packaging, and the reported video encoder. Missing delivery metadata displays “Playback method unavailable.” | Verify these labels on a physical Apple TV; simulator compilation and tests do not establish device playback |
 | Server setup | Manual address | Bonjour `_plurx._tcp` first; manual fallback; port 32400; resolution runs on the main run loop and always returns or fails within its own deadline | Validate discovery on bare metal, host-network Docker, iPhone, and Apple TV; eventual `NWBrowser`/`NWConnection` migration (`NetService` is legacy) |
 | Local-network permission | Browser permission model | Bonjour starts before auth; URL requests wait while the iOS prompt is open | Add UI that distinguishes Denied from multicast unavailable |

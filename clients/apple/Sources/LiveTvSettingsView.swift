@@ -58,10 +58,10 @@ struct LiveTvSettingsView: View {
                 Section("Tuner configuration") {
                     TextField("Tuner private IPv4", text: $admin.ipv4)
                         .disabled(admin.busy)
-                    Picker("Maximum channel streams", selection: $admin.sessions) {
+                    SettingsPicker("Maximum channel streams", value: String(admin.sessions), selection: $admin.sessions) {
                         ForEach(1...4, id: \.self) { Text(String($0)).tag($0) }
                     }.disabled(admin.busy)
-                    Picker("Maximum quality", selection: $admin.height) {
+                    SettingsPicker("Maximum quality", value: admin.height == 0 ? "Original / Auto" : "\(admin.height)p ceiling", selection: $admin.height) {
                         Text("Original / Auto").tag(0)
                         Text("480p ceiling").tag(480)
                         Text("720p ceiling").tag(720)

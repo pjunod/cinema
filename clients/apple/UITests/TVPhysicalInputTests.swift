@@ -31,6 +31,10 @@ final class TVPhysicalInputTests: XCTestCase {
             XCTFail("Could not focus Quality picker")
             return
         }
+        XCTAssertTrue(app.staticTexts["settings-quality-title"].exists,
+                      "Quality must be named beside the selected value")
+        XCTAssertTrue(app.staticTexts["Audio language-title"].exists)
+        XCTAssertTrue(app.staticTexts["Subtitle language-title"].exists)
         remote.press(.select)
 
         let auto = app.descendants(matching: .any)
