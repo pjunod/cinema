@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT / "verification/worker-control"
 CRATE = "crates/plurx-worker-control"
 CORE = f"{CRATE}/src/library_lifecycle.rs"
+STAGED_RUST_SOURCES = ("lib.rs", "library_driver.rs", "library_lifecycle.rs", "proofs.rs")
 HARNESS_NAMES = (
     "t1_all_typed_inputs_total_deterministic",
     "t2_every_reachable_prefix_gates_process",
@@ -39,7 +40,7 @@ HARNESSES = tuple(f"proofs::{name}" for name in HARNESS_NAMES)
 GOVERNED = (
     "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "crates/plurxd/Cargo.toml",
     "crates/plurxd/src/library_work.rs", f"{CRATE}/Cargo.toml",
-    f"{CRATE}/src/lib.rs", CORE, f"{CRATE}/src/proofs.rs",
+    *(f"{CRATE}/src/{name}" for name in STAGED_RUST_SOURCES),
     "scripts/check-worker-control", "verification/worker-control/toolchain.json",
     "verification/worker-control/controls.json",
     "tests/operations/test_worker_control_runner.py",
@@ -217,7 +218,7 @@ def stage_sources(output: Path, source: dict) -> tuple[Path, dict]:
     directory = output / "source"
     (directory / "src").mkdir(parents=True)
     staged = {}
-    for name in ("lib.rs", "library_lifecycle.rs", "proofs.rs"):
+    for name in STAGED_RUST_SOURCES:
         original = ROOT / CRATE / "src" / name
         destination = directory / "src" / name
         shutil.copyfile(original, destination)
@@ -420,6 +421,8 @@ def validate_case_sources(output: Path, source: dict, mutation: bool) -> None:
             expected = source["mutated_core_sha256"]
         if digest(output / "source/src" / name) != expected:
             raise RuntimeError("case source drift")
+    if set(packaging["source_files"]) != set(STAGED_RUST_SOURCES):
+        raise RuntimeError("staged Rust module inventory differs from reviewed source set")
 
 
 def retain_previous(prior: Path | None, output: Path, harness: str, source: dict,
@@ -442,6 +445,11 @@ def retain_previous(prior: Path | None, output: Path, harness: str, source: dict
         validate_case_sources(prior, old_source, marker is not None)
         old_candidate = old_source["source"] if marker else old_source
         new_candidate = source["source"] if marker else source
+        # Older receipts predate the real async driver input. They cannot be
+        # adopted as proof of the enlarged Rust module graph.
+        if any(path not in old_candidate.get("files", {}) or path not in new_candidate.get("files", {})
+               for path in PROOF_INPUTS):
+            return None
         if any(old_candidate["files"][path] != new_candidate["files"][path] for path in PROOF_INPUTS):
             return None
         if marker and any(old_source[key] != source[key] for key in
@@ -545,7 +553,7 @@ def controls(driver: Path, env: dict, output: Path, source: dict, tools: dict,
         try:
             source_dir = destination / "source/src"
             source_dir.mkdir(parents=True)
-            for name in ("lib.rs", "library_lifecycle.rs", "proofs.rs"):
+            for name in STAGED_RUST_SOURCES:
                 shutil.copyfile(output / "source/src" / name, source_dir / name)
             mutated = mutate_source(original, control)
             (source_dir / "library_lifecycle.rs").write_text(mutated)
