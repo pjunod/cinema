@@ -9,7 +9,9 @@ CREATE TABLE IF NOT EXISTS foreground_source_owners (
     projection_json TEXT NOT NULL CHECK(json_valid(projection_json)),
     started_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    lease_expires_at_ms INTEGER NOT NULL
+    lease_expires_at_ms INTEGER NOT NULL,
+    settlement_proof TEXT CHECK(settlement_proof IN ('no_reader','aborted','joined')) DEFAULT 'no_reader',
+    activation_id TEXT
 ) STRICT;
 -- next statement
 CREATE VIEW IF NOT EXISTS foreground_source_required_resources AS
@@ -108,7 +110,9 @@ CREATE TABLE IF NOT EXISTS background_source_custody (
     phase TEXT NOT NULL CHECK(phase IN ('active','paused','cleanup_pending')),
     started_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    lease_expires_at_ms INTEGER NOT NULL
+    lease_expires_at_ms INTEGER NOT NULL,
+    settlement_proof TEXT CHECK(settlement_proof IN ('no_reader','aborted','joined')) DEFAULT 'no_reader',
+    activation_id TEXT
 ) STRICT;
 -- next statement
 CREATE VIEW IF NOT EXISTS source_io_occupancy AS

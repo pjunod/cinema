@@ -1423,6 +1423,10 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         ledger.transactions.push(transaction(1,"a".repeat(64),QualityState::Presented,Some(0)));
         ledger.transactions.push(transaction(2,"b".repeat(64),QualityState::Ready,None));
         ledger.latest_intent_revision=2;
+        ledger.transactions[1].state=QualityState::Preparing;
+        assert!(VodServe::companion_source_required(&ledger, &"b".repeat(64)),
+            "accepted Prepare upgrades source purpose before init is ready");
+        ledger.transactions[1].state=QualityState::Ready;
         let active = |ledger:&QualityLedger| VodServe::controlled_video_demand(ledger).expect("active")
             .into_iter().map(str::to_owned).collect::<Vec<_>>();
         assert_eq!(active(&ledger),vec!["a".repeat(64),"b".repeat(64)]);
@@ -1432,12 +1436,171 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         assert!(!ledger.transactions[0].cancel_requested);
         ledger.transactions[1].cancel_requested=true;
         assert_eq!(active(&ledger),vec!["a".repeat(64)]);
+        assert!(!VodServe::companion_source_required(&ledger, &"b".repeat(64)),
+            "superseded optional target gives source service back");
         ledger.transactions[1].cancel_requested=false;
         ledger.transactions[1].state=QualityState::Presented;
         ledger.transactions[1].first_presented_tick=Some(48);
         assert_eq!(active(&ledger),vec!["b".repeat(64)]);
         ledger.transactions[1].state=QualityState::Disposed;
         assert_eq!(active(&ledger),vec!["b".repeat(64)],"ordinary eviction does not retire wanted loading");
+    }
+
+    #[tokio::test]
+    async fn discovered_companion_upgrades_on_accepted_prepare_then_returns_to_optional() {
+        use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger, QualityState, QualityTransaction};
+        let base = crate::test_tempdir().expect("quality settlement fixture");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
+        let generation = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        activate_control_route(&store, &session_id, &generation).await;
+        let mut incumbent = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut incumbent).expect("private incumbent").key = "a".repeat(64);
+        let mut companion = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut companion).expect("private companion").key = "b".repeat(64);
+        insert_control_session(&serve, &session_id, Arc::clone(&incumbent), Instant::now()).await;
+        companion.attach_reader("companion", 0).await;
+        {
+            let mut readers = companion.readers.lock().await;
+            let reader = readers.get_mut("companion").expect("attached companion");
+            reader.companion_bootstrap = true;
+            reader.admission_priority = crate::admission::Priority::Speculative;
+        }
+        let owner = {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let parent = sessions.get_mut(&session_id).expect("parent");
+            // Family discovery clears this transient flag before revision 2
+            // can be accepted. The Reader role must survive that transition.
+            parent.children.push(ParentMediaReader {
+                versioned_family: true,
+                companion_bootstrap: false,
+                controlled: true,
+                candidate_id: None,
+                reader_id: "companion".into(),
+                rendition: Arc::clone(&companion),
+                _reservation: None,
+            });
+            parent.response_owner()
+        };
+        let id = || uuid::Uuid::new_v4().to_string();
+        let transaction = |revision, target: String, state, presented: Option<u64>| QualityTransaction {
+            transaction_id: id(), intent_revision: revision, target_rendition_id: target, state,
+            intent_superseded: false, cancel_requested: false, preparation: None,
+            ready: vec![], reserved: vec![], appended: vec![], ever_appended: presented.is_some(),
+            disposed: vec![], first_presented_tick: presented,
+            first_presented_at_ms: presented.map(|_| 1),
+        };
+        let attachment = QualityAttachment {
+            client_instance_id: id(), lifetime_id: session_id.clone(),
+            attachment_id: id(), family_id: "c".repeat(64),
+        };
+        let mut ledger = QualityLedger::new(generation, 1, attachment).expect("ledger");
+        ledger.transactions.push(transaction(1, incumbent.key.clone(), QualityState::Presented, Some(0)));
+        ledger.transactions.push(transaction(2, companion.key.clone(), QualityState::Preparing, None));
+        ledger.latest_intent_revision = 2;
+        assert!(store.write_quality_ledger(&ledger, "node-a", 0, now_ms()).await.expect("prepare write"));
+        serve.settle_controlled_video(&session_id, &owner, &ledger).await.expect("accepted prepare settlement");
+        assert_eq!(companion.readers.lock().await["companion"].admission_priority,
+            crate::admission::Priority::Live, "accepted Preparing needs source before init");
+        ledger.transactions[1].intent_superseded = true;
+        ledger.transactions[1].cancel_requested = true;
+        assert!(store.write_quality_ledger(&ledger, "node-a", 1, now_ms()).await.expect("supersession write"));
+        serve.settle_controlled_video(&session_id, &owner, &ledger).await.expect("supersession settlement");
+        assert_eq!(companion.readers.lock().await["companion"].admission_priority,
+            crate::admission::Priority::Speculative, "superseded target returns to finite service");
+    }
+
+    #[tokio::test]
+    async fn accepted_parent_candidate_selection_requires_only_its_companion_before_discovery() {
+        use crate::playback_control::{ClientPlatform, LocalControlRequest, PreparedSuccessorObservation, QualitySelection};
+        use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger, QualityState, QualityTransaction};
+        let base = crate::test_tempdir().expect("pending companion fixture");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
+        let generation = uuid::Uuid::new_v4().to_string();
+        let first = uuid::Uuid::new_v4().to_string();
+        let second = uuid::Uuid::new_v4().to_string();
+        activate_control_route(&store, &first, &generation).await;
+        let other_generation = uuid::Uuid::new_v4().to_string();
+        activate_control_route(&store, &second, &other_generation).await;
+        let mut root = synthetic_rendition(&base.path().join("first")).await;
+        Arc::get_mut(&mut root).expect("private root").key = "a".repeat(64);
+        let mut other_root = synthetic_rendition(&base.path().join("second")).await;
+        Arc::get_mut(&mut other_root).expect("private other root").key = "c".repeat(64);
+        let mut companion = synthetic_rendition(&base.path().join("pending-companion")).await;
+        Arc::get_mut(&mut companion).expect("private companion").key = "b".repeat(64);
+        insert_control_session(&serve, &first, root, Instant::now()).await;
+        insert_control_session(&serve, &second, other_root, Instant::now()).await;
+        let candidate = plurx_core::playback::candidate::CandidateId([7; 16]);
+        for (parent, reader_id) in [(&first, "first-companion"), (&second, "other-companion")] {
+            companion.attach_reader(reader_id, 0).await;
+            let mut readers = companion.readers.lock().await;
+            let reader = readers.get_mut(reader_id).expect("companion reader");
+            reader.companion_bootstrap = true;
+            reader.admission_priority = crate::admission::Priority::Speculative;
+            drop(readers);
+            serve.shared.sessions.lock().await.get_mut(parent).expect("parent").children.push(ParentMediaReader {
+                versioned_family: true, companion_bootstrap: true, controlled: true,
+                candidate_id: Some(candidate), reader_id: reader_id.into(),
+                rendition: Arc::clone(&companion), _reservation: None,
+            });
+        }
+        let mut pending = crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple);
+        pending.selection.quality = QualitySelection::Auto { height: None, candidate_id: Some(candidate) };
+        let control = |sequence, snapshot| LocalControlRequest {
+            session_id: first.as_str(), generation: generation.as_str(), owner_node_id: "node-a",
+            owner_epoch: 1, client_instance_id: "00000000-0000-4000-8000-000000000005",
+            sequence, snapshot, prepared_successor: PreparedSuccessorObservation::NotRequested,
+        };
+        let accepted = serve.control(control(1, pending.clone())).await.expect("parent exists").expect("accepted selection");
+        assert_eq!(accepted.accepted_sequence, 1);
+        {
+            let readers = companion.readers.lock().await;
+            assert_eq!(readers["first-companion"].admission_priority, crate::admission::Priority::Live,
+                "the accepted candidate needs init before family revision 2");
+            assert_eq!(readers["other-companion"].admission_priority, crate::admission::Priority::Speculative,
+                "a second viewer cannot borrow the selection");
+        }
+        let id = || uuid::Uuid::new_v4().to_string();
+        let transaction = |revision, target: String, state, presented: Option<u64>| QualityTransaction {
+            transaction_id: id(), intent_revision: revision, target_rendition_id: target, state,
+            intent_superseded: false, cancel_requested: false, preparation: None,
+            ready: vec![], reserved: vec![], appended: vec![], ever_appended: presented.is_some(),
+            disposed: vec![], first_presented_tick: presented,
+            first_presented_at_ms: presented.map(|_| 1),
+        };
+        let attachment = QualityAttachment { client_instance_id: id(), lifetime_id: first.clone(),
+            attachment_id: id(), family_id: "e".repeat(64) };
+        let mut ledger = QualityLedger::new(generation.clone(), 1, attachment).expect("ledger");
+        ledger.transactions.push(transaction(1, "a".repeat(64), QualityState::Presented, Some(0)));
+        ledger.latest_intent_revision = 1;
+        assert!(store.write_quality_ledger(&ledger, "node-a", 0, now_ms()).await.expect("incumbent ledger"));
+        let owner = serve.shared.sessions.lock().await[&first].response_owner();
+        serve.settle_controlled_video(&first, &owner, &ledger).await.expect("old incumbent settlement");
+        assert_eq!(companion.readers.lock().await["first-companion"].admission_priority,
+            crate::admission::Priority::Live, "old ledger cannot revoke accepted pending selection");
+        // A later family response clears the transient bootstrap marker.
+        serve.shared.sessions.lock().await.get_mut(&first).expect("parent").children[0].companion_bootstrap = false;
+        assert_eq!(companion.readers.lock().await["first-companion"].admission_priority, crate::admission::Priority::Live);
+        ledger.transactions.push(transaction(2, companion.key.clone(), QualityState::Preparing, None));
+        ledger.latest_intent_revision = 2;
+        assert!(store.write_quality_ledger(&ledger, "node-a", 1, now_ms()).await.expect("accepted prepare"));
+        serve.settle_controlled_video(&first, &owner, &ledger).await.expect("prepare settlement");
+        assert!(serve.control(control(1, crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple)))
+            .await.expect("parent exists").is_err(), "a stale sequence cannot undo selection");
+        assert_eq!(companion.readers.lock().await["first-companion"].admission_priority, crate::admission::Priority::Live);
+        let incumbent = crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple);
+        let restored = serve.control(control(2, incumbent)).await.expect("parent exists").expect("accepted incumbent");
+        assert_eq!(restored.accepted_sequence, 2);
+        assert_eq!(companion.readers.lock().await["first-companion"].admission_priority,
+            crate::admission::Priority::Live, "incumbent control cannot revoke accepted Preparing");
+        ledger.transactions[1].intent_superseded = true;
+        ledger.transactions[1].cancel_requested = true;
+        assert!(store.write_quality_ledger(&ledger, "node-a", 2, now_ms()).await.expect("accepted cancellation"));
+        serve.settle_controlled_video(&first, &owner, &ledger).await.expect("cancellation settlement");
+        assert_eq!(companion.readers.lock().await["first-companion"].admission_priority,
+            crate::admission::Priority::Speculative, "supersession returns optional source service");
     }
 
     #[tokio::test]

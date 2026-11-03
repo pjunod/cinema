@@ -65,6 +65,7 @@ async fn input(
         source: std::sync::Mutex::new(Some(source)),
         custody: std::sync::Mutex::new(None),
         observer: None,
+        purpose_budget: None,
         background_budget: Some(allocator.clone()),
         pause: None,
         budget: tokio::sync::Mutex::new(ByteBudget::default()),
@@ -83,6 +84,98 @@ async fn input(
         file,
         allocator,
     )
+}
+
+struct SwitchingPurposeBudget {
+    required: std::sync::atomic::AtomicBool,
+    claimed: AtomicU64,
+}
+impl SourceInputByteBudget for SwitchingPurposeBudget {
+    fn allowance(
+        &self,
+        max: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<usize>> + Send + '_>>
+    {
+        let count = if self.required.load(Ordering::SeqCst) {
+            max
+        } else {
+            max.min(SOURCE_WINDOW_CONTROL)
+        };
+        self.claimed.fetch_add(count as u64, Ordering::SeqCst);
+        Box::pin(async move { Ok(count) })
+    }
+    fn revalidate_read(
+        &self,
+        size: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<usize>> + Send + '_>>
+    {
+        let count = if self.required.load(Ordering::SeqCst) {
+            size
+        } else {
+            size.min(SOURCE_WINDOW_CONTROL)
+        };
+        Box::pin(async move { Ok(count) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_read_window_tracks_selected_purpose_at_physical_read() {
+    use std::io::Write;
+    let bytes = vec![7; 8 * 1024 * 1024];
+    let mut file = tempfile::tempfile().expect("source file");
+    file.write_all(&bytes).expect("source bytes");
+    let source =
+        crate::fragment_index_cluster::SourceFence::clone_current_held(&file).expect("held source");
+    let budget = Arc::new(SwitchingPurposeBudget {
+        required: std::sync::atomic::AtomicBool::new(false),
+        claimed: AtomicU64::new(0),
+    });
+    let (reached, parked) = tokio::sync::oneshot::channel();
+    let gate = Arc::new(ReadGate {
+        reached: std::sync::Mutex::new(Some(reached)),
+        released: std::sync::Mutex::new(false),
+        changed: std::sync::Condvar::new(),
+    });
+    let state = Arc::new(InputState {
+        source: std::sync::Mutex::new(Some(source)),
+        custody: std::sync::Mutex::new(None),
+        observer: None,
+        purpose_budget: Some(budget.clone()),
+        background_budget: None,
+        pause: None,
+        budget: tokio::sync::Mutex::new(ByteBudget::default()),
+        close: tokio_util::sync::CancellationToken::new(),
+        read_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+        len: bytes.len() as u64,
+        mime: "application/octet-stream",
+        window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+        source_bytes: AtomicU64::new(0),
+        cache_hits: AtomicU64::new(0),
+        cached_bytes: std::sync::atomic::AtomicUsize::new(0),
+        read_gate: Some(Arc::clone(&gate)),
+    });
+    let first_state = Arc::clone(&state);
+    let first = tokio::spawn(async move { read_source(&first_state, 0, 8 * 1024 * 1024).await });
+    parked.await.expect("worker parked before physical read");
+    budget.required.store(true, Ordering::SeqCst);
+    gate.release();
+    first.await.expect("read task").expect("optional read");
+    assert_eq!(
+        state.source_bytes.load(Ordering::SeqCst),
+        SOURCE_WINDOW_CONTROL as u64
+    );
+    let selected = read_source(&state, 4 * 1024 * 1024, 4 * 1024 * 1024)
+        .await
+        .expect("selected read");
+    assert_eq!(selected.len(), SOURCE_HTTP_CHUNK);
+    assert_eq!(
+        state.source_bytes.load(Ordering::SeqCst),
+        (SOURCE_WINDOW_CONTROL + SOURCE_WINDOW_MAX) as u64
+    );
+    assert_eq!(
+        budget.claimed.load(Ordering::SeqCst),
+        (SOURCE_WINDOW_CONTROL + SOURCE_WINDOW_MAX) as u64
+    );
 }
 
 #[test]

@@ -251,16 +251,26 @@ impl ReadAttestations {
             {
                 Ok(BackgroundSourceRegistration::Registered(receipt)) => receipt,
                 _ => {
-                    settle_read_owner(&store, &source_owner, None).await;
+                    settle_read_owner(&store, &source_owner, None, false).await;
                     finish(&owner, &key, Status::Paused(work));
                     return;
                 }
             };
+            if crate::source_custody::activate_background_with_journal(&store, custody.clone())
+                .await
+                .is_err()
+            {
+                settle_read_owner(&store, &source_owner, Some(custody), false).await;
+                finish(&owner, &key, Status::Paused(work));
+                return;
+            }
             if cancel.is_cancelled()
                 || shutdown.is_cancelled()
                 || crate::state::clock_ms() >= lease.expires_at_unix_ms
             {
-                settle_read_owner(&store, &source_owner, Some(custody)).await;
+                // Activation succeeded, but no hash worker or source read was
+                // started. The exact armed custody is physically settled here.
+                settle_activated_without_reader(&store, &source_owner, custody).await;
                 finish(&owner, &key, Status::Paused(work));
                 return;
             }
@@ -333,18 +343,29 @@ impl ReadAttestations {
             };
             // Every hash/read future has physically joined before either its
             // exact coordinator fence or its source custody can be returned.
-            settle_read_owner(&store, &source_owner, Some(custody)).await;
+            settle_read_owner(&store, &source_owner, Some(custody), true).await;
             finish(&owner, &key, status);
         });
         Err(pending())
     }
 }
+async fn settle_activated_without_reader(
+    store: &Arc<dyn plurx_core::store::Store>,
+    owner: &plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) {
+    // This scope activated successfully and started no reader. Its physical
+    // join proof must be recorded before the armed receipt can be deleted.
+    settle_read_owner(store, owner, Some(receipt), true).await;
+}
+
 /// This runs inside the pre-existing read owner, never in Drop or a new actor.
 /// Close-before-resolve fences delayed registration/renewal acknowledgements.
 async fn settle_read_owner(
     store: &Arc<dyn plurx_core::store::Store>,
     owner: &plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
     mut receipt: Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
+    physical_joined: bool,
 ) {
     loop {
         match store
@@ -360,16 +381,12 @@ async fn settle_read_owner(
     }
     loop {
         if let Some(held) = receipt.take() {
-            match store
-                .release_background_source_custody(held.clone(), crate::state::clock_ms())
-                .await
-            {
-                Ok(_) => return,
-                Err(error) => {
-                    receipt = Some(held);
-                    tracing::warn!(%error,"read attestation source settlement pending");
-                }
+            if physical_joined {
+                crate::background_jobs::settle_joined_source_custody(store, held).await;
+            } else {
+                crate::background_jobs::settle_no_reader_source_custody(store, held).await;
             }
+            return;
         } else {
             use plurx_core::store::background_jobs_resources::BackgroundSourceRegistration;
             match store
@@ -590,6 +607,92 @@ mod tests {
             Some("source_changed")
         );
     }
+    #[tokio::test]
+    async fn activated_cancelled_read_scope_settles_exact_armed_receipt() {
+        use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+        use plurx_core::store::background_jobs_resources::{
+            BackgroundSourceOwner, BackgroundSourceRegistration,
+        };
+        use plurx_core::store::{SqliteStore, Store};
+
+        let directory = crate::test_tempdir().expect("database directory");
+        let database = directory.path().join("read-attestation.db");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&database).expect("real store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "read attestation cancellation".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/attest".into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "source".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = store
+            .upsert_file(item, "/attest/source.mkv", 100, 1, &Default::default())
+            .await
+            .expect("file");
+        let coordinator = StoreCoordinator::new(Arc::clone(&store), "worker").expect("owner");
+        let lease = match coordinator
+            .acquire("subtitle-read-attest:worker:0", Duration::from_secs(30))
+            .await
+            .expect("lease")
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            other => panic!("expected acquired lease, got {other:?}"),
+        };
+        let owner = BackgroundSourceOwner::ReadAttestation {
+            lease,
+            file_id,
+            source_size: 100,
+            source_mtime: 1,
+        };
+        let receipt = match store
+            .register_background_source_custody(owner.clone(), crate::state::clock_ms())
+            .await
+            .expect("custody registration")
+        {
+            BackgroundSourceRegistration::Registered(receipt) => receipt,
+            other => panic!("expected custody receipt, got {other:?}"),
+        };
+        assert!(store
+            .activate_background_source_custody(receipt.clone(), uuid::Uuid::new_v4().to_string())
+            .await
+            .expect("activation"));
+        assert!(!store
+            .release_background_source_custody(receipt.clone(), crate::state::clock_ms())
+            .await
+            .expect("armed receipt must stay charged"));
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(cancelled.is_cancelled(), "cancel before any read starts");
+        settle_activated_without_reader(&store, &owner, receipt.clone()).await;
+        let connection = rusqlite::Connection::open(&database).expect("inspect store");
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM background_source_custody WHERE custody_id=?1",
+                [&receipt.custody_id],
+                |row| row.get(0),
+            )
+            .expect("exact custody count");
+        assert_eq!(
+            remaining, 0,
+            "activated cancelled scope must settle its exact receipt"
+        );
+    }
+
     #[test]
     fn dropping_runtime_cancels_owned_read_work_without_strong_owner_cycle() {
         let cache = ReadAttestations::new();

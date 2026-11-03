@@ -104,6 +104,7 @@ pub enum ForegroundSourcePolicy {
     Rolling,
     Transfer,
     RollingOrTransfer,
+    Companion,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -171,6 +172,10 @@ pub struct ForegroundSourceProjection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BackgroundSourceOwner {
+    /// Optional continuous media uses the exact physical foreground custody
+    /// already retained by its producer. It borrows background byte service
+    /// while unselected; this is not a second custody or cleanup owner.
+    Companion { token: Box<ForegroundSourceToken> },
     Job {
         token: super::background_jobs::JobToken,
     },
@@ -233,10 +238,10 @@ impl ForegroundSourceProjection {
             return false;
         }
         match self.phase {
-            ForegroundSourcePhase::Sharing => matches!(policy,ForegroundSourcePolicy::Rolling|ForegroundSourcePolicy::RollingOrTransfer) && self.source_quiescent
+            ForegroundSourcePhase::Sharing => matches!(policy,ForegroundSourcePolicy::Rolling|ForegroundSourcePolicy::RollingOrTransfer|ForegroundSourcePolicy::Companion) && self.source_quiescent
                 && self.observation_expires_at_ms>now_ms && self.transfer_grant.is_none()
                 && matches!((self.contiguous_lead_ms,self.low_ms,self.high_ms), (Some(lead),Some(low),Some(high)) if lead<=JS_MAX && low>0 && high>low && high<=JS_MAX),
-            ForegroundSourcePhase::TransferService => matches!(policy,ForegroundSourcePolicy::Transfer|ForegroundSourcePolicy::RollingOrTransfer) && self.transfer_grant.as_ref().is_some_and(|grant| {
+            ForegroundSourcePhase::TransferService => matches!(policy,ForegroundSourcePolicy::Transfer|ForegroundSourcePolicy::RollingOrTransfer|ForegroundSourcePolicy::Companion) && self.transfer_grant.as_ref().is_some_and(|grant| {
                 let duration=grant.expires_at_ms.saturating_sub(grant.starts_at_ms);
                 if grant.epoch_id>JS_MAX || grant.starts_at_ms<0 || grant.starts_at_ms%5000!=0 || grant.epoch_id!=grant.starts_at_ms as u64/5000 || grant.starts_at_ms>now_ms || grant.expires_at_ms<=now_ms || duration!=5000
                     || grant.background_bytes<1_048_576 || grant.background_bytes>JS_MAX || grant.foreground_bytes>JS_MAX { return false; }
@@ -358,8 +363,72 @@ pub(super) async fn release_foreground<T: QueueSql>(
     if !token.owner.valid() || token.fence <= 0 || now_ms < 0 {
         return Err(StoreError::Task("invalid foreground source release".into()));
     }
-    let rows=store.queue_sql("DELETE FROM foreground_source_owners WHERE owner_id=json_extract($1,'$.owner.owner_id') AND identity_json=json_extract($1,'$.owner') AND fence=json_extract($1,'$.fence') RETURNING 'true' AS result_json".into(),encode(&token)?,true,true).await?;
+    let rows=store.queue_sql("DELETE FROM foreground_source_owners WHERE owner_id=json_extract($1,'$.owner.owner_id') AND identity_json=json_extract($1,'$.owner') AND fence=json_extract($1,'$.fence') AND settlement_proof IS NOT NULL RETURNING 'true' AS result_json".into(),encode(&token)?,true,true).await?;
     Ok(!rows.is_empty())
+}
+
+/// Arm the exact foreground owner before returning a guard that can start input.
+/// A failed or lost acknowledgement leaves an initial no-reader proof for
+/// replay; callers that cannot confirm arming must not open the source.
+pub(super) async fn activate_foreground_custody<T: QueueSql>(
+    store: &T,
+    token: ForegroundSourceToken,
+    activation_id: String,
+) -> Result<bool, StoreError> {
+    if !token.owner.valid() || token.fence <= 0 || uuid::Uuid::parse_str(&activation_id).is_err() {
+        return Err(StoreError::Task(
+            "invalid foreground source activation".into(),
+        ));
+    }
+    let rows = store.queue_sql(
+        "UPDATE foreground_source_owners SET settlement_proof=NULL,activation_id=json_extract($1,'$.activation_id') WHERE owner_id=json_extract($1,'$.token.owner.owner_id') AND identity_json=json_extract($1,'$.token.owner') AND fence=json_extract($1,'$.token.fence') AND settlement_proof='no_reader' AND activation_id IS NULL RETURNING 'true' AS result_json".into(),
+        encode(&serde_json::json!({"token":token,"activation_id":activation_id}))?, true, true,
+    ).await?;
+    Ok(!rows.is_empty())
+}
+
+/// This registration scope never exposed input. Revoke only its own committed
+/// activation, or the still-unarmed row. A duplicate's nonce cannot be used.
+pub(super) async fn abort_foreground_activation<T: QueueSql>(
+    store: &T,
+    token: ForegroundSourceToken,
+    activation_id: String,
+) -> Result<bool, StoreError> {
+    if !token.owner.valid() || token.fence <= 0 || uuid::Uuid::parse_str(&activation_id).is_err() {
+        return Err(StoreError::Task(
+            "invalid foreground activation abort".into(),
+        ));
+    }
+    let rows = store.queue_sql(
+        "UPDATE foreground_source_owners SET settlement_proof='aborted',activation_id=json_extract($1,'$.activation_id') WHERE owner_id=json_extract($1,'$.token.owner.owner_id') AND identity_json=json_extract($1,'$.token.owner') AND ((settlement_proof='no_reader' AND activation_id IS NULL) OR (activation_id=json_extract($1,'$.activation_id') AND (settlement_proof IS NULL OR settlement_proof='aborted'))) RETURNING 'true' AS result_json".into(),
+        encode(&serde_json::json!({"token":token,"activation_id":activation_id}))?, true, true,
+    ).await?;
+    Ok(!rows.is_empty())
+}
+
+/// Physical join belongs to the immutable owner, whose publication CAS fence
+/// may have advanced while it held input. Only that owner may gain this proof.
+pub(super) async fn mark_foreground_settled<T: QueueSql>(
+    store: &T,
+    token: ForegroundSourceToken,
+) -> Result<bool, StoreError> {
+    if !token.owner.valid() || token.fence <= 0 {
+        return Err(StoreError::Task(
+            "invalid foreground settlement proof".into(),
+        ));
+    }
+    let rows = store.queue_sql(
+        "UPDATE foreground_source_owners SET settlement_proof='joined' WHERE owner_id=json_extract($1,'$.owner.owner_id') AND identity_json=json_extract($1,'$.owner') RETURNING 'true' AS result_json".into(),
+        encode(&token)?, true, true,
+    ).await?;
+    Ok(!rows.is_empty())
+}
+
+pub(super) async fn settled_foreground_custody<T: QueueSql>(
+    store: &T,
+) -> Result<Vec<ForegroundSourceToken>, StoreError> {
+    store.queue_sql(format!("SELECT {} AS result_json FROM foreground_source_owners WHERE settlement_proof IS NOT NULL ORDER BY started_at_ms,owner_id LIMIT 128", token_json()), "{}".into(), false, true).await?
+        .iter().map(|row| decode(row)).collect()
 }
 
 fn background_identity_sql() -> &'static str {
@@ -608,6 +677,266 @@ mod source_tests {
             .expect("charged source");
         token
     }
+    #[tokio::test]
+    async fn committed_activation_with_lost_ack_aborts_only_exact_nonce() {
+        let store = fixture();
+        let token =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Transfer), 1000, 2000)
+                .await
+                .expect("register")
+                .expect("receipt");
+        let exact = uuid::Uuid::new_v4().to_string();
+        assert!(
+            activate_foreground_custody(&store, token.clone(), exact.clone())
+                .await
+                .expect("commit before lost reply")
+        );
+        assert!(!abort_foreground_activation(
+            &store,
+            token.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("other nonce"));
+        assert!(!release_foreground(&store, token.clone(), 1001)
+            .await
+            .expect("unknown reader remains charged"));
+        assert!(abort_foreground_activation(&store, token.clone(), exact)
+            .await
+            .expect("same no-reader scope"));
+        assert!(release_foreground(&store, token, 1002)
+            .await
+            .expect("abort replay"));
+        let delayed =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Transfer), 1000, 2000)
+                .await
+                .expect("register delayed")
+                .expect("receipt");
+        let delayed_nonce = uuid::Uuid::new_v4().to_string();
+        assert!(
+            abort_foreground_activation(&store, delayed.clone(), delayed_nonce.clone())
+                .await
+                .expect("abort before RPC commit")
+        );
+        assert!(
+            !activate_foreground_custody(&store, delayed.clone(), delayed_nonce)
+                .await
+                .expect("late activation fenced")
+        );
+        assert!(release_foreground(&store, delayed, 1002)
+            .await
+            .expect("aborted no-reader row"));
+
+        let owner = BackgroundSourceOwner::Job {
+            token: seed_job(&store),
+        };
+        let receipt = register_background_custody(&store, owner, 1000)
+            .await
+            .expect("register")
+            .expect("receipt");
+        let exact = uuid::Uuid::new_v4().to_string();
+        assert!(
+            activate_background_custody(&store, receipt.clone(), exact.clone())
+                .await
+                .expect("commit before lost reply")
+        );
+        assert!(!abort_background_activation(
+            &store,
+            receipt.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("other nonce"));
+        assert!(!release_background_custody(&store, receipt.clone(), 1001)
+            .await
+            .expect("unknown reader remains charged"));
+        assert!(abort_background_activation(&store, receipt.clone(), exact)
+            .await
+            .expect("same no-reader scope"));
+        assert!(release_background_custody(&store, receipt, 1002)
+            .await
+            .expect("abort replay"));
+        let owner = BackgroundSourceOwner::Job {
+            token: seed_job(&store),
+        };
+        let delayed = register_background_custody(&store, owner, 1000)
+            .await
+            .expect("register delayed")
+            .expect("receipt");
+        let delayed_nonce = uuid::Uuid::new_v4().to_string();
+        assert!(
+            abort_background_activation(&store, delayed.clone(), delayed_nonce.clone())
+                .await
+                .expect("abort before RPC commit")
+        );
+        assert!(
+            !activate_background_custody(&store, delayed.clone(), delayed_nonce)
+                .await
+                .expect("late activation fenced")
+        );
+        assert!(release_background_custody(&store, delayed, 1002)
+            .await
+            .expect("aborted no-reader row"));
+    }
+
+    #[tokio::test]
+    async fn committed_registration_with_lost_ack_replays_no_reader_exact_owner() {
+        let store = fixture();
+        let job = seed_job(&store);
+        let owner = BackgroundSourceOwner::Job { token: job };
+        let committed = register_background_custody(&store, owner.clone(), 1000)
+            .await
+            .expect("commit before lost reply")
+            .expect("receipt");
+        // The caller never receives `committed`, so no input can be armed.
+        let recovered = register_background_typed(&store, owner, 1001)
+            .await
+            .expect("resolve exact owner");
+        let BackgroundSourceRegistration::Registered(recovered) = recovered else {
+            panic!("committed registration must resolve");
+        };
+        assert_eq!(recovered.custody_id, committed.custody_id);
+        assert_eq!(
+            settled_background_custody(&store)
+                .await
+                .expect("durable proof")
+                .len(),
+            1
+        );
+        assert!(release_background_custody(&store, recovered, 1002)
+            .await
+            .expect("no-reader delete"));
+        assert!(settled_background_custody(&store)
+            .await
+            .expect("replay page")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn analysis_source_join_replays_only_its_fenced_receipt() {
+        let store = fixture();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        {
+            let connection = store.0.lock().expect("connection");
+            connection.execute("INSERT INTO analysis_requests(request_id,owner_node_id,fence,state,cancel_requested,lease_expires_ms,file_id,source_size,source_mtime) VALUES(?1,'worker',7,'running',0,30000,1,100,1)", [&request_id]).expect("analysis owner");
+            connection
+                .execute(
+                    "INSERT INTO analysis_source_reservations VALUES('source_io',?1,7,30000)",
+                    [&request_id],
+                )
+                .expect("analysis source reservation");
+        }
+        let owner = BackgroundSourceOwner::Analysis {
+            request_id: request_id.clone(),
+            node_id: "worker".into(),
+            fence: 7,
+        };
+        let receipt = register_background_custody(&store, owner, 1000)
+            .await
+            .expect("register")
+            .expect("receipt");
+        assert!(activate_background_custody(
+            &store,
+            receipt.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("arm"));
+        assert!(settled_background_custody(&store)
+            .await
+            .expect("unknown stays charged")
+            .is_empty());
+        assert!(!release_background_custody(&store, receipt.clone(), 1001)
+            .await
+            .expect("no proof"));
+        assert!(mark_background_settled(&store, receipt.clone())
+            .await
+            .expect("joined proof"));
+        assert!(release_background_custody(&store, receipt, 1002)
+            .await
+            .expect("exact receipt"));
+    }
+
+    #[tokio::test]
+    async fn settled_source_replay_requires_exact_no_reader_or_joined_proof() {
+        let store = fixture();
+        let no_reader =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Transfer), 1000, 2000)
+                .await
+                .expect("register no-reader")
+                .expect("receipt");
+        let unknown =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Transfer), 1000, 2000)
+                .await
+                .expect("register unknown")
+                .expect("receipt");
+        assert!(activate_foreground_custody(
+            &store,
+            unknown.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("arm"));
+        let proven = settled_foreground_custody(&store)
+            .await
+            .expect("replay page");
+        assert_eq!(proven.len(), 1);
+        assert_eq!(proven[0].owner.owner_id, no_reader.owner.owner_id);
+        assert!(!release_foreground(&store, unknown.clone(), 1001)
+            .await
+            .expect("unknown stays"));
+        assert!(release_foreground(&store, no_reader, 1001)
+            .await
+            .expect("no-reader replay"));
+        assert!(mark_foreground_settled(&store, unknown.clone())
+            .await
+            .expect("joined proof"));
+        assert!(release_foreground(&store, unknown, 1002)
+            .await
+            .expect("joined replay"));
+
+        let first = BackgroundSourceOwner::Job {
+            token: seed_job(&store),
+        };
+        let settled = register_background_custody(&store, first, 1000)
+            .await
+            .expect("register")
+            .expect("receipt");
+        let second = BackgroundSourceOwner::Job {
+            token: seed_job(&store),
+        };
+        let still_unknown = register_background_custody(&store, second, 1000)
+            .await
+            .expect("register")
+            .expect("receipt");
+        assert!(activate_background_custody(
+            &store,
+            still_unknown.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("arm"));
+        let proven = settled_background_custody(&store)
+            .await
+            .expect("replay page");
+        assert_eq!(proven.len(), 1);
+        assert_eq!(proven[0].custody_id, settled.custody_id);
+        assert!(
+            !release_background_custody(&store, still_unknown.clone(), 1001)
+                .await
+                .expect("unknown stays")
+        );
+        assert!(release_background_custody(&store, settled, 1001)
+            .await
+            .expect("no-reader replay"));
+        assert!(mark_background_settled(&store, still_unknown.clone())
+            .await
+            .expect("joined proof"));
+        assert!(release_background_custody(&store, still_unknown, 1002)
+            .await
+            .expect("joined replay"));
+    }
+
     #[tokio::test]
     async fn foreground_source_hysteresis_requires_all_owners_and_stale_custody_stays_charged() {
         let store = fixture();
@@ -911,6 +1240,119 @@ mod source_tests {
             .await
             .expect("new foreground revokes opportunity")
             .is_none());
+    }
+    #[tokio::test]
+    async fn deferred_companion_yields_original_reads_to_primary_refill() {
+        let store = fixture();
+        let primary =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Rolling), 1000, 10000)
+                .await
+                .expect("primary registration")
+                .expect("primary custody");
+        assert!(activate_foreground_custody(
+            &store,
+            primary.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("primary input armed"));
+        let primary = project_foreground(&store, primary, sharing(1, 200, 1001), 1001, 10000)
+            .await
+            .expect("primary sharing")
+            .expect("current primary");
+        let mut companions = Vec::new();
+        for _ in 0..2 {
+            let token = register_foreground(
+                &store,
+                owner(ForegroundSourcePolicy::Companion),
+                1001,
+                10000,
+            )
+            .await
+            .expect("optional registration")
+            .expect("optional custody");
+            assert!(activate_foreground_custody(
+                &store,
+                token.clone(),
+                uuid::Uuid::new_v4().to_string()
+            )
+            .await
+            .expect("actual optional input armed"));
+            let mut service = ForegroundSourceProjection::startup(1002);
+            service.phase = ForegroundSourcePhase::TransferService;
+            service.observation_version = 1;
+            service.observation_expires_at_ms = 5000;
+            service.transfer_grant = Some(SourceServiceGrant {
+                epoch_id: 0,
+                starts_at_ms: 0,
+                expires_at_ms: 5000,
+                foreground_bytes: 16 * 1048576,
+                background_bytes: 8 * 1048576,
+                foreground_floor_bps: None,
+                supply_floor_bps: None,
+                service_class: SourceServiceClass::WeightedUnqualified,
+            });
+            let token = project_foreground(&store, token, service, 1002, 10000)
+                .await
+                .expect("finite optional service")
+                .expect("current optional owner");
+            companions.push(token);
+        }
+        let owners = companions
+            .iter()
+            .cloned()
+            .map(|token| BackgroundSourceOwner::Companion {
+                token: Box::new(token),
+            })
+            .collect::<Vec<_>>();
+        let first = claim_background_service(&store, owners[0].clone(), 1003)
+            .await
+            .expect("first optional claim")
+            .expect("first grant");
+        let second = claim_background_service(&store, owners[1].clone(), 1003)
+            .await
+            .expect("second optional claim")
+            .expect("second grant");
+        assert_eq!(first.byte_allowance, Some(4 * 1048576));
+        assert_eq!(second.byte_allowance, Some(4 * 1048576));
+        let mut refill = ForegroundSourceProjection::startup(1004);
+        refill.observation_version = 2;
+        let primary = project_foreground(&store, primary, refill, 1004, 10000)
+            .await
+            .expect("selected primary refill")
+            .expect("current primary");
+        for optional in &owners {
+            assert!(
+                claim_background_service(&store, optional.clone(), 1005)
+                    .await
+                    .expect("pressure revalidation")
+                    .is_none(),
+                "both optional owners yield before another original read"
+            );
+        }
+        let primary = project_foreground(&store, primary, sharing(3, 200, 1006), 1006, 10000)
+            .await
+            .expect("restored primary sharing")
+            .expect("current primary");
+        assert!(claim_background_service(&store, owners[0].clone(), 1007)
+            .await
+            .expect("same optional owner resumes")
+            .is_some());
+        let mut selected = ForegroundSourceProjection::startup(1008);
+        selected.observation_version = 2;
+        project_foreground(&store, companions[0].clone(), selected, 1008, 10000)
+            .await
+            .expect("accepted companion selection")
+            .expect("selected owner");
+        assert!(claim_background_service(&store, owners[0].clone(), 1009)
+            .await
+            .expect("selected owner no longer claims optional bytes")
+            .is_none());
+        assert!(claim_background_service(&store, owners[1].clone(), 1009)
+            .await
+            .expect("other optional yields to selected refill")
+            .is_none());
+        let _ = primary;
     }
     #[tokio::test]
     async fn rolling_fallback_interest_receipts_preserve_other_viewers_and_never_revive_a_successor(
@@ -1428,6 +1870,17 @@ pub struct BackgroundSourceCustodyToken {
 }
 fn background_owner_key(owner: &BackgroundSourceOwner) -> Result<String, StoreError> {
     Ok(match owner {
+        BackgroundSourceOwner::Companion { token } => {
+            if !token.owner.valid() || token.fence <= 0 {
+                return Err(StoreError::Task("invalid companion source owner".into()));
+            }
+            crate::segplan::argv_fingerprint(&[
+                "companion".into(),
+                token.owner.owner_id.clone(),
+                token.owner.session_incarnation.clone(),
+                token.owner.source_generation.clone(),
+            ])
+        }
         BackgroundSourceOwner::Job { token } => {
             token.validate()?;
             crate::segplan::argv_fingerprint(&[
@@ -1531,6 +1984,7 @@ pub(super) async fn register_background_custody<T: QueueSql>(
         identity=format!("{identity} AND EXISTS(SELECT 1 FROM job_leases exact WHERE exact.resource=json_extract($1,'$.lease.resource') AND exact.revision=json_extract($1,'$.lease.revision') AND exact.expires_at_ms=json_extract($1,'$.lease.expires_at_unix_ms'))");
     }
     let (kind,work,fence,lease)=match &owner {
+        BackgroundSourceOwner::Companion{..}=>return Err(StoreError::Task("companion retains its exact foreground custody".into())),
         BackgroundSourceOwner::Job{..}=>("job","json_extract($1,'$.token.job_id')","json_extract($1,'$.token.fence')","json_extract($1,'$.token.lease_expires_ms')"),
         BackgroundSourceOwner::Analysis{..}=>("analysis","json_extract($1,'$.request_id')","json_extract($1,'$.fence')","(SELECT lease_expires_ms FROM analysis_requests WHERE request_id=json_extract($1,'$.request_id'))"),
         BackgroundSourceOwner::ReadAttestation{..}=>("lease","json_extract($1,'$.lease.resource')","json_extract($1,'$.lease.fence')","json_extract($1,'$.lease.expires_at_unix_ms')"),
@@ -1565,8 +2019,65 @@ pub(super) async fn release_background_custody<T: QueueSql>(
         return Err(StoreError::Task("invalid source settlement receipt".into()));
     }
     let key = background_owner_key(&token.owner)?;
-    let rows=store.queue_sql("DELETE FROM background_source_custody WHERE custody_id=json_extract($1,'$.custody_id') AND owner_key=json_extract($1,'$.owner_key') RETURNING 'true' AS result_json".into(),encode(&serde_json::json!({"custody_id":token.custody_id,"owner_key":key}))?,true,true).await?;
+    let rows=store.queue_sql("DELETE FROM background_source_custody WHERE custody_id=json_extract($1,'$.custody_id') AND owner_key=json_extract($1,'$.owner_key') AND settlement_proof IS NOT NULL RETURNING 'true' AS result_json".into(),encode(&serde_json::json!({"custody_id":token.custody_id,"owner_key":key}))?,true,true).await?;
     Ok(!rows.is_empty())
+}
+
+/// Arming is the last durable barrier before a job or analysis owner may
+/// begin input. A no-reader row is safe for restart replay until this succeeds.
+pub(super) async fn activate_background_custody<T: QueueSql>(
+    store: &T,
+    token: BackgroundSourceCustodyToken,
+    activation_id: String,
+) -> Result<bool, StoreError> {
+    if uuid::Uuid::parse_str(&token.custody_id).is_err()
+        || uuid::Uuid::parse_str(&activation_id).is_err()
+    {
+        return Err(StoreError::Task(
+            "invalid background source activation".into(),
+        ));
+    }
+    let owner_key = background_owner_key(&token.owner)?;
+    let rows=store.queue_sql("UPDATE background_source_custody SET settlement_proof=NULL,activation_id=json_extract($1,'$.activation_id') WHERE custody_id=json_extract($1,'$.custody_id') AND owner_key=json_extract($1,'$.owner_key') AND settlement_proof='no_reader' AND activation_id IS NULL RETURNING 'true' AS result_json".into(),encode(&serde_json::json!({"custody_id":token.custody_id,"owner_key":owner_key,"activation_id":activation_id}))?,true,true).await?;
+    Ok(!rows.is_empty())
+}
+
+pub(super) async fn abort_background_activation<T: QueueSql>(
+    store: &T,
+    token: BackgroundSourceCustodyToken,
+    activation_id: String,
+) -> Result<bool, StoreError> {
+    if uuid::Uuid::parse_str(&token.custody_id).is_err()
+        || uuid::Uuid::parse_str(&activation_id).is_err()
+    {
+        return Err(StoreError::Task(
+            "invalid background activation abort".into(),
+        ));
+    }
+    let owner_key = background_owner_key(&token.owner)?;
+    let rows=store.queue_sql("UPDATE background_source_custody SET settlement_proof='aborted',activation_id=json_extract($1,'$.activation_id') WHERE custody_id=json_extract($1,'$.custody_id') AND owner_key=json_extract($1,'$.owner_key') AND ((settlement_proof='no_reader' AND activation_id IS NULL) OR (activation_id=json_extract($1,'$.activation_id') AND (settlement_proof IS NULL OR settlement_proof='aborted'))) RETURNING 'true' AS result_json".into(),encode(&serde_json::json!({"custody_id":token.custody_id,"owner_key":owner_key,"activation_id":activation_id}))?,true,true).await?;
+    Ok(!rows.is_empty())
+}
+
+pub(super) async fn mark_background_settled<T: QueueSql>(
+    store: &T,
+    token: BackgroundSourceCustodyToken,
+) -> Result<bool, StoreError> {
+    if uuid::Uuid::parse_str(&token.custody_id).is_err() {
+        return Err(StoreError::Task(
+            "invalid background settlement proof".into(),
+        ));
+    }
+    let owner_key = background_owner_key(&token.owner)?;
+    let rows=store.queue_sql("UPDATE background_source_custody SET settlement_proof='joined' WHERE custody_id=json_extract($1,'$.custody_id') AND owner_key=json_extract($1,'$.owner_key') RETURNING 'true' AS result_json".into(),encode(&serde_json::json!({"custody_id":token.custody_id,"owner_key":owner_key}))?,true,true).await?;
+    Ok(!rows.is_empty())
+}
+
+pub(super) async fn settled_background_custody<T: QueueSql>(
+    store: &T,
+) -> Result<Vec<BackgroundSourceCustodyToken>, StoreError> {
+    store.queue_sql("SELECT json_object('custody_id',custody_id,'owner',json(owner_json)) AS result_json FROM background_source_custody WHERE settlement_proof IS NOT NULL ORDER BY started_at_ms,custody_id LIMIT 128".into(),"{}".into(),false,true).await?
+        .iter().map(|row| decode(row)).collect()
 }
 
 /// One physical owner's shared budget. Replaying a receipt never replenishes
@@ -1590,22 +2101,27 @@ pub(super) async fn claim_background_service<T: QueueSql>(
     }
     let owner_key = background_owner_key(&owner)?;
     let identity = background_owner_identity(&owner);
+    let companion = matches!(&owner, BackgroundSourceOwner::Companion { .. });
     let blocked = foreground_blocks("resource.value", "json_extract($1,'$.now_ms')");
     let mut body = serde_json::to_value(&owner).map_err(|e| StoreError::Task(e.to_string()))?;
     body["id"] = uuid::Uuid::new_v4().to_string().into();
     body["owner_key"] = owner_key.into();
     body["now_ms"] = now_ms.into();
     body["epoch_id"] = (now_ms / 5000).into();
+    let custody = if companion {
+        "SELECT fg.resource_keys_json FROM foreground_source_owners fg WHERE fg.owner_id=json_extract($1,'$.token.owner.owner_id') AND fg.identity_json=json_extract($1,'$.token.owner') AND fg.settlement_proof IS NULL AND json_extract(fg.identity_json,'$.policy')='companion' AND fg.phase='transfer_service' AND fg.lease_expires_at_ms>json_extract($1,'$.now_ms') AND json_extract(fg.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')"
+    } else {
+        "SELECT owned.resource_keys_json FROM background_source_custody owned WHERE owned.owner_key=json_extract($1,'$.owner_key') AND owned.phase IN ('active','paused')"
+    };
     let eligibility = format!(
-        r#"{identity} AND EXISTS(SELECT 1 FROM background_source_custody owned WHERE owned.owner_key=json_extract($1,'$.owner_key') AND owned.phase IN ('active','paused')) AND NOT EXISTS(SELECT 1 FROM background_source_custody custody,json_each(custody.resource_keys_json) resource
-      WHERE custody.owner_key=json_extract($1,'$.owner_key') AND {blocked})"#
+        r#"{identity} AND NOT EXISTS(SELECT 1 FROM custody,json_each(custody.resource_keys_json) resource WHERE {blocked})"#
     );
     // Revalidate and reduce a replay in the same transaction as allocation.
     // A pre-pressure unlimited receipt becomes finite under the SAME identity;
     // its local spend ledger therefore cannot be reset by a resumed reader.
     let sql = format!(
         r#"INSERT INTO background_job_commands(id,operation,request_json,result_json)
-      WITH custody AS (SELECT * FROM background_source_custody WHERE owner_key=json_extract($1,'$.owner_key')),
+      WITH custody AS ({custody}),
       prior AS (SELECT * FROM background_source_service_grants WHERE owner_key=json_extract($1,'$.owner_key') AND epoch_id=json_extract($1,'$.epoch_id')),
       resource_set AS (SELECT CASE WHEN EXISTS(SELECT 1 FROM foreground_source_permissions fg WHERE fg.resource_key='source_io'
           AND (fg.lease_expires_at_ms>json_extract($1,'$.now_ms') OR fg.custody_held=1))
@@ -1613,13 +2129,18 @@ pub(super) async fn claim_background_service<T: QueueSql>(
         THEN '["source_io"]' ELSE resource_keys_json END AS resources FROM custody),
       policy AS (SELECT EXISTS(SELECT 1 FROM custody,json_each(custody.resource_keys_json) resource
           JOIN foreground_source_required_resources fg_resource ON fg_resource.resource_key=resource.value OR fg_resource.resource_key='source_io' OR resource.value='source_io'
-          JOIN foreground_source_owners fg ON fg.owner_id=fg_resource.owner_id WHERE fg.phase='transfer_service' AND fg.lease_expires_at_ms>json_extract($1,'$.now_ms')) AS finite,
+          JOIN foreground_source_owners fg ON fg.owner_id=fg_resource.owner_id WHERE fg.phase='transfer_service' AND fg.lease_expires_at_ms>json_extract($1,'$.now_ms')
+            AND json_extract(fg.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')) AS finite,
         (SELECT MIN(json_extract(fg.projection_json,'$.transfer_grant.background_bytes')) FROM custody,json_each(custody.resource_keys_json) resource
           JOIN foreground_source_required_resources fg_resource ON fg_resource.resource_key=resource.value OR fg_resource.resource_key='source_io' OR resource.value='source_io'
           JOIN foreground_source_owners fg ON fg.owner_id=fg_resource.owner_id WHERE fg.phase='transfer_service'
             AND fg.lease_expires_at_ms>json_extract($1,'$.now_ms')
             AND json_extract(fg.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')) AS quota,
-        (SELECT MAX(1,COUNT(*)) FROM background_source_custody peer WHERE
+        (SELECT MAX(1,COUNT(*)
+          + (SELECT COUNT(*) FROM foreground_source_owners peer WHERE peer.phase='transfer_service' AND peer.settlement_proof IS NULL AND json_extract(peer.identity_json,'$.policy')='companion' AND peer.lease_expires_at_ms>json_extract($1,'$.now_ms')
+            AND EXISTS(SELECT 1 FROM json_each(peer.resource_keys_json) a,custody,json_each(custody.resource_keys_json) b
+              WHERE a.value=b.value OR a.value='source_io' OR b.value='source_io')))
+          FROM background_source_custody peer WHERE
           EXISTS(SELECT 1 FROM background_source_current_owners current WHERE current.custody_id=peer.custody_id AND current.authority_expires_at_ms>json_extract($1,'$.now_ms'))
           AND EXISTS(SELECT 1 FROM json_each(peer.resource_keys_json) a,custody,json_each(custody.resource_keys_json) b
             WHERE a.value=b.value OR a.value='source_io' OR b.value='source_io')) AS readers,
@@ -1666,6 +2187,7 @@ pub(super) async fn resolve_foreground<T: QueueSql>(
 
 fn background_owner_identity(owner: &BackgroundSourceOwner) -> String {
     match owner {
+        BackgroundSourceOwner::Companion{..}=>"EXISTS(SELECT 1 FROM foreground_source_owners fg WHERE fg.owner_id=json_extract($1,'$.token.owner.owner_id') AND fg.identity_json=json_extract($1,'$.token.owner') AND fg.settlement_proof IS NULL AND json_extract(fg.identity_json,'$.policy')='companion' AND fg.lease_expires_at_ms>json_extract($1,'$.now_ms') AND fg.phase='transfer_service' AND json_extract(fg.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms'))".to_owned(),
         BackgroundSourceOwner::Job{..}=>format!("EXISTS(SELECT 1 FROM background_jobs job WHERE {})",background_identity_sql()),
         BackgroundSourceOwner::Analysis{..}=>"EXISTS(SELECT 1 FROM analysis_requests request WHERE request.request_id=json_extract($1,'$.request_id') AND request.owner_node_id=json_extract($1,'$.node_id') AND request.fence=json_extract($1,'$.fence') AND request.state='running' AND request.cancel_requested=0 AND request.lease_expires_ms>json_extract($1,'$.now_ms') AND NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||request.owner_node_id))".to_owned(),
         BackgroundSourceOwner::ReadAttestation{..}=>"EXISTS(SELECT 1 FROM job_leases lease JOIN files file ON file.id=json_extract($1,'$.file_id') AND file.size=json_extract($1,'$.source_size') AND file.mtime=json_extract($1,'$.source_mtime') WHERE lease.resource=json_extract($1,'$.lease.resource') AND lease.owner_node_id=json_extract($1,'$.lease.owner_node_id') AND lease.fence=json_extract($1,'$.lease.fence') AND lease.expires_at_ms>json_extract($1,'$.now_ms') AND NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||lease.owner_node_id))".to_owned(),
@@ -1674,6 +2196,7 @@ fn background_owner_identity(owner: &BackgroundSourceOwner) -> String {
 }
 fn background_owner_resources(owner: &BackgroundSourceOwner) -> String {
     match owner {
+        BackgroundSourceOwner::Companion{..}=>"SELECT resource.value AS resource_key FROM foreground_source_owners fg,json_each(fg.resource_keys_json) resource WHERE fg.owner_id=json_extract($1,'$.token.owner.owner_id') AND fg.identity_json=json_extract($1,'$.token.owner')".to_owned(),
         BackgroundSourceOwner::Job{..}=>"SELECT resource_key FROM background_job_reservations WHERE job_id=json_extract($1,'$.token.job_id') AND fence=json_extract($1,'$.token.fence') AND resource_key LIKE 'source_io%' AND expires_at_ms>json_extract($1,'$.now_ms') UNION SELECT resource.value AS resource_key FROM background_source_pauses paused,json_each(paused.resource_keys_json) resource WHERE paused.job_id=json_extract($1,'$.token.job_id') AND paused.fence=json_extract($1,'$.token.fence')".to_owned(),
         BackgroundSourceOwner::Analysis{..}=>"SELECT resource_key FROM analysis_source_reservations WHERE request_id=json_extract($1,'$.request_id') AND fence=json_extract($1,'$.fence') AND expires_at_ms>json_extract($1,'$.now_ms')".to_owned(),
         BackgroundSourceOwner::ReadAttestation{..}|BackgroundSourceOwner::Offline{..}=>{

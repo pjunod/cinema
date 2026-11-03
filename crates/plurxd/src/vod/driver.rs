@@ -211,12 +211,57 @@ pub(super) async fn perform_driver_step(
             .source_observer(rendition.gen_epoch.load(Relaxed))
         {
             observer.refill().await.map_err(std::io::Error::other)?;
+            if source_readers_are_optional(rendition).await {
+                observer
+                    .companion_service()
+                    .await
+                    .map_err(std::io::Error::other)?;
+            }
         }
     }
     let performed = rendition.slot.perform(step, || {}).await?;
     record_performed_step(shared, rendition, step);
     project_source_sharing(shared, rendition).await;
     Ok(performed)
+}
+
+pub(super) async fn source_readers_are_optional(rendition: &Rendition) -> bool {
+    let readers = rendition.readers.lock().await;
+    let active =
+        |reader: &&Reader| !reader.authority_only && !reader.draining_after_prepared_commit;
+    readers
+        .values()
+        .filter(active)
+        .any(|reader| reader.companion_bootstrap)
+        && readers
+            .values()
+            .filter(active)
+            .all(|reader| reader.admission_priority == crate::admission::Priority::Speculative)
+}
+
+pub(super) fn source_control_session<'a>(
+    sessions: &'a HashMap<String, Session>,
+    rendition: &Rendition,
+    reader_id: &str,
+) -> Option<&'a Session> {
+    sessions
+        .get(reader_id)
+        .filter(|session| {
+            session.tombstone.is_none()
+                && session
+                    .rendition
+                    .as_ref()
+                    .is_some_and(|root| std::ptr::eq(root.as_ref(), rendition))
+        })
+        .or_else(|| {
+            sessions.values().find(|session| {
+                session.tombstone.is_none()
+                    && session.children.iter().any(|child| {
+                        child.reader_id == reader_id
+                            && std::ptr::eq(child.rendition.as_ref(), rendition)
+                    })
+            })
+        })
 }
 
 /// Every live reader of this physical producer must offer fresh contiguous
@@ -228,6 +273,10 @@ async fn project_source_sharing(shared: &Shared, rendition: &Rendition) {
     else {
         return;
     };
+    if source_readers_are_optional(rendition).await {
+        let _ = observer.companion_service().await;
+        return;
+    }
     let readers = rendition.readers.lock().await.clone();
     let sessions = shared.sessions.lock().await;
     let manifest = rendition.manifest.lock().await;
@@ -240,7 +289,7 @@ async fn project_source_sharing(shared: &Shared, rendition: &Rendition) {
         if reader.authority_only || reader.draining_after_prepared_commit {
             continue;
         }
-        let Some(session) = sessions.get(id) else {
+        let Some(session) = source_control_session(&sessions, rendition, id) else {
             fresh = false;
             continue;
         };

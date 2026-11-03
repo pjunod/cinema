@@ -394,6 +394,155 @@ async fn claim_with_resolution_inner(
     Ok(None)
 }
 
+/// Called by the operation owner only after its read/child join, or before
+/// input was ever exposed. The proof write is durable before the exact row is
+/// deleted, so restart replay can finish an unacknowledged DELETE.
+pub(crate) async fn settle_joined_source_custody(
+    store: &Arc<dyn Store>,
+    receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) {
+    let _receipt_owner = crate::source_custody::lock_background_settlement(&receipt).await;
+    loop {
+        match crate::source_custody::persist_background_settlement(&receipt) {
+            Ok(()) => break,
+            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
+                "joined source journal remains pending"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    loop {
+        match store.mark_background_source_settled(receipt.clone()).await {
+            Ok(false) => {
+                if let Err(error) = crate::source_custody::clear_background_settlement(&receipt) {
+                    tracing::warn!(%error,"background source journal cleanup will replay");
+                }
+                return;
+            }
+            Ok(true) => break,
+            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
+                "joined source proof remains pending"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    loop {
+        let deleted = store
+            .release_background_source_custody(receipt.clone(), unix_ms().unwrap_or_default())
+            .await;
+        #[cfg(test)]
+        let deleted = faults::after_commit(faults::SOURCE_RELEASE, deleted);
+        match deleted {
+            Ok(_) => {
+                if let Err(error) = crate::source_custody::clear_background_settlement(&receipt) {
+                    tracing::warn!(%error,"background source journal cleanup will replay");
+                }
+                return;
+            }
+            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
+                "joined source deletion remains pending"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Initial registration itself carries a durable no-reader proof. DELETE is
+/// conditional on that proof, so a duplicate or ambiguously armed reader stays
+/// charged instead of being mistaken for this unstarted operation.
+pub(crate) async fn settle_no_reader_source_custody(
+    store: &Arc<dyn Store>,
+    receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) {
+    loop {
+        match store
+            .release_background_source_custody(receipt.clone(), unix_ms().unwrap_or_default())
+            .await
+        {
+            Ok(_) => return,
+            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
+                "no-reader source deletion remains pending"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// A registration error may be a committed insert with a lost acknowledgement.
+/// Close the exact claim before resolving it, so no delayed write can create a
+/// source reader after a no-reader receipt is released.
+async fn settle_unstarted_job_source(
+    store: &Arc<dyn Store>,
+    owner: plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    mut receipt: Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
+) {
+    let plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job { token } = &owner
+    else {
+        return;
+    };
+    loop {
+        let now_ms = unix_ms().unwrap_or_default();
+        let resolution = store
+            .resolve_claim(ResolveClaim {
+                job_id: token.job_id.clone(),
+                node_id: token.node_id.clone(),
+                boot_id: token.boot_id.clone(),
+                claim_id: token.claim_id.clone(),
+                fence: Some(token.fence),
+                dispatched_at_ms: now_ms,
+                now_ms,
+            })
+            .await;
+        let settlement = match resolution {
+            Ok(ClaimResolution::Running { token }) => Some((
+                token,
+                JobSettlement::Yield {
+                    error_code: Some("source_registration_unavailable".into()),
+                    checkpoint: None,
+                    not_before_ms: now_ms,
+                },
+            )),
+            Ok(ClaimResolution::CancelRequested { cleanup_token }) => {
+                Some((cleanup_token, JobSettlement::Cancel))
+            }
+            Ok(
+                ClaimResolution::LostOwnership
+                | ClaimResolution::Settled { .. }
+                | ClaimResolution::ExpiredOrPruned,
+            ) => break,
+            Err(error) => {
+                tracing::warn!(%error,job=%token.job_id,
+                "unstarted source claim fencing will retry");
+                None
+            }
+        };
+        if let Some((token, settlement)) = settlement {
+            if let Err(error) = store
+                .settle_job(SettleJob {
+                    token,
+                    settlement,
+                    now_ms,
+                })
+                .await
+            {
+                tracing::warn!(%error,"unstarted source claim settlement will retry");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    loop {
+        if let Some(held) = receipt.take() {
+            settle_no_reader_source_custody(store, held).await;
+            return;
+        }
+        match store.register_background_source_custody(owner.clone(), unix_ms().unwrap_or_default()).await {
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(held)) => {
+                receipt = Some(held);
+            }
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired
+                | plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership) => return,
+            Err(error) => tracing::warn!(%error,"unstarted source receipt resolution will retry"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 impl ActiveBackgroundJob {
     pub(crate) async fn start(
         store: Arc<dyn Store>,
@@ -408,30 +557,39 @@ impl ActiveBackgroundJob {
                 "background claim acknowledgement arrived after its deadline".to_owned(),
             ));
         }
+        let owner = plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
+            token: token.clone(),
+        };
         let registration = store
-            .register_background_source_custody(
-                plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
-                    token: token.clone(),
-                },
-                unix_ms()?,
-            )
-            .await?;
-        let source_custody=match registration {
-            plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)=>Some(receipt),
-            plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired=>None,
-            plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership=>return Err(StoreError::Task("source custody claim unavailable before execution".into())),
+            .register_background_source_custody(owner.clone(), unix_ms()?)
+            .await;
+        #[cfg(test)]
+        let registration = faults::after_commit(faults::SOURCE_REGISTER, registration);
+        let source_custody = match registration {
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)) => Some(receipt),
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired) => None,
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership) => {
+                return Err(StoreError::Task("source custody claim unavailable before execution".into()));
+            }
+            Err(error) => {
+                settle_unstarted_job_source(&store, owner, None).await;
+                return Err(error);
+            }
         };
         if Instant::now() >= deadline {
-            // No input began, so even a resolved expired registration can
-            // safely settle using its original physical-custody receipt.
-            if let Some(custody) = source_custody {
-                let _ = store
-                    .release_background_source_custody(custody, unix_ms()?)
-                    .await;
-            }
+            settle_unstarted_job_source(&store, owner, source_custody).await;
             return Err(StoreError::Task(
                 "source custody registration exceeded the claim deadline".into(),
             ));
+        }
+        if let Some(receipt) = &source_custody {
+            if let Err(error) =
+                crate::source_custody::activate_background_with_journal(&store, receipt.clone())
+                    .await
+            {
+                settle_unstarted_job_source(&store, owner, source_custody).await;
+                return Err(StoreError::Task(error));
+            }
         }
         let lost = CancellationToken::new();
         let source_budget = SourceReadBudget::new(
@@ -526,22 +684,7 @@ impl ActiveBackgroundJob {
             tracing::warn!(%error, "background retirement remains ambiguous");
         }
         if let Some(custody) = self.fence.0.source_custody.clone() {
-            match self
-                .fence
-                .0
-                .store
-                .release_background_source_custody(custody.clone(), unix_ms().unwrap_or_default())
-                .await
-            {
-                Ok(true) => {}
-                Ok(false) => tracing::debug!(
-                    custody_id = custody.custody_id,
-                    "source custody already settled"
-                ),
-                Err(error) => {
-                    tracing::warn!(custody_id=custody.custody_id,%error,"joined source custody settlement remains pending")
-                }
-            }
+            settle_joined_source_custody(&self.fence.0.store, custody).await;
         }
         metrics::execution(self.fence.0.kind, self.fence.0.started.elapsed());
     }
@@ -3662,6 +3805,28 @@ pub(crate) mod tests {
             Some(after)
         );
         active.finish().await;
+    }
+
+    #[tokio::test]
+    async fn joined_source_settlement_retries_without_losing_exact_receipt() {
+        let (store, _id, active) = active().await;
+        let receipt = active
+            .fence
+            .0
+            .source_custody
+            .clone()
+            .expect("source custody");
+        let ((), dropped) = faults::dropping(faults::SOURCE_RELEASE, active.finish()).await;
+        assert_eq!(dropped, faults::SOURCE_RELEASE);
+        assert!(store
+            .settled_background_source_custody()
+            .await
+            .expect("proof rows")
+            .is_empty());
+        assert!(!store
+            .release_background_source_custody(receipt, unix_ms().expect("clock"))
+            .await
+            .expect("exact row already retired"));
     }
 
     #[tokio::test]

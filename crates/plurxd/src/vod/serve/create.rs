@@ -1694,8 +1694,16 @@ impl VodServe {
             );
             if Arc::ptr_eq(&child.rendition, &rendition) {
                 replacement_readers.insert(child.reader_id.clone(), {
-                    let mut reader = Reader::with_priority(entry, admission_priority);
+                    let mut reader = Reader::with_priority(
+                        entry,
+                        if child.companion_bootstrap {
+                            crate::admission::Priority::Speculative
+                        } else {
+                            admission_priority
+                        },
+                    );
                     reader.nonpreemptive_trial = nonpreemptive_trial;
+                    reader.companion_bootstrap = child.companion_bootstrap;
                     reader.authority_only = child.companion_bootstrap;
                     reader
                 });
@@ -1710,8 +1718,16 @@ impl VodServe {
                 }
                 .expect("private media reader guard");
                 readers.insert(child.reader_id.clone(), {
-                    let mut reader = Reader::with_priority(entry, admission_priority);
+                    let mut reader = Reader::with_priority(
+                        entry,
+                        if child.companion_bootstrap {
+                            crate::admission::Priority::Speculative
+                        } else {
+                            admission_priority
+                        },
+                    );
                     reader.nonpreemptive_trial = nonpreemptive_trial;
+                    reader.companion_bootstrap = child.companion_bootstrap;
                     reader.authority_only = child.companion_bootstrap;
                     reader
                 });

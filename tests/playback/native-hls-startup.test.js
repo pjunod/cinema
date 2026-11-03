@@ -269,8 +269,8 @@ test('native attached startup expires at its fixed deadline without a new readin
  h.ctx.exhaustHlsStartup(h.player,'duplicate');h.advance(1);await flush();assert.equal(h.diagnoses.length,1);h.stop();
 });
 
-async function readyNativeHarness(){
- const h=harness();await flush();h.answers.push(h.response(master),h.response(media));
+async function readyNativeHarness(options){
+ const h=harness(options);await flush();h.answers.push(h.response(master),h.response(media));
  h.advance(1000);await flush();assert.equal(h.sources.length,1);return h;
 }
 function retireNative(h){
@@ -834,4 +834,32 @@ test('generic diagnosis racing the original native timer concludes only observat
  assert.equal(o.surface.kind,'banner');assert.equal(o.state.presenting,false);
  assert.equal(h.stops.length,0);assert.equal(o.pauses,0);assert.equal(h.rescues.length,0);
  h.stop();
+});
+
+
+test('resume play rejection after observation conclusion retains transport failure authority',async()=>{
+ for(const retired of [false,true]){
+  const h=await readyNativeHarness({realTransport:true}),o=nativeObservationSurface(h);
+  while(h.ctx.performance.now()<h.player.hlsStartup.deadlineMs)o.progress();
+  const episode=h.player.hlsStartup,deadline=episode.deadlineMs;
+  assert.equal(episode.state,'observation_unavailable');
+  let reject;h.video.play=()=>new Promise((_resolve,no)=>{reject=no;});
+  h.player.wantsPlayback=false;h.player.controlIntentGeneration++;h.ctx.pauseHlsStartup(h.player);
+  h.player.wantsPlayback=true;h.player.controlIntentGeneration++;
+  assert.equal(h.ctx.resumeHlsStartup(h.video,h.player),true);
+  if(retired)h.player.mediaAttachment={};
+  reject(Object.assign(new Error('command refused'),{name:'NotSupportedError'}));await flush();
+  assert.equal(episode.deadlineMs,deadline,'transport rejection cannot mint a new observation budget');
+  assert.equal(episode.native.deadlineTimer,null);
+  if(retired){
+   assert.equal(episode.playRejection,null);assert.equal(episode.state,'observation_unavailable');
+   assert.equal(h.diagnoses.length,0,'a retired Play invocation has no failure authority');
+  }else{
+   assert.equal(episode.playRejection.name,'NotSupportedError');assert.equal(episode.state,'exhausted');
+   assert.match(h.ctx.diagnoseHlsStartup(h.player).title,/browser could not start/);
+   h.advance(1);await flush();assert.equal(h.diagnoses.length,1,'current transport refusal reaches diagnosis immediately');
+   assert.equal(o.state.presenting,false,'a rejected Play never supplies presentation proof');
+  }
+  h.stop();
+ }
 });

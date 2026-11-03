@@ -11,6 +11,12 @@ pub(super) async fn spawn_generation(
     if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
         return;
     }
+    let companion_source = {
+        let readers = rendition.readers.lock().await;
+        readers
+            .values()
+            .any(|reader| reader.companion_bootstrap && !reader.draining_after_prepared_commit)
+    };
     let source_request = shared
         .source_identity
         .lock()
@@ -22,7 +28,13 @@ pub(super) async fn spawn_generation(
                 &rendition.recipe.file,
                 &rendition.key,
                 uuid::Uuid::new_v4(),
-                if rendition.recipe.source_telemetry||rendition.source_owners.has_source_telemetry() {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling} else {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::RollingOrTransfer},
+                if companion_source {
+                    plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Companion
+                } else if rendition.recipe.source_telemetry || rendition.source_owners.has_source_telemetry() {
+                    plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling
+                } else {
+                    plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::RollingOrTransfer
+                },
             )
         });
     let generation_epoch = rendition.gen_epoch.load(Relaxed);
@@ -207,12 +219,34 @@ pub(super) async fn spawn_generation(
         }
     } else {
         match source_request {
-            Some(request) => match crate::source_input::SourceInput::open(
-                request,
-                format!("vod-{}", rendition.gen_epoch.load(Relaxed)),
-            )
-            .await
-            {
+            Some(request) => match if companion_source {
+                let rendition = Arc::downgrade(rendition);
+                let required: crate::source_input::SourceRequired = Arc::new(move || {
+                    let rendition = rendition.clone();
+                    Box::pin(async move {
+                        let Some(rendition) = rendition.upgrade() else {
+                            return false;
+                        };
+                        let readers = rendition.readers.lock().await;
+                        readers.values().any(|reader| {
+                            !reader.authority_only
+                                && !reader.draining_after_prepared_commit
+                                && reader.admission_priority
+                                    != crate::admission::Priority::Speculative
+                        })
+                    })
+                });
+                crate::source_input::SourceInput::open_companion(
+                    request,
+                    format!("vod-{}", generation_epoch),
+                    Arc::clone(&shared.store),
+                    required,
+                )
+                .await
+            } else {
+                crate::source_input::SourceInput::open(request, format!("vod-{}", generation_epoch))
+                    .await
+            } {
                 Ok(custody) => Some(custody),
                 Err(cause) => {
                     record_failure(

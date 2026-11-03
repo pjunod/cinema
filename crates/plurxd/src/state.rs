@@ -1127,6 +1127,7 @@ impl AppState {
             credential_key_path,
             backup_client,
         } = config;
+        crate::source_custody::configure_settlement_journal(&data_dir);
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
             artwork: artwork_dir,
@@ -6282,6 +6283,9 @@ impl JobManager {
     /// between a learner that quietly does nothing and one that schedules the
     /// cluster's jobs a second time.
     async fn schedule_tick(self: &Arc<Self>, transcode: &Arc<TranscodeManager>) -> bool {
+        // Local fsynced join evidence must be replayed even if this daemon
+        // restarted as a learner. Replicated no-reader proof is node-agnostic.
+        self.replay_settled_source_custody().await;
         if !self.may_run_cluster_jobs().await {
             tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
             return false;
@@ -6434,6 +6438,41 @@ impl JobManager {
             }
         };
         tokio::join!(preparation, fragments, libraries, subtitles);
+    }
+
+    async fn replay_settled_source_custody(&self) {
+        if let Err(error) = crate::source_custody::replay_local_settlements(&self.store).await {
+            tracing::warn!(%error,"replaying local source settlement journal");
+        }
+        match self.store.settled_background_source_custody().await {
+            Ok(receipts) => {
+                for receipt in receipts {
+                    if let Err(error) = self
+                        .store
+                        .release_background_source_custody(receipt, clock_ms())
+                        .await
+                    {
+                        tracing::warn!(%error,"replaying settled background source custody");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error,"reading settled background source custody"),
+        }
+        match self.store.settled_foreground_source_custody().await {
+            Ok(receipts) => {
+                for receipt in receipts {
+                    if let Err(error) = self
+                        .store
+                        .release_foreground_source(receipt, clock_ms())
+                        .await
+                    {
+                        tracing::warn!(%error,"replaying settled foreground source custody");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error,"reading settled foreground source custody"),
+        }
+        crate::source_custody::source_pressure_changed().notify_waiters();
     }
 
     async fn maintain_background_queue(self: Arc<Self>) {
@@ -10046,16 +10085,30 @@ impl JobManager {
         let registration = self
             .store
             .register_background_source_custody(owner.clone(), clock_ms())
+            .await;
+        let custody = match registration {
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)) => receipt,
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired
+                | plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership) =>
+                return Err(AnalysisResolutionError::ClaimLost),
+            Err(error) => {
+                tracing::warn!(request_id=%request.request_id,%error,
+                    "resolving ambiguous analysis source registration");
+                self.settle_unstarted_analysis_source(owner).await;
+                return Err(AnalysisResolutionError::Retry {
+                    code: "source_custody_unavailable", charge_attempt: false,
+                });
+            }
+        };
+        if crate::source_custody::activate_background_with_journal(&self.store, custody.clone())
             .await
-            .map_err(|_| AnalysisResolutionError::Retry {
+            .is_err()
+        {
+            return Err(AnalysisResolutionError::Retry {
                 code: "source_custody_unavailable",
                 charge_attempt: false,
-            })?;
-        let custody=match registration {
-            plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)=>receipt,
-            plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired
-            |plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership=>return Err(AnalysisResolutionError::ClaimLost),
-        };
+            });
+        }
         let budget = crate::background_jobs::SourceReadBudget::new(
             Arc::clone(&self.store),
             owner,
@@ -10077,14 +10130,29 @@ impl JobManager {
         .await;
         // Every source read/child above is joined even after pressure/loss.
         // Release the original receipt; successor fences own distinct rows.
-        if let Err(error) = self
-            .store
-            .release_background_source_custody(custody, clock_ms())
-            .await
-        {
-            tracing::warn!(request_id=request.request_id,%error,"joined analysis source custody settlement remains pending");
-        }
+        crate::background_jobs::settle_joined_source_custody(&self.store, custody).await;
         result
+    }
+
+    /// This attempt never exposed input. A lost insert acknowledgement can
+    /// still have committed an exact no-reader row; resolve and settle it in
+    /// the existing analysis owner before reporting the retry.
+    async fn settle_unstarted_analysis_source(
+        &self,
+        owner: plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    ) {
+        loop {
+            match self.store.register_background_source_custody(owner.clone(), clock_ms()).await {
+                Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)) => {
+                    crate::background_jobs::settle_no_reader_source_custody(&self.store, receipt).await;
+                    return;
+                }
+                Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired
+                    | plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership) => return,
+                Err(error) => tracing::warn!(%error,"analysis no-reader source resolution will retry"),
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

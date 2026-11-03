@@ -11,6 +11,8 @@ use axum::{
     Router,
 };
 use plurx_core::store::background_jobs_resources::SourceServiceGrant;
+use plurx_core::store::background_jobs_resources::{BackgroundSourceOwner, ForegroundSourcePolicy};
+use plurx_core::store::Store;
 use std::{net::SocketAddr, sync::Arc};
 const SOURCE_WINDOW_MAX: usize = 4 * 1024 * 1024;
 const SOURCE_WINDOW_CONTROL: usize = 256 * 1024;
@@ -21,6 +23,119 @@ pub(crate) trait SourceInputByteBudget: Send + Sync {
         &self,
         max: usize,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<usize>> + Send + '_>>;
+    fn revalidate_read(
+        &self,
+        size: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<usize>> + Send + '_>>
+    {
+        Box::pin(async move { Ok(size) })
+    }
+}
+
+/// Reads the current accepted rendition purpose. A new parent can attach to
+/// the same immutable rendition while one producer generation is alive.
+pub(crate) type SourceRequired = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync,
+>;
+
+struct CompanionReadBudget {
+    budget: Arc<crate::background_jobs::SourceReadBudget>,
+    observer: SourceObserver,
+    required: SourceRequired,
+    required_published: std::sync::atomic::AtomicBool,
+    last_allowance_required: std::sync::atomic::AtomicBool,
+}
+impl SourceInputByteBudget for CompanionReadBudget {
+    fn allowance(
+        &self,
+        max: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<usize>> + Send + '_>>
+    {
+        Box::pin(async move {
+            loop {
+                if (self.required)().await {
+                    if !self
+                        .required_published
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        self.observer
+                            .declare_rolling_policy()
+                            .await
+                            .map_err(std::io::Error::other)?;
+                        self.observer
+                            .refill()
+                            .await
+                            .map_err(std::io::Error::other)?;
+                        self.required_published
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    self.last_allowance_required
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    return Ok(max);
+                }
+                self.required_published
+                    .store(false, std::sync::atomic::Ordering::Release);
+                // This existing finite foreground class publishes the same
+                // domain grant used by background source-service allocation.
+                // The optional reader cannot consume its foreground half.
+                self.observer
+                    .companion_service()
+                    .await
+                    .map_err(std::io::Error::other)?;
+                tokio::select! {
+                    result = self.budget.allowance(max.min(SOURCE_WINDOW_CONTROL)) => {
+                        let allowance = result.map_err(std::io::Error::other)?;
+                        self.last_allowance_required.store(false, std::sync::atomic::Ordering::Release);
+                        return Ok(allowance);
+                    },
+                    () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                }
+            }
+        })
+    }
+    fn revalidate_read(
+        &self,
+        size: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<usize>> + Send + '_>>
+    {
+        Box::pin(async move {
+            if (self.required)().await {
+                if !self
+                    .required_published
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    self.observer
+                        .declare_rolling_policy()
+                        .await
+                        .map_err(std::io::Error::other)?;
+                    self.observer
+                        .refill()
+                        .await
+                        .map_err(std::io::Error::other)?;
+                    self.required_published
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+                return Ok(size);
+            }
+            self.required_published
+                .store(false, std::sync::atomic::Ordering::Release);
+            self.observer
+                .companion_service()
+                .await
+                .map_err(std::io::Error::other)?;
+            if self
+                .last_allowance_required
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                self.budget
+                    .allowance(size.min(SOURCE_WINDOW_CONTROL))
+                    .await
+                    .map_err(std::io::Error::other)
+            } else {
+                Ok(size.min(SOURCE_WINDOW_CONTROL))
+            }
+        })
+    }
 }
 
 impl SourceInputByteBudget for crate::background_jobs::SourceReadBudget {
@@ -106,6 +221,7 @@ struct InputState {
     source: std::sync::Mutex<Option<crate::fragment_index_cluster::SourceFence>>,
     custody: std::sync::Mutex<Option<SourceCustody>>,
     observer: Option<SourceObserver>,
+    purpose_budget: Option<Arc<dyn SourceInputByteBudget>>,
     background_budget: Option<Arc<dyn SourceInputByteBudget>>,
     pause: Option<plurx_core::process::bounded::SourcePauseController>,
     budget: tokio::sync::Mutex<ByteBudget>,
@@ -160,6 +276,21 @@ impl SourceInput {
         request: SourceRequest,
         attempt: impl ToString,
     ) -> Result<Self, String> {
+        Self::open_purposed(request, attempt, None).await
+    }
+    pub(crate) async fn open_companion(
+        request: SourceRequest,
+        attempt: impl ToString,
+        store: Arc<dyn Store>,
+        required: SourceRequired,
+    ) -> Result<Self, String> {
+        Self::open_purposed(request, attempt, Some((store, required))).await
+    }
+    async fn open_purposed(
+        request: SourceRequest,
+        attempt: impl ToString,
+        companion: Option<(Arc<dyn Store>, SourceRequired)>,
+    ) -> Result<Self, String> {
         let source =
             crate::fragment_index_cluster::open_source_playback_fence(request.file(), None).await?;
         let len = source
@@ -176,10 +307,46 @@ impl SourceInput {
         let observer = custody.observer();
         observer.mediate_reads();
         let close = tokio_util::sync::CancellationToken::new();
+        let mut initial_required = false;
+        let purpose_budget: Option<Arc<dyn SourceInputByteBudget>> =
+            if let Some((store, required)) = companion {
+                let token = custody.token();
+                if token.owner.policy != ForegroundSourcePolicy::Companion {
+                    return Err("companion source owner has the wrong purpose".into());
+                }
+                initial_required = (required)().await;
+                let budget = crate::background_jobs::SourceReadBudget::new(
+                    store,
+                    BackgroundSourceOwner::Companion {
+                        token: Box::new(token),
+                    },
+                    close.clone(),
+                );
+                Some(Arc::new(CompanionReadBudget {
+                    budget,
+                    observer: observer.clone(),
+                    required,
+                    required_published: std::sync::atomic::AtomicBool::new(initial_required),
+                    last_allowance_required: std::sync::atomic::AtomicBool::new(initial_required),
+                }))
+            } else {
+                None
+            };
+        if purpose_budget.is_some() {
+            if initial_required {
+                observer.declare_rolling_policy().await?;
+                observer.refill().await?;
+            } else {
+                // Publish the finite optional service class before the bridge
+                // is visible. Its own startup must not block a peer.
+                observer.companion_service().await?;
+            }
+        }
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
             custody: std::sync::Mutex::new(Some(custody)),
             observer: Some(observer),
+            purpose_budget,
             background_budget: None,
             pause: None,
             budget: tokio::sync::Mutex::new(ByteBudget::default()),
@@ -245,6 +412,7 @@ impl SourceInput {
             source: std::sync::Mutex::new(Some(source)),
             custody: std::sync::Mutex::new(Some(custody)),
             observer: Some(observer),
+            purpose_budget: None,
             background_budget: None,
             pause: None,
             budget: tokio::sync::Mutex::new(ByteBudget::default()),
@@ -290,6 +458,7 @@ impl SourceInput {
             source: std::sync::Mutex::new(Some(source)),
             custody: std::sync::Mutex::new(None),
             observer: None,
+            purpose_budget: None,
             background_budget: Some(budget),
             pause: plurx_core::process::bounded::source_pause_controller(),
             budget: tokio::sync::Mutex::new(ByteBudget::default()),
@@ -570,7 +739,12 @@ async fn read_source(
     if observer.is_some_and(|observer| !observer.has_authority()) {
         return Err(std::io::Error::other("source authority lost"));
     }
-    let allowance = if let Some(observer) = observer {
+    let allowance = if let Some(allocator) = state.purpose_budget.as_ref() {
+        tokio::select! {biased;
+            ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
+            allowance=allocator.allowance(wanted as usize)=>allowance? as u64,
+        }
+    } else if let Some(observer) = observer {
         if !observer.rolling_policy() && budget.grant.is_none() && observer.has_completed_read() {
             budget.grant = Some(
                 observer
@@ -683,6 +857,16 @@ async fn read_source(
         #[cfg(test)]
         if let Some(gate) = &read_state.read_gate {
             gate.park()?;
+        }
+        // The accepted quality can change while this read waits for its
+        // source slot or worker. Revalidate immediately before read_at.
+        let size = if let Some(allocator) = read_state.purpose_budget.as_ref() {
+            tokio::runtime::Handle::current().block_on(allocator.revalidate_read(size))?
+        } else {
+            size
+        };
+        if size == 0 || read_state.close.is_cancelled() {
+            return Err(std::io::Error::other("source purpose or input closed"));
         }
         let mut source = read_state.source.lock().expect("source input");
         let source = source

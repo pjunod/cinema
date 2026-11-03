@@ -604,11 +604,16 @@ function notePlaybackPlayRejection(player,invocation,error){
     method:record.method,vcodec:record.vcodec,
     transport:record});
   const episode=player.hlsStartup;
-  if(!cancelled&&current&&episode&&hlsStartupCurrent(player,episode)&&episode.state==='active'){
+  if(!cancelled&&current&&episode&&hlsStartupCurrent(player,episode)
+    &&['active','observation_unavailable'].includes(episode.state)){
     // Keep the command failure separate from decoder evidence and viewer
     // Pause. Permission refusal stops below; other failures retain the
     // startup owner's existing absolute diagnosis deadline.
     episode.playRejection={name,code,status};
+    // The observation deadline is already concluded. This current transport
+    // refusal owns an immediate diagnosis; it never restarts that deadline.
+    if(episode.state==='observation_unavailable'&&name!=='NotAllowedError')
+      exhaustHlsStartup(player,'transport_play_rejected');
   }
   if(current&&!invocation.cancelledReason&&name==='NotAllowedError'&&!player.playPermissionDenied){
     // Permission is a transport refusal, never evidence of missing bytes or a

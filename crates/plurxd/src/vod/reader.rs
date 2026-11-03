@@ -26,6 +26,14 @@ pub(super) struct Recipe {
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 pub(super) struct Reader {
+    /// Exact controlled companion attachment. The source-purpose bridge must
+    /// survive quality selection, supersession and later producer generations.
+    pub(super) companion_bootstrap: bool,
+    /// The exact parent's accepted selection can require a pending companion
+    /// before family metadata exists. Quality settlement has independent
+    /// authority once its accepted ledger names the target.
+    pub(super) control_required: bool,
+    pub(super) quality_required: bool,
     /// Admission purpose belongs to this consumer, not the cached recipe.
     pub(super) admission_priority: crate::admission::Priority,
     /// Voluntary Auto trials must not borrow the incumbent's permit.
@@ -68,6 +76,9 @@ impl Reader {
         admission_priority: crate::admission::Priority,
     ) -> Self {
         Self {
+            companion_bootstrap: false,
+            control_required: false,
+            quality_required: false,
             admission_priority,
             nonpreemptive_trial: false,
             authority_only: false,

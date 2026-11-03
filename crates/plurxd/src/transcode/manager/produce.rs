@@ -3189,6 +3189,15 @@ impl TranscodeManager {
                 .map_err(|error| error.to_string())?;
             match registered {
                 BackgroundSourceRegistration::Registered(token) => {
+                    if crate::source_custody::activate_background_with_journal(
+                        &self.store,
+                        token.clone(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return Err("offline source custody activation was not acknowledged".into());
+                    }
                     let budget = crate::background_jobs::SourceReadBudget::from_existing_custody(
                         Arc::clone(&self.store),
                         &token,
@@ -3234,19 +3243,7 @@ impl TranscodeManager {
                 .map_err(|error| format!("cache original source read join: {error}"))?;
         }
         if let Some(custody) = custody {
-            loop {
-                match self
-                    .store
-                    .release_background_source_custody(custody.clone(), crate::state::clock_ms())
-                    .await
-                {
-                    Ok(_) => break,
-                    Err(error) => {
-                        tracing::warn!(%error,"joined offline source custody release will retry");
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                }
-            }
+            crate::background_jobs::settle_joined_source_custody(&self.store, custody).await;
         }
         result
     }

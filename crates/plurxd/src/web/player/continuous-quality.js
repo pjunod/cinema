@@ -165,6 +165,28 @@ async function continuousQualityBootstrapFamily(url,signal,exchange=continuousQu
     }
   }
 }
+// Discovery belongs to the existing directed-change deadline and signal.
+// Only the immutable bootstrap companion may still be absent from revision 1.
+async function continuousQualityDiscoverCandidate(candidateId,bootstrap,lookup,refresh,
+  {signal,deadlineMs,live=()=>true,now=()=>performance.now(),wait=(ms,signal)=>playbackRetryDelay(ms,signal)}){
+  let row=lookup();
+  if(row||candidateId!==bootstrap.companion_candidate_id)return row;
+  for(;;){
+    if(signal?.aborted||!live())throw Object.assign(new Error('Quality choice superseded.'),{name:'AbortError'});
+    if(!Number.isFinite(deadlineMs)||now()>=deadlineMs)
+      throw Object.assign(new Error('Continuous companion is still preparing.'),{name:'TimeoutError'});
+    let delay=250;
+    try{await refresh(signal);}
+    catch(error){
+      if(error.status!==503||error.streamFailure?.code!=='segment_pending')throw error;
+      delay=Math.max(1,Math.min(1000,error.retryAfterMs||1000));
+    }
+    if(signal?.aborted||!live())throw Object.assign(new Error('Quality choice superseded.'),{name:'AbortError'});
+    if(now()>=deadlineMs)throw Object.assign(new Error('Continuous companion is still preparing.'),{name:'TimeoutError'});
+    row=lookup();if(row)return row;
+    await wait(Math.min(delay,deadlineMs-now()),signal);
+  }
+}
 function continuousQualityProtocol(bootstrap,attachment,exchange=continuousQualityFetch,
   wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))){
   if(!bootstrap||!continuousQualityIdentity(bootstrap.generation)||!continuousQualityInteger(bootstrap.control_epoch,1)
@@ -362,8 +384,8 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     if(!familyFlight)familyFlight=readFamily().finally(()=>{familyFlight=null;});
     return familyFlight;
   }
-  async function readFamily(){
-    const next=await exchange(bootstrap.family_url,null,{signal:familyAbort.signal,limit:32768});
+  async function readFamily(signal=familyAbort.signal){
+    const next=await exchange(bootstrap.family_url,null,{signal,limit:32768});
     if(!current())return;
     if(!continuousQualityFamilyUpdate(family,next)
       ||next.video.some(row=>![bootstrap.primary_candidate_id,bootstrap.companion_candidate_id].includes(row.candidate_id)))
@@ -702,10 +724,18 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       }
       frontier=through;if(changed)seekRevision++;return true;
     },
-    choose(candidateId,live=()=>true){return serial(async()=>{
+    choose(candidateId,live=()=>true,discovery={}){return serial(async()=>{
       if(!current())return 'superseded';
-      try{await refreshFamily();}catch(error){note(error);}
-      const next=family.video.find(row=>row.candidate_id===candidateId);if(!next)return 'outside_family';
+      let next;
+      try{
+        next=await continuousQualityDiscoverCandidate(candidateId,bootstrap,
+          ()=>family.video.find(row=>row.candidate_id===candidateId),readFamily,
+          {...discovery,live:()=>current()&&live()});
+      }catch(error){
+        note(error);
+        return !current()||!live()?'superseded':'retained_current';
+      }
+      if(!next)return 'outside_family';
       if(next.rendition_id===wanted.rendition_id)return 'continuous';
       const previous=wanted,old=transaction,choiceSeek=seekRevision;
       try{

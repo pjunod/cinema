@@ -499,7 +499,8 @@ where
     #[cfg(target_os = "linux")]
     {
         use plurx_core::process::bounded::{SourcePauseController, SourcePausePhase};
-        let control = SourcePauseController::new(Duration::from_secs(18 * 60 * 60));
+        let control = SourcePauseController::new_slot_gated(Duration::from_secs(18 * 60 * 60));
+        let _pause_binding = source_budget.bind_pause_controller(control.clone());
         // Close the claim-to-first-read race before polling the producer. An
         // empty scope can acknowledge source quiescence without spawning.
         if !fence.source_may_continue().await.unwrap_or(false) {
@@ -513,6 +514,8 @@ where
         tokio::pin!(work);
         let mut source_paused = false;
         let mut pacing_hold = false;
+        let mut finite_hold_only = false;
+        let mut finite_hold_pressure_revision = None;
         loop {
             if shutdown.is_cancelled()
                 || !transcode.fragment_worker_idle(admission)
@@ -528,6 +531,21 @@ where
                 match fence.pause_source().await {
                     Ok(true) => {
                         source_paused = true;
+                        if finite_hold_pressure_revision
+                            != Some(crate::source_custody::source_pressure_changed().revision())
+                        {
+                            // A foreground change may have occurred while
+                            // this owner awaited the pause Store RPC.
+                            finite_hold_only = false;
+                        }
+                        if finite_hold_only && control.quota_waiters() != 0 {
+                            // Physical stop was proved before the RPC. Only
+                            // its acknowledgement plus a live finite wait
+                            // may begin active-time credit.
+                            if !control.confirm_pause_slot(observation.revision) {
+                                cancel.cancel();
+                            }
+                        }
                         tracing::debug!(
                             pause_revision = observation.revision,
                             source_pacing_hold = pacing_hold,
@@ -537,7 +555,40 @@ where
                     _ => cancel.cancel(),
                 }
             }
+            if source_paused
+                && source_budget.pacing_waiters() != 0
+                && control.quota_waiters() != 0
+                && !cancel.is_cancelled()
+            {
+                let pressure = crate::source_custody::source_pressure_changed();
+                if finite_hold_only && finite_hold_pressure_revision == Some(pressure.revision()) {
+                    control.confirm_pause_slot(observation.revision);
+                } else {
+                    // A global projection notification may belong to another
+                    // domain. Stop credit before the Store query; the same
+                    // fence and a stable notification revision can restore
+                    // this finite hold while the process remains stopped.
+                    match revalidate_finite_source_hold(
+                        &control,
+                        observation.revision,
+                        || source_budget.pacing_waiters() != 0,
+                        || pressure.revision(),
+                        || async { fence.source_may_continue().await.unwrap_or(false) },
+                    )
+                    .await
+                    {
+                        Ok(revision) => {
+                            finite_hold_pressure_revision = revision;
+                            finite_hold_only = revision.is_some();
+                        }
+                        Err(()) => cancel.cancel(),
+                    }
+                }
+            }
             if source_paused && source_budget.pacing_waiters() == 0 && !cancel.is_cancelled() {
+                // Validation and slot reacquisition are store/authority work,
+                // never a finite service hold. The child remains stopped.
+                control.suspend_pause_credit(observation.revision);
                 if !validate_resume().await {
                     cancel.cancel();
                 } else if fence.resume_source().await.unwrap_or(false) {
@@ -546,6 +597,8 @@ where
                         cancel.cancel();
                     } else {
                         source_paused = false;
+                        finite_hold_only = false;
+                        finite_hold_pressure_revision = None;
                         tracing::debug!(
                             pause_ms = observation.paused_for.as_millis(),
                             source_pacing_hold = pacing_hold,
@@ -565,6 +618,7 @@ where
                     // A completed/no-child stage cannot let the next stage
                     // access source while this same claim's slot is paused.
                     while source_paused && !cancel.is_cancelled() {
+                        control.suspend_pause_credit(control.observation().revision);
                         if shutdown.is_cancelled() || !transcode.fragment_worker_idle(admission)
                             || control.pause_budget_exhausted() || !validate_resume().await { cancel.cancel(); break; }
                         if fence.resume_source().await.unwrap_or(false) {
@@ -579,18 +633,40 @@ where
                     }
                     return result;
                 },
-                ()=crate::source_custody::source_pressure_changed().notified()=>{},
+                ()=crate::source_custody::source_pressure_changed().notified()=>{
+                    if source_paused {
+                        // This notification is not finite-byte evidence.
+                        // Recheck the same fence on the next owner iteration.
+                        finite_hold_only = false;
+                        finite_hold_pressure_revision = None;
+                        control.suspend_pause_credit(control.observation().revision);
+                    }
+                },
                 ()=tokio::time::sleep(Duration::from_millis(250))=>{},
             }
             if !cancel.is_cancelled() {
-                let pressure = !fence.source_may_continue().await.unwrap_or(false);
                 let paced = source_budget.pacing_waiters() != 0;
-                if pressure || paced {
-                    pacing_hold |= paced;
-                    if pressure && control.observation().phase == SourcePausePhase::Running {
-                        source_budget.invalidate_grant();
+                if !source_paused {
+                    let pressure_revision =
+                        crate::source_custody::source_pressure_changed().revision();
+                    let pressure = !fence.source_may_continue().await.unwrap_or(false)
+                        || crate::source_custody::source_pressure_changed().revision()
+                            != pressure_revision;
+                    if pressure || paced {
+                        pacing_hold |= paced;
+                        if control.observation().phase == SourcePausePhase::Running {
+                            finite_hold_only = paced && !pressure;
+                            finite_hold_pressure_revision =
+                                finite_hold_only.then_some(pressure_revision);
+                        } else if pressure {
+                            finite_hold_only = false;
+                            finite_hold_pressure_revision = None;
+                        }
+                        if pressure && control.observation().phase == SourcePausePhase::Running {
+                            source_budget.invalidate_grant();
+                        }
+                        control.request_pause();
                     }
-                    control.request_pause();
                 }
             }
             if let Some(progress) = progress {
@@ -600,11 +676,114 @@ where
     }
 }
 
+/// The owner has already received its pause RPC acknowledgement. Recheck the
+/// same fence before restoring finite-hold credit after a pressure signal.
+/// The authority RPC and any uncertain interval remain active execution time.
+#[cfg(target_os = "linux")]
+async fn revalidate_finite_source_hold<Live, Revision, Check, CheckFuture>(
+    control: &plurx_core::process::bounded::SourcePauseController,
+    pause_revision: u64,
+    finite_wait_live: Live,
+    pressure_revision: Revision,
+    may_continue: Check,
+) -> Result<Option<u64>, ()>
+where
+    Live: Fn() -> bool,
+    Revision: Fn() -> u64,
+    Check: FnOnce() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = bool>,
+{
+    use plurx_core::process::bounded::SourcePausePhase;
+    control.suspend_pause_credit(pause_revision);
+    let before = pressure_revision();
+    let permitted = may_continue().await;
+    let observation = control.observation();
+    if !permitted
+        || pressure_revision() != before
+        || !finite_wait_live()
+        || control.quota_waiters() == 0
+        || observation.revision != pause_revision
+        || observation.phase != SourcePausePhase::Paused
+    {
+        return Ok(None);
+    }
+    if !control.confirm_pause_slot(pause_revision) {
+        return Err(());
+    }
+    if pressure_revision() != before || !finite_wait_live() || control.quota_waiters() == 0 {
+        control.suspend_pause_credit(pause_revision);
+        return Ok(None);
+    }
+    Ok(Some(before))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::{EncoderCaps, Pipeline};
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unrelated_pressure_signal_rechecks_finite_hold_and_charges_rpc_time() {
+        use plurx_core::process::bounded::SourcePauseController;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let control = SourcePauseController::new_slot_gated(Duration::from_secs(5));
+        let quota_wait = control.finite_quota_wait();
+        let revision = control.request_pause();
+        assert!(control.confirm_pause_slot(revision));
+
+        let signal = Arc::new(AtomicU64::new(0));
+        signal.fetch_add(1, Ordering::AcqRel); // unrelated domain projection
+        let signal_for_query = Arc::clone(&signal);
+        let control_for_query = control.clone();
+        let (query_started, query_started_rx) = tokio::sync::oneshot::channel();
+        let query_release = Arc::new(tokio::sync::Notify::new());
+        let release_for_query = Arc::clone(&query_release);
+        let recheck = tokio::spawn(async move {
+            revalidate_finite_source_hold(
+                &control_for_query,
+                revision,
+                || true,
+                || signal_for_query.load(Ordering::Acquire),
+                move || async move {
+                    query_started.send(()).expect("query start observed");
+                    release_for_query.notified().await;
+                    true
+                },
+            )
+            .await
+        });
+        query_started_rx.await.expect("authority query started");
+        // The group remains physically stopped, yet the Store wait spends
+        // active time until the same fence has been checked again.
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            control.wait_active_budget(Duration::from_millis(20)),
+        )
+        .await
+        .expect("uncredited RPC wait spends active budget");
+
+        query_release.notify_one();
+        assert_eq!(recheck.await.expect("recheck task"), Ok(Some(1)));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                control.wait_active_budget(Duration::from_millis(20)),
+            )
+            .await
+            .is_err(),
+            "same-fence finite hold restores active-time credit"
+        );
+        drop(quota_wait);
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            control.wait_active_budget(Duration::from_millis(20)),
+        )
+        .await
+        .expect("closed quota guard spends active budget");
+    }
 
     #[tokio::test]
     async fn probe_capacity_refusal_preserves_a_nonfinal_candidate_cursor() {

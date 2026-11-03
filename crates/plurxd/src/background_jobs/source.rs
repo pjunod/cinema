@@ -147,9 +147,13 @@ tokio::task_local! { static PACING_CLOCK: SourcePacingClock; }
 struct PacingWait<'a> {
     budget: &'a SourceReadBudget,
     clock: Option<SourcePacingClock>,
+    quota: Option<plurx_core::process::bounded::SourceQuotaWait>,
 }
 impl Drop for PacingWait<'_> {
     fn drop(&mut self) {
+        // Stop clock credit before publishing the absence of a waiter to the
+        // owner; its next poll may begin a source-slot reacquisition RPC.
+        drop(self.quota.take());
         let prior = self.budget.pacing_waiters.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(prior > 0);
         if let Some(clock) = &self.clock {
@@ -158,6 +162,19 @@ impl Drop for PacingWait<'_> {
         if self.budget.pacing_waiters() == 0 {
             self.budget.changed.notify_waiters();
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct SourcePauseBinding(Arc<SourceReadBudget>);
+#[cfg(target_os = "linux")]
+impl Drop for SourcePauseBinding {
+    fn drop(&mut self) {
+        self.0
+            .pause_controller
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 }
 
@@ -170,6 +187,7 @@ pub(crate) struct SourceReadBudget {
     invalidated: std::sync::atomic::AtomicBool,
     changed: tokio::sync::Notify,
     pacing_waiters: AtomicUsize,
+    pause_controller: Mutex<Option<plurx_core::process::bounded::SourcePauseController>>,
 }
 impl SourceReadBudget {
     pub(crate) fn new(
@@ -186,6 +204,7 @@ impl SourceReadBudget {
             invalidated: std::sync::atomic::AtomicBool::new(false),
             changed: tokio::sync::Notify::new(),
             pacing_waiters: AtomicUsize::new(0),
+            pause_controller: Mutex::new(None),
         })
     }
     /// The existing operation supervisor retains this exact receipt and must
@@ -262,9 +281,31 @@ impl SourceReadBudget {
     pub(crate) fn pacing_waiters(&self) -> usize {
         self.pacing_waiters.load(Ordering::Acquire)
     }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn bind_pause_controller(
+        self: &Arc<Self>,
+        controller: plurx_core::process::bounded::SourcePauseController,
+    ) -> SourcePauseBinding {
+        let mut bound = self
+            .pause_controller
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            bound.is_none(),
+            "one source pause driver owns a byte budget"
+        );
+        *bound = Some(controller);
+        SourcePauseBinding(Arc::clone(self))
+    }
     fn pacing_wait(&self) -> PacingWait<'_> {
         self.pacing_waiters.fetch_add(1, Ordering::AcqRel);
         let clock = PACING_CLOCK.try_with(Clone::clone).ok();
+        let quota = self
+            .pause_controller
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(plurx_core::process::bounded::SourcePauseController::finite_quota_wait);
         if let Some(clock) = &clock {
             clock.set_waiting(true);
         }
@@ -272,6 +313,7 @@ impl SourceReadBudget {
         PacingWait {
             budget: self,
             clock,
+            quota,
         }
     }
 
@@ -299,6 +341,13 @@ impl SourceReadBudget {
         loop {
             if cancel.is_cancelled() || self.cancel.is_cancelled() {
                 return Err("source read cancelled".into());
+            }
+            if matches!(&self.owner, BackgroundSourceOwner::Companion { .. }) {
+                // Optional foreground custody is physical, but byte service
+                // is revocable. Revalidate every bounded bridge range so a
+                // selected reader's new Refill projection takes effect before
+                // another original-media read is issued.
+                *cached = None;
             }
             if self
                 .invalidated
@@ -512,6 +561,35 @@ mod tests {
             child_finished < Duration::from_millis(2400),
             "a live daemon read is not aggregate source quiescence"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn finite_wait_drop_closes_confirmed_slot_credit_before_driver_poll() {
+        use plurx_core::process::bounded::SourcePauseController;
+        let (_store, _job, active) = crate::background_jobs::tests::active().await;
+        let budget = active.fence().source_budget();
+        let control = SourcePauseController::new_slot_gated(Duration::from_secs(1));
+        let _binding = budget.bind_pause_controller(control.clone());
+        let revision = control.request_pause();
+        assert!(control.confirm_pause_slot(revision));
+        let wait = budget.pacing_wait();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let credited = control.paused_duration();
+        assert!(credited >= Duration::from_millis(30));
+        drop(wait);
+        assert_eq!(budget.pacing_waiters(), 0);
+        assert_eq!(control.quota_waiters(), 0);
+        let after_drop = control.paused_duration();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(
+            control.paused_duration(),
+            after_drop,
+            "finite credit must stop at the waiter's synchronous drop"
+        );
+        assert!(control.resume(revision));
+        drop(_binding);
+        active.finish().await;
     }
 
     #[tokio::test]

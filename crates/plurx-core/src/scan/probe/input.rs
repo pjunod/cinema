@@ -198,4 +198,115 @@ mod tests {
             "lost fence must await provider cleanup rather than aborting it"
         );
     }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn finite_source_holds_do_not_exhaust_library_probe_active_budget() {
+        use crate::process::bounded::{self, SourcePauseController, SourcePausePhase};
+        let directory = tempfile::tempdir().expect("private probe input fixture directory");
+        let logical = directory.path().join("catalog.mkv");
+        let physical = directory.path().join("held-input.opaque");
+        std::fs::write(&physical, b"fixture").expect("write held input fixture");
+        let fixture = super::super::tests::install_fixture(
+            &physical,
+            super::super::tests::FixtureMode::SleepDeadline,
+            Duration::from_millis(500),
+        );
+        let settled = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn ProbeInputProvider> = Arc::new(Provider {
+            physical,
+            prepared: Arc::new(AtomicUsize::new(0)),
+            settled: Arc::clone(&settled),
+        });
+        let control = SourcePauseController::new(Duration::from_secs(2));
+        let started = tokio::time::Instant::now();
+        let task = tokio::spawn({
+            let control = control.clone();
+            async move {
+                bounded::pausable(
+                    control,
+                    with_probe_inputs(provider, super::super::probe(&logical)),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while fixture.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("probe begins its owned child");
+        let revision = control.request_pause();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while control.observation().phase != SourcePausePhase::Paused {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("child group reaches verified pause");
+        tokio::time::sleep(Duration::from_millis(550)).await;
+        assert!(control.resume(revision));
+        let error = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("probe keeps a finite wall bound")
+            .expect("owned probe task joins")
+            .expect_err("sleeping child exhausts active parser budget");
+        assert!(matches!(error, ProbeError::Transient { .. }));
+        assert!(started.elapsed() >= Duration::from_millis(550));
+        assert_eq!(settled.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn outstanding_daemon_read_does_not_credit_library_probe_active_budget() {
+        use crate::process::bounded::{self, SourcePauseController, SourcePausePhase};
+        let directory = tempfile::tempdir().expect("private probe input fixture directory");
+        let logical = directory.path().join("catalog.mkv");
+        let physical = directory.path().join("held-input.opaque");
+        std::fs::write(&physical, b"fixture").expect("write held input fixture");
+        let fixture = super::super::tests::install_fixture(
+            &physical,
+            super::super::tests::FixtureMode::SleepDeadline,
+            Duration::from_millis(500),
+        );
+        let provider: Arc<dyn ProbeInputProvider> = Arc::new(Provider {
+            physical,
+            prepared: Arc::new(AtomicUsize::new(0)),
+            settled: Arc::new(AtomicUsize::new(0)),
+        });
+        let control = SourcePauseController::new(Duration::from_secs(2));
+        let read = control
+            .enlist(&tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("register outstanding daemon read");
+        let started = tokio::time::Instant::now();
+        let task = tokio::spawn({
+            let control = control.clone();
+            async move {
+                bounded::pausable(
+                    control,
+                    with_probe_inputs(provider, super::super::probe(&logical)),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while fixture.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("probe begins its owned child");
+        control.request_pause();
+        let error = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("unverified daemon read spends active time")
+            .expect("owned probe task joins")
+            .expect_err("sleeping child exhausts active parser budget");
+        assert!(matches!(error, ProbeError::Transient { .. }));
+        assert_eq!(control.observation().phase, SourcePausePhase::Stopping);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(read);
+    }
 }

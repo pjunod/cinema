@@ -1174,6 +1174,9 @@ impl TranscodeManager {
                                 let owner=BackgroundSourceOwner::Offline{package_id,node_id,claim_generation};
                                 match store.register_background_source_custody(owner,crate::state::clock_ms()).await {
                                     Ok(BackgroundSourceRegistration::Registered(token)) => {
+                                        if crate::source_custody::activate_background_with_journal(&store, token.clone()).await.is_err() {
+                                            return crate::ffmpeg::DoviPixelProof::Inconclusive("offline source proof activation unavailable".into());
+                                        }
                                         let budget=crate::background_jobs::SourceReadBudget::from_existing_custody(Arc::clone(&store),&token,cancel);
                                         custody=Some(token);Some(budget)
                                     }
@@ -1189,12 +1192,8 @@ impl TranscodeManager {
                             crate::source_custody::with_request(foreground,crate::ffmpeg::dovi_reshape_changes_pixels(&file,class)).await
                         };
                         if let Some(custody)=custody {
-                            // Both probe children and their source readers have
-                            // physically joined before returning from the proof.
-                            loop {match store.release_background_source_custody(custody.clone(),crate::state::clock_ms()).await {
-                                Ok(_)=>break,
-                                Err(error)=>{tracing::warn!(%error,"joined offline pixel-proof custody release will retry");tokio::time::sleep(Duration::from_secs(1)).await;}
-                            }}
+                            // The proof's child and source bridge have joined.
+                            crate::background_jobs::settle_joined_source_custody(&store, custody).await;
                         }
                         proof
                     }

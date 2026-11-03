@@ -329,3 +329,63 @@ test('bundled hls additive family levels retain incumbent indexes audio groups a
  assert.equal(hls.levels[1].videoCodec,companion.codec);assert.equal(detached,0);assert.equal(manifest,0);
  hls.destroy();
 });
+
+
+test('known pending companion waits within the original quality deadline',async()=>{
+ const discover=context.continuousQualityDiscoverCandidate;
+ for(const pending of ['revision_one','segment_pending']){
+  const controller=new AbortController(),candidate={candidate_id:'c'.repeat(32)};
+  let now=0,row=null,calls=0;const signals=[],waits=[];
+  const found=await discover(candidate.candidate_id,{companion_candidate_id:candidate.candidate_id},()=>row,
+   async signal=>{signals.push(signal);if(++calls===2){row=candidate;return;}
+    if(pending==='segment_pending')throw Object.assign(new Error('pending'),{status:503,streamFailure:{code:'segment_pending'},retryAfterMs:1});},
+   {signal:controller.signal,deadlineMs:500,now:()=>now,wait:async ms=>{waits.push(ms);now+=ms;}});
+  assert.equal(found,candidate);assert.equal(calls,2);assert.ok(signals.every(signal=>signal===controller.signal));
+  assert.equal(waits.length,1);assert.ok(now<=500,'the original budget is never extended');
+ }
+});
+
+test('pending companion discovery preserves incumbent on deadline and cancels superseded choices',async()=>{
+ const discover=context.continuousQualityDiscoverCandidate,candidate='c'.repeat(32),binding={companion_candidate_id:candidate};
+ for(const mode of ['deadline','superseded']){
+  let now=0,reads=0;const owner=new AbortController();
+  await assert.rejects(discover(candidate,binding,()=>null,async()=>{reads++;},
+   {signal:owner.signal,deadlineMs:5,now:()=>now,wait:async ms=>{if(mode==='superseded')owner.abort();else now+=ms;}}),
+   error=>error.name===(mode==='deadline'?'TimeoutError':'AbortError'));
+  assert.equal(reads,1,'no refresh follows settlement');
+ }
+ let reads=0;
+ assert.equal(await discover('d'.repeat(32),binding,()=>null,async()=>reads++,{deadlineMs:5,now:()=>0}),null);
+ assert.equal(reads,0,'only the exact bound companion owns a pending discovery');
+});
+
+test('directed pending companion waits for its accepted parent selection before discovery',async()=>{
+ const candidate='c'.repeat(32),selection={quality:{mode:'auto',candidate_id:candidate}};
+ let notifications=0,discoveries=0;
+ const ctx=vm.createContext({AbortController,setTimeout,clearTimeout,performance:{now:()=>0},
+  playbackOwnsAttachedMedia:()=>true,playbackControlSelection:()=>selection,
+  continuousQualitySelectionCompatible:()=>true,
+  continuousQualityCandidate:()=>({id:candidate}),
+  notifyPlaybackControl:()=>++notifications});
+ vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/directed-change.js','utf8'),ctx);
+ const reporter={sequence:0,stopped:false,bootstrap:{generation:uuid(1),control_epoch:3}};
+ const p={sessionId:'one',controlIntentGeneration:1,controlReporter:reporter,
+  continuousQuality:{family:{version:2,video:[{candidate_id:'a'.repeat(32)}]},
+   choose:async()=>{discoveries++;return 'continuous';},protocol:{ledger:{latest_intent_revision:2,
+   transactions:[{intent_revision:2,transaction_id:uuid(8),first_presented_tick:0,first_presented_at_ms:1}]}}},
+  continuousQualityPresented:{candidate_id:candidate}};
+ const choosing=ctx.requestQualityChange(p,'manual');
+ assert.equal(notifications,1);assert.equal(discoveries,0);
+ const request={sequence:1,generation:uuid(1),control_epoch:3,selection};
+ ctx.settlePlaybackControlWaiters(p,{...request,generation:uuid(99)},{accepted_sequence:1},null);
+ ctx.settlePlaybackControlWaiters(p,{...request,selection:{quality:{mode:'auto',candidate_id:'d'.repeat(32)}}},{accepted_sequence:1},null);
+ assert.equal(discoveries,0,'other owner and candidate cannot release discovery');
+ ctx.settlePlaybackControlWaiters(p,request,{accepted_sequence:1},null);
+ assert.equal(await choosing,'continuous');assert.equal(discoveries,1);
+ assert.equal(p.directedChange.outcome,'committed');
+ const stale={intentGeneration:2,discoveryAbort:new AbortController()};
+ p.directedChange=stale;
+ const pending=ctx.awaitContinuousSelectionAcceptance(p,stale,selection,12000);
+ stale.discoveryAbort.abort();
+ assert.equal(await pending,false,'supersession closes the exact pending waiter');
+});

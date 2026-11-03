@@ -28,7 +28,13 @@ struct State {
     next_child: u64,
     children: BTreeMap<u64, bool>,
     verified_since: Option<Instant>,
-    paused_total: Duration,
+    verified_total: Duration,
+    // Slot-gated owners exclude time only while a finite quota wait is live
+    // and their exact pause RPC has acknowledged the verified stop.
+    slot_gated: bool,
+    slot_acknowledged: bool,
+    credited_since: Option<Instant>,
+    credited_total: Duration,
 }
 impl State {
     fn phase(&self) -> SourcePausePhase {
@@ -56,6 +62,15 @@ pub struct SourcePauseController(Arc<Inner>);
 
 impl SourcePauseController {
     pub fn new(max_paused: Duration) -> Self {
+        Self::with_slot_gate(max_paused, false)
+    }
+    /// A source-slot owner separates physical stop proof from timeout credit.
+    /// Call `confirm_pause_slot` only after its pause RPC acknowledges the
+    /// exact revision. The quota guard closes credit synchronously on drop.
+    pub fn new_slot_gated(max_paused: Duration) -> Self {
+        Self::with_slot_gate(max_paused, true)
+    }
+    fn with_slot_gate(max_paused: Duration, slot_gated: bool) -> Self {
         Self(Arc::new(Inner {
             state: Mutex::new(State {
                 requested: false,
@@ -63,7 +78,11 @@ impl SourcePauseController {
                 next_child: 0,
                 children: BTreeMap::new(),
                 verified_since: None,
-                paused_total: Duration::ZERO,
+                verified_total: Duration::ZERO,
+                slot_gated,
+                slot_acknowledged: false,
+                credited_since: None,
+                credited_total: Duration::ZERO,
             }),
             changed: watch::channel(0).0,
             max_paused,
@@ -77,10 +96,28 @@ impl SourcePauseController {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     fn changed(&self, state: &mut State) {
+        let now = Instant::now();
         if state.phase() == SourcePausePhase::Paused {
-            state.verified_since.get_or_insert_with(Instant::now);
+            state.verified_since.get_or_insert(now);
         } else if let Some(since) = state.verified_since.take() {
-            state.paused_total = state.paused_total.saturating_add(since.elapsed());
+            state.verified_total = state
+                .verified_total
+                .saturating_add(now.duration_since(since));
+        }
+        let creditable = state.phase() == SourcePausePhase::Paused
+            && (!state.slot_gated
+                || (state.slot_acknowledged
+                    && self
+                        .0
+                        .quota_waiters
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        > 0));
+        if creditable {
+            state.credited_since.get_or_insert(now);
+        } else if let Some(since) = state.credited_since.take() {
+            state.credited_total = state
+                .credited_total
+                .saturating_add(now.duration_since(since));
         }
         self.0
             .changed
@@ -96,18 +133,29 @@ impl SourcePauseController {
                 .map_or(Duration::ZERO, |since| since.elapsed()),
         }
     }
-    /// Verified source-idle time only; stop-request/D-state time still counts
-    /// as active execution and cannot inflate measured source capacity.
+    /// Active-time credit. A slot-gated owner earns this only after both
+    /// physical quiescence and its pause RPC acknowledge a live finite hold.
     pub fn paused_duration(&self) -> Duration {
         let state = self.state();
-        state.paused_total.saturating_add(
+        state.credited_total.saturating_add(
+            state
+                .credited_since
+                .map_or(Duration::ZERO, |since| since.elapsed()),
+        )
+    }
+    fn verified_duration(&self) -> Duration {
+        let state = self.state();
+        state.verified_total.saturating_add(
             state
                 .verified_since
                 .map_or(Duration::ZERO, |since| since.elapsed()),
         )
     }
+    fn pause_credit_active(&self) -> bool {
+        self.state().credited_since.is_some()
+    }
     pub fn pause_budget_exhausted(&self) -> bool {
-        self.paused_duration() >= self.0.max_paused
+        self.verified_duration() >= self.0.max_paused
     }
     /// Deliberate finite-byte service holds only. This is a request to the
     /// existing owner driver, never a stop acknowledgement or clock credit.
@@ -115,9 +163,8 @@ impl SourcePauseController {
         self.0
             .quota_waiters
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        self.0
-            .changed
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        let mut state = self.state();
+        self.changed(&mut state);
         SourceQuotaWait(self.clone())
     }
     pub fn quota_waiters(&self) -> usize {
@@ -140,7 +187,7 @@ impl SourcePauseController {
             if now >= wall || now >= deadline {
                 return;
             }
-            let sleep = if self.observation().phase == SourcePausePhase::Paused {
+            let sleep = if self.pause_credit_active() {
                 wall
             } else {
                 deadline
@@ -156,6 +203,7 @@ impl SourcePauseController {
         let mut state = self.state();
         if !state.requested {
             state.requested = true;
+            state.slot_acknowledged = false;
             state.revision = state
                 .revision
                 .checked_add(1)
@@ -163,6 +211,37 @@ impl SourcePauseController {
             self.changed(&mut state);
         }
         state.revision
+    }
+    /// The existing owner has received the exact pause RPC acknowledgement.
+    /// A stale result cannot enable credit for a successor revision.
+    pub fn confirm_pause_slot(&self, revision: u64) -> bool {
+        let mut state = self.state();
+        if !state.slot_gated
+            || state.revision != revision
+            || state.phase() != SourcePausePhase::Paused
+        {
+            return false;
+        }
+        if state.slot_acknowledged {
+            return true;
+        }
+        state.slot_acknowledged = true;
+        self.changed(&mut state);
+        true
+    }
+    /// Stop credit before validation and the store RPC that reacquires the
+    /// source slot. The group stays physically stopped until `resume` succeeds.
+    pub fn suspend_pause_credit(&self, revision: u64) -> bool {
+        let mut state = self.state();
+        if !state.slot_gated || state.revision != revision || !state.requested {
+            return false;
+        }
+        if !state.slot_acknowledged {
+            return true;
+        }
+        state.slot_acknowledged = false;
+        self.changed(&mut state);
+        true
     }
     /// Call only after the current fenced source slot was reacquired. A stale
     /// acknowledgement cannot resume a later pause or an unverified D-state.
@@ -172,6 +251,7 @@ impl SourcePauseController {
             return false;
         }
         state.requested = false;
+        state.slot_acknowledged = false;
         for stopped in state.children.values_mut() {
             *stopped = false;
         }
@@ -183,7 +263,8 @@ impl SourcePauseController {
     }
     pub(super) fn hard_deadline(&self, active_budget: Duration) -> Instant {
         Instant::now()
-            + active_budget.saturating_add(self.0.max_paused.saturating_sub(self.paused_duration()))
+            + active_budget
+                .saturating_add(self.0.max_paused.saturating_sub(self.verified_duration()))
     }
     /// Enlist before spawning a manually owned child. Retain the returned
     /// guard through physical stop/cleanup; call `run_group` while its pipes
@@ -228,10 +309,8 @@ impl Drop for SourceQuotaWait {
             .quota_waiters
             .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         debug_assert!(prior > 0);
-        self.0
-             .0
-            .changed
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        let mut state = self.0.state();
+        self.0.changed(&mut state);
     }
 }
 
@@ -263,44 +342,63 @@ impl ChildPauseGuard {
             let controller = &self.controller;
             let mut changes = controller.subscribe();
             let mut ticks = tokio::time::interval(Duration::from_millis(100));
-            let mut active_deadline = Instant::now() + active_budget;
+            let started = Instant::now();
+            let paused_before = controller.paused_duration();
             let wall = controller.hard_deadline(active_budget);
-            let mut paused_since = None;
             let mut stop_sent = false;
+            let mut stop_revision = None;
+            let mut acknowledged_revision = None;
             let mut stopped_observations = 0;
             tokio::pin!(work);
             loop {
                 let observation = controller.observation();
                 if observation.phase != SourcePausePhase::Running {
-                    if paused_since.is_none() {
+                    // A Running watch update may coalesce with a newer pause.
+                    // The old stopped group is not an acknowledgement of the
+                    // new revision, even when it never observed SIGCONT.
+                    if stop_revision != Some(observation.revision) {
                         signal_group(group, libc::SIGSTOP)?;
                         stop_sent = true;
+                        stop_revision = Some(observation.revision);
+                        acknowledged_revision = None;
+                        stopped_observations = 0;
+                    }
+                    if acknowledged_revision != Some(observation.revision) {
                         if verified_group(group, true).await.unwrap_or(false) {
                             stopped_observations += 1;
-                            if stopped_observations >= 2
-                                && self.acknowledge(observation.revision)
-                                && controller.observation().phase == SourcePausePhase::Paused
-                            {
-                                // The child alone is insufficient: a daemon
-                                // AVIO syscall may still hold an activity guard.
-                                // Only aggregate quiescence freezes active time.
-                                paused_since = Some(Instant::now());
+                            if stopped_observations >= 2 && self.acknowledge(observation.revision) {
+                                acknowledged_revision = Some(observation.revision);
                             }
                         } else {
                             stopped_observations = 0;
                         }
                     }
                 } else if stop_sent {
+                    // resume(revision) is the slot-reacquisition CAS and has
+                    // already happened before the controller says Running.
                     signal_group(group, libc::SIGCONT)?;
-                    if let Some(since) = paused_since.take() {
-                        active_deadline += since.elapsed();
-                    }
                     stop_sent = false;
+                    stop_revision = None;
+                    acknowledged_revision = None;
                     stopped_observations = 0;
+                }
+                // Credit comes only from aggregate verified quiescence. A
+                // stop request or an outstanding daemon read cannot extend it.
+                let paused = controller.paused_duration().saturating_sub(paused_before);
+                let active_deadline = started + active_budget.saturating_add(paused);
+                let aggregate_paused = controller.pause_credit_active();
+                // The owner may have awaited a store RPC while this future
+                // was not polled. A later finite hold cannot erase that spent
+                // active time merely because credit is active now.
+                if Instant::now() >= active_deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "source child active execution timed out",
+                    ));
                 }
                 tokio::select! {
                     result=&mut work=>return result,
-                    ()=tokio::time::sleep_until(active_deadline),if paused_since.is_none()=>return Err(io::Error::new(io::ErrorKind::TimedOut,"source child active execution timed out")),
+                    ()=tokio::time::sleep_until(active_deadline),if !aggregate_paused=>return Err(io::Error::new(io::ErrorKind::TimedOut,"source child active execution timed out")),
                     ()=tokio::time::sleep_until(wall)=>return Err(io::Error::new(io::ErrorKind::TimedOut,"source child paused wall age exhausted")),
                     result=changes.changed()=>{result.map_err(io::Error::other)?;},
                     _=ticks.tick()=>{},
@@ -550,6 +648,114 @@ mod tests {
         )
         .await
         .expect("verified pause cannot exceed remaining finite wall credit");
+    }
+
+    #[tokio::test]
+    async fn slot_rpc_waits_spend_active_time() {
+        let control = SourcePauseController::new_slot_gated(Duration::from_secs(1));
+        let quota = control.finite_quota_wait();
+        let revision = control.request_pause();
+        assert_eq!(control.observation().phase, SourcePausePhase::Paused);
+
+        // Physical stop plus a finite wait is insufficient before the exact
+        // pause RPC acknowledges the slot transition.
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            control.wait_active_budget(Duration::from_millis(30)),
+        )
+        .await
+        .expect("pause RPC wait consumes active budget");
+        assert_eq!(control.paused_duration(), Duration::ZERO);
+
+        assert!(control.confirm_pause_slot(revision));
+        let clock = control.wait_active_budget(Duration::from_millis(30));
+        tokio::pin!(clock);
+        assert!(tokio::time::timeout(Duration::from_millis(60), &mut clock)
+            .await
+            .is_err());
+        assert!(control.paused_duration() >= Duration::from_millis(40));
+
+        // The group remains stopped during the resume RPC, but its active
+        // clock must run. No CONT is authorized until resume(revision).
+        assert!(control.suspend_pause_credit(revision));
+        tokio::time::timeout(Duration::from_millis(100), clock)
+            .await
+            .expect("resume RPC wait consumes active budget");
+        assert_eq!(control.observation().phase, SourcePausePhase::Paused);
+        drop(quota);
+        assert!(control.resume(revision));
+    }
+
+    #[tokio::test]
+    async fn verified_pressure_without_finite_quota_still_spends_active_time() {
+        let control = SourcePauseController::new_slot_gated(Duration::from_secs(1));
+        let revision = control.request_pause();
+        assert!(control.confirm_pause_slot(revision));
+        assert_eq!(control.observation().phase, SourcePausePhase::Paused);
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            control.wait_active_budget(Duration::from_millis(30)),
+        )
+        .await
+        .expect("unidentified pressure is not finite quota service");
+        assert_eq!(control.paused_duration(), Duration::ZERO);
+        assert!(control.resume(revision));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn coalesced_resume_and_repause_reacknowledges_new_revision() {
+        let control = SourcePauseController::new(Duration::from_secs(2));
+        let guard = control
+            .enlist(&CancellationToken::new())
+            .await
+            .expect("enlist owned child");
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        let mut child = command.spawn().expect("spawn isolated child group");
+        let process_id = child.id().expect("child process identity");
+        let driver = tokio::spawn(async move {
+            guard
+                .run_group(process_id, Duration::from_millis(400), async {
+                    std::future::pending::<io::Result<()>>().await
+                })
+                .await
+        });
+        let first = control.request_pause();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while control.observation().phase != SourcePausePhase::Paused {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first revision reaches verified pause");
+
+        // There is no await between these transitions on this single-thread
+        // runtime. The driver can see only the newer Stopping observation.
+        assert!(control.resume(first));
+        let second = control.request_pause();
+        assert!(second > first);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while control.observation().phase != SourcePausePhase::Paused {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("coalesced newer revision is reverified and acknowledged");
+        assert_eq!(control.observation().revision, second);
+        assert!(control.resume(second));
+        let result = tokio::time::timeout(Duration::from_millis(1200), driver)
+            .await
+            .expect("active clock resumes before the longer wall limit")
+            .expect("owned driver joins");
+        assert_eq!(
+            result
+                .expect_err("pending work reaches active budget")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        child.start_kill().expect("stop fixture child");
+        child.wait().await.expect("reap fixture child");
     }
 
     #[cfg(target_os = "linux")]

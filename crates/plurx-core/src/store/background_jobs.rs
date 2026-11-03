@@ -2394,6 +2394,40 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         token: super::background_jobs_resources::ForegroundSourceToken,
     ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn activate_foreground_source_custody(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError>;
+    async fn abort_foreground_source_activation(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError>;
+    async fn mark_foreground_source_settled(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+    ) -> Result<bool, StoreError>;
+    async fn settled_foreground_source_custody(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn activate_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError>;
+    async fn abort_background_source_activation(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError>;
+    async fn mark_background_source_settled(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+    ) -> Result<bool, StoreError>;
+    async fn settled_background_source_custody(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>;
     async fn register_background_source_custody(
         &self,
         owner: super::background_jobs_resources::BackgroundSourceOwner,
@@ -4249,6 +4283,61 @@ LIMIT 1
         token: super::background_jobs_resources::ForegroundSourceToken,
     ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
         super::background_jobs_resources::resolve_foreground(self, token).await
+    }
+    async fn activate_foreground_source_custody(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::activate_foreground_custody(self, token, activation_id)
+            .await
+    }
+    async fn abort_foreground_source_activation(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::abort_foreground_activation(self, token, activation_id)
+            .await
+    }
+    async fn mark_foreground_source_settled(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::mark_foreground_settled(self, token).await
+    }
+    async fn settled_foreground_source_custody(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
+        super::background_jobs_resources::settled_foreground_custody(self).await
+    }
+    async fn activate_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::activate_background_custody(self, token, activation_id)
+            .await
+    }
+    async fn abort_background_source_activation(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        activation_id: String,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::abort_background_activation(self, token, activation_id)
+            .await
+    }
+    async fn mark_background_source_settled(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::mark_background_settled(self, token).await
+    }
+    async fn settled_background_source_custody(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>
+    {
+        super::background_jobs_resources::settled_background_custody(self).await
     }
     async fn register_background_source_custody(
         &self,

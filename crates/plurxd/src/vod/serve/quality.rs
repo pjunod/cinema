@@ -122,6 +122,26 @@ impl VodServe {
         frontier_ms: i64,
         deadline: Instant,
     ) -> Result<(), String> {
+        self.admit_controlled_video_for_control_before(
+            session_id,
+            rendition_id,
+            frontier_ms,
+            deadline,
+            None,
+        )
+        .await
+    }
+
+    /// A parent selection may need the deferred companion before any init is
+    /// available. Only its still-current accepted sequence may spend credit.
+    pub(super) async fn admit_controlled_video_for_control_before(
+        &self,
+        session_id: &str,
+        rendition_id: &str,
+        frontier_ms: i64,
+        deadline: Instant,
+        expected_sequence: Option<u64>,
+    ) -> Result<(), String> {
         let work = async {
             let (lifecycle, incarnation, mut media) = {
                 let sessions = self.shared.sessions.lock().await;
@@ -164,7 +184,7 @@ impl VodServe {
                 );
             }
             let _lifecycle = lifecycle.lock().await;
-            let needs_reservation = {
+            let (needs_reservation, priority) = {
                 let sessions = self.shared.sessions.lock().await;
                 let session = sessions
                     .get(session_id)
@@ -175,13 +195,24 @@ impl VodServe {
                 {
                     return Err("controlled attachment changed during admission".into());
                 }
-                session
+                let child = session
                     .children
                     .iter()
                     .find(|child| child.controlled && child.rendition.key == rendition_id)
-                    .ok_or("controlled target disappeared")?
-                    ._reservation
-                    .is_none()
+                    .ok_or("controlled target disappeared")?;
+                let readers = child.rendition.readers.lock().await;
+                let reader = readers
+                    .get(&child.reader_id)
+                    .ok_or("controlled reader disappeared")?;
+                if expected_sequence.is_some_and(|sequence| {
+                    !reader.companion_bootstrap
+                        || !reader.control_required
+                        || reader.control_sequence != Some(sequence)
+                }) {
+                    return Err("selected companion control changed".into());
+                }
+                let priority = reader.admission_priority;
+                (child._reservation.is_none(), priority)
             };
             if media.iter().any(|rendition| {
                 rendition.closed.load(Acquire)
@@ -193,13 +224,7 @@ impl VodServe {
                 return Err("controlled source changed during admission".into());
             }
             let permits = if needs_reservation {
-                Some(
-                    Self::reserve_media_group(
-                        &media,
-                        Some(crate::admission::Priority::Speculative),
-                    )
-                    .await?,
-                )
+                Some(Self::reserve_media_group(&media, Some(priority)).await?)
             } else {
                 None
             };
@@ -220,6 +245,13 @@ impl VodServe {
             let reader = readers
                 .get_mut(&child.reader_id)
                 .ok_or("controlled reader disappeared")?;
+            if expected_sequence.is_some_and(|sequence| {
+                !reader.companion_bootstrap
+                    || !reader.control_required
+                    || reader.control_sequence != Some(sequence)
+            }) {
+                return Err("selected companion control changed".into());
+            }
             // An already admitted producer still needs the new preparation
             // frontier. Its retained credit is capacity, not a demand anchor.
             if let Some(permits) = permits {
@@ -283,18 +315,38 @@ impl VodServe {
         (!keep.is_empty()).then_some(keep)
     }
 
+    pub(super) fn companion_source_required(ledger: &QualityLedger, rendition_id: &str) -> bool {
+        Self::controlled_video_demand(ledger).is_some_and(|keep| keep.contains(rendition_id))
+            && ledger.transactions.iter().any(|tx| {
+                tx.target_rendition_id == rendition_id
+                    && (tx.first_presented_tick.is_some()
+                        || (tx.intent_revision == ledger.latest_intent_revision
+                            && !tx.cancel_requested
+                            && !tx.intent_superseded
+                            && matches!(
+                                tx.state,
+                                QualityState::Preparing
+                                    | QualityState::Ready
+                                    | QualityState::Scheduled
+                                    | QualityState::Appended
+                                    | QualityState::Presented
+                            )))
+            })
+    }
+
     /// Completed scheduling retires demand, never the immutable child or
     /// its committed interval pins. Shared workers retain their physical
     /// permit through confirmed reap and continue for any other active reader.
-    async fn settle_controlled_video(
+    pub(super) async fn settle_controlled_video(
         &self,
         session_id: &str,
         owner: &ResponseOwner,
         ledger: &QualityLedger,
     ) -> Result<(), String> {
-        let Some(keep) = Self::controlled_video_demand(ledger) else {
+        let keep = Self::controlled_video_demand(ledger).unwrap_or_default();
+        if keep.is_empty() && ledger.transactions.is_empty() {
             return Ok(());
-        };
+        }
         let _lifecycle = owner.lifecycle.lock().await;
         {
             let sessions = self.shared.sessions.lock().await;
@@ -349,6 +401,28 @@ impl VodServe {
         let mut released = Vec::new();
         for ((rendition, id), readers) in media.iter().zip(readers.iter_mut()) {
             let reader = readers.get_mut(id).expect("validated controlled reader");
+            let persistent_companion = reader.companion_bootstrap
+                && session.children.iter().any(|child| {
+                    child.reader_id == *id
+                        && child.controlled
+                        && Arc::ptr_eq(&child.rendition, rendition)
+                });
+            if persistent_companion {
+                // The accepted ledger, under this exact parent's lifecycle
+                // and incarnation, is the only authority that upgrades the
+                // optional source purpose. Preparing is already a directed
+                // selection; waiting for Ready would deadlock its first init.
+                reader.quality_required = Self::companion_source_required(ledger, &rendition.key);
+                let priority = if reader.control_required || reader.quality_required {
+                    crate::admission::Priority::Live
+                } else {
+                    crate::admission::Priority::Speculative
+                };
+                if reader.admission_priority != priority {
+                    reader.admission_priority = priority;
+                    rendition.kick();
+                }
+            }
             let preparing = ledger.transactions.iter().any(|tx| {
                 tx.intent_revision == ledger.latest_intent_revision
                     && tx.target_rendition_id == rendition.key
@@ -359,7 +433,9 @@ impl VodServe {
             if !preparing {
                 reader.preparation_frontier = None;
             }
-            if keep.contains(rendition.key.as_str())
+            if reader.control_required
+                || reader.quality_required
+                || keep.contains(rendition.key.as_str())
                 || session.children.iter().any(|child| {
                     child.reader_id == *id
                         && child.companion_bootstrap

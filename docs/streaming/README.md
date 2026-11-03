@@ -26,6 +26,8 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [NATIVE-CALLBACK-DELIVERY-RCA.md](NATIVE-CALLBACK-DELIVERY-RCA.md) | Native callback root cause and revised per-element multiplexer repair contract. | open |
 | [NATIVE-CALLBACK-FABLE-REVIEW.md](NATIVE-CALLBACK-FABLE-REVIEW.md) | Fable P2/P3 dispositions; implementation drafted, final review pending. | open |
 | [PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md](PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md) | Eight-lane owner, implementation, PR and final-candidate qualification ledger. | open |
+| [PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md](PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md) | Astra's final implementation review of frozen candidate `2bc1e54e1`; seven findings and the request-changes verdict. | done |
+| [PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) | Source dispositions and outstanding review and qualification evidence for Astra's seven startup findings. | open |
 | [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, and one fast-lane PR. | open |
 | [PLAYBACK-START-FAILURES-2026-10-13.md](PLAYBACK-START-FAILURES-2026-10-13.md) | Standalone reader contention, unpublished native attachment, stale inventory/error ownership and separate Apple TV audio evidence; fixes built, deployment and physical acceptance open. | open |
 | [BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md](BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md) | Five Apple TV remux interruptions from deploy restarts, quorum fences, rolling retirement and whole-file re-attestation (fixed). | open |

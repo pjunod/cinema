@@ -1,8 +1,8 @@
 # Playback startup, Resume and native callback implementation status
 
-**Status:** implementation committed; platform lint and final review pending · **Owner:** Codex/root · **Branch:**
+**Status:** six Astra findings source-verified; pending companion selection correction awaits final verification · **Owner:** Codex/root · **Branch:**
 `codex/playback-startup-fixes` · **Base:** `bd213c819` · **Updated:**
-2026-11-02
+2026-11-03
 
 Companion to the [canonical startup proposal](COLD-PLAYBACK-STARTUP-RCA-AND-PROPOSAL.md),
 [AC3 retest RCA](COLD-PLAYBACK-AC3-RETEST-RCA.md), [native callback RCA](NATIVE-CALLBACK-DELIVERY-RCA.md)
@@ -10,10 +10,31 @@ and [Fable dispositions](NATIVE-CALLBACK-FABLE-REVIEW.md). This is the delivery
 ledger for the user-authorized batched repair. Commits follow the smallest-first
 work order below; one main PR opens only after the batch is complete and
 reviewable. The branch was advanced to current main on 2026-11-02; its runner
-maintenance changes do not overlap this implementation. Implementation is committed through `7ec51905a` and frozen for integration
-checks. Mac workspace hooks and web typing pass. Linux production/core
-compilation and the renderer SDK build pass; Linux lint cleanup is finishing.
-No unit suite, PR or merge qualification is recorded yet.
+maintenance changes do not overlap this implementation. Astra reviewed frozen
+candidate `2bc1e54e1` and requested changes: four P1 findings cover custody
+recovery, pause revisions, exact continuous-parent telemetry and optional source
+admission; three P2 findings cover probe active time, pending family discovery
+and post-conclusion Play rejection. Sol owns the Rust corrections; Codex owns
+the browser corrections. All seven findings now have source changes and
+unrun regressions. Exact activation IDs and durable intents cover lost
+activation acknowledgements; receipt-scoped locks preserve unrelated starts.
+Probe pause credit excludes Store RPC waits and unknown pressure. A selected
+companion retains normal source batching; optional work has revocable bounds.
+Production/core compilation passed on frozen pre-findings candidate
+`2bc1e54e1`; it does not qualify the changed source. The learner compiler slot
+is prepared with pinned Rust 1.97.1, a warm task cache, four CPUs and an 18 GiB
+memory cap. No behavioral tests, final finding verification or merge
+qualification are recorded yet.
+
+Astra's focused verification closes findings 1, 2, 3, 5, 6 and 7 by source
+inspection. Finding 4 remains open: a selected pending companion must acquire
+accepted source purpose before init discovery, rather than waiting for a
+Prepare that discovery itself gates. The correction accepts the exact parent selection and acquires existing
+controlled admission before discovery. Independent parent-selection and quality
+requirements preserve each owner; Astra verification is pending. No behavioral tests have run.
+
+The [Astra dispositions](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) distinguish
+source changes from findings that are reviewed and qualified.
 
 ## 1. Work lanes
 
@@ -123,10 +144,10 @@ boundaries require Linux and packaged-parser qualification after review.
 |---|---|
 | Pinned Mac workspace Clippy, all targets, formatting, catalog and served JS syntax | Passed through the normal commit hooks. |
 | Web TypeScript baseline | Passed without raising the baseline. |
-| Pinned Linux production daemon and core all-target compilation | Passed on `7ec51905a`; three lint-only corrections are being committed. |
+| Pinned Linux production daemon and core all-target compilation | Passed on frozen pre-findings candidate `2bc1e54e1`; it does not qualify the changed source. |
 | Full Linux renderer SDK plus CPU harness compilation | Passed; renderer/header hashes match the current code. No renderer regression has executed. |
-| Full Linux daemon test-target compilation | Exceeds the voter compiler's 8 GiB limit, including with incremental compilation disabled. A larger eligible lab/learner slot remains needed. The voter cap stays intact. |
-| Adversarial review, focused regressions and main fast lane | Pending, in that order. |
+| Full Linux daemon test-target compilation | Exceeds the voter compiler's 8 GiB limit, including with incremental compilation disabled. A larger eligible builder is being prepared after `lab3` was confirmed a learner. The voter cap stays intact. |
+| Final review, focused regressions and main fast lane | Pending; finding 5 RPC-wait accounting is not yet resolved. |
 
 Private compiler logs, archive checksums and source ownership handoffs live in
 the workflow's durable evidence directory, outside its disposable build cache.

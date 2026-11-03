@@ -13,6 +13,8 @@ use plurx_core::{
         Store,
     },
 };
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 
@@ -20,9 +22,487 @@ const LEASE_MS: i64 = 30_000;
 pub(crate) const SERVICE_EPOCH_MS: i64 = 5_000;
 pub(crate) const BACKGROUND_QUANTUM: u64 = 1_048_576;
 
-pub(crate) fn source_pressure_changed() -> &'static tokio::sync::Notify {
-    static CHANGED: OnceLock<tokio::sync::Notify> = OnceLock::new();
-    CHANGED.get_or_init(tokio::sync::Notify::new)
+/// Local, fsynced evidence closes the store-outage/restart window after a
+/// physical join. Files live under data_dir, never the disposable runtime cache.
+static SETTLEMENT_JOURNAL: OnceLock<PathBuf> = OnceLock::new();
+type ReceiptLock = tokio::sync::Mutex<()>;
+static ACTIVATION_LOCKS: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<ReceiptLock>>>,
+> = OnceLock::new();
+
+fn receipt_lock(name: &str) -> Arc<ReceiptLock> {
+    let locks =
+        ACTIVATION_LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut locks = locks.lock().expect("source receipt lock map");
+    if let Some(lock) = locks.get(name).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(ReceiptLock::new(()));
+    locks.insert(name.to_owned(), Arc::downgrade(&lock));
+    lock
+}
+
+pub(crate) fn configure_settlement_journal(data_dir: &Path) {
+    if !data_dir.as_os_str().is_empty() {
+        let _ = SETTLEMENT_JOURNAL.set(data_dir.join("source-custody-settlements"));
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "receipt", deny_unknown_fields)]
+enum SettlementReceipt {
+    Foreground(ForegroundSourceToken),
+    Background(plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken),
+    ForegroundActivation {
+        token: ForegroundSourceToken,
+        activation_id: String,
+    },
+    BackgroundActivation {
+        token: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+        activation_id: String,
+    },
+}
+
+fn settlement_name(receipt: &SettlementReceipt) -> String {
+    match receipt {
+        SettlementReceipt::Foreground(token)
+        | SettlementReceipt::ForegroundActivation { token, .. } => {
+            format!("foreground-{}.json", token.owner.owner_id)
+        }
+        SettlementReceipt::Background(token)
+        | SettlementReceipt::BackgroundActivation { token, .. } => {
+            format!("background-{}.json", token.custody_id)
+        }
+    }
+}
+
+fn write_settlement_receipt(receipt: &SettlementReceipt) -> Result<(), String> {
+    let Some(dir) = SETTLEMENT_JOURNAL.get() else {
+        return Ok(());
+    };
+    write_settlement_receipt_at(dir, receipt)
+}
+
+fn write_settlement_receipt_at(dir: &Path, receipt: &SettlementReceipt) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+    }
+    let path = dir.join(settlement_name(receipt));
+    let temporary = dir.join(format!(
+        ".{}.{}.tmp",
+        settlement_name(receipt),
+        uuid::Uuid::new_v4()
+    ));
+    let encoded = serde_json::to_vec(receipt).map_err(|error| error.to_string())?;
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(&encoded)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)?;
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|error| error.to_string())
+}
+
+fn clear_settlement_receipt(receipt: &SettlementReceipt) -> Result<(), String> {
+    let Some(dir) = SETTLEMENT_JOURNAL.get() else {
+        return Ok(());
+    };
+    clear_settlement_receipt_at(dir, receipt)
+}
+
+fn clear_settlement_receipt_at(dir: &Path, receipt: &SettlementReceipt) -> Result<(), String> {
+    match std::fs::remove_file(dir.join(settlement_name(receipt))) {
+        Ok(()) => std::fs::File::open(dir)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| error.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// The intent is fsynced before the activation RPC. Until it is removed and
+/// fsynced, this caller cannot expose input. Replay can therefore revoke only
+/// its nonce after a lost acknowledgement or daemon restart.
+pub(crate) async fn activate_foreground_with_journal(
+    store: &Arc<dyn Store>,
+    token: ForegroundSourceToken,
+) -> Result<(), String> {
+    let receipt = SettlementReceipt::ForegroundActivation {
+        token: token.clone(),
+        activation_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let SettlementReceipt::ForegroundActivation { activation_id, .. } = &receipt else {
+        unreachable!()
+    };
+    let lock = receipt_lock(&settlement_name(&receipt));
+    let _guard = lock.lock().await;
+    write_settlement_receipt(&receipt)?;
+    let activated = store
+        .activate_foreground_source_custody(token.clone(), activation_id.clone())
+        .await;
+    if activated.as_ref().is_ok_and(|value| *value) && clear_settlement_receipt(&receipt).is_ok() {
+        return Ok(());
+    }
+    if let Err(error) = activated {
+        tracing::warn!(%error,"foreground activation acknowledgement lost");
+    }
+    loop {
+        match store
+            .abort_foreground_source_activation(token.clone(), activation_id.clone())
+            .await
+        {
+            Ok(aborted) => {
+                if aborted {
+                    match store.resolve_foreground_source(token.clone()).await {
+                        Ok(Some(current)) => match store
+                            .release_foreground_source(current, crate::state::clock_ms())
+                            .await
+                        {
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::warn!(%error,"foreground activation abort release will retry");
+                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                continue;
+                            }
+                        },
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%error,"foreground activation abort resolution will retry");
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            continue;
+                        }
+                    }
+                }
+                let _ = clear_settlement_receipt(&receipt);
+                return Err("foreground source activation did not settle".into());
+            }
+            Err(error) => tracing::warn!(%error,"foreground activation abort will retry"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+pub(crate) async fn activate_background_with_journal(
+    store: &Arc<dyn Store>,
+    token: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) -> Result<(), String> {
+    let receipt = SettlementReceipt::BackgroundActivation {
+        token: token.clone(),
+        activation_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let SettlementReceipt::BackgroundActivation { activation_id, .. } = &receipt else {
+        unreachable!()
+    };
+    let lock = receipt_lock(&settlement_name(&receipt));
+    let _guard = lock.lock().await;
+    write_settlement_receipt(&receipt)?;
+    let activated = store
+        .activate_background_source_custody(token.clone(), activation_id.clone())
+        .await;
+    if activated.as_ref().is_ok_and(|value| *value) && clear_settlement_receipt(&receipt).is_ok() {
+        return Ok(());
+    }
+    if let Err(error) = activated {
+        tracing::warn!(%error,"background activation acknowledgement lost");
+    }
+    loop {
+        match store
+            .abort_background_source_activation(token.clone(), activation_id.clone())
+            .await
+        {
+            Ok(aborted) => {
+                if aborted {
+                    match store
+                        .release_background_source_custody(token.clone(), crate::state::clock_ms())
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(%error,"background activation abort release will retry");
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            continue;
+                        }
+                    }
+                }
+                let _ = clear_settlement_receipt(&receipt);
+                return Err("background source activation did not settle".into());
+            }
+            Err(error) => tracing::warn!(%error,"background activation abort will retry"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+pub(crate) async fn lock_background_settlement(
+    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    let name = settlement_name(&SettlementReceipt::Background(receipt.clone()));
+    receipt_lock(&name).lock_owned().await
+}
+
+pub(crate) fn persist_background_settlement(
+    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) -> Result<(), String> {
+    write_settlement_receipt(&SettlementReceipt::Background(receipt.clone()))
+}
+
+pub(crate) fn clear_background_settlement(
+    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) -> Result<(), String> {
+    clear_settlement_receipt(&SettlementReceipt::Background(receipt.clone()))
+}
+
+/// Replay is owned by recurring queue upkeep. Only files written after a
+/// physical join (or exact no-reader scope) can authorize a deletion.
+pub(crate) async fn replay_local_settlements(store: &Arc<dyn Store>) -> Result<(), String> {
+    let Some(dir) = SETTLEMENT_JOURNAL.get() else {
+        return Ok(());
+    };
+    replay_local_settlements_at(store, dir).await
+}
+
+async fn replay_local_settlements_at(store: &Arc<dyn Store>, dir: &Path) -> Result<(), String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries.take(128) {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_file()
+        {
+            continue;
+        }
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let lock = receipt_lock(name);
+        let Ok(_guard) = lock.try_lock() else {
+            // An operation in this process still owns this exact intent.
+            continue;
+        };
+        // Read after acquiring the receipt lock. A successful activation may
+        // have removed/replaced the file while replay was enumerating it.
+        let bytes = match std::fs::read(entry.path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        let receipt: SettlementReceipt = match serde_json::from_slice(&bytes) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                tracing::warn!(%error,"invalid source settlement journal retained");
+                continue;
+            }
+        };
+        let expected_name = settlement_name(&receipt);
+        let file_name = entry.file_name();
+        if file_name.to_str() != Some(expected_name.as_str()) {
+            tracing::warn!("source settlement journal filename mismatch retained");
+            continue;
+        }
+        match &receipt {
+            SettlementReceipt::BackgroundActivation {
+                token,
+                activation_id,
+            } => {
+                if store
+                    .abort_background_source_activation(token.clone(), activation_id.clone())
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    store
+                        .release_background_source_custody(token.clone(), crate::state::clock_ms())
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            SettlementReceipt::ForegroundActivation {
+                token,
+                activation_id,
+            } => {
+                if store
+                    .abort_foreground_source_activation(token.clone(), activation_id.clone())
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    if let Some(current) = store
+                        .resolve_foreground_source(token.clone())
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        store
+                            .release_foreground_source(current, crate::state::clock_ms())
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+            SettlementReceipt::Background(token) => {
+                if store
+                    .mark_background_source_settled(token.clone())
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    store
+                        .release_background_source_custody(token.clone(), crate::state::clock_ms())
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            SettlementReceipt::Foreground(token) => {
+                if store
+                    .mark_foreground_source_settled(token.clone())
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    if let Some(current) = store
+                        .resolve_foreground_source(token.clone())
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        store
+                            .release_foreground_source(current, crate::state::clock_ms())
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+        }
+        clear_settlement_receipt(&receipt)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod settlement_journal_tests {
+    use super::*;
+    use plurx_core::store::background_jobs_resources::{
+        BackgroundSourceCustodyToken, BackgroundSourceOwner,
+    };
+
+    #[tokio::test]
+    async fn live_activation_intent_is_skipped_while_other_replay_progresses() {
+        let dir = tempfile::tempdir().expect("journal directory");
+        let token = BackgroundSourceCustodyToken {
+            custody_id: uuid::Uuid::new_v4().to_string(),
+            owner: BackgroundSourceOwner::Analysis {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                node_id: "journal-node".into(),
+                fence: 7,
+            },
+        };
+        let live = SettlementReceipt::BackgroundActivation {
+            token: token.clone(),
+            activation_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let completed = SettlementReceipt::Background(BackgroundSourceCustodyToken {
+            custody_id: uuid::Uuid::new_v4().to_string(),
+            owner: token.owner.clone(),
+        });
+        write_settlement_receipt_at(dir.path(), &live).expect("live intent");
+        write_settlement_receipt_at(dir.path(), &completed).expect("completed proof");
+        let lock = receipt_lock(&settlement_name(&live));
+        let held = lock.lock().await;
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        replay_local_settlements_at(&store, dir.path())
+            .await
+            .expect("bounded replay");
+        assert!(
+            dir.path().join(settlement_name(&live)).exists(),
+            "live intent cannot be aborted"
+        );
+        assert!(
+            !dir.path().join(settlement_name(&completed)).exists(),
+            "unrelated replay progresses"
+        );
+        drop(held);
+        replay_local_settlements_at(&store, dir.path())
+            .await
+            .expect("orphan replay");
+        assert!(!dir.path().join(settlement_name(&live)).exists());
+    }
+
+    #[test]
+    fn joined_receipt_survives_operation_restart_with_exact_identity() {
+        let dir = tempfile::tempdir().expect("journal directory");
+        let receipt = SettlementReceipt::Background(BackgroundSourceCustodyToken {
+            custody_id: uuid::Uuid::new_v4().to_string(),
+            owner: BackgroundSourceOwner::Analysis {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                node_id: "journal-node".into(),
+                fence: 7,
+            },
+        });
+        write_settlement_receipt_at(dir.path(), &receipt).expect("fsynced proof");
+        let bytes = std::fs::read(dir.path().join(settlement_name(&receipt))).expect("reopen");
+        let replay: SettlementReceipt = serde_json::from_slice(&bytes).expect("durable receipt");
+        match replay {
+            SettlementReceipt::Background(token) => {
+                let original_id = match &receipt {
+                    SettlementReceipt::Background(original) => original.custody_id.as_str(),
+                    _ => unreachable!(),
+                };
+                assert_eq!(token.custody_id, original_id);
+                assert!(matches!(
+                    token.owner,
+                    BackgroundSourceOwner::Analysis { fence: 7, .. }
+                ));
+            }
+            _ => panic!("wrong receipt kind"),
+        }
+        clear_settlement_receipt_at(dir.path(), &receipt).expect("acknowledged cleanup");
+        assert!(!dir.path().join(settlement_name(&receipt)).exists());
+    }
+}
+
+/// The revision lets an owner detect a pressure transition that arrived
+/// while it was awaiting a Store RPC, when a Notify subscription was absent.
+pub(crate) struct SourcePressureSignal {
+    changed: tokio::sync::Notify,
+    revision: std::sync::atomic::AtomicU64,
+}
+impl SourcePressureSignal {
+    pub(crate) fn notified(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.changed.notified()
+    }
+    pub(crate) fn notify_waiters(&self) {
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.changed.notify_waiters();
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+pub(crate) fn source_pressure_changed() -> &'static SourcePressureSignal {
+    static CHANGED: OnceLock<SourcePressureSignal> = OnceLock::new();
+    CHANGED.get_or_init(|| SourcePressureSignal {
+        changed: tokio::sync::Notify::new(),
+        revision: std::sync::atomic::AtomicU64::new(0),
+    })
 }
 
 #[derive(Clone)]
@@ -146,6 +626,7 @@ impl SourceIdentity {
 
 pub(crate) struct SourceCustody {
     observer: SourceObserver,
+    token: ForegroundSourceToken,
     settled: bool,
 }
 #[derive(Clone)]
@@ -246,8 +727,8 @@ impl SourceRequest {
         self.owner.source_generation = hex::encode(Sha256::digest(version.as_bytes()));
         self
     }
-    /// Registration is the only start barrier. It never waits for another
-    /// reader's physical pause/reap, whose old charge remains in the ledger.
+    /// Registration and exact activation form the start barrier. Neither
+    /// waits for another reader's physical pause/reap, whose old charge remains.
     pub(crate) async fn register(&self, attempt: impl ToString) -> Result<SourceCustody, String> {
         let now = crate::fragment_index_cluster::unix_ms();
         let mut owner = self.owner.clone();
@@ -291,6 +772,10 @@ impl SourceRequest {
                 }
             },
         };
+        // Registration starts with durable no-reader proof. Clear it before
+        // returning a guard that can open input; an uncertain activation never
+        // authorizes a read. The existing owner resolves and retries settlement.
+        activate_foreground_with_journal(&self.store, token.clone()).await?;
         source_pressure_changed().notify_waiters();
         let (commands, receiver) = mpsc::unbounded_channel();
         let reads = Arc::new(ReadActivity::default());
@@ -304,11 +789,12 @@ impl SourceRequest {
         );
         tokio::spawn(run_owner(
             Arc::clone(&self.store),
-            token,
+            token.clone(),
             receiver,
             Arc::clone(&reads),
         ));
         Ok(SourceCustody {
+            token,
             observer: SourceObserver {
                 commands,
                 reads,
@@ -319,6 +805,10 @@ impl SourceRequest {
     }
 }
 impl SourceCustody {
+    pub(crate) fn token(&self) -> ForegroundSourceToken {
+        self.token.clone()
+    }
+
     pub(crate) fn observer(&self) -> SourceObserver {
         self.observer.clone()
     }
@@ -515,6 +1005,19 @@ impl SourceObserver {
         self.project(projection).await?;
         Ok(grant)
     }
+    pub(crate) async fn companion_service(&self) -> Result<SourceServiceGrant, String> {
+        // An expired finite epoch may have parked the descriptor in SourceIdle.
+        // Reopen that exact read gate before publishing the next bounded class;
+        // ordinary active epochs need no intervening Refill projection.
+        if self
+            .reads
+            .reads_held
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.refill().await?;
+        }
+        self.transfer_epoch().await
+    }
     /// Call only after the read join and all prefetch have settled. Holding
     /// buffered materialized output alone does not spend source occupancy.
     pub(crate) async fn idle(&self) -> Result<(), String> {
@@ -566,6 +1069,9 @@ async fn run_owner(
     let mut version = 0_u64;
     let mut cleanup_pending = false;
     let mut release_pending = false;
+    let mut proof_recorded = false;
+    let mut journal_recorded = false;
+    let mut settlement_lock: Option<tokio::sync::OwnedMutexGuard<()>> = None;
     let mut first_read_promoted = false;
     let mut last_publication_ms = crate::fragment_index_cluster::unix_ms();
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -608,13 +1114,44 @@ async fn run_owner(
         };
         let now = crate::fragment_index_cluster::unix_ms();
         if release_pending {
-            match release_settled(store.as_ref(), &mut token, now).await {
-                Ok(()) => {
-                    source_pressure_changed().notify_waiters();
-                    return;
+            if settlement_lock.is_none() {
+                let name = settlement_name(&SettlementReceipt::Foreground(token.clone()));
+                settlement_lock = Some(receipt_lock(&name).lock_owned().await);
+            }
+            if !journal_recorded {
+                match write_settlement_receipt(&SettlementReceipt::Foreground(token.clone())) {
+                    Ok(()) => journal_recorded = true,
+                    Err(error) => tracing::warn!(%error,owner=%token.owner.owner_id,
+                        "joined foreground source journal will retry"),
                 }
-                Err(error) => {
-                    tracing::warn!(%error,owner=%token.owner.owner_id,"settled source release retained for exact retry")
+            }
+            if journal_recorded && !proof_recorded {
+                match store.mark_foreground_source_settled(token.clone()).await {
+                    Ok(true) => proof_recorded = true,
+                    Ok(false) => {
+                        let _ =
+                            clear_settlement_receipt(&SettlementReceipt::Foreground(token.clone()));
+                        source_pressure_changed().notify_waiters();
+                        return;
+                    }
+                    Err(error) => tracing::warn!(%error,owner=%token.owner.owner_id,
+                        "joined foreground source proof will retry"),
+                }
+            }
+            if proof_recorded {
+                match release_settled(store.as_ref(), &mut token, now).await {
+                    Ok(()) => {
+                        if let Err(error) =
+                            clear_settlement_receipt(&SettlementReceipt::Foreground(token.clone()))
+                        {
+                            tracing::warn!(%error,"foreground source journal cleanup will replay");
+                        }
+                        source_pressure_changed().notify_waiters();
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error,owner=%token.owner.owner_id,"settled source release retained for exact retry")
+                    }
                 }
             }
         }

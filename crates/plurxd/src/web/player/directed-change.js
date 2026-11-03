@@ -203,8 +203,23 @@ async function requestQualityChange(p,reason,fallback,autoMove,standingSelection
     const candidate=continuousQualityCandidate(p,selection);
     change.continuousOwner=p.continuousQuality;
     change.continuousAttachment=p.mediaAttachment;
-    const outcome=await p.continuousQuality.choose(candidate.id,()=>p.directedChange===change
-      &&(p.controlIntentGeneration||0)===change.intentGeneration);
+    change.discoveryAbort=new AbortController();
+    const discoveryDeadline=change.tappedAt+PREPARED_OFFER_BOUND_MS;
+    const discoveryTimer=setTimeout(()=>change.discoveryAbort.abort(),Math.max(0,discoveryDeadline-performance.now()));
+    let outcome;
+    try{
+      const pendingCompanion=p.continuousQuality.family.version===2
+        &&!p.continuousQuality.family.video.some(row=>row.candidate_id===candidate.id);
+      const wireSelection=pendingCompanion?playbackControlSelection(p,true):null;
+      const accepted=!pendingCompanion||(continuousQualityCandidate(p,wireSelection)?.id===candidate.id
+        &&await awaitContinuousSelectionAcceptance(p,change,wireSelection,discoveryDeadline));
+      outcome=accepted?await p.continuousQuality.choose(candidate.id,()=>p.directedChange===change
+        &&(p.controlIntentGeneration||0)===change.intentGeneration,
+        {signal:change.discoveryAbort.signal,deadlineMs:discoveryDeadline}):
+        p.directedChange===change?'retained_current':'superseded';
+    }finally{
+      clearTimeout(discoveryTimer);change.discoveryAbort.abort();change.discoveryAbort=null;
+    }
     if(p.directedChange!==change)return "superseded";
     if(outcome==="continuous"){
       change.outcome=outcome;change.outcomeAt=performance.now();
@@ -242,6 +257,32 @@ async function requestQualityChange(p,reason,fallback,autoMove,standingSelection
   if(outcome==="superseded"){ settleDirectedChange(p,change,"superseded"); return outcome; }
   fallBackDirectedChange(p,change,outcome);
   return outcome;
+}
+// A pending companion cannot discover its init while the primary source is
+// refilling. The accepted parent sequence first names the exact candidate;
+// only then may the existing family/Prepare path spend this same deadline.
+function awaitContinuousSelectionAcceptance(p,change,selection,deadlineMs){
+  const reporter=p?.controlReporter,signal=change?.discoveryAbort?.signal;
+  if(!reporter||reporter.stopped||!signal||signal.aborted||performance.now()>=deadlineMs)return Promise.resolve(false);
+  const minSequence=(Number(reporter.sequence)||0)+1;
+  const generation=reporter.bootstrap?.generation,controlEpoch=reporter.bootstrap?.control_epoch;
+  const trigger=notifyPlaybackControl();
+  if(!trigger)return Promise.resolve(false);
+  if(!p.controlWaiters)p.controlWaiters=[];
+  const waiters=p.controlWaiters;
+  return new Promise(resolve=>{
+    const waiter={kind:'continuous_selection',minSequence,generation,controlEpoch,
+      selection,intentGeneration:change.intentGeneration,change,settled:false,
+      settle:accepted=>{
+        if(waiter.settled)return;
+        waiter.settled=true;signal.removeEventListener('abort',abort);
+        const at=waiters.indexOf(waiter);if(at!==-1)waiters.splice(at,1);
+        resolve(accepted===true);
+      },extend:()=>{}};
+    const abort=()=>waiter.settle(false);
+    signal.addEventListener('abort',abort,{once:true});waiters.push(waiter);
+    if(reporter.stopped||signal.aborted)waiter.settle(false);
+  });
 }
 // The one reopen.
 //
@@ -439,6 +480,7 @@ function settleDirectedChange(p,change,why,detail){
   const owned=change||(p&&p.directedChange);
   if(!p||!owned||owned.settled||p.directedChange!==owned) return false;
   owned.settled=true;
+  owned.discoveryAbort?.abort();
   if(owned.commitTimer!=null){ clearTimeout(owned.commitTimer); owned.commitTimer=null; }
   owned.outcome=why;
   owned.outcomeAt=performance.now();
@@ -515,6 +557,14 @@ function settlePlaybackControlWaiters(p,request,response,error){
     // An offer waiter is settled by rule, never by arrival: the exchange that
     // answers a directed change is rarely the one that carried it.
     if(waiter.kind==="offer"){ settlePreparedOfferWaiter(p,waiter,mine,response,error); continue; }
+    if(waiter.kind==='continuous_selection'){
+      if(p.directedChange!==waiter.change||(p.controlIntentGeneration||0)!==waiter.intentGeneration){
+        waiter.settle(false);continue;
+      }
+      if(mine&&JSON.stringify(request.selection)===JSON.stringify(waiter.selection)
+        &&response?.accepted_sequence===request.sequence&&!error)waiter.settle(true);
+      continue;
+    }
     if(mine) waiter.settle(action); else waiter.extend();
   }
   // A stop that follows its own last exchange leaves a reporter that will never
