@@ -244,7 +244,8 @@ impl NodeResourceRuntime {
         loop {
             let mut bundle = owner.state.lock().await;
             if let Some(progress) = self.scratch_io_slot_busy(&bundle, index, member) {
-                wait_for_io_slot(bundle, progress, deadline).await?;
+                self.wait_for_io_slot(bundle, index, member, progress, deadline)
+                    .await?;
                 continue;
             }
             return self.queue_scratch_publication_locked(
@@ -482,7 +483,8 @@ impl NodeResourceRuntime {
             {
                 NativeIoStep::Done => return Ok(()),
                 NativeIoStep::SlotBusy(progress) => {
-                    wait_for_io_slot(bundle, progress, deadline).await?
+                    self.wait_for_io_slot(bundle, index, member, progress, deadline)
+                        .await?
                 }
             }
         }

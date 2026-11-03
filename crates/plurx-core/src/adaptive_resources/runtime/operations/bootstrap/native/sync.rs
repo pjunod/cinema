@@ -1,5 +1,5 @@
 //! Bounded, prearmed sync over the SAME held child and exact file inventory.
-use super::publication::{queue_output_change, wait_for_io_slot, NativeIoStep};
+use super::publication::{queue_output_change, NativeIoStep};
 use super::*;
 use crate::fs_secure::{
     sync_files::{SyncFile, SyncIo, SyncRequest},
@@ -233,7 +233,8 @@ impl NodeResourceRuntime {
         loop {
             let mut bundle = owner.state.lock().await;
             if let Some(progress) = self.scratch_io_slot_busy(&bundle, index, member) {
-                wait_for_io_slot(bundle, progress, deadline).await?;
+                self.wait_for_io_slot(bundle, index, member, progress, deadline)
+                    .await?;
                 continue;
             }
             return self.queue_scratch_sync_locked(&mut bundle, index, member, outputs);
@@ -367,7 +368,8 @@ impl NodeResourceRuntime {
             {
                 NativeIoStep::Done => return Ok(()),
                 NativeIoStep::SlotBusy(progress) => {
-                    wait_for_io_slot(bundle, progress, deadline).await?
+                    self.wait_for_io_slot(bundle, index, member, progress, deadline)
+                        .await?
                 }
             }
         }
