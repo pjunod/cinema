@@ -25,6 +25,8 @@ use plurx_core::error::StoreError;
 use plurx_core::store::Store;
 use plurx_core::transcode::OutputGrade;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use uuid::Uuid;
 
 use crate::http::peer_transport::{
     deadline_after, PeerAuthMode, PeerResponse, PeerTransport, PeerTransportError,
@@ -319,6 +321,59 @@ impl SessionSettlementGuard {
             .or_insert(0) += 1;
         Self {
             session_id: session_id.to_owned(),
+        }
+    }
+}
+
+/// Adaptive owners already have fixed controller slots. Keep their settlement
+/// protection in fixed UUID storage too: no String or retained HashMap growth
+/// is acquired by a finite role. Lease snapshots still allocate bounded IDs.
+#[cfg(target_os = "linux")]
+static ADAPTIVE_SETTLEMENT_PROTECTED: StdMutex<
+    [Option<(Uuid, usize)>; crate::transcode::adaptive_attempts::MAX_LOCAL_ATTEMPTS],
+> = StdMutex::new([None; crate::transcode::adaptive_attempts::MAX_LOCAL_ATTEMPTS]);
+
+#[cfg(target_os = "linux")]
+pub(crate) struct AdaptiveSessionSettlementGuard {
+    session_id: Uuid,
+}
+
+#[cfg(target_os = "linux")]
+impl AdaptiveSessionSettlementGuard {
+    pub(crate) fn try_begin(session_id: Uuid) -> Option<Self> {
+        if session_id.is_nil() {
+            return None;
+        }
+        let mut slots = ADAPTIVE_SETTLEMENT_PROTECTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, holders)) = slots.iter_mut().flatten().find(|(id, _)| *id == session_id) {
+            *holders = holders.checked_add(1)?;
+        } else {
+            *slots.iter_mut().find(|slot| slot.is_none())? = Some((session_id, 1));
+        }
+        Some(Self { session_id })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for AdaptiveSessionSettlementGuard {
+    fn drop(&mut self) {
+        let mut slots = ADAPTIVE_SETTLEMENT_PROTECTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(slot) = slots
+            .iter_mut()
+            .find(|slot| slot.as_ref().is_some_and(|(id, _)| *id == self.session_id))
+        else {
+            return;
+        };
+        let Some((_, holders)) = slot else {
+            return;
+        };
+        *holders = holders.saturating_sub(1);
+        if *holders == 0 {
+            *slot = None;
         }
     }
 }
@@ -907,12 +962,26 @@ impl Drop for SessionSettlementGuard {
 }
 
 pub(crate) fn settlement_protected_ids() -> HashSet<String> {
-    SESSION_SETTLEMENT_PROTECTED
+    // Snapshot both kinds under one lock order. A continuous handoff from
+    // adaptive to ordinary protection must never disappear between reads.
+    let ordinary = SESSION_SETTLEMENT_PROTECTED
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .keys()
-        .cloned()
-        .collect()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(target_os = "linux")]
+    let adaptive = ADAPTIVE_SETTLEMENT_PROTECTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let ids: HashSet<String> = ordinary.keys().cloned().collect();
+    #[cfg(target_os = "linux")]
+    let ids = {
+        let mut ids = ids;
+        ids.extend(adaptive.iter().flatten().map(|(id, _)| id.to_string()));
+        ids
+    };
+    #[cfg(target_os = "linux")]
+    drop(adaptive);
+    drop(ordinary);
+    ids
 }
 
 impl Drop for TakeoverMetricGuard {
@@ -5382,7 +5451,11 @@ pub(crate) async fn lease_loop(state: AppState) {
         // observed either through its settlement guard or through the adopted
         // worker/lease seed. Freezing this set before the read let the same
         // tick misclassify a just-claimed successor as stale and End it.
-        let mut live = lease_tick_live(state.transcode.renewable_session_ids().await);
+        let mut live = lease_tick_live_after_handoff(
+            &state.transcode,
+            state.transcode.renewable_session_ids().await,
+        )
+        .await;
         let fresh_seeds = state.media_sessions.take_lease_seeds().await;
         let fresh_seed_incarnations = fresh_seeds.keys().cloned().collect::<HashSet<_>>();
         // Publication inserts the seed before dropping its settlement guard.
@@ -7241,6 +7314,19 @@ fn lease_tick_live(renewable_session_ids: Vec<String>) -> HashSet<String> {
     live
 }
 
+/// Sample workers again after protection. If the first worker snapshot ran
+/// before attachment and the guard snapshot after its release, the published
+/// worker must be visible here. Existing takeover/replacement seeds still
+/// close their own handoffs; adaptive owners need no new retained seed map.
+async fn lease_tick_live_after_handoff(
+    manager: &TranscodeManager,
+    first_renewable: Vec<String>,
+) -> HashSet<String> {
+    let mut live = lease_tick_live(first_renewable);
+    live.extend(manager.renewable_session_ids().await);
+    live
+}
+
 fn lease_tick_active<'a>(
     routes: &'a [OwnedMediaSessionLease],
     live: &HashSet<String>,
@@ -7258,6 +7344,87 @@ fn lease_tick_active<'a>(
         // missing-from-inventory reaper does not see it either.
         .filter(|route| !drain_window_closed(route, now_ms))
         .collect()
+}
+
+/// Classify the real post-Adopt lease through the production lease tick.
+/// The attempt is paused before attachment, so no worker frontier exists yet.
+#[cfg(all(test, feature = "cluster-integration-tests", target_os = "linux"))]
+pub(crate) fn assert_adaptive_adopt_lease_transition(
+    routes: &[OwnedMediaSessionLease],
+    session_id: &str,
+    renewable: Vec<String>,
+    now_ms: i64,
+) {
+    assert!(
+        routes.iter().any(|route| route.session_id == session_id),
+        "committed owner is inventoried"
+    );
+    assert!(
+        !renewable.iter().any(|id| id == session_id),
+        "worker is not attached at the barrier"
+    );
+    let live = lease_tick_live(renewable);
+    assert!(
+        live.contains(session_id),
+        "Adopt-to-attach gap must retain durable ownership"
+    );
+    assert!(
+        !lease_tick_active(routes, &live, now_ms)
+            .iter()
+            .any(|route| route.session_id == session_id),
+        "no frontier means no renewal"
+    );
+    let stale = take_stale_settlement_candidates(
+        routes,
+        &live,
+        &mut HashSet::new(),
+        &mut HashMap::new(),
+        tokio::time::Instant::now(),
+        now_ms,
+    );
+    assert!(
+        !stale
+            .iter()
+            .any(|(route, _)| route.session_id == session_id),
+        "stale settlement must not race adaptive attachment"
+    );
+}
+
+#[cfg(all(test, feature = "cluster-integration-tests", target_os = "linux"))]
+pub(crate) async fn assert_adaptive_adopt_liveness_handoff(
+    manager: &TranscodeManager,
+    routes: &[OwnedMediaSessionLease],
+    session_id: &str,
+    stale_workers: Vec<String>,
+    now_ms: i64,
+) {
+    assert!(!stale_workers.iter().any(|id| id == session_id));
+    assert!(
+        !settlement_protected_ids().contains(session_id),
+        "original guard handed off"
+    );
+    let live = lease_tick_live_after_handoff(manager, stale_workers).await;
+    assert!(
+        live.contains(session_id),
+        "actual published worker closes the guard snapshot gap"
+    );
+    assert!(
+        lease_tick_active(routes, &live, now_ms)
+            .iter()
+            .any(|route| route.session_id == session_id),
+        "established worker is renewable"
+    );
+    let stale = take_stale_settlement_candidates(
+        routes,
+        &live,
+        &mut HashSet::new(),
+        &mut HashMap::new(),
+        tokio::time::Instant::now(),
+        now_ms,
+    );
+    assert!(!stale
+        .iter()
+        .any(|(route, _)| route.session_id == session_id));
 }
 
 /// Whether this owned route is draining and its deadline has passed.

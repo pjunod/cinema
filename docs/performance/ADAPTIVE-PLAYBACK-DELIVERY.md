@@ -1,6 +1,60 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation active · updated 2026-10-29. PR #1248 remains
+**Status:** open · implementation active · updated 2026-11-03. Task PRs #1293,
+#1338 and #1360–#1364 are merged into draft effort #1248. Codex resumes at
+`b97188c9fd8e2de6caeea826b1c2acd14be2035a`; the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#current-continuation--two-node-publication-and-test-isolation)
+records the current two-node diagnosis and pending validation. V1–V5 and final
+qualification remain open. The checklist below retains its historical source
+and evidence limits; a merged component does not close all-path acceptance.
+
+## Adopt publication — retain the exact owner through local attachment
+
+A two-node failure at source `4a6461e6214c` had no rendition-key collisions or
+producer deaths, but still failed publication. The lease loop saw a newly
+active durable route before its local VOD worker was attached, queued stale
+settlement, and then ended that same session as `Replaced` after attachment.
+The real adaptive regression at `d76dc43ef` now pauses after committed Adopt,
+reads the actual owned lease and runs the production live/renewable/stale
+selectors. It fails deterministically at the missing protected-live assertion.
+An earlier fixture-environment refusal is preserved separately; it is not
+counted as that behavioral negative control.
+
+The original RichAttempt retains a Linux adaptive settlement guard before
+Store Adopt, across unknown/refused results, until publication and established
+local liveness, or a positively cleanup-authorizing Fence. Fixed UUID slots
+share the 64-entry local-attempt bound. Their guard owns no heap; its inline
+bytes are included in the existing RichAttempt projection. Snapshot conversion
+still allocates bounded node-level IDs; this does not close allocator/native
+memory acceptance. The ordinary and adaptive protection registries are read
+under one lock order so a continuous handoff cannot vanish between snapshots.
+Guard regression, repeated two-node execution and gate results belong to the
+task PR; all-path acceptance and promotion remain open.
+
+## Next closure — separate authored fixtures from production policy
+
+At runtime source `5d65151d3`, the five affected daemon cases pass with zero
+ignored: overlapping ordinary/adaptive protection, generic lease classification,
+actual paused Adopt and liveness handoff, and both refused-Adopt cleanup cases.
+The two-node and exact-head gate results are recorded in the task PR.
+
+The next acceptance slice already has selected finite lifecycle and process-
+restart fixtures. Their existence is not a pass, but the historical checklist
+must not be read as proof that implementation is absent. Before the restart
+cell can run, its fixture must follow production storage canonicalization and
+Source enablement, and use recovery-aware directory creation.
+
+There is also genuine M2 implementation work: the selected finite path currently
+reads history for advisory comparisons in
+[`finite_software.rs`](../../crates/plurxd/src/vod/finite_software.rs), while
+`TrialMonitor`, `TrialBudget` and `GrowthState` have no daemon consumers.
+Connecting original-deadline trial control and owned stopping to the selected
+producer remains open. Preserve UnknownBounds/UnknownMemory refusals; priors
+alone never authorize expansion. No all-path or hard-memory acceptance closes
+with the publication repair.
+
+## 2026-10-29 checkpoint — historical source-bound evidence
+
+**Historical checkpoint:** 2026-10-29. PR #1248 remains
 the sole effort; task PR #1293 is unmerged. Current committed implementation
 `b1f2794d79b1012714a6de0644c72df44f10e9e1` includes effort
 `29a238af69bd2e101f0a5b4d6ed21fb1404f8ed1` and main

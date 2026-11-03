@@ -1,32 +1,56 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation active · updated 2026-10-29. PR #1248 remains
-the sole effort; task PR #1293 is unmerged. Current committed implementation
-`b1f2794d79b1012714a6de0644c72df44f10e9e1` includes effort
-`29a238af69bd2e101f0a5b4d6ed21fb1404f8ed1` and main
-`6c8c98c79b06ee3e814515fc168f7dd8c7408384`. Later main changes still require integration
-and qualification before final effort promotion.
+**Status:** open · implementation active · updated 2026-11-03. Codex has
+resumed Claude's adaptive effort #1248. The effort remains a draft; no release
+qualification or deployment is claimed.
 
-This exact implementation passed all three macOS compiler phases and Linux
-Core/daemon all-target strict Clippy with fixture/cluster features. Receipt
-SHA-256 values: host `8f3164937669c23f2da7bb8d95310f86e93f9723dfa763c96cb5973c94d1f75a`;
-native `32562e6e5124dca4f8ec3ecd106c1d50f466baa183fc566a4585835fdd4464da`.
-The first current Linux behavioral run selected 206 cases and stopped after
-**31 passes and one failure**, with zero ignored or incomplete executed cases.
-All five registered-planning entry/cancellation cases passed. Static playback
-failed during fixture recipe resolution: its legacy resolver rejects the zero
-software budget before the selected static worker is reached. That failure
-remains under repair; it is not a passing candidate. Behavioral receipt SHA-256:
-`7af46d30d2415dadffecc2c75a0a1e62c32d3669839d54c9403b812354b77aaf`. A diagnostic run continues independent
-cases; it grants no passing qualification before its final result. The focused
-web cleanup regression passed one case with zero skipped; receipt SHA-256:
-`c25142d8c361cc4eae1a956a80017b89b2d5935933db683772be12b5e413790c`.
+Companion to [the plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) (requirements) and
+[finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) (the source checklist).
 
-Earlier failed runs remain tied to their source and are preserved in the review
-history. The separately tested M2 observation and M4 outage components are not
-integrated into this candidate. Required behavioral tests are authorized; no
-full behavioral, model, mutation or workload acceptance is claimed. V1–V5 and
-R1/M0–M7 remain open. No external review service, deployment or restart is run.
+## Current continuation — two-node publication and test isolation
+
+The continuation starts at effort `b97188c9fd8e2de6caeea826b1c2acd14be2035a`.
+Task PRs #1293, #1338 and #1360–#1364 are merged into that effort. They cover
+copy/start, M2/M4 components, causal deadlines, main integration, clock split
+and remote placement, concurrent scratch readers and dropped-reader settlement.
+This replaces the obsolete unmerged-task summary below; the earlier receipt
+identities remain historical evidence for their original source only.
+
+The retained two-node failures exposed two harness defects: arbitrary heights
+can snap to the same rendition key, and searching heights cannot override a
+consistent local storage-latency ranking advantage. The continuation uses
+three distinct ladder rungs and controls only the peer proxy's advisory I/O
+and speed measurements. Clock, eligibility, capacity, identity and every
+adaptive control exchange remain real. It proves those control/serving paths,
+not performance under naturally selected placement.
+
+A separate publication race occurs when the exact attached owner renews its
+lease after Adopt but before publication. Publication must compare the current
+matching route/job-lease copies, while retaining the original custody, owner,
+epoch, pointer and live-lease guards. On source `4a6461e6214c`, five affected
+publication cases passed with SQLite and the real three-voter backend; neither
+new case passes the original behavior at `099eafdcee4c`. Pinned Rust 1.97.1
+workspace/all-target strict Clippy, including fixture/cluster features, and
+paperwork 15/15 passed. The guard batch at `5d65151d3` passed 5/5, zero ignored.
+Two-node serving and development-gate results belong to the task PR; they do not imply M0–M7 qualification.
+
+The continuation also protects the committed-Adopt-to-attachment gap from
+stale settlement; the [delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md) records that
+second race and the bounded guard's ownership.
+
+Still open: M0 coverage/contracts, M3a/C2 native and allocator containment,
+V1–V5 acceptance, broader adapter/platform qualification, integrating the
+then-current main and the Main promotion gate. The handoff calls the containment
+gap “M0 owned containment”; it is distinct from the plan’s M0 inventory.
+The handoff also records a pre-existing actor-application lease regression and
+an unresolved selected-static FFmpeg `-display_rotation` capability decision.
+Neither is silently accepted or closed by this task.
+
+## 2026-10-29 checkpoint — historical source-bound evidence
+
+The earlier implementation and receipt identities are preserved in the
+[finite-delivery checkpoint](ADAPTIVE-PLAYBACK-DELIVERY.md#2026-10-29-checkpoint--historical-source-bound-evidence).
+They establish only the stated source/scope, not current acceptance.
 
 The copy driver retains the same NeverRoot/RootOnly/Joined witnesses and
 one-shot settlement. Positive post-Arm refusal may close the never-entered
