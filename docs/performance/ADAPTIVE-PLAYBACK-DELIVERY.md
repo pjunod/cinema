@@ -7,6 +7,29 @@ records the current two-node diagnosis and pending validation. V1–V5 and final
 qualification remain open. The checklist below retains its historical source
 and evidence limits; a merged component does not close all-path acceptance.
 
+## Adopt publication — retain the exact owner through local attachment
+
+A two-node failure at source `4a6461e6214c` had no rendition-key collisions or
+producer deaths, but still failed publication. The lease loop saw a newly
+active durable route before its local VOD worker was attached, queued stale
+settlement, and then ended that same session as `Replaced` after attachment.
+The real adaptive regression at `d76dc43ef` now pauses after committed Adopt,
+reads the actual owned lease and runs the production live/renewable/stale
+selectors. It fails deterministically at the missing protected-live assertion.
+An earlier fixture-environment refusal is preserved separately; it is not
+counted as that behavioral negative control.
+
+The original RichAttempt retains a Linux adaptive settlement guard before
+Store Adopt, across unknown/refused results, until publication and established
+local liveness, or a positively cleanup-authorizing Fence. Fixed UUID slots
+share the 64-entry local-attempt bound. Their guard owns no heap; its inline
+bytes are included in the existing RichAttempt projection. Snapshot conversion
+still allocates bounded node-level IDs; this does not close allocator/native
+memory acceptance. The ordinary and adaptive protection registries are read
+under one lock order so a continuous handoff cannot vanish between snapshots.
+Guard regression, repeated two-node execution and gate results belong to the
+task PR; all-path acceptance and promotion remain open.
+
 ## 2026-10-29 checkpoint — historical source-bound evidence
 
 **Historical checkpoint:** 2026-10-29. PR #1248 remains

@@ -4372,3 +4372,23 @@ async fn processing_owner_header_preserves_old_control_body_and_refuses_wrong_in
         assert_eq!(parsed, expected);
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn adaptive_settlement_guards_preserve_overlapping_ordinary_protection() {
+    let id = Uuid::new_v4();
+    let session = id.to_string();
+    let ordinary = SessionSettlementGuard::begin(&session);
+    let first = AdaptiveSessionSettlementGuard::try_begin(id).expect("bounded adaptive slot");
+    let second = AdaptiveSessionSettlementGuard::try_begin(id).expect("same UUID shares its slot");
+    drop(first);
+    assert!(settlement_protected_ids().contains(&session));
+    drop(ordinary);
+    assert!(
+        settlement_protected_ids().contains(&session),
+        "adaptive overlap still owns protection"
+    );
+    drop(second);
+    assert!(!settlement_protected_ids().contains(&session));
+    assert!(AdaptiveSessionSettlementGuard::try_begin(Uuid::nil()).is_none());
+}

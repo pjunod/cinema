@@ -34,6 +34,10 @@ workspace/all-target strict Clippy, including fixture/cluster features, and
 paperwork 15/15 passed. Two-node serving and development-gate results belong to
 the task PR; they do not imply M0–M7 qualification.
 
+The continuation also protects the committed-Adopt-to-attachment gap from
+stale settlement; the [delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md) records that
+second race and the bounded guard's ownership.
+
 Still open: M0 coverage/contracts, M3a/C2 native and allocator containment,
 V1–V5 acceptance, broader adapter/platform qualification, integrating the
 then-current main and the Main promotion gate. The handoff calls the containment

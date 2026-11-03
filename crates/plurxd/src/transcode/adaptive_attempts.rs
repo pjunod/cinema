@@ -26,7 +26,7 @@ use crate::vodserve::{
 /// The fixed node controller can refuse a new provisional worker without
 /// growing a native-owning registry. This limit is independent of Store's
 /// three-attempt-per-request ordinal bound.
-const MAX_LOCAL_ATTEMPTS: usize = 64;
+pub(crate) const MAX_LOCAL_ATTEMPTS: usize = 64;
 
 /// Explicit requested-heap policy for the temporary P/M-to-R recipe. This
 /// pays for a measured prepared recipe before R admission; it is not an RSS
@@ -538,6 +538,10 @@ pub(super) struct RichAttempt {
     pub(super) prepared: Option<PreparedAttempt>,
     pub(super) fence: Option<plurx_core::store::adaptive_resource_attempts::AttemptFence>,
     pub(super) adoption: Option<plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption>,
+    /// Protect the exact durable route across commit-unknown Adopt and the
+    /// commit-to-attach gap. This guard owns no heap; its inline size is part
+    /// of the existing RichAttempt application projection.
+    pub(super) settlement: Option<crate::media_sessions::AdaptiveSessionSettlementGuard>,
     // Last: destroy the pending owner and strings before releasing the
     // registered application fence.
     pub(super) application_lease: FiniteApplicationLease,
@@ -2021,6 +2025,17 @@ impl super::TranscodeManager {
             rich.adoption = Some(adoption);
         }
         let original = rich.adoption.as_ref().expect("stored exact Adopt");
+        if rich.settlement.is_none() {
+            // Acquire before the first Store await and retain in the original
+            // owner on every unknown/refused reply. An active durable route
+            // must not be stale-settled or renewed without a local frontier.
+            rich.settlement = Some(
+                crate::media_sessions::AdaptiveSessionSettlementGuard::try_begin(
+                    original.key.session_id,
+                )
+                .ok_or("adaptive settlement protection is full; original owner remains held")?,
+            );
+        }
         let outcome = match self.store.adopt_adaptive_winner(original).await {
             Ok(AttemptAdoption::Applied(outcome) | AttemptAdoption::Replay(outcome)) => outcome,
             Ok(AttemptAdoption::Refused(_)) => {
@@ -2090,7 +2105,9 @@ impl super::TranscodeManager {
             unreachable!();
         };
         let RichAttempt {
-            application_lease, ..
+            application_lease,
+            settlement,
+            ..
         } = *rich;
         let mut held = entry
             .finishing_lease
@@ -2101,6 +2118,8 @@ impl super::TranscodeManager {
             return Err("adaptive Adopt application fence was already retained".into());
         }
         *held = Some(application_lease);
+        // The published local worker is now visible to ordinary liveness.
+        drop(settlement);
         Ok(start)
     }
 
@@ -2407,8 +2426,12 @@ impl super::TranscodeManager {
             prepared: _,
             fence,
             adoption: _,
+            settlement,
             application_lease,
         } = *rich;
+        // This handoff follows a positively committed cleanup-authorizing
+        // Fence. There is no adopted live route to keep out of settlement.
+        drop(settlement);
         drop(selected_recipe_json);
         let task = pending.begin_abandon()?;
         *state = AttemptState::Handoff(Box::new(HandoffAttempt {
@@ -2747,6 +2770,7 @@ impl super::TranscodeManager {
             prepared: None,
             fence: None,
             adoption: None,
+            settlement: None,
             application_lease,
         }));
         let AttemptState::Rich(rich) = &mut *state else {
@@ -3328,6 +3352,12 @@ impl super::TranscodeManager {
                 };
                 if let Some(adoption) = refused_adopt.as_ref() {
                     assert_eq!(rich.adoption.as_ref(), Some(adoption));
+                    assert!(
+                        rich.settlement.is_some(),
+                        "unresolved original Adopt retains protection"
+                    );
+                    assert!(crate::media_sessions::settlement_protected_ids()
+                        .contains(&claim.key.session_id.to_string()));
                     assert!(rich.fence.is_none());
                 } else {
                     assert_eq!(rich.fence.as_ref(), Some(&stale));
@@ -3729,10 +3759,11 @@ impl super::TranscodeManager {
             .owned_media_sessions(&claim.key.worker_node_id, now)
             .await
             .expect("actual owned lease inventory after Adopt");
+        let stale_workers = self.renewable_session_ids().await;
         crate::media_sessions::assert_adaptive_adopt_lease_transition(
             &routes,
             &claim.key.session_id.to_string(),
-            self.renewable_session_ids().await,
+            stale_workers.clone(),
             now,
         );
         resume_tx.send(()).expect("resume the same adopted worker");
@@ -3746,6 +3777,14 @@ impl super::TranscodeManager {
                 .contains(&claim.key.session_id.to_string()),
             "established local worker takes over liveness"
         );
+        crate::media_sessions::assert_adaptive_adopt_liveness_handoff(
+            self,
+            &routes,
+            &claim.key.session_id.to_string(),
+            stale_workers,
+            crate::media_sessions::unix_ms(),
+        )
+        .await;
         assert_eq!(start.session_id, claim.key.session_id.to_string());
         let route = self
             .store
