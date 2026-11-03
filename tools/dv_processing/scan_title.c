@@ -41,10 +41,6 @@
 // source-service admission budgets every finite Range. Do not impose the
 // renderer's 128 MiB cumulative window on a complete source scan.
 #define WINDOW_READ_LIMIT UINT64_MAX
-// A verified source-pressure stop may outlast a socket's wall timeout. The
-// existing bounded child owner retains its active/total limits and cancellation
-// through pause/resume, so no separate socket wall deadline owns this scan.
-#define MOVIE_SOURCE_IO_TIMEOUT_SECONDS 0
 #include "movie_source_io.h"
 
 static struct budget_io title_io = {.fd = -1, .upstream = -1};

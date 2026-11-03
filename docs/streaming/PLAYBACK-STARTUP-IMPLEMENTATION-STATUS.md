@@ -140,3 +140,8 @@ and paired title scans now use the same private AVIO despite the SDK's disabled
 network protocols; complete-title scanning retains its existing owner limits
 rather than inheriting the renderer's window cap or socket deadline. Their
 new compiler and regression receipts remain pending.
+
+Private C input sockets follow the existing child owner's cancellation and
+work deadlines for both renderer and scanner. A separate socket wall deadline
+would keep counting while verified source-service holds suspend active work;
+it is removed. The scanner IO control checks the actual kernel socket policy.
