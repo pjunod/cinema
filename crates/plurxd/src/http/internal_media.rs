@@ -86,12 +86,11 @@ pub(crate) async fn snapshot(
     StatusCode,
 > {
     authorize(&state, &headers, "GET", SNAPSHOT_PATH, &[]).await?;
-    let mut snapshot = local_snapshot(&state).await;
-    // Identity/readiness is not proof of an origin's remaining monotonic
-    // create budget across unknown clock skew/delivery. Local callers retain
-    // their actual budget; remote fresh preparation stays unadvertised until
-    // a genuine original-deadline projection is available.
-    snapshot.adaptive_worker_quote = None;
+    // The advertised quote is identity/readiness only (local_snapshot
+    // withholds it while not accepting, not ready or in maintenance). The
+    // origin's remaining create budget reaches this worker only through the
+    // causal Register/Grant exchange, checked under strict cluster policy.
+    let snapshot = local_snapshot(&state).await;
     Ok((private_no_store_headers(), Json(snapshot)))
 }
 
@@ -597,6 +596,24 @@ mod tests {
         };
         source::testing::write_manifest(&root, 7, stamp, vec![track]);
         (base, root, artifact)
+    }
+
+    #[test]
+    fn peer_snapshot_advertises_the_local_adaptive_quote_unchanged() {
+        // local_snapshot alone decides whether a quote is advertised; the
+        // authenticated peer handler must not strip or rewrite it.
+        let source = include_str!("internal_media.rs");
+        let start = source
+            .find("pub(crate) async fn snapshot(")
+            .expect("peer snapshot handler");
+        let end = start
+            + source[start..]
+                .find("fn private_no_store_headers")
+                .expect("handler end");
+        let handler = &source[start..end];
+        assert!(handler.contains("let snapshot = local_snapshot(&state).await;"));
+        assert!(!handler.contains("adaptive_worker_quote ="));
+        assert!(!handler.contains("let mut snapshot"));
     }
 
     #[test]

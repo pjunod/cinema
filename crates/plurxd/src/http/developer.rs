@@ -221,7 +221,10 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
                      two consecutive rounds above {CLOCK_OFFSET_REFUSAL_MS} ms make /readyz \
                      answer 503. Startup is never refused. Now: {current}; \
                      plurx_cluster_clock_advisory_refusals_total counts what it would have \
-                     refused while off"
+                     refused while off. Independently of this switch, a cross-node adaptive \
+                     preparation grant always needs this same evidence when it is issued and \
+                     accepted; once accepted, only the local clock can close it. \
+                     plurx_cluster_clock_continuous_refusals_total counts both seams"
                 ),
             },
         ],

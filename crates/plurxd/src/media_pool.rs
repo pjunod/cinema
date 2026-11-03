@@ -932,7 +932,9 @@ pub(crate) struct MediaPool {
 impl MediaPool {
     /// Advisory worker identity from the same bounded snapshot cache used by
     /// placement. The worker rechecks its actual owner and generation when it
-    /// receives Claim; this cached quote never grants native authority.
+    /// receives Claim; this cached quote never grants native authority. A
+    /// remote quote must be fresh and same-protocol: its deadline evidence
+    /// comes from the causal Register/Grant exchange, not from the quote.
     #[cfg_attr(
         not(target_os = "linux"),
         allow(
@@ -951,10 +953,16 @@ impl MediaPool {
                 .adaptive_worker_quote
                 .filter(AdaptiveWorkerQuote::valid);
         }
-        // Fresh remote placement stays unadvertised until the causal P path
-        // is composed with the SAME continuous guard on dormant finite R
-        // Source/root entry. Identity alone cannot authorize that boundary.
-        None
+        let now = tokio::time::Instant::now();
+        self.snapshots
+            .read()
+            .await
+            .get(node_id)
+            .filter(|cached| {
+                now <= cached.expires_at && cached.snapshot.protocol_version == PROTOCOL_VERSION
+            })
+            .and_then(|cached| cached.snapshot.adaptive_worker_quote.clone())
+            .filter(AdaptiveWorkerQuote::valid)
     }
 
     pub(crate) async fn retained_output_receiver(&self, node_id: &str) -> bool {
@@ -2906,23 +2914,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_peer_identity_quote_cannot_replace_original_deadline_evidence() {
+    async fn fresh_same_protocol_peer_quote_is_offered_and_stale_or_old_protocol_quote_is_not() {
         let state = crate::http::internal_media_sessions::output_capture_test_state();
-        let peer = "peer-without-original-create-clock";
-        let mut observed = snapshot(peer, &["h264"], 1080);
-        observed.adaptive_worker_quote = Some(AdaptiveWorkerQuote {
+        let peer = "peer-with-causal-grant-path";
+        let quote = AdaptiveWorkerQuote {
             version: 1,
             owner_id: uuid::Uuid::new_v4(),
             serving_generation: 7,
-        });
+        };
+        let mut observed = snapshot(peer, &["h264"], 1080);
+        observed.adaptive_worker_quote = Some(quote.clone());
         assert!(snapshot_is_bounded(&observed, peer));
         state.media_pool.cache_snapshot_for_test(observed).await;
-        assert!(state.media_pool.snapshots.read().await[peer]
-            .snapshot
-            .adaptive_worker_quote
+        // Identity only: the deadline evidence arrives with the causal grant.
+        assert_eq!(
+            state.media_pool.adaptive_worker_quote(&state, peer).await,
+            Some(quote.clone())
+        );
+        let set = |edit: fn(&mut CachedSnapshot)| {
+            let pool = std::sync::Arc::clone(&state.media_pool);
+            async move {
+                edit(
+                    pool.snapshots
+                        .write()
+                        .await
+                        .get_mut(peer)
+                        .expect("cached peer"),
+                );
+            }
+        };
+        set(|cached| cached.snapshot.protocol_version = PROTOCOL_VERSION - 1).await;
+        assert!(state
+            .media_pool
+            .adaptive_worker_quote(&state, peer)
+            .await
+            .is_none());
+        set(|cached| cached.snapshot.protocol_version = PROTOCOL_VERSION).await;
+        set(|cached| {
+            cached.snapshot.adaptive_worker_quote = Some(AdaptiveWorkerQuote {
+                version: 1,
+                owner_id: uuid::Uuid::nil(),
+                serving_generation: 7,
+            })
+        })
+        .await;
+        assert!(state
+            .media_pool
+            .adaptive_worker_quote(&state, peer)
+            .await
+            .is_none());
+        set(|cached| {
+            cached.snapshot.adaptive_worker_quote = Some(AdaptiveWorkerQuote {
+                version: 1,
+                owner_id: uuid::Uuid::from_u128(1),
+                serving_generation: 7,
+            })
+        })
+        .await;
+        assert!(state
+            .media_pool
+            .adaptive_worker_quote(&state, peer)
+            .await
             .is_some());
-        assert!(state.media_pool.adaptive_worker_quote(&state, peer).await.is_none(),
-            "current identity/readiness cannot authorize remote native entry without the original deadline");
+        set(|cached| cached.expires_at = tokio::time::Instant::now() - Duration::from_secs(1))
+            .await;
+        assert!(state
+            .media_pool
+            .adaptive_worker_quote(&state, peer)
+            .await
+            .is_none());
+        assert!(state
+            .media_pool
+            .adaptive_worker_quote(&state, "never-advertised")
+            .await
+            .is_none());
         state.shutdown.cancel();
     }
 
