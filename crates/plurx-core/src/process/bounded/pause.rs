@@ -555,11 +555,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn uninterruptible_or_running_threads_never_acknowledge_source_quiescence() {
-        for state in [b'D', b'R', b'S', b'I'] {
+        for &state in b"DRSI" {
             assert!(!thread_quiescent(state, true));
             assert!(!thread_quiescent(state, false));
         }
-        for state in [b'T', b't'] {
+        for &state in b"Tt" {
             assert!(thread_quiescent(state, true));
             assert!(!thread_quiescent(state, false), "stopped is not reaped");
         }
