@@ -2321,6 +2321,9 @@ fn confirm_linux_probe_fork(
 }
 
 #[cfg(target_os = "linux")]
+// Keep the independently fenced exec barrier and source-service lifetime inputs
+// explicit at the existing supervisor boundary.
+#[allow(clippy::too_many_arguments)]
 fn supervise_linux_probe_execs(
     receiver: Arc<LinuxProbeReceiver>,
     stop: Arc<AtomicBool>,
