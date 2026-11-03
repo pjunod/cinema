@@ -2053,6 +2053,23 @@ impl TranscodeManager {
             } else {
                 None
             };
+            let reused = if destination == DvDestination::Hdr10 {
+                match reused {
+                    Some(root) => {
+                        let desired = Self::processed_hdr10_video_kbps(
+                            &planning,
+                            &trial,
+                            &root.encoding.options,
+                            root.encoding.plan.options().input_has_audio,
+                            crate::ffmpeg::has_dovi_rpu().await,
+                        )?;
+                        (root.encoding.options.video_bitrate_kbps == desired).then_some(root)
+                    }
+                    None => None,
+                }
+            } else {
+                reused
+            };
             let mut root = match reused {
                 Some(root) => root,
                 None => {
@@ -3100,6 +3117,16 @@ impl TranscodeManager {
                     if destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
                         processed_options.video_bitrate_kbps =
                             plurx_core::transcode::reconstructed_p81_video_kbps(file);
+                    } else if destination == plurx_core::transcode::dv_processing::DvDestination::Hdr10 {
+                        // An Original/Remux enhancement replaces a source-rate
+                        // copy. Freeze its bounded measured source rate before
+                        // the plan, argv, identity, storage and candidate costs.
+                        // Explicit encode rungs retain their selected rate.
+                        processed_options.video_bitrate_kbps = Self::processed_hdr10_video_kbps(
+                            &planning, req, &processed_options,
+                            retained.0.options().input_has_audio,
+                            crate::ffmpeg::has_dovi_rpu().await,
+                        )?;
                     }
                     let held = source.handle.try_clone().map(Arc::new).map_err(|e| e.to_string())?;
                     let processed_plan = self.resolve_vod_movie_plan(file, &processed_options, Encoder::Software, held).await?;

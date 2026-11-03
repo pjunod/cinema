@@ -52,10 +52,11 @@ pub use dolby::{
 };
 pub use encoder::{
     benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for,
-    reconstructed_p81_video_kbps, reconstructed_p81_window_encode_args, vaapi_device,
-    validate_quality_rate_control, validate_quality_rate_control_yielding, vbv_maxrate_bps,
-    vbv_maxrate_kbps, CompletedReconstructedOutputContract, EffectiveRateControl, Encoder,
-    EncoderCaps, EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
+    reconstructed_p81_video_kbps, reconstructed_p81_window_encode_args,
+    source_copy_hdr10_video_kbps, vaapi_device, validate_quality_rate_control,
+    validate_quality_rate_control_yielding, vbv_maxrate_bps, vbv_maxrate_kbps,
+    CompletedReconstructedOutputContract, EffectiveRateControl, Encoder, EncoderCaps,
+    EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
     QualityRateControlValidation, QualityRc, RateMode, VaapiHdrPolicy, VideoCodec,
     RECONSTRUCTED_P81_MAX_VIDEO_KBPS, RECONSTRUCTED_P81_RECIPE,
 };

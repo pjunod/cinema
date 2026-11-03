@@ -1396,6 +1396,69 @@ pub fn reconstructed_p81_video_kbps(source: &crate::domain::MediaFile) -> u32 {
         .max(1_000)
 }
 
+/// Raise an HDR10-E source-copy replacement above the ordinary encode rung,
+/// using measured source rate only. This does not select the source-copy
+/// policy: the caller independently establishes that route and native geometry.
+/// A selected encode rung keeps its own rate.
+///
+/// The source's container average includes audio, so it is a conservative
+/// video estimate. Unknown source rate leaves the existing rung unchanged.
+/// The 60 Mb/s target is bounded by the output raster/cadence's HEVC High-tier
+/// level and any stricter decoder/delivery video-peak allowance. The caller
+/// subtracts its resolved soundtrack from a muxed ceiling. Existing rung
+/// compatibility is still checked by ordinary output admission.
+pub fn source_copy_hdr10_video_kbps(
+    source: &crate::domain::MediaFile,
+    rung_kbps: u32,
+    width: u32,
+    height: u32,
+    rate: Option<(u32, u32)>,
+    video_peak_limit_bps: Option<u64>,
+) -> u32 {
+    let measured = source
+        .bitrate
+        .filter(|bps| *bps > 0)
+        .map(|bps| bps as u128 / 1000)
+        .or_else(|| {
+            source
+                .duration_ms
+                .filter(|ms| *ms > 0)
+                .and_then(|ms| (source.size > 0).then(|| source.size as u128 * 8 / ms as u128))
+        });
+    let Some(measured) = measured.filter(|kbps| *kbps > 0) else {
+        return rung_kbps;
+    };
+    let Some((numerator, denominator)) = rate.filter(|(n, d)| *n > 0 && *d > 0) else {
+        return rung_kbps;
+    };
+    if (u64::from(width) * u64::from(height))
+        .checked_mul(u64::from(numerator))
+        .is_none()
+    {
+        return rung_kbps;
+    }
+    let Some(level) = hevc_level_for(width, height, numerator, denominator) else {
+        return rung_kbps;
+    };
+    // The completed VA-API recipe uses High tier at the raster's level.
+    // Levels >= 5 admit the whole 90 Mb/s peak of the 60 Mb/s target.
+    let level_peak = match level {
+        "4" => 30_000_000,
+        "4.1" => 50_000_000,
+        _ => 90_000_000,
+    };
+    let peak = video_peak_limit_bps.map_or(level_peak, |limit| limit.min(level_peak));
+    // Invert floor(3 * target_kbps / 2), the encoder's whole-kbps VBV
+    // ceiling, exactly. An odd target can share the preceding half-kbps
+    // boundary without exceeding a decoder's integer-kbps allowance.
+    let target_cap = (u128::from(peak / 1000) * 2 + 1) / 3;
+    let raised = measured
+        .min(60_000)
+        .min(target_cap)
+        .max(u128::from(rung_kbps));
+    u32::try_from(raised).unwrap_or(rung_kbps)
+}
+
 /// Physical inventory, independent of whether an encoder initialized successfully.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GraphicsDevice {
@@ -3261,6 +3324,72 @@ mod tests {
             frames >= 10,
             "{frames} frames is not enough for a lookahead"
         );
+    }
+
+    #[test]
+    fn hdr10_source_copy_rate_uses_measurements_and_never_lowers_the_rung() {
+        let mut source = crate::transcode::tests::file(Some("hdr10"));
+        let rate = |file: &crate::domain::MediaFile| {
+            source_copy_hdr10_video_kbps(file, 20_000, 3840, 2160, Some((24, 1)), None)
+        };
+        source.bitrate = Some(80_000_000);
+        assert_eq!(rate(&source), 60_000);
+        source.bitrate = Some(8_000_000);
+        assert_eq!(rate(&source), 20_000, "source quality is raise-only");
+        source.bitrate = None;
+        source.duration_ms = Some(1000);
+        source.size = 10_000_000;
+        assert_eq!(
+            rate(&source),
+            60_000,
+            "container size/duration is measured rate"
+        );
+        source.size = 0;
+        assert_eq!(rate(&source), 20_000, "unknown rate cannot invent 60 Mb/s");
+        source.bitrate = Some(80_000_000);
+        assert_eq!(
+            source_copy_hdr10_video_kbps(&source, 20_000, 3840, 2160, None, None),
+            20_000
+        );
+    }
+
+    #[test]
+    fn hdr10_source_copy_rate_respects_level_and_decoder_peak_allowance() {
+        let mut source = crate::transcode::tests::file(Some("hdr10"));
+        source.bitrate = Some(80_000_000);
+        for (width, height, rate, expected) in [
+            (1920, 1080, (24, 1), 20_000),
+            (1920, 1080, (60, 1), 33_333),
+            (3840, 2160, (24, 1), 60_000),
+        ] {
+            let target =
+                source_copy_hdr10_video_kbps(&source, 8_000, width, height, Some(rate), None);
+            assert_eq!(target, expected);
+        }
+        let target = source_copy_hdr10_video_kbps(
+            &source,
+            20_000,
+            3840,
+            2160,
+            Some((24, 1)),
+            Some(89_808_000),
+        );
+        assert_eq!(target, 59_872);
+        assert!(vbv_maxrate_bps(target) + 192_000 <= 90_000_000);
+        source.bitrate = Some(43_567_000);
+        let odd = source_copy_hdr10_video_kbps(
+            &source,
+            20_000,
+            3840,
+            2160,
+            Some((24, 1)),
+            Some(65_350_000),
+        );
+        assert_eq!(
+            odd, 43_567,
+            "exact inverse of the encoder's whole-kbps peak"
+        );
+        assert_eq!(vbv_maxrate_bps(odd), 65_350_000);
     }
 
     #[test]
