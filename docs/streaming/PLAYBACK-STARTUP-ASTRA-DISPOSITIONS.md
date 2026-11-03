@@ -1,5 +1,8 @@
 # Playback startup review dispositions — what changed after Astra's request
 
+**Status:** open — source-review findings closed; behavioral qualification
+and CI remain pending.
+
 Companion to the [implementation ledger](PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md)
 and [frozen-candidate implementation review](PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md). This
 document records source changes and remaining qualification evidence for the

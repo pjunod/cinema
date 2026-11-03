@@ -1,5 +1,8 @@
 # Final adversarial implementation review
 
+**Status:** done — request-changes verdict recorded against the frozen
+candidate; implementation qualification is tracked separately.
+
 **Verdict: Request changes.** Seven actionable findings remain in frozen candidate `2bc1e54e1467baa9afe7f2f5219b439e14da4902`, compared with `origin/main` / `bd213c81942175f591912e4bb0a2cc10f2a7a195`. This is the complete batched implementation review, not a proposal review. The implementation was not edited and no behavioral tests were executed.
 
 Review source: frozen candidate `2bc1e54e1467baa9afe7f2f5219b439e14da4902`.

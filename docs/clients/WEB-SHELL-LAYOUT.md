@@ -165,7 +165,7 @@ had to be edited.
 | 33 | [`detail/edit.js`](../../crates/plurxd/src/web/detail/edit.js) | Editing metadata and home libraries (admin), including the tag-chip field. | 6745–6854 |
 | 34 | [`player/player.js`](../../crates/plurxd/src/web/player/player.js) | `PLAYER`, opening and closing a stream, the play/pause transport core. | 6855–7714 |
 | 35 | [`player/continuous-media.js`](../../crates/plurxd/src/web/player/continuous-media.js) | Bounded actual AVC/AAC sample inspection and container-independent payload hashes, with attachment-owned verification workers for continuous quality receipts. | **Relocated.** New continuous media inspector. |
-| 36 | [`player/video-frames.js`](../../crates/plurxd/src/web/player/video-frames.js) | One native frame request per element, subscriber fan-out and native discontinuity renewal. | Shared presentation transport. |
+| 36 | [`player/video-frames.js`](../../crates/plurxd/src/web/player/video-frames.js) | One native frame request per element, subscriber fan-out and native discontinuity renewal. | **Relocated.** Frame observation extracted from the player transport. |
 | 37 | [`player/continuous-quality.js`](../../crates/plurxd/src/web/player/continuous-quality.js) | Versioned family negotiation, exact schedule receipts, reserved fragment loading, completed append/disposal and decoded-frame observations. | **Relocated.** New continuous quality protocol. |
 | 38 | [`player/session.js`](../../crates/plurxd/src/web/player/session.js) | Session lifecycle: start, keepalive, teardown. | 7715–7949 |
 | 39 | [`player/prepared-replacement.js`](../../crates/plurxd/src/web/player/prepared-replacement.js) | The prepared successor: staging, commit, rollback. | 7950–8531 |

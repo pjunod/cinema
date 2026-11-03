@@ -1,68 +1,50 @@
 # Playback startup, Resume and native callback implementation status
 
-**Status:** Astra source review closed all seven findings on `bd3bfffba2feacc22ee85dfd323f3e15c6539b6d`; focused tests and CI remain pending · **Owner:** Codex/root · **Branch:**
-`codex/playback-startup-fixes` · **Base:** `bd213c819` · **Updated:**
-2026-11-03
+**Status:** Source review closed; execution qualification in progress · **Owner:**
+Codex/root · **Branch:** `codex/playback-startup-fixes` · **Base:** `bd213c819` ·
+**Updated:** 2026-11-03
 
 Companion to the [canonical startup proposal](COLD-PLAYBACK-STARTUP-RCA-AND-PROPOSAL.md),
 [AC3 retest RCA](COLD-PLAYBACK-AC3-RETEST-RCA.md), [native callback RCA](NATIVE-CALLBACK-DELIVERY-RCA.md)
 and [Fable dispositions](NATIVE-CALLBACK-FABLE-REVIEW.md). This is the delivery
-ledger for the user-authorized batched repair. Commits follow the smallest-first
-work order below; one main PR opens only after the batch is complete and
-reviewable. The branch was advanced to current main on 2026-11-02; its runner
-maintenance changes do not overlap this implementation. Astra reviewed frozen
-candidate `2bc1e54e1` and requested changes: four P1 findings cover custody
-recovery, pause revisions, exact continuous-parent telemetry and optional source
-admission; three P2 findings cover probe active time, pending family discovery
-and post-conclusion Play rejection. Sol owns the Rust corrections; Codex owns
-the browser corrections. All seven findings now have source changes and
-unrun regressions. Exact activation IDs and durable intents cover lost
-activation acknowledgements; receipt-scoped locks preserve unrelated starts.
-Probe pause credit excludes Store RPC waits and unknown pressure. A selected
-companion retains normal source batching; optional work has revocable bounds.
-Production/core compilation passed on frozen pre-findings candidate
-`2bc1e54e1`; it does not qualify the changed source. The learner compiler slot
-is prepared with pinned Rust 1.97.1, a warm task cache, four CPUs and an 18 GiB
-memory cap. Renderer and complete-title C controls pass on the reviewed source hashes.
-Focused Rust, Apple/Android and main fast-lane qualification remain pending. Final source review is recorded below;
-CI and merge qualification remain pending.
+ledger for the user-authorized batched repair. One main PR contains the work;
+the maintainer owns deployment. Startup within five seconds remains a runtime
+acceptance target, not a measured result for this candidate.
 
-Astra's follow-up review closed all seven findings against exact source commit
+Astra's follow-up review closed all seven findings against source commit
 `bd3bfffba2feacc22ee85dfd323f3e15c6539b6d`. The private
-`ASTRA-REVIEW-COMMIT-BINDING.json` records that reviewed diff SHA-256
-`531f1000fc09e8a5f2b2cda0888b602f8dc2134fe3de49cd87e3ab16758c186a` maps to
-that commit. A selected pending companion now acquires controlled source
-admission from the exact accepted parent selection before init discovery.
-`control_required` and `quality_required` remain independent facts; the
-persistent companion is Live while either owner requires it. Init verification
-still gates family publication and Prepare. This closes the source-review
-finding, while focused regression execution, current Linux compilation, CI, and
-merge qualification remain pending.
+`ASTRA-REVIEW-COMMIT-BINDING.json` binds reviewed diff SHA-256
+`531f1000fc09e8a5f2b2cda0888b602f8dc2134fe3de49cd87e3ab16758c186a` to
+that commit. Exact activation IDs, durable intents and receipt-scoped locks
+cover acknowledgement loss without serializing unrelated starts. Verified
+pause credit excludes Store RPC waits and unknown pressure. Accepted pending
+companion selection acquires source admission before init discovery;
+`control_required` and `quality_required` remain independent ownership facts.
+The [Astra dispositions](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) record the
+source changes and qualification boundaries.
 
-The normal pinned Mac commit hook passed on
-`bd3bfffba2feacc22ee85dfd323f3e15c6539b6d`. The earlier Linux production/core
-compile remains bound to frozen pre-findings `2bc1e54e1`. Current Linux
-all-target Clippy is running on the eligible learner with 18 GiB and four
-CPUs; C controls are being prepared. No behavioral regression has run.
+Qualification snapshot for implementation candidate `ad2180342`:
 
-The [Astra dispositions](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) distinguish
-source changes from findings that are reviewed and qualified.
+- Renderer and complete-title C controls pass on matching source hashes.
+- The focused Apple model test passes (1/1); the Android model class passes
+  (10/10), with matching source hashes and no skipped cases.
+- Rust qualification retains 68 passes. Eighteen failed, incomplete or new
+  cases remain in the deduplicated 86-case selection; passing cases are not
+  rerun. The new candidate is compiling on the confirmed learner with pinned
+  Rust 1.97.1, four CPUs, an 18 GiB memory cap and no swap.
+- Normal Mac commit hooks and the unchanged web TypeScript baseline pass.
+  Current-candidate Linux checks, remaining Rust cases, main fast lane and
+  merge qualification are still required.
 
-Qualification update: both C controls, the Apple model test (1) and Android
-model tests (10) pass on matching source hashes. The first focused Rust run
-retained 35 passes, found 11 confirmed failures, and left 39 cases incomplete
-after a test-thread stack abort. Receipt identity encoding and bounded replay
-queries are corrected; a decoder fixture now exercises its intended enforced
-policy. Retries use the repository's documented 8 MiB test-stack convention.
-Only failed, incomplete and newly added cases will execute again.
-
-Further targeted qualification retained 68 Rust passes. Parser diagnostics
-identified a 5,915,304-byte collection future and an 11,830,744-byte spawn frame
-in the test build. The collection and platform futures are now heap-pinned
-before nested owner scopes; ownership and cancellation stay with the existing
-collector. A VOD fixture now asserts the protocol's idempotent Replay behavior,
-and the browser options type matches its existing optional defaults. Failed,
-incomplete and new cases remain the only pending Rust executions.
+Narrow test-phase corrections follow the reviewed source: `91745417d` fixes
+Linux fixture imports; `580ae8f3f` canonicalizes typed receipt identities,
+parameterizes bounded replay queries and corrects fixture policy/schema;
+`ad2180342` heap-pins the collector and platform futures before nested owner
+scopes and asserts the VOD protocol's idempotent Replay behavior. Parser
+tracing identified a 5,915,304-byte collection future and an 11,830,744-byte
+spawn frame. Heap placement removes that stack expansion while preserving
+existing ownership, cancellation and reap. The test stack stays at the
+repository's documented 8 MiB convention.
 
 ## 1. Work lanes
 
@@ -90,8 +72,8 @@ exact main merge candidate, then perform the requested adversarial review.
 Only after that review, run the final fast lane and each requested test once on
 that exact candidate. Retry failed tests only. The fast-lane result and each
 actual test result must name the candidate revision; a result against an older
-base does not qualify the moved candidate. No tests have run for this status
-entry.
+base does not qualify the moved candidate. The snapshot above records completed focused evidence and the remaining
+qualification work.
 
 Open the owned PR only when the batched main candidate is complete and
 reviewable. Record its URL/number and exact head here when created. Keep PR
@@ -171,27 +153,26 @@ boundaries require Linux and packaged-parser qualification after review.
 
 | Check | Current result |
 |---|---|
-| Pinned Mac workspace Clippy, all targets, formatting, catalog and served JS syntax | Passed through the normal commit hook on `bd3bfffba2feacc22ee85dfd323f3e15c6539b6d`. |
-| Web TypeScript baseline | Passed without raising the baseline. |
-| Pinned Linux production daemon and core all-target compilation | Passed on frozen pre-findings candidate `2bc1e54e1`; it does not qualify the changed source. |
-| Full Linux renderer SDK plus CPU harness compilation | Passed; renderer/header hashes match the current code. No renderer regression has executed. |
-| Current Linux all-target Clippy | Running on the eligible learner with 18 GiB and four CPUs. |
-| Full Linux daemon test-target compilation and C controls | Pending; the eligible builder is ready and C controls are being prepared. |
-| Astra source review | Closed all seven findings on `bd3bfffba2feacc22ee85dfd323f3e15c6539b6d`; the private binding receipt ties the reviewed diff to this commit. |
-| Focused behavioral regressions, main fast lane and merge qualification | Pending; no behavioral tests have run. |
+| Pinned Mac workspace Clippy, all targets, formatting, catalog and served JS syntax | Normal commit hooks pass through implementation candidate `ad2180342`. |
+| Web TypeScript baseline | Pass; no increase to the existing baseline. |
+| Linux all-target Clippy and focused test binaries | Earlier candidate compiled; affected checks and binaries are being rebuilt for `ad2180342` on the confirmed learner. |
+| Renderer and complete-title C controls | Pass; renderer, scanner and input-header hashes match current source. |
+| Focused Apple / Android model tests | Pass: 1 Apple and 10 Android; input hashes match current source. |
+| Focused Rust regressions | 68 passes retained; 18 failed, incomplete or new cases pending out of 86. |
+| Astra source review | Seven findings source-closed on `bd3bfffba`; narrow test-phase corrections are identified above. |
+| Main fast lane and merge qualification | Pending; no main PR has been opened yet. |
 
-Private compiler logs, archive checksums and source ownership handoffs live in
-the workflow's durable evidence directory, outside its disposable build cache.
-The full daemon test target is an environment capacity gap, not a test pass.
-A source-only production check does not replace that target or runtime startup
-acceptance. The operator deployment remains separate from this repair PR.
+Private compiler logs, archive checksums, test receipts and ownership handoffs
+live in the workflow's durable evidence directory, outside its disposable build
+cache. Source-only checks and focused synthetic controls do not establish
+runtime cold-start acceptance. The maintainer owns deployment after merge.
 
 Final reader inventory corrections require owned input at every production
 processed-runtime entry point, including the first prepared window. Standalone
 and paired title scans now use the same private AVIO despite the SDK's disabled
 network protocols; complete-title scanning retains its existing owner limits
 rather than inheriting the renderer's window cap or socket deadline. Their
-new compiler and regression receipts remain pending.
+C compiler and regression controls pass on matching input hashes.
 
 Private C input sockets follow the existing child owner's cancellation and
 work deadlines for both renderer and scanner. A separate socket wall deadline
