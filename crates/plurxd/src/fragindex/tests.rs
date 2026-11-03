@@ -2061,6 +2061,88 @@ mod dv_title_companion {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn budgeted_companion_inherits_no_raw_source_and_refused_pass_joins_its_input() {
+        use plurx_core::transcode::{DvBackendIdentity, DvDigest};
+        use std::os::unix::fs::PermissionsExt;
+        let directory = crate::test_tempdir().expect("companion custody fixture");
+        let scanner = directory.path().join("scanner");
+        std::fs::write(
+            &scanner,
+            r#"#!/bin/sh
+set -eu
+case "$1" in http://127.0.0.1:*/*) ;; *) exit 91 ;; esac
+test "$2" = 0
+test ! -e /proc/self/fd/3
+printf '%s' "$1" > "${0%/*}/scanner.input"
+printf '%s' "$$" > "${0%/*}/scanner.pid"
+exec /bin/sleep 60
+"#,
+        )
+        .expect("write capability-checking scanner");
+        std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o700))
+            .expect("executable scanner fixture");
+        let digest = || DvDigest::new("a".repeat(64)).expect("fixture digest");
+        let identity = DvBackendIdentity::new(digest(), digest(), digest(), digest(), 1, digest())
+            .expect("fixture backend identity");
+        let tools = crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture_with_scanner(
+            identity, scanner,
+        )
+        .expect("identity-bound scanner fixture");
+        let ride = DvTitleRide {
+            tools: Arc::new(tools),
+            stream_index: 0,
+        };
+        let source_path = directory.path().join("original.mkv");
+        std::fs::write(&source_path, b"original media capability").expect("held source fixture");
+        let source = std::fs::File::open(source_path).expect("source descriptor");
+        let (_store, _job, active) = crate::background_jobs::tests::active().await;
+        let task = crate::background_jobs::budgeted(active.fence().source_budget(), async {
+            ride.spawn(&source, Duration::from_secs(60))
+                .expect("owned companion")
+        })
+        .await;
+        let pid_path = directory.path().join("scanner.pid");
+        let pid: i32 = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(pid) = tokio::fs::read_to_string(&pid_path).await {
+                    if let Ok(pid) = pid.parse() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("scanner accepted URL and no inherited source FD");
+        let url = tokio::fs::read_to_string(directory.path().join("scanner.input"))
+            .await
+            .expect("actual private input URL");
+        assert!(
+            ride.finish(1, task, false, Duration::from_secs(1))
+                .await
+                .is_none(),
+            "a refused index pass keeps no title aggregate"
+        );
+        // SAFETY: zero observes only this fixture's already-joined process.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "refusal returns only after scanner reap"
+        );
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("local capability client");
+        assert!(
+            client.get(url).send().await.is_err(),
+            "companion source listener is revoked and joined before return"
+        );
+        active.finish().await;
+    }
+
     /// The daemon's own index pass on a real title, with an installed
     /// processing bundle, yields the aggregate the standalone scan published.
     #[cfg(target_os = "linux")]

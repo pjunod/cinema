@@ -19,6 +19,9 @@
 #ifndef WINDOW_READ_LIMIT
 #define WINDOW_READ_LIMIT (128ULL * 1024 * 1024)
 #endif
+#ifndef MOVIE_SOURCE_IO_TIMEOUT_SECONDS
+#define MOVIE_SOURCE_IO_TIMEOUT_SECONDS 30
+#endif
 struct budget_io {
   int fd;
   uint64_t bytes, requested_bytes;
@@ -84,7 +87,7 @@ static int movie_http_head(struct budget_io *io, bool head, int size) {
   io->upstream = socket(AF_INET, SOCK_STREAM, 0);
   if (io->upstream < 0) return AVERROR(errno);
   if (fcntl(io->upstream, F_SETFD, FD_CLOEXEC) < 0) goto failed;
-  struct timeval timeout = {.tv_sec = 30};
+  struct timeval timeout = {.tv_sec = MOVIE_SOURCE_IO_TIMEOUT_SECONDS};
   if (setsockopt(io->upstream, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ||
       setsockopt(io->upstream, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)))
     goto failed;

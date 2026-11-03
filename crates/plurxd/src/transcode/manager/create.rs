@@ -3328,9 +3328,16 @@ impl TranscodeManager {
                         let worker = credit.clone().try_claim_worker().ok_or("DV preparation credit already claimed")?;
                         (Some(credit), crate::dv_segment::SegmentAdmission::Retained(worker))
                     } else { (None, crate::dv_segment::SegmentAdmission::Owned(bundle)) };
-                    let (verified, selected) = match runtime.execute_until(file, &processed_plan, &processed_options, grid,
+                    // The same explicitly scoped FG/BG owner that prepared
+                    // this recipe must own its first actual original reads.
+                    // Clone the held descriptor; never reacquire path authority.
+                    let input=crate::source_input::SourceInput::open_current_held(
+                        &runtime.source.handle,"processed-first-window").await?
+                        .ok_or("processed first window has no original source read owner")?;
+                    let (verified, selected) = match runtime.execute_with_source_input(file, &processed_plan, &processed_options, grid,
                         entry, &executable.path, admission,
-                        Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None, processing_deadline).await {
+                        Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None,
+                        input, processing_deadline).await {
                             // This awaited owner still holds the frozen graph's
                             // admission. Dropping it never reaches this branch;
                             // normal cancellation makes no backend claim.

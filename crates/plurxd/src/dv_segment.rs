@@ -125,7 +125,7 @@ impl SegmentAdmission {
 /// argv already selects encoder/output and keeps source time with -copyts. Its
 /// NUT video is fd3; original source audio remains fd4 (independent demux input).
 pub(crate) struct SegmentRequest {
-    pub(crate) source_input: Option<crate::source_input::SourceInput>,
+    pub(crate) source_input: Option<Arc<SourceInputLease>>,
     pub(crate) renderer: PathBuf,
     /// Trusted worker runtime configuration, scoped to the renderer child only.
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
@@ -360,18 +360,59 @@ impl Drop for SegmentProducer {
     }
 }
 
-#[cfg(target_os = "linux")]
-struct SourceInputLease {
+/// One existing input owner shared by the renderer/encoder resource graph.
+/// Closing the input waits for those actual physical owners to drop, as well
+/// as the input server's blocking reads; an error waiter is not reap proof.
+pub(crate) struct SourceInputLease {
     input: std::sync::Mutex<Option<crate::source_input::SourceInput>>,
+    #[cfg(target_os = "linux")]
     url: String,
+    users: std::sync::atomic::AtomicUsize,
+    settled: tokio::sync::Notify,
 }
-#[cfg(target_os = "linux")]
 impl SourceInputLease {
-    fn new(input: crate::source_input::SourceInput) -> Arc<Self> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn new(input: crate::source_input::SourceInput) -> Arc<Self> {
         Arc::new(Self {
             url: input.url().into(),
             input: std::sync::Mutex::new(Some(input)),
+            users: std::sync::atomic::AtomicUsize::new(0),
+            settled: tokio::sync::Notify::new(),
         })
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn physical_owner(self: &Arc<Self>) -> SourceInputUse {
+        self.users.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        SourceInputUse(Arc::clone(self))
+    }
+    pub(crate) async fn close_and_wait(&self) -> std::io::Result<()> {
+        loop {
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if self.users.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                break;
+            }
+            settled.await;
+        }
+        let input = { self.input.lock().expect("DV source input").take() };
+        if let Some(input) = input {
+            input.close_and_wait().await?;
+        }
+        Ok(())
+    }
+}
+#[cfg(target_os = "linux")]
+pub(crate) struct SourceInputUse(Arc<SourceInputLease>);
+#[cfg(target_os = "linux")]
+impl Drop for SourceInputUse {
+    fn drop(&mut self) {
+        let prior = self
+            .0
+            .users
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(prior > 0);
+        self.0.settled.notify_waiters();
     }
 }
 /// Minted only after the actual helper and encoder are registered. It is
@@ -387,20 +428,16 @@ impl SourceInputSettlement {
     pub(crate) async fn settle(self) -> Result<(), String> {
         self.encoder.wait_confirmed_reap().await;
         let _ = self.helper.wait().await;
-        let input = { self.input.input.lock().expect("DV source input").take() };
-        if let Some(input) = input {
-            input
-                .close_and_wait()
-                .await
-                .map_err(|error| format!("DV source read join: {error}"))?;
-        }
-        Ok(())
+        self.input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV source read join: {error}"))
     }
 }
 
 struct Resources {
     #[cfg(target_os = "linux")]
-    _source_input: Option<Arc<SourceInputLease>>,
+    _source_input: Option<SourceInputUse>,
     source: Arc<SourceFence>,
     original_offset: u64,
     _offset_lane: Option<OwnedSemaphorePermit>,
@@ -1143,9 +1180,9 @@ async fn run_streaming(
         .prefix("dv-stream-")
         .tempdir_in(&request.runtime_cache)
         .map_err(|e| e.to_string())?;
-    let source_input = request.source_input.map(SourceInputLease::new);
+    let source_input = request.source_input;
     let resources = Arc::new(Resources {
-        _source_input: source_input.clone(),
+        _source_input: source_input.as_ref().map(|input| input.physical_owner()),
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),

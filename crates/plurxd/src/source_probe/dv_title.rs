@@ -42,11 +42,13 @@ pub(super) async fn scan(
         input.as_ref().map_or(descriptor, |input| input.url()),
         &index.to_string(),
     ]);
-    crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-        &mut command,
-        &[(source.handle.as_raw_fd(), 3)],
-        None,
-    );
+    if input.is_none() {
+        crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
+            &mut command,
+            &[(source.handle.as_raw_fd(), 3)],
+            None,
+        );
+    }
     let output = plurx_core::process::bounded::output_command_clean_env(
         &mut command,
         Duration::from_secs(6 * 60 * 60),

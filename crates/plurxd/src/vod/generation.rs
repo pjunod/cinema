@@ -312,6 +312,15 @@ pub(super) async fn spawn_generation(
                     .registered(&source_dispatch, registration);
                 drop(source_dispatch);
             });
+            let Some(source_custody) = source_custody else {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    "processed generation has no original source read owner".into(),
+                );
+                return;
+            };
             runtime
                 .execute_with_source_input(
                     &recipe.file,
@@ -324,7 +333,8 @@ pub(super) async fn spawn_generation(
                     Arc::clone(&rendition.slot),
                     tokio_util::sync::CancellationToken::new(),
                     Some(hook),
-                    source_custody.map(|input| input.without_prefetch()),
+                    source_custody,
+                    None,
                 )
                 .await
                 .and_then(|outcome| match outcome {

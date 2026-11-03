@@ -1,6 +1,6 @@
 # Playback startup, Resume and native callback implementation status
 
-**Status:** implementation drafted; compiler and final review pending · **Owner:** Codex/root · **Branch:**
+**Status:** implementation committed; platform lint and final review pending · **Owner:** Codex/root · **Branch:**
 `codex/playback-startup-fixes` · **Base:** `bd213c819` · **Updated:**
 2026-11-02
 
@@ -10,8 +10,10 @@ and [Fable dispositions](NATIVE-CALLBACK-FABLE-REVIEW.md). This is the delivery
 ledger for the user-authorized batched repair. Commits follow the smallest-first
 work order below; one main PR opens only after the batch is complete and
 reviewable. The branch was advanced to current main on 2026-11-02; its runner
-maintenance changes do not overlap this implementation. Implementation is frozen for integration compilation. Syntax checks have run;
-unit suites have not. No PR or qualification is recorded yet.
+maintenance changes do not overlap this implementation. Implementation is committed through `7ec51905a` and frozen for integration
+checks. Mac workspace hooks and web typing pass. Linux production/core
+compilation and the renderer SDK build pass; Linux lint cleanup is finishing.
+No unit suite, PR or merge qualification is recorded yet.
 
 ## 1. Work lanes
 
@@ -114,3 +116,27 @@ through the held host capability, and Windows through the private source
 bridge. Quota holds exclude active time only after aggregate physical stop
 proof; source-service refusal is not cached as decoder evidence. These new
 boundaries require Linux and packaged-parser qualification after review.
+
+## 6. Compiler receipts and remaining merge work
+
+| Check | Current result |
+|---|---|
+| Pinned Mac workspace Clippy, all targets, formatting, catalog and served JS syntax | Passed through the normal commit hooks. |
+| Web TypeScript baseline | Passed without raising the baseline. |
+| Pinned Linux production daemon and core all-target compilation | Passed on `7ec51905a`; three lint-only corrections are being committed. |
+| Full Linux renderer SDK plus CPU harness compilation | Passed; renderer/header hashes match the current code. No renderer regression has executed. |
+| Full Linux daemon test-target compilation | Exceeds the voter compiler's 8 GiB limit, including with incremental compilation disabled. A larger eligible lab/learner slot remains needed. The voter cap stays intact. |
+| Adversarial review, focused regressions and main fast lane | Pending, in that order. |
+
+Private compiler logs, archive checksums and source ownership handoffs live in
+the workflow's durable evidence directory, outside its disposable build cache.
+The full daemon test target is an environment capacity gap, not a test pass.
+A source-only production check does not replace that target or runtime startup
+acceptance. The operator deployment remains separate from this repair PR.
+
+Final reader inventory corrections require owned input at every production
+processed-runtime entry point, including the first prepared window. Standalone
+and paired title scans now use the same private AVIO despite the SDK's disabled
+network protocols; complete-title scanning retains its existing owner limits
+rather than inheriting the renderer's window cap or socket deadline. Their
+new compiler and regression receipts remain pending.

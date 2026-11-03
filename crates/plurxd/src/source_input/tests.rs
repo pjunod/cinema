@@ -316,3 +316,60 @@ async fn strict_host_range_reader_is_positioned_bounded_and_revoked_on_close() {
     .expect_err("closed capability");
     assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn processed_input_close_waits_for_actual_registered_child_reap() {
+    let (input, _file, _budget) = input(b"owned original bytes", SOURCE_WINDOW_MAX, None).await;
+    let state = Arc::clone(&input.state);
+    let url = input.url().to_owned();
+    let lease = crate::dv_segment::SourceInputLease::new(input.without_prefetch());
+    let physical_owner = lease.physical_owner();
+    let mut command = tokio::process::Command::new("/bin/sleep");
+    command
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let (child, job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background(
+            "processed original input ownership regression",
+        ),
+    )
+    .expect("real owned child");
+    let slot = Arc::new(crate::prodrun::ProducerSlot::new());
+    let (registration, writers) = slot
+        .attach_registered_job_owned(child, job, 0, Some(Box::new(physical_owner)))
+        .await;
+    writers.settled();
+    let closing_lease = Arc::clone(&lease);
+    let closing = tokio::spawn(async move { closing_lease.close_and_wait().await });
+    tokio::task::yield_now().await;
+    assert!(
+        !closing.is_finished(),
+        "returning an error cannot close a still-owned original input"
+    );
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .expect("capability remains live until reap");
+    assert_eq!(
+        response.bytes().await.expect("owned source body").as_ref(),
+        b"owned original bytes"
+    );
+    assert!(state.source.lock().expect("source state").is_some());
+    assert!(slot
+        .request_registered_retirement(&registration)
+        .await
+        .expect("exact child retirement"));
+    registration.wait_confirmed_reap().await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), closing)
+        .await
+        .expect("physical input join")
+        .expect("close owner")
+        .expect("joined input close");
+    assert!(state.source.lock().expect("source state").is_none());
+}

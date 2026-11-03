@@ -439,6 +439,7 @@ async fn execute(
 
 /// Cancellation is observed while awaiting the child, never by dropping its
 /// collector. bounded::cancellable returns only after the process is reaped.
+#[cfg(any(not(target_os = "linux"), test))]
 async fn run_admitted_probe<F, T, E>(
     transcode: &crate::transcode::TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,

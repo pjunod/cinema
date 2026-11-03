@@ -1,7 +1,9 @@
 "use strict";
 const test=require("node:test"),assert=require("node:assert/strict");
 const fs=require("node:fs"),path=require("node:path"),vm=require("node:vm");
-const source=fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/player/prepared-replacement.js"),"utf8");
+const webPlayer=path.join(__dirname,"../../crates/plurxd/src/web/player");
+const frameSource=fs.readFileSync(path.join(webPlayer,"video-frames.js"),"utf8");
+const source=fs.readFileSync(path.join(webPlayer,"prepared-replacement.js"),"utf8");
 function harness({origin=600000,rate=1,voluntary=true}={}){
   let now=0,next=0,attached=true;
   const timers=new Map(),exposed=[],failed=[],pairs=[],logs=[];
@@ -18,6 +20,7 @@ function harness({origin=600000,rate=1,voluntary=true}={}){
     performance:{now:()=>now},setTimeout(fn,ms){const id=++next;timers.set(id,{fn,at:now+ms});return id;},
     clearTimeout(id){timers.delete(id);},playbackOwnsAttachedMedia:()=>attached,
     streamHasVideo:()=>true,bufferRunway:()=>20,playbackContext:()=>({}),clientLog:row=>logs.push(row)});
+  vm.runInContext(frameSource,ctx);
   vm.runInContext(source,ctx);
   ctx.failPreparedReplacement=(p,s,reason)=>{failed.push(reason);p.prepared=null;};
   ctx.exposePreparedReplacement=(p,s,v,spare,filmMs)=>{exposed.push({p,s,v,spare,filmMs});};

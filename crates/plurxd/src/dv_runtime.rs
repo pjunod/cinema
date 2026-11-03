@@ -899,42 +899,6 @@ impl RuntimeRecipe {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn execute(
-        &self,
-        file: &plurx_core::domain::MediaFile,
-        plan: &plurx_core::transcode::ResolvedTranscode,
-        options: &plurx_core::transcode::TranscodeOptions,
-        grid: plurx_core::transcode::VodFrameGrid,
-        entry: &plurx_core::segplan::PlanEntry,
-        encoder: &Path,
-        admission: crate::dv_segment::SegmentAdmission,
-        producer: Arc<crate::prodrun::ProducerSlot>,
-        cancel: tokio_util::sync::CancellationToken,
-        registration_hook: Option<RegistrationHook>,
-    ) -> Result<
-        WindowOutcome<(
-            VerifiedWindow,
-            plurx_core::transcode::dv_processing::DvProcessingPlan,
-        )>,
-        String,
-    > {
-        self.execute_until(
-            file,
-            plan,
-            options,
-            grid,
-            entry,
-            encoder,
-            admission,
-            producer,
-            cancel,
-            registration_hook,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_with_source_input(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -947,45 +911,7 @@ impl RuntimeRecipe {
         producer: Arc<crate::prodrun::ProducerSlot>,
         cancel: tokio_util::sync::CancellationToken,
         registration_hook: Option<RegistrationHook>,
-        source_input: Option<crate::source_input::SourceInput>,
-    ) -> Result<
-        WindowOutcome<(
-            VerifiedWindow,
-            plurx_core::transcode::dv_processing::DvProcessingPlan,
-        )>,
-        String,
-    > {
-        self.execute_policy_until_with_source(
-            file,
-            plan,
-            options,
-            grid,
-            entry,
-            encoder,
-            admission,
-            producer,
-            cancel,
-            registration_hook,
-            None,
-            self.display_target,
-            source_input,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn execute_until(
-        &self,
-        file: &plurx_core::domain::MediaFile,
-        plan: &plurx_core::transcode::ResolvedTranscode,
-        options: &plurx_core::transcode::TranscodeOptions,
-        grid: plurx_core::transcode::VodFrameGrid,
-        entry: &plurx_core::segplan::PlanEntry,
-        encoder: &Path,
-        admission: crate::dv_segment::SegmentAdmission,
-        producer: Arc<crate::prodrun::ProducerSlot>,
-        cancel: tokio_util::sync::CancellationToken,
-        registration_hook: Option<RegistrationHook>,
+        source_input: crate::source_input::SourceInput,
         absolute_deadline: Option<tokio::time::Instant>,
     ) -> Result<
         WindowOutcome<(
@@ -994,26 +920,41 @@ impl RuntimeRecipe {
         )>,
         String,
     > {
-        self.execute_policy_until(
-            file,
-            plan,
-            options,
-            grid,
-            entry,
-            encoder,
-            admission,
-            producer,
-            cancel,
-            registration_hook,
-            absolute_deadline,
-            self.display_target,
-        )
-        .await
+        let source_input =
+            crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
+        let result = self
+            .execute_policy_until_with_source(
+                file,
+                plan,
+                options,
+                grid,
+                entry,
+                encoder,
+                admission,
+                producer,
+                cancel,
+                registration_hook,
+                absolute_deadline,
+                self.display_target,
+                Arc::clone(&source_input),
+            )
+            .await;
+        // Early validation/spawn failures and every terminal graph result use
+        // this same join. Physical Resources retain their input use through
+        // helper and encoder reap; no caller can release it by returning early.
+        source_input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV original source cleanup: {error}"))?;
+        result
     }
 
     /// Explicit immutable policy; live preparation freezes the title-qualified
     /// target, ordinary VOD/pre-encode recipes retain None. No per-window
     /// environment/caps/settings selection occurs here.
+    // Explicit fixture/custom qualification control. Ordinary original-media
+    // production can enter only execute_with_source_input with owned service.
+    #[cfg(any(test, plurx_dv_segment_probe))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_policy_until(
         &self,
@@ -1029,6 +970,7 @@ impl RuntimeRecipe {
         registration_hook: Option<RegistrationHook>,
         absolute_deadline: Option<tokio::time::Instant>,
         display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+        source_input: crate::source_input::SourceInput,
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -1036,22 +978,30 @@ impl RuntimeRecipe {
         )>,
         String,
     > {
-        self.execute_policy_until_with_source(
-            file,
-            plan,
-            options,
-            grid,
-            entry,
-            encoder,
-            admission,
-            producer,
-            cancel,
-            registration_hook,
-            absolute_deadline,
-            display_target,
-            None,
-        )
-        .await
+        let source_input =
+            crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
+        let result = self
+            .execute_policy_until_with_source(
+                file,
+                plan,
+                options,
+                grid,
+                entry,
+                encoder,
+                admission,
+                producer,
+                cancel,
+                registration_hook,
+                absolute_deadline,
+                display_target,
+                Arc::clone(&source_input),
+            )
+            .await;
+        source_input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV qualification source cleanup: {error}"))?;
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1069,7 +1019,7 @@ impl RuntimeRecipe {
         registration_hook: Option<RegistrationHook>,
         absolute_deadline: Option<tokio::time::Instant>,
         display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
-        source_input: Option<crate::source_input::SourceInput>,
+        source_input: Arc<crate::dv_segment::SourceInputLease>,
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -1186,7 +1136,7 @@ impl RuntimeRecipe {
                 export_raster: Some(export_raster),
                 display_target: export_policy.display_target(),
                 request: crate::dv_segment::SegmentRequest {
-                    source_input,
+                    source_input: Some(source_input),
                     renderer: self.tools.renderer.clone(),
                     renderer_env,
                     muxer: self.tools.renderer.clone(),
@@ -1407,7 +1357,7 @@ impl RuntimeRecipe {
 /// owned-job retirement have all been observed. Cancellation drops the pipe
 /// owner and retires the same registered process, never a replacement PID.
 #[cfg(target_os = "linux")]
-pub(crate) async fn run_private_window(
+async fn run_private_window(
     mut request: crate::dv_segment::StreamingSegmentRequest,
     registration_hook: Option<RegistrationHook>,
 ) -> Result<WindowOutcome<PrivateWindow>, String> {

@@ -1401,9 +1401,9 @@ pub(crate) struct DvTitleRide {
     stream_index: u32,
 }
 
-/// The companion scan's task. Dropping it — the pass future dropped by a
-/// preemption, an early return — aborts the task, and the task's child is
-/// killed with it; a bare `JoinHandle` would leave the scan reading on.
+/// The companion scan's task. Ordinary pass completion and cancellation join
+/// this owner before returning source custody. Drop requests cancellation;
+/// a dropped waiter alone never proves that the child or its reads settled.
 #[cfg(target_os = "linux")]
 struct DvTitleScan {
     task: tokio::task::JoinHandle<Result<plurx_core::process::bounded::Output, String>>,
@@ -1449,8 +1449,9 @@ impl DvTitleRide {
         }
     }
 
-    /// Start the scanner on a duplicate of the pass's held source. The task
-    /// owns the scanner: dropping or aborting it kills the child.
+    /// Start the scanner from the pass's held source capability. A budgeted
+    /// scan reads exclusively through the shared source service bridge. The
+    /// caller retains and joins this task through scanner and read cleanup.
     fn spawn(&self, source: &std::fs::File, wall_time: Duration) -> Option<DvTitleScan> {
         let held = match source.try_clone() {
             Ok(held) => held,
@@ -1488,11 +1489,13 @@ impl DvTitleRide {
                         .map_or("/proc/self/fd/3", |input| input.url()),
                     &index,
                 ]);
-                crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-                    &mut command,
-                    &[(held.as_raw_fd(), 3)],
-                    None,
-                );
+                if input.is_none() {
+                    crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
+                        &mut command,
+                        &[(held.as_raw_fd(), 3)],
+                        None,
+                    );
+                }
                 let output = plurx_core::process::bounded::output_command_clean_env(
                     &mut command,
                     wall_time,
@@ -2535,11 +2538,6 @@ async fn build_attested_pass(
         let input = "/dev/fd/3".to_owned();
         #[cfg(windows)]
         let input = path.to_string_lossy().into_owned();
-        #[cfg(target_os = "linux")]
-        let dv_title = match DvTitleRide::for_file(file, probed.expectation.stream_index).await {
-            Some(ride) => ride.spawn(source, budget).map(|task| (ride, task)),
-            None => None,
-        };
         let input_bridge = match crate::background_jobs::source_budget() {
             Some(budget) => match crate::fragment_index_cluster::SourceFence::clone_held(
                 source,
@@ -2563,14 +2561,20 @@ async fn build_attested_pass(
             },
             None => None,
         };
+        #[cfg(target_os = "linux")]
+        let dv_title = match DvTitleRide::for_file(file, probed.expectation.stream_index).await {
+            Some(ride) => ride.spawn(source, budget).map(|task| (ride, task)),
+            None => None,
+        };
         let input = input_bridge
             .as_ref()
             .map_or(input, |bridge| bridge.url().to_owned());
+        let output_count = outputs.len();
         let pass = shared_index_pass(file, outputs, Some(&input), probed.expectation, plan);
         #[cfg(unix)]
         let (source_fd, source_handoff) = {
             use std::os::fd::AsRawFd;
-            (Some(source.as_raw_fd()), None)
+            (input_bridge.is_none().then(|| source.as_raw_fd()), None)
         };
         #[cfg(windows)]
         let (source_fd, source_handoff) = (None, Some((source, path.as_path())));
@@ -2586,13 +2590,21 @@ async fn build_attested_pass(
             cancel,
         )
         .await;
-        if let Some(input) = input_bridge {
-            if let Err(error) = input.close_and_wait().await {
-                return refuse_all(IndexOutcome::Unsupported(format!(
-                    "source input cleanup did not settle: {error}"
-                )));
-            }
-        }
+        let built = match input_bridge {
+            Some(input) => match input.close_and_wait().await {
+                Ok(()) => built,
+                Err(error) => (0..output_count)
+                    .map(|_| {
+                        IndexBuild::plain(IndexOutcome::Unsupported(format!(
+                            "source input cleanup did not settle: {error}"
+                        )))
+                    })
+                    .collect(),
+            },
+            None => built,
+        };
+        // Even a refused main pass must cancel and join its companion before
+        // the common owner can return source custody to the scheduler.
         #[allow(unused_mut)]
         let mut built = built;
         #[cfg(target_os = "linux")]
