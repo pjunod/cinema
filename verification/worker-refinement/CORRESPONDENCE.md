@@ -29,6 +29,45 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Playback startup custody — scoped source review on 2026-11-03
+
+Codex agent `/root/other_formal_correspondence` compared base
+`bd213c81942175f591912e4bb0a2cc10f2a7a195` with source candidate
+`594210a783986d4da5ec7184f0895433ffe98b90`. Every previous mapped source
+fingerprint matches the base. The detailed source audit and external waits
+are in the [operation-progress wait map](../operation-progress/WAIT-MAP.md#playback-startup-custody--scoped-source-review-on-2026-11-03).
+
+[Queue ownership](../../crates/plurxd/src/background_jobs.rs) adds custody
+registration/activation before heartbeat startup and joined-source settlement
+after heartbeat join and token retirement. Settlement awaits durable local
+journal persistence, replicated proof and exact custody deletion, retrying
+without a local completion bound. Thus `FinishRetire` retains its existing
+queue meaning; its source anchor also contains an additional unmodeled wait
+before `DropAdmission`. A model cleanup result does not prove this wait ends.
+
+[The environment](../../crates/plurxd/src/library_work/env.rs) retains the
+physical admission `Arc` in the awaited work future. Work join still precedes
+domain release, queue retirement and physical admission drop. Linux source
+pressure now uses verified pause and durable source-slot reacquisition inside
+that future; other-platform source pressure selects cancellation. These source
+slots are distinct from modeled physical admission. Custody, pause/resume,
+byte pacing, private input, process-group quiescence and settlement replay
+have no state/action/fairness mapping or schedule coverage in this package.
+Additional core claim eligibility and paused-reservation renewal states also
+remain outside the model. Neither selected lock facts nor existing filesystem,
+backend and runtime premises establish progress through these new mechanisms.
+
+[The library entry file](../../crates/plurxd/src/library_work.rs) only adds
+the probe-input module declaration; its selected bodies and test schedules
+are unchanged. [The storage schedules](../../crates/plurx-core/tests/store_contract/formal_publication.rs)
+only gate an `Arc` import by their existing feature. These source edits add
+no schedule execution evidence. Retain every action/boundary, exact anchor,
+trust classification, schedule and gap; refresh only their reviewed source
+fingerprints and the containing correspondence fingerprint. Model/configuration
+bytes and historical qualification identities remain unchanged. This authored
+audit supplies no independent review, new execution, simulation proof or
+custody/pause liveness guarantee.
+
 ## Selected source binding refresh — 2026-10-22
 
 The 16 `background_jobs.rs` bindings were compared from their exact prior

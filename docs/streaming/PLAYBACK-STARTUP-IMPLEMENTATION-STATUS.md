@@ -43,6 +43,26 @@ Qualification record through implementation candidate `9205cb735`:
   surfaces. The PR records its live result, exact candidate and landing;
   focused test passes alone do not authorize merge.
 
+Formal correspondence was aligned after the main lane detected source drift.
+The durable-jobs model now represents an exact stable-owner source pause,
+renewal/replay without its source reservation, and fenced reacquisition;
+binding and publication still require real covering reservations. All 18
+registered configurations returned their expected outcomes in individual
+local runs on identical model, mapping, runner and input hashes. This includes
+unfiltered bounded safety and a ten-step pause-to-publication witness. The
+bound permits one pause/reacquisition pair across a finite execution; it does
+not prove physical I/O, journal recovery, concurrent pauses or paused-worker
+liveness. See the [durable-job contract](../../verification/durable-jobs/CONTRACT.md).
+Operation-progress and worker-refinement correspondence retain their protocol
+safety scope and explicitly name the additional external settlement waits.
+The main gate and landing remain recorded by PR #1366.
+
+The knowledge pilot's matched capability-profile and execution-plan rules
+retain their governing policy. Their function bodies and named regression
+sources are unchanged from the base; byte-custody changes occur later in
+`http/stream.rs`. This is scoped source correspondence, not blanket routing
+coverage or execution credit, and does not close standing obligations.
+
 Narrow test-phase corrections follow the reviewed source: `91745417d` fixes
 Linux fixture imports; `580ae8f3f` canonicalizes typed receipt identities,
 parameterizes bounded replay queries and corrects fixture policy/schema;
