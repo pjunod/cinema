@@ -856,7 +856,7 @@ pub(in crate::adaptive_resources::runtime::operations) fn queue_output_change(
             .head,
         event: AssetEventV3::OutputV2 { event },
     };
-    bootstrap.change = Some((v2::Id::new(operation)?, change.clone()));
+    stage_change(bootstrap, v2::Id::new(operation)?, change.clone())?;
     start_named_transition(
         journal,
         role,

@@ -186,6 +186,14 @@ fn queue_directory(
             },
         },
     };
+    // The journal commits before `apply_committed` folds: stage only a change
+    // this fold admits, so a refusal leaves fold, role and journal untouched.
+    scratch
+        .fold
+        .as_ref()
+        .ok_or(OperationError::State)?
+        .admits(&scratch.plan, io_id, &change)
+        .map_err(|_| OperationError::State)?;
     scratch.change = Some((io_id, change.clone()));
     scratch.directory_arm = Some(io_id);
     start_named_transition(

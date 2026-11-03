@@ -84,6 +84,56 @@ impl ScratchFold {
             pending: None,
         }
     }
+    /// The journal commits a change before the runtime folds it, and `apply`
+    /// consumes the fold. A runtime therefore stages a change only after this
+    /// check: the chain linkage and the single pending I/O slot preconditions
+    /// `apply` enforces, evaluated without consuming or changing the fold. A
+    /// change it refuses must never be journaled.
+    pub(crate) fn admits(
+        &self,
+        plan: &ScratchPlanV2,
+        operation_id: Id,
+        change: &AssetChangeV2,
+    ) -> Result<(), CustodyError> {
+        if change.asset_id != plan.asset_id
+            || change.generation_epoch != plan.generation_epoch
+            || change.previous != self.state.head
+            || self
+                .state
+                .head
+                .as_ref()
+                .is_some_and(|h| h.operation_id == operation_id)
+        {
+            return Err(codec::invalid());
+        }
+        self.admits_slot(operation_id, &change.event)
+    }
+    /// Exactly one native operation may be armed and unobserved per asset:
+    /// an arm needs the slot free, an observe needs it held by that same IO,
+    /// and the lifecycle transitions that require it free are refused while
+    /// it is held. Mirrors the slot checks in `apply_event`.
+    pub(super) fn admits_slot(
+        &self,
+        operation_id: Id,
+        event: &AssetEventV1,
+    ) -> Result<(), CustodyError> {
+        let admitted = match event {
+            AssetEventV1::ArmIo { io_id, .. } => self.pending.is_none() && *io_id == operation_id,
+            AssetEventV1::ObserveIo { io_id, .. } => self
+                .pending
+                .as_ref()
+                .is_some_and(|(armed, _)| armed == io_id),
+            AssetEventV1::Freeze { .. }
+            | AssetEventV1::BeginRetirement { .. }
+            | AssetEventV1::BeginProducerCancellation { .. } => self.pending.is_none(),
+            AssetEventV1::Fence { .. } => true,
+        };
+        if admitted {
+            Ok(())
+        } else {
+            Err(codec::invalid())
+        }
+    }
     pub(crate) fn apply(
         mut self,
         plan: &ScratchPlanV2,

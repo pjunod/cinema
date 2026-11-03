@@ -3274,6 +3274,106 @@ async fn copy_concurrent_readers_wait_for_io_slot_and_asset_stays_healthy() {
     retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
 }
 
+// The journal commits a change before `apply_committed` folds it, and `apply`
+// consumes the fold. A change the fold would refuse (here a second ArmIo while
+// a client's ReadRange holds the single slot) must be refused BEFORE it is
+// staged or submitted: the member keeps its exact fold, no command is staged
+// or journaled, and the held read and the producer carry on.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn copy_fold_refused_change_is_never_journaled_and_keeps_the_fold() {
+    use v2::scratch::{AssetEventV1, AssetIoV1, ByteRangeV1, OutputKey};
+    let root = tempfile::tempdir().expect("actual refused change fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    original_prefix(&runtime, &mut owner, &preparation).await;
+    let member = output_member(&preparation).await;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("original lease before closing");
+    let init = publish_synced_init(&runtime, &preparation, member).await;
+    let len = init.len() as u64;
+    let reader = runtime
+        .prepare_finite_reader(
+            &preparation,
+            0,
+            member,
+            OutputKey::Init,
+            0,
+            len,
+            len,
+            deadline(),
+        )
+        .await
+        .expect("client reader of the published init");
+    let gate = hold_read_in_slot(&reader).await;
+    {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        let sequence = role.sequence;
+        let before = role.bootstrap[&member]
+            .fold()
+            .expect("original fold")
+            .state();
+        assert_eq!(
+            before.asset.totals.pending_jobs, 1,
+            "the read holds the slot"
+        );
+        let io = v2::Id::new(Uuid::new_v4()).expect("fixture IO id");
+        let refused = super::super::bootstrap::fixture_queue_output_change(
+            &runtime.journal,
+            role,
+            member,
+            io.uuid(),
+            AssetEventV1::ArmIo {
+                io_id: io,
+                operation: AssetIoV1::ReadRange {
+                    lease_id: v2::Id::new(reader.fixture_lease_id()).expect("lease id"),
+                    range: ByteRangeV1 {
+                        start: 0,
+                        end_exclusive: len,
+                    },
+                },
+            },
+            deadline(),
+        );
+        assert!(
+            matches!(refused, Err(OperationError::State)),
+            "a fold-refused change is refused before the journal: {refused:?}"
+        );
+        assert!(
+            role.transition.is_none(),
+            "nothing submitted to the journal"
+        );
+        assert_eq!(role.sequence, sequence, "nothing journaled");
+        assert!(
+            role.bootstrap[&member]
+                .fold()
+                .is_some_and(|fold| fold.state() == before),
+            "the member keeps its exact fold"
+        );
+    }
+    // No staged command blocks the held read's own observe or the producer.
+    drop(gate);
+    let chunk = reader
+        .next_chunk(deadline())
+        .await
+        .expect("held read resumes and is observed")
+        .expect("init bytes");
+    assert_eq!(chunk.as_ref(), init.as_slice());
+    drop(chunk);
+    reader
+        .close(deadline())
+        .await
+        .expect("positive close of the reader");
+    drop(reader);
+    publish_synced_segment(&runtime, &preparation, member).await;
+    retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
+}
+
 // Each irreversible errno filter runs in its own harness subprocess and on
 // its current Tokio thread. These cases require actual kernel syscall errors;
 // absence of the expected syscall/errno fails rather than supplying coverage.

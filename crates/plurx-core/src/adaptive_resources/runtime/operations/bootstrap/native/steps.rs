@@ -368,8 +368,8 @@ impl NodeResourceRuntime {
                         operation: operation.clone(),
                     },
                 };
+                stage_change(bootstrap, io, change.clone())?;
                 bootstrap.next_arm = Some((io, operation));
-                bootstrap.change = Some((io, change.clone()));
                 start_named_transition(
                     &self.journal,
                     role,
@@ -464,7 +464,7 @@ impl NodeResourceRuntime {
                         result: audit,
                     },
                 };
-                bootstrap.change = Some((observe_id, change.clone()));
+                stage_change(bootstrap, observe_id, change.clone())?;
                 start_named_transition(
                     &self.journal,
                     role,
@@ -571,7 +571,7 @@ impl NodeResourceRuntime {
                 result: audit,
             },
         };
-        bootstrap.change = Some((observe_id, change.clone()));
+        stage_change(bootstrap, observe_id, change.clone())?;
         start_named_transition(
             &self.journal,
             role,
