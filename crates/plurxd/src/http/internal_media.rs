@@ -86,12 +86,21 @@ pub(crate) async fn snapshot(
     StatusCode,
 > {
     authorize(&state, &headers, "GET", SNAPSHOT_PATH, &[]).await?;
-    // The advertised quote is identity/readiness only (local_snapshot
-    // withholds it while not accepting, not ready or in maintenance). The
-    // origin's remaining create budget reaches this worker only through the
-    // causal Register/Grant exchange, checked under strict cluster policy.
-    let snapshot = local_snapshot(&state).await;
-    Ok((private_no_store_headers(), Json(snapshot)))
+    Ok(advertised_snapshot(&state).await)
+}
+
+/// The authenticated peer answer. The advertised quote is identity and
+/// readiness only (`local_snapshot` withholds it while not accepting, not
+/// ready or in maintenance). The origin's remaining create budget reaches
+/// this worker only through the causal Register/Grant exchange, checked under
+/// strict cluster policy.
+async fn advertised_snapshot(
+    state: &AppState,
+) -> (
+    [(HeaderName, &'static str); 1],
+    Json<crate::media_pool::MediaNodeSnapshot>,
+) {
+    (private_no_store_headers(), Json(local_snapshot(state).await))
 }
 
 fn private_no_store_headers() -> [(HeaderName, &'static str); 1] {
@@ -598,22 +607,46 @@ mod tests {
         (base, root, artifact)
     }
 
-    #[test]
-    fn peer_snapshot_advertises_the_local_adaptive_quote_unchanged() {
-        // local_snapshot alone decides whether a quote is advertised; the
-        // authenticated peer handler must not strip or rewrite it.
-        let source = include_str!("internal_media.rs");
-        let start = source
-            .find("pub(crate) async fn snapshot(")
-            .expect("peer snapshot handler");
-        let end = start
-            + source[start..]
-                .find("fn private_no_store_headers")
-                .expect("handler end");
-        let handler = &source[start..end];
-        assert!(handler.contains("let snapshot = local_snapshot(&state).await;"));
-        assert!(!handler.contains("adaptive_worker_quote ="));
-        assert!(!handler.contains("let mut snapshot"));
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn peer_snapshot_advertises_the_local_adaptive_quote_unchanged() {
+        // A real custody runtime opened by the production startup path, on a
+        // real selected singleton Store: the peer answer must carry exactly
+        // the quote this node computes, and nothing else may strip it.
+        let base = crate::test_tempdir().expect("fixture root");
+        let mut config = plurx_core::config::Config::default();
+        config.storage.data_dir = base.path().join("database");
+        let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("fixture Raft port");
+        let api = std::net::TcpListener::bind("127.0.0.1:0").expect("fixture API port");
+        config.cluster.raft_bind = raft.local_addr().expect("Raft address");
+        config.cluster.api_bind = api.local_addr().expect("API address");
+        config.cluster.advertise_host = "localhost".into();
+        drop((raft, api));
+        crate::canonicalize_storage_roots(&mut config).expect("storage preflight");
+        let mut selected = crate::sharing_fixture_clock::select_applied_singleton(&config)
+            .await
+            .expect("actual selected local voter");
+        let runtime = crate::resource_runtime::open_before_cleanup(&mut selected, &config)
+            .await
+            .expect("production custody startup")
+            .expect("Linux custody runtime");
+        let mut state = crate::http::internal_media_sessions::output_capture_test_state();
+        state.resource_runtime = Some(std::sync::Arc::clone(&runtime));
+        let local = local_snapshot(&state)
+            .await
+            .adaptive_worker_quote
+            .expect("a ready, accepting node quotes its custody owner");
+        assert_eq!(local.owner_id, runtime.owner().owner_id);
+        let (headers, Json(advertised)) = advertised_snapshot(&state).await;
+        assert_eq!(headers, private_no_store_headers());
+        assert_eq!(advertised.adaptive_worker_quote, Some(local));
+        // The same handler still refuses an unauthenticated caller.
+        assert_eq!(
+            snapshot(State(state.clone()), HeaderMap::new()).await.err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        drop(state);
+        drop(selected);
     }
 
     #[test]
