@@ -1,0 +1,19 @@
+# Every container on a Raft voter except plurxd. Install with
+# deploy/voter-isolation/README.md.
+#
+# dockerd makes this the default parent ("cgroup-parent" in daemon.json), so
+# an ad-hoc agent build container lands here without asking. Percentages are
+# of this host's physical memory, so one file fits every voter. The limits
+# are sized so they never bind on the steady siblings (measure their RSS
+# first); they exist for a build that would otherwise fill swap. IOWeight is
+# deliberately absent: it needs BFQ or io.cost, which are not assumed.
+# scripts/voter-isolation-check reports the IO scheduler instead.
+[Unit]
+Description=Containers on a Raft voter other than plurxd: bounded
+Before=slices.target
+
+[Slice]
+MemoryHigh=50%
+MemoryMax=70%
+MemorySwapMax=2G
+CPUWeight=50

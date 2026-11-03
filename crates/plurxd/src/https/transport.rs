@@ -147,7 +147,8 @@ impl Serving {
         let listener = TlsListener::new(prepared.socket, &prepared.identity);
         let stop = listener_stop.child_token();
         let shutdown = stop.clone();
-        let future = crate::serve_http(
+        let future = crate::serve_http_listener(
+            "https",
             listener,
             app,
             async move { shutdown.cancelled().await },
@@ -259,6 +260,71 @@ mod tests {
         })
         .await
         .expect("bounded handshake observation");
+    }
+
+    #[tokio::test]
+    async fn plaintext_http_follows_active_https_without_a_redirect_loop() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let identity = identity(root.path());
+        let tls_socket = socket().await;
+        let tls_address = tls_socket.local_addr().expect("TLS address");
+        let plain_socket = socket().await;
+        let plain_address = plain_socket.local_addr().expect("HTTP address");
+        let app = Router::new()
+            .route(
+                "/target",
+                get(|| async { "secure" }).post(|uri: axum::http::Uri, body: Bytes| async move {
+                    format!("{uri}:{}", String::from_utf8_lossy(&body))
+                }),
+            )
+            .route("/readyz", get(|| async { "ready" }));
+        let stop = CancellationToken::new();
+        let tls_stop = stop.clone();
+        let tls = tokio::spawn(crate::serve_http(
+            TlsListener::new(tls_socket, &identity),
+            app.clone(),
+            async move { tls_stop.cancelled().await },
+            HTTP_TIMEOUTS,
+        ));
+        let plain_stop = stop.clone();
+        let plain = tokio::spawn(crate::serve_http(
+            plain_socket,
+            super::super::redirect::router(app, Some(tls_address.port())),
+            async move { plain_stop.cancelled().await },
+            HTTP_TIMEOUTS,
+        ));
+        let client = client(&identity, false);
+        let response = client
+            .post(format!("http://{plain_address}/target?next=%2Fsettings"))
+            .header("x-forwarded-proto", "https")
+            .body("payload")
+            .send()
+            .await
+            .expect("follow trusted HTTPS redirect");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.url().scheme(), "https");
+        assert_eq!(response.url().port(), Some(tls_address.port()));
+        assert_eq!(
+            response.text().await.expect("body"),
+            "/target?next=%2Fsettings:payload"
+        );
+        let direct = client
+            .get(format!("https://{tls_address}/target"))
+            .send()
+            .await
+            .expect("direct TLS");
+        assert_eq!(direct.status(), reqwest::StatusCode::OK);
+        assert_eq!(direct.text().await.expect("body"), "secure");
+        let health = client
+            .get(format!("http://{plain_address}/readyz"))
+            .send()
+            .await
+            .expect("HTTP readiness");
+        assert_eq!(health.url().scheme(), "http");
+        assert_eq!(health.text().await.expect("body"), "ready");
+        stop.cancel();
+        plain.await.expect("HTTP task").expect("HTTP drain");
+        tls.await.expect("TLS task").expect("TLS drain");
     }
 
     #[tokio::test]

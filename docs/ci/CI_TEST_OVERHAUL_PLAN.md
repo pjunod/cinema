@@ -310,9 +310,10 @@ For Apple changes, T1 begins on the private-repository lab runner selected by
 `[self-hosted, macOS, ARM64, lab, apple, xcode-27.2]`. The M4 MacBook Air is
 primary and the M3 Max MacBook Pro is standby, as described in
 [APPLE-RUNNER-FAILOVER.md](APPLE-RUNNER-FAILOVER.md).
-It verifies Xcode 27.2 build 27B52, the iOS 27.2 and tvOS 27.2 SDKs, iOS 26.5
-runtime build 23F77, tvOS 26.5 runtime build 23L470, and XcodeGen 2.46.0
-before restoring DerivedData or booting a simulator. That makes
+Every Apple job verifies Xcode 27.2 build 27B52 and XcodeGen 2.46.0 before it
+builds. The full `ci.yml` lane also verifies the iOS 27.2 and tvOS 27.2 SDKs,
+the iOS 26.5 runtime build 23F77 and the tvOS 26.5 runtime build 23L470, before
+it boots a simulator. That makes
 toolchain drift fail in seconds instead of paying for a partial build. The
 runner creates uniquely named iPhone, iPad, and Apple TV devices for each run
 and deletes them in an `always()` cleanup step; persistent runner state is not

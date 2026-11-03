@@ -27,10 +27,14 @@ concurrency:
 jobs:
   release-check:
     name: current version is ready to tag
-    # Readiness answers "would the gate pass if we tagged now", so it has to run
-    # the gate's ffmpeg rather than the week's. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
-    timeout-minutes: 90
+    # Use the shipped media runtime, independently of the host's FFmpeg.
+    # The complete Rust suite needs the same memory pool as ci.yml:check.
+    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]
+    env:
+      CARGO_BUILD_JOBS: "1"
+      RUST_TEST_THREADS: "2"
+    # Includes the candidate-owned runtime build and complete strict sweep.
+    timeout-minutes: 180
     outputs:
       pending: ${{ steps.release.outputs.pending }}
       tag: ${{ steps.release.outputs.tag }}
@@ -40,6 +44,19 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+        with:
+          components: rustfmt, clippy
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: release-readiness
+          disk-gb: "45"
+      - name: Prepare the shipped-runtime release runner
+        run: |
+          # Keep the current runner outside the checkout: a pending release
+          # can predate this workflow fix and its helper.
+          cp scripts/release-readiness "$RUNNER_TEMP/release-readiness"
       - name: Find the release commit, if a release is waiting
         id: release
         run: |
@@ -54,24 +71,21 @@ jobs:
         env:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
         run: git checkout -q --detach "$RELEASE_SHA"
-      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
-        with:
-          components: rustfmt, clippy
-      - uses: https://github.com/Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - uses: ./.github/actions/ffmpeg
-        with:
-          major: "6"
-      - uses: ./.github/actions/playwright
-        with:
-          version: "1.62.0"
       - name: Verify release readiness
         if: steps.release.outputs.pending == 'true'
-        run: make release-check
+        run: python3 "$RUNNER_TEMP/release-readiness" make release-check
       - name: Verify main is releasable (no release pending)
         if: steps.release.outputs.pending != 'true'
         run: |
           echo "No release pending: $(scripts/release-cut --pending | tr '\n' ' ')"
-          scripts/validate run --profile ci --all --strict
+          python3 "$RUNNER_TEMP/release-readiness" scripts/validate run --profile ci --all --strict
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
   tag:
     name: tag the green release commit

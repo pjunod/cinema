@@ -367,7 +367,7 @@ mod tests {
     }
     #[tokio::test]
     async fn restarted_reader_requires_full_hash_and_held_cache_rejects_replacement() {
-        let directory = tempfile::tempdir().expect("directory");
+        let directory = crate::test_tempdir().expect("directory");
         let path = directory.path().join("source.mkv");
         let bytes = vec![37_u8; 128 * 1024 + 17];
         std::fs::write(&path, &bytes).expect("source");
@@ -419,7 +419,8 @@ mod tests {
     }
     #[tokio::test]
     async fn concurrent_reads_single_flight_and_cache_budget_preserve_live_work() {
-        let mut source = tempfile::NamedTempFile::new().expect("source");
+        let directory = crate::test_tempdir().expect("directory");
+        let mut source = tempfile::NamedTempFile::new_in(directory.path()).expect("source");
         source.write_all(b"one physical source").expect("bytes");
         let media = file(source.path().into());
         let cache = ReadAttestations::new();

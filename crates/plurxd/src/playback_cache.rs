@@ -34,6 +34,154 @@ pub(crate) trait CacheOwner: Send + Sync {
     async fn evict(&self, candidate: &CacheCandidate) -> io::Result<bool>;
 }
 
+/// Where the cache ceiling (`cache.max_gb`) is read from. The production
+/// source is the replicated Store, which needs a leader; only the settings
+/// task reads it, never a writer (C3 of
+/// `docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md`).
+#[async_trait::async_trait]
+pub(crate) trait CacheCeilingSource: Send + Sync {
+    async fn read_max_gb(&self) -> io::Result<Option<String>>;
+}
+
+struct StoreCeilingSource(Arc<dyn Store>);
+
+#[async_trait::async_trait]
+impl CacheCeilingSource for StoreCeilingSource {
+    async fn read_max_gb(&self) -> io::Result<Option<String>> {
+        self.0
+            .get_setting(keys::CACHE_MAX_GB)
+            .await
+            .map_err(io::Error::other)
+    }
+}
+
+/// The last ceiling the settings task read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CeilingSetting {
+    /// The first read has not finished.
+    Unread,
+    /// No read has ever succeeded; this is why the last one failed.
+    Unavailable(String),
+    /// The ceiling in bytes, as of the last successful read. A later failed
+    /// or hung read keeps it.
+    Known(u64),
+}
+
+/// How often a failed settings read may warn.
+const SETTING_WARNING_INTERVAL: Duration = Duration::from_secs(60);
+
+fn parse_ceiling(value: Option<String>) -> io::Result<u64> {
+    match value {
+        None => Ok(DEFAULT_BUDGET),
+        Some(value) => value
+            .trim()
+            .parse::<u64>()
+            .map(|gib| gib.saturating_mul(GIB))
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "cache.max_gb is not a non-negative integer",
+                )
+            }),
+    }
+}
+
+/// Read `cache.max_gb` every [`SAMPLE_AGE`] and publish it, for as long as
+/// the budget exists. Runs on its own task, so a Store read that fails or
+/// hangs during an election delays only this loop: every writer keeps the
+/// last ceiling it was told.
+///
+/// If the loop ends while the budget is still in use (a panic in the source,
+/// a runtime that went away under it), its guard says so once, clears the
+/// started flag so the next writer's `refresh` starts it again, and turns an
+/// unread ceiling into a refusal instead of leaving writers waiting on a
+/// read that will never come. That is the existing start-on-demand path,
+/// not a watchdog: nothing polls for it.
+async fn ceiling_settings_loop(
+    budget: Weak<PlaybackCacheBudget>,
+    source: Arc<dyn CacheCeilingSource>,
+    ceiling: Arc<tokio::sync::watch::Sender<CeilingSetting>>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+) {
+    struct Running {
+        budget: Weak<PlaybackCacheBudget>,
+        ceiling: Arc<tokio::sync::watch::Sender<CeilingSetting>>,
+        started: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for Running {
+        fn drop(&mut self) {
+            if self.budget.strong_count() > 0 {
+                self.ceiling.send_if_modified(|current| match current {
+                    CeilingSetting::Unread => {
+                        *current = CeilingSetting::Unavailable(
+                            "the playback cache settings task ended before its first read"
+                                .to_owned(),
+                        );
+                        true
+                    }
+                    _ => false,
+                });
+                tracing::warn!(
+                    panicked = std::thread::panicking(),
+                    kept = ?*self.ceiling.borrow(),
+                    "playback cache settings task ended while the cache is in use; the next \
+                     writer restarts it"
+                );
+            }
+            self.started
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _running = Running {
+        budget: budget.clone(),
+        ceiling: Arc::clone(&ceiling),
+        started,
+    };
+    let mut interval = tokio::time::interval(SAMPLE_AGE);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_warning: Option<Instant> = None;
+    loop {
+        interval.tick().await;
+        if budget.strong_count() == 0 {
+            return;
+        }
+        let read = match tokio::time::timeout(IO_TIMEOUT, source.read_max_gb()).await {
+            Ok(read) => read.and_then(parse_ceiling),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "playback cache budget setting timed out",
+            )),
+        };
+        match read {
+            Ok(bytes) => {
+                ceiling.send_if_modified(|current| {
+                    let changed = *current != CeilingSetting::Known(bytes);
+                    *current = CeilingSetting::Known(bytes);
+                    changed
+                });
+            }
+            Err(error) => {
+                let kept = ceiling.send_if_modified(|current| match current {
+                    CeilingSetting::Known(_) => false,
+                    _ => {
+                        *current = CeilingSetting::Unavailable(error.to_string());
+                        true
+                    }
+                });
+                if last_warning.is_none_or(|at| at.elapsed() >= SETTING_WARNING_INTERVAL) {
+                    last_warning = Some(Instant::now());
+                    tracing::warn!(
+                        %error,
+                        kept = ?*ceiling.borrow(),
+                        first_read_failed = kept,
+                        "playback cache budget setting unreadable; writers keep the last ceiling"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SweepReport {
     pub bytes_before: u64,
@@ -84,7 +232,6 @@ struct State {
     dirty: bool,
     dirty_revision: u64,
     ceiling: u64,
-    setting_at: Option<Instant>,
 }
 
 impl State {
@@ -361,7 +508,11 @@ pub(crate) fn is_pinned(path: &Path) -> bool {
 }
 
 pub(crate) struct PlaybackCacheBudget {
-    store: Arc<dyn Store>,
+    ceiling_source: Arc<dyn CacheCeilingSource>,
+    /// Published by `ceiling_settings_loop`; read without any Store call.
+    ceiling_setting: Arc<tokio::sync::watch::Sender<CeilingSetting>>,
+    /// Set while `ceiling_settings_loop` runs; the loop clears it as it ends.
+    ceiling_task_started: Arc<std::sync::atomic::AtomicBool>,
     roots: Vec<PathBuf>,
     owners: Mutex<Vec<Arc<dyn CacheOwner>>>,
     state: Mutex<State>,
@@ -387,6 +538,13 @@ impl std::fmt::Debug for PlaybackCacheBudget {
 
 impl PlaybackCacheBudget {
     pub(crate) fn new(store: Arc<dyn Store>, roots: Vec<PathBuf>) -> Arc<Self> {
+        Self::with_ceiling_source(Arc::new(StoreCeilingSource(store)), roots)
+    }
+
+    pub(crate) fn with_ceiling_source(
+        ceiling_source: Arc<dyn CacheCeilingSource>,
+        roots: Vec<PathBuf>,
+    ) -> Arc<Self> {
         let mut roots = roots
             .into_iter()
             .map(|path| normalized(&path).expect("valid cache root"))
@@ -399,7 +557,9 @@ impl PlaybackCacheBudget {
             }
         }
         let budget = Arc::new(Self {
-            store,
+            ceiling_source,
+            ceiling_setting: Arc::new(tokio::sync::watch::Sender::new(CeilingSetting::Unread)),
+            ceiling_task_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             roots: disjoint,
             owners: Mutex::default(),
             state: Mutex::default(),
@@ -445,41 +605,64 @@ impl PlaybackCacheBudget {
             })
     }
 
-    async fn refresh(&self, force: bool) -> io::Result<()> {
-        let refresh_setting = {
-            let state = self.lock();
-            force || state.setting_at.is_none_or(|at| at.elapsed() >= SAMPLE_AGE)
-        };
-        if refresh_setting {
-            let value =
-                tokio::time::timeout(IO_TIMEOUT, self.store.get_setting(keys::CACHE_MAX_GB))
-                    .await
-                    .map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "playback cache budget setting timed out",
-                        )
-                    })?
-                    .map_err(io::Error::other)?;
-            let ceiling = match value {
-                None => DEFAULT_BUDGET,
-                Some(value) => value
-                    .trim()
-                    .parse::<u64>()
-                    .map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "cache.max_gb is not a non-negative integer",
-                        )
-                    })?
-                    .saturating_mul(GIB),
-            };
-            #[cfg(test)]
-            let ceiling = ceiling.min(self.test_ceiling.load(std::sync::atomic::Ordering::Relaxed));
-            let mut state = self.lock();
-            state.ceiling = ceiling;
-            state.setting_at = Some(Instant::now());
+    /// Start the settings task unless it is running. The sweep loop starts it
+    /// at boot; a writer starts it if nothing has yet, or again if it ended.
+    pub(crate) fn start_ceiling_settings(self: &Arc<Self>) {
+        if self
+            .ceiling_task_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
         }
+        tokio::spawn(ceiling_settings_loop(
+            Arc::downgrade(self),
+            Arc::clone(&self.ceiling_source),
+            Arc::clone(&self.ceiling_setting),
+            Arc::clone(&self.ceiling_task_started),
+        ));
+    }
+
+    /// The ceiling the settings task last read. No Store call: before the
+    /// first read finishes this waits for it, at most as long as that read
+    /// may take, and before any read has succeeded it fails closed.
+    async fn known_ceiling(&self) -> io::Result<u64> {
+        let mut setting = self.ceiling_setting.subscribe();
+        let current = setting.borrow_and_update().clone();
+        let current = match current {
+            CeilingSetting::Unread => tokio::time::timeout(
+                IO_TIMEOUT,
+                setting.wait_for(|setting| *setting != CeilingSetting::Unread),
+            )
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "playback cache budget setting timed out",
+                )
+            })?
+            .map_err(io::Error::other)?
+            .clone(),
+            known => known,
+        };
+        match current {
+            CeilingSetting::Known(bytes) => Ok(bytes),
+            CeilingSetting::Unavailable(error) => Err(io::Error::other(error)),
+            CeilingSetting::Unread => Err(io::Error::other(
+                "playback cache budget setting has not been read",
+            )),
+        }
+    }
+
+    async fn refresh(self: &Arc<Self>, force: bool) -> io::Result<()> {
+        // `force` (eviction, sweep) and ordinary refreshes alike take the
+        // ceiling the settings task holds. Nothing under `operations` waits on
+        // the Store, so a leaderless moment cannot stall or fail a writer that
+        // already knows its ceiling.
+        self.start_ceiling_settings();
+        let ceiling = self.known_ceiling().await?;
+        #[cfg(test)]
+        let ceiling = ceiling.min(self.test_ceiling.load(std::sync::atomic::Ordering::Relaxed));
+        self.lock().ceiling = ceiling;
         let (needed, committed, device_committed, dirty_revision) = {
             let state = self.lock();
             (
@@ -552,6 +735,35 @@ impl PlaybackCacheBudget {
             )
         })?;
         let _operation = self.operation().await?;
+        // A cancelled write or eviction can invalidate a scan while it runs.
+        // Reconcile again instead of turning that transient state into a fatal
+        // StorageFull. Bound the whole retry sequence, including owner work.
+        tokio::time::timeout(IO_TIMEOUT + PRESSURE_TIMEOUT, async {
+            loop {
+                if let Some(reservation) =
+                    self.try_reserve_from_inventory(&path, index, bytes).await?
+                {
+                    return Ok(reservation);
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "playback cache inventory did not stabilize before reservation deadline",
+            )
+        })?
+    }
+
+    /// None means a concurrent cancellation invalidated the inventory. The
+    /// caller keeps the operation lock across retries and its overall timeout.
+    async fn try_reserve_from_inventory(
+        self: &Arc<Self>,
+        path: &Path,
+        index: usize,
+        bytes: u64,
+    ) -> io::Result<Option<CacheReservation>> {
         self.refresh(false).await?;
         let (device, allocation_unit) = {
             let state = self.lock();
@@ -569,9 +781,32 @@ impl PlaybackCacheBudget {
                 "write exceeds shared playback cache budget",
             ));
         }
-        self.make_room(Some((device, bytes))).await?;
+        let report = self.make_room(Some((device, bytes))).await?;
         let mut state = self.lock();
-        if state.dirty || state.ceiling == 0 || state.remaining(device) < bytes {
+        if state.dirty {
+            // The admission and pending grant share this lock, so a drop
+            // after refresh cannot slip through as unaccounted capacity.
+            return Ok(None);
+        }
+        if state.ceiling == 0 || state.remaining(device) < bytes {
+            let cause = if state.ceiling == 0 {
+                "zero_ceiling"
+            } else {
+                "no_room"
+            };
+            tracing::warn!(
+                cause,
+                requested_bytes = bytes,
+                ceiling = state.ceiling,
+                used = state.used(),
+                remaining = state.remaining(device),
+                dirty_revision = state.dirty_revision,
+                evicted = report.evicted,
+                protected = report.protected,
+                bytes_before = report.bytes_before,
+                bytes_after = report.bytes_after,
+                "shared playback cache reservation refused"
+            );
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
                 "shared playback cache budget or filesystem reserve exhausted",
@@ -580,7 +815,7 @@ impl PlaybackCacheBudget {
         if state
             .evicting
             .values()
-            .any(|candidate| overlapping(candidate, &path))
+            .any(|candidate| overlapping(candidate, path))
         {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -596,15 +831,15 @@ impl PlaybackCacheBudget {
                 allocation_unit,
             },
         );
-        state.pins.insert(id, path);
-        Ok(CacheReservation {
+        state.pins.insert(id, path.to_path_buf());
+        Ok(Some(CacheReservation {
             budget: Arc::clone(self),
             id,
             settled: false,
-        })
+        }))
     }
 
-    pub(crate) async fn available_bytes(&self, path: &Path) -> io::Result<u64> {
+    pub(crate) async fn available_bytes(self: &Arc<Self>, path: &Path) -> io::Result<u64> {
         let path = normalized(path)?;
         let index = self.root_index(&path).ok_or_else(|| {
             io::Error::new(
@@ -627,7 +862,7 @@ impl PlaybackCacheBudget {
         })
     }
 
-    pub(crate) async fn ceiling_bytes(&self) -> io::Result<u64> {
+    pub(crate) async fn ceiling_bytes(self: &Arc<Self>) -> io::Result<u64> {
         let _operation = self.operation().await?;
         self.refresh(false).await?;
         Ok(self.lock().ceiling)
@@ -635,7 +870,7 @@ impl PlaybackCacheBudget {
 
     /// Used by settings and queue admission; includes old files and every
     /// outstanding writer grant, regardless of the namespace's Store rows.
-    pub(crate) async fn used_bytes(&self) -> io::Result<u64> {
+    pub(crate) async fn used_bytes(self: &Arc<Self>) -> io::Result<u64> {
         let _operation = self.operation().await?;
         self.refresh(false).await?;
         let state = self.lock();
@@ -657,7 +892,6 @@ impl PlaybackCacheBudget {
             allocation_unit: 1,
         });
         let mut state = self.lock();
-        state.setting_at = None;
         state.dirty = true;
         state.dirty_revision = state.dirty_revision.wrapping_add(1);
     }
@@ -828,6 +1062,7 @@ impl PlaybackCacheBudget {
     }
 
     pub(crate) async fn run(self: Arc<Self>, shutdown: CancellationToken) {
+        self.start_ceiling_settings();
         let mut interval = tokio::time::interval(SWEEP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -1301,11 +1536,21 @@ mod tests {
 
         fn limit(&self, bytes: u64) {
             self.budget.test_ceiling.store(bytes, Ordering::Relaxed);
-            self.budget.lock().setting_at = None;
         }
 
         async fn used(&self) -> u64 {
             self.budget.sweep().await.expect("inventory").bytes_after
+        }
+
+        async fn ceiling_published(&self, bytes: u64) {
+            let mut setting = self.budget.ceiling_setting.subscribe();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                setting.wait_for(|setting| *setting == CeilingSetting::Known(bytes)),
+            )
+            .await
+            .expect("the settings task publishes the new ceiling")
+            .expect("settings channel");
         }
     }
 
@@ -1491,6 +1736,340 @@ mod tests {
         })
         .await
         .expect("detached inventory releases callback slot");
+    }
+
+    /// A ceiling source a test can stall or break.
+    #[derive(Default)]
+    struct ControlledCeiling {
+        value: Mutex<Option<String>>,
+        hang: std::sync::atomic::AtomicBool,
+        fail: std::sync::atomic::AtomicBool,
+        panic_next: std::sync::atomic::AtomicBool,
+        entered_hang: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl CacheCeilingSource for ControlledCeiling {
+        async fn read_max_gb(&self) -> io::Result<Option<String>> {
+            if self.hang.load(Ordering::SeqCst) {
+                self.entered_hang.notify_one();
+                std::future::pending::<()>().await;
+            }
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(io::Error::other("CheckIsLeaderError: no leader"));
+            }
+            assert!(
+                !self.panic_next.swap(false, Ordering::SeqCst),
+                "the ceiling source panicked"
+            );
+            Ok(self.value.lock().expect("value").clone())
+        }
+    }
+
+    fn fixture_with(source: Arc<ControlledCeiling>) -> Fixture {
+        let mut fixture = Fixture::new();
+        let budget = PlaybackCacheBudget::with_ceiling_source(source, fixture.roots.clone());
+        *budget.test_space.lock().expect("space") = Some(DiskSpace {
+            free: 1024 * GIB,
+            total: 1024 * GIB,
+            allocation_unit: 1,
+        });
+        fixture.budget = budget;
+        fixture
+    }
+
+    /// C3: a settings read that hangs (an election) while a reservation has
+    /// to evict does not stall that reservation; it proceeds on the ceiling
+    /// the settings task already holds, and evicts.
+    #[tokio::test]
+    async fn a_hung_settings_read_does_not_stall_a_reservation_that_must_evict() {
+        let source = Arc::new(ControlledCeiling::default());
+        let fixture = fixture_with(Arc::clone(&source));
+        let old = fixture.file(0, "old.m4s", 64 * 1024);
+        let baseline = fixture.used().await;
+        fixture.limit(baseline);
+        fixture.budget.register(Files::new(vec![old.clone()]));
+
+        source.hang.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(5), source.entered_hang.notified())
+            .await
+            .expect("the settings task's next read is now hung");
+
+        let grant = tokio::time::timeout(
+            Duration::from_secs(2),
+            reserve(&fixture.roots[1].join("next.ts"), 8 * 1024),
+        )
+        .await
+        .expect("the reservation does not wait on the hung settings read")
+        .expect("reserved on the cached ceiling")
+        .expect("managed");
+        assert!(!old.exists(), "the reservation evicted to make room");
+        drop(grant);
+    }
+
+    /// C3: before any settings read has succeeded, writers fail closed.
+    #[tokio::test]
+    async fn without_a_first_settings_read_reservations_fail_closed() {
+        let source = Arc::new(ControlledCeiling::default());
+        source.fail.store(true, Ordering::SeqCst);
+        let fixture = fixture_with(source);
+        assert!(reserve(&fixture.roots[0].join("first"), 1).await.is_err());
+        assert!(fixture.budget.used_bytes().await.is_err());
+    }
+
+    /// C3: a settings task that dies does not freeze the ceiling. The
+    /// writers waiting on its first read are refused at once rather than
+    /// after a timeout, and the next writer starts it again, so a ceiling
+    /// read after that takes effect.
+    #[tokio::test]
+    async fn a_settings_task_that_dies_is_restarted_by_the_next_writer() {
+        let source = Arc::new(ControlledCeiling::default());
+        *source.value.lock().expect("value") = Some("3".to_owned());
+        source.panic_next.store(true, Ordering::SeqCst);
+        let fixture = fixture_with(Arc::clone(&source));
+        let first = tokio::time::timeout(Duration::from_secs(2), fixture.budget.ceiling_bytes())
+            .await
+            .expect("a dead settings task does not leave the writer waiting");
+        assert!(first.is_err(), "nothing was ever read: fail closed");
+        let ceiling = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(bytes) = fixture.budget.ceiling_bytes().await {
+                    return bytes;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a writer restarted the settings task and it read the ceiling");
+        assert_eq!(ceiling, 3 * GIB);
+    }
+
+    /// C3: a known ceiling of zero is enforced, and a failed read afterwards
+    /// keeps it rather than reopening the cache.
+    #[tokio::test]
+    async fn a_known_zero_ceiling_is_enforced_and_kept_across_failed_reads() {
+        let source = Arc::new(ControlledCeiling::default());
+        *source.value.lock().expect("value") = Some("0".to_owned());
+        let fixture = fixture_with(Arc::clone(&source));
+        let refused = reserve(&fixture.roots[0].join("first"), 1)
+            .await
+            .expect_err("a zero ceiling admits nothing");
+        assert_eq!(refused.kind(), io::ErrorKind::StorageFull);
+        source.fail.store(true, Ordering::SeqCst);
+        tokio::time::sleep(SAMPLE_AGE * 2).await;
+        assert_eq!(
+            *fixture.budget.ceiling_setting.borrow(),
+            CeilingSetting::Known(0),
+            "a failed read keeps the last ceiling"
+        );
+        assert_eq!(fixture.budget.ceiling_bytes().await.expect("ceiling"), 0);
+        assert!(reserve(&fixture.roots[0].join("second"), 1).await.is_err());
+    }
+
+    /// M0: a refusal carries the sweep report, so the log alone says whether
+    /// `make_room` found nothing to evict or an inventory was left dirty.
+    #[tokio::test]
+    async fn a_refused_reservation_logs_its_cause_and_sweep_report() {
+        let buffer = Arc::new(crate::logbuf::LogBuffer::new(16));
+        let _capture = crate::logbuf::capture_for_test(&buffer);
+        let fixture = Fixture::new();
+        let held = fixture.file(0, "held.m4s", 16 * 1024);
+        let baseline = fixture.used().await;
+        fixture.limit(baseline);
+        fixture.budget.register(Files::new(vec![held.clone()]));
+        let _pin = pin(&held).expect("pin").expect("managed");
+        let refused = reserve(&fixture.roots[1].join("next.ts"), 8 * 1024).await;
+        assert_eq!(
+            refused.expect_err("nothing is evictable").kind(),
+            io::ErrorKind::StorageFull
+        );
+        let lines = buffer.tail("trace", 16);
+        let line = lines
+            .iter()
+            .find(|entry| entry.message.contains("reservation refused"))
+            .unwrap_or_else(|| panic!("no refusal line in {lines:?}"));
+        for field in [
+            "cause=\"no_room\"",
+            "requested_bytes=8192",
+            "remaining=0",
+            "evicted=0",
+            "protected=1",
+            "dirty_revision=",
+        ] {
+            assert!(
+                line.message.contains(field),
+                "{field} missing from {}",
+                line.message
+            );
+        }
+    }
+
+    // Hold the inventory slot after refresh captures its generation, then
+    // cancel an already admitted writer before the census completes.
+    async fn admission_after_cancelled_scan(
+        fixture: &Fixture,
+    ) -> io::Result<Option<CacheReservation>> {
+        let partial = fixture.roots[2].join("partial.tmp");
+        let cancelled = reserve(&partial, 64 * 1024)
+            .await
+            .expect("initial grant")
+            .expect("managed");
+        let slot = Arc::clone(&fixture.budget.io_slot)
+            .acquire_owned()
+            .await
+            .expect("inventory slot");
+        fixture.budget.lock().sample.as_mut().expect("sample").at = Instant::now() - SAMPLE_AGE;
+        let next = fixture.roots[0].join("next.m4s");
+        let admission = tokio::spawn(async move { reserve(&next, 64 * 1024).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !fixture.budget.lock().dirty {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("admission started its scan");
+        std::fs::write(partial, vec![0x5a; 64 * 1024]).expect("partial write");
+        drop(cancelled);
+        drop(slot);
+        admission.await.expect("admission task")
+    }
+
+    #[tokio::test]
+    async fn cancelled_writer_during_inventory_does_not_fail_playback_with_room() {
+        let fixture = Fixture::new();
+        let baseline = fixture.used().await;
+        fixture.limit(baseline + 128 * 1024);
+        let next = admission_after_cancelled_scan(&fixture)
+            .await
+            .expect("a dirty inventory is reconciled, not reported as disk full")
+            .expect("managed");
+        let state = fixture.budget.lock();
+        assert!(!state.dirty);
+        assert_eq!(state.pending.len(), 1);
+        assert!(state.used() >= baseline + 128 * 1024);
+        drop(state);
+        next.commit(0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_writer_during_inventory_cannot_hide_partial_bytes() {
+        let fixture = Fixture::new();
+        let baseline = fixture.used().await;
+        fixture.limit(baseline + 96 * 1024);
+        let refused = admission_after_cancelled_scan(&fixture)
+            .await
+            .expect_err("partial bytes leave too little room for the next segment");
+        assert_eq!(refused.kind(), io::ErrorKind::StorageFull);
+        let state = fixture.budget.lock();
+        assert!(!state.dirty, "the refusal follows a complete rescan");
+        assert!(state.used() >= baseline + 64 * 1024);
+        assert!(state.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inventory_conflicts_during_eviction_retry_before_admission() {
+        struct CancelWriter {
+            reservation: Mutex<Option<CacheReservation>>,
+        }
+        #[async_trait::async_trait]
+        impl CacheOwner for CancelWriter {
+            async fn candidates(&self) -> io::Result<Vec<CacheCandidate>> {
+                drop(self.reservation.lock().expect("reservation").take());
+                Ok(Vec::new())
+            }
+            async fn evict(&self, _: &CacheCandidate) -> io::Result<bool> {
+                unreachable!()
+            }
+        }
+        let fixture = Fixture::new();
+        fixture.file(0, "held.m4s", 64 * 1024);
+        let baseline = fixture.used().await;
+        fixture.limit(baseline + 96 * 1024);
+        let partial = fixture.roots[2].join("partial.tmp");
+        let reservation = reserve(&partial, 64 * 1024)
+            .await
+            .expect("initial grant")
+            .expect("managed");
+        std::fs::write(partial, vec![0x5a; 16 * 1024]).expect("partial write");
+        fixture.budget.register(Arc::new(CancelWriter {
+            reservation: Mutex::new(Some(reservation)),
+        }));
+        let next = reserve(&fixture.roots[1].join("next.ts"), 64 * 1024)
+            .await
+            .expect("reconcile a cancellation after refresh, during pressure selection")
+            .expect("managed");
+        assert!(!fixture.budget.lock().dirty);
+        assert!(fixture.budget.lock().used() >= baseline + 80 * 1024);
+        next.commit(0);
+    }
+
+    #[tokio::test]
+    async fn persistent_inventory_conflicts_have_one_reservation_deadline() {
+        struct InvalidateInventory {
+            budget: Weak<PlaybackCacheBudget>,
+            calls: std::sync::atomic::AtomicUsize,
+            proceed: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl CacheOwner for InvalidateInventory {
+            async fn candidates(&self) -> io::Result<Vec<CacheCandidate>> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                let budget = self.budget.upgrade().expect("budget");
+                {
+                    let mut state = budget.lock();
+                    state.dirty = true;
+                    state.dirty_revision = state.dirty_revision.wrapping_add(1);
+                }
+                self.proceed.notified().await;
+                Ok(Vec::new())
+            }
+            async fn evict(&self, _: &CacheCandidate) -> io::Result<bool> {
+                unreachable!()
+            }
+        }
+        let fixture = Fixture::new();
+        fixture.file(0, "held.m4s", 16 * 1024);
+        let baseline = fixture.used().await;
+        fixture.limit(baseline);
+        let owner = Arc::new(InvalidateInventory {
+            budget: Arc::downgrade(&fixture.budget),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            proceed: tokio::sync::Notify::new(),
+        });
+        fixture.budget.register(owner.clone());
+        let next = fixture.roots[0].join("next.m4s");
+        let admission = tokio::spawn(async move { reserve(&next, 8192).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while owner.calls.load(Ordering::Relaxed) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first pressure callback");
+        tokio::time::pause();
+        // Keep each callback below its own ten-second timeout while the
+        // repeated conflicts consume the single forty-second deadline.
+        for expected_calls in 2..=5 {
+            tokio::time::advance(Duration::from_secs(9)).await;
+            owner.proceed.notify_one();
+            let waiting_since = Instant::now();
+            while owner.calls.load(Ordering::Relaxed) < expected_calls {
+                assert!(waiting_since.elapsed() < Duration::from_secs(2));
+                tokio::task::yield_now().await;
+            }
+        }
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let refused = admission
+            .await
+            .expect("admission task")
+            .expect_err("persistent inventory conflicts are bounded");
+        assert_eq!(refused.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            refused.to_string(),
+            "playback cache inventory did not stabilize before reservation deadline"
+        );
+        assert!(fixture.budget.lock().pending.is_empty());
+        owner.proceed.notify_one();
     }
 
     #[tokio::test]
@@ -1706,6 +2285,9 @@ mod tests {
             .put_setting(keys::CACHE_MAX_GB, "0")
             .await
             .expect("disable cache");
+        // The settings task, not the sweep, reads the Store: the change is
+        // in effect within about a second.
+        fixture.ceiling_published(0).await;
         assert_eq!(fixture.budget.sweep().await.expect("off sweep").evicted, 1);
         assert!(!new.exists());
         assert_eq!(

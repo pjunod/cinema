@@ -474,7 +474,19 @@ pub fn validate_sharing_playlist(resource: &SharingHlsResource, bytes: &[u8]) ->
             }
             pending = true;
         } else if let Some(raw) = line.strip_prefix("#EXT-X-START:") {
-            let attrs = closed_attributes(raw, &["TIME-OFFSET"])?;
+            let attrs = closed_attributes(raw, &["TIME-OFFSET", "PRECISE"])?;
+            // PRECISE is an unquoted enumerated string, unlike URI-bearing
+            // quoted attributes. Check its parsed value as well as the raw
+            // spelling so a comma inside a quoted value cannot spoof a token.
+            if let Some(&precise) = attrs.get("PRECISE") {
+                if !matches!(precise, "YES" | "NO")
+                    || !raw
+                        .split(',')
+                        .any(|attribute| matches!(attribute, "PRECISE=YES" | "PRECISE=NO"))
+                {
+                    return Err(SharingResourceUnsupported);
+                }
+            }
             let offset = attrs
                 .get("TIME-OFFSET")
                 .ok_or(SharingResourceUnsupported)?
@@ -642,6 +654,47 @@ mod tests {
         )
         .expect("unmodified actual generator output");
     }
+    #[test]
+    fn sharing_hls_playlist_accepts_bounded_start_hints_with_closed_precision() {
+        let resource = SharingHlsResource::parse("index.m3u8").expect("media playlist");
+        for attributes in [
+            "TIME-OFFSET=1.000,PRECISE=NO",
+            "TIME-OFFSET=-1.5,PRECISE=YES",
+            "PRECISE=NO,TIME-OFFSET=86400",
+            "TIME-OFFSET=-86400",
+        ] {
+            let playlist = format!(
+                "#EXTM3U\n#EXT-X-START:{attributes}\n#EXTINF:2.000,\nseg00000.m4s\n#EXT-X-ENDLIST\n"
+            );
+            validate_sharing_playlist(&resource, playlist.as_bytes())
+                .unwrap_or_else(|_| panic!("valid start hint: {attributes}"));
+        }
+        for attributes in [
+            "TIME-OFFSET=1,PRECISE=MAYBE",
+            "TIME-OFFSET=1,PRECISE=yes",
+            "TIME-OFFSET=1,PRECISE=\"NO\"",
+            "TIME-OFFSET=1,PRECISE=\"YES\"",
+            "TIME-OFFSET=1,PRECISE=\"x,PRECISE=YES,x\"",
+            "TIME-OFFSET=1,PRECISE=NO,PRECISE=YES",
+            "TIME-OFFSET=1,TIME-OFFSET=2,PRECISE=NO",
+            "TIME-OFFSET=1,PRECISE=NO,URI=\"source\"",
+            "TIME-OFFSET=1,PRECISE=NO,UNKNOWN=1",
+            "TIME-OFFSET=NaN,PRECISE=NO",
+            "TIME-OFFSET=inf,PRECISE=YES",
+            "TIME-OFFSET=86400.001,PRECISE=NO",
+            "TIME-OFFSET=-86400.001,PRECISE=YES",
+            "PRECISE=NO",
+        ] {
+            let playlist = format!(
+                "#EXTM3U\n#EXT-X-START:{attributes}\n#EXTINF:2.000,\nseg00000.m4s\n#EXT-X-ENDLIST\n"
+            );
+            assert!(
+                validate_sharing_playlist(&resource, playlist.as_bytes()).is_err(),
+                "invalid start hint: {attributes}"
+            );
+        }
+    }
+
     #[test]
     fn sharing_hls_playlist_refuses_hidden_uris_encryption_and_unbounded_bodies() {
         let resource = SharingHlsResource::parse("index.m3u8").expect("media playlist");

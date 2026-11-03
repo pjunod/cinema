@@ -17,7 +17,7 @@ use wasmtime::{
     StoreLimitsBuilder, Val,
 };
 
-pub const ABI_ID: &str = "plurx-source-wasi-p1-v1-wasmtime-49.0.2";
+pub const ABI_ID: &str = "plurx-source-wasi-p1-v1-wasmtime-50.0.0";
 const MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 const IO_LIMIT: usize = 64 * 1024;
 const BADF: i32 = 8;
@@ -680,6 +680,52 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn native_traps_keep_memory_arithmetic_stack_and_growth_bounds() {
+        for (source, expected) in [
+            (
+                "(module (memory 1) (func (export \"_start\") (drop (i32.load (i32.const 65536)))))",
+                "out of bounds memory access",
+            ),
+            (
+                "(module (func (export \"_start\") (drop (i32.div_s (i32.const 1) (i32.const 0)))))",
+                "integer divide by zero",
+            ),
+            (
+                "(module (func (export \"_start\") unreachable))",
+                "unreachable",
+            ),
+            (
+                "(module (func $recurse (call $recurse)) (func (export \"_start\") (call $recurse)))",
+                "call stack exhausted",
+            ),
+        ] {
+            let p = parser(source);
+            assert!(p.engine.get_signals_based_traps());
+            assert!(p.engine.get_epoch_interruption());
+            assert_eq!(p.engine.get_max_wasm_stack(), 1024 * 1024);
+            let error = run(&p, None, 32).err().expect("guest traps within its owner");
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+        let p = parser(
+            "(module (memory 1) (func (export \"_start\") (if (i32.ne (memory.grow (i32.const 8192)) (i32.const -1)) (then unreachable))))",
+        );
+        assert!(run(&p, None, 32).is_ok(), "growth above 512MiB is refused");
+    }
+
+    #[test]
+    fn cancelled_parser_work_is_refused_before_guest_output() {
+        let p = parser("(module (func (export \"_start\") (loop $again (br $again))))");
+        let result = p.run(
+            None,
+            Vec::new(),
+            (32, 16 * 1024),
+            Instant::now() + std::time::Duration::from_secs(1),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+        assert_eq!(result.err().as_deref(), Some("parser cancelled"));
+    }
+
     #[test]
     fn endless_guest_code_observes_the_existing_deadline() {
         let p = parser("(module (func (export \"_start\") (loop $again (br $again))))");

@@ -81,6 +81,15 @@ def port_number(value: object, label: str) -> int:
     return port
 
 
+def redirect_environment(environment: dict[str, str], published: int, internal: int) -> dict:
+    if "PLURX_HTTPS_REDIRECT_PORT" in environment:
+        port_number(environment["PLURX_HTTPS_REDIRECT_PORT"], "PLURX_HTTPS_REDIRECT_PORT")
+        return {}
+    if published == internal:
+        return {}
+    return {"environment": {"PLURX_HTTPS_REDIRECT_PORT": str(published)}}
+
+
 def https_port_overlay(document: dict, interpolation: dict[str, str]) -> dict:
     service = document["services"]["plurxd"]
     if service.get("network_mode") == "host":
@@ -124,9 +133,25 @@ def https_port_overlay(document: dict, interpolation: dict[str, str]) -> dict:
     # An operator's explicit host address/port remains authoritative. Compose
     # returns long-form ports, including random host-port publications; expose
     # is a separate field and does not publish a port.
-    if any(str(item.get("target")) == str(port)
-           and item.get("protocol", "tcp") == "tcp"
-           for item in service.get("ports", [])):
-        return {}
+    existing = [item for item in service.get("ports", [])
+                if str(item.get("target")) == str(port) and item.get("protocol", "tcp") == "tcp"]
+    if existing:
+        if "PLURX_HTTPS_REDIRECT_PORT" in environment:
+            return redirect_environment(environment, port, port)
+        try:
+            published_ports = {port_number(item.get("published"), "published HTTPS port") for item in existing}
+        except HttpsPortError as error:
+            raise HttpsPortError(
+                "random HTTPS publications need an explicit PLURX_HTTPS_REDIRECT_PORT "
+                "in the plurxd container environment"
+            ) from error
+        if len(published_ports) != 1:
+            raise HttpsPortError(
+                "multiple HTTPS publications need an explicit PLURX_HTTPS_REDIRECT_PORT "
+                "in the plurxd container environment"
+            )
+        return redirect_environment(environment, published_ports.pop(), port)
     published = port_number(interpolation.get("PLURX_HTTPS_HOST_PORT") or port, "PLURX_HTTPS_HOST_PORT")
-    return {"ports": [{"target": port, "published": str(published), "protocol": "tcp"}]}
+    overlay = {"ports": [{"target": port, "published": str(published), "protocol": "tcp"}]}
+    overlay.update(redirect_environment(environment, published, port))
+    return overlay

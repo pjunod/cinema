@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Run inside scripts/release-readiness so mutants use the shipping media tools.
+set -euo pipefail
+
+mkdir -p target/mutants
+summary=target/mutants/summary.md
+history=$(git log --since=7.days --name-only --format=)
+changed=()
+while IFS= read -r path; do
+  changed+=("$path")
+done < <(printf '%s\n' "$history" | awk '/^crates\/.*\.rs$/ {print}' | sort -u)
+if (( ${#changed[@]} == 0 )); then
+  echo '## Mutation spot-check: no Rust files changed in seven days' > "$summary"
+  exit 0
+fi
+
+# Installation/setup failure is a real job failure. Only mutation outcomes
+# below are advisory. The cache's binaries follow the image's media tools.
+cargo install cargo-mutants --locked
+export PATH="$PATH:${CARGO_HOME:-$HOME/.cargo}/bin"
+command -v cargo-mutants >/dev/null
+file_args=()
+for path in "${changed[@]}"; do
+  file_args+=(--file "$path")
+done
+set +e
+timeout --signal=TERM --kill-after=30s 60m cargo mutants \
+  --timeout 300 --output target/mutants "${file_args[@]}"
+status=$?
+set -e
+{
+  echo '## Mutation spot-check (report-only)'
+  echo "cargo-mutants exit status: $status"
+  if (( status == 124 )); then
+    echo 'Campaign time budget reached; inspect the partial evidence.'
+  elif (( status == 137 )); then
+    echo 'Campaign was killed; evidence is partial and the cause is unproven.'
+  elif (( status != 0 && status != 2 && status != 3 )); then
+    echo 'Mutation setup, baseline, or execution failed; this is not a mutation result.'
+  elif grep -RqsE 'MISSED|TIMEOUT' target/mutants; then
+    echo 'Surviving or timed-out mutants were reported; inspect the artifact.'
+  else
+    echo 'No surviving mutant marker was found in the report.'
+  fi
+} > "$summary"
+# Only measured mutant outcomes and the explicit campaign budget are advisory.
+# https://mutants.rs/exit-codes.html documents usage/baseline/internal failures.
+case "$status" in
+  0|2|3|124) exit 0 ;;
+  *) exit "$status" ;;
+esac

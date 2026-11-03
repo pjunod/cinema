@@ -45,25 +45,25 @@
     "table": "08 worker acquisition and cleanup",
     "source": "crates/plurxd/src/library_work.rs",
     "anchor": "pub(super) async fn work_library_queue(",
-    "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
+    "sha256": "1f601ccf22d47ce625ed1c7939aaf23a61a1b4036030be080b7dcb27a565ff87"
   },
   {
     "table": "09 domain lease acquisition",
-    "source": "crates/plurxd/src/library_work.rs",
-    "anchor": "Effect::AcquireDomain => {",
-    "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
+    "source": "crates/plurxd/src/library_work/env.rs",
+    "anchor": ".acquire_job(format!(\"scan:library:{}\", self.library_id))",
+    "sha256": "f842ebf06c1e99e79ad5af1bf834fe77468319bb37029c7bb27f3721069391ec"
   },
   {
     "table": "10 work iteration bound",
     "source": "crates/plurxd/src/library_work.rs",
     "anchor": "for _ in 0..8 {",
-    "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
+    "sha256": "1f601ccf22d47ce625ed1c7939aaf23a61a1b4036030be080b7dcb27a565ff87"
   },
   {
     "table": "11 lost reply resolution",
     "source": "crates/plurxd/src/library_work.rs",
     "anchor": "// A lost completion acknowledgement must not rerun a published result.",
-    "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
+    "sha256": "1f601ccf22d47ce625ed1c7939aaf23a61a1b4036030be080b7dcb27a565ff87"
   },
   {
     "table": "12 domain lease ttl heartbeat",

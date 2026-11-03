@@ -35,6 +35,8 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                 else:
                     expected_guard += " && steps.native_receipts.outputs.tv_navigation != 'true'"
                     self.assertIn("run: python3 -m validation.native_receipts", apple_job)
+                    self.assertIn("run: python3 -m validation.native_receipts --verify-tv-plan", apple_job)
+                    self.assertIn("PLURX_TV_NAVIGATION_PLAN: .main-preflight-receipts/native/receipt.json", step)
                     build = apple_job.split("- name: Compile iOS and tvOS without running simulator tests", 1)[1].split("- name:", 1)[0]
                     self.assertEqual(re.findall(r"^        if: (.+)$", build, re.MULTILINE), [expected_guard])
                     self.assertIn("run: make apple-build", build)
@@ -66,7 +68,7 @@ class AppleTVNavigationGateTests(unittest.TestCase):
 
     def test_apple_jobs_keep_derived_data_local_and_preserve_build_contracts(self):
         for path, apple, command, budget, serialized in (
-            (".github/workflows/main-fast-lane.yml", "apple_compile", "apple-build", 120, True),
+            (".github/workflows/main-fast-lane.yml", "apple_compile", "apple-build", 120, False),
             (".github/workflows/effort-ci.yml", "apple_compile", "apple-build", 45, False),
             (".github/workflows/ci.yml", "apple", "apple-test", 120, True),
         ):
@@ -89,6 +91,29 @@ class AppleTVNavigationGateTests(unittest.TestCase):
             self.assertIn('-destination "generic/platform=' + platform + ' Simulator"', build)
         for override in ("ARCHS=", "EXCLUDED_ARCHS", "ONLY_ACTIVE_ARCH"):
             self.assertNotIn(override, build)
+
+    def test_fast_apple_jobs_run_independently_with_isolated_native_owners(self):
+        fast = job(".github/workflows/main-fast-lane.yml", "apple_compile")
+        self.assertNotIn("concurrency:", fast)
+        self.assertIn("runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]", fast)
+        workflow = (ROOT / ".github/workflows/main-fast-lane.yml").read_text()
+        self.assertIn("group: main-fast-lane-${{ github.event.pull_request.number }}", workflow)
+        self.assertIn("path: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}", fast)
+        runner = (ROOT / "scripts/apple-tv-navigation-test").read_text()
+        self.assertIn('device = run("xcrun", "simctl", "create",', runner)
+        self.assertIn('"-destination", f"id={device}"', runner)
+        self.assertIn('"-derivedDataPath", str(derived)', runner)
+        self.assertIn('"-parallel-testing-enabled", "NO"', runner)
+        for operation in ("shutdown", "delete"):
+            self.assertIn('["xcrun", "simctl", "' + operation + '", device]', runner)
+        # Full units still use shared named destinations; Lima packaging keeps
+        # its existing host-contention boundary. Neither loses its lock.
+        full = job(".github/workflows/ci.yml", "apple")
+        package = job(".github/workflows/ci.yml", "package_smoke")
+        self.assertIn("group: plurx-apple-silicon-heavy", full)
+        self.assertIn("matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy'", package)
+        for section in (full, package):
+            self.assertIn("cancel-in-progress: false", section)
 
     def test_full_apple_budget_covers_units_and_required_native_journeys(self):
         full = job(".github/workflows/ci.yml", "apple")

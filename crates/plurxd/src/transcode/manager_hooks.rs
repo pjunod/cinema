@@ -20,6 +20,11 @@ pub(crate) trait TranscodeManagerHooks: std::any::Any + Send + Sync {
     fn before_quality_catalog_ordinary(&self) -> crate::seam_hooks::HookFuture<'static> {
         Box::pin(crate::seam_hooks::HookReady)
     }
+    /// Pause: `serving_fence_loop` has resolved one loss and not yet
+    /// published the resolution, the window in which a new loss can land.
+    fn after_outage_loss_resolved(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
     /// Pause: a subtitle playlist's bytes and exact owner are resolved and its
     /// cues are warm, before the composite response commits.
     fn before_subtitle_playlist_commit(&self) -> crate::seam_hooks::HookFuture<'static>;
@@ -112,6 +117,7 @@ impl TranscodeManagerHooks for NoopTranscodeManagerHooks {
 #[derive(Default)]
 pub(crate) struct TranscodeManagerTestHooks {
     pub(crate) quality_catalog_ordinary: crate::seam_hooks::PauseSlot,
+    pub(crate) outage_loss_resolved: crate::seam_hooks::PauseSlot,
     pub(crate) subtitle_playlist_commit: crate::seam_hooks::PauseSlot,
     pub(crate) vod_publication_admission: crate::seam_hooks::PauseSlot,
     pub(crate) vod_fallback_start: crate::seam_hooks::PauseSlot,
@@ -167,6 +173,9 @@ impl TranscodeManagerHooks for TranscodeManagerTestHooks {
 
     fn before_quality_catalog_ordinary(&self) -> crate::seam_hooks::HookFuture<'static> {
         self.quality_catalog_ordinary.hold()
+    }
+    fn after_outage_loss_resolved(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.outage_loss_resolved.hold()
     }
     fn before_subtitle_playlist_commit(&self) -> crate::seam_hooks::HookFuture<'static> {
         self.subtitle_playlist_commit.hold()

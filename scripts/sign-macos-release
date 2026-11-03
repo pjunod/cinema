@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Sign and notarize an assembled macOS cohort without executing its contents."""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
+
+
+def package_tool():
+    loader = importlib.machinery.SourceFileLoader("macos_release_package", str(Path(__file__).with_name("package-macos")))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def seal(package, version):
+    files = []
+    for path in sorted(package.rglob("*")):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise ValueError("unsafe signed package member")
+        if path.is_file() and path != package / "runtime-closure-v1.json":
+            files.append(dict(path=path.relative_to(package).as_posix(), size=path.stat().st_size,
+                              sha256=digest(path), executable=bool(path.stat().st_mode & 0o111)))
+    write_json(package / "runtime-closure-v1.json", dict(schema_version=1, version=version, files=files))
+
+
+def sign_package(package, identity, team_id, key, key_id, issuer):
+    if (re.fullmatch(r"[A-Z0-9]{10}", team_id or "") is None
+            or not identity.startswith("Developer ID Application: ") or not identity.endswith(f"({team_id})")
+            or re.fullmatch(r"[A-Z0-9]{10}", key_id or "") is None
+            or re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", issuer or "") is None
+            or not key.is_absolute() or key.is_symlink() or not key.is_file()
+            or not package.is_absolute() or package.is_symlink() or not package.is_dir()):
+        raise ValueError("explicit Developer ID/team and notarization API credentials are required")
+    tool = package_tool()
+    release, _, actual = tool.verify_package_closure(package)
+    tool.validate_native_package(package / "runtime")
+    tool.engine_recipe().verify(package / "runtime/subtitle-engine")
+    receipt_path = package / "provenance/apple-signing.json"
+    if receipt_path.exists():
+        raise ValueError("package already has a distribution signing receipt")
+    # Preserve the build observations before signing changes any hashes.
+    manifest_paths = ["runtime/provenance/manifest.json", "runtime/subtitle-engine/subtitle-engine.json", "provenance/manifest.json"]
+    originals = {name: json.loads((package / name).read_bytes()) for name in manifest_paths}
+    # Metadata may name only members already bound by the input closure.
+    # Reject escape paths before any Apple tool runs in this credentialed job.
+    references = list(originals[manifest_paths[0]]["binaries"])
+    references += list(originals[manifest_paths[0]].get("font_tools", {}).get("binaries", {}))
+    references += list(originals[manifest_paths[2]]["artifacts"])
+    references += ["subtitle-engine/" + facts["filename"] for facts in originals[manifest_paths[1]].get("cpu_variants", {}).values()]
+    for name in references:
+        if (not isinstance(name, str) or Path(name).is_absolute()
+                or any(part in ["", ".", ".."] for part in name.split("/"))
+                or "runtime/" + name not in actual):
+            raise ValueError("signing metadata references a member outside the candidate closure")
+    images = [package / name for name in sorted(actual) if tool.loadable_macho(package / name)]
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"}
+    changes = {}
+    frontend = package / "Plurx Server.app/Contents/MacOS/plurx-control"
+    controller = package / "control/plurx-control"
+    if digest(frontend) != digest(controller):
+        raise ValueError("embedded controller differs from the standalone controller")
+    for image in images:
+        relative = image.relative_to(package).as_posix()
+        before = digest(image)
+        if image == frontend:
+            changes[relative] = {"input_sha256": before}
+            continue
+        mode = image.stat().st_mode & 0o777
+        image.chmod(mode | 0o200)
+        command = ["/usr/bin/codesign", "--force", "--sign", identity, "--timestamp", "--options", "runtime"]
+        if relative == "runtime/plurxd":
+            command += ["--entitlements", str(Path(__file__).with_name("macos-source-parser.entitlements"))]
+        try:
+            subprocess.run(command + [str(image)], env=env, check=True, timeout=120)
+        finally:
+            image.chmod(mode)
+        changes[relative] = {"input_sha256": before, "signed_sha256": digest(image)}
+    # The tray's frontend and standalone controller must remain byte-identical;
+    # separate timestamped signatures would break the native cohort contract.
+    frontend_mode = frontend.stat().st_mode & 0o777
+    frontend.chmod(frontend_mode | 0o200)
+    shutil.copyfile(controller, frontend)
+    frontend.chmod(frontend_mode)
+    # Nested code is signed first; reseal the containing app only afterwards.
+    app = package / "Plurx Server.app"
+    subprocess.run(["/usr/bin/codesign", "--force", "--sign", identity, "--timestamp", "--options", "runtime", str(app)],
+                   env=env, check=True, timeout=120)
+    # Rebind package hashes to signed bytes, retaining the exact input manifests
+    # in the transformation receipt. Source identities and slice facts stay intact.
+    native = json.loads((package / manifest_paths[0]).read_bytes())
+    for name, facts in {**native["binaries"], **native.get("font_tools", {}).get("binaries", {})}.items():
+        image = package / "runtime" / name
+        facts["sha256"] = digest(image)
+        if "bytes" in facts:
+            facts["bytes"] = image.stat().st_size
+    write_json(package / manifest_paths[0], native)
+    engine_path = package / manifest_paths[1]
+    engine = json.loads(engine_path.read_bytes())
+    for filename, facts in [("whisper-cli", engine)] + [(facts["filename"], facts) for facts in engine.get("cpu_variants", {}).values()]:
+        image = engine_path.parent / filename
+        facts.update(binary_sha256=digest(image), binary_bytes=image.stat().st_size)
+    write_json(engine_path, engine)
+    outer = json.loads((package / manifest_paths[2]).read_bytes())
+    for name in outer["artifacts"]:
+        outer["artifacts"][name] = digest(package / "runtime" / name)
+    outer["subtitle_engine"] = engine
+    outer["signing"] = "Developer ID signature; see apple-signing.json for notarization"
+    write_json(package / manifest_paths[2], outer)
+    tool.validate_native_package(package / "runtime")
+    tool.engine_recipe().verify(package / "runtime/subtitle-engine")
+    with tempfile.TemporaryDirectory(prefix="macos-notary-") as temporary:
+        archive = Path(temporary) / "submission.zip"
+        subprocess.run(["/usr/bin/ditto", "-c", "-k", "--keepParent", "--norsrc", str(package), str(archive)],
+                       env=env, check=True, timeout=300)
+        result = subprocess.run(["/usr/bin/xcrun", "notarytool", "submit", str(archive), "--key", str(key),
+                                 "--key-id", key_id, "--issuer", issuer, "--wait", "--timeout", "30m", "--output-format", "json"],
+                                env=env, check=True, stdout=subprocess.PIPE, timeout=1900)
+        observation = json.loads(result.stdout)
+        if observation.get("status") != "Accepted":
+            raise ValueError(f"Apple notarization was not Accepted: {observation.get('status')}; submission {observation.get('id')}")
+    subprocess.run(["/usr/bin/xcrun", "stapler", "staple", str(app)], env=env, check=True, timeout=180)
+    # Signing the app can replace its main executable's signature. Record the
+    # final images only after outer signing and ticket stapling have finished.
+    for relative, facts in changes.items():
+        facts["signed_sha256"] = digest(package / relative)
+    receipt = dict(schema_version=1, team_id=team_id, notarization={name: observation[name] for name in ["id", "status"]},
+                   input_manifests=originals, signed_images=changes)
+    write_json(receipt_path, receipt)
+    # Stapling adds an app ticket. The final closure must describe those bytes,
+    # and existing Apple verification remains mandatory before archiving.
+    seal(package, release["version"])
+    tool.verify_distribution(package, team_id)
+    return receipt
+
+
+def extract_candidate(archive, destination, version, source_commit):
+    wrapper = f"plurxd-{version}-macos-universal"
+    with tarfile.open(archive, "r:gz") as source:
+        members = source.getmembers()
+        names, total = set(), 0
+        for member in members:
+            path = Path(member.name)
+            if (len(names) >= 100000 or path.is_absolute() or not path.parts or path.parts[0] != wrapper
+                    or any(part in [".", ".."] for part in member.name.split("/")) or member.name in names
+                    or not (member.isdir() or member.isfile()) or member.mode & 0o7000):
+                raise ValueError("unsafe macOS candidate archive")
+            names.add(member.name)
+            total += member.size
+            if total > 16 * 1024**3:
+                raise ValueError("macOS candidate exceeds unpacked bound")
+        source.extractall(destination, members=members, filter="data")
+    package = destination / wrapper
+    release, _, _ = package_tool().verify_package_closure(package)
+    if release.get("version") != version or release.get("source_commit") != source_commit or release.get("architecture") != "universal":
+        raise ValueError("macOS candidate differs from resolved release identity")
+    return package
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ["archive", "output", "key"]:
+        parser.add_argument("--" + name, type=Path, required=True)
+    for name in ["identity", "team-id", "key-id", "issuer", "version", "source-commit"]:
+        parser.add_argument("--" + name, required=True)
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix="macos-release-") as temporary:
+        package = extract_candidate(args.archive, Path(temporary), args.version, args.source_commit)
+        receipt = sign_package(package, args.identity, args.team_id, args.key, args.key_id, args.issuer)
+        package_tool().archive_native(package, args.output, int(os.environ.get("SOURCE_DATE_EPOCH", "0")))
+    print(json.dumps({"status": "Accepted", "submission": receipt["notarization"]["id"], "archive": str(args.output)}))
+
+
+if __name__ == "__main__":
+    main()

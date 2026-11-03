@@ -531,14 +531,22 @@ class JanitorContractCase(unittest.TestCase):
         `vod_web` asks for 45 G because it carries Playwright browsers and an
         ffmpeg build on top of the workspace. Nothing reclaims the gap between
         25 G and 45 G on its behalf; that lane needs a runner with the room,
-        which is placement rather than pruning.
+        which is placement rather than pruning. `release-check` uses the same
+        45 G bar for the audited SDK export, candidate-built media/CI image,
+        and complete browser suite.
 
         The exception is counted, not just named. Keying on the value alone
         let a *second*, unrelated lane copy `disk-gb: "45"` and pass in
         silence -- and copying the heavy lane that already exists is the
         likeliest way another one appears.
         """
-        known_larger = {"45": ("vod_web: Playwright browsers plus an ffmpeg build", 1)}
+        known_larger = {
+            "45": (
+                "vod_web: Playwright browsers plus an ffmpeg build; "
+                "release-check, nightly-deep, nightly-mutation: audited SDK export and shipping runtime CI images",
+                4,
+            ),
+        }
 
         reserved = int(self.janitor_required_gb())
         asked = re.findall(

@@ -135,9 +135,9 @@ async function translationRequest(state,path,{method="GET",body=null,headers={},
     const bytes=await translationReadBytes(response,max);
     if(!state.current()||requestGeneration!==(state.requestGeneration||0))throw Error("Retired translation response");
     if(!response.ok){
-      let code="network_error",legacySetupError=false;try{const error=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes));if(typeof error.code==="string")code=error.code;else legacySetupError=path.startsWith("/subtitle-transcription/")&&typeof error.error==="string";if(!headerClock)translationClock(state,error.server_now_ms,started);}catch(error){void error;}
+      let code="network_error",legacySetupError=false,operationId=null;try{const error=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes));if(typeof error.code==="string")code=error.code;else legacySetupError=path.startsWith("/subtitle-transcription/")&&typeof error.error==="string";if(response.status===409&&code==="operation_stopped"&&translationId(error.operation_id))operationId=error.operation_id;if(!headerClock)translationClock(state,error.server_now_ms,started);}catch(error){void error;}
       if(response.status===401&&auth===AUTH_GENERATION&&token===TOKEN&&typeof logout==="function")void logout({revoke:false});
-      const error=Object.assign(new Error(legacySetupError&&response.status!==403?"Model setup request failed. Refresh worker status, then retry. Check Activity for an existing job.":translationFailure(response.status===403?"permission_denied":code)),{code:"",status:response.status});error.code=response.status===403?"permission_denied":code;error.status=response.status;throw error;
+      const error=Object.assign(new Error(legacySetupError&&response.status!==403?"Model setup request failed. Refresh worker status, then retry. Check Activity for an existing job.":translationFailure(response.status===403?"permission_denied":code)),{code:"",status:response.status,operationId});error.code=response.status===403?"permission_denied":code;error.status=response.status;throw error;
     }
     if(!/application\/json/i.test(response.headers.get("content-type")||""))throw Error("Unexpected translation response type");
     if(raw)return {response,data:null,bytes,started};
@@ -211,6 +211,13 @@ function translationRangeStatus(coverage,position){
   return {covered:false,runway_ms:0,lag_ms:Math.max(0,position-previous)};
 }
 function translationPosition(state){const ms=Math.round(((state.player.offset||0)+state.video.currentTime)*1000);return translationMs(ms)?ms:0;}
+function translationCurrentFailure(state,position,covered){
+  const width=state.profile?.window?.core_ms,operation=state.operation;
+  if(covered||!Number.isSafeInteger(width)||width<=0)return null;
+  const core=Math.floor(position/width),active=operation?.active_job;
+  if(active&&["queued","running","cancelling"].includes(active.state)&&(active.core_index==null||active.core_index===core))return null;
+  return operation?.failed_ranges?.find(range=>range.core_index===core)||null;
+}
 function translationRenderStatus(state){
   const operation=state.operation,position=translationPosition(state),coverage=translationRangeStatus(state.coverage,position);
   const task=state.task||translationTask(state.profile),noun=translationTaskNoun(task),output=state.outputLanguage||translationOutputLanguage(state.profile,state.spokenLanguage),outputName=output?(typeof subtitleLanguageName==="function"?subtitleLanguageName(output):output):"spoken language";
@@ -220,6 +227,8 @@ function translationRenderStatus(state){
     else if(coverage.covered)message=operation?.state==="complete"?`AI ${noun} complete.`:`Partial ${outputName} captions available.`;
     else message=ME?.is_admin&&state.demand?`Processing this part. Playback continues.`:`Not available here yet. Ask an administrator to process this part.`;
   }
+  const currentFailure=translationCurrentFailure(state,position,coverage.covered);
+  if(currentFailure&&!state.stopped)message=translationFailure(currentFailure.reason);
   if(state.stopIntent&&!state.stopped)message="Stop is unconfirmed. Retry Stop; cached captions remain available.";
   if(state.error)message=state.error;
   translationStatus(state,message);
@@ -234,7 +243,8 @@ function translationRenderStatus(state){
   state.failureSignature=failureSignature;
   failures.replaceChildren();
   for(const range of state.operation?.failed_ranges||[]){
-    if(!range.retryable||!ME?.is_admin||!state.options.permissions?.demand)continue;
+    if(!range.retryable){const description=document.createElement("div");description.textContent=`Range ${range.core_index+1}: ${translationFailure(range.reason)}`;failures.appendChild(description);continue;}
+    if(!ME?.is_admin||!state.options.permissions?.demand)continue;
     failures.appendChild(translationActionButton(`Retry range ${range.core_index+1}`,()=>translationRetryRange(state,range)));
   }
   const cursor=state.operation?.failed_ranges_next_cursor;
@@ -407,8 +417,25 @@ async function translationStart(state){
     const body=state.createIntent||(state.createIntent={...translationEnvelope(state),source_size:state.options.source_size,source_mtime:state.options.source_mtime,audio_index:state.audioIndex,spoken_language:language,output_language:outputLanguage,task,model_id:profile.model_id,profile_id:profile.profile_id,playback_id:state.playbackId,continuity_id:translationContinuity(state),position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
     const {data}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-translation`,{method:"POST",body});
     if(!state.current()||translationProducerGeneration(state)!==generation)return;translationAdoptReceipt(state,data,body);state.error=null;state.createIntent=null;translationRenewContinuity(state,body);await translationPoll(state,true);
-  }catch(error){if(state.current()&&translationProducerGeneration(state)===generation){translationRejectIntent(state,"createIntent",error);state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
+  }catch(error){if(state.current()&&translationProducerGeneration(state)===generation){
+    translationRejectIntent(state,"createIntent",error);
+    if(error.status===409&&error.code==="operation_stopped"&&translationId(error.operationId)){
+      try{await translationRecoverStopped(state,error.operationId,generation);}catch(recovery){if(state.current()&&translationProducerGeneration(state)===generation)state.error=recovery.code?translationFailure(recovery.code):recovery.message;}
+    }else state.error=error.code?translationFailure(error.code):error.message;
+    if(state.current()&&translationProducerGeneration(state)===generation)translationRenderStatus(state);
+  }}
   finally{state.starting=false;if(state.resumeProducerAfterHandoff&&state.current()&&state.positionReady!==false&&!state.rebinding){state.resumeProducerAfterHandoff=false;if(state.createIntent)void translationStart(state);}}
+}
+async function translationRecoverStopped(state,operationId,generation){
+  const selection=state.createKey;
+  const {data}=await translationRequest(state,`/subtitle-translation/operations/${operationId}`);
+  if(!state.current()||translationProducerGeneration(state)!==generation||state.createKey!==selection||state.panel.querySelector("[data-translation-profile]").value!==state.profile?.profile_id||state.panel.querySelector("[data-translation-task]").value!==translationTask(state.profile)||state.panel.querySelector("[data-translation-language]").value!==state.spokenLanguage)return;
+  // Validate before adopting the handle. Discovery grants no producer intent,
+  // demand, continuity or asset; Resume remains an explicit epoch-fenced action.
+  translationValidateOperation({...state,operation:{operation_id:operationId}},data);
+  state.operation=data;state.assetId=data.asset_id;state.contentRevision=data.content_revision;
+  state.demand=null;state.stopped=data.state==="stopped";state.resumeIntent=null;state.resumeKey=null;
+  state.error=translationFailure(data.state==="stopped"?"operation_stopped":"epoch_conflict");
 }
 function translationValidateOperation(state,operation){
   if(operation?.version!==1||operation.operation_id!==state.operation.operation_id||operation.file_id!==state.fileId||operation.source_size!==state.options.source_size||operation.source_mtime!==state.options.source_mtime||operation.audio_index!==state.audioIndex||operation.output_language!==translationOutputLanguage(state.profile,operation.spoken_language)||operation.task!==translationTask(state.profile)||operation.profile_id!==state.profile.profile_id||!translationCounter(operation.operation_epoch)||!translationCounter(operation.view_revision))throw Error("Caption operation identity changed");

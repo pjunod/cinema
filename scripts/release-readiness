@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Run release qualification in the candidate's CI image built from the shipping media assets.
+
+The host owns the checkout and Docker daemon. Mount the checkout at its actual
+host path so Android's sibling containers see the same source, and run checks
+as the host user so compilation never leaves root-owned files behind.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import shutil
+import subprocess
+import sys
+import tempfile
+import uuid
+
+
+BOOTSTRAP = r'''
+set -euo pipefail
+# These tools are needed by the complete catalog, beyond ci.yml's media jobs.
+# Install them only in this disposable container; never replace its FFmpeg.
+apt-get -o Acquire::Retries=3 update
+DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends npm libssl-dev libgtk-4-dev libdbus-1-dev
+
+pkg-config --exists openssl 'gtk4 >= 4.0' dbus-1
+probe="$(mktemp -d)"
+printf '#include <openssl/ssl.h>\nint main(void) { return OPENSSL_init_ssl(0, 0) != 1; }\n' > "$probe/openssl.c"
+cc "$probe/openssl.c" $(pkg-config --cflags --libs openssl) -o "$probe/openssl"
+"$probe/openssl"
+rm -rf "$probe"
+
+test "$PLURX_FFMPEG" = /usr/lib/jellyfin-ffmpeg/ffmpeg
+test "$PLURX_FFPROBE" = /usr/lib/jellyfin-ffmpeg/ffprobe
+test -x "$PLURX_BOUND_FFPROBE"
+test "$(readlink -f "$(command -v ffmpeg)")" = "$PLURX_FFMPEG"
+test "$(readlink -f "$(command -v ffprobe)")" = "$PLURX_FFPROBE"
+ffmpeg -version | grep -E '^ffmpeg version n?8[.]'
+ffprobe -version | grep -E '^ffprobe version n?8[.]'
+dpkg-query -W jellyfin-ffmpeg8
+sha256sum "$PLURX_FFMPEG" "$PLURX_FFPROBE" "$PLURX_BOUND_FFPROBE"
+if [ "$READINESS_MEDIA_TARGET" = runtime-assets-dolby-amd64 ]; then
+  # CI build tools must not replace any of the audited runtime's ELF providers.
+  sha256sum -c /usr/lib/jellyfin-ffmpeg/provenance/shipping-system-elf-sha256.txt
+fi
+rustc --version | grep -F 'rustc 1.97.1 '
+python3 -c 'import importlib.metadata; assert importlib.metadata.version("playwright") == "1.62.0"'
+export PLURX_PLAYBACK_CHROME="$(python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+test -x "$PLURX_PLAYBACK_CHROME"
+# The image keeps its toolchain; only build/dependency caches are host-mounted.
+# Check the host client against the daemon after dropping root, too. The
+# Bookworm docker.io client is too old for this fleet's Docker 29 API.
+setpriv --reuid "$READINESS_UID" --regid "$READINESS_GID" --groups "$READINESS_GROUPS" docker version
+setpriv --reuid "$READINESS_UID" --regid "$READINESS_GID" --groups "$READINESS_GROUPS" docker buildx version
+# Host-network live-TV fixtures bind port 80 as the checkout owner. Preserve
+# only this capability when dropping root; no host sysctl changes are needed.
+capabilities=()
+if [ "$READINESS_HOST_NETWORK" = 1 ]; then
+  capabilities=(--inh-caps=+net_bind_service --ambient-caps=+net_bind_service)
+fi
+exec setpriv --reuid "$READINESS_UID" --regid "$READINESS_GID" --groups "$READINESS_GROUPS" "${capabilities[@]}" "$@"
+'''
+
+# Pass provenance and build settings, never the host's credential environment or
+# its PLURX_FFMPEG/PATH overrides. The immutable image owns the media executables.
+FORWARD_ENV = (
+    "CI", "GITHUB_ACTIONS", "FORGEJO_ACTIONS", "GITHUB_REPOSITORY",
+    "GITHUB_SHA", "GITHUB_REF", "GITHUB_EVENT_NAME", "GITHUB_RUN_ID",
+    "GITHUB_RUN_NUMBER", "GITHUB_RUN_ATTEMPT", "GITHUB_SERVER_URL",
+    "GITHUB_API_URL", "GITHUB_WORKSPACE", "CARGO_BUILD_JOBS", "RUST_TEST_THREADS",
+    "CARGO_INCREMENTAL", "CARGO_TERM_COLOR",
+    "PLURX_LIVE_TV_DEVICE", "PLURX_LIVE_TV_TUNERS",
+)
+
+
+def media_target(source: str) -> str:
+    # Match publish-release.yml's amd64 media contract selection.
+    return ("runtime-assets-dolby-amd64" if
+            "FROM scratch AS linux-dolby-package-export" in source.splitlines()
+            else "runtime-assets")
+
+
+def ci_dockerfile(source: str) -> str:
+    """Put the candidate's unchanged CI tooling on its selected shipping assets.
+
+    The audited media stage is declared after the ordinary CI stage. Move the
+    CI stage to the end so its new parent is an earlier Dockerfile declaration;
+    no tooling recipes or production Dockerfile stages are replaced.
+    """
+    start = source.index("FROM runtime-assets AS ci\n")
+    end = source.index("\nFROM runtime-assets AS runtime\n", start)
+    stage = source[start:end].replace("FROM runtime-assets AS ci\n",
+                                     f"FROM {media_target(source)} AS ci\n", 1)
+    return source[:start] + source[end:] + "\n" + stage + "\n"
+
+
+def read_image_id(path: Path) -> str:
+    image = path.read_text().strip()
+    if len(image) != 71 or not image.startswith("sha256:") or any(
+        char not in "0123456789abcdef" for char in image[7:]
+    ):
+        raise ValueError("builder returned no immutable CI image ID")
+    return image
+
+
+def export_package(output: Path) -> Path:
+    """Copy the exact export stage without BuildKit's local-file exporter.
+
+    The fleet's Docker/Buildx local exporter can stop transferring files in
+    the large SDK provenance tree. Load its identical scratch image instead
+    and use Docker's archive API. The extraction container is never started.
+    """
+    image_id = output / "package-image-id"
+    run_owned([
+        "docker", "buildx", "build", "--load", "--platform", "linux/amd64",
+        "--target", "linux-dolby-package-export", "--iidfile", str(image_id), ".",
+    ])
+    image = read_image_id(image_id)
+    name = "plurx-readiness-package-" + uuid.uuid4().hex
+    exported = output / "media"
+    exported.mkdir()
+    try:
+        run_owned(["docker", "create", "--name", name, image, "/unused"])
+        run_owned(["docker", "cp", f"{name}:/package", str(exported)])
+    finally:
+        subprocess.run(["docker", "rm", "--force", name], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+    return exported / "package"
+
+
+def build_image() -> str:
+    """Build exactly the media contract selected by release publication."""
+    source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    dockerfile = Path("Dockerfile").read_text()
+    target = media_target(dockerfile)
+    with tempfile.TemporaryDirectory(prefix="release-runtime-") as output:
+        output = Path(output)
+        extra = []
+        if target == "runtime-assets-dolby-amd64":
+            exported = export_package(output)
+            extra = ["--build-context", f"linux-dolby-package={exported}"]
+        generated = output / "Dockerfile.readiness"
+        generated.write_text(ci_dockerfile(dockerfile))
+        image_id = output / "image-id"
+        run_owned([
+            "docker", "buildx", "build", "--load", "--platform", "linux/amd64",
+            "--file", str(generated), "--target", "ci", *extra,
+            "--build-arg", "PLURX_CI_SOURCE_SHA=" + source,
+            "--iidfile", str(image_id), ".",
+        ])
+        image = read_image_id(image_id)
+    print(f"Release readiness source: {source}; media target: {target}", flush=True)
+    return image
+
+
+def run_owned(args: list[str], *, check: bool = True) -> int:
+    """Forward cancellation to the owned Docker client and reap it."""
+    with subprocess.Popen(args) as child:
+        try:
+            status = child.wait()
+        except BaseException:
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+            raise
+    if check and status:
+        raise subprocess.CalledProcessError(status, args)
+    return status
+
+
+def container_command(image: str, command: list[str], name: str, *, host_network: bool = False, memory_gb: int = 16) -> list[str]:
+    if memory_gb not in (8, 16):
+        raise ValueError("runtime memory must be 8 or 16 GiB")
+    workspace = Path.cwd().resolve()
+    if not (workspace / "Cargo.toml").is_file() or not (workspace / ".git").exists():
+        raise ValueError("run from the checked-out repository root")
+    socket = Path("/var/run/docker.sock")
+    if not socket.is_socket():
+        raise ValueError("release readiness requires the host Docker socket for Android checks")
+    cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))).resolve()
+    target = Path(os.environ.get("CARGO_TARGET_DIR", str(workspace / "target"))).resolve()
+    home = Path(os.environ["RUNNER_TEMP"]).resolve() / "release-readiness-home"
+    scratch = Path(os.environ["RUNNER_TEMP"]).resolve() / "shipped-runtime-tmp"
+    args = [
+        "docker", "run", "--rm", "--init", "--pull=never", "--name", name,
+        "--cpus", "3", "--memory", f"{memory_gb}g",
+        "--memory-swap", "8g" if memory_gb == 8 else "18g", "--pids-limit", "4096",
+        "--workdir", str(workspace),
+    ]
+    if host_network:
+        # Nightly sibling-container tests probe ports on the Docker host.
+        args += ["--network", "host"]
+    for path in dict.fromkeys((workspace, cargo_home, target, home, scratch)):
+        path.mkdir(parents=True, exist_ok=True)
+        if "," in str(path):
+            raise ValueError("Docker mount paths cannot contain commas")
+        args += ["--mount", f"type=bind,source={path},target={path}"]
+    args += ["--mount", f"type=bind,source={socket},target={socket}"]
+    # Reuse the client's proven server compatibility; do not install an older
+    # distro Docker client. These are executable-only mounts, with no auth config.
+    docker_cli = Path(shutil.which("docker") or "").resolve()
+    plugins = json.loads(subprocess.check_output(
+        ["docker", "info", "--format", "{{json .ClientInfo.Plugins}}"], text=True,
+    ))
+    buildx = next((Path(p["Path"]).resolve() for p in plugins if p["Name"] == "buildx"), None)
+    if not docker_cli.is_file() or buildx is None or not buildx.is_file():
+        raise ValueError("release readiness requires the host Docker CLI and Buildx plugin")
+    for source, destination in (
+        (docker_cli, "/usr/local/bin/docker"),
+        (buildx, "/usr/local/lib/docker/cli-plugins/docker-buildx"),
+    ):
+        if "," in str(source):
+            raise ValueError("Docker mount paths cannot contain commas")
+        args += ["--mount", f"type=bind,source={source},target={destination},readonly"]
+    env = {
+        "HOME": str(home), "CARGO_HOME": str(cargo_home), "CARGO_TARGET_DIR": str(target),
+        "TMPDIR": str(scratch), "READINESS_HOST_NETWORK": "1" if host_network else "0",
+        "READINESS_MEDIA_TARGET": media_target((workspace / "Dockerfile").read_text()),
+        "READINESS_UID": str(os.getuid()), "READINESS_GID": str(os.getgid()),
+        "READINESS_GROUPS": ",".join(str(g) for g in sorted({os.getgid(), *os.getgroups()})),
+        "PLURX_FFMPEG": "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+        "PLURX_FFPROBE": "/usr/lib/jellyfin-ffmpeg/ffprobe",
+        "PLURX_BOUND_FFPROBE": "/usr/local/lib/plurx/ffprobe",
+        "PLURX_DOVI_TOOL": "/usr/local/bin/dovi_tool",
+        "PLURX_MKVMERGE": "/usr/bin/mkvmerge",
+    }
+    env.update({key: os.environ[key] for key in FORWARD_ENV if key in os.environ})
+    for key, value in env.items():
+        args += ["--env", f"{key}={value}"]
+    return [*args, "--entrypoint", "bash", image, "-c", BOOTSTRAP, "release-readiness", *command]
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host-network", action="store_true")
+    parser.add_argument("--memory-gb", type=int, choices=(8, 16), default=16)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    options = parser.parse_args(argv)
+    if not options.command:
+        parser.error("a command is required")
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, lambda received, _frame: sys.exit(128 + received))
+    image = build_image()
+    name = "plurx-release-readiness-" + uuid.uuid4().hex
+    args = container_command(image, options.command, name, host_network=options.host_network,
+                             memory_gb=options.memory_gb)
+    print(f"Release readiness runtime: {image}", flush=True)
+    try:
+        return run_owned(args, check=False)
+    finally:
+        # Also remove the container when cancellation interrupts docker run.
+        subprocess.run(["docker", "rm", "--force", name], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        sys.exit(f"release-readiness: {error}")

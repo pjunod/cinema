@@ -17,6 +17,15 @@ struct SharedPlaybackReference: Codable, Hashable {
 }
 
 private final class PlaybackDetailRedirectFence: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let decision = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(decision.0, decision.1)
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,

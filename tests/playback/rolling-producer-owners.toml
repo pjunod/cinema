@@ -52,6 +52,187 @@
 # Scan roots and existing forbidden zeroes are unchanged. The positive wait
 # anchor follows the actual supervisor-settlement API. This is source
 # correspondence, not executed regressions, native closure or peak qualification.
+# Latest main5ac integration source audit (2026-10-29; 460 Rust files):
+# exact counts are 1029 namespaced tasks, 81 method spawns, 1917 timers,
+# 312 Commands, 838 launch-shaped methods, 360 lifecycle methods, 74 UFCS
+# lifecycle sites and 117 kill-on-drop constructors. Roots, patterns, row IDs,
+# exact equality and all forbidden zeroes remain unchanged.
+# Native fixture stress replaces the unbounded fork loop with four joined
+# workers and 300 barrier rounds: Builder.spawn adds one method site, five
+# Barrier.wait calls add lifecycle-shaped observations, and one additional
+# Command.status shape is an owned, checked fork/exec. Its removed namespaced
+# thread spawn is balanced by sharing_host's joined cancellation-test task.
+# sharing_host now uses the existing bounded inherited-environment child owner;
+# its direct wait/kill and kill-on-drop sites disappear. Three awaited fixture
+# timers replace its old production timeout site (net +2). The announced PID's
+# libc::kill(pid,0) is a post-settlement existence check, never a signal.
+# One additional transcode timer bounds failure diagnostics after the original
+# retention deadline; it neither extends success nor reaps a child. The new
+# bounded-process Command constructor is a test of inherited environment.
+# Existing lifecycle fixture sites also require raw-symbol correspondence:
+# DVR adds one always-ready ServingAuthority; diagnostic route setup adds two
+# publication_ready_at_ms fields and one blocked sentinel. These are test-only
+# authority observations, not new publication or serving permission.
+# Main10ef metadata integration (2026-10-29): retain both parent ownership
+# audits. Relative to main859, the incoming bounded-pipe tests add two tasks,
+# two awaited timers and three Command constructors; all parent repair sites
+# remain. The new diagnostics snapshot tests add two awaited timeout calls;
+# these are observation bounds, not detached work or child-reap evidence.
+# Two new diagnostics Response::status assertions add launch-shaped matches
+# without starting children. The frozen source census totals 836 such matches.
+# Patterns, roots, exact equality and forbidden zeroes are unchanged. Final
+# source census must include any additional in-flight operator fixtures.
+# Main metadata integration (2026-10-29; main 85910425c): preserve both
+# parent ownership audits and the repair fixture counts. Main changes since
+# 6c8c98c79 affect no Rust/Cargo or served-asset bytes; exact source census,
+# roots, patterns and forbidden zeroes retain their reviewed identities.
+# Cache regression fixture review (2026-10-29): one added awaited 2100 ms
+# settling delay in ffmpeg/tests.rs preserves the production metadata grace.
+# It starts no task or child and supplies no reap or publication authority.
+# Exact namespaced timer count is 1910; roots, patterns and zeroes unchanged.
+# Integration with main 10f45ae5f: retain its two awaited Live TV fixture timers
+# and three HTTP response observations alongside the reviewed repair fixtures.
+# Final exact counts are verified by the unchanged structural inventory.
+# Additional upstream ownership audit (66a33d723 -> 10f45ae5f, 2026-10-29):
+# +3 namespaced tasks belong to private sharing, not rolling media producers.
+# main.rs starts sharing_host::run and sharing_network::run with the existing
+# BackgroundLoopGuard cancellation token. Their JoinHandles are not retained;
+# guard Drop requests cancellation, without proving either loop has joined.
+# sharing_network::issue detaches one invitation owner from its request waiter.
+# It bounds issue_inner at 22s, serializes persisted provider intent/cleanup
+# through network_invite_lock, and abandons/cancels the invitation on error or
+# lost response delivery before attempting cleanup. The cleanup continuation
+# has no overall 22s deadline and is not a confirmed daemon-shutdown receipt.
+# +4 timers: that 22s issue bound, the network loop's cancellation-aware 30s
+# cadence, sharing_host's cancellation-aware 5s cadence, and its 8s child bound.
+# +1 Command/+1 kill-on-drop/+2 lifecycle methods are sharing_host::command:
+# the existing background ChildWork launcher registers its child; stdout is
+# limited to 256 KiB plus one refusal byte, stderr discarded, and normal success
+# drains stdout then awaits child.wait. Returned inner errors await child.kill;
+# timeout returns before that branch and relies on kill-on-drop. Neither drop
+# nor the deadline proves confirmed reap or descendant settlement on every exit.
+# +9 launch-shaped methods start no child: sharing_host has three production
+# status reads and four test-only SetupState::status reads, while sharing_network
+# reads the same HTTP response status twice. The child above is launched through
+# the existing shared launcher, adding no .spawn/.output/.status call site here.
+# Additional reviewed totals: 1027 tasks, 1909 timers, 308 Commands, 833 launch
+# shapes, 357 lifecycle methods and 118 kill-on-drop sites. Source roots,
+# structural patterns, exact equality and every forbidden zero remain unchanged.
+# Integration with main 66a33d723 (2026-10-29): retain its four progressive
+# subtitle admission timers plus the four test-only repair timers. Exact
+# namespaced timer census is 1903; all other merged counts match source.
+# Roots, patterns, and forbidden zeroes stay unchanged.
+# Unit coverage repair ownership author audit (2026-10-28):
+# Base 24d1bad72 -> repair candidate, including its native HEVC fixture.
+# Codex coverage_opportunities authored the HTTP/subtitle fixtures and audited
+# the exact source delta here; this is author audit, not independent approval.
+# Independent Codex coverage_review checked all 15 deltas, source hashes and
+# ownership claims on 2026-10-28; that review did not execute the fixtures.
+# No production owner, new task site or kill-on-drop constructor is introduced.
+# +1 method-spawn/+1 Command/+1 launch is observe_tests.rs's /bin/true child.
+# The test transfers it to ProducerSlot::attach_registered_job_owned, settles
+# writers, requests exact registration retirement and awaits confirmed reap
+# before retaining only its registration identity for observation. This normal
+# path is a reap receipt, not a claim of cleanup after every fixture panic.
+# +1 Command/+1 launch is hevc_census.rs's synchronous output() observation of
+# the production copy argv over the finite four-second 160x96 fixture. output
+# owns/drains both pipes and waits for the direct child before returning; it
+# has no separate wall timeout/output cap or asynchronous cancellation owner.
+# +2 Commands are runtime_tests.rs's real FFmpeg/FFprobe fixture construction.
+# Both await runtime::child_output with 15s/64KiB limits through the existing
+# clean-environment bounded collector/ChildWork guard; no launcher is added.
+# The other +11 launch-shaped matches are HTTP Response::status assertions:
+# DVR five, library channels one, Live TV one, subtitle translation API four.
+# They inspect response values and start no process or producer.
+# +4 timers are test-only: API's awaited 5ms source-verifying poll under a 5s
+# observation horizon; runtime's awaited 10ms start-marker poll, bounded by
+# its 15s startup timeout, and its 5s cancellation/join observation. The
+# operation is pinned in the test, not detached. The latter completes before
+# attempt-directory and exact announced PID absence assertions. Timeout/panic
+# alone is not confirmed reap. +1 UFCS lifecycle call is kill(pid, 0): an
+# existence observation, never a signal, after successful cancellation return.
+# +1 lifecycle-method is ReleaseSettlement::wait after the elected fixture
+# response owner has awaited complete_release_settlement. It observes a
+# completed shared response, not a child wait or an independent repair owner.
+# All nine durable-symbol deltas are in media_sessions/cleanup_tests.rs:
+# projection completion +1, exact release completion +3, publication fence +13,
+# durable safety window +2, blocked sentinel +2, terminal safety window +3,
+# shared settlement +1, client release intent +7, terminal cause +2. Real
+# SQLite activation/End/projection calls and awaited cleanup use the existing
+# exact owner/epoch fence; assertions preserve pending proof and cache authority
+# for unreachable peers, early boundaries, wrong epochs and uncommitted End.
+# Updated repair-only structural totals before main integration: 80 method spawns, 1899 namespaced timers,
+# 307 Commands, 821 launch shapes, 355 lifecycle methods, 73 UFCS lifecycle
+# sites. Module roots, patterns, exact equality and forbidden zeroes unchanged.
+
+# Integration review (2026-10-29): preserve both reviewed owner sets below.
+# Relative to the native-fixture source: +2 joined selected-stderr test tasks,
+# +2 awaited test bounds, +3 bounded test Command constructors and +1 HTTP
+# status projection. Exact combined counts are 1029/1910/308/822; all other
+# reviewed counts, scan patterns, roots and forbidden zeroes are unchanged.
+
+# Subtitle repair ownership review (issue #1329, 2026-10-29;
+# reviewed corrective source 9996d26f4, current tree c4e32f291):
+# +2 namespaced tasks are cfg(test) bounded.rs duplex-pipe writers in
+# selected_stderr_ignores_large_metadata_and_preserves_split_records and
+# selected_stderr_overflow_and_overlong_lines_drain_before_refusal. Each
+# writer is explicitly joined after the fully draining reader reaches EOF.
+# +2 namespaced timers are those tests' awaited 10s/5s observation bounds;
+# they create no detached timer or new production deadline policy.
+# +3 Command constructors are cfg(test): bounded.rs first constructs a bare
+# `sh`, rejected by absolute-path validation before spawn, then an absolute
+# `/bin/sh` collected by the existing clean-environment child owner. The
+# third constructor is runtime.rs's actual_multichannel_decoder_keeps_clock_
+# frames_past_side_data_log_budget E-AC-3 fixture encoder; child_output awaits
+# it under the existing 20s bounded process-group/cancellation/reap owner.
+# +1 launch-shaped match is the stopped_create_conflict_exposes_only_a_
+# validated_read_handle test's Axum Response::status() assertion. It launches
+# no child and grants no producer authority.
+# The live stderr task changes from direct drain_capped to an optional
+# selected-line drain inside the same single tokio::spawn (net zero tasks).
+# Existing command owner, cancellation, process group, kill/reap and old
+# caller paths remain unchanged. No watchdog, gate or repair owner is added.
+# Counts change only: task 1027->1029, timer 1905->1907, Command 304->307,
+# launch-shaped 820->821. Patterns, scan roots, equality checks and all other
+# counts/forbidden-shape zeroes are unchanged. Source review is not execution.
+
+# Native fixture ownership review (2026-10-29): four test-only forkers keep
+# all 300 immediate fixture executions, with at most 1200 checked child
+# attempts. Each round drains child outcomes; stop/barrier release joins the
+# workers after fixture failure, and partial creation drops unarmed channels.
+# A bounded async-signal-safe pre_exec poll forces the inheritance window.
+# Replacing namespaced thread::spawn with Builder.spawn gives -1 namespaced
+# task spelling and +1 method/broad launch spelling; no new producer owner.
+# Five new .wait() matches are Barrier synchronization, not child lifecycle.
+# One timer diagnoses an already-failed retained-copy completion after its
+# unchanged 30s bound; it never reaps/signals a child or permits late success.
+# Patterns, roots, equality checks and forbidden zeroes remain unchanged.
+
+# Sharing-host and invitation ownership review (2026-10-28):
+# main.rs starts sharing_host::run and sharing_network::run with the existing
+# BackgroundLoopGuard token. Their polling loops observe cancellation; the
+# daemon does not retain/join these background handles, so this is cooperative
+# cancellation rather than a joined daemon-shutdown receipt.
+# sharing_network::issue retains its state and persisted invitation job while
+# its spawned owner delivers an oneshot outcome. Its 22s issue timeout does not
+# bound subsequent abandonment/revocation cleanup; the periodic cleanup owner
+# polls every 30s. These are node-local invitation owners, not rolling producers.
+# sharing_host::command now delegates its eight-second, LIMIT+1 capture to the
+# existing bounded process-group owner. Native user/IPC environment is preserved
+# explicitly; normal exit, timeout and cooperative cancellation settle the child
+# and pipe readers before this directly awaited helper returns. Dropping an
+# unrelated caller still uses the bounded owner's best-effort Drop backstop.
+# This removes the unawaited timeout/drop collection path and the duplicate
+# direct wait/kill/kill_on_drop sites; existing shared-owner counts remain.
+# New regression owners: one joined cancellation driver, three bounded fixture
+# waits/polls, and one shell constructor testing explicit environment retention.
+# One libc::kill(pid, 0) observes only the exact fixture PID to prove it is reaped;
+# it sends no signal and introduces no process owner. Nine .status() projections
+# (seven sharing-host, two network HTTP response reads) launch no child/task.
+# Net measured additions: +4 namespaced tasks, +6 timers, +2 constructors,
+# +9 launch-shaped status reads and +1 free lifecycle observation. Patterns,
+# scanned roots, exact equality, and forbidden-shape zeroes stay unchanged.
+
 # Live TV upload regression ownership review (PR #1312, 2026-10-28;
 # Rust source 9c5aa95df): +2 namespaced timers are the awaited five-second
 # fixture observation deadline and its five-millisecond poll. Neither starts
@@ -342,7 +523,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # regression in `transcode/tests/chunk_05.rs`. It passes the existing budget
 # to one frozen InitialProducerPolicy and asserts the software startup
 # allowance and retained CPU reservation; it creates no new timer or owner.
-expected_occurrences = 13
+# PR1341 (quorum gaps): +1 test-only, chunk_06.rs, where an M5 init-wait
+# test names the stall budget it must finish well inside; no new stall owner.
+expected_occurrences = 14
 kind = "recovery_timer"
 replacement = "the sole actor-owned rolling producer progress budget before and after first media"
 
@@ -738,7 +921,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # joined/panic/cancellation fixture tasks. Existing retirement/reader/supervisor task sites
 # were rewritten without additional launch authority.
 # M5: One same-owner remote coordinator launch site replaces local frame-channel setup; it is retained before native entry, never a nonce-only detached owner.
-expected_occurrences = 136
+# PR1341: +1 test-only spawn in chunk_06.rs (M5 init-wait driver); the
+# test joins it under its deadline.
+expected_occurrences = 137
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -893,7 +1078,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # timeout; the sleep neither owns inference nor starts work by itself.
 # Expired refused-Adopt regression sleeps once until the real original Claim deadline passes; no production wait: 94 + 1 = 95.
 # M5: Two control-only real-clock expiry fixtures; no production verdict polling or new cleanup retry loop.
-expected_occurrences = 97
+# PR1341: +4, all test-only. Three in chunk_06.rs drive the M5 init-wait
+# fixtures under a paused clock; one in publication.rs is a source-pin
+# string (`match_indices`) proving the 100 ms init poll is the only sleep in
+# both pre-object wait branches. No shipped sleep is added.
+expected_occurrences = 101
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1027,7 +1216,8 @@ pattern = "PROGRESS_STALL"
 # `advancing-progress-stall`; neither is a shipped compatibility watchdog.
 # 12 -> 13 for the same Pi startup-policy regression documented under
 # `advancing-progress-stall`; the production timer ownership is unchanged.
-expected_occurrences = 13
+# PR1341: +1 test-only (chunk_06.rs), same as advancing-progress-stall.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "legacy-watchdog-poll"
@@ -1143,7 +1333,9 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-response-completion-settlement"
 pattern = "settle_streamed_response_completion"
-expected_occurrences = 3
+# PR1341: +1 test-only (authority_recovery.rs) asserting a streamed
+# commit is settled once and never retried after an authority loss.
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-response-completion-capacity"
@@ -1259,7 +1451,9 @@ pattern = "SegmentPublication"
 # Adaptive source audit e1d42fb2: manager/publication.rs adds two
 # Missing(Some(current_owner())) returns on selected finite ownership checks. They preserve
 # the exact response owner and do not launch a producer.
-expected_occurrences = 49
+# PR1341: +6. publication.rs +2: the exact attempt's terminal pre-publication
+# verdict authorizes its ProducerEnded 502 (the segment-gap fix). Tests +4.
+expected_occurrences = 55
 
 [[module_symbols]]
 id = "m4-typed-presentation-resolution"
@@ -1354,7 +1548,9 @@ pattern = "actor_managed_prepublication_process"
 # declaration that status authorization must cross the production actor path,
 # not a new process scope or a bypass around that owner.
 # S10 retained attachment initializes false: existing actor still owns response publication.
-expected_occurrences = 14
+# PR1341: +1 in rolling/session.rs: the M5 exact-attempt snapshot reads the
+# process scope through the actor; no new owner.
+expected_occurrences = 15
 
 [[module_symbols]]
 id = "m4-first-media-owner-claim-latch"
@@ -1407,7 +1603,9 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-typed-published-producer-end"
 pattern = "ProducerEnded"
-expected_occurrences = 22
+# PR1341: +6. publication.rs +2 (segment-gap 502 stamped with its attempt via
+# `for_attempt`); chunk_06.rs +4 test assertions.
+expected_occurrences = 28
 
 [[module_symbols]]
 id = "m4-bounded-terminal-command-admission"
@@ -1552,7 +1750,9 @@ pattern = "ServingAuthority"
 # media-pool quality contexts, adaptive adoption, and VOD Store-adopt attachment. One is a
 # control.rs ownership comment; none grants a native witness.
 # M4 follow-on: The genuine refused-Adopt fixture passes the original ServingAuthority; no new production grant.
-expected_occurrences = 38
+# PR1341: +3 in serving_fence.rs: the packed ready+generation word and
+# `admit_or_outage_baseline` project the same ServingAuthority.
+expected_occurrences = 42
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1568,7 +1768,10 @@ pattern = "commit_guard_before"
 # Promotion union: the Source-specific deferred commit wrapper also checks the
 # existing serving authority. It does not mint a new producer or publication
 # proof; the opaque Source assignment and ingress permission remain required.
-expected_occurrences = 18
+# PR1341: +1 net. serving_fence.rs +2 (`commit_guard_or_refusal_before`,
+# which returns the refusal reason for publication commits only);
+# publication.rs -1 (moved onto it). Existing callers keep the old signature.
+expected_occurrences = 19
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
@@ -1581,7 +1784,9 @@ pattern = "admitted_serving_generation"
 # S10 #680: +2 in manager/create.rs::create_cluster_session_for_receiver,
 # the parameter and forwarding call for the existing admitted generation.
 # Negotiated receipt capture does not mint another serving authority.
-expected_occurrences = 31
+# PR1341: +2 in publication.rs: AuthorityLost carries the admitted
+# generation so a held request retries only after a newer recovery.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "m4-owner-bound-status-publication"
@@ -1711,7 +1916,7 @@ pattern = "MediaSessionProjectionCompletion"
 # PR1225: +1 in manager/processed_reuse_tests.rs:1541, the existing
 # PredecessorAcknowledged proof after awaited exact-predecessor retirement.
 # This test helper does not add a proof variant or a shipped release owner.
-expected_occurrences = 20
+expected_occurrences = 21
 
 [[module_symbols]]
 id = "m4-activation-handoff-proof"
@@ -1726,7 +1931,7 @@ expected_occurrences = 10
 [[module_symbols]]
 id = "m4-exact-release-proof-completion"
 pattern = "complete_release_(?:with_route|absent|settlement)"
-expected_occurrences = 26
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "m4-terminal-route-proof-cache"
@@ -1842,7 +2047,7 @@ pattern = "publication_ready_at_ms"
 # claim/adopt/origin readiness to MEDIA_SESSION_PUBLICATION_BLOCKED; one terminal_memory.rs
 # destructuring occurrence sizes the actual retained route.
 # M4 follow-on: The genuine refused-Adopt fixture constructs the same blocked original activation DTO before actual Store refusal.
-expected_occurrences = 154
+expected_occurrences = 169
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -1861,7 +2066,7 @@ pattern = "MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS"
 # fixture cannot drift away from the window it is meant to represent.
 # 5 -> 6 with the control plane's owner-loss answer: its publication-fence test
 # builds the same fixture from the same constant rather than a literal.
-expected_occurrences = 6
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-durable-publication-blocked-sentinel"
@@ -1913,13 +2118,13 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # Adaptive source audit e1d42fb2: The three new MEDIA_SESSION_PUBLICATION_BLOCKED references
 # are the same origin/adoption/claim readiness guards; they add no publication authority.
 # M4 follow-on: The actual refused-Adopt input preserves the original prepublication-blocked sentinel; no publication or close proof.
-expected_occurrences = 61
+expected_occurrences = 64
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
 pattern = "TERMINAL_PROJECTION_SAFETY_WINDOW"
-expected_occurrences = 10
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-cluster-make-before-break"
@@ -2032,12 +2237,12 @@ expected_occurrences = 15
 [[module_symbols]]
 id = "m4-release-shared-settlement"
 pattern = "ReleaseSettlement"
-expected_occurrences = 13
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-release-terminal-intent"
 pattern = "ReleaseIntent"
-expected_occurrences = 10
+expected_occurrences = 17
 
 [[module_symbols]]
 id = "m4-durable-terminal-cause"
@@ -2094,7 +2299,7 @@ pattern = "terminal_reason"
 # Adaptive source audit e1d42fb2: playback_control.rs excludes a replaced route from unrelated
 # End authority; terminal_memory.rs adds destructuring and actual optional-string sizing of
 # terminal_reason.
-expected_occurrences = 56
+expected_occurrences = 58
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -2104,7 +2309,8 @@ expected_occurrences = 10
 [[module_symbols]]
 id = "m4-release-publication-gate"
 pattern = "begin_session_publication_fence"
-expected_occurrences = 6
+# PR1341: +1 test-only (authority_recovery.rs).
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-release-terminal-store-deadlines"
@@ -2274,7 +2480,10 @@ pattern = "rendition_build_gate"
 # serialization across resolve/adaptive prepare/original finite close; two finite_software
 # fixture references exercise abandoned build/metadata wait. Existing purge gate moved within
 # the same owner.
-expected_occurrences = 40
+# PR #1293 added two references and counted one: 0d92ebb37's retained-S capture in
+# vod/serve/create.rs takes the EXISTING exact-key gate, and dd54b6f06's vod/tests/chunk_01.rs holds
+# that same gate in its fixture. Neither creates a build owner; main adds none.
+expected_occurrences = 41
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -2406,6 +2615,8 @@ expected_occurrences = 18
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# Live TV ledger fixtures replace detached shell publishers with one owned
+# Rust publisher task, joined after child reap or aborted on setup/panic.
 # PR1045 review fix: +1 joined test-only releaser task in
 # `processed_preparation_waits_only_for_background_work_that_can_yield`; it
 # frees the held capacity after a short sleep and is awaited by the test.
@@ -3408,7 +3619,30 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Stack composition with M4 (effort base 1085 -> M4 1086): 1089 + 1 = 1090.
 # Compose M4 fixture and current-main owner sites: 1086; source equality still enforced.
 # M5: One same original registered remote coordinator, bounded by the existing fixed entry registry and actual measured P/M frame.
-expected_occurrences = 1091
+# Subtitle cue index (#1340): +3 awaited spawn_blocking calls in
+# subtitles::sparse_subtitle_input (index read, subset read, temp-file write);
+# each is awaited by its caller and the subset read stops at SPARSE_DEADLINE.
+# PR1341: +14. Shipped: playback_cache.rs +1 (the ceiling settings task,
+# one per budget, restarted by the next writer only after its own drop
+# guard clears the started flag). The other 13 are test-only
+# (authority_recovery.rs +10, serving_fence.rs tests +2, chunk_06.rs +1).
+# PR1308 HTTP-to-HTTPS regression: +2 test-only tokio::spawn owners in
+# https/transport.rs::plaintext_http_follows_active_https_without_a_redirect_loop.
+# Each serves one prebound ephemeral HTTP/TLS socket; both observe the same
+# cancellation token, and the fixture cancels it and awaits both JoinHandles.
+# No production task, child process or rolling-producer owner is added.
+# PR1350 playback cache reconciliation: +2 test-only admission tasks in
+# admission_after_cancelled_scan and the persistent inventory conflict test.
+# Each JoinHandle is awaited before its fixture returns; neither owns a
+# production writer, timer loop or child process.
+# PR1358 review fix: +1 test-only `tokio::spawn` in
+# library_work::tests::library_worker_environment_drops_quietly_while_unwinding.
+# It hosts one library worker whose future is unwound by an injected panic; the
+# test joins the handle and asserts the panic, so nothing outlives the test and
+# the task owns no admission, publisher, queue token or child after it returns.
+# Main 7ea74370b into effort ca95fde57: measured on the merge base, not its stale
+# census; every changed file composes exactly as ours + theirs - base: effort 1091 + main (1052 - 1027).
+expected_occurrences = 1116
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3658,7 +3892,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # owned 8 MiB std thread, positively joined before returning the real Store.
 # Both use the original runtime; Source worker stacks remain unchanged.
 # This is test-only pre-R bootstrap, not a new media producer or close proof.
-expected_occurrences = 86
+# Subtitle cue index (#1340): +1 scope.spawn in mkv_sparse::parallel; the
+# reader threads are scoped and joined by std::thread::scope before it returns.
+expected_occurrences = 89
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3687,6 +3923,8 @@ expected_occurrences = 20
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Live TV ledger fixtures add five test-only declaration/publication/cleanup
+# waits; actual child reap and publisher join remain required for success.
 # PR1045 review fix: +1 test-only sleep in the same releaser task
 # (`processed_preparation_waits_only_for_background_work_that_can_yield`).
 # PR947 unit follow-up: the inventory-cancellation regression replaces
@@ -5139,7 +5377,38 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # These timers grant no native entry or physical-close/refund witness: 2080 + 1 = 2081.
 # These timers grant no native entry or physical-close/refund witness.
 # M5: Three original-cutoff waits plus three real clock fixture sleeps; no renewed startup window or standalone native closer.
-expected_occurrences = 2087
+# PR1339 sharing diagnosis: +1 tokio::time::timeout bounds the read-only
+# `tailscale status --json` netmap read awaited inline by the admin request;
+# no task, timer owner or producer is added.
+# Subtitle cue index (#1340): +1 constructor for the bounded ffprobe start probe.
+# PR1341: +23. Shipped, all deadline-bounded and owned by the request or
+# task that creates them: serving_fence.rs timeout_at on the outage watch
+# (the hold deadline) x2; response.rs timeout_at bounding the one buffered
+# retry; rolling/session.rs timeout_at bounding the M5 actor snapshot;
+# playback_cache.rs the settings task's 1 s interval, its IO_TIMEOUT Store
+# read, and the first-read wait. The rest are test-only.
+# PR1350 playback cache reconciliation: +3 in playback_cache.rs. The one
+# production timeout is awaited inline by reserve_owned and bounds all scan
+# retries and owner work to IO_TIMEOUT + PRESSURE_TIMEOUT (40 seconds), after
+# the existing operation-lock wait. Cancellation drops the admission future
+# and operation guard; detached eviction callbacks retain their existing
+# fences until settlement. No production task or timer loop is introduced.
+# The other two timeouts bound test-only waits for scan/pressure entry; the
+# admission tasks remain joined and timeouts supply no accounting evidence.
+# Library worker driver: +1 timer, the paused-clock `tokio::time::interval` in
+# library_work::tests::library_worker_ready_work_precedes_burst_pressure_ticks.
+# It is a local 250ms interval awaited through the shared select_work selector
+# for at most three decisions; it spawns nothing and owns no admission, publisher,
+# queue token or child. The production pressure interval only moved from
+# library_work.rs to library_work/env.rs (TokioEnvironment::poll_work) with no
+# constructor delta and stays local to the admission-retaining selection scope.
+# PR1358 review fix: +3 timers, the paused-clock `tokio::time::interval`s in
+# library_work::tests::library_worker_select_prefers_ready_work_to_a_ready_tick
+# (one per case); each is a local 250ms interval polled once through
+# select_next and dropped with the test. No production constructor changed.
+# Main 7ea74370b into effort ca95fde57: measured on the merge base, not its stale
+# census; every changed file composes exactly as ours + theirs - base: effort 2087 + main (1954 - 1905).
+expected_occurrences = 2136
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5186,7 +5455,8 @@ pattern = "use\\s+tokio::time"
 # actual timer constructors and detached task are reviewed in their rows.
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
-expected_occurrences = 5
+# PR1341: +1 test-only `use tokio::time` in authority_recovery.rs.
+expected_occurrences = 6
 
 [[module_structures]]
 id = "process-command-construction"
@@ -5631,7 +5901,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # the original launcher command and a test self-exec. observation.rs Command is test-only.
 # Other new constructors are isolated finite/probe fixtures and the title scanner using the
 # existing bounded collector with the original keeper.
-expected_occurrences = 313
+# Subtitle cue index (#1340): +3 Commands -- the subset window conversion, the
+# ffprobe start-time probe and the test presence probe; each is awaited and
+# the two production ones are kill_on_drop.
+# Main 7ea74370b into effort ca95fde57: measured on the merge base, not its stale
+# census; every changed file composes exactly as ours + theirs - base: effort 313 + main (315 - 304).
+expected_occurrences = 324
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6295,7 +6570,26 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Main 6c8c98c79 composition: 831 + (811 - 808) = 834; source equality remains required.
 # Compose task and current-main owner sites: 845; exact source census still required.
 # Stack composition with M4 (effort base 843 -> M4 844): 845 + 1 = 846.
-expected_occurrences = 846
+# Sharing native-host regression: +1 SetupState::status() lookup in
+# native_host_mode_keeps_unmanaged_hosts_out_of_container_handoff. It builds
+# the setup message and reads the clock; it starts no task, timer or process
+# and adds no child or producer owner. Existing command ownership is unchanged.
+# PR1339 sharing diagnosis: SharingManager::status()/SetupState::status()
+# reads of in-memory observations, not process launches or producers.
+# Subtitle cue index (#1340): +3 launches for the Commands above, each owned
+# by its awaiting caller; no detached child.
+# PR1341: +6, none launch a process: `.status(` reads of HTTP responses in
+# fence.rs (+3, one shipped log field, two in its tests) and
+# authority_recovery.rs tests (+2), and the decision reason's `.status()` in
+# playback_control.rs (+1).
+# PR1308: +14 test-only HTTP status observations: twelve Axum Response::status()
+# reads in https/redirect.rs and two Reqwest Response::status() reads in
+# https/transport.rs::plaintext_http_follows_active_https_without_a_redirect_loop.
+# These assertions launch no process, task or producer. The prior 848 matches
+# are unchanged; the two joined fixture tasks are classified above separately.
+# Main 7ea74370b into effort ca95fde57: measured on the merge base, not its stale
+# census; every changed file composes exactly as ours + theirs - base: effort 846 + main (862 - 820).
+expected_occurrences = 888
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6597,7 +6891,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Test-only finite/attempt fixtures account for the remaining calls. No raw numeric-
 # descriptor/native absence authority is inferred.
 # Compose task and current-main owner sites: 377; exact source census still required.
-expected_occurrences = 377
+# Main 7ea74370b into effort ca95fde57: measured on the merge base, not its stale
+# census; every changed file composes exactly as ours + theirs - base: effort 377 + main (360 - 356).
+expected_occurrences = 381
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6681,7 +6977,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # wrapper, and method declarations named wait/signal that match this broad shape. Group
 # signaling/reaping uncertainty remains explicit; the census does not qualify native group
 # absence.
-expected_occurrences = 78
+expected_occurrences = 80
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6830,7 +7126,11 @@ pattern = "kill_on_drop\\s*\\("
 # decode_facts controls. Added fixed_planning_engine/observation sites are original bounded
 # launch and test child; finite restart adds a fixture guard. kill_on_drop remains a request,
 # never a confirmed native-close receipt.
-expected_occurrences = 122
+# Subtitle cue index (#1340): +2 kill_on_drop guards on the subset window
+# conversion and the ffprobe start-time probe.
+# Main 7ea74370b into effort ca95fde57: measured on the merge base, not its stale
+# census; every changed file composes exactly as ours + theirs - base: effort 122 + main (119 - 118).
+expected_occurrences = 123
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

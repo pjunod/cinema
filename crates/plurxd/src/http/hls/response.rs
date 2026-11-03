@@ -39,6 +39,7 @@ pub(super) async fn authorize_response_publication(
     publication: crate::transcode::MediaResponsePublication,
     deadline: Instant,
 ) -> Result<crate::transcode::MediaResponseAuthorization, ApiError> {
+    fence::note_response_owner(owner);
     match tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         state
@@ -48,32 +49,6 @@ pub(super) async fn authorize_response_publication(
     .await
     {
         Ok(Ok(authorization)) => Ok(authorization),
-        Ok(Err(rejection)) => {
-            Err(response_publication_rejection_before(state, session, rejection, deadline).await)
-        }
-        Err(_) => Err(response_publication_timeout()),
-    }
-}
-
-/// Commit completion using the authorization issued for these exact response
-/// bytes. The opaque token prevents EOF from reconstructing authority from a
-/// reusable session id or an object name after a successor has taken over.
-pub(super) async fn commit_authorized_media(
-    state: &AppState,
-    session: &str,
-    authorization: crate::transcode::MediaResponseAuthorization,
-    complete_object: bool,
-    deadline: Instant,
-) -> Result<(), ApiError> {
-    match tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        state
-            .transcode
-            .commit_authorized_media(authorization, complete_object, deadline),
-    )
-    .await
-    {
-        Ok(Ok(())) => Ok(()),
         Ok(Err(rejection)) => {
             Err(response_publication_rejection_before(state, session, rejection, deadline).await)
         }
@@ -225,7 +200,140 @@ pub(super) fn response_publication_rejection(
             let error = PlaylistError::ProducerEnded(reason);
             ApiError::typed(StatusCode::BAD_GATEWAY, error.code(), error.message())
         }
+        crate::transcode::MediaResponsePublicationRejection::AuthorityLost { .. } => {
+            serving_fenced_error()
+        }
     }
+}
+
+/// The answer to a request that lost serving authority and did not get it
+/// back inside its wait: the router's own `serving_fenced` 503, so a client
+/// can tell it from `response_state_changed`.
+pub(in crate::http) fn serving_fenced_error() -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "serving_fenced",
+        message: crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
+        retry_after_seconds: 1,
+    }
+}
+
+/// A publication step's failure before it is mapped to an HTTP answer.
+pub(super) enum RawPublicationError {
+    Rejected(crate::transcode::MediaResponsePublicationRejection),
+    TimedOut,
+}
+
+/// Run one buffered publication, and when serving authority alone refused
+/// it, wait read-only for the manager's resolution of that outage and run it
+/// once more from the top.
+///
+/// Each run is a whole new authorization: a fresh `.admit()` and every
+/// existing check of the exact owner and object. Nothing from the abandoned
+/// run is reused, so the second run is exactly a second request that arrived
+/// after the first was abandoned. The wait never spends or resets the outage
+/// budget, which `TranscodeManager::serving_fence_loop` owns; it ends at
+/// `deadline` or the outage's own expiry, whichever is first. At most one
+/// retry, and only once authority is actually held: a recovery that a new
+/// loss has already superseded is waited past rather than spent. A loss
+/// during the retry, an expired outage or a passed deadline answers
+/// `serving_fenced`. Every other refusal is mapped exactly as before.
+///
+/// Only buffered responses come here. A streamed body is already on the wire
+/// when it commits, so there is nothing left to serve again.
+pub(super) async fn with_authority_recovery<T, F, Fut>(
+    state: &AppState,
+    session: &str,
+    deadline: Instant,
+    mut run: F,
+) -> Result<T, ApiError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, RawPublicationError>>,
+{
+    let mut retried = false;
+    loop {
+        match run().await {
+            Ok(value) => return Ok(value),
+            Err(RawPublicationError::Rejected(
+                crate::transcode::MediaResponsePublicationRejection::AuthorityLost {
+                    admitted_generation,
+                },
+            )) => {
+                if retried {
+                    return Err(serving_fenced_error());
+                }
+                // Wait for the outage after `admitted_generation`, then for
+                // any that followed before this request got to run again: a
+                // recovery already superseded by a new loss is not one the
+                // retry may be spent on, since `.admit()` would refuse it.
+                let mut baseline = Some(admitted_generation);
+                while let Some(after) = baseline {
+                    match state
+                        .transcode
+                        .wait_for_outage_resolution(after, deadline)
+                        .await
+                    {
+                        crate::serving_fence::OutageWait::Recovered => {
+                            baseline = state.serving.authority().outage_baseline();
+                        }
+                        crate::serving_fence::OutageWait::Expired
+                        | crate::serving_fence::OutageWait::TimedOut => {
+                            return Err(serving_fenced_error())
+                        }
+                    }
+                }
+                retried = true;
+            }
+            Err(RawPublicationError::Rejected(rejection)) => {
+                return Err(response_publication_rejection_before(
+                    state, session, rejection, deadline,
+                )
+                .await)
+            }
+            Err(RawPublicationError::TimedOut) => return Err(response_publication_timeout()),
+        }
+    }
+}
+
+/// Authorize and commit one buffered response's bytes, waiting out at most
+/// one serving outage (see [`with_authority_recovery`]).
+pub(super) async fn authorize_and_commit_buffered(
+    state: &AppState,
+    session: &str,
+    owner: &crate::transcode::MediaResponseOwner,
+    publication: crate::transcode::MediaResponsePublication,
+    complete_object: bool,
+    deadline: Instant,
+) -> Result<(), ApiError> {
+    with_authority_recovery(state, session, deadline, || {
+        let publication = publication.clone();
+        async move {
+            fence::note_response_owner(owner);
+            let authorization = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                state.transcode.authorize_response_publication(
+                    session,
+                    owner,
+                    publication,
+                    deadline,
+                ),
+            )
+            .await
+            .map_err(|_| RawPublicationError::TimedOut)?
+            .map_err(RawPublicationError::Rejected)?;
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                state
+                    .transcode
+                    .commit_authorized_media(authorization, complete_object, deadline),
+            )
+            .await
+            .map_err(|_| RawPublicationError::TimedOut)?
+            .map_err(RawPublicationError::Rejected)
+        }
+    })
+    .await
 }
 
 pub(super) async fn response_publication_rejection_before(
@@ -838,15 +946,15 @@ pub(in crate::http) async fn complete_buffered_response_before(
     response: Response,
     deadline: Instant,
 ) -> Result<Response, ApiError> {
-    let authorization = Box::pin(authorize_response_publication(
+    Box::pin(authorize_and_commit_buffered(
         state,
         session,
         owner,
         publication,
+        complete_object,
         deadline,
     ))
     .await?;
-    commit_authorized_media(state, session, authorization, complete_object, deadline).await?;
     Ok(bound_admitted_media_body(response))
 }
 

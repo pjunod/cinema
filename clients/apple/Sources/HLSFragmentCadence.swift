@@ -182,6 +182,18 @@ enum HLSFragmentCadence {
     /// on it, and refuses redirects so a read never leaves the item's own
     /// media namespace.
     private final class ChunkedLoads: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            let response = ServerTrust.shared.disposition(for: challenge)
+            completionHandler(response.0, response.1)
+        }
+
+        func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            let response = ServerTrust.shared.disposition(for: challenge)
+            completionHandler(response.0, response.1)
+        }
+
         enum Event { case response(URLResponse), bytes(Data) }
         private let lock = NSLock()
         private var readers: [Int: AsyncThrowingStream<Event, Error>.Continuation] = [:]

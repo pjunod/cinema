@@ -33,7 +33,7 @@ jobs:
           fetch-depth: 0
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22.23.2"
+          node-version: "22.23.4"
       - name: Check index rows, release counters, names and Regression-Test fields
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -109,7 +109,8 @@ jobs:
           while IFS= read -r path; do
             case "$path" in
               crates/plurx-worker-control/*|verification/worker-control/*|\
-              crates/plurxd/src/library_work.rs|crates/plurxd/Cargo.toml|\
+              crates/plurxd/src/library_work.rs|crates/plurxd/src/library_work/env.rs|\
+              crates/plurxd/Cargo.toml|\
               Cargo.toml|Cargo.lock|rust-toolchain.toml|\
               scripts/check-worker-control|validation/worker_control_resume.py|\
               .github/workflows/main-fast-lane.yml)
@@ -182,9 +183,10 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Allows the 5-minute worker witness smoke, other package smokes, toolchain
-    # provisioning and preflight validation to finish with headroom.
-    timeout-minutes: 15
+    # A cold continuation can run the full unit set when older receipts cannot
+    # authenticate. History alone took seven minutes in run 6234; allow the
+    # remaining contracts and receipt publication to finish on a busy runner.
+    timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -210,7 +212,7 @@ jobs:
           printf '%s\n' "$plurx_python_dir/python/bin" >> "$GITHUB_PATH"
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22.23.2"
+          node-version: "22.23.4"
       - name: Restore attributable main Python successes
         id: receipts
         env:
@@ -367,7 +369,16 @@ jobs:
           apt-get -o Acquire::Retries=3 update
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
             build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
-            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
+            libgtk-4-dev libdbus-1-dev make nasm ninja-build xz-utils pkg-config python3
+          # Forgejo needs Node before checkout; use the patched upstream build.
+          node_tmp="$(mktemp -d)"
+          trap 'rm -rf "$node_tmp"' EXIT
+          curl --fail --silent --show-error --location --retry 3 \
+            https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz \
+            -o "$node_tmp/node.tar.xz"
+          echo "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  $node_tmp/node.tar.xz" | sha256sum --check --strict
+          tar -xJf "$node_tmp/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
+          node --version | grep -Fx 'v22.23.4'
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -422,7 +433,7 @@ jobs:
           fetch-depth: 0
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
       - name: Parse every shipped JavaScript surface
         run: |
           scripts/js-check
@@ -437,10 +448,11 @@ jobs:
       - name: Type-check the web shell against its baseline
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          node tests/web/jsconfig-generated.test.js
+          python3 -m validation.web_unit_receipts --command jsconfig-generated
           scripts/web-types --base "$PR_BASE_SHA"
-          node tests/web/player-typedef.test.js
+          python3 -m validation.web_unit_receipts --command player-typedef
       # Every Node web and playback test, the same list `make web-check` runs
       # minus its two real-browser scripts. Until 2026-10-04 a pull request ran
       # two of them here and the rest ran only when someone typed make; a stale
@@ -448,7 +460,16 @@ jobs:
       - name: Run every Node web and playback test
         env:
           TMPDIR: /tmp
-        run: make web-unit-check
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.web_unit_receipts --command suite
+      - name: Preserve original web unit adoption provenance
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: web-unit-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .main-preflight-receipts/web-unit
+          if-no-files-found: error
+          retention-days: 90
 
   apple_compile:
     name: Apple compile and native TV navigation
@@ -457,9 +478,8 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
-    concurrency:
-      group: plurx-apple-silicon-heavy
-      cancel-in-progress: false
+    # The dedicated 32 GiB M4 runner admits two independent fast-lane jobs.
+    # Each owns its checkout, DerivedData, simulator UUID and evidence paths.
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -516,10 +536,16 @@ jobs:
       - name: Compile iOS and tvOS without running simulator tests
         if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         run: make apple-build
+      - name: Reauthenticate original native cases before executing the pending selection
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.native_receipts --verify-tv-plan
       - name: Require native TV navigation journeys
         if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+          PLURX_TV_NAVIGATION_PLAN: .main-preflight-receipts/native/receipt.json
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
         if: always() && needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'

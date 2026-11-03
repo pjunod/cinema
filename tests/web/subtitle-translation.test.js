@@ -561,3 +561,37 @@ test('first unedited setup follows saved Small model or Base hint without changi
  s.setup.edit=0;s.setup.choicesLoaded=false;s.setup.saved.model_id=null;s.fields['[data-translation-setting-profile]'].value='';h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,base.profile_id);
  s.setup.catalog.default_profile_id='8'.repeat(64);assert.throws(()=>h.ctx.translationSetupChoices(s.setup),/Invalid preferred/);assert.equal(s.fields['[data-translation-setting-profile]'].value,base.profile_id);
 });
+
+
+test('stopped Create discovers its exact operation without demand until explicit Resume',async()=>{
+ const h=harness();h.state.operation=null;h.state.assetId=null;
+ h.ctx.respond=(url,init)=>init.method==='POST'?response({version:1,code:'operation_stopped',message:'Stopped',operation_id:OP,server_now_ms:100000},409):response(operation(h,{operation_id:OP,operation_epoch:'2',view_revision:'75',state:'stopped',asset_id:null,content_revision:null}));
+ await h.ctx.translationStart(h.state);
+ assert.equal(h.state.operation.operation_id,OP);assert.equal(h.state.operation.state,'stopped');assert.equal(h.state.assetId,null);assert.equal(h.state.demand,null);assert.equal(h.controls['[data-translation-resume]'].hidden,false);
+ assert.equal(h.calls.length,2);assert.equal(h.calls.filter(call=>call.init.method==='POST').length,1);assert.match(h.calls[1].url,/operations\//);
+ h.ctx.translationPoll=async()=>{};h.ctx.respond=(_url,init)=>{const body=JSON.parse(init.body);assert.equal(body.expected_operation_epoch,'2');assert.equal(body.expected_view_revision,'75');assert.equal(body.expected_state,'stopped');return response({version:1,outcome:'resumed',operation_id:OP,operation_epoch:'3',view_revision:'76',state:'checking_source',asset_id:null,demand_id:DEMAND,demand_generation:'1',server_now_ms:100000});};
+ await h.ctx.translationResume(h.state);assert.equal(h.calls.filter(call=>call.init.method==='POST').length,2);assert.match(h.calls.at(-1).url,/retry$/);
+});
+
+test('stopped Create discovery refuses mismatched observations and stale selection',async()=>{
+ for(const fields of [{file_id:'42'},{source_size:'42'},{profile_id:A},{audio_index:9},{spoken_language:'ja'},{model_sha256:A},{timeline_contract:'other'}]){
+  const h=harness();h.state.operation=null;h.state.assetId=null;
+  h.ctx.respond=(_url,init)=>init.method==='POST'?response({code:'operation_stopped',message:'Stopped',operation_id:OP,server_now_ms:100000},409):response(operation(h,{operation_id:OP,operation_epoch:'2',view_revision:'75',state:'stopped',asset_id:null,...fields}));
+  await h.ctx.translationStart(h.state);assert.equal(h.state.operation,null);assert.equal(h.calls.filter(call=>call.init.method==='POST').length,1);
+ }
+ const h=harness();h.state.operation=null;h.state.assetId=null;let finish;
+ h.ctx.respond=(_url,init)=>init.method==='POST'?response({code:'operation_stopped',message:'Stopped',operation_id:OP,server_now_ms:100000},409):new Promise(resolve=>finish=resolve);
+ const pending=h.ctx.translationStart(h.state);await settle();h.controls['[data-translation-language]'].value='ja';finish(response(operation(h,{operation_id:OP,operation_epoch:'2',view_revision:'75',state:'stopped',asset_id:null})));await pending;
+ assert.equal(h.state.operation,null);assert.equal(h.calls.filter(call=>call.init.method==='POST').length,1);
+});
+
+
+test('current nonretryable range failure preserves coverage and relevant active progress',()=>{
+ const h=harness();h.state.profile.window={core_ms:30000};h.state.coverage=[];h.state.demand={id:DEMAND};h.video.currentTime=65;
+ h.state.operation.failed_ranges=[{core_index:2,range_revision:'1',reason:'source_clock_unsupported',retryable:false,attempts:1}];
+ h.ctx.translationRenderStatus(h.state);assert.match(h.controls['[data-translation-status]'].textContent,/timeline.*not supported/);assert.equal(h.controls['[data-translation-failures]'].children.length,1);assert.notEqual(h.controls['[data-translation-failures]'].children[0].tagName,'BUTTON');
+ h.state.operation.active_job={state:'running',core_index:2};h.ctx.translationRenderStatus(h.state);assert.match(h.controls['[data-translation-status]'].textContent,/Processing this part/);
+ h.state.operation.active_job={state:'running',core_index:3};h.ctx.translationRenderStatus(h.state);assert.match(h.controls['[data-translation-status]'].textContent,/timeline.*not supported/);
+ h.state.coverage=[{start_ms:60000,end_ms:90000}];h.ctx.translationRenderStatus(h.state);assert.match(h.controls['[data-translation-status]'].textContent,/captions available/);
+ h.state.coverage=[];h.video.currentTime=5;h.ctx.translationRenderStatus(h.state);assert.match(h.controls['[data-translation-status]'].textContent,/Processing this part/);
+});

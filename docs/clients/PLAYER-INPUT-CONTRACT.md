@@ -350,6 +350,12 @@ read a row. A paused film with no chrome is a black frame with no
 affordance, so the hide runs only while playing. The preview ladder replaces
 the ±30 s vertical seek with something a held key discovers by itself.
 
+On tvOS, holding a directional click on the focused timeline starts repeating
+previews after 350 ms, then advances every 150 ms through the same acceleration
+ladder. Release stops the preview; Select commits and Back cancels. The hold
+owner retires when focus leaves the timeline, a different command arrives, or
+the app becomes inactive. Native move repeats cannot double-count timer ticks.
+
 ---
 
 ## 4a. Live TV — the same rulings on a surface with no timeline

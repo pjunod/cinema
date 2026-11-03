@@ -620,6 +620,9 @@ impl RollingProducerOperationalSnapshot {
             completion_attempt: _,
             completion_final_segment: _,
             completion_final_end_ms: _,
+            // Copy values: a retained decision and a static failure kind.
+            failed_attempt_decision: _,
+            terminal_prepublication_failure: _,
         } = self;
         add(
             string(presentation_contract_fingerprint),

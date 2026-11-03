@@ -27,6 +27,18 @@ make validate-full     # include browser, client, and packaging checks
 make validate-nightly  # exhaustive playback, recovery, bounds, and packaging
 ```
 
+The nightly deep-validation and mutation jobs use `scripts/release-readiness`
+to build the tested commit's CI tooling on the same media package selected
+by release publication. Their host FFmpeg is irrelevant. Deep validation
+retains host-loopback access and task-owned scratch paths for sibling Docker
+tests, plus the explicitly configured Live TV device/tuner settings. Missing
+hardware prerequisites still fail the strict profile. Mutation setup failures
+fail the job; mutation outcomes remain report-only, with their summary and
+evidence under `target/mutants`. Both jobs select bounded Incus guests on
+non-voter hosts and limit the test container to three CPUs and 8 GiB without
+swap. Host-network Live TV fixtures retain only the low-port bind capability
+when dropping to the checkout owner.
+
 Use `make validate-staged` during ordinary work. Use `make validate` when the
 working tree is complicated or path selection itself is in doubt. Use
 `make validate-full` before a risky merge or release; it can take longer and
@@ -484,6 +496,15 @@ and the plurxd side of it is #386. Before this pin, no CI job had ever run
 ffmpeg 8; the gate was green by accident of whichever image `ubuntu-latest`
 resolved to that week, and a promotion past 24.04 would have turned `main` red
 in one silent step with no diff to blame.
+
+Weekly release readiness builds the candidate's CI tooling on the media
+stage selected by release publication and runs the strict CI catalog by the
+resulting immutable image ID. For amd64 sources with the audited package
+export, it builds that export and inherits `runtime-assets-dolby-amd64`;
+otherwise it inherits `runtime-assets`. The production Dockerfile is unchanged.
+The audited runtime's system ELF hashes must still match after adding CI tools.
+It checks both the daemon's explicit FFmpeg/ffprobe paths and bare shell resolution before executing any checks;
+a host's installed FFmpeg is never used as release-readiness evidence.
 
 The nightly `ffmpeg8-pacing` job remains a separate capability contract on
 Ubuntu 26.04's distro ffmpeg 8. It is not a substitute for the full-sweep

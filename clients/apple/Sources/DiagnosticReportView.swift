@@ -483,7 +483,7 @@ struct DiagnosticReportView: View {
     private func incidentDescription(_ draft: DiagnosticStore.Draft) -> some View {
         Group {
             Text("Report " + draft.id).font(.caption)
-                        Picker("Category", selection: Binding(get: { reports.draft?.category ?? "other" }, set: { reports.stopLocalExport(); reports.draft?.category = $0 })) {
+                        SettingsPicker("Category", value: ["playback": "Playback", "connection": "Connection / sign-in", "interface": "Interface / interrupted run", "other": "Other"][draft.category] ?? "Other", selection: Binding(get: { reports.draft?.category ?? "other" }, set: { reports.stopLocalExport(); reports.draft?.category = $0 })) {
                             Text("Playback").tag("playback"); Text("Connection / sign-in").tag("connection"); Text("Interface / interrupted run").tag("interface"); Text("Other").tag("other")
                         }.disabled(draft.consented || reports.busy)
                         #if os(iOS)

@@ -211,13 +211,29 @@ pub(super) async fn source_decision(
         force: input.force,
         ..Default::default()
     };
-    let decision = stream::decision_for_source_file(state, snapshot.file, q).await?;
+    let decision = stream::decision_for_source_file(state, snapshot.file, q)
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(
+                phase = "source_plan",
+                file_id = target.file_id.as_str(),
+                code = error.code().unwrap_or("sharing_source_plan_failed"),
+                "shared playback decision failed"
+            );
+        })?;
     authority.still_current(state, headers, &target).await?;
     shared_library::source_file_json(
         authority.grant,
         &target,
-        json!({"protocol":1,"reference":target,"decision":decision}),
+        json!({"protocol":1,"reference":target,"decision":source_decision_payload(decision)}),
     )
+}
+
+pub(super) fn source_decision_payload(mut decision: stream::DecisionResponse) -> serde_json::Value {
+    // Complete-output measurements are public HTTP advisories backed by this
+    // process's retained artifacts. They are not part of the private peer wire.
+    decision.measured_candidate_outputs = None;
+    json!(decision)
 }
 
 #[derive(Deserialize)]
@@ -293,17 +309,26 @@ async fn viewer_decision(
         .sharing
         .read_file_decision(&state, user.id, &reference, &input)
         .await
-        .map_err(|_| refused())?;
+        .map_err(|error| {
+            tracing::warn!(phase = "upstream", %import_id, file_id = reference.file_id.as_str(), code = super::sharing::peer_error_code(&error), "shared playback decision failed");
+            refused()
+        })?;
     let file = reference
         .file_id
         .as_str()
         .parse::<i64>()
         .map_err(|_| invalid())?;
     let decoded = super::sharing_decision_decode::DecodedDecision::parse(reply.decision, file)
-        .map_err(|_| refused())?;
+        .map_err(|_| {
+            tracing::warn!(phase = "decode", %import_id, file_id = reference.file_id.as_str(), code = "sharing_decision_shape_mismatch", "shared playback decision failed");
+            refused()
+        })?;
     let projected =
         super::sharing_playback_wire::project_decoded_decision(decoded, &reference, &key)
-            .map_err(|_| refused())?;
+            .map_err(|_| {
+                tracing::warn!(phase = "project", %import_id, file_id = reference.file_id.as_str(), code = "sharing_decision_projection_failed", "shared playback decision failed");
+                refused()
+            })?;
     shared_library::receiver_file_json(
         &state,
         &token,

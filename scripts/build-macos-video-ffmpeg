@@ -310,7 +310,7 @@ def attach_source_parser(package, stage, evidence):
         raise ValueError("source parser package must use explicit regular artifacts")
     manifest = json.loads(manifest_path.read_text())
     if (manifest.get("source_sha256") != SOURCE_SHA256 or manifest.get("source_commit") != COMMIT
-            or manifest.get("parser_abi") != "plurx-source-wasi-p1-v1-wasmtime-49.0.2"):
+            or manifest.get("parser_abi") != "plurx-source-wasi-p1-v1-wasmtime-50.0.0"):
         raise ValueError("source parser package source/ABI does not match pinned Jellyfin")
     actual = digest(artifact)
     if (actual != manifest.get("module_sha256") or artifact.stat().st_size != manifest.get("module_bytes")

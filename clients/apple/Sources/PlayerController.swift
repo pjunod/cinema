@@ -107,7 +107,7 @@ final class PlayerController: ObservableObject {
 
     init(
         player: AVPlayer = AVPlayer(),
-        makePlayerItem: @escaping @MainActor (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) },
+        makePlayerItem: @escaping @MainActor (URL) -> AVPlayerItem = { ServerTrust.playerItem(url: $0) },
         requestPlaybackDecision: (@MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps))? = nil,
         mediaSelectionPreparation: MediaSelectionPreparation = MediaSelectionPreparation(),
         itemPreparation: ItemPreparation = ItemPreparation(),
@@ -1096,7 +1096,7 @@ final class PlayerController: ObservableObject {
         let waitMs = Int(min(remaining, 250))
         return await withTaskGroup(of: Bool.self) { group in
             group.addTask {
-                guard let (_, response) = try? await URLSession.shared.data(for: frozenRequest),
+                guard let (_, response) = try? await ServerTrust.session.data(for: frozenRequest),
                       let response = response as? HTTPURLResponse,
                       ProcessInfo.processInfo.systemUptime < deadline,
                       autoNegativeLinkAcknowledgement(receipt: receipt,
@@ -1935,7 +1935,7 @@ final class PlayerController: ObservableObject {
         let generation = openGeneration
         let requestedRecipeRevision = recipeRevision.desired
         let attemptId = UUID().uuidString
-        let asset = AVURLAsset(url: url)
+        let asset = ServerTrust.asset(url: url)
         guard canPlayOffline(asset) else {
             fail(APIError.transport("Download incomplete"))
             return
@@ -3620,7 +3620,8 @@ final class PlayerController: ObservableObject {
         if let sessionId {
             self.sessionId = nil
             let model = model
-            Task { await model?.endHlsSession(sessionId) }
+            let releaseHlsSession = self.releaseHlsSession
+            Task { if let model { await releaseHlsSession(model, sessionId) } }
         }
         let wasRemoteOwner = RemoteCommandOwner.shared.isCurrent(remoteOwnerToken)
         removeRemoteCommands()
@@ -7067,7 +7068,10 @@ final class PlayerController: ObservableObject {
         let detail = PlayerItemFailure.classify(
             fatal: fatalError,
             item: itemError,
-            log: item.errorLog()?.events.map(PlayerItemFailure.LogEntry.init) ?? [],
+            log: item.errorLog()?.events.map { event in
+                PlayerItemFailure.LogEntry(uri: Self.originalResourceURI(event.uri), domain: event.errorDomain,
+                                           status: event.errorStatusCode, comment: event.errorComment)
+            } ?? [],
             failedURI: Self.failedResourceURI(item: item, error: fatalError ?? itemError)
         )
         lastItemFailureDetail = detail.map { (item, $0) }
@@ -7276,7 +7280,7 @@ final class PlayerController: ObservableObject {
         let executedSeekGeneration = seekState.generation
         let executedSeekTarget = seekState.pendingMs
         isChangingStream = true
-        let item = AVPlayerItem(url: url)
+        let item = ServerTrust.playerItem(url: url)
         Self.configureBuffering(item, growingHLS: sessionId != nil && !isVOD)
         installSeekVideoOutput(on: item)
         #if os(iOS)
@@ -7367,14 +7371,16 @@ final class PlayerController: ObservableObject {
         return path
     }
 
+    private static func originalResourceURI(_ raw: String?) -> String? {
+        guard let raw, let url = URL(string: raw) else { return raw }
+        return (PlayerTrustProxy.shared.originalURL(for: url) ?? url).absoluteString
+    }
+
     private static func failedResourceURI(item: AVPlayerItem, error: NSError?) -> String? {
-        if let uri = error?.userInfo[NSURLErrorFailingURLStringErrorKey] as? String {
-            return uri
-        }
-        if let url = error?.userInfo[NSURLErrorFailingURLErrorKey] as? URL {
-            return url.absoluteString
-        }
-        return (item.asset as? AVURLAsset)?.url.absoluteString
+        let raw = (error?.userInfo[NSURLErrorFailingURLStringErrorKey] as? String)
+            ?? (error?.userInfo[NSURLErrorFailingURLErrorKey] as? URL)?.absoluteString
+            ?? (item.asset as? AVURLAsset)?.url.absoluteString
+        return originalResourceURI(raw)
     }
 
     private func reportPlaybackFailure(
@@ -7395,7 +7401,10 @@ final class PlayerController: ObservableObject {
             : PlayerItemFailure.classify(
                 fatal: nil,
                 item: itemError,
-                log: item.errorLog()?.events.map(PlayerItemFailure.LogEntry.init) ?? [],
+                log: item.errorLog()?.events.map { event in
+                    PlayerItemFailure.LogEntry(uri: Self.originalResourceURI(event.uri), domain: event.errorDomain,
+                                               status: event.errorStatusCode, comment: event.errorComment)
+                } ?? [],
                 failedURI: Self.failedResourceURI(item: item, error: itemError)
             )
         let failure = detail?.error
@@ -7624,7 +7633,7 @@ final class PlayerController: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         Session.shared.authorize(&request)
         Task {
-            _ = try? await URLSession.shared.data(for: request)
+            _ = try? await ServerTrust.session.data(for: request)
         }
     }
 
@@ -10023,7 +10032,7 @@ extension PlayerController: PreparedSuccessorHost {
               let url = preparedAcquisitionURL(actionURL, filmPositionMs: anchors.acquisitionFilmMs)
         else { return false }
         preparedOverlapStartedAtMs = Int(ProcessInfo.processInfo.systemUptime * 1_000)
-        let item = AVPlayerItem(url: url)
+        let item = ServerTrust.playerItem(url: url)
         Self.configureBuffering(item, growingHLS: true)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
         item.add(output)

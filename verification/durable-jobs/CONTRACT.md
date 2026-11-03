@@ -4,7 +4,8 @@
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
 `be610d6472b8717bc034e45404141ef0854c4bf2` (adaptive boundaries),
 `7d2d4a9c777d42f6f3cb28db8e2a7d5be6f46a37` (title-analysis delta),
-`c3d764a01` (subtitle admission delta) · **Scope:** bound `library_scan` and
+`c3d764a01` (subtitle admission delta), main `5ac9d8f25` combined with
+repair `59c648db` (scoped audits below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -13,6 +14,36 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## Effort/main integration — source correspondence on 2026-11-02
+
+Claude (claude-opus-5-5) merged main `7ea74370b` into effort `ca95fde57` on
+task branch `claude/adaptive-integrate-main`. Main replaces the inline library
+worker with the shared `plurx_worker_control::library_driver` and its
+`library_work/env.rs` environment; its re-pointed rows (`env.rs`,
+`library_driver.rs`, `publication.rs`) are kept. The effort's original
+admission ownership is ported into that environment: it holds the same
+`Arc<FragmentAdmission>`, and the work future runs inside
+`with_original_work_keeper`, so native and filesystem workers keep that
+admission until they return. The effort's `finish_original_controller` anchor
+and the `drop.admission` last-alias gap stay authoritative; main's
+move-consuming `finish(mut self)` anchor does not exist in the merged source.
+Two durable-job citation rows into the removed inline controller are dropped
+with main, because their anchors no longer exist.
+
+`bounded.rs` keeps the effort's original pipe keeper and carries main's
+selected-stderr reader through that same owner. `Cargo.lock` is main's lock
+plus the effort's plurx-core `wasmtime`/`wat` edges; plurx-core's macOS
+Wasmtime pin follows main to `=50.0.0`. The other refreshed pins are files
+changed on both sides that merged without a textual conflict (Store queue,
+Hiqlite, SQLite, conformance parent, membership, `state.rs`, `main.rs`, manager
+construction). `state.rs` also gains main's sharing log buffer in its
+test-only store projection.
+
+Only whole-file pins move. Every exact anchor is unique; models,
+configurations, properties, bounds, validators and earlier review identities
+are unchanged. Offline `check-mapping` passes for all three packages. No
+model, behavioral or qualification result is claimed.
 
 ## Composed main/effort source correspondence — 2026-10-28
 
@@ -67,6 +98,122 @@ configurations, bounds, fairness premises, action/check/test inventories and
 validators do not change. This correspondence audit runs no model or
 behavioral tests and grants no native closure, progress or new qualification.
 
+## Local main integration — source correspondence on 2026-10-29
+
+The repair source `59c648db` is combined locally with main `5ac9d8f25`.
+Both parent audits below retain their historical source identities. Incoming
+Cargo.lock and `main.rs` pins follow the reviewed macOS runtime update and
+bounded test-only fork stress. The merged Store and caption fixtures retain
+both parents' closed shape, marker, retained-data and atomic refusal checks,
+including schema 121 with managed v3. Their live whole-file hashes follow the
+resolved source; selected formal-publication and library-worker anchors remain.
+
+This reconciliation changes no model, configuration, property, fairness
+premise, validator or historical qualification receipt and supplies no new
+runtime or TLC evidence. The frozen `59c648db` measurement and this integration
+candidate are separate source identities; neither substitutes for the other's
+required validation.
+
+## Test-only schema expectation — scoped source review on 2026-10-29
+
+Against incoming main `10f45ae5f2619ab3e807b5576bf6ffb39ade6e86`, the
+repair changes only the upgraded-version expectation in
+[the translation schema tests](../../crates/plurx-core/src/store/subtitle_translation_schema.rs)
+from 119 to 120. The v115 starting fixture, retained handoff assertions and
+production shape recognizer and upgrade guards are unchanged. One whole-file
+row pin follows those inspected bytes; its exact anchor remains unique.
+
+Codex agent `coverage_review` inspected the source and authored this mapping
+refresh; parent and independent Codex diagnose_core_failures metadata review found no issues. Selected library-worker
+transitions, model/configuration/toolchain bytes, bounds, properties, scope
+and historical source receipts remain unchanged. This review ran no builds,
+tests or TLC and supplies no new execution or qualification evidence.
+
+## Combined-source integration — scoped author audit on 2026-10-29
+
+The repair is combined with main `66a33d723096ee931ce2e05e860f51f8f3671513`.
+Retain its reviewed resource-admission v2 schema and mapping inputs. The
+historical rewind now validates schema 119 with managed v1, or schema 120
+with managed v2, before any mutation; crossed pairs are refused atomically.
+The conformance parent retains the selected `formal_publication` module and
+combines the independently reviewed strict caption/continuity teardown with
+main's exact managed shape/data planner. Relative to this main, `state.rs`
+adds only the test-module declaration; mapped production bodies are unchanged.
+
+Only affected whole-file pins follow the combined source; anchors, models,
+configurations, properties, bounds and historical source receipts retain their
+identities. Independent Codex agent `coverage_review` reviewed the merged source pins, both parents' anchors and the combined ownership census, finding no blockers. That source review ran no builds, tests or TLC. This is a
+source correspondence audit and supplies no new runtime or TLC qualification.
+
+## Unit-coverage repair — scoped author audit on 2026-10-28
+
+Codex agent `/root/diagnose_core_failures` compared immutable base
+`24d1bad72bed328b6de9a568a3537f375f9c206f` with runtime/test source
+`d03c8abdf17dea7147e112a32fec274834151fca`. The base file hashes match the
+previous pins. This agent authored the core fixture repairs; this audit is
+source-author correspondence, not independent review of that implementation.
+Independent Codex agent `coverage_review` reviewed the implementation diff and this metadata disposition on 2026-10-28, finding no blockers. That review ran no builds, tests or TLC checks and supplies no new qualification claim.
+
+[State](../../crates/plurxd/src/state.rs) adds only a `cfg(test)` backfill
+module declaration; the five mapped production callers are byte-identical.
+The [Store parent](../../crates/plurx-core/tests/store_contract.rs) registers
+four existing caption methods, corrects the method inventory, and validates
+exact empty caption/handoff extensions before historical fixture teardown.
+Its `formal_publication` registration and selected examples are unchanged.
+The selected library claim, binding, renewal, cancellation, publication and
+cleanup transitions retain their existing correspondence. Caption methods
+and historical schema teardown remain outside this finite model.
+
+Six whole-file row pins follow the inspected source; exact anchors remain
+unique. Model/configuration/toolchain bytes, bounds, properties, scope,
+validators and historical source-anchor snapshots are unchanged. This audit
+supplies no new runtime or TLC execution, refinement theorem, liveness,
+physical acceptance or qualification. Historical receipts retain their
+recorded source identities; fresh affected execution is separate evidence.
+
+## macOS parser runtime — scoped lock refresh on 2026-10-29
+
+Wasmtime 50.0.0 includes the [upstream Mach receiver fix](https://github.com/bytecodealliance/wasmtime/pull/14414).
+The macOS-only runtime and required Cranelift dependencies change; native traps,
+epoch deadlines, memory/stack limits and import restrictions remain. Tokio
+1.53.1 and Hiqlite 0.14.0 remain pinned. Refresh only the live Cargo.lock
+whole-file hash. Selected library-worker behavior, historical anchors, models,
+configurations, toolchain and qualification identities are unchanged. This
+source correspondence adds no formal execution or progress claim.
+
+## Current validation fixtures — scoped refresh on 2026-10-29
+
+Scoped review on 2026-10-29 of conformance parent registration: the exact Store inventory records four existing text-caption methods with new typed dispatch/absence/refusal coverage on all backends. Formal-publication module registration and selected library positive examples are unchanged. Positive caption publication on Hiqlite is not claimed. Refresh only live M2 parent correspondence; historical anchors, model/configuration and qualification identities remain unchanged; source review is not execution evidence.
+
+The final replicated fixture review also checks the exact current tail and marker
+inventories before one child-first mutation transaction. Its refusal matrix and
+ordinary-bootstrap round trip are runtime checks, separate from this correspondence
+record. The selected formal-publication examples and historical identities stay
+unchanged.
+
+## Historical schema fixtures — scoped refresh on 2026-10-29
+
+Compared with `d5cd473536`, the caption schema source changes only the
+[v115 migration test](../../crates/plurx-core/src/store/subtitle_translation_schema.rs):
+it expects the current composed schema and verifies the managed v2 resources.
+The production recognizer and migration SQL remain unchanged. Refresh its one
+whole-file pin while retaining the exact anchor and historical source anchors.
+
+The [SQLite fixture rewind](../../crates/plurx-core/tests/support/queue_fixture.rs)
+now validates the exact empty v120 text/caption tail, continuity layout and
+managed v2 marker before planning any mutation. Unknown objects, marker drift
+and retained work refuse without changing DDL, versions or data. Historical
+SQLite layouts retain their legacy translation witness; the published
+replicated fixture witnesses remain separate. This closes the SQLite v115-only
+limitation recorded in the earlier scoped review, without claiming a general
+downgrade or complete replicated-schema qualification.
+
+The consistent-read census records existing committed-authority reads and keeps
+its unannotated ceiling at 237. No selected library claim, publication,
+reservation, lease or progress behavior changes. Models, configurations,
+properties and qualification identities retain their bytes; fresh mapping and
+smoke results are separate execution evidence.
+
 ## Managed-v2 fixture follow-through — scoped refresh on 2026-10-28
 
 The test-only follow-through on `48e2acc2a` restores the current managed marker
@@ -74,8 +221,8 @@ as v2 in the owned replicated refusal fixtures. Both backend rewind helpers use
 the canonical published v1/v2 DDL with a matching marker and reject populated,
 partial or drifted managed extensions before mutation. Historical v1 authority
 remains exact; a v1 marker cannot certify the v2 view. The v120 downgrade
-inventory entry names the new managed marker definition. The separate baseline
-handoff rewind still supports v115 only and its v116–v119 inventory gap remains;
+inventory entry names the new managed marker definition. At that historical reviewed snapshot, the separate baseline
+handoff rewind supported v115 only and its v116–v119 inventory gap remained;
 these focused managed-fixture checks do not qualify a complete current-schema
 historical downgrade.
 
@@ -84,6 +231,26 @@ Only the whole-file pin for the conformance parent module changes. Its
 selected conformance module. No production queue, reservation, lease, binding or
 publication transition changes. Model/configuration/property/toolchain inputs
 remain unchanged; this source review supplies no new execution qualification.
+
+## Artifact-only text translation — scoped source review on 2026-10-28
+
+Managed v3 / SQLite v121 exempts only the new closed
+`subtitle_text_translate_artifact` job kind. Its worker reads pinned, bounded,
+materialized VTT bytes, verifies the original input SHA, and retains source,
+model, configuration, administrative and publication authority checks. A miss
+fails explicitly; Retry reacquires input before enqueue. Legacy
+`subtitle_text_translate` remains source-fenced because old workers can extract
+media. Old candidate-kind filters cannot dispatch the new kind; queued and
+running legacy jobs are not rewritten. The upgrade requires exact v2 DDL and
+marker, commits atomically, and preserves existing owners and reservations.
+
+The selected `library_scan` / `metadata_refresh` source-domain and provider
+rows, claim identity, renewal, binding, publication and settlement remain
+unchanged, as do the two-reader and one-speculative-reader limits. The v3 view
+and upgrade guards are mapped correspondence inputs. Caption inference,
+rolling upgrades and input acquisition remain outside this finite model;
+model/configuration/property/bound/toolchain bytes are unchanged. This source
+review supplies no new runtime, formal-execution or qualification evidence.
 
 ## Subtitle resource admission — scoped refresh on 2026-10-28
 

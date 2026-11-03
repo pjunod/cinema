@@ -124,7 +124,8 @@ os = "Linux"
 arch = "X64"
 labels = ["lab", "incus", "ubuntu-24.04", "android-kvm"]
 
-# --- lab5 (`asus` in the ansible inventory): baremetal, non-voter ----------
+# --- lab5 (`asus` in the ansible inventory): baremetal, active voter -------
+# Do not place uncapped SDK builds here; nightly media jobs use lab1/lab2 VMs.
 [[runners]]
 name = "gha-lab5-general-01"
 host = "lab5"
@@ -177,37 +178,19 @@ labels = ["lab", "android-kvm", "baremetal", "ubuntu-26.04"]
 
 # --- lab6, lab3, lab4: Incus guest hosts, production plurx voters -------------
 [[runners]]
-name = "gha-lab6-general-01"
-host = "lab6"
-os = "Linux"
-arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
-
-[[runners]]
 name = "gha-lab6-general-02"
 host = "lab6"
 os = "Linux"
 arch = "X64"
 # Reserved diagnostic VM. No general/high-cpu label: coverage never occupies
 # a merge slot. One daemon per 8 GiB guest; duplicate services are disabled.
-labels = ["lab", "incus", "ubuntu-24.04", "ci-coverage", "ffmpeg-6"]
+labels = ["lab", "incus", "ubuntu-24.04", "ci-coverage"]
 
 # lab3 runners are retired (2026-10-11): observability and production share
 # its disk. boot.autostart=false and no recovery allowlist entry keep them off.
 
-[[runners]]
-name = "gha-lab4-general-01"
-host = "lab4"
-os = "Linux"
-arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
-
-[[runners]]
-name = "gha-lab4-general-02"
-host = "lab4"
-os = "Linux"
-arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
+# The former lab6 general and lab4 guests are retired; recovery must not
+# recreate the obsolete FFmpeg capability. The diagnostic guest remains.
 
 # --- media1: baremetal, production plurx voter -------------------------------
 [[runners]]
@@ -253,7 +236,7 @@ name = "gha-maca-apple-01"
 host = "maca"
 os = "macOS"
 arch = "ARM64"
-labels = ["lab", "apple", "xcode-27", "primary"]
+labels = ["lab", "apple", "xcode-27", "primary", "xcode-27.2"]
 
 [[runners]]
 name = "gha-macb-apple-01"
