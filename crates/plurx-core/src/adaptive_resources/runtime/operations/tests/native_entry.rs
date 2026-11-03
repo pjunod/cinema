@@ -183,3 +183,31 @@ async fn expired_original_continuous_cutoff_closes_native_entry_and_keeps_the_ch
     entered.await.expect("released latch");
     runtime.drain().expect("drain journal owner");
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn roster_hiccup_keeps_an_accepted_continuous_cutoff_open_at_native_entry() {
+    let root = tempfile::tempdir().expect("durable TMPDIR");
+    let runtime = runtime(root.path());
+    let owner = prepare(&runtime, vec![plan()], deadline()).expect("one role prepare");
+    runtime
+        .resolve_preparation(&owner, deadline())
+        .await
+        .expect("durable role preparation");
+    let binding = owner.state.lock().await.roles[0].binding;
+    let clock = Arc::new(crate::cluster::clock::ClusterClockGuard::new(false));
+    let original = clock
+        .capture_continuous()
+        .expect("actual Linux clock")
+        .deadline_after(std::time::Duration::from_secs(5))
+        .expect("original live cutoff");
+    // A roster read timeout moves cluster admission evidence only. The
+    // accepted cutoff closes on local evidence, so entry still proceeds.
+    clock.roster_failed();
+    let (enter, entered) = oneshot::channel();
+    runtime
+        .release_native_entry(binding, Some(&original), enter)
+        .expect("a cluster hiccup cannot close an accepted cutoff");
+    entered.await.expect("released latch");
+    runtime.drain().expect("drain journal owner");
+}

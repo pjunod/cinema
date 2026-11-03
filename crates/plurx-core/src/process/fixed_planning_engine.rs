@@ -799,7 +799,7 @@ async fn run_original_command(
 ) -> Result<ClosedCommand, FixedEngineNativeFailure> {
     if close_operation_id.is_nil()
         || Instant::now() >= deadline
-        || continuous.is_some_and(|limit| limit.remaining().is_err())
+        || continuous.is_some_and(|limit| limit.entry_remaining().is_err())
     {
         return Err(FixedEngineNativeFailure::at(
             io::Error::new(
@@ -850,7 +850,7 @@ async fn run_original_command(
             Ok(())
         });
     }
-    if continuous.is_some_and(|limit| limit.remaining().is_err()) {
+    if continuous.is_some_and(|limit| limit.entry_remaining().is_err()) {
         return Err(FixedEngineNativeFailure::at(
             io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -1094,7 +1094,7 @@ pub(crate) async fn collect_fixed_engine_with_continuous(
 ) -> Result<FixedEngineNativeCompletion, FixedEngineNativeFailure> {
     if continuous
         .as_ref()
-        .is_some_and(|limit| limit.remaining().is_err())
+        .is_some_and(|limit| limit.entry_remaining().is_err())
     {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,

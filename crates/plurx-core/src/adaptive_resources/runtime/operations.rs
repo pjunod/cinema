@@ -166,7 +166,7 @@ struct OwnedRole {
 pub(in crate::adaptive_resources::runtime) fn continuous_window_closed(
     continuous: Option<&crate::cluster::clock::ContinuousDeadline>,
 ) -> bool {
-    continuous.is_some_and(|limit| limit.remaining().is_err())
+    continuous.is_some_and(|limit| limit.entry_remaining().is_err())
 }
 
 /// The local entry deadline or the original continuous cutoff, whichever

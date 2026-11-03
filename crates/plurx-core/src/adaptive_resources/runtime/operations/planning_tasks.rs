@@ -310,7 +310,7 @@ async fn original_probe_task(
         if input
             .continuous_entry_deadline
             .as_ref()
-            .is_some_and(|limit| limit.remaining().is_err())
+            .is_some_and(|limit| limit.entry_remaining().is_err())
         {
             return Err(AdmittedProbeNativeFailure::before_entry(
                 DecodeFactError::Deadline,
@@ -375,7 +375,7 @@ async fn original_engine_task(
         if input
             .continuous_entry_deadline
             .as_ref()
-            .is_some_and(|limit| limit.remaining().is_err())
+            .is_some_and(|limit| limit.entry_remaining().is_err())
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -439,7 +439,9 @@ impl NodeResourceRuntime {
         limit: crate::cluster::clock::ContinuousDeadline,
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
-        limit.remaining().map_err(|_| OperationError::Deadline)?;
+        limit
+            .entry_remaining()
+            .map_err(|_| OperationError::Deadline)?;
         let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
         let role = bundle.roles.get_mut(0).ok_or(OperationError::State)?;
         if !role.sources.is_empty() || !role.roots.is_empty() || !role.armed.is_empty() {

@@ -610,7 +610,7 @@ pub(crate) fn create_remote_grant_ms(stage_deadline: tokio::time::Instant) -> Op
             let continuous = budget
                 .continuous_prepare_cutoff
                 .as_ref()?
-                .remaining()
+                .grant_remaining()
                 .ok()?;
             let cutoff =
                 stage_deadline.min(budget.deadline.checked_sub(CREATE_ACTIVATION_ALLOWANCE)?);

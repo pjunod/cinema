@@ -99,9 +99,12 @@ impl RemoteRegistration {
             // Exact replay preserves W0/cutoff, even after expiry. It can
             // only replay the already owned original task/result.
         } else {
+            // Grant-time cluster policy: the W0 admission evidence must be
+            // unchanged and the CURRENT clock policy must admit. After this
+            // the deadline closes on local evidence only.
             let deadline = self
                 .anchor
-                .deadline_after(std::time::Duration::from_millis(u64::from(allowance_ms)))
+                .grant_deadline_after(std::time::Duration::from_millis(u64::from(allowance_ms)))
                 .map_err(|error| {
                     format!("deadline_budget: original remote grant expired: {error}")
                 })?;
@@ -983,7 +986,7 @@ impl super::TranscodeManager {
                     .await
                     .map_err(|_| "original remote registration expired without grant")?
                     .map_err(|_| "original remote grant was cancelled")?;
-                continuous.remaining().map_err(|error| {
+                continuous.entry_remaining().map_err(|error| {
                     format!("original remote clock before source entry: {error}")
                 })?;
                 deadline = deadline.min(
@@ -1217,7 +1220,7 @@ impl super::TranscodeManager {
                 .remote_deadline()?
                 .ok_or("original remote grant is absent")?;
             original
-                .remaining()
+                .entry_remaining()
                 .map_err(|error| format!("original remote response deadline: {error}"))?;
             tokio::time::timeout_at(
                 original
@@ -1533,7 +1536,7 @@ impl super::TranscodeManager {
         };
         if let Some(original) = entry.remote_deadline()? {
             original
-                .remaining()
+                .entry_remaining()
                 .map_err(|error| format!("original remote preparation expired: {error}"))?;
             deadline = deadline.min(
                 original
@@ -1760,7 +1763,7 @@ impl super::TranscodeManager {
     ) -> Result<crate::vodserve::VodStart, String> {
         if let Some(original) = entry.remote_deadline()? {
             original
-                .remaining()
+                .entry_remaining()
                 .map_err(|error| format!("original remote activation deadline: {error}"))?;
             deadline = deadline.min(
                 original
@@ -3428,7 +3431,7 @@ mod tests {
             .as_ref()
             .expect("same retained original deadline");
         assert_eq!(retained.monotonic_cutoff().expect("same cutoff"), cutoff);
-        assert!(retained.remaining().is_err());
+        assert!(retained.entry_remaining().is_err());
     }
 
     #[tokio::test]

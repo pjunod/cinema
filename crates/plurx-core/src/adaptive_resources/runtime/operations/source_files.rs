@@ -301,7 +301,9 @@ impl SourceCell {
         {
             return Err(OperationError::State);
         }
-        limit.remaining().map_err(|_| OperationError::Deadline)?;
+        limit
+            .entry_remaining()
+            .map_err(|_| OperationError::Deadline)?;
         self.continuous_entry_deadline = Some(limit);
         Ok(())
     }
@@ -522,7 +524,7 @@ impl SourceCell {
             if registered.blocking_recv().is_err()
                 || continuous_entry_deadline
                     .as_ref()
-                    .is_some_and(|limit| limit.remaining().is_err())
+                    .is_some_and(|limit| limit.entry_remaining().is_err())
             {
                 return SourceResult {
                     file: None,

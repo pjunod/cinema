@@ -511,6 +511,46 @@ async fn v7_original_planning_prepare_persists_p_and_metadata_claim_before_nativ
     Arc::try_unwrap(runtime).ok().unwrap().drain().unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn roster_hiccup_keeps_an_accepted_continuous_cutoff_attachable_to_planning() {
+    let root = tempfile::tempdir().expect("real P fixture");
+    std::fs::write(
+        root.path().join("never-opened.mp4"),
+        b"same retained source",
+    )
+    .expect("actual original source");
+    let runtime = fixture_runtime(root.path());
+    let request = fixture_request(
+        root.path(),
+        "/never-entered/ffprobe".into(),
+        "/never-entered/ffmpeg".into(),
+    );
+    let mut original = plan::prepare(&runtime, request, deadline()).expect("actual charged P/M");
+    let clock = std::sync::Arc::new(crate::cluster::clock::ClusterClockGuard::new(false));
+    let limit = clock
+        .capture_continuous()
+        .expect("actual Linux clock")
+        .deadline_after(Duration::from_secs(5))
+        .expect("original live cutoff");
+    // A roster read timeout moves cluster admission evidence only; the
+    // accepted cutoff still attaches to the SAME never-entered P owner.
+    clock.roster_failed();
+    original
+        .retain_continuous_entry_deadline(limit)
+        .expect("a cluster hiccup cannot close an accepted cutoff");
+    original
+        .finish_native(deadline())
+        .await
+        .expect("same never-entered original P closes");
+    drop(original);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("original journal drained");
+}
+
 #[derive(Clone, Copy)]
 enum EntryFence {
     Epoch,

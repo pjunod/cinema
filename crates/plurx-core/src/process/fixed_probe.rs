@@ -993,7 +993,7 @@ fn check_admitted_continuous_deadline(
         if held
             .continuous_entry_deadline
             .as_ref()
-            .is_some_and(|limit| limit.remaining().is_err())
+            .is_some_and(|limit| limit.entry_remaining().is_err())
         {
             return Err(DecodeFactError::Deadline);
         }
@@ -3811,7 +3811,7 @@ async fn spawn_configured_probe(
                 .clone();
             if deadline
                 .as_ref()
-                .is_some_and(|limit| limit.remaining().is_err())
+                .is_some_and(|limit| limit.entry_remaining().is_err())
             {
                 // configure_probe_execution may already own its supervisor.
                 // Retain that SAME owner in the original command slot; this
