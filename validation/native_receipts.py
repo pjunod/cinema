@@ -73,7 +73,9 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    'Makefile': 'a8dfee1e29ba93b43cf58ee5233a5aef1aeddd381765a759d47b05c8126b23c2',
+    # Reviewed change adds only the Node resume-position suite to web-unit-check;
+    # native targets, build scripts and bundled-resource boundaries are unchanged.
+    'Makefile': 'd74b5626264702988ac3d7bc9f64aac246a1656e8408d539c0241659375971d8',
     # Reviewed 0.8.0 build 287: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 286 bytes; bundled resources and build scripts are unchanged.
     'clients/apple/project.yml': 'b6d8faedc0d81afefc100afa976398498a3b23627811c8ce76103228d46f2ea0',

@@ -2382,7 +2382,10 @@ pattern = "(?:VodPreparationGuard|preparing_sessions|begin_preparing_session|own
 # Recipe preview reuses the existing preparation queue and creates no reader
 # or rendition producer; it introduces no preparation owner.
 # J4 shared startup: One test-only registry read proves concurrent compatibility entries share one preparing/active native session; no new owner.
-expected_occurrences = 40
+# PR1369: +1 test-only registry read in settle_publication_control. It observes
+# preparing/live sessions while stopping this isolated control's survivors;
+# the ten-second settlement deadline never supplies closure evidence.
+expected_occurrences = 41
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -3488,7 +3491,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # It hosts one library worker whose future is unwound by an injected panic; the
 # test joins the handle and asserts the panic, so nothing outlives the test and
 # the task owns no admission, publisher, queue token or child after it returns.
-expected_occurrences = 1052
+# PR1369: +2 test-only tasks in playback_cache's optional-inventory regression.
+# The warm owner is awaited or aborted and joined; the reservation owner is
+# joined after an unwind-safe Release guard releases the blocked scan. The
+# actual blocking scan keeps its io_slot credit until it returns. Production
+# warm_inventory awaits the existing refresh owner and spawns no extra task.
+expected_occurrences = 1054
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5226,7 +5234,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # library_work::tests::library_worker_select_prefers_ready_work_to_a_ready_tick
 # (one per case); each is a local 250ms interval polled once through
 # select_next and dropped with the test. No production constructor changed.
-expected_occurrences = 1954
+# PR1369: +15. playback_cache adds six bounds: the optional quarter-SAMPLE_AGE
+# wait, three 100-ms skip regressions and two two-second scan/admission waits.
+# The cancelled scan retains its credit until reconciliation; timeout is never
+# completion. The physical publication control adds nine awaited timers:
+# create 30s, GET 20s, body 10s, stop 5s, offline decode/probe 20s each, and
+# settlement 10s with 500-ms stop attempts and a 10-ms condition poll. Its
+# caught errors/panics still settle all isolated sessions before offline checks.
+expected_occurrences = 1969
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5712,7 +5727,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Subtitle cue index (#1340): +3 Commands -- the subset window conversion, the
 # ffprobe start-time probe and the test presence probe; each is awaited and
 # the two production ones are kill_on_drop.
-expected_occurrences = 315
+# PR1369: +2 offline physical-control diagnostics, FFmpeg decoding each served
+# window and FFprobe checking the joined stream. Both output() owners collect
+# normal exit under a 20-second timeout with kill_on_drop as cancellation's
+# backstop. They run only after the session and reconstruction slot settle;
+# neither launches a production producer or turns timeout into valid evidence.
+expected_occurrences = 317
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6381,7 +6401,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # https/transport.rs::plaintext_http_follows_active_https_without_a_redirect_loop.
 # These assertions launch no process, task or producer. The prior 848 matches
 # are unchanged; the two joined fixture tasks are classified above separately.
-expected_occurrences = 862
+# PR1369: +2 output() calls for the same bounded offline FFmpeg/FFprobe
+# controls inventoried above, not additional children or detached owners.
+expected_occurrences = 864
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6903,7 +6925,10 @@ pattern = "kill_on_drop\\s*\\("
 # owner; kill-on-drop is the backstop, not the settlement.
 # Subtitle cue index (#1340): +2 kill_on_drop guards on the subset window
 # conversion and the ffprobe start-time probe.
-expected_occurrences = 119
+# PR1369: +2 cancellation backstops on those same physical-control diagnostics.
+# Successful evidence requires collected exit status and decoded/probed media;
+# a timeout drops the guarded child and fails the control.
+expected_occurrences = 121
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
