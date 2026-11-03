@@ -592,3 +592,180 @@ async fn finite_freeze_waits_for_prepared_unarmed_reader_and_drop_settles_origin
         .expect("same conserving retirement");
     fixture.finish(retained).await;
 }
+
+async fn assert_original_reader_ack_pending(
+    fixture: &OriginalOutput,
+    lease: Uuid,
+    original: [Uuid; 3],
+    stage: bootstrap::readers::ack_observation_fixture::Stage,
+) {
+    use bootstrap::readers::ack_observation_fixture::{pending_ids, Stage};
+    let bundle = fixture.preparation.state.lock().await;
+    let role = &bundle.roles[0];
+    let command = match stage {
+        Stage::Arm => original[0],
+        Stage::Observe => original[1],
+    };
+    let transition = role
+        .transition
+        .as_ref()
+        .expect("same queued reader transition");
+    assert!(transition.effect == Effect::Bootstrap(fixture.member));
+    assert_eq!(transition.operation.id, command);
+    assert!(
+        transition.operation.pending.is_some(),
+        "original reply remains unobserved"
+    );
+    assert!(transition.operation.result.is_none());
+    assert_eq!(
+        pending_ids(role, fixture.member, lease),
+        (original, command)
+    );
+}
+
+async fn frozen_reader_before_ack_observed_waits_for_original_handoff(
+    stage: bootstrap::readers::ack_observation_fixture::Stage,
+) {
+    use bootstrap::readers::ack_observation_fixture::Gate as AckObservationGate;
+    let (fixture, reader) = OriginalOutput::produce(Some(EarlyReader::Opened)).await;
+    let reader = reader.expect("same reader opened before producer join");
+    fixture.freeze().await;
+    let lease = reader.fixture_lease_id();
+    let gate = AckObservationGate::install(lease, stage);
+    let mut read = Box::pin(reader.next_chunk(deadline()));
+    let original = tokio::select! {
+        result = &mut read => panic!("reader returned before its queued {stage:?} ACK observation was paused: {}", result.is_ok()),
+        result = tokio::time::timeout(Duration::from_secs(10), gate.reached()) => {
+            result.expect("original command queued before ACK observed")
+        }
+    };
+    // Only the borrowed read leaves. The real command may already have
+    // committed in SQL; its exact runtime ACK remains unobserved here.
+    drop(read);
+    assert_original_reader_ack_pending(&fixture, lease, original, stage).await;
+    let before = fixture.identity().await;
+    let charge = fixture.runtime.accounting().unwrap().used;
+    assert_eq!(
+        fixture.runtime.accounting().unwrap().unknown_peak_producers,
+        1
+    );
+
+    let expired_allocation = fixture
+        .output
+        .allocate_response_buffer(
+            fixture.init_len as usize,
+            Instant::now() + Duration::from_millis(50),
+        )
+        .await;
+    assert_deadline(
+        expired_allocation
+            .err()
+            .expect("queued reader ACK cannot grant a new body"),
+    );
+    let expired_selection = fixture
+        .output
+        .prepare_reader(
+            FiniteFile::Init,
+            0,
+            fixture.init_len,
+            fixture.init_len,
+            Instant::now() + Duration::from_millis(50),
+        )
+        .await;
+    assert_deadline(
+        expired_selection
+            .err()
+            .expect("queued reader ACK cannot arm a new reader"),
+    );
+    assert_original_reader_ack_pending(&fixture, lease, original, stage).await;
+    assert_eq!(fixture.identity().await, before);
+    assert_eq!(fixture.runtime.accounting().unwrap().used, charge);
+
+    let mut allocation = Box::pin(
+        fixture
+            .output
+            .allocate_response_buffer(fixture.init_len as usize, deadline()),
+    );
+    let mut selection = Box::pin(fixture.output.prepare_reader(
+        FiniteFile::Init,
+        0,
+        fixture.init_len,
+        fixture.init_len,
+        deadline(),
+    ));
+    let mut retirement = Box::pin(fixture.owner.retire_output(deadline()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut allocation)
+            .await
+            .is_err(),
+        "response allocation waits for this original handoff, rather than refusing State"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut selection)
+            .await
+            .is_err(),
+        "new reader waits without arming into the original reader transition"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut retirement)
+            .await
+            .is_err(),
+        "retirement cannot consume another reader's unobserved ACK"
+    );
+    assert_original_reader_ack_pending(&fixture, lease, original, stage).await;
+    assert_eq!(
+        fixture.identity().await,
+        before,
+        "no replacement command or reader lease"
+    );
+    assert_eq!(fixture.runtime.accounting().unwrap().used, charge);
+    assert_eq!(
+        fixture.runtime.accounting().unwrap().unknown_peak_producers,
+        1
+    );
+
+    drop(gate);
+    let (chunk, retained, buffer, selected) = tokio::join!(
+        reader.next_chunk(deadline()),
+        retirement,
+        allocation,
+        selection,
+    );
+    let chunk = chunk
+        .expect("same original read observes its retained ACK")
+        .expect("original next byte");
+    assert_eq!(chunk.as_ref().len(), 1);
+    drop(chunk);
+    assert_eq!(reader.fixture_lease_id(), lease);
+    let retained = retained.expect("same original conserving R-to-S operation");
+    let buffer = buffer.expect("known S wakes original allocation request");
+    let selected = selected.expect("known S wakes original reader selection");
+    reader
+        .close(deadline())
+        .await
+        .expect("same transferred reader closes positively");
+    drop(reader);
+    read_init(&selected, buffer, fixture.init_len).await;
+    drop(selected);
+    assert_eq!(
+        fixture.runtime.accounting().unwrap().unknown_peak_producers,
+        0
+    );
+    fixture.finish(retained).await;
+}
+
+#[tokio::test]
+async fn finite_frozen_reader_arm_before_ack_observed_waits_for_same_handoff() {
+    frozen_reader_before_ack_observed_waits_for_original_handoff(
+        bootstrap::readers::ack_observation_fixture::Stage::Arm,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn finite_frozen_reader_observe_before_ack_observed_waits_for_same_handoff() {
+    frozen_reader_before_ack_observed_waits_for_original_handoff(
+        bootstrap::readers::ack_observation_fixture::Stage::Observe,
+    )
+    .await;
+}

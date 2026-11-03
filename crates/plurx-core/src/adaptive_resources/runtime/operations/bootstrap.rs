@@ -1061,12 +1061,14 @@ pub(super) fn finite_handoff_progress(
     }
     let finite = role.finite_vod.as_ref()?;
     let bootstrap = role.bootstrap.get(&member)?;
+    // A cancelled reader still owns its queued Arm/Observe and its matching
+    // in-memory IO state. Wait for that reader; never reconcile its ACK here.
+    let reader_transition = readers::reader_transition_progress(role, member).is_some();
     (!finite.source_drifted
         && finite.producer_joined
         && finite.retiring
         && finite.process_closure.is_some()
-        && role.transition.is_none()
-        && bootstrap.change.is_none()
+        && ((role.transition.is_none() && bootstrap.change.is_none()) || reader_transition)
         && bootstrap.retirement.is_none()
         && matches!(
             bootstrap.fold.as_ref()?.state().asset.lifecycle,

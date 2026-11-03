@@ -691,6 +691,20 @@ impl NodeResourceRuntime {
                     },
                     deadline,
                 )?;
+                #[cfg(all(
+                    test,
+                    feature = "fixtures",
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ))]
+                if matches!(&io.operation, AssetIoV1::ReadRange { .. }) {
+                    ack_observation_fixture::before_ack_observed(
+                        lease,
+                        ack_observation_fixture::Stage::Arm,
+                        [io.io.uuid(), io.observe.uuid(), io.join.uuid()],
+                    )
+                    .await;
+                }
             }
             retry_retained_transition(role, &self.journal, deadline)?;
             self.finish_transition(bundle_id, role).await?;
@@ -867,6 +881,20 @@ impl NodeResourceRuntime {
                 },
                 deadline,
             )?;
+            #[cfg(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            if matches!(&io.operation, AssetIoV1::ReadRange { .. }) {
+                ack_observation_fixture::before_ack_observed(
+                    lease,
+                    ack_observation_fixture::Stage::Observe,
+                    [io.io.uuid(), io.observe.uuid(), io.join.uuid()],
+                )
+                .await;
+            }
         }
         retry_retained_transition(role, &self.journal, deadline)?;
         self.finish_transition(bundle_id, role).await?;
@@ -996,4 +1024,115 @@ fn resolve_member(role: &OwnedRole, requested: Uuid) -> Result<Uuid, OperationEr
         .as_ref()
         .and_then(|retirement| retirement.resolve_source_member(requested))
         .ok_or(OperationError::State)
+}
+
+/// Delay only the borrower's observation of its already queued command. SQL
+/// may have committed; this fixture never supplies an ACK or a native result.
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(in crate::adaptive_resources::runtime::operations) mod ack_observation_fixture {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, OnceLock};
+    use tokio::sync::{Notify, Semaphore};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub(in crate::adaptive_resources::runtime::operations) enum Stage {
+        Arm,
+        Observe,
+    }
+
+    struct Pause {
+        original: Mutex<Option<[Uuid; 3]>>,
+        reached: Notify,
+        release: Semaphore,
+    }
+
+    type Key = (Uuid, Stage);
+    fn registry() -> &'static Mutex<BTreeMap<Key, Arc<Pause>>> {
+        static REGISTRY: OnceLock<Mutex<BTreeMap<Key, Arc<Pause>>>> = OnceLock::new();
+        REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+    }
+
+    pub(in crate::adaptive_resources::runtime::operations) struct Gate {
+        key: Key,
+        pause: Arc<Pause>,
+    }
+
+    impl Gate {
+        pub(in crate::adaptive_resources::runtime::operations) fn install(
+            lease: Uuid,
+            stage: Stage,
+        ) -> Self {
+            let key = (lease, stage);
+            let pause = Arc::new(Pause {
+                original: Mutex::new(None),
+                reached: Notify::new(),
+                release: Semaphore::new(0),
+            });
+            assert!(registry()
+                .lock()
+                .unwrap()
+                .insert(key, Arc::clone(&pause))
+                .is_none());
+            Self { key, pause }
+        }
+
+        pub(in crate::adaptive_resources::runtime::operations) async fn reached(
+            &self,
+        ) -> [Uuid; 3] {
+            self.pause.reached.notified().await;
+            self.pause
+                .original
+                .lock()
+                .unwrap()
+                .expect("original queued reader IDs")
+        }
+    }
+
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            registry().lock().unwrap().remove(&self.key);
+            self.pause.release.add_permits(1);
+        }
+    }
+
+    pub(super) async fn before_ack_observed(lease: Uuid, stage: Stage, ids: [Uuid; 3]) {
+        let pause = registry().lock().unwrap().get(&(lease, stage)).cloned();
+        if let Some(pause) = pause {
+            assert!(pause.original.lock().unwrap().replace(ids).is_none());
+            pause.reached.notify_one();
+            let permit = pause
+                .release
+                .acquire()
+                .await
+                .expect("original ACK-observation gate");
+            permit.forget();
+        }
+    }
+
+    pub(in crate::adaptive_resources::runtime::operations) fn pending_ids(
+        role: &OwnedRole,
+        member: Uuid,
+        lease: Uuid,
+    ) -> ([Uuid; 3], Uuid) {
+        let bootstrap = &role.bootstrap[&member];
+        let io = bootstrap.readers[&lease]
+            .current
+            .as_ref()
+            .expect("same original reader IO");
+        (
+            [io.io.uuid(), io.observe.uuid(), io.join.uuid()],
+            bootstrap
+                .change
+                .as_ref()
+                .expect("same queued reader change")
+                .0
+                .uuid(),
+        )
+    }
 }
