@@ -9,8 +9,10 @@
 //!
 //! The ingress cannot be put in maintenance to withhold its own quote:
 //! maintenance refuses the create itself at A's front door. The test instead
-//! asks A's own placement diagnostics for a rendition height whose ranking
-//! puts B first, which is the same decision the create makes.
+//! controls only B's advisory I/O and speed measurements in its forwarding
+//! proxy, then waits for A's own diagnostics to rank the genuinely eligible B
+//! first. Clock, identity, capacity and adaptive control messages are real.
+//! This is placement/ownership evidence, not a performance measurement.
 //!
 //! Skips without `PLURX_FFMPEG`, which names the encoder both daemons and
 //! the fixture generator use.
@@ -44,7 +46,11 @@ const CLOCK_PATH: &str = "/_internal/v1/clock";
 const PREPARE_PATH: &str = "/internal/cluster/media/adaptive-attempts/prepare";
 const ADOPT_PATH: &str = "/internal/cluster/media/adaptive-attempts/adopt";
 const CANCEL_PATH: &str = "/internal/cluster/media/adaptive-attempts/cancel";
-const HEIGHTS: [i64; 8] = [240, 288, 360, 432, 480, 540, 576, 640];
+const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
+const OFFERS_PATH: &str = "/internal/v1/media/offers";
+// Canonical ladder rungs. Arbitrary requested heights can resolve to the same
+// rendition key, so distinct wire heights do not establish distinct owners.
+const HEIGHTS: [i64; 3] = [240, 360, 480];
 
 // ---------------------------------------------------------------------------
 // Daemon harness, copied from cluster_activity.rs: integration tests are
@@ -161,6 +167,7 @@ async fn wait_ready(client: &reqwest::Client, daemon: &mut Daemon, port: u16) {
 #[derive(Clone)]
 struct ProxyState {
     target: String,
+    prefer_worker: bool,
     block_clock: Arc<AtomicBool>,
     hits: Arc<Mutex<HashMap<String, u64>>>,
     client: reqwest::Client,
@@ -174,13 +181,14 @@ struct PeerProxy {
 }
 
 impl PeerProxy {
-    async fn start(target_port: u16) -> Self {
+    async fn start(target_port: u16, prefer_worker: bool) -> Self {
         let listener = TokioTcpListener::bind("127.0.0.1:0")
             .await
             .expect("proxy loopback");
         let port = listener.local_addr().expect("proxy address").port();
         let state = ProxyState {
             target: format!("http://127.0.0.1:{target_port}"),
+            prefer_worker,
             block_clock: Arc::new(AtomicBool::new(false)),
             hits: Arc::new(Mutex::new(HashMap::new())),
             client: reqwest::Client::builder()
@@ -262,6 +270,27 @@ async fn forward(State(state): State<ProxyState>, request: Request<Body>) -> Res
     let Ok(bytes) = upstream.bytes().await else {
         return StatusCode::BAD_GATEWAY.into_response();
     };
+    if status.is_success() && state.prefer_worker {
+        // Isolate the clock/ownership scenarios from this shared host's I/O
+        // timing. These are synthetic advisory measurements only: no quote,
+        // eligibility, capacity, identity or control field is changed.
+        if path == SNAPSHOT_PATH || path == OFFERS_PATH {
+            let mut value: Value = serde_json::from_slice(&bytes).expect("peer advisory JSON");
+            if path == SNAPSHOT_PATH {
+                value["io"]["storage_read_micros"] = json!(0);
+            } else {
+                // Break a possible zero-latency tie with A. A finite speed
+                // keeps the normal wire validator and comparator in use.
+                value["recent_speed"] = json!(f64::MAX);
+            }
+            return (
+                status,
+                headers,
+                serde_json::to_vec(&value).expect("advisory JSON"),
+            )
+                .into_response();
+        }
+    }
     (status, headers, bytes).into_response()
 }
 
@@ -320,8 +349,8 @@ impl Cluster {
         let mut reserved: Vec<ReservedPort> = (0..6).map(|_| ReservedPort::new()).collect();
         let [a_http, a_raft, a_api, b_http, b_raft, b_api] =
             std::array::from_fn(|index| reserved[index].port);
-        let proxy_a = PeerProxy::start(a_http).await;
-        let proxy_b = PeerProxy::start(b_http).await;
+        let proxy_a = PeerProxy::start(a_http, false).await;
+        let proxy_b = PeerProxy::start(b_http, true).await;
 
         let a_data = root.path().join("node-a");
         std::fs::create_dir_all(&a_data).expect("node A data");
@@ -542,9 +571,14 @@ impl Cluster {
         format!("\nA offers at {height}: {offers}\nA view of B: {b:?}\nA directory: remote_placement_ready={}", directory["remote_placement_ready"])
     }
 
-    /// A height whose ranking on A puts B first while A is also eligible,
-    /// once A holds B's fresh adaptive quote.
+    /// Wait for a fresh quote and real eligibility for the next unused rung.
+    /// The proxy fixes only advisory ranking, so this cannot make an unready
+    /// worker eligible or authorize a grant.
     async fn height_ranking_b_first(&mut self, file_id: i64) -> i64 {
+        let height = HEIGHTS
+            .into_iter()
+            .find(|height| !self.used_heights.contains(height))
+            .expect("each clock scenario has its own canonical rendition");
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             self.node_a.assert_running("waiting for B's quote");
@@ -556,21 +590,15 @@ impl Cluster {
                 })
             });
             if quoted {
-                for height in HEIGHTS
-                    .into_iter()
-                    .filter(|height| !self.used_heights.contains(height))
-                {
-                    let response = self
-                        .client
-                        .post(format!("{}/api/v1/cluster/media/offers", self.a_base))
-                        .bearer_auth(&self.token)
-                        .json(&json!({"file_id": file_id, "target_height": height}))
-                        .send()
-                        .await
-                        .expect("diagnostic offers");
-                    if !response.status().is_success() {
-                        continue;
-                    }
+                let response = self
+                    .client
+                    .post(format!("{}/api/v1/cluster/media/offers", self.a_base))
+                    .bearer_auth(&self.token)
+                    .json(&json!({"file_id": file_id, "target_height": height}))
+                    .send()
+                    .await
+                    .expect("diagnostic offers");
+                if response.status().is_success() {
                     let offers = response.json::<Value>().await.expect("offers JSON")["offers"]
                         .as_array()
                         .cloned()
@@ -594,42 +622,35 @@ impl Cluster {
             }
             assert!(
                 Instant::now() < deadline,
-                "no rendition height ranks B first with both nodes eligible: {directory}{}",
+                "rendition {height} never ranks eligible B first: {directory}{}",
                 self.logs()
             );
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
-    /// Create on A until A's own counter for `outcome` moves. Between two
-    /// idle nodes the ranking is decided by live measurements (recent speed,
-    /// storage reads, spare threads), so B is not first on every create even
-    /// when the diagnostics just said so. Every refused create is recorded.
-    async fn create_until(
+    /// One create per scenario. A different placement or any publication
+    /// refusal fails that scenario instead of consuming another rendition.
+    async fn create_for_outcome(
         &mut self,
         file_id: i64,
         playback: &str,
         outcome: &str,
         refused: &mut Vec<String>,
     ) -> i64 {
-        for attempt in 0..6 {
-            let height = self.height_ranking_b_first(file_id).await;
-            let before = placements(&self.metrics(&self.a_base).await, outcome);
-            self.used_heights.push(height);
-            if let Err(error) = self
-                .create_and_play(file_id, height, &format!("{playback}-{attempt}"))
-                .await
-            {
-                refused.push(error);
-            }
-            if placements(&self.metrics(&self.a_base).await, outcome) > before {
-                return height;
-            }
+        let height = self.height_ranking_b_first(file_id).await;
+        let before = placements(&self.metrics(&self.a_base).await, outcome);
+        self.used_heights.push(height);
+        if let Err(error) = self.create_and_play(file_id, height, playback).await {
+            refused.push(error);
         }
-        panic!(
-            "six creates never produced outcome {outcome} (refused: {refused:?}){}",
+        assert_eq!(
+            placements(&self.metrics(&self.a_base).await, outcome),
+            before + 1,
+            "create did not produce outcome {outcome} (refused: {refused:?}){}",
             self.logs()
         );
+        height
     }
 
     /// Create on A, then read the playlist and one listed segment through A.
@@ -658,6 +679,10 @@ impl Cluster {
             return Err(format!("create {playback} refused: {status} {body}"));
         }
         let started: Value = serde_json::from_str(&body).expect("start JSON");
+        assert_eq!(
+            started["height"], height,
+            "scenario must use its own canonical rung"
+        );
         let playlist = started["playlist_url"].as_str().expect("playlist URL");
         let failures = self.producer_failures();
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -910,7 +935,7 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
     let adopts = cluster.proxy_b.hits(ADOPT_PATH);
     let mut refused = Vec::new();
     cluster
-        .create_until(file_id, "adaptive-two-node-remote", "placed", &mut refused)
+        .create_for_outcome(file_id, "adaptive-two-node-remote", "placed", &mut refused)
         .await;
     let after_a = cluster.metrics(&a_base).await;
     let after_b = cluster.metrics(&b_base).await;
@@ -950,7 +975,7 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
     let before_a = cluster.metrics(&a_base).await;
     let prepares = cluster.proxy_b.hits(PREPARE_PATH);
     let height = cluster
-        .create_until(
+        .create_for_outcome(
             file_id,
             "adaptive-two-node-skip",
             "clock_skipped",
@@ -992,7 +1017,7 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
     let prepares = cluster.proxy_b.hits(PREPARE_PATH);
     let cancels = cluster.proxy_b.hits(CANCEL_PATH);
     cluster
-        .create_until(
+        .create_for_outcome(
             file_id,
             "adaptive-two-node-refused",
             "grant_refused",

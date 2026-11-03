@@ -1,6 +1,44 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation active · updated 2026-10-29. PR #1248 remains
+**Status:** open · implementation active · updated 2026-11-03. Codex has
+resumed Claude's adaptive effort #1248. The effort remains a draft; no release
+qualification or deployment is claimed.
+
+Companion to [the plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) (requirements) and
+[finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) (the source checklist).
+
+## Current continuation — two-node publication and test isolation
+
+The continuation starts at effort `b97188c9fd8e2de6caeea826b1c2acd14be2035a`.
+Task PRs #1293, #1338 and #1360–#1364 are merged into that effort. They cover
+copy/start, M2/M4 components, causal deadlines, main integration, clock split
+and remote placement, concurrent scratch readers and dropped-reader settlement.
+This replaces the obsolete unmerged-task summary below; the earlier receipt
+identities remain historical evidence for their original source only.
+
+The retained two-node failures exposed two harness defects: arbitrary heights
+can snap to the same rendition key, and searching heights cannot override a
+consistent local storage-latency ranking advantage. The continuation uses
+three distinct ladder rungs and controls only the peer proxy's advisory I/O
+and speed measurements. Clock, eligibility, capacity, identity and every
+adaptive control exchange remain real. It proves those control/serving paths,
+not performance under naturally selected placement.
+
+A separate publication race occurs when the exact attached owner renews its
+lease after Adopt but before publication. Publication must compare the current
+matching route/job-lease copies, while retaining the original custody, owner,
+epoch, pointer and live-lease guards. Regression and compiler validation of
+this continuation are pending; authored tests are not execution evidence.
+
+Still open: M0 owned containment, V1–V5 acceptance, broader adapter and platform
+qualification, integrating the then-current main and the Main promotion gate.
+The handoff also records a pre-existing actor-application lease regression and
+an unresolved selected-static FFmpeg `-display_rotation` capability decision.
+Neither is silently accepted or closed by this task.
+
+## 2026-10-29 checkpoint — historical source-bound evidence
+
+**Historical checkpoint:** 2026-10-29. PR #1248 remains
 the sole effort; task PR #1293 is unmerged. Current committed implementation
 `b1f2794d79b1012714a6de0644c72df44f10e9e1` includes effort
 `29a238af69bd2e101f0a5b4d6ed21fb1404f8ed1` and main

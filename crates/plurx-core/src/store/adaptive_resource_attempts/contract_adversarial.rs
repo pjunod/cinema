@@ -677,3 +677,93 @@ async fn adaptive_publication_refuses_without_the_exact_committed_adoption() {
     })
     .await;
 }
+
+/// A live attached rendition may renew between Adopt and publication. The
+/// original Adopt remains the publication capability after that renewal.
+#[tokio::test]
+async fn adaptive_publication_accepts_the_same_owners_renewed_live_lease() {
+    for_each_adaptive_backend(|store, backend| async move {
+        let store = store.as_ref();
+        let (_, adoption) = committed_adoption(store).await;
+        let renewed = store
+            .renew_media_sessions(
+                &adoption.key.worker_node_id,
+                &[MediaSessionRenewal {
+                    incarnation_id: adoption.activation.incarnation_id.clone(),
+                    owner_epoch: adoption.key.owner_epoch,
+                    produced_playable_through_ms: 0,
+                    fetched_through_ms: 0,
+                    media_sequence: 0,
+                }],
+                10_005,
+                50_000,
+            )
+            .await
+            .expect("same owner renews its attached route");
+        assert_eq!(
+            renewed,
+            vec![adoption.activation.incarnation_id.clone()],
+            "{backend}"
+        );
+        let route = adaptive_route(store, &adoption).await;
+        assert_eq!(route.lease_expires_at_ms, 50_000, "{backend}");
+        assert_eq!(
+            route.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED
+        );
+        // The original expiry was 30 000. Only the actual renewed lease,
+        // with the same owner and epoch, makes publication at 30 001 live.
+        let published = store
+            .publish_adaptive_adoption(&adoption, 30_001)
+            .await
+            .expect("publication after legitimate renewal")
+            .expect("same adopted route");
+        assert_eq!(published.route.lease_expires_at_ms, 50_000, "{backend}");
+        assert_eq!(published.route.publication_ready_at_ms, 0, "{backend}");
+        let replay = store
+            .publish_adaptive_adoption(&adoption, 30_002)
+            .await
+            .expect("publication replay")
+            .expect("same published route");
+        assert_eq!(replay.route, published.route, "{backend}");
+        assert!(
+            store
+                .publish_adaptive_adoption(&adoption, 50_001)
+                .await
+                .is_err(),
+            "{backend}: renewal never authorizes publication after its actual expiry"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn adaptive_publication_refuses_mismatched_live_route_and_job_leases() {
+    for_each_adaptive_strandable_backend(|store, backend, raw| async move {
+        let store = store.as_ref();
+        let (_, adoption) = committed_adoption(store).await;
+        let changed = format!(
+            "UPDATE job_leases SET expires_at_ms=40000 WHERE resource='session:{}'",
+            adoption.activation.incarnation_id
+        );
+        assert!(
+            !raw_refused(raw.as_ref(), &changed).await,
+            "{backend}: fixture lease mismatch"
+        );
+        assert!(
+            store
+                .publish_adaptive_adoption(&adoption, 10_005)
+                .await
+                .is_err(),
+            "{backend}: two live but inconsistent lease copies cannot publish"
+        );
+        assert_eq!(
+            adaptive_route(store, &adoption)
+                .await
+                .publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}"
+        );
+    })
+    .await;
+}

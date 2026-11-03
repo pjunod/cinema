@@ -1,6 +1,15 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation active · updated 2026-10-29. PR #1248 remains
+**Status:** open · implementation active · updated 2026-11-03. Task PRs #1293,
+#1338 and #1360–#1364 are merged into draft effort #1248. Codex resumes at
+`b97188c9fd8e2de6caeea826b1c2acd14be2035a`; the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#current-continuation--two-node-publication-and-test-isolation)
+records the current two-node diagnosis and pending validation. V1–V5 and final
+qualification remain open. The checklist below retains its historical source
+and evidence limits; a merged component does not close all-path acceptance.
+
+## 2026-10-29 checkpoint — historical source-bound evidence
+
+**Historical checkpoint:** 2026-10-29. PR #1248 remains
 the sole effort; task PR #1293 is unmerged. Current committed implementation
 `b1f2794d79b1012714a6de0644c72df44f10e9e1` includes effort
 `29a238af69bd2e101f0a5b4d6ed21fb1404f8ed1` and main
