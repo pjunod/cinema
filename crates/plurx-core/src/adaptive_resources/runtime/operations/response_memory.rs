@@ -100,9 +100,18 @@ impl NodeResourceRuntime {
             let bundle = owner.state.lock().await;
             self.eligible(&bundle)?;
             let role = bundle.roles.get(index).ok_or(OperationError::State)?;
-            if let Some(progress) = bootstrap::finite_handoff_progress(role, requested_member) {
-                bootstrap::wait_for_handoff(bundle, progress, deadline).await?;
-                continue;
+            // A joined producer may still have an Open asset while native
+            // reader entry is fenced. Its existing response-memory budget
+            // remains usable; only non-ready allocation waits for S.
+            let allocation_ready = role
+                .bootstrap
+                .get(&requested_member)
+                .is_some_and(|native| native.response_allocation_ready());
+            if !allocation_ready {
+                if let Some(progress) = bootstrap::finite_handoff_progress(role, requested_member) {
+                    bootstrap::wait_for_handoff(bundle, progress, deadline).await?;
+                    continue;
+                }
             }
             let member = if role.bootstrap.contains_key(&requested_member) {
                 requested_member

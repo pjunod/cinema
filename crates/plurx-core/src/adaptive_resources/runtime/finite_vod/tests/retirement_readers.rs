@@ -104,8 +104,18 @@ struct OriginalOutput {
     root: FixtureRoot,
 }
 
+#[derive(Clone, Copy)]
+enum EarlyReader {
+    Unarmed,
+    Opened,
+}
+
 impl OriginalOutput {
     async fn produced() -> Self {
+        Self::produce(None).await.0
+    }
+
+    async fn produce(early: Option<EarlyReader>) -> (Self, Option<FiniteReader>) {
         let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/finite-vod-fixtures");
         std::fs::create_dir_all(&parent).expect("repo-local native fixture parent");
@@ -127,6 +137,60 @@ impl OriginalOutput {
         let mut initialized = 0_u32;
         let mut materialized = 0_u32;
         let mut published_bytes = 0_u64;
+        let mut early_reader = None;
+        if early.is_some() {
+            // Initialized follows the original Init publication and sync. Do
+            // not even construct join_producer until this selection is ready:
+            // its completed join fences later native opens on the original R.
+            loop {
+                match tokio::time::timeout_at(deadline().into(), events.recv())
+                    .await
+                    .expect("actual initial publication event watchdog")
+                {
+                    Some(SoftwareVodEvent::Initialized(_)) => {
+                        initialized += 1;
+                        let len = output
+                            .file_len(FiniteFile::Init)
+                            .await
+                            .expect("original Init inventory before join")
+                            .expect("Initialized names the actual published Init");
+                        assert!(len > 1);
+                        let cap = if matches!(early, Some(EarlyReader::Opened)) {
+                            1
+                        } else {
+                            len
+                        };
+                        let reader = output
+                            .prepare_reader(FiniteFile::Init, 0, len, cap, deadline())
+                            .await
+                            .expect("original reader selection before producer join");
+                        if matches!(early, Some(EarlyReader::Opened)) {
+                            let first = reader
+                                .next_chunk(deadline())
+                                .await
+                                .expect("actual native open before producer join")
+                                .expect("first original byte before the entry fence");
+                            assert_eq!(first.as_ref().len(), 1);
+                            drop(first);
+                        }
+                        {
+                            let bundle = preparation.state.lock().await;
+                            assert!(!bundle.roles[0].finite_vod.as_ref().unwrap().producer_joined);
+                        }
+                        early_reader = Some(reader);
+                        break;
+                    }
+                    Some(SoftwareVodEvent::Materialized { entry, bytes, .. }) => {
+                        assert_eq!(entry, 0, "only the admitted segment is produced");
+                        materialized += 1;
+                        published_bytes += bytes;
+                    }
+                    // Preserve the real completion diagnostics if native
+                    // setup failed before it could emit Initialized.
+                    None => break,
+                }
+            }
+        }
         let completion = {
             let joined = owner.join_producer();
             tokio::pin!(joined);
@@ -178,15 +242,18 @@ impl OriginalOutput {
             .expect("original inventory")
             .expect("actual published init");
         assert!(init_len > 1);
-        Self {
-            runtime,
-            owner,
-            preparation,
-            member,
-            output,
-            init_len,
-            root,
-        }
+        (
+            Self {
+                runtime,
+                owner,
+                preparation,
+                member,
+                output,
+                init_len,
+                root,
+            },
+            early_reader,
+        )
     }
 
     async fn lifecycle(&self) -> ScratchLifecycleV1 {
@@ -345,6 +412,34 @@ async fn finite_reader_preparation_waits_for_original_frozen_retirement_without_
         .allocate_response_buffer(fixture.init_len as usize, deadline())
         .await
         .expect("original response partition before freeze");
+    assert_eq!(fixture.lifecycle().await, ScratchLifecycleV1::Open);
+    let joined_identity = fixture.identity().await;
+    let joined_charge = fixture.runtime.accounting().unwrap().used;
+    let result = fixture
+        .output
+        .prepare_reader(
+            FiniteFile::Init,
+            0,
+            fixture.init_len,
+            fixture.init_len,
+            Instant::now() + Duration::from_millis(50),
+        )
+        .await;
+    assert_deadline(
+        result
+            .err()
+            .expect("joined R cannot enter a new native reader"),
+    );
+    assert_eq!(
+        fixture.identity().await,
+        joined_identity,
+        "post-join selection waits without creating a lease or Arm"
+    );
+    assert_eq!(fixture.runtime.accounting().unwrap().used, joined_charge);
+    assert_eq!(
+        fixture.runtime.accounting().unwrap().unknown_peak_producers,
+        1
+    );
     fixture.freeze().await;
     let before = fixture.identity().await;
     let charge = fixture.runtime.accounting().unwrap().used;
@@ -389,15 +484,8 @@ async fn finite_reader_preparation_waits_for_original_frozen_retirement_without_
 
 #[tokio::test]
 async fn finite_retirement_waits_for_same_frozen_reader_io_and_transfers_its_lease() {
-    let fixture = OriginalOutput::produced().await;
-    let reader = fixture.reader(1).await;
-    let first = reader
-        .next_chunk(deadline())
-        .await
-        .unwrap()
-        .expect("opened actual reader");
-    assert_eq!(first.as_ref().len(), 1);
-    drop(first);
+    let (fixture, reader) = OriginalOutput::produce(Some(EarlyReader::Opened)).await;
+    let reader = reader.expect("same reader opened and read before producer join");
     fixture.freeze().await;
     let lease = reader.fixture_lease_id();
     let gate = Gate::install_next(Kind::ReaderRead, lease);
@@ -461,8 +549,8 @@ async fn finite_retirement_waits_for_same_frozen_reader_io_and_transfers_its_lea
 
 #[tokio::test]
 async fn finite_freeze_waits_for_prepared_unarmed_reader_and_drop_settles_original_selection() {
-    let fixture = OriginalOutput::produced().await;
-    let reader = fixture.reader(fixture.init_len).await;
+    let (fixture, reader) = OriginalOutput::produce(Some(EarlyReader::Unarmed)).await;
+    let reader = reader.expect("same reader selected before producer join");
     let before = fixture.identity().await;
     let charge = fixture.runtime.accounting().unwrap().used;
     let result = fixture

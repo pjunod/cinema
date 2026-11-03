@@ -1042,8 +1042,8 @@ pub(super) fn io_slot_held(role: &OwnedRole, member: Uuid) -> Option<Arc<tokio::
         .then(|| Arc::clone(&bootstrap.io_progress))
 }
 
-/// New response owners wait across this original producer's Frozen → S
-/// handoff. Frozen never grants a new native OpenReader operation.
+/// New readers wait across this original joined producer's handoff to S.
+/// Join already fenced R's native entry; Frozen never grants OpenReader.
 #[cfg(unix)]
 pub(super) fn finite_handoff_progress(
     role: &OwnedRole,
@@ -1068,8 +1068,11 @@ pub(super) fn finite_handoff_progress(
         && role.transition.is_none()
         && bootstrap.change.is_none()
         && bootstrap.retirement.is_none()
-        && bootstrap.fold.as_ref()?.state().asset.lifecycle == ScratchLifecycleV1::Frozen)
-        .then(|| Arc::clone(&bootstrap.io_progress))
+        && matches!(
+            bootstrap.fold.as_ref()?.state().asset.lifecycle,
+            ScratchLifecycleV1::Open | ScratchLifecycleV1::Frozen
+        ))
+    .then(|| Arc::clone(&bootstrap.io_progress))
 }
 
 #[cfg(unix)]
