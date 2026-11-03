@@ -121,6 +121,31 @@ checks. The policy-0 screen does not improve every dark metric, so it is
 not part of that change. Independent mapping comparison and weaker-source
 coverage remain required.
 
+Four full 4K frames from that same window (indices 0, 16, 32 and 47) have
+now been independently mapped with Dolby's reference tool at the same
+1,000-nit/P3 target. Lossless transported masters match their original
+RGB48 hashes; all 48 pre-map/target source PTS, duration, RPU and BL bindings
+agree. The actual resolved target is checked in the tool log. This validates
+mapping conditional on the supplied FEL master, not FEL reconstruction.
+The XML bridge omits L5; scoring uses the original L5 interior and retains
+full-frame spatial context. Four phase lattices give 122,880 samples:
+
+| Output compared to independent mapping | Active-picture mean / p99 Delta E ITP |
+|---|---|
+| Unencoded enhanced helper | 0.0079 / 0.0190 |
+| Unencoded no-FEL ablation | 3.268 / 6.489 |
+| Decoded 20 Mb/s output | 4.045 / 12.345 |
+| Decoded 60 Mb/s output | 3.221 / 10.228 |
+
+The rate repair recovers the mean advantage on this strong-FEL sample,
+but its tails still lose to the unencoded no-FEL ablation. The two rates
+produce identical sampled startup-IDR pixels; fresh-window encoder startup
+is a further repair target, consistent with the earlier slice-QP evidence
+in the P8.1 ledger. These results do not complete enhancement acceptance.
+Only five samples occupy the below-0.01-nit band, so this run cannot qualify
+black preservation. Weaker-FEL scenes, other targets and held-out content
+remain open.
+
 1. **Finish the full-window comparison.** Measure 48 consecutive pictures,
    actual encoded segment peaks, time and per-frame/band errors. Compare
    actual conversion fallback and composed output at the same presentation
