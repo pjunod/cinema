@@ -42,16 +42,9 @@ struct rational {
 static struct rational window_start, window_end;
 static int64_t first_emitted_pts = AV_NOPTS_VALUE,
                last_emitted_end = AV_NOPTS_VALUE, boundary_pts = AV_NOPTS_VALUE;
-struct budget_io {
-  int fd;
-  uint64_t bytes;
-  bool exhausted;
-};
+#include "source_reader.h"
 static struct budget_io movie_io;
 static AVIOContext *movie_avio;
-#ifndef WINDOW_READ_LIMIT
-#define WINDOW_READ_LIMIT (128ULL * 1024 * 1024)
-#endif
 
 static FILE *rgb_output, *timing_output;
 static AVFormatContext *nut_output;
@@ -163,8 +156,13 @@ static int compare_window(int64_t pts, struct rational value) {
   return av_compare_ts(pts, source_time_base, value.num,
                        (AVRational){1, value.den});
 }
+static struct source_reader movie_reader = SOURCE_READER_INITIALIZER;
 static int movie_read(void *opaque, uint8_t *buffer, int size) {
   struct budget_io *io = opaque;
+  if (movie_reader.active) {
+    ssize_t n = source_reader_read(&movie_reader, buffer, (size_t)size);
+    return n == 0 ? AVERROR_EOF : (int)n;
+  }
   if (io->bytes >= WINDOW_READ_LIMIT) {
     io->exhausted = true;
     return AVERROR(ENOSPC);
@@ -189,8 +187,7 @@ static int64_t movie_seek(void *opaque, int64_t offset, int whence) {
     struct stat st;
     return fstat(io->fd, &st) == 0 ? st.st_size : AVERROR(errno);
   }
-  off_t result = lseek(io->fd, (off_t)offset, whence & ~AVSEEK_FORCE);
-  return result < 0 ? AVERROR(errno) : (int64_t)result;
+  return source_reader_seek(&movie_reader, io, offset, whence & ~AVSEEK_FORCE);
 }
 static void open_movie_io(AVFormatContext *input, const char *source) {
   movie_io.fd = open(source, O_RDONLY | O_CLOEXEC);
@@ -972,6 +969,7 @@ int main(int argc, char **argv) {
     need(avformat_seek_file(input, stream_index, INT64_MIN, target, target,
                             AVSEEK_FLAG_BACKWARD) >= 0,
          "keyframe seek before exact window start");
+    need(source_reader_start(&movie_reader, &movie_io) == 0, "start owned source reader");
   }
   if (streaming)
     open_nut(argv[11]);
@@ -1012,6 +1010,7 @@ int main(int argc, char **argv) {
     if (window_done)
       break;
   }
+  need(source_reader_stop(&movie_reader) == 0, "stop and join owned source reader");
   need(!movie_io.exhausted, "window source read budget exhausted");
   source_eof = result == AVERROR_EOF;
   need(window_done || source_eof, "complete bounded source read");
@@ -1103,6 +1102,7 @@ int main(int argc, char **argv) {
     avio_context_free(&movie_avio);
     need(close(movie_io.fd) == 0, "close held movie IO");
   }
+  source_reader_destroy(&movie_reader);
   if (window_mode) {
     printf("{\"kind\":\"window_complete\",\"requested_start\":\"%lld/"
            "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"%lld/"

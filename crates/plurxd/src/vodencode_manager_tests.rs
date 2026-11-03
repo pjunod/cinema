@@ -112,16 +112,27 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         !compare_cache || cache_budget.is_some(),
         "cache comparison requires its real inventory root"
     );
+    let detected = plurx_core::transcode::detect_encoders(&crate::ffmpeg::ffmpeg_bin()).await;
+    assert!(
+        detected.vaapi,
+        "physical control requires a proved VA-API encoder"
+    );
+    println!(
+        "{}",
+        serde_json::json!({
+            "vaapi_hdr_policy":detected.vaapi_hdr_policy.map(|policy| policy.recipe_value()),
+        "vaapi_driver":detected.vaapi_driver.as_deref(),
+        })
+    );
     let mut manager = TranscodeManager::new(
         Arc::clone(&store),
         base.path().join("runtime"),
         EncoderCaps {
             vaapi: true,
-            // The radeonsi worker's detected policy: the one encoder the
-            // reconstructed 8.1's recipe and verdicts are qualified on.
-            vaapi_hdr_policy: profile81
-                .then_some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq),
-            vaapi_driver: profile81.then(|| "lab radeonsi VA driver".to_owned()),
+            // Preserve the actual boot-proved driver policy for every HDR
+            // destination, including HDR10-E on radeonsi.
+            vaapi_hdr_policy: detected.vaapi_hdr_policy,
+            vaapi_driver: detected.vaapi_driver,
             ..Default::default()
         },
         Pipeline::Cpu,
@@ -191,7 +202,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     // PLURX_DV_WINDOW_DESTINATION=profile81 takes the Dolby Vision client's
     // route instead: the P7 conversion copy, which FEL re-encode turns into a
     // reconstructed Profile 8.1 rendition at the source raster.
-    let request = SessionRequest {
+    let mut request = SessionRequest {
         request_id: Some("actual-processed-hdr-window".into()),
         automatic: false,
         // Any resolution: PLURX_DV_WINDOW_HEIGHT selects the rung (720 by default).
@@ -217,6 +228,39 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         block_budget_secs: Some(10.0),
         ..reopen_request(id, "actual-hdr-probe", "unused", "unused")
     };
+    if std::env::var("PLURX_DV_WINDOW_SURROUND").is_ok_and(|value| value == "1") {
+        use plurx_core::playback::audio::{resolve_audio, AudioClaim, AudioRoute};
+        // Retained incident claim, reconstructed through the ordinary resolver.
+        // Eight source channels resolve to AAC 5.1/320k, not legacy stereo160k.
+        let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+            "v":2,"audio":["aac","flac","mp3"],"audio_sinks":[
+                {"codec":"aac","max_channels":8,"passthrough":false,"sample_rates_hz":[44100,48000]},
+                {"codec":"flac","max_channels":8,"passthrough":false,"sample_rates_hz":[44100,48000]},
+                {"codec":"mp3","max_channels":8,"passthrough":false,"sample_rates_hz":[44100,48000]}]
+        })).expect("retained audio capabilities");
+        let claim = AudioClaim::from_caps(&caps)
+            .expect("canonical claim")
+            .expect("audio claim");
+        let track = file
+            .audio_streams
+            .iter()
+            .find(|track| Some(track.index) == request.audio_index)
+            .expect("selected source audio");
+        let audio = resolve_audio(
+            Some(track),
+            &claim.profile(),
+            AudioRoute::EncodedVod,
+            request.audio_offset_ms,
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&audio.byte_identity())
+                .expect("audio identity"),
+            serde_json::json!([{"kind":"encode","codec":"aac","channels":6,"layout":"5.1","bitrate_kbps":320,"sample_rate":48000},
+                {"kind":"requires_layout_measurement","source_channels":8}])
+        );
+        request.audio_claim = Some(claim);
+        request.audio_delivery = Some(audio);
+    }
     if profile81 {
         // No verdict yet: the play keeps the plain conversion while the title
         // is measured. Then an admitting verdict for this source, renderer and
@@ -418,6 +462,45 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             manager.processed_reconstruction_slots.available_permits(),
             0
         );
+    }
+    // Keep throughput controls free of the standalone raw-video/luma
+    // diagnostics. Normal session creation below still executes every private
+    // window publication check; joined output checks run after its owner stops.
+    if std::env::var("PLURX_DV_WINDOW_PUBLICATION_ONLY").is_ok_and(|value| value == "1") {
+        assert!(
+            std::env::var("PLURX_DV_WINDOW_PUBLICATION_PROFILE").is_ok_and(|value| value == "1")
+        );
+        assert!(!sdr && !profile81 && display_target.is_none());
+        let first: usize = std::env::var("PLURX_DV_WINDOW_ENTRIES")
+            .expect("one explicit publication entry")
+            .parse()
+            .expect("one integer publication entry");
+        let grid = encoding.grid;
+        let count = publication_control_count();
+        let segment_plan = grid.plan(file.duration_ms.expect("duration"), 0);
+        assert!(first
+            .checked_add(count)
+            .is_some_and(|end| end <= segment_plan.entries.len()));
+        assert!(segment_plan.entries[first..first + count]
+            .iter()
+            .all(
+                |entry| entry.kind == plurx_core::segplan::PlanEntryKind::Video
+                    && entry.duration_ticks == grid.segment_ticks()
+            ));
+        drop(verified);
+        drop(prepared_root);
+        drop(encoding);
+        assert_eq!(
+            manager.processed_reconstruction_slots.available_permits(),
+            1
+        );
+        manager = manager.with_cache(
+            base.path().join("publication-cache"),
+            crate::ffmpeg::ffmpeg_build().await,
+            "control".into(),
+        );
+        profile_actual_processed_publication(&manager, request, first, grid, raster).await;
+        return;
     }
     let luma = processed_window_luma(&verified.bytes, raster, false);
     println!(
@@ -649,6 +732,349 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
         );
     }
+    if std::env::var("PLURX_DV_WINDOW_PUBLICATION_PROFILE").is_ok_and(|value| value == "1") {
+        assert!(
+            !sdr && !profile81 && display_target.is_none(),
+            "publication timing control currently covers master HDR10-E"
+        );
+        let first = *entries.first().expect("explicit publication entry");
+        let count = publication_control_count();
+        assert!(
+            first
+                .checked_add(count)
+                .is_some_and(|end| end <= segment_plan.entries.len()),
+            "requested publication windows exist"
+        );
+        let grid = encoding.grid;
+        assert!(
+            segment_plan.entries[first..first + count]
+                .iter()
+                .all(
+                    |entry| entry.kind == plurx_core::segplan::PlanEntryKind::Video
+                        && entry.duration_ticks == grid.segment_ticks()
+                ),
+            "complete video publication windows exist"
+        );
+        drop(encoding);
+        assert_eq!(
+            manager.processed_reconstruction_slots.available_permits(),
+            1,
+            "standalone control must release its reconstruction owner"
+        );
+        manager = manager.with_cache(
+            base.path().join("publication-cache"),
+            crate::ffmpeg::ffmpeg_build().await,
+            "control".into(),
+        );
+        profile_actual_processed_publication(&manager, request, first, grid, raster).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn publication_control_count() -> usize {
+    let count = match std::env::var("PLURX_DV_WINDOW_PUBLICATION_COUNT") {
+        Ok(value) => value.parse().expect("integer publication window count"),
+        Err(std::env::VarError::NotPresent) => 4,
+        Err(error) => panic!("invalid publication count: {error}"),
+    };
+    assert!(
+        (4..=32).contains(&count),
+        "bounded publication window count"
+    );
+    count
+}
+
+/// Normal registry/driver/publication path, without a browser or real account.
+/// Its isolated Store does not measure replicated writes or HTTP transport.
+#[cfg(target_os = "linux")]
+async fn profile_actual_processed_publication(
+    manager: &TranscodeManager,
+    mut request: SessionRequest,
+    first: usize,
+    grid: plurx_core::transcode::VodFrameGrid,
+    raster: (u32, u32),
+) {
+    use futures_util::FutureExt;
+    use tokio::io::AsyncReadExt;
+    let count = publication_control_count();
+    let audio_channels = request
+        .audio_delivery
+        .as_ref()
+        .and_then(|audio| audio.presentation_identity())
+        .map_or(2, |(_, channels)| channels);
+    request.request_id = Some("actual-processed-publication-control".into());
+    request.previous_session_id = None;
+    request.reopen_reason = None;
+    request.start_seconds = first as f64 * grid.frames_per_segment as f64 * grid.denominator as f64
+        / grid.numerator as f64;
+    let created = Instant::now();
+    let opening = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        Duration::from_secs(30),
+        create_local_vod(manager, &request, "publication-control"),
+    ))
+    .catch_unwind()
+    .await;
+    let start = match opening {
+        Ok(Ok(Ok(start))) => start,
+        failure => {
+            // The create may have attached a reader before an error or timeout.
+            // This manager belongs solely to the control, so stop every survivor.
+            settle_publication_control(manager).await;
+            match failure {
+                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(Ok(Err(cause))) => panic!("public processed create refused: {cause}"),
+                Ok(Err(_)) => panic!("public processed create exceeded its deadline"),
+                Ok(Ok(Ok(_))) => unreachable!("successful create was handled"),
+            }
+        }
+    };
+    println!(
+        "{}",
+        serde_json::json!({"publication_create_ms":created.elapsed().as_millis()})
+    );
+    // Catch assertion failures as well as ordinary errors so every successfully
+    // opened session is stopped before an error can unwind its temporary base.
+    let result = std::panic::AssertUnwindSafe(async {
+        assert_eq!(
+            start.processed_fel,
+            Some(true),
+            "no ordinary-route fallback"
+        );
+        assert_eq!(start.grade, OutputGrade::Hdr10);
+        assert!(start.vod, "normal VOD registry");
+        let mut init = Vec::new();
+        let mut segments = Vec::new();
+        for entry in std::iter::once(None).chain((first..first + count).map(Some)) {
+            let name = entry.map_or_else(|| "init.mp4".to_owned(), |at| format!("seg{at:05}.m4s"));
+            let started = Instant::now();
+            let response = tokio::time::timeout(
+                Duration::from_secs(20),
+                manager.vod_segment(&start.session_id, &name),
+            )
+            .await
+            .expect("bounded segment wait")
+            .expect("normal segment route");
+            let owner = response.owner;
+            let mut ready = response
+                .result
+                .expect("published segment")
+                .expect("planned resource");
+            let wait_ms = started.elapsed().as_millis();
+            let body_started = Instant::now();
+            let mut bytes = Vec::new();
+            const LIMIT: u64 = 64 * 1024 * 1024;
+            assert!(ready.len <= LIMIT, "bounded served object");
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                (&mut ready.file).take(LIMIT + 1).read_to_end(&mut bytes),
+            )
+            .await
+            .expect("bounded body read")
+            .expect("served bytes");
+            assert_eq!(bytes.len() as u64, ready.len);
+            assert!(!bytes.is_empty());
+            println!(
+                "{}",
+                serde_json::json!({"publication_entry":entry,"wait_ms":wait_ms,
+                    "body_ms":body_started.elapsed().as_millis(),"bytes":bytes.len()})
+            );
+            // Keep Ready's publication ownership until its read is complete.
+            drop(ready);
+            drop(owner);
+            if entry.is_some() {
+                segments.push(bytes);
+            } else {
+                init = bytes;
+            }
+        }
+        (init, segments)
+    })
+    .catch_unwind()
+    .await;
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(5),
+        manager.stop_session(&start.session_id, "test"),
+    )
+    .await;
+    settle_publication_control(manager).await;
+    assert!(
+        matches!(stopped, Ok(true)),
+        "public control session stopped"
+    );
+    let (init, segments) = result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    let directory = crate::test_tempdir().expect("served publication verification");
+    let mut joined = init.clone();
+    let mut segment_bounds = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        let bytes: Vec<_> = init.iter().chain(segment).copied().collect();
+        let path = directory.path().join(format!("window-{index}.mp4"));
+        tokio::fs::write(&path, &bytes)
+            .await
+            .expect("served window");
+        let decoded = tokio::time::timeout(
+            Duration::from_secs(20),
+            tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+                .args(["-nostdin", "-v", "error", "-xerror", "-i"])
+                .arg(&path)
+                .args(["-f", "null", "-"])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("bounded served decode")
+        .expect("decode served window");
+        assert!(
+            decoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        let start = joined.len() as u64;
+        joined.extend_from_slice(segment);
+        segment_bounds.push((start, joined.len() as u64));
+    }
+    let path = directory.path().join("joined.mp4");
+    tokio::fs::write(&path, joined)
+        .await
+        .expect("joined served windows");
+    let probe = tokio::time::timeout(Duration::from_secs(20), tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
+        .args([
+            "-v",
+            "error",
+            "-show_streams",
+            "-show_packets",
+            "-show_entries",
+            "stream=codec_type,codec_name,profile,width,height,pix_fmt,color_range,color_space,color_transfer,color_primaries,channels,sample_rate:packet=codec_type,pts_time,pos",
+            "-of",
+            "json",
+        ])
+        .arg(&path)
+        .kill_on_drop(true)
+        .output())
+        .await.expect("bounded joined probe")
+        .expect("joined packet probe");
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&probe.stdout).expect("packet timing");
+    let streams = document["streams"].as_array().expect("served streams");
+    let video = streams
+        .iter()
+        .find(|stream| stream["codec_type"] == "video")
+        .expect("served video");
+    assert_eq!(video["width"], raster.0);
+    assert_eq!(video["height"], raster.1);
+    assert_eq!(video["codec_name"], "hevc");
+    assert_eq!(video["profile"], "Main 10");
+    assert_eq!(video["pix_fmt"], "yuv420p10le");
+    assert_eq!(video["color_primaries"], "bt2020");
+    assert_eq!(video["color_transfer"], "smpte2084");
+    assert_eq!(video["color_space"], "bt2020nc");
+    assert_eq!(video["color_range"], "tv");
+    let audio = streams
+        .iter()
+        .find(|stream| stream["codec_type"] == "audio")
+        .expect("served audio");
+    assert_eq!(audio["codec_name"], "aac");
+    assert_eq!(audio["channels"], audio_channels);
+    assert_eq!(audio["sample_rate"], "48000");
+    let packets = document["packets"].as_array().expect("served packets");
+    let mut times = Vec::new();
+    for (from, through) in segment_bounds {
+        let mut window: Vec<f64> = packets
+            .iter()
+            .filter(|packet| {
+                let position: u64 = packet["pos"]
+                    .as_str()
+                    .expect("packet position")
+                    .parse()
+                    .expect("numeric position");
+                packet["codec_type"] == "video" && position >= from && position < through
+            })
+            .map(|packet| {
+                packet["pts_time"]
+                    .as_str()
+                    .expect("PTS")
+                    .parse()
+                    .expect("numeric PTS")
+            })
+            .collect();
+        assert_eq!(window.len(), grid.frames_per_segment as usize);
+        // B-frame decoding may reorder packets within one fragment. Preserve
+        // requested fragment order while comparing their presentation clocks.
+        window.sort_by(f64::total_cmp);
+        times.extend(window);
+    }
+    assert_eq!(times.len(), count * grid.frames_per_segment as usize);
+    let period = grid.denominator as f64 / grid.numerator as f64;
+    assert!(
+        times
+            .windows(2)
+            .all(|pair| ((pair[1] - pair[0]) - period).abs() < 0.001),
+        "consecutive served windows retain presentation cadence at every boundary"
+    );
+    let audio_times: Vec<f64> = document["packets"]
+        .as_array()
+        .expect("served packets")
+        .iter()
+        .filter(|packet| packet["codec_type"] == "audio")
+        .map(|packet| {
+            packet["pts_time"]
+                .as_str()
+                .expect("audio PTS")
+                .parse()
+                .expect("numeric audio PTS")
+        })
+        .collect();
+    assert!(
+        audio_times.len() >= count * 90,
+        "AAC audio for every window"
+    );
+    let audio_period = 1024.0 / 48000.0;
+    assert!(
+        audio_times
+            .windows(2)
+            .all(|pair| ((pair[1] - pair[0]) - audio_period).abs() < 0.001),
+        "served AAC cadence spans every window boundary without a gap or overlap"
+    );
+    // AAC packet rounding and its encoder priming can each span one packet.
+    let audio_tolerance = 2.0 * audio_period + 0.001;
+    assert!((audio_times[0] - times[0]).abs() <= audio_tolerance);
+    assert!(
+        (audio_times.last().expect("last audio") + audio_period
+            - (times.last().expect("last video") + period))
+            .abs()
+            <= audio_tolerance
+    );
+    println!(
+        "{}",
+        serde_json::json!({"publication_joined_frames":times.len(),
+        "publication_span_seconds":times.last().expect("last frame")-times[0]+period})
+    );
+}
+
+#[cfg(target_os = "linux")]
+async fn settle_publication_control(manager: &TranscodeManager) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut ids = manager.vod.live_or_preparing_session_ids().await;
+            ids.extend(manager.active_session_ids().await);
+            if ids.is_empty() && manager.processed_reconstruction_slots.available_permits() == 1 {
+                break;
+            }
+            for id in ids {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    manager.stop_session(&id, "test"),
+                )
+                .await;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("isolated sessions and producer ownership settled before offline checks");
 }
 
 /// Bounded physical coverage, not HTTP playback or full-app EOF: the shared

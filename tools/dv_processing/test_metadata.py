@@ -8,6 +8,28 @@ import unittest
 
 
 class MetadataAdmission(unittest.TestCase):
+    def test_bounded_source_reader(self):
+        source = Path(__file__).with_name("test_source_reader.c")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "source-reader"
+            subprocess.run([os.environ.get("CC", "cc"), "-O2", "-std=c11",
+                            "-Wall", "-Wextra", "-Werror", "-pthread", str(source),
+                            "-o", str(binary)], check=True, timeout=30)
+            subprocess.run([str(binary)], check=True, timeout=20)
+
+    def test_source_reader_preserves_unread_avio_bytes_across_seeks(self):
+        source = Path(__file__).with_name("test_source_reader_avio.c")
+        flags = shlex.split(subprocess.check_output(
+            ["pkg-config", "--static", "--cflags", "--libs", "libavformat",
+             "libavcodec", "libavutil"], text=True, timeout=15))
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "source-reader-avio"
+            subprocess.run([os.environ.get("CC", "cc"), "-O2", "-std=c11",
+                            "-Wall", "-Wextra", "-Werror", "-pthread", str(source),
+                            "-o", str(binary), *flags, "-lm", "-ldl"],
+                           check=True, timeout=60)
+            subprocess.run([str(binary)], check=True, timeout=20)
+
     def test_title_mastering_constants_survive_missing_blocks(self):
         """Run the production accumulator, including nonadjacent conflicts."""
         source = Path(__file__).with_name("test_title_constants.c")

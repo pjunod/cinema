@@ -110,7 +110,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 15] = [
+    let inputs: [(&str, &[u8]); 16] = [
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -162,6 +162,10 @@ fn renderer_source_identity() -> String {
         (
             "segment_decode_render.c",
             include_bytes!("../../../tools/dv_processing/segment_decode_render.c"),
+        ),
+        (
+            "source_reader.h",
+            include_bytes!("../../../tools/dv_processing/source_reader.h"),
         ),
         (
             "title_constants.h",
@@ -2128,6 +2132,14 @@ impl PrivateWindow {
         let source_keys: Vec<_> = pictures.iter().map(|frame| frame.key.clone()).collect();
         dv_map_source_to_output_grid(&source_keys, tick, source_origin, grid, first_frame, frames)
             .map_err(|e| e.to_string())?;
+        tracing::debug!(target: "plurxd::dv",
+            window_start = %complete.requested_start, window_end = %complete.requested_end,
+            frames, preroll_pairs = complete.preroll_pairs,
+            paired_pictures = complete.paired_pictures,
+            source_bytes_read = complete.source_bytes_read,
+            renderer_device_type = gpu.device_type, renderer_vendor_id = gpu.vendor_id,
+            decoder = ?decoder, software_frame_workers,
+            "processed window source coverage validated");
         Ok(ObservedWindow {
             pictures,
             #[cfg(test)]

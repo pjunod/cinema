@@ -971,12 +971,13 @@ pub(crate) fn streaming_helper_cpu_threads(
         2
     };
     // Per layer: four frame-only software decoder workers, or one GPU decode
-    // context. Plus one caller doing parsing/upload/packing and one bounded
-    // software-Vulkan worker.
+    // context. Plus one caller doing parsing/upload/packing, one bounded
+    // software-Vulkan worker and one owned source-reader worker. Finite legacy
+    // controls conservatively reserve the windowed graph's source-reader debit.
     match decode {
-        RendererDecode::Software => layers * STREAMING_DECODER_THREADS + 2,
+        RendererDecode::Software => layers * STREAMING_DECODER_THREADS + 3,
         #[cfg(any(target_os = "linux", plurx_dv_segment_probe))]
-        RendererDecode::Gpu => layers + 2,
+        RendererDecode::Gpu => layers + 3,
     }
 }
 
@@ -2080,10 +2081,10 @@ mod tests {
                 ["19"]
             );
             for (mode, decode, helper) in [
-                (DvProcessingMode::BaseRpu, RendererDecode::Software, 6),
-                (DvProcessingMode::Fel, RendererDecode::Software, 10),
-                (DvProcessingMode::BaseRpu, RendererDecode::Gpu, 3),
-                (DvProcessingMode::Fel, RendererDecode::Gpu, 4),
+                (DvProcessingMode::BaseRpu, RendererDecode::Software, 7),
+                (DvProcessingMode::Fel, RendererDecode::Software, 11),
+                (DvProcessingMode::BaseRpu, RendererDecode::Gpu, 4),
+                (DvProcessingMode::Fel, RendererDecode::Gpu, 5),
             ] {
                 assert_eq!(streaming_helper_cpu_threads(mode, decode), helper);
                 let total = helper + if audio { 5 } else { 3 };

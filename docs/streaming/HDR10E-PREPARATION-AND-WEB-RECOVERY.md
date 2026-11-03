@@ -71,7 +71,113 @@ reservation at 1,568/1,494 ms without overlap and 1,475/1,449 ms with overlap
 Renderer time also varied (1,317–1,386 ms), and expensive test-only luma
 diagnostics separated samples. This proves a bounded inventory improvement,
 not sustained production throughput, HTTP delivery or smooth playback.
+The earlier HDR10-E fixture did not inject the detected Mesa driver policy.
+Those ABBA figures qualify the inventory overlap for that controlled recipe;
+they are not production-policy throughput evidence. The physical fixture now
+detects the encoder and preserves its actual policy for every destination.
 Transferred executables and generated media were automatically removed.
+
+## Full publication timing still requires attribution
+
+An isolated normal VOD session now exercises the registry, retained driver,
+private verification, publication and four consecutive segment reads. It stops
+and settles every producer before independently decoding the served segments
+and checking joined video/AAC cadence, raster and HDR signalling. The actual
+Mesa policy control passed with 192 frames spanning eight seconds. This is an
+unoptimized Rust test with a private SQLite store, manual session selection
+and local file reads; it does not measure HTTP or replicated-store delivery.
+
+At entries 1122–1125, one policy-correct run measured create at 1,510 ms and
+subsequent segment waits at 2,535/2,325/2,382 ms; bodies took 3 ms. Another run
+measured 1,395/2,431/2,343 ms. Child-lifetime observation placed the long waits
+inside live renderer/encoder execution, rather than a fixed successful
+retirement grace period. Similar child CPU totals across fast and slow windows
+do not identify whether source I/O, pipe blocking or GPU waiting caused them.
+The in-flight prefetch after stopping the session is excluded from throughput
+claims. Standalone raw-video/luma diagnostics precede these controls and may
+change their environment; a separate publication-only mode avoids that load.
+Its first four windows had useful headroom, but a longer 32-window run still
+fell behind: 2,219 ms median and 3,055 ms maximum wait for two-second segments.
+All 1,536 served frames spanned 64 seconds with valid joined audio/video cadence.
+Short controls therefore cannot establish sustained preparation throughput.
+
+Several native controls were rejected, with quality policy unchanged:
+
+| Experiment | Balanced median observation | Disposition |
+|---|---|---|
+| NUT direct AVIO writes | 1,276 versus 1,388 ms | Reverted; slower despite lower CPU time. |
+| 64 KiB versus 1 MiB raw-video pipe | 1,308 versus 1,306 ms | No meaningful gain. |
+| VA-API queue depth 1 versus 4 | 1,258 versus 1,279 ms | No gain; existing bounded depth remains required. |
+| Mesa shader cache disabled versus enabled | 1,270 versus 1,254 ms | Insufficient gain; unmanaged driver caches remain disabled. |
+
+Each comparison retained source fencing and frame/FEL evidence; separate raw
+pixel/PTS controls matched. These native controls omit normal daemon admission
+and publication, so they do not replace the complete validation harness.
+The common launcher disables driver caches even when the renderer supplies a
+private shader-directory path. Enabling those writes would require enforceable
+capacity admission; the path and Mesa's approximate size setting are not enough.
+
+The retained durable request was joined internally to its incident telemetry.
+It resolves eight source audio channels to AAC 5.1, six channels at 320 kbps,
+48 kHz. The initial manual control used stereo at 160 kbps. That bitrate
+difference predicts 40,000 extra bytes over two seconds; the corrected canonical
+audio claim produced the original three captured segment lengths exactly:
+4,766,965, 4,545,736 and 4,735,176 bytes. This resolves the size discrepancy
+without an AAC-preroll defect. The corrected control passed normal publication,
+decode and eight-second joined cadence checks. Equal lengths are not retained
+content hashes, and manual admission does not restore an old Auto owner's lease.
+
+An isolated source-inode read interposer then measured the sustained slow
+control. Renderer read syscalls took a median 984 ms per window; encoder reads
+took 531 ms. Individual reads reached 200–320 ms. The children run concurrently,
+so their read durations must not be added to derive wall time. Instrumentation
+adds an `fstat` before reads and excludes that overhead from its read duration;
+uninstrumented sustained waits were similarly slow. Warm same-window reads took
+only milliseconds. This identifies source-read waiting as a substantial cost in
+the reproduced control, not an incident-era trace of NFS transport specifically.
+
+Both nodes' backing-device read-ahead settings were 128 KiB. A helper-only
+sequential-access hint showed no useful gain across balanced, disjoint first-touch
+blocks and is not a product change. A 1 MiB input buffer gained about 7% in one
+balanced comparison, while 4 MiB was slower. Neither buffer change is retained;
+the AVIO input buffer remains 64 KiB. Driver-cache enablement, kernel prefetch
+hints and global mount tuning are not part of this candidate.
+
+## The owned reader overlaps source waiting with rendering
+
+After the final demux seek, one helper-owned reader fills four 1 MiB slots while
+the existing decoder/render/encode pipeline consumes them. The four-slot bound
+includes an in-flight read. The reader has an explicit 256 KiB thread stack;
+the existing AVIO buffer, thread guard and TLS are additional memory. Admission
+reserves one extra CPU worker: the GPU FEL/audio graph now debits ten threads
+rather than nine. There is no new setting or observer retry.
+
+Every completed descriptor read spends the same 128 MiB allowance, including
+queued, discarded and in-flight data. Seeks never refund those bytes. Queued
+bytes are delivered before EOF, errors or a terminal budget refusal. The reader
+tracks bytes delivered to AVIO separately from AVIO's own buffered consumer
+position; seek pauses and joins it, restores the callback cursor, applies the
+seek and restarts. Completion stops it before writer/GPU cleanup and joins it
+before closing the source or reporting success. A blocked filesystem read has
+no promised completion time; existing daemon deadlines and actual-reap ownership
+remain authoritative. The new header participates in both helper source identities.
+
+The native first-touch comparison retained original six-channel audio and
+matched raw pixels, PTS and encoded bytes on its same-window fidelity controls.
+Instrumented baseline/reader median wall times were 1,995/1,712 ms. A separate
+uninstrumented comparison measured 1,436/1,362 ms; its source/cache conditions
+were different. Disjoint windows and source variation prevent treating these
+as paired same-scene gains. Additional application reads may warm subsequent
+windows; they remain counted, and no claim equates them to extra NFS wire bytes.
+
+The standard rebuilt bundle and matching daemon then passed 32 consecutive
+normal VOD publication windows with the recovered AAC 5.1/320 kbps recipe.
+Create took 2,143 ms; the next 31 two-second segments had median/mean waits of
+1,522/1,518 ms and a maximum of 1,646 ms, with body reads at most 5 ms. All 1,536
+frames spanned 64 seconds with valid HDR metadata and joined video/AAC cadence.
+With the first segment prepared, every subsequent local object became ready
+before its simulated two-second playback boundary. These are isolated manual
+VOD/local-read results, not HTTP, replicated-store or browser acceptance.
 
 ## Native observation remains a root-cause investigation
 
@@ -121,7 +227,15 @@ test for inventory ownership.
 Focused resume regressions have passed, including Shared launches (22 tests).
 The cache suite passed 27 tests; its read-only physical timing control is
 explicitly ignored by ordinary runs. The candidate physical ABBA harness
-passed with all validation intact. The rejected observer patch's tests do not
-establish incident closure. No candidate deployment or sustained smooth-playback
-acceptance is recorded yet; further production timing and a matching Safari
-JavaScript capture remain necessary.
+passed with all validation intact. Native reader controls cover cursors, unread
+AVIO data, seeks, short reads, EOF/errors, exact budget exhaustion, discarded
+reads, start refusal and owned shutdown. Six native metadata/reader tests and
+12 focused Rust resource/lifecycle tests and 29 runtime metadata/receipt tests
+passed. Address/undefined-behavior
+sanitizer controls passed ten runs with a fixed executable mapping; ThreadSanitizer
+could not start on the test kernel, so it supplies no race-check evidence.
+
+The rejected observer patch's tests do not establish incident closure. The
+64-second publication result establishes server preparation headroom under its
+recorded conditions. No deployment or live browser acceptance is recorded yet;
+final compiler/CLI gates and a matching Safari JavaScript capture remain separate.
