@@ -379,6 +379,10 @@ pub struct SoftwareVodOwner {
     history_family: crate::adaptive_resources::FamilyIdentity,
     #[cfg(target_os = "linux")]
     history_units: u32,
+    #[cfg(target_os = "linux")]
+    policy_generation: u64,
+    #[cfg(target_os = "linux")]
+    policy_limit_epoch: u64,
     // Last: drop every rich field before announcing application release.
     app_guard: Arc<super::finite_lifetime::FiniteAppGuard>,
 }
@@ -832,6 +836,48 @@ impl NodeResourceRuntime {
 }
 
 impl SoftwareVodOwner {
+    /// Original typed scratch/task epoch, fixed before admission. This is
+    /// observation identity, not a session UUID or cleanup authority.
+    #[cfg(target_os = "linux")]
+    pub fn generation_epoch(&self) -> u64 {
+        self.policy_generation
+    }
+
+    /// A terminal/failed driver clears positive service evidence without
+    /// erasing the class cooldown or announcing native cleanup.
+    #[cfg(target_os = "linux")]
+    pub fn invalidate_policy_service(&self, now: Instant) {
+        if let Some(basis) = self.history_basis {
+            self.runtime.invalidate_finite_policy_service(
+                basis.policy_class(),
+                self.history_family,
+                now,
+            );
+        }
+    }
+
+    /// Observe the original durable producer service event. This updates only
+    /// fixed node-local hysteresis; it cannot admit a trial or release custody.
+    #[cfg(target_os = "linux")]
+    pub fn observe_policy_service(
+        &self,
+        sample: crate::resource_observation::WorkSample,
+        now: Instant,
+    ) {
+        if let Some(basis) = self.history_basis {
+            self.runtime.observe_finite_policy_service(
+                basis.policy_class(),
+                (
+                    self.history_family,
+                    self.policy_generation,
+                    self.policy_limit_epoch,
+                ),
+                sample,
+                now,
+            );
+        }
+    }
+
     /// Read the exact current ledger mixture and matching bounded history.
     /// A missing/stale mix or clock never becomes zero-cost evidence.
     #[cfg(target_os = "linux")]
@@ -1681,6 +1727,10 @@ impl NodeResourceRuntime {
                 history_family: family,
                 #[cfg(target_os = "linux")]
                 history_units: request.segment_count,
+                #[cfg(target_os = "linux")]
+                policy_generation: request.generation_epoch,
+                #[cfg(target_os = "linux")]
+                policy_limit_epoch: request.demand.limit_epoch,
                 app_guard,
             },
             application,

@@ -23,10 +23,22 @@ const DRIVER_ABORTED: u8 = 3;
 const IDENTITY_METADATA_BYTES: u64 = 64 * 1024;
 const ENCODED_MARKER_BYTES: u64 = 4 * 1024;
 
+fn speculative_capacity_refusal(refusal: plurx_core::adaptive_resources::AdmissionRefusal) -> bool {
+    use plurx_core::adaptive_resources::AdmissionRefusal;
+    matches!(
+        refusal,
+        AdmissionRefusal::InsufficientEvidence
+            | AdmissionRefusal::HardLimit(_)
+            | AdmissionRefusal::TrialAlreadyHeld
+            | AdmissionRefusal::LedgerFull
+    )
+}
+
 /// Persistent application owner. Stage is diagnostic/control serialization;
 /// only core's original receipts and known journal commits release resources.
 pub(crate) struct FiniteSoftwareProducer {
     owner: Mutex<SoftwareVodOwner>,
+    generation_epoch: u64,
     cache_grant: std::sync::Mutex<Option<crate::playback_cache::FiniteCacheReservation>>,
     compatibility: std::sync::Mutex<Option<crate::vodencode::FiniteSoftwareCompatibility>>,
     // Captured before publication. Source-spec paths are only removed and
@@ -79,6 +91,7 @@ impl FiniteSoftwareProducer {
     ) -> Self {
         Self {
             control: owner.control(),
+            generation_epoch: owner.generation_epoch(),
             owner_heap_bound: owner.requested_heap_bytes(),
             owner: Mutex::new(owner),
             cache_grant: std::sync::Mutex::new(Some(cache_grant)),
@@ -89,6 +102,9 @@ impl FiniteSoftwareProducer {
             driver_state: AtomicU8::new(DRIVER_UNREGISTERED),
             driver_change: Notify::new(),
         }
+    }
+    pub(crate) fn generation_epoch(&self) -> u64 {
+        self.generation_epoch
     }
     pub(super) fn take_cache_grant(&self) -> Option<crate::playback_cache::FiniteCacheReservation> {
         self.cache_grant
@@ -389,6 +405,7 @@ pub(super) fn projected_driver_future_bytes() -> usize {
         Option<usize>,
         Option<plurx_core::cluster::clock::ContinuousDeadline>,
         &'static mut Option<super::shared::PreparedAttemptCleanup>,
+        &'static mut Option<plurx_core::resource_policy::TrialRefusal>,
     ) -> F;
     fn build_frame_bytes<
         F: std::future::Future<
@@ -440,6 +457,7 @@ pub(super) async fn build(
     settings: &VodSettings,
 ) -> Result<Arc<Rendition>, String> {
     let mut ignored = None;
+    let mut ignored_trial_refusal = None;
     build_inner(
         shared,
         key,
@@ -450,6 +468,7 @@ pub(super) async fn build(
         None,
         None,
         &mut ignored,
+        &mut ignored_trial_refusal,
     )
     .await
     .map(|(rendition, _)| rendition)
@@ -472,6 +491,7 @@ pub(super) async fn build_attempt(
     continuous_entry_deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
 ) -> Result<(Arc<Rendition>, FiniteApplicationLease), super::shared::AdaptiveBuildFailure> {
     let mut cleanup = None;
+    let mut trial_refusal = None;
     let result = build_inner(
         shared,
         key,
@@ -482,10 +502,14 @@ pub(super) async fn build_attempt(
         Some(application_owner_bytes),
         continuous_entry_deadline,
         &mut cleanup,
+        &mut trial_refusal,
     )
     .await;
-    let (rendition, lease) =
-        result.map_err(|message| super::shared::AdaptiveBuildFailure { message, cleanup })?;
+    let (rendition, lease) = result.map_err(|message| super::shared::AdaptiveBuildFailure {
+        message,
+        trial_refusal,
+        cleanup,
+    })?;
     Ok((
         rendition,
         lease.expect("attempt build takes its application lease"),
@@ -506,6 +530,7 @@ async fn build_inner(
     application_owner_bytes: Option<usize>,
     continuous_entry_deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     failed_attempt_cleanup: &mut Option<super::shared::PreparedAttemptCleanup>,
+    failed_attempt_trial_refusal: &mut Option<plurx_core::resource_policy::TrialRefusal>,
 ) -> Result<(Arc<Rendition>, Option<FiniteApplicationLease>), String> {
     let runtime = shared
         .resource_runtime
@@ -598,6 +623,12 @@ async fn build_inner(
         .map_err(|_| "finite software pool policy is invalid".to_owned())?
         .unwrap_or_else(|| crate::admission::software_budget() as u64);
     let admission_deadline = Instant::now() + settings.materialize_budget;
+    // Adaptive creates already reserved activation upstream. A fresh local
+    // materialization budget must never extend their original policy cutoff.
+    let original_policy_cutoff = continuous_entry_deadline
+        .as_ref()
+        .and_then(|cutoff| cutoff.monotonic_cutoff().ok())
+        .unwrap_or_else(Instant::now);
     let epoch = runtime
         .refresh_admission_capacity(admission_deadline)
         .await
@@ -622,6 +653,13 @@ async fn build_inner(
         capacity.cpu_ns_per_second,
         plurx_core::process::observation::Metric::Known(0)
     ) {
+        if application_owner_bytes.is_some() {
+            *failed_attempt_trial_refusal = Some(runtime.finite_unprofiled_trial_refusal(
+                continuous_entry_deadline.as_ref(),
+                original_policy_cutoff,
+                Instant::now(),
+            ));
+        }
         return Err(crate::transcode::vod_refusal_error(
             "vod_family_capacity",
             "finite software admission refused: no unspent hard CPU budget",
@@ -642,6 +680,7 @@ async fn build_inner(
             .charge_application_owner_bytes(bytes)
             .map_err(|error| format!("charging adaptive attempt owner: {error}"))?;
     }
+    request.continuous_entry_deadline = continuous_entry_deadline;
     // This aliases the same selected request for legacy compatibility only.
     // The core CPU demand above came from hard total capacity; do not subtract
     // this thread-pool claim again or add it as another physical core role.
@@ -657,6 +696,13 @@ async fn build_inner(
         )
         .await
         .ok_or_else(|| {
+            if application_owner_bytes.is_some() {
+                *failed_attempt_trial_refusal = Some(runtime.finite_trial_refusal(
+                    &request,
+                    original_policy_cutoff,
+                    Instant::now(),
+                ));
+            }
             crate::transcode::vod_refusal_error(
                 "vod_family_capacity",
                 "finite software compatibility pool is occupied",
@@ -687,13 +733,22 @@ async fn build_inner(
     .map_err(|_| "finite build cleanup slot deadline elapsed".to_owned())??;
     let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
     let compatibility = compatibility.enter();
-    request.continuous_entry_deadline = continuous_entry_deadline;
+    // This is only a refusal candidate. Successful conservative admission
+    // below ignores it; policy cannot turn unknown peaks into a trial permit.
+    let speculative_refusal = application_owner_bytes
+        .map(|_| runtime.finite_trial_refusal(&request, original_policy_cutoff, Instant::now()));
     let owner = match runtime.prepare_software_vod(request, admission_deadline) {
         Ok(owner) => owner,
         Err(error) => {
             if error.definitely_before_reservation() {
                 cache_grant.known_closed();
                 compatibility.known_retired();
+                if error
+                    .admission_refusal()
+                    .is_some_and(speculative_capacity_refusal)
+                {
+                    *failed_attempt_trial_refusal = speculative_refusal;
+                }
             }
             return Err(if let Some(refusal) = error.admission_refusal() {
                 crate::transcode::vod_refusal_error(
@@ -1071,6 +1126,7 @@ async fn run_body(
         &rendition,
         plurx_core::resource_observation::WorkPhase::Retiring,
     );
+    owner.invalidate_policy_service(Instant::now());
     let deadline = Instant::now() + rendition.materialize_budget;
     let retired = async {
         owner.freeze_output(deadline).await?;
@@ -1115,8 +1171,9 @@ async fn join_and_observe(
             tokio::select! {
                 completion = &mut joined => break completion,
                 event = events.recv(), if channel_open => match event {
-                    Some(event) => if let Err(error) = observe(shared, rendition, event).await {
+                    Some(event) => if let Err(error) = observe(shared, rendition, owner, event).await {
                         fail(shared, rendition, producer, format!("indexing finite output: {error}"));
+                        owner.invalidate_policy_service(Instant::now());
                     },
                     None => channel_open = false,
                 },
@@ -1128,15 +1185,19 @@ async fn join_and_observe(
     };
     // The writer can finish before the final metadata event wins select.
     while let Ok(event) = events.try_recv() {
-        if let Err(error) = observe(shared, rendition, event).await {
+        if let Err(error) = observe(shared, rendition, owner, event).await {
             fail(
                 shared,
                 rendition,
                 producer,
                 format!("indexing finite output: {error}"),
             );
+            owner.invalidate_policy_service(Instant::now());
         }
     }
+    // Joined production no longer supplies active service stability. Losing
+    // that evidence never claims a native close or manufactures a cooldown.
+    owner.invalidate_policy_service(Instant::now());
     completion
 }
 
@@ -1166,9 +1227,24 @@ fn note_resource_phase(rendition: &Rendition, phase: plurx_core::resource_observ
     }
 }
 
+fn observe_policy_service(rendition: &Rendition, owner: &SoftwareVodOwner) {
+    let now = Instant::now();
+    if let Some((sample, _)) = rendition
+        .recipe
+        .encoding
+        .as_ref()
+        .and_then(|encoding| encoding.resource_service_sample(now))
+    {
+        // The accepted sample carries its original event time. Polls and
+        // retained reads cannot refresh class stability or prove headroom.
+        owner.observe_policy_service(sample, now);
+    }
+}
+
 async fn observe(
     shared: &Arc<Shared>,
     rendition: &Arc<Rendition>,
+    owner: &SoftwareVodOwner,
     event: SoftwareVodEvent,
 ) -> io::Result<()> {
     match event {
@@ -1236,6 +1312,7 @@ async fn observe(
                         ticks_to_ms(planned.end_ticks(), rendition.timescale),
                         phase,
                     );
+                    observe_policy_service(rendition, owner);
                 }
             }
             shared.working_set.fetch_add(bytes, Relaxed);

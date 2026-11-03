@@ -4,12 +4,14 @@
 resumed Claude's adaptive effort #1248. The effort remains a draft; no release
 qualification or deployment is claimed.
 
-Companion to [the plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) (requirements) and
-[finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) (the source checklist).
+[Plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) ·
+[finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) ·
+[production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) (qualified scope).
 
 ## Current continuation — two-node publication and test isolation
 
-Task PRs #1293, #1338 and #1360–#1365 are merged into effort #1248.
+Task PRs #1293, #1338, #1360–#1365 and #1368 are merged into effort #1248.
+PR #1368 landed at `8aa9cae1b28dd6d6dc9fdb5db3265ef549e8d2f7`; gate 6411 passed.
 PR #1365 landed at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e` after its
 nine-job development gate passed. The current [finite lifecycle and restart
 qualification](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)

@@ -23,6 +23,10 @@ use crate::resource_custody::{
 
 mod capacity_observer;
 #[cfg(target_os = "linux")]
+mod finite_policy;
+#[cfg(target_os = "linux")]
+pub use finite_policy::FinitePolicyServiceDiagnostics;
+#[cfg(target_os = "linux")]
 pub mod copy_vod;
 #[cfg(target_os = "linux")]
 pub mod direct_source;
@@ -103,6 +107,9 @@ pub struct NodeResourceRuntime {
     /// these records for admission, physical closure or refund.
     #[cfg(target_os = "linux")]
     history: Arc<Mutex<crate::resource_history::ResourceHistory>>,
+    /// Fixed node-local monotonic evidence, separate from persisted priors.
+    #[cfg(target_os = "linux")]
+    finite_policy: Mutex<finite_policy::FinitePolicyRegistry>,
     recovered_bindings: BTreeMap<Uuid, ReservationBinding>,
     // Reopened native S owners remain under their complete restored holds.
     // Import alone cannot authorize serving or old-owner journal settlement.
@@ -165,6 +172,8 @@ impl NodeResourceRuntime {
             ledger,
             #[cfg(target_os = "linux")]
             history,
+            #[cfg(target_os = "linux")]
+            finite_policy: Mutex::new(finite_policy::FinitePolicyRegistry::default()),
             recovered_bindings,
             #[cfg(target_os = "linux")]
             recovered_s: Mutex::new(BTreeMap::new()),

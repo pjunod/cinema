@@ -159,6 +159,9 @@ pub(crate) struct PreparedAttemptCleanup {
 #[cfg(target_os = "linux")]
 pub(crate) struct AdaptiveBuildFailure {
     pub(crate) message: String,
+    /// Known refusal of speculative growth after ordinary admission failed.
+    /// This is neither a trial grant nor evidence that P/R cleanup completed.
+    pub(crate) trial_refusal: Option<plurx_core::resource_policy::TrialRefusal>,
     /// Present only when the original finite R was admitted and its exact
     /// closing owner was registered before this failure was returned.
     pub(crate) cleanup: Option<PreparedAttemptCleanup>,
@@ -169,6 +172,7 @@ impl AdaptiveBuildFailure {
     pub(crate) fn before_r(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            trial_refusal: None,
             cleanup: None,
         }
     }
@@ -1729,6 +1733,14 @@ impl Shared {
             plan.duration_ticks() as f64 / f64::from(timescale) / plan.len() as f64
         };
         let plan_len = plan.len();
+        // Finite output owns its native generation before the driver starts;
+        // that driver bypasses the legacy scheduler's first epoch increment.
+        #[cfg(target_os = "linux")]
+        let generation_epoch = dir
+            .finite_producer()
+            .map_or(0, |producer| producer.generation_epoch());
+        #[cfg(not(target_os = "linux"))]
+        let generation_epoch = 0;
         Arc::new(Rendition {
             ephemeral_processing,
             _processed_instance_allowance: processed_instance_allowance,
@@ -1777,7 +1789,7 @@ impl Shared {
             init_notify: Notify::new(),
             wake: Notify::new(),
             hooks: Box::new(NoopRenditionHooks),
-            gen_epoch: AtomicU64::new(0),
+            gen_epoch: AtomicU64::new(generation_epoch),
             last_child_pid: AtomicU32::new(0),
             // Creation can be cancelled after the rendition is installed but
             // before a session reader attaches. Start it as dormant so that

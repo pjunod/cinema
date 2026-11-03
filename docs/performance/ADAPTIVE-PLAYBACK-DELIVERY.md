@@ -1,8 +1,8 @@
 # Adaptive playback — finite delivery closure
 
 **Status:** open · implementation active · updated 2026-11-03. Task PRs #1293,
-#1338 and #1360–#1365 are merged into draft effort #1248. This finite follow-up
-starts at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e`; the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#current-continuation--two-node-publication-and-test-isolation)
+#1338, #1360–#1365 and #1368 are merged into draft effort #1248. Finite PR #1368
+landed at `8aa9cae1b28dd6d6dc9fdb5db3265ef549e8d2f7` after gate 6411 passed; the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#current-continuation--two-node-publication-and-test-isolation)
 records the publication repair and current qualification scope. V1–V5 and final
 qualification remain open. The checklist below retains its historical source
 and evidence limits; a merged component does not close all-path acceptance.
@@ -89,14 +89,13 @@ The two-node and exact-head gate results are recorded in the task PR.
 The finite qualification above separates implemented fixtures from executed
 results. Their presence does not close the historical all-path checklist.
 
-There is also genuine M2 implementation work: the selected finite path currently
-reads history for advisory comparisons in
-[`finite_software.rs`](../../crates/plurxd/src/vod/finite_software.rs), while
-`TrialMonitor`, `TrialBudget` and `GrowthState` have no daemon consumers.
-Connecting original-deadline trial control and owned stopping to the selected
-producer remains open. Preserve UnknownBounds/UnknownMemory refusals; priors
-alone never authorize expansion. No all-path or hard-memory acceptance closes
-with the publication repair.
+The [production policy slice](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
+connects typed speculative refusals and bounded growth observations to actual
+finite admission/materialization. Fourteen scoped cases pass. Unknown native
+peaks, startup/cleanup bounds, full inventory and pre-Winner ownership still
+block trial execution. `TrialMonitor` has no production trial owner; priors
+and growth stability never authorize expansion. M2 and hard-memory acceptance
+remain open.
 
 ## 2026-10-29 checkpoint — historical source-bound evidence
 
