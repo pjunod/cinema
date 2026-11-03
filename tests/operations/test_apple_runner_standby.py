@@ -119,6 +119,47 @@ class AppleRunnerStandbyTests(unittest.TestCase):
         }
         self.assertFalse(standby.probe(config))
 
+    def test_primary_health_outputs_only_a_fully_validated_toolchain(self):
+        import os
+        health = ROOT / "deploy/apple-runner/plurx-apple-primary-health"
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            shims = {
+                "launchctl": '#!/bin/sh\n[ "$PRIMARY_SERVICE_READY" = 1 ] || exit 1\nprintf "state = running\\n"\n',
+                "xcodebuild": '#!/bin/sh\nprintf "%s\\n" "$PRIMARY_XCODE_VERSION"\n',
+                "curl": '#!/bin/sh\n[ "$PRIMARY_FORGE_READY" = 1 ] || exit 22\n',
+            }
+            script = health.read_text()
+            for original, name in (("/bin/launchctl", "launchctl"),
+                                   ("/usr/bin/xcodebuild", "xcodebuild"),
+                                   ("/usr/bin/curl", "curl")):
+                path = base / name
+                path.write_text(shims[name])
+                path.chmod(0o755)
+                self.assertIn(original, script, "readiness dependency moved; update the execution fixture")
+                script = script.replace(original, str(path))
+            candidate = base / "health"
+            candidate.write_text(script)
+            expected = "Xcode 27.2\nBuild version 27B52\n"
+            cases = (
+                ({}, True),
+                ({"PRIMARY_SERVICE_READY": "0"}, False),
+                ({"PRIMARY_XCODE_VERSION": "Xcode 27.1\nBuild version 27B52"}, False),
+                ({"PRIMARY_XCODE_VERSION": "Xcode 27.2\nBuild version 27WRONG"}, False),
+                ({"PRIMARY_FORGE_READY": "0"}, False),
+            )
+            for changes, healthy in cases:
+                with self.subTest(changes=changes):
+                    env = dict(os.environ, PRIMARY_SERVICE_READY="1", PRIMARY_FORGE_READY="1",
+                               PRIMARY_XCODE_VERSION=expected.rstrip("\n"))
+                    env.update(changes)
+                    result = subprocess.run(["/bin/bash", str(candidate)], env=env,
+                                            capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode == 0, healthy)
+                    self.assertEqual(result.stdout, expected if healthy else "")
+                    if healthy:
+                        self.assertEqual(len(result.stdout.encode()), 31)
+
     def test_expected_probe_output_requires_exact_successful_response(self):
         for command, expected, healthy in (
             ('print("primary-ready")', "primary-ready\n", True),
