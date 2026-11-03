@@ -847,8 +847,10 @@ impl RetainedSImportClaim {
             || current.asset.totals.readers != 0
             || current.asset.totals.pending_jobs != 0
             || current.bootstrap.possible_child.is_some()
-            || current.bootstrap.parent.is_some()
-            || current.asset.directory.is_some()
+            // Native import validated these recorded directory facts. The
+            // target fold needs them for reads; they are not File ownership.
+            || current.bootstrap.parent.is_none()
+            || current.asset.directory.is_none()
         {
             return Err(CustodyError::new(
                 ErrorKind::Conflict,

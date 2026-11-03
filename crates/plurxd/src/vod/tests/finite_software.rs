@@ -640,9 +640,9 @@ impl Drop for FiniteLifecycleFixtureRoot {
     }
 }
 
-/// Advance only the existing terminal-response retention policy after actual
-/// cleanup completed. Native exit/join/close proofs above use the real kernel;
-/// no clock advance supplies resource extinction or settlement authority.
+/// Wait for the existing terminal-response retention after actual cleanup.
+/// Keep Tokio and std clocks aligned with native deadlines; retention never
+/// supplies resource extinction or settlement authority.
 async fn expire_finite_session_tombstone(serve: &VodServe, session_id: &str) {
     let cleanup = {
         let sessions = serve.shared.sessions.lock().await;
@@ -656,9 +656,7 @@ async fn expire_finite_session_tombstone(serve: &VodServe, session_id: &str) {
     };
     cleanup.wait().await;
     drop(cleanup);
-    tokio::time::pause();
-    tokio::time::advance(TERMINAL_TOMBSTONE_RETENTION + Duration::from_secs(1)).await;
-    tokio::time::resume();
+    tokio::time::sleep(TERMINAL_TOMBSTONE_RETENTION + Duration::from_secs(1)).await;
     // Ordinary maintenance must also obtain its fresh durable non-live check.
     serve.maintain().await;
     assert!(
