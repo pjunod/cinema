@@ -1801,6 +1801,68 @@ impl super::TranscodeManager {
         Ok(receiver)
     }
 
+    /// BLOCKED -> 0 of this worker's own committed Adopt, replaying the SAME
+    /// retained DTO until the original deadline. An unknown Store outcome is
+    /// retried; a definite refusal, lost serving authority or the deadline
+    /// leaves this owner held with its Adopt, exactly as a failed attach does.
+    async fn publish_adopted_route(
+        &self,
+        entry: &AttemptEntry,
+        adoption: &plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
+        authority: &crate::serving_fence::ServingAuthority,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        loop {
+            if !authority.is_current(entry.serving_generation()) {
+                return Err(
+                    "adaptive worker lost its serving authority before publication; owner remains held"
+                        .into(),
+                );
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(
+                    "adaptive adopted route publication reached its deadline; owner remains held"
+                        .into(),
+                );
+            }
+            match tokio::time::timeout(
+                remaining,
+                self.store
+                    .publish_adaptive_adoption(adoption, crate::media_sessions::unix_ms()),
+            )
+            .await
+            {
+                Ok(Ok(Some(outcome)))
+                    if outcome.route.incarnation_id == adoption.activation.incarnation_id
+                        && outcome.route.owner_node_id == adoption.worker.node_id
+                        && outcome.route.owner_epoch == adoption.key.owner_epoch
+                        && outcome.route.state == "active"
+                        && outcome.route.publication_ready_at_ms == 0 =>
+                {
+                    return Ok(())
+                }
+                Ok(Ok(_)) => {
+                    return Err(
+                        "adaptive adopted route could not be published; owner remains held".into(),
+                    )
+                }
+                Ok(Err(error)) => tracing::debug!(
+                    attempt_id = %entry.attempt_id(),
+                    %error,
+                    "adaptive adopted route publication is unknown; replaying the same Adopt"
+                ),
+                Err(_) => continue,
+            }
+            tokio::time::sleep(
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(std::time::Duration::from_millis(100)),
+            )
+            .await;
+        }
+    }
+
     pub(crate) fn begin_adaptive_cancel(
         self: &Arc<Self>,
         fence: plurx_core::store::adaptive_resource_attempts::AttemptFence,
@@ -1971,6 +2033,7 @@ impl super::TranscodeManager {
         {
             return Err("adaptive Adopt committed a different route".into());
         }
+        let publication_authority = authority.clone();
         let start = rich
             .pending
             .attach_after_store_adopt(
@@ -1992,6 +2055,12 @@ impl super::TranscodeManager {
                 "adaptive activation preview duration differs from the attached plan".into(),
             );
         }
+        // Adopt committed the route BLOCKED. This original owner observed
+        // that exact commit and attached its Rendition under the same serving
+        // admission, so it alone clears the fence; the ingress cannot read
+        // `adopted` before the route is publishable.
+        self.publish_adopted_route(entry, original, &publication_authority, deadline)
+            .await?;
         let AttemptState::Rich(rich) = std::mem::replace(&mut *state, AttemptState::Adopted) else {
             unreachable!();
         };
@@ -3413,6 +3482,244 @@ impl super::TranscodeManager {
             settled.unknown_peak_producers,
             baseline.unknown_peak_producers
         );
+    }
+}
+
+/// Runs from the same selected-store/native finite fixture as the foreign
+/// fence case, but this original owner wins, Adopts, attaches and publishes.
+#[cfg(all(test, feature = "cluster-integration-tests"))]
+impl super::TranscodeManager {
+    pub(crate) async fn adopted_publication_regression<F, Fut>(
+        self: &Arc<Self>,
+        claim: AttemptClaim,
+        selected_recipe_json: String,
+        key_capacity: usize,
+        settings: crate::vodserve::VodSettings,
+        authority: crate::serving_fence::ServingAuthority,
+        make_pending: F,
+    ) where
+        F: FnOnce(usize) -> Fut + Send + 'static,
+        Fut: Future<
+                Output = (
+                    PreparedAttemptRendition,
+                    plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
+                ),
+            > + Send
+            + 'static,
+    {
+        use plurx_core::store::adaptive_resource_attempts::WinnerSelection;
+        assert!(matches!(
+            self.store
+                .claim_media_session_request(
+                    &claim.binding.principal,
+                    &claim.binding.key.request_id,
+                    &claim.binding.request_fingerprint,
+                    &claim.binding.playback_id,
+                    &claim.binding.key.request_incarnation_id.to_string(),
+                    claim.context.now_ms,
+                    claim.binding.original_deadline_ms,
+                )
+                .await
+                .expect("real original root request"),
+            plurx_core::domain::MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(matches!(
+            self.store
+                .claim_adaptive_attempt(&claim)
+                .await
+                .expect("real Claim"),
+            AttemptMutation::Applied(_)
+        ));
+        let entry = self
+            .adaptive_attempts
+            .reserve(
+                claim.key.attempt_id,
+                claim.key.request.request_incarnation_id,
+                claim.worker_instance_id,
+                claim.serving_generation,
+                None,
+                None,
+            )
+            .expect("original bounded worker slot");
+        let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
+        let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let manager = Arc::clone(self);
+        let original = Arc::clone(&entry);
+        let original_claim = claim.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        entry
+            .spawn_coordinator(
+                async move {
+                    let actual_frame = frame_rx.await.expect("same registered frame measurement");
+                    let application_bytes = projected_application_owner_bytes(
+                        &original_claim,
+                        &selected_recipe_json,
+                        key_capacity,
+                        actual_frame,
+                        crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES,
+                    )
+                    .expect("actual recipe and coordinator application projection");
+                    let (pending, output_alias) = make_pending(application_bytes).await;
+                    manager
+                        .record_adaptive_prepared(
+                            &original,
+                            original_claim,
+                            selected_recipe_json,
+                            pending,
+                            settings,
+                            deadline,
+                            application_bytes,
+                        )
+                        .await
+                        .expect("same actual pending owner reaches Store Prepared");
+                    assert!(
+                        prepared_tx.send(output_alias).is_ok(),
+                        "real original output alias"
+                    );
+                    release_rx
+                        .await
+                        .expect("release same original coordinator frame");
+                },
+                frame_tx,
+            )
+            .expect("retain original coordinator before entry");
+        let escaped = prepared_rx.await.expect("actual original Prepared");
+        assert_eq!(
+            self.adaptive_attempt_local_status(claim.key.attempt_id)
+                .await,
+            "prepared_owner_held"
+        );
+        let (worker, preview_json, recipe_json) = {
+            let state = entry.state().await;
+            let AttemptState::Rich(rich) = &*state else {
+                panic!("actual original finite owner is prepared")
+            };
+            (
+                rich.prepared
+                    .as_ref()
+                    .expect("actual original Prepared")
+                    .worker
+                    .clone(),
+                rich.preview_json.clone().expect("actual original preview"),
+                rich.selected_recipe_json.clone(),
+            )
+        };
+        let sequences = |status: &plurx_core::store::adaptive_resource_attempts::RequestStatus| {
+            let row = status
+                .attempts
+                .iter()
+                .find(|row| row.key == claim.key)
+                .expect("same original row");
+            (status.sequence, row.sequence)
+        };
+        let status = self
+            .store
+            .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+            .await
+            .expect("actual Prepared status")
+            .expect("same original request");
+        let (request_sequence, attempt_sequence) = sequences(&status);
+        let won = match self
+            .store
+            .select_adaptive_winner(&WinnerSelection {
+                context: MutationContext {
+                    operation_id: Uuid::new_v4(),
+                    expected_request_sequence: request_sequence,
+                    expected_attempt_sequence: attempt_sequence,
+                    now_ms: crate::media_sessions::unix_ms(),
+                },
+                binding: claim.binding.clone(),
+                key: claim.key.clone(),
+                worker: worker.clone(),
+            })
+            .await
+            .expect("real Winner")
+        {
+            AttemptMutation::Applied(status) => status,
+            other => panic!("original Winner: {other:?}"),
+        };
+        let (request_sequence, attempt_sequence) = sequences(&won);
+        let preview: crate::media_sessions::RemoteStartResponse =
+            serde_json::from_str(&preview_json).expect("same actual prepared preview");
+        let mut public = serde_json::to_value(&preview).expect("actual preview JSON");
+        public["height"] = serde_json::json!(preview.target_height);
+        public["media_origin_ms"] =
+            serde_json::json!((preview.media_origin_seconds * 1_000.0).round() as i64);
+        public["delivered_audio"] =
+            serde_json::to_value(&preview.audio_delivery).expect("actual audio delivery");
+        public["ladder"] = serde_json::json!([]);
+        let public: crate::http::hls::StartResponse =
+            serde_json::from_value(public).expect("real public activation response shape");
+        let now_ms = crate::media_sessions::unix_ms();
+        let adoption = plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: request_sequence,
+                expected_attempt_sequence: attempt_sequence,
+                now_ms,
+            },
+            binding: claim.binding.clone(),
+            key: claim.key.clone(),
+            worker,
+            activation: plurx_core::domain::MediaSessionActivation {
+                incarnation_id: claim.key.route_incarnation_id.to_string(),
+                session_id: claim.key.session_id.to_string(),
+                principal: claim.binding.principal.clone(),
+                playback_id: claim.binding.playback_id.clone(),
+                recovery_epoch: claim.binding.recovery_epoch.to_string(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: true,
+                request_id: Some(claim.binding.key.request_id.clone()),
+                request_fingerprint: claim.binding.request_fingerprint.clone(),
+                owner_node_id: claim.key.worker_node_id.clone(),
+                recipe_json,
+                response_json: serde_json::to_string(&public).expect("canonical public response"),
+                publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: (preview.media_origin_seconds * 1_000.0).round() as i64,
+                now_ms,
+                lease_expires_at_ms: claim.binding.original_deadline_ms,
+                expected_desired_revision: claim.binding.expected_desired_revision,
+            },
+        };
+        let start = self
+            .begin_adaptive_adopt(adoption, preview_json, authority, deadline)
+            .expect("same registered original Adopt control")
+            .await
+            .expect("actual original Adopt reply")
+            .expect("the original owner adopts, attaches and publishes");
+        assert_eq!(start.session_id, claim.key.session_id.to_string());
+        let route = self
+            .store
+            .media_session_route_by_incarnation(&claim.key.route_incarnation_id.to_string())
+            .await
+            .expect("adopted route read")
+            .expect("adopted route");
+        assert_eq!(route.state, "active");
+        assert_eq!(
+            route.publication_ready_at_ms, 0,
+            "the worker cleared its own Adopt fence before reporting adopted"
+        );
+        assert_eq!(route.owner_epoch, claim.key.owner_epoch);
+        assert_eq!(
+            self.adaptive_attempt_local_status(claim.key.attempt_id)
+                .await,
+            "adopted"
+        );
+        let ingress = self
+            .store
+            .publish_media_session_activation(
+                &claim.binding.principal,
+                &claim.binding.key.request_id,
+                &claim.key.route_incarnation_id.to_string(),
+                crate::media_sessions::unix_ms(),
+            )
+            .await
+            .expect("ingress publication")
+            .expect("the ingress publishes the worker-published adoption");
+        assert_eq!(ingress.incarnation_id, route.incarnation_id);
+        release_tx.send(()).expect("release same original frame");
+        drop(escaped);
     }
 }
 

@@ -253,9 +253,11 @@ async fn adopt_adaptive_origin(
         .await
         .map_err(|error| session_store_error("reading adaptive adopted route", error))?
         .ok_or_else(|| ApiError::ServiceUnavailable("adaptive adopted route is absent".into()))?;
+    // The original worker publishes its own Adopt after attaching, before
+    // it reports `adopted`.
     if !route_matches_activation(&route, &activation)
         || route.state != "active"
-        || route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED
+        || route.publication_ready_at_ms != 0
     {
         return Err(ApiError::ServiceUnavailable(
             "adaptive adopted route differs from original activation".into(),
