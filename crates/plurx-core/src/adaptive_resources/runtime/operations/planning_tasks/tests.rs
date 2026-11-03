@@ -527,15 +527,22 @@ async fn roster_hiccup_keeps_an_accepted_continuous_cutoff_attachable_to_plannin
         "/never-entered/ffmpeg".into(),
     );
     let mut original = plan::prepare(&runtime, request, deadline()).expect("actual charged P/M");
+    // A standalone node proves its own roster, so this is a genuinely
+    // ACCEPTED cross-node style grant, minted under the strict policy.
     let clock = std::sync::Arc::new(crate::cluster::clock::ClusterClockGuard::new(false));
     let limit = clock
         .capture_continuous()
         .expect("actual Linux clock")
-        .deadline_after(Duration::from_secs(5))
-        .expect("original live cutoff");
+        .grant_deadline_after(Duration::from_secs(5))
+        .expect("accepted original grant");
+    assert_eq!(limit.mint(), crate::cluster::clock::ContinuousMint::ClusterGrant);
     // A roster read timeout moves cluster admission evidence only; the
     // accepted cutoff still attaches to the SAME never-entered P owner.
     clock.roster_failed();
+    assert!(
+        limit.grant_remaining().is_err(),
+        "the hiccup is real at grant time"
+    );
     original
         .retain_continuous_entry_deadline(limit)
         .expect("a cluster hiccup cannot close an accepted cutoff");

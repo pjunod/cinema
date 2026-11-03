@@ -195,15 +195,25 @@ async fn roster_hiccup_keeps_an_accepted_continuous_cutoff_open_at_native_entry(
         .await
         .expect("durable role preparation");
     let binding = owner.state.lock().await.roles[0].binding;
+    // A standalone node proves its own roster, so this is a genuinely
+    // ACCEPTED grant, minted under the strict grant-time policy.
     let clock = Arc::new(crate::cluster::clock::ClusterClockGuard::new(false));
     let original = clock
         .capture_continuous()
         .expect("actual Linux clock")
-        .deadline_after(std::time::Duration::from_secs(5))
-        .expect("original live cutoff");
+        .grant_deadline_after(std::time::Duration::from_secs(5))
+        .expect("accepted original grant");
+    assert_eq!(
+        original.mint(),
+        crate::cluster::clock::ContinuousMint::ClusterGrant
+    );
     // A roster read timeout moves cluster admission evidence only. The
     // accepted cutoff closes on local evidence, so entry still proceeds.
     clock.roster_failed();
+    assert!(
+        original.grant_remaining().is_err(),
+        "the hiccup is real at grant time"
+    );
     let (enter, entered) = oneshot::channel();
     runtime
         .release_native_entry(binding, Some(&original), enter)
