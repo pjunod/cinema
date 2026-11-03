@@ -465,9 +465,22 @@ async fn prepare_claimed_adaptive_origin(
                     break;
                 }
                 crate::transcode::adaptive_attempts::AdaptivePrepareStart::Started(receiver) => {
-                    if let Ok(Ok(Ok(reply))) = tokio::time::timeout_at(deadline, receiver).await {
-                        prepared = Some(reply);
-                        break;
+                    match tokio::time::timeout_at(deadline, receiver).await {
+                        Ok(Ok(Ok(reply))) => {
+                            prepared = Some(reply);
+                            break;
+                        }
+                        // The original owner keeps the attempt; the reason it
+                        // gave is the only record of why this node's own
+                        // preparation did not finish.
+                        Ok(Ok(Err(error))) => tracing::warn!(
+                            target: "plurxd::http::hls",
+                            attempt = %claim.key.attempt_id,
+                            ordinal = claim.key.ordinal,
+                            %error,
+                            "adaptive local Prepare failed"
+                        ),
+                        Ok(Err(_)) | Err(_) => {}
                     }
                 }
                 crate::transcode::adaptive_attempts::AdaptivePrepareStart::Pending => {}
@@ -515,12 +528,8 @@ async fn prepare_claimed_adaptive_origin(
                 // O2 follows the actual ACK. W0 preceded that ACK, so fixing
                 // W0+floor(B_prepare-O2) can only shorten the original window.
                 // Strict original continuous health/epoch remains mandatory.
-                let allowance_ms =
-                    crate::media_pool::create_remote_grant_ms(deadline).ok_or_else(|| {
-                        AdaptivePrepareFailure::Hold(ApiError::ServiceUnavailable(
-                            "deadline_budget: no proved original create allowance remains".into(),
-                        ))
-                    })?;
+                let allowance_ms = crate::media_pool::create_remote_grant(deadline)
+                    .map_err(adaptive_retry::original_grant_refusal)?;
                 remote_grant = Some(
                     crate::media_sessions::AdaptiveAttemptPrepareControlV2::Grant {
                         version: crate::media_sessions::ADAPTIVE_CAUSAL_PREPARE_VERSION,
@@ -553,7 +562,11 @@ async fn prepare_claimed_adaptive_origin(
                     break;
                 }
             } else if answer.status != reqwest::StatusCode::ACCEPTED {
-                return Err(adaptive_retry::prepare_http_refusal(answer.status));
+                return Err(adaptive_retry::grant_http_refusal(
+                    &owner_node_id,
+                    answer.status,
+                    &answer.body,
+                ));
             }
         }
         let current = state
@@ -4782,6 +4795,18 @@ async fn create_with_purpose_inner(
         }
         #[cfg(target_os = "linux")]
         if let Some(quote) = adaptive_quote {
+            // A peer this create could never grant is passed over BEFORE
+            // Claim or Register, so no remote P/M is charged and the next
+            // candidate -- local included -- places exactly as it would
+            // without that peer.
+            if let Some(error) = adaptive_retry::remote_candidate_refusal(
+                &state.node_id,
+                &candidate,
+                placement_deadline,
+            ) {
+                last_error = Some(error);
+                continue;
+            }
             // The root claim has entered the versioned attempt protocol.
             // A failed or uncertain result never falls through to legacy.
             request_guard.disarm();
@@ -4807,7 +4832,14 @@ async fn create_with_purpose_inner(
             )
             .await;
             let selection = match selection {
-                Ok(selection) => selection,
+                Ok(selection) => {
+                    if candidate != state.node_id {
+                        crate::media_pool::record_remote_placement(
+                            crate::media_pool::RemotePlacementOutcome::Placed,
+                        );
+                    }
+                    selection
+                }
                 Err(AdaptiveOriginFailure::NextWorker(error)) => {
                     last_error = Some(error);
                     continue;

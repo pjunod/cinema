@@ -6586,7 +6586,9 @@ pub(crate) async fn metrics(
         build = crate::version::BUILD,
         // The takeover statics, then this node's route-cache instrumentation
         // (C-07 M5): atomics on the coordinator, so no lock and no Store read.
-        takeover_metrics = crate::media_sessions::prometheus() + &state.route_cache.prometheus(),
+        takeover_metrics = crate::media_sessions::prometheus()
+            + &state.route_cache.prometheus()
+            + &crate::media_pool::prometheus_remote_placements(),
         control_metrics = crate::playback_control::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
         availability_metrics = crate::availability::prometheus(),

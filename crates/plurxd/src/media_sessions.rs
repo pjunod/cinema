@@ -1897,6 +1897,12 @@ impl AdaptiveAttemptPrepareV1 {
 #[cfg(target_os = "linux")]
 pub(crate) const ADAPTIVE_CAUSAL_PREPARE_VERSION: u16 = 2;
 
+/// Typed code of a worker's 503 when the cluster clock refuses an original
+/// grant. Retryable: the coordinator fences the registration through this
+/// worker and offers the create to its next candidate.
+#[cfg(target_os = "linux")]
+pub(crate) const ADAPTIVE_GRANT_CLOCK_REFUSED: &str = "cluster_clock_grant_refused";
+
 #[cfg(target_os = "linux")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "snake_case", deny_unknown_fields)]

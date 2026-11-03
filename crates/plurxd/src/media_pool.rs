@@ -617,29 +617,132 @@ pub(crate) fn create_continuous_entry_deadline(
         .flatten()
 }
 
+/// Why this create cannot hand a cross-node worker an original grant.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteGrantRefusal {
+    /// No original continuous cutoff: outside a create scope, or ingress had
+    /// no healthy local BOOTTIME.
+    NoOriginalCutoff,
+    /// The cluster clock does not currently admit a cross-node deadline.
+    ClusterClock(plurx_core::cluster::clock::ClockRefusal),
+    /// The original preparation allowance is spent.
+    Spent,
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for RemoteGrantRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoOriginalCutoff => {
+                f.write_str("deadline_budget: no proved original create allowance remains")
+            }
+            Self::ClusterClock(reason) => write!(
+                f,
+                "cluster_clock: the cluster clock cannot prove a cross-node deadline ({reason})"
+            ),
+            Self::Spent => f.write_str("deadline_budget: the original create allowance is spent"),
+        }
+    }
+}
+
 /// Grant duration is derived only after the genuine registration receipt.
 /// Both original clocks and the caller's already clipped stage constrain it.
 /// Millisecond flooring never grants the fractional tail to the worker.
-/// This is where the strict cluster-clock policy applies to a create.
+/// This is where the strict cluster-clock policy applies to a create; it
+/// has no side effect beyond the clock's refusal counter, so placement also
+/// asks it before Claim to skip a worker it could never grant.
 #[cfg(target_os = "linux")]
-pub(crate) fn create_remote_grant_ms(stage_deadline: tokio::time::Instant) -> Option<u32> {
+pub(crate) fn create_remote_grant(
+    stage_deadline: tokio::time::Instant,
+) -> Result<u32, RemoteGrantRefusal> {
     CREATE_STARTUP_BUDGET
         .try_with(|budget| {
             let continuous = budget
                 .continuous_prepare_cutoff
-                .as_ref()?
+                .as_ref()
+                .ok_or(RemoteGrantRefusal::NoOriginalCutoff)?
                 .grant_remaining()
-                .ok()?;
-            let cutoff =
-                stage_deadline.min(budget.deadline.checked_sub(CREATE_ACTIVATION_ALLOWANCE)?);
-            let remaining =
-                continuous.min(cutoff.checked_duration_since(tokio::time::Instant::now())?);
+                .map_err(RemoteGrantRefusal::ClusterClock)?;
+            let cutoff = budget
+                .deadline
+                .checked_sub(CREATE_ACTIVATION_ALLOWANCE)
+                .map(|prepare| stage_deadline.min(prepare))
+                .ok_or(RemoteGrantRefusal::Spent)?;
+            let remaining = cutoff
+                .checked_duration_since(tokio::time::Instant::now())
+                .map(|monotonic| continuous.min(monotonic))
+                .ok_or(RemoteGrantRefusal::Spent)?;
             u32::try_from(remaining.as_millis())
                 .ok()
                 .filter(|millis| *millis != 0)
+                .ok_or(RemoteGrantRefusal::Spent)
         })
-        .ok()
-        .flatten()
+        .unwrap_or(Err(RemoteGrantRefusal::NoOriginalCutoff))
+}
+
+#[cfg(all(target_os = "linux", test))]
+pub(crate) fn create_remote_grant_ms(stage_deadline: tokio::time::Instant) -> Option<u32> {
+    create_remote_grant(stage_deadline).ok()
+}
+
+/// Remote adaptive placement outcomes on this coordinator: what a peer's
+/// encode time was spent on, and why a peer was passed over. Closed label
+/// vocabulary; no node, session or caller-supplied labels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemotePlacementOutcome {
+    /// A peer prepared the attempt and was selected as its worker.
+    Placed,
+    /// Skipped before Claim: the cluster clock could not grant that peer.
+    ClockSkipped,
+    /// Registered, then the grant was refused on cluster-clock evidence; the
+    /// original attempt was fenced through its worker and placement moved on.
+    GrantRefused,
+    /// Any other refused or uncertain remote attempt.
+    Failed,
+}
+
+impl RemotePlacementOutcome {
+    const ALL: [Self; 4] = [
+        Self::Placed,
+        Self::ClockSkipped,
+        Self::GrantRefused,
+        Self::Failed,
+    ];
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Placed => "placed",
+            Self::ClockSkipped => "clock_skipped",
+            Self::GrantRefused => "grant_refused",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+static REMOTE_PLACEMENTS: [std::sync::atomic::AtomicU64; 4] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+pub(crate) fn record_remote_placement(outcome: RemotePlacementOutcome) {
+    REMOTE_PLACEMENTS[outcome as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn remote_placement_count(outcome: RemotePlacementOutcome) -> u64 {
+    REMOTE_PLACEMENTS[outcome as usize].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn prometheus_remote_placements() -> String {
+    let mut out = String::from(
+        "# HELP plurx_adaptive_remote_placements_total Adaptive creates this coordinator offered to a peer worker, by outcome.\n\
+         # TYPE plurx_adaptive_remote_placements_total counter\n",
+    );
+    for outcome in RemotePlacementOutcome::ALL {
+        out.push_str(&format!(
+            "plurx_adaptive_remote_placements_total{{outcome=\"{}\"}} {}\n",
+            outcome.label(),
+            remote_placement_count(outcome)
+        ));
+    }
+    out
 }
 
 pub(crate) fn create_stage_deadline(maximum: Duration) -> tokio::time::Instant {

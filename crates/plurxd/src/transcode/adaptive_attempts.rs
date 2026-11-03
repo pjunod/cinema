@@ -69,6 +69,35 @@ pub(crate) enum AdaptiveRemoteRegistrationStart {
         deadline: std::time::Instant,
     },
 }
+/// A refused original grant. Only cluster-clock evidence is retryable: the
+/// registration stays ungranted, so the coordinator's Fence reaches this
+/// worker's original coordinator, which closes its own P/M.
+#[derive(Debug)]
+pub(crate) enum RemoteGrantError {
+    ClusterClock(plurx_core::cluster::clock::ClockRefusal),
+    Refused(String),
+}
+impl From<String> for RemoteGrantError {
+    fn from(reason: String) -> Self {
+        Self::Refused(reason)
+    }
+}
+impl From<&str> for RemoteGrantError {
+    fn from(reason: &str) -> Self {
+        Self::Refused(reason.to_owned())
+    }
+}
+impl std::fmt::Display for RemoteGrantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClusterClock(reason) => write!(
+                f,
+                "cluster_clock: the cluster clock cannot prove the original grant ({reason})"
+            ),
+            Self::Refused(reason) => f.write_str(reason),
+        }
+    }
+}
 struct RemoteRegistration {
     claim: AttemptClaim,
     nonce: Uuid,
@@ -85,7 +114,7 @@ impl RemoteRegistration {
         claim: &AttemptClaim,
         nonce: Uuid,
         allowance_ms: u32,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteGrantError> {
         if nonce.is_nil() || allowance_ms == 0 || allowance_ms > 9_750 {
             return Err("deadline_budget: invalid original grant".into());
         }
@@ -101,13 +130,12 @@ impl RemoteRegistration {
         } else {
             // Grant-time cluster policy: the W0 admission evidence must be
             // unchanged and the CURRENT clock policy must admit. After this
-            // the deadline closes on local evidence only.
+            // the deadline closes on local evidence only. A refusal leaves
+            // the grant unsent, so the original registration stays fenceable.
             let deadline = self
                 .anchor
                 .grant_deadline_after(std::time::Duration::from_millis(u64::from(allowance_ms)))
-                .map_err(|error| {
-                    format!("deadline_budget: original remote grant expired: {error}")
-                })?;
+                .map_err(RemoteGrantError::ClusterClock)?;
             let sender = self.grant.take().ok_or("original grant sender is absent")?;
             self.granted_ms = Some(allowance_ms);
             self.deadline = Some(deadline.clone());
@@ -1412,7 +1440,7 @@ impl super::TranscodeManager {
         claim: &AttemptClaim,
         nonce: Uuid,
         allowance_ms: u32,
-    ) -> Result<AdaptivePrepareReplay, String> {
+    ) -> Result<AdaptivePrepareReplay, RemoteGrantError> {
         if nonce.is_nil() || allowance_ms == 0 || allowance_ms > 9_750 {
             return Err("deadline_budget: invalid original grant".into());
         }
@@ -1437,7 +1465,9 @@ impl super::TranscodeManager {
             remote.apply_original_grant(claim, nonce, allowance_ms)?;
         }
         if let Some(reply) = self.replay_adaptive_prepared(claim.key.attempt_id).await {
-            return reply.map(AdaptivePrepareReplay::Prepared);
+            return reply
+                .map(AdaptivePrepareReplay::Prepared)
+                .map_err(RemoteGrantError::Refused);
         }
         Ok(AdaptivePrepareReplay::Pending)
     }
@@ -3534,6 +3564,74 @@ mod tests {
                 .expect("same cutoff"),
             cutoff
         );
+    }
+
+    #[tokio::test]
+    async fn cluster_clock_grant_refusal_stays_ungranted_so_the_original_fence_reaches_its_cleanup()
+    {
+        let (mut original, receiver) = remote_control_fixture();
+        // A replicated guard whose roster was never proved: grant-time policy
+        // is Unknown, exactly the one-voter-down / just-restarted cluster.
+        let unproved = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(true));
+        original.anchor = unproved
+            .capture_continuous()
+            .expect("local capture needs no cluster evidence");
+        original.ready = true; // control gate premise only, not a P ACK claim
+        let claim = original.claim.clone();
+        let nonce = original.nonce;
+        assert!(matches!(
+            original.apply_original_grant(&claim, nonce, 500),
+            Err(RemoteGrantError::ClusterClock(
+                plurx_core::cluster::clock::ClockRefusal::Unknown
+            ))
+        ));
+        assert!(
+            original.grant.is_some() && original.granted_ms.is_none() && original.deadline.is_none(),
+            "a refused grant mints nothing and keeps the original registration ungranted"
+        );
+        // The coordinator's retry Fences this attempt through its worker;
+        // the existing ungranted branch drops the unsent grant so the SAME
+        // original coordinator closes its own P/M.
+        let state = crate::http::internal_media_sessions::output_capture_test_state();
+        let entry = state
+            .transcode
+            .adaptive_attempts
+            .reserve(
+                claim.key.attempt_id,
+                claim.key.request.request_incarnation_id,
+                claim.worker_instance_id,
+                claim.serving_generation,
+                None,
+            )
+            .expect("original registration slot");
+        *entry.remote_registration.lock().expect("registration") = Some(original);
+        let fence = plurx_core::store::adaptive_resource_attempts::AttemptFence {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: 1,
+                expected_attempt_sequence: 1,
+                now_ms: crate::media_sessions::unix_ms(),
+            },
+            binding: claim.binding.clone(),
+            key: claim.key.clone(),
+            cancel_request: false,
+        };
+        let cancelled = state
+            .transcode
+            .begin_adaptive_cancel(fence.clone())
+            .expect("the original worker accepts its own Fence");
+        assert!(
+            cancelled.await.expect("cancel answer").is_err(),
+            "the answer never asserts native extinction"
+        );
+        assert!(
+            receiver.await.is_err(),
+            "the unsent original grant is dropped, so the coordinator closes P/M"
+        );
+        let held = entry.remote_registration.lock().expect("registration");
+        let remote = held.as_ref().expect("same original registration");
+        assert_eq!(remote.fence.as_ref(), Some(&fence));
+        assert!(remote.grant.is_none() && remote.granted_ms.is_none());
     }
 
     #[tokio::test]
