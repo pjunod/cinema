@@ -1710,6 +1710,26 @@ function armNativeHlsDeadline(player,episode){
       exhaustHlsStartup(player,'deadline');
   },Math.max(0,episode.deadlineMs-performance.now()));
 }
+// Source-execution authority is independent of presentation observations.
+// It names one episode, element, attachment and execution.
+function nativeHlsSourceOwner(video,player,episode,execution,mediaEvent=false){
+  const attachment=episode?.mediaAttachment,sourceUrl=episode?.native?.sourceUrl;
+  const current=()=>{
+    if(!episode||episode.transport!=='native'||episode.native.video!==video
+      ||document.getElementById('video')!==video
+      ||player?.mediaAttachment!==attachment||episode.attachment.token!==attachment
+      ||episode.native.execution!==execution||episode.state==='cancelled'
+      ||!hlsStartupCurrent(player,episode)||!playbackOwnsAttachedMedia(player,true)) return false;
+    if(!mediaEvent) return true; // This execution may still be fetching before assignment.
+    if(!episode.native.attached||episode.native.sourceExecution!==execution
+      ||!sourceUrl||episode.native.sourceUrl!==sourceUrl) return false;
+    try{
+      const selected=video.currentSrc||video.getAttribute('src')||video.src;
+      return !!selected&&new URL(selected,location.href).href===sourceUrl;
+    }catch(error){return false;}
+  };
+  return Object.freeze({player,video,episode,attachment,execution,current});
+}
 function nativeHlsCurrent(player,episode,execution,intent){
   return hlsStartupCurrent(player,episode)&&episode.transport==='native'
     &&playbackOwnsAttachedMedia(player,true)
@@ -1730,9 +1750,10 @@ function nativeHlsResourceUrl(uri,parent){
 // rendition manifest (4 MiB), plus the bounded acquisition-start tag. A master
 // or an error response is a different, small document; init has its own bound.
 const NATIVE_HLS_BODY_LIMITS=Object.freeze({playlist:4*1024*1024+72,master:65536,error:65536,init:1048576});
-async function nativeHlsFetch(player,episode,url,{init=false}={}){
+async function nativeHlsFetch(player,episode,url,{init=false,sourceOwner=null}={}){
   const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
-  const current=()=>nativeHlsCurrent(player,episode,execution,intent);
+  const owner=sourceOwner||nativeHlsSourceOwner(episode.native.video,player,episode,execution);
+  const current=()=>owner.current()&&nativeHlsCurrent(player,episode,execution,intent);
   if(!current()) throw Object.assign(new Error('Native readiness was superseded.'),{cancelled:true});
   if(performance.now()>=episode.deadlineMs||(!init&&episode.dispatches>=PlaybackPolicy.HLS_STARTUP.manifest_dispatch_ceiling))
     throw Object.assign(new Error('Native readiness budget exhausted.'),{terminal:true});
@@ -1791,9 +1812,9 @@ async function nativeHlsFetch(player,episode,url,{init=false}={}){
     })()]);
   }finally{clearTimeout(timer);ctl.signal.removeEventListener('abort',abortListener);ctl.abort();episode.loaders.delete(loader);}
 }
-async function nativeHlsPlaylists(player,episode){
+async function nativeHlsPlaylists(player,episode,sourceOwner){
   episode.manifestState='loading';
-  const master=await nativeHlsFetch(player,episode,tok(episode.playlistUrl));
+  const master=await nativeHlsFetch(player,episode,tok(episode.playlistUrl),{sourceOwner});
   let media=master;
   const lines=master.text.split(/\r?\n/).map(line=>line.trim());
   const variants=lines.map((line,i)=>line.startsWith('#EXT-X-STREAM-INF:')?i:-1).filter(i=>i>=0);
@@ -1803,7 +1824,7 @@ async function nativeHlsPlaylists(player,episode){
     if(variants.length!==1) throw Object.assign(new Error('Native readiness requires one session video variant.'),{terminal:true});
     const uri=lines[variants[0]+1];
     if(!uri||uri.startsWith('#')) throw Object.assign(new Error('The HLS master has no selected media URI.'),{terminal:true});
-    media=await nativeHlsFetch(player,episode,nativeHlsResourceUrl(uri,master.url));
+    media=await nativeHlsFetch(player,episode,nativeHlsResourceUrl(uri,master.url),{sourceOwner});
   }
   const times=parseSegTimes(media.text);
   if(!times.length||!times.every(time=>Number.isFinite(time)&&time>0))
@@ -1822,15 +1843,14 @@ function armNativeHlsReadiness(video,player,episode,delayMs){
 }
 // Reuse the attachment's authority owner after every asynchronous readiness
 // boundary. A retired session must never be reloaded or codec-rescued.
-function nativeHlsRecoverAuthority(video,player,episode,execution){
-  if(!hlsStartupCurrent(player,episode)||episode.native.execution!==execution
-    ||!['active','paused'].includes(episode.state)||!playbackOwnsAttachedMedia(player,true)) return false;
-  return recoverServingFencedAttachment(video,player);
+function nativeHlsRecoverAuthority(video,player,episode,execution,sourceOwner){
+  const owner=sourceOwner||nativeHlsSourceOwner(video,player,episode,execution);
+  if(!owner.current()||!['active','paused'].includes(episode.state)) return false;
+  return recoverServingFencedAttachment(video,player,owner);
 }
-function nativeHlsAuthenticationRefused(player,episode){
+function nativeHlsAuthenticationRefused(player,episode,sourceOwner){
   const failure=episode.latestFailure;
-  if(!hlsStartupCurrent(player,episode)||!playbackOwnsAttachedMedia(player,true)
-    ||![401,403].includes(failure?.status)) return false;
+  if(!sourceOwner.current()||![401,403].includes(failure?.status)) return false;
   // Cancel startup work before handing the typed refusal to the existing
   // authentication surface, which owns Sign in / Close in every context.
   cancelHlsStartup(player,'authentication_refused');
@@ -1844,12 +1864,14 @@ async function runNativeHlsReadiness(video,player,episode){
   // for a player that does not yet own the media, or abandon its startup.
   if(!playbackOwnsAttachedMedia(player,true)) return armNativeHlsReadiness(video,player,episode);
   const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
+  const sourceOwner=nativeHlsSourceOwner(video,player,episode,execution);
+  if(!sourceOwner.current()) return;
   const readinessAt=performance.now();
   episode.native.busy=true;
   try{
-    const media=await nativeHlsPlaylists(player,episode);
-    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return;
-    if(!nativeHlsCurrent(player,episode,execution,intent)) return;
+    const media=await nativeHlsPlaylists(player,episode,sourceOwner);
+    if(nativeHlsRecoverAuthority(video,player,episode,execution,sourceOwner)) return;
+    if(!sourceOwner.current()||!nativeHlsCurrent(player,episode,execution,intent)) return;
     player.segSrc=media.url;player.segTimes=parseSegTimes(media.text);player._segIdx=null;
     clearStreamFailure();episode.latestFailure=null;
     player.controlRenderOverride=null;
@@ -1870,12 +1892,13 @@ async function runNativeHlsReadiness(video,player,episode){
       readiness_ms:Math.round(performance.now()-readinessAt),
       remaining_ms:Math.max(0,Math.round(episode.deadlineMs-performance.now())),
       message:'Current master and selected media playlist are ready; attaching native HLS.'},playbackContext()));
+    episode.native.sourceUrl=expectedSource;episode.native.sourceExecution=execution;
     setPlaybackMediaSource(video,tok(episode.playlistUrl));
     applyPlaybackTransportIntent(video,player);
   }catch(error){
-    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return;
-    if(!nativeHlsCurrent(player,episode,execution,intent)) return;
-    if(nativeHlsAuthenticationRefused(player,episode)) return;
+    if(nativeHlsRecoverAuthority(video,player,episode,execution,sourceOwner)) return;
+    if(!sourceOwner.current()||!nativeHlsCurrent(player,episode,execution,intent)) return;
+    if(nativeHlsAuthenticationRefused(player,episode,sourceOwner)) return;
     if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
       exhaustHlsStartup(player,'native_readiness_refused');}
     else if(!error.cancelled) armNativeHlsReadiness(video,player,episode);
@@ -1888,11 +1911,13 @@ async function runNativeHlsReadiness(video,player,episode){
       armNativeHlsReadiness(video,player,episode);
   }
 }
-async function classifyNativeHlsError(video,player,code,message){
+async function classifyNativeHlsError(video,player,code,message,sourceOwner=null){
   const episode=player&&player.hlsStartup;
   if(!episode||episode.transport!=='native'||episode.native.video!==video
     ||!episode.native.attached||![3,4].includes(code)
     ||episode.state==='presenting'||!hlsStartupCurrent(player,episode)) return false;
+  const owner=sourceOwner||nativeHlsSourceOwner(video,player,episode,episode.native.execution,true);
+  if(!owner.current()) return false;
   if(episode.state==='observation_unavailable'){
     // A real element rejection remains authoritative after the observation
     // deadline. It must not be swallowed by the concluded sensor outcome.
@@ -1906,15 +1931,15 @@ async function classifyNativeHlsError(video,player,code,message){
   }
   episode.native.classifying=true;
   const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
-  const current=()=>nativeHlsCurrent(player,episode,execution,intent);
+  const current=()=>owner.current()&&nativeHlsCurrent(player,episode,execution,intent);
   try{
-    const media=await nativeHlsPlaylists(player,episode);
-    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
+    const media=await nativeHlsPlaylists(player,episode,owner);
+    if(nativeHlsRecoverAuthority(video,player,episode,execution,owner)) return true;
     if(!current()) throw Object.assign(new Error('Native classification was superseded.'),{cancelled:true});
     const init=/^#EXT-X-MAP:.*?URI="([^"]+)"/m.exec(media.text);
     if(!init) throw Object.assign(new Error('The native init shape could not be verified.'),{terminal:true});
-    await nativeHlsFetch(player,episode,nativeHlsResourceUrl(init[1],media.url),{init:true});
-    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
+    await nativeHlsFetch(player,episode,nativeHlsResourceUrl(init[1],media.url),{init:true,sourceOwner:owner});
+    if(nativeHlsRecoverAuthority(video,player,episode,execution,owner)) return true;
     if(!current()) return true;
     if(!episode.native.reloadUsed){
       episode.native.reloadUsed=true;episode.native.execution++;
@@ -1943,14 +1968,14 @@ async function classifyNativeHlsError(video,player,code,message){
     startTranscodeFallback('stream-rejected',note);
     return true;
   }catch(error){
-    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
+    if(nativeHlsRecoverAuthority(video,player,episode,execution,owner)) return true;
     if(!current()){
-      if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player,true)
+      if(owner.current()
         &&['paused','active'].includes(episode.state))
         episode.native.pendingError={code,message,execution};
       return true;
     }
-    if(nativeHlsAuthenticationRefused(player,episode)) return true;
+    if(nativeHlsAuthenticationRefused(player,episode,owner)) return true;
     if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
       exhaustHlsStartup(player,'native_readiness_refused');}
     else if(!error.cancelled){

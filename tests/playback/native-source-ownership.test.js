@@ -1,6 +1,7 @@
 "use strict";
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const control=require('../../crates/plurxd/src/web/playback-control.js');
+const policy=require('../../crates/plurxd/src/web/playback-policy.js');
 function shipped(file,name){
  const text=fs.readFileSync('crates/plurxd/src/web/player/'+file,'utf8');
  const found=new RegExp(`(?:async )?function ${name}\\(`).exec(text);assert.ok(found,name);const start=found.index;
@@ -19,12 +20,14 @@ test('first real control POST during delayed native readiness uses the target an
  }
  const protocol={...control,Reporter};
  const c=vm.createContext({PLAYER:player,window:{PlurxPlaybackControl:protocol},PlurxPlaybackControl:protocol,CONTROL_CLIENT_ID:'22222222-2222-4222-8222-222222222222',
-  document:{getElementById:()=>video},performance:{now:()=>0},PERSISTENT_STALL_MS:8000,ENDED_SLACK_SEC:5,TOKEN:null,
+  document:{getElementById:id=>id==='video'?video:null},performance:{now:()=>0},PlaybackPolicy:policy,
+  clientLog:()=>{},PERSISTENT_STALL_MS:8000,ENDED_SLACK_SEC:5,TOKEN:null,
   stopPlaybackControl(){},hasPendingPlaybackOpen:()=>false,candidateLinkReceipt:()=>null,
   playbackControlSelection:()=>({quality:{mode:'auto'},audio_track:0,subtitle:{mode:'off',track:null},audio_offset_ms:0,codec:'auto',dynamic_range:'auto'}),
   playbackControlCapabilities:()=>({platform:'web',max_height:2160,codecs:['h264'],dynamic_ranges:['sdr'],dual_player_preparation:false}),
   pendingPlaybackControlAcknowledgement:()=>null,qualityControlSupported:()=>false,
   fetch:(_url,options)=>{requests.push(JSON.parse(options.body));return new Promise(()=>{});}});
+ vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/surface.js','utf8'),c);
  for(const [file,names] of [
   ['stall-diagnosis.js',['playbackOwnsAttachedMedia']],
   ['session.js',['playbackControlBufferedRange','playbackControlObservationOverride','playbackControlSnapshot']],

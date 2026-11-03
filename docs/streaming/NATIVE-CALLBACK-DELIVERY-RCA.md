@@ -155,10 +155,13 @@ callback lifetime and cancellation handle. The incumbent and spare elements
 have separate multiplexers. No owner-cohort negotiation is needed: a renewal
 cancels the single native request and registers a fresh one on that element.
 
-For native-src playback, never trust a pending request registered before the
-element's latest media discontinuity: seek start, `emptied`/source attach, or
-`loadeddata`. At the first qualified readiness after each discontinuity,
-cancel the request and register a new one exactly once:
+For native-src playback, renew across source attachment, `emptied` and
+`loadeddata`, and across active-playback seek start. A paused same-resource
+seek preserves an already armed request from the current generation so its
+single landing can arrive before `seeked`; if none is pending, current data
+can arm one. A source change or stale generation retains cancellation and
+late-delivery fences. At the first qualified readiness after an invalidating
+discontinuity, cancel the request and register a new one exactly once:
 
 - Active playback: `!seeking && readyState >= 3`.
 - Paused playback: retain the separate paused-seek path in the consolidated

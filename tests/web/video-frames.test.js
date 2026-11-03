@@ -2,8 +2,9 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
 const source=fs.readFileSync('crates/plurxd/src/web/player/video-frames.js','utf8');
 
-class Video{
+class Video extends EventTarget{
  constructor({src='https://media.example/movie.m3u8',readyState=4,paused=false,seeking=false}={}){
+  super();
   Object.assign(this,{src,currentSrc:src,readyState,paused,seeking});
   this.listeners=new Map();this.registrations=[];this.callbacks=new Map();this.pending=new Map();this.cancelled=[];this.nextId=1;
  }
@@ -11,9 +12,12 @@ class Video{
   const id=this.nextId++;this.registrations.push(id);this.callbacks.set(id,callback);this.pending.set(id,callback);return id;
  }
  cancelVideoFrameCallback(id){this.cancelled.push(id);this.pending.delete(id);}
- addEventListener(type,callback){if(!this.listeners.has(type))this.listeners.set(type,new Set());this.listeners.get(type).add(callback);}
- removeEventListener(type,callback){this.listeners.get(type)?.delete(callback);}
- emit(type){for(const callback of [...(this.listeners.get(type)||[])])callback({type});}
+ addEventListener(type,callback,options){
+  if(!this.listeners.has(type))this.listeners.set(type,new Set());this.listeners.get(type).add(callback);
+  super.addEventListener(type,callback,options);
+ }
+ removeEventListener(type,callback,options){this.listeners.get(type)?.delete(callback);super.removeEventListener(type,callback,options);}
+ emit(type){this.dispatchEvent(new Event(type));}
  deliver(id,metadata={mediaTime:1}){
   const callback=this.callbacks.get(id);assert.ok(callback,`request ${id} was registered`);
   this.pending.delete(id);callback(10,metadata);
@@ -109,6 +113,54 @@ test('a paused request still pending from seeking is renewed once at seek comple
  assert.deepEqual(f.video.cancelled,[1]);assert.deepEqual(f.video.registrations,[1,2]);
  f.video.deliver(1,{mediaTime:1});assert.deepEqual(delivered,[]);
  f.video.deliver(2,{mediaTime:9});assert.deepEqual(delivered,[9]);
+});
+
+test('paused native seeking preserves its already armed same-resource landing request',()=>{
+ const f=fixture({readyState:3,paused:true}),delivered=[];
+ f.request((_,metadata)=>delivered.push(metadata.mediaTime));
+ f.video.seeking=true;f.video.emit('seeking');
+ assert.deepEqual(f.video.cancelled,[],'seeking cannot discard the only paused landing request');
+ assert.deepEqual(f.video.registrations,[1]);assert.deepEqual([...f.video.pending.keys()],[1]);
+ assert.deepEqual(delivered,[],'seeking alone supplies no presentation proof');
+ f.video.deliver(1,{mediaTime:42});assert.deepEqual(delivered,[42]);
+ f.video.seeking=false;f.video.emit('seeked');
+ assert.deepEqual(f.video.registrations,[1]);assert.equal(f.video.listenerCount(),0);
+});
+test('paused native seeking arms a landing when readiness arrived without a pending request',()=>{
+ const f=fixture({readyState:0,paused:true}),delivered=[];
+ f.request((_,metadata)=>delivered.push(metadata.mediaTime));
+ assert.deepEqual(f.video.registrations,[]);
+ f.video.readyState=2;f.video.seeking=true;f.video.emit('seeking');f.video.emit('seeking');
+ assert.deepEqual(f.video.registrations,[1],'the ready paused seek gathers one landing request');
+ assert.deepEqual([...f.video.pending.keys()],[1]);assert.deepEqual(delivered,[]);
+ f.video.deliver(1,{mediaTime:18});assert.deepEqual(delivered,[18]);
+ f.video.seeking=false;f.video.emit('seeked');assert.equal(f.video.listenerCount(),0);
+});
+test('paused native resource changes cancel the old request and fence its delayed delivery',()=>{
+ for(const changed of ['src','currentSrc']){
+  const f=fixture({readyState:2,paused:true}),delivered=[];
+  f.request((_,metadata)=>delivered.push(metadata.mediaTime));
+  // During replacement, currentSrc can still name the previous resource.
+  f.video[changed]='https://media.example/replacement.m3u8';
+  f.video.seeking=true;f.video.emit('seeking');
+  assert.deepEqual(f.video.cancelled,[1]);assert.deepEqual(f.video.registrations,[1]);
+  assert.equal(f.video.pending.size,0);
+  f.video.deliver(1,{mediaTime:99});assert.deepEqual(delivered,[]);
+  f.video.src=f.video.currentSrc='https://media.example/replacement.m3u8';
+  f.video.emit('loadeddata');
+  assert.deepEqual(f.video.registrations,[1,2]);assert.deepEqual(delivered,[]);
+  f.video.deliver(2,{mediaTime:12});assert.deepEqual(delivered,[12]);
+  assert.equal(f.video.listenerCount(),0);
+ }
+});
+test('paused seek during fan-out fences siblings until a later landing frame',()=>{
+ const f=fixture({paused:true}),delivered=[];
+ f.request(()=>{delivered.push('first');f.video.seeking=true;f.video.emit('seeking');});
+ f.request(()=>delivered.push('sibling'));
+ f.video.deliver(1);assert.deepEqual(delivered,['first']);
+ assert.deepEqual(f.video.registrations,[1,2]);assert.deepEqual([...f.video.pending.keys()],[2]);
+ f.video.deliver(2,{mediaTime:12});assert.deepEqual(delivered,['first','sibling']);
+ assert.equal(f.video.listenerCount(),0);
 });
 
 test('MSE blob sources keep their callback across seek events',()=>{

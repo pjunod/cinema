@@ -22,6 +22,11 @@ function pbPosSec(){ const v=document.getElementById("video"); if(PLAYER?.mediaA
 function positionForPlaybackIntent(v,p){
   const target=p&&p.controlSeek&&Number(p.controlSeek.targetMs);
   if(Number.isFinite(target)) return Math.max(0,target/1000);
+  if(p?.mediaAttachment?.nativePositionPending){
+    const hint=p.controlPositionHintSec;
+    if(hint!=null&&Number.isFinite(Number(hint))) return Math.max(0,Number(hint));
+    return Math.max(0,(Number(p.offset)||0)+(Number(p.hlsStartup?.startAt)||0));
+  }
   return Math.max(0,((p&&p.offset)||0)+((v&&v.currentTime)||0));
 }
 // A committed destination no attachment has executed yet, on the scrubber's
@@ -945,19 +950,21 @@ function wirePlayerMedia(v){
   // And a remux/direct stream the browser rejects gets one automatic rescue:
   // restart as a transcode session (the server re-encodes to plain H.264/AAC).
   v.addEventListener("error",async()=>{
-    if(!playbackOwnsAttachedMedia(PLAYER)) return;
+    const nativePlayer=PLAYER,episode=nativePlayer?.hlsStartup;
+    const sourceOwner=episode?.transport==='native'
+      ?nativeHlsSourceOwner(v,nativePlayer,episode,episode.native.execution,true):null;
+    if(sourceOwner?!sourceOwner.current():!playbackOwnsAttachedMedia(nativePlayer)) return;
     // Detaching the source on purpose (the reset a remux seek does before
     // handing over the next stream) can raise an error event with no source
     // attached. That is us, not a broken file — never rescue-transcode on it.
     if(!v.getAttribute("src")&&!v.currentSrc) return;
     const err=v.error, code=err?err.code:0, msg=(err&&err.message)||"";
-    const nativePlayer=PLAYER;
     if(nativePlayer?.hlsStartup?.transport==='native'&&nativePlayer.hlsStartup.native.video!==v) return;
     // Authority retirement owns the reopen, before native decoder diagnosis.
-    if(nativePlayer.sessionTerminal&&recoverServingFencedAttachment(v,nativePlayer)) return;
+    if(nativePlayer.sessionTerminal&&recoverServingFencedAttachment(v,nativePlayer,sourceOwner)) return;
     if(nativePlayer?.hlsStartup?.transport==='native'&&!playbackIsReal()
-      &&await classifyNativeHlsError(v,nativePlayer,code,msg)) return;
-    if(PLAYER!==nativePlayer) return;
+      &&await classifyNativeHlsError(v,nativePlayer,code,msg,sourceOwner)) return;
+    if(PLAYER!==nativePlayer||(sourceOwner&&!sourceOwner.current())||!playbackOwnsAttachedMedia(nativePlayer)) return;
     const controlTrigger=notifyPlaybackControl("failed");
     clearStall();
     const src=(v.currentSrc||"").split("?")[0];

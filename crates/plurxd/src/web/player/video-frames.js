@@ -44,7 +44,8 @@ function requestPlaybackVideoFrame(video,callback){
         // paused request is renewed at seek completion below.
         if(video.paused?video.readyState<2:(video.seeking||video.readyState<3))return;
       }
-      const generation=owner.generation,request={id:null,whileSeeking:!!video.seeking};
+      const generation=owner.generation,request={id:null,whileSeeking:!!video.seeking,
+        generation,src:video.src,currentSrc:video.currentSrc};
       owner.request=request;
       try{request.id=video.requestVideoFrameCallback((now,metadata)=>{
         if(owner.request!==request)return;
@@ -71,6 +72,15 @@ function requestPlaybackVideoFrame(video,callback){
     };
     owner.event=event=>{
       if(!native())return; // MSE keeps its existing callback lifecycle.
+      if(event.type==="seeking"&&video.paused&&!owner.dispatching){
+        const request=owner.request;
+        // A same-resource paused seek can present its only landing before
+        // seeked. Keep a valid armed request, or gather one if none is pending.
+        // Failed cancellation and source replacement retain their old fences.
+        if(request&&request.generation===owner.generation
+          &&request.src===video.src&&request.currentSrc===video.currentSrc)return;
+        if(!request){owner.arm();return;}
+      }
       if(event.type==="seeking"||event.type==="emptied"||event.type==="loadeddata"){
         // Cancelling the sole native request empties WebKit's callback list.
         // The next qualified readiness event starts a new gathering cycle.

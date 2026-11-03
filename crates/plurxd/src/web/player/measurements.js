@@ -672,9 +672,11 @@ async function persistentWait(v,p,began,generation,actionGeneration){
 // Native decode errors after an authoritative retirement use the existing
 // one-recovery owner and seek/create retry path. Admission waits for fresh
 // server authority; no new timer or codec recipe is introduced here.
-function recoverServingFencedAttachment(v,p){
+function recoverServingFencedAttachment(v,p,sourceOwner=null){
   const terminal=p&&p.sessionTerminal;
-  if(!playbackOwnsAttachedMedia(p)||!terminal
+  const owns=sourceOwner?sourceOwner.player===p&&sourceOwner.video===v&&sourceOwner.current()
+    :playbackOwnsAttachedMedia(p);
+  if(!owns||!terminal
     ||terminal.attachment!==p.mediaAttachment||terminal.sessionId!==p.sessionId
     ||!['serving_fenced','authority_fenced'].includes(terminal.reason)) return false;
   if(p.recoveringStall) return true;

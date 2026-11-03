@@ -75,6 +75,18 @@ spawn frame. Heap placement removes that stack expansion while preserving
 existing ownership, cancellation and reap. The test stack stays at the
 repository's documented 8 MiB convention.
 
+Browser qualification also exposed two ownership errors in the candidate.
+Native errors and typed readiness responses need exact source-execution
+ownership before metadata; presentation ownership remains required for
+controls and presentation proof. The repair binds diagnostics to the current
+element, attachment, episode, execution and assigned source, fences delayed
+bodies after element replacement, and preserves the intended destination
+while native positioning is pending. A paused same-resource seek preserves
+its valid armed landing callback; resource replacement and stale generations
+still cancel and fence delivery. Targeted failing and new browser cases pass
+on pinned Node 22, including the real shipped helpers. The web TypeScript
+baseline remains unchanged. The PR records final main-lane qualification.
+
 ## 1. Work lanes
 
 | Order | Lane | State | Owner |
