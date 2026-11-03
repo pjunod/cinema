@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "e83bd0777415bab7bf6287362fcc22ad50433460ef05e969e5cb422d801b6fa1"
+        "sha256": "c7d2b7856805f1582f5fb910a056131eb73d5236e864367a3533cafaaa333f71"
       },
       {
         "table": "31 authority implementation",

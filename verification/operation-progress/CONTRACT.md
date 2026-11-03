@@ -7,6 +7,33 @@ and [WAIT-MAP.md](WAIT-MAP.md) (source waits and external boundaries).
 This contract defines the meaning of `OperationProgress.tla`; it does not
 extend the original [safety contract](../durable-jobs/CONTRACT.md).
 
+## HDR recipe requests — scoped source review on 2026-11-03
+
+The source audit compares effort `701e90d6e` with HDR repair `4de042586`.
+The [shared queue file](../../crates/plurx-core/src/store/background_jobs.rs)
+adds only a title-specific `request_dv_fel_variant` trait method and adapter.
+Table 30's `library_scan` / `metadata_refresh` authority boundary, selected
+worker waits, claim/bind/renew/settle behavior, publication lock order and
+physical-admission lifetime are unchanged.
+
+The reopened terminal flag belongs to the title demand outbox. The modeled
+library request result and terminal waiter remain atomic and unchanged;
+shared queue terminal jobs retain their existing transitions. A yielded title
+job is reclaimed with the existing fresh claim fence. Title scheduling, recipe
+receipts and qualification remain outside the selected worker operation, as
+[the wait map](WAIT-MAP.md#metadata-only-title-analysis--scoped-refresh-on-2026-10-28)
+records. The title runtime regression supplies separate SQLite and replicated
+storage evidence, without establishing FEL scheduling fairness or progress in
+this model.
+
+Independent Astra review approved this scope disposition. Only Table 30's live
+whole-file hash changes. Its exact anchor, model/configuration bytes, bounds,
+properties, fairness premises, toolchain pins, historical source anchors and
+qualification receipts remain unchanged. Offline mapping checks establish
+source correspondence; they supply no new TLC execution or qualification.
+Fresh affected smoke receipts remain a separate CI obligation outside effort
+compile-only mode.
+
 ## Artifact-only text translation — scoped source review on 2026-10-28
 
 Managed v3 / SQLite v121 exempts only the new closed
