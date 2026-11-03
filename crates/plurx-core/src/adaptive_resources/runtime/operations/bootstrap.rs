@@ -798,51 +798,83 @@ impl NodeResourceRuntime {
         deadline: Instant,
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
-        let mut bundle = owner.state.lock().await;
-        if !bundle.installed {
-            return Err(OperationError::State);
-        }
-        let id = bundle.id;
-        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
-        let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
-        if role.refunded || finite.source_drifted || !finite.producer_joined || !finite.retiring {
-            return Err(OperationError::State);
-        }
-        let planned = role.typed_members.as_ref().is_some_and(|members| {
-            members.iter().any(|planned| {
-                matches!(planned,
-                    v2::MemberPlan::ScratchAssetsV3 { slot, plan }
-                        if slot.member_id.uuid() == member
-                            && role.bootstrap.get(&member)
-                                .is_some_and(|bootstrap| bootstrap.plan == *plan))
-            })
-        });
-        if !planned {
-            return Err(OperationError::State);
-        }
-
-        // A prior operation belongs to this exact bootstrap member or this
-        // retirement cannot advance it. Resume the retained operation ID and
-        // journal transition; never synthesize an acknowledgement.
-        if role.transition.is_some() {
-            if role
-                .transition
-                .as_ref()
-                .is_none_or(|transition| transition.effect != Effect::Bootstrap(member))
+        let mut bundle = loop {
+            let mut bundle = owner.state.lock().await;
+            if !bundle.installed {
+                return Err(OperationError::State);
+            }
+            let id = bundle.id;
+            let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+            let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
+            if role.refunded || finite.source_drifted || !finite.producer_joined || !finite.retiring
             {
                 return Err(OperationError::State);
             }
-            self.finish_transition(id, role).await?;
-        } else if role
-            .bootstrap
-            .get(&member)
-            .ok_or(OperationError::State)?
-            .change
-            .is_some()
-        {
-            resume_change(&self.journal, role, member, deadline)?;
-            self.finish_transition(id, role).await?;
-        }
+            let planned = role.typed_members.as_ref().is_some_and(|members| {
+                members.iter().any(|planned| {
+                    matches!(planned,
+                        v2::MemberPlan::ScratchAssetsV3 { slot, plan }
+                            if slot.member_id.uuid() == member
+                                && role.bootstrap.get(&member)
+                                    .is_some_and(|bootstrap| bootstrap.plan == *plan))
+                })
+            });
+            if !planned {
+                return Err(OperationError::State);
+            }
+
+            if let Some(progress) = readers::reader_transition_progress(role, member) {
+                self.wait_for_io_slot(bundle, index, member, progress, deadline)
+                    .await?;
+                continue;
+            }
+
+            // A prior operation belongs to this exact bootstrap member or this
+            // retirement cannot advance it. Resume the retained operation ID and
+            // journal transition; never synthesize an acknowledgement.
+            if role.transition.is_some() {
+                if role
+                    .transition
+                    .as_ref()
+                    .is_none_or(|transition| transition.effect != Effect::Bootstrap(member))
+                {
+                    return Err(OperationError::State);
+                }
+                self.finish_transition(id, role).await?;
+            } else if role
+                .bootstrap
+                .get(&member)
+                .ok_or(OperationError::State)?
+                .change
+                .is_some()
+            {
+                resume_change(&self.journal, role, member, deadline)?;
+                self.finish_transition(id, role).await?;
+            }
+
+            let bootstrap = role.bootstrap.get(&member).ok_or(OperationError::State)?;
+            // Settle selected-but-unarmed readers while Open, including an
+            // original Arm just recovered above. Frozen allows existing
+            // reads/closes but never a new OpenReader operation.
+            let held = (bootstrap
+                .fold
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .state()
+                .asset
+                .lifecycle
+                == ScratchLifecycleV1::Open
+                && readers::transfer_pending(bootstrap))
+            .then(|| Arc::clone(&bootstrap.io_progress));
+            if let Some(progress) = held {
+                self.wait_for_io_slot(bundle, index, member, progress, deadline)
+                    .await?;
+            } else {
+                break bundle;
+            }
+        };
+        let id = bundle.id;
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
 
         // Each successful acknowledgment is followed by a fresh fold read.
         // At most Fence and Freeze can be newly queued in this call.
@@ -994,7 +1026,7 @@ fn stage_change(
 /// publication or a sync). A transition of another effect is not this slot's
 /// and is left to the caller's own check.
 #[cfg(unix)]
-fn io_slot_held(role: &OwnedRole, member: Uuid) -> Option<Arc<tokio::sync::Notify>> {
+pub(super) fn io_slot_held(role: &OwnedRole, member: Uuid) -> Option<Arc<tokio::sync::Notify>> {
     if role
         .transition
         .as_ref()
@@ -1008,6 +1040,57 @@ fn io_slot_held(role: &OwnedRole, member: Uuid) -> Option<Arc<tokio::sync::Notif
         || bootstrap.change.is_some()
         || state.asset.totals.pending_jobs != 0)
         .then(|| Arc::clone(&bootstrap.io_progress))
+}
+
+/// New readers wait across this original joined producer's handoff to S.
+/// Join already fenced R's native entry; Frozen never grants OpenReader.
+#[cfg(unix)]
+pub(super) fn finite_handoff_progress(
+    role: &OwnedRole,
+    member: Uuid,
+) -> Option<Arc<tokio::sync::Notify>> {
+    if role.refunded {
+        return None;
+    }
+    if let Some(progress) = role
+        .retirement
+        .as_ref()
+        .and_then(|retirement| retirement.handoff_progress(member))
+    {
+        return Some(progress);
+    }
+    let finite = role.finite_vod.as_ref()?;
+    let bootstrap = role.bootstrap.get(&member)?;
+    // A cancelled reader still owns its queued Arm/Observe and its matching
+    // in-memory IO state. Wait for that reader; never reconcile its ACK here.
+    let reader_transition = readers::reader_transition_progress(role, member).is_some();
+    (!finite.source_drifted
+        && finite.producer_joined
+        && finite.retiring
+        && finite.process_closure.is_some()
+        && ((role.transition.is_none() && bootstrap.change.is_none()) || reader_transition)
+        && bootstrap.retirement.is_none()
+        && matches!(
+            bootstrap.fold.as_ref()?.state().asset.lifecycle,
+            ScratchLifecycleV1::Open | ScratchLifecycleV1::Frozen
+        ))
+    .then(|| Arc::clone(&bootstrap.io_progress))
+}
+
+#[cfg(unix)]
+pub(super) async fn wait_for_handoff(
+    bundle: tokio::sync::MutexGuard<'_, Bundle>,
+    progress: Arc<tokio::sync::Notify>,
+    deadline: Instant,
+) -> Result<(), OperationError> {
+    native::publication::wait_for_io_slot(bundle, progress, deadline).await
+}
+
+#[cfg(unix)]
+impl BootstrapMember {
+    pub(super) fn progress_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.io_progress)
+    }
 }
 
 // A command may be retained before queue submission fails (e.g. its deadline).

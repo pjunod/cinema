@@ -38,6 +38,11 @@ pub(super) struct FiniteRetirement {
 }
 
 impl FiniteRetirement {
+    pub(super) fn handoff_progress(&self, source: Uuid) -> Option<Arc<tokio::sync::Notify>> {
+        (!self.installed && self.source_member == source)
+            .then(|| self.native.as_ref().map(|native| native.progress_signal()))
+            .flatten()
+    }
     pub(in crate::adaptive_resources::runtime) fn resolve_source_member(
         &self,
         source: Uuid,
@@ -80,7 +85,31 @@ impl NodeResourceRuntime {
                 self.seal_role(owner, index, deadline).await?;
             }
         }
-        let mut bundle = owner.state.lock().await;
+        let mut bundle = loop {
+            let bundle = owner.state.lock().await;
+            let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+            // Existing readers may continue after Freeze. Transfer only at
+            // an acknowledged boundary of their original operations; a busy
+            // reader is not a failed retirement and never proves extinction.
+            let held = if role.retirement.is_none()
+                && bootstrap::finite_handoff_progress(role, source_member).is_some()
+            {
+                bootstrap::io_slot_held(role, source_member).or_else(|| {
+                    role.bootstrap.get(&source_member).and_then(|native| {
+                        bootstrap::readers::transfer_pending(native)
+                            .then(|| native.progress_signal())
+                    })
+                })
+            } else {
+                None
+            };
+            if let Some(progress) = held {
+                self.wait_for_io_slot(bundle, index, source_member, progress, deadline)
+                    .await?;
+            } else {
+                break bundle;
+            }
+        };
         let bundle_metadata_bytes = retained_bundle_metadata_bytes(&bundle)?;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.retirement.is_none() {
@@ -583,6 +612,11 @@ impl NodeResourceRuntime {
                 .get(&retirement.target_member)
                 .expect("installed retained member"),
         );
+        role.bootstrap
+            .get(&retirement.target_member)
+            .expect("installed retained member")
+            .progress_signal()
+            .notify_waiters();
         Ok(retirement.target_member)
     }
 }

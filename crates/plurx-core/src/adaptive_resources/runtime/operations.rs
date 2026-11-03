@@ -1966,3 +1966,12 @@ mod tests;
 #[cfg(all(test, unix))]
 #[path = "operations/finite_initialization_tests.rs"]
 mod finite_initialization_tests;
+
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[path = "finite_vod/tests/retirement_readers.rs"]
+mod finite_retirement_reader_tests;

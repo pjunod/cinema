@@ -553,6 +553,17 @@ impl NodeResourceRuntime {
                     .is_some();
             #[cfg(not(target_os = "linux"))]
             let recovered_producer = false;
+            // An adopted S owns imported native cells without an in-process
+            // R→S transition. Only its private retained recovery authority
+            // admits this path; producer recovery is a separate capability.
+            #[cfg(target_os = "linux")]
+            let recovered_retained = role
+                .handle
+                .as_ref()
+                .and_then(|handle| handle.recovery_authority())
+                .is_some();
+            #[cfg(not(target_os = "linux"))]
+            let recovered_retained = false;
             #[cfg(target_os = "linux")]
             let closed_copy_producer = role.copy_vod.as_ref().is_some_and(|copy| {
                 let never_root = copy.never_root_closure.is_some();
@@ -568,7 +579,9 @@ impl NodeResourceRuntime {
             #[cfg(not(target_os = "linux"))]
             let closed_copy_producer = false;
             if role.refunded
-                || (mode == CleanupMode::Retained && role.retirement.is_none())
+                || (mode == CleanupMode::Retained
+                    && role.retirement.is_none()
+                    && !recovered_retained)
                 || (mode.is_producer()
                     && (role.retirement.is_some()
                         || (!recovered_producer

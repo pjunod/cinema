@@ -13,10 +13,12 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
     std::fs::create_dir_all(&target).expect("repo-local fixture root");
     let target = std::fs::canonicalize(target).expect("canonical native fixture ancestry");
-    let base = tempfile::Builder::new()
-        .prefix("finite-software-vod-")
-        .tempdir_in(&target)
-        .expect("repo-local finite fixture");
+    let base = FiniteLifecycleFixtureRoot(
+        tempfile::Builder::new()
+            .prefix("finite-software-vod-")
+            .tempdir_in(&target)
+            .expect("repo-local finite fixture"),
+    );
     let source_path = base.path().join("source.mkv");
     // A short, actual media source keeps the native writer and test bounded.
     testfixtures::run(
@@ -244,6 +246,7 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     assert_eq!(init_body.len() as u64, init_len);
     assert!(init_body.windows(4).any(|box_type| box_type == b"moov"));
     drop(init_body);
+    drop(init); // Release the counted output alias before final eviction.
 
     wait_until(
         "normal R-to-S retirement",
@@ -283,11 +286,28 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         .last()
         .expect("nonempty ordinary plan")
         .end_ticks();
-    assert_eq!(
-        service.completed,
-        u64::try_from(ticks_to_ms(end, rendition.timescale))
-            .expect("finite plan duration is nonnegative")
-    );
+    let final_ms = u64::try_from(ticks_to_ms(end, rendition.timescale))
+        .expect("finite plan duration is nonnegative");
+    // This is the last accepted one-second observation, not a synthetic
+    // completion sample. A short encode may publish several entries within
+    // one observation interval and retain the earlier durable frontier.
+    assert!(service.completed > 0 && service.completed <= final_ms);
+    let manifest = rendition.manifest.lock().await;
+    assert!(rendition.plan.entries.iter().any(|entry| {
+        u64::try_from(ticks_to_ms(entry.end_ticks(), rendition.timescale))
+            == Ok(service.completed)
+            && manifest
+                .state(entry.index)
+                .is_some_and(|state| state.is_materialized() && state.bytes() > 0)
+    }));
+    drop(manifest);
+    assert!(matches!(
+        service.units_per_second,
+        plurx_core::process::observation::Metric::Unknown(
+            plurx_core::process::observation::UnknownReason::InsufficientEvidence
+                | plurx_core::process::observation::UnknownReason::Stale
+        )
+    ));
     assert!(
         rendition
             .recipe
@@ -440,6 +460,11 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         file: FiniteFile::Segment(0),
         len: retained_len,
     };
+    let encoding = rendition.recipe.encoding.as_ref().expect("finite encoding");
+    let before_cache_read = encoding
+        .resource_service_sample(Instant::now())
+        .expect("original accepted producer sample")
+        .0;
     let retained_body = retained_file
         .read_all_bounded(retained_len, deadline)
         .await
@@ -448,6 +473,32 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     assert_eq!(retained_body.len() as u64, retained_len);
     drop(retained_body);
     drop(retained_file);
+    let after_cache_read = encoding
+        .resource_service_sample(Instant::now())
+        .expect("original producer sample survives retained reads")
+        .0;
+    assert_eq!(
+        (
+            after_cache_read.generation,
+            after_cache_read.phase,
+            after_cache_read.unit,
+            after_cache_read.completed,
+            after_cache_read.deadline_slack_ms,
+            after_cache_read.queued_bytes,
+            after_cache_read.at,
+        ),
+        (
+            before_cache_read.generation,
+            before_cache_read.phase,
+            before_cache_read.unit,
+            before_cache_read.completed,
+            before_cache_read.deadline_slack_ms,
+            before_cache_read.queued_bytes,
+            before_cache_read.at,
+        ),
+        "retained reads cannot refresh the producer event or advance useful work"
+    );
+    drop(output); // The first rendition still owns S; this test alias is done.
     // A second ordinary selected finite builder really admits another R
     // while the first S still owns every retained file and reader budget.
     let second_key = "b".repeat(64);
@@ -567,9 +618,31 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     assert_eq!(final_snapshot.used, Default::default());
 }
 
-/// Advance only the existing terminal-response retention policy after actual
-/// cleanup completed. Native exit/join/close proofs above use the real kernel;
-/// no clock advance supplies resource extinction or settlement authority.
+/// Keep the failed installation and journal available for diagnosis.
+struct FiniteLifecycleFixtureRoot(tempfile::TempDir);
+
+impl std::ops::Deref for FiniteLifecycleFixtureRoot {
+    type Target = tempfile::TempDir;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for FiniteLifecycleFixtureRoot {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.disable_cleanup(true);
+            eprintln!(
+                "retained failed finite lifecycle fixture: {}",
+                self.0.path().display()
+            );
+        }
+    }
+}
+
+/// Wait for the existing terminal-response retention after actual cleanup.
+/// Keep Tokio and std clocks aligned with native deadlines; retention never
+/// supplies resource extinction or settlement authority.
 async fn expire_finite_session_tombstone(serve: &VodServe, session_id: &str) {
     let cleanup = {
         let sessions = serve.shared.sessions.lock().await;
@@ -583,9 +656,7 @@ async fn expire_finite_session_tombstone(serve: &VodServe, session_id: &str) {
     };
     cleanup.wait().await;
     drop(cleanup);
-    tokio::time::pause();
-    tokio::time::advance(TERMINAL_TOMBSTONE_RETENTION + Duration::from_secs(1)).await;
-    tokio::time::resume();
+    tokio::time::sleep(TERMINAL_TOMBSTONE_RETENTION + Duration::from_secs(1)).await;
     // Ordinary maintenance must also obtain its fresh durable non-live check.
     serve.maintain().await;
     assert!(
