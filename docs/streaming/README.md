@@ -153,10 +153,10 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [DV_HDR_PROCESSING_REVIEW.md](DV_HDR_PROCESSING_REVIEW.md) | Adversarial findings and dispositions for the DV processing proposal and build handoff; cleared for M0 feasibility only. | done |
 | [DV_HDR_PROCESSING_FEASIBILITY.md](DV_HDR_PROCESSING_FEASIBILITY.md) | Sol 6.1 M0 reuse findings: existing DV/FEL renderers, P8.1 recipe, metric checks and unproven boundaries. | open |
 | [DV_HDR_M1_CONTRACTS.md](DV_HDR_M1_CONTRACTS.md) | Approved additive M1 type, frame-coverage, graph and recovery-episode contracts; the initial slice kept the production registry empty. | open |
-| [DV_HDR_PROCESSING_STATUS.md](DV_HDR_PROCESSING_STATUS.md) | Implementation ledger: backend and serving integration, HDR10-E, resource measurements, reproducible acceptance fixtures, packaging and remaining qualification. | open |
-| [DV-FOLLOWUPS-HANDOFF.md](DV-FOLLOWUPS-HANDOFF.md) | What is left after the HDR10-E work, for any agent: the Pixel HLS/Animals branch, FEL→8.1 for DV displays, display-targeted PR A, and small open items, with branches, files, tests and merge lines. | open |
+| [DV_HDR_PROCESSING_STATUS.md](DV_HDR_PROCESSING_STATUS.md) | Processing implementation, HDR10-E serving, measurements and remaining qualification. | open |
+| [DV-FOLLOWUPS-HANDOFF.md](DV-FOLLOWUPS-HANDOFF.md) | HDR10-E follow-ups: Pixel delivery, FEL→8.1, display targets and merge evidence. | open |
 | [DM-PRECISION-STATUS.md](DM-PRECISION-STATUS.md) | Shader PQ precision repair, rejected CM v2.9 affine experiment, ownership and merge evidence. | done |
-| [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md) | Current A–F implementation and source-pinned qualification matrix, retained checkpoint history, remaining effort promotion, and physical accuracy acceptance. | in progress |
+| [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md) | Display-target implementation, source-bound qualification and remaining accuracy acceptance. | in progress |
 | [DISPLAY-TARGETED-DV-QUALIFICATION-HISTORY.md](DISPLAY-TARGETED-DV-QUALIFICATION-HISTORY.md) | Historical display-target source checkpoints and qualification records, retained verbatim with original attribution. | historical |
 | [DISPLAY-TARGETED-DV-TRIM-CONTRACT.md](DISPLAY-TARGETED-DV-TRIM-CONTRACT.md) | Superseded stub: the never-merged Annex B.3 RGB trim candidate, replaced by the closed-form display management of the build plan's phase 2. | superseded |
 | [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md) | Which Dolby Vision enhancements are possible but unbuilt (HDR10+ from L1, DV→SDR trims, MEL detection, P5, more routes and profiles, pipeline performance) and what each involves. | open |
@@ -169,6 +169,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [DV_HDR_RPU_REUSE_CONTROLS.md](DV_HDR_RPU_REUSE_CONTROLS.md) | Reviewed explicit mapping reuse, cache/reset refusals, input-bound execution and retained-prerequisite replay. | open |
 | [DV_HDR_COMBINED_CONTROLS.md](DV_HDR_COMBINED_CONTROLS.md) | Reviewed finite P7/FEL source-to-HDR10 chain, actual output/timing, numerical limits and remaining movie integration. | open |
 | [FEL-P81-RECONSTRUCTION.md](FEL-P81-RECONSTRUCTION.md) | Reconstructed Profile 8.1: admission, truthfulness, proofs, route recipe, per-title qualification. | open |
+| [DV_HDR_QUALITY_REPAIR.md](DV_HDR_QUALITY_REPAIR.md) | Make RPU/DYN/FEL improve the delivered picture: measurements, fixes and remaining acceptance. | open |
 | [DV_PROCESSING_TOOLS.md](DV_PROCESSING_TOOLS.md) | Build and run the bounded streaming FEL reconstruction and P8.1 authoring helpers; remaining serving limits. | open |
 | [DV_HDR_NONIDENTITY_CONTROLS.md](DV_HDR_NONIDENTITY_CONTROLS.md) | Reproduce reviewed affine FEL reconstruction and P8.1 repeated-reshape controls, separate HDR10-base checks and exact replay provenance. | open |
 | [DV-DISK-CONVERSION-DIAGNOSIS.md](DV-DISK-CONVERSION-DIAGNOSIS.md) | Why the on-disk conversion never completes, and a proposal. | open |

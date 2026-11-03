@@ -25,6 +25,12 @@ use std::sync::LazyLock;
 /// takes the verdict with it.
 pub const PROBE_KEY: &str = "plurx_dv_fel_v1";
 pub const SCHEMA: u32 = 1;
+/// Absolute BT.2020/PQ inverse shared with the standalone picture proof.
+/// The planar RGB intermediate prevents zscale negotiating a YUV output.
+/// Older swscale RGB48 paths compress the full-range code interval and can
+/// introduce colour error into the measurement itself.
+pub const RGB48_FROM_PQ_YUV_FILTER: &str =
+    include_str!("../../../../tools/dv_quality/bt2020_pq_rgb48.filter");
 /// Sample windows per title, spread evenly through it (at (i+1)/(K+1) of the
 /// duration). K comes from the window-to-window spread of the EL's gain: on
 /// the measured title with the most varied windows one window's gain ranged
@@ -353,7 +359,7 @@ impl FelVerdict {
 pub fn identity(renderer_identity: &str, recipe: &str, encoder_identity: &str) -> String {
     hex::encode(Sha256::digest(
         serde_json::to_vec(&(
-            "plurx-dv-fel-qualification-v2",
+            "plurx-dv-fel-qualification-v3",
             renderer_identity,
             recipe,
             encoder_identity,
@@ -486,6 +492,32 @@ mod tests {
         let mut values = [3.0, 1.0, 2.0];
         assert_eq!(mean_p99(&mut values), Some((2.0, 2.0)));
         assert_eq!(mean_p99(&mut []), None);
+    }
+
+    #[test]
+    fn biased_rgb_conversion_verdicts_are_not_reused() {
+        let old_identity = hex::encode(Sha256::digest(
+            serde_json::to_vec(&(
+                "plurx-dv-fel-qualification-v2",
+                "renderer",
+                "recipe",
+                "encoder",
+            ))
+            .expect("old identity"),
+        ));
+        let current_identity = identity("renderer", "recipe", "encoder");
+        let mut verdict = FelVerdict::unmeasurable(old_identity, 10, 20, 30);
+        let document = serde_json::json!({PROBE_KEY: verdict}).to_string();
+        assert_eq!(
+            verdict_state(Some(&document), 10, 20, &current_identity),
+            VerdictState::Missing
+        );
+        verdict.identity = current_identity.clone();
+        let document = serde_json::json!({PROBE_KEY: verdict}).to_string();
+        assert_eq!(
+            verdict_state(Some(&document), 10, 20, &current_identity),
+            VerdictState::Current(verdict)
+        );
     }
 
     #[test]
