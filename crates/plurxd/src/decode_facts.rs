@@ -1535,6 +1535,15 @@ const LINUX_AUDIT_ARCH: u32 = 0xc000_00b7;
 ))]
 const LINUX_AUDIT_ARCH: u32 = 0;
 
+// libc 0.2.189 omits this symbol. Linux UAPI asm/unistd_64.h defines
+// x86-64 333; arm64's UAPI selects asm-generic/unistd.h, which defines 292.
+// Only these 64-bit ABIs can install the strict filter. Other architectures
+// already return Unsupported before source execution; no fallback number exists.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const LINUX_NR_IO_PGETEVENTS: libc::c_long = 333;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const LINUX_NR_IO_PGETEVENTS: libc::c_long = 292;
+
 #[cfg(target_os = "linux")]
 fn seccomp_statement(code: u16, value: u32) -> libc::sock_filter {
     libc::sock_filter {
@@ -1661,7 +1670,7 @@ fn build_linux_probe_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
         libc::SYS_io_submit,
         libc::SYS_io_cancel,
         libc::SYS_io_getevents,
-        libc::SYS_io_pgetevents,
+        LINUX_NR_IO_PGETEVENTS,
         libc::SYS_io_uring_setup,
         libc::SYS_io_uring_enter,
         libc::SYS_io_uring_register,
@@ -2489,11 +2498,13 @@ fn supervise_linux_probe_execs(
                     | libc::SYS_io_submit
                     | libc::SYS_io_cancel
                     | libc::SYS_io_getevents
-                    | libc::SYS_io_pgetevents
                     | libc::SYS_io_uring_setup
                     | libc::SYS_io_uring_enter
                     | libc::SYS_io_uring_register
             );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            let unsupported_read =
+                unsupported_read || request.data.nr as libc::c_long == LINUX_NR_IO_PGETEVENTS;
             if scalar || unsupported_read {
                 let reserved = if unsupported_read {
                     Err(DecodeFactError::SourceService("strict parser requested unsupported vector, file mapping or copy source access".into()))

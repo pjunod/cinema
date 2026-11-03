@@ -1254,7 +1254,7 @@ async fn run_streaming(
             &request.encoder,
             &crate::source_input::source_args(
                 &request.encoder_args,
-                Path::new(""),
+                std::path::Path::new(""),
                 &[4],
                 source_input.as_ref().map(|input| input.url.as_str()),
             ),
