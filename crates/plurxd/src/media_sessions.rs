@@ -1972,6 +1972,95 @@ pub(crate) const ADAPTIVE_CAUSAL_PREPARE_VERSION: u16 = 2;
 #[cfg(target_os = "linux")]
 pub(crate) const ADAPTIVE_GRANT_CLOCK_REFUSED: &str = "cluster_clock_grant_refused";
 
+/// Only an authenticated worker's known policy refusal carries this evidence.
+/// A refusal never grants capacity or proves that its original owner is closed.
+#[cfg(target_os = "linux")]
+pub(crate) const ADAPTIVE_TRIAL_REFUSED: &str = "adaptive_trial_refused";
+#[cfg(target_os = "linux")]
+const MAX_ADAPTIVE_TRIAL_REFUSAL_BYTES: usize = 1024;
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdaptiveTrialRefusalV1 {
+    version: u16,
+    code: AdaptiveTrialRefusalCode,
+    message: String,
+    pub(crate) reason: plurx_core::resource_policy::TrialRefusal,
+}
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize, Deserialize)]
+enum AdaptiveTrialRefusalCode {
+    #[serde(rename = "adaptive_trial_refused")]
+    TrialRefused,
+}
+#[cfg(target_os = "linux")]
+impl AdaptiveTrialRefusalV1 {
+    pub(crate) fn new(reason: plurx_core::resource_policy::TrialRefusal) -> Self {
+        Self {
+            version: 1,
+            code: AdaptiveTrialRefusalCode::TrialRefused,
+            message: format!("adaptive trial refused: {reason:?}"),
+            reason,
+        }
+    }
+    /// Strict and bounded before allocating a diagnostic; unknown protocol
+    /// versions, fields and reasons carry no policy/capacity evidence.
+    pub(crate) fn decode(body: &[u8]) -> Option<Self> {
+        if body.len() > MAX_ADAPTIVE_TRIAL_REFUSAL_BYTES {
+            return None;
+        }
+        let value: Self = serde_json::from_slice(body).ok()?;
+        (value.version == 1).then_some(value)
+    }
+    /// An invalid policy-shaped response must hold rather than bypass the
+    /// policy-specific original-cleanup gate through generic 503 retry. Limit
+    /// all parsing/scanning first. Oversized replies and malformed JSON objects
+    /// conservatively hold, including truncated escaped codes. Valid generic
+    /// objects and legacy non-JSON bodies retain their prior classification.
+    pub(crate) fn invalid_response_requires_hold(body: &[u8]) -> bool {
+        if body.len() > MAX_ADAPTIVE_TRIAL_REFUSAL_BYTES {
+            return true;
+        }
+        if body
+            .windows(ADAPTIVE_TRIAL_REFUSED.len())
+            .any(|bytes| bytes == ADAPTIVE_TRIAL_REFUSED.as_bytes())
+        {
+            return true;
+        }
+        if body
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            != Some(b'{')
+        {
+            return false;
+        }
+        // Serde decodes escaped code strings and rejects duplicate `code`
+        // fields; a Value object alone would silently discard a duplicate.
+        #[derive(Deserialize)]
+        struct RefusalCodeHint {
+            #[serde(default)]
+            code: Option<serde_json::Value>,
+        }
+        match serde_json::from_slice::<RefusalCodeHint>(body) {
+            Ok(hint) => {
+                hint.code.as_ref().and_then(serde_json::Value::as_str)
+                    == Some(ADAPTIVE_TRIAL_REFUSED)
+            }
+            Err(_) => true,
+        }
+    }
+    pub(crate) fn into_api_error(self) -> crate::http::error::ApiError {
+        crate::http::error::ApiError::typed_detail(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            ADAPTIVE_TRIAL_REFUSED,
+            self.message,
+            serde_json::json!({"version": self.version, "reason": self.reason}),
+        )
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "snake_case", deny_unknown_fields)]

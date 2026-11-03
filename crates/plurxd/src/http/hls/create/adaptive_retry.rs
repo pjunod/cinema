@@ -26,6 +26,15 @@ impl From<ApiError> for AdaptivePrepareFailure {
         Self::Retry(error)
     }
 }
+#[cfg(target_os = "linux")]
+pub(super) fn local_prepare_refusal(
+    error: crate::transcode::adaptive_attempts::AdaptivePrepareError,
+) -> AdaptivePrepareFailure {
+    AdaptivePrepareFailure::Retry(match error.trial_refusal {
+        Some(reason) => crate::media_sessions::AdaptiveTrialRefusalV1::new(reason).into_api_error(),
+        None => ApiError::ServiceUnavailable(error.message),
+    })
+}
 pub(super) fn prepare_http_refusal(status: reqwest::StatusCode) -> AdaptivePrepareFailure {
     let error = held("adaptive peer refused Prepare");
     match status.as_u16() {
@@ -63,6 +72,16 @@ pub(super) fn grant_http_refusal(
     status: reqwest::StatusCode,
     body: &[u8],
 ) -> AdaptivePrepareFailure {
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        if let Some(refusal) = crate::media_sessions::AdaptiveTrialRefusalV1::decode(body) {
+            return AdaptivePrepareFailure::Retry(refusal.into_api_error());
+        }
+        if crate::media_sessions::AdaptiveTrialRefusalV1::invalid_response_requires_hold(body) {
+            return AdaptivePrepareFailure::Hold(held(
+                "adaptive policy refusal protocol is uncertain",
+            ));
+        }
+    }
     let clock = status == reqwest::StatusCode::SERVICE_UNAVAILABLE
         && serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
             value["code"].as_str() == Some(crate::media_sessions::ADAPTIVE_GRANT_CLOCK_REFUSED)
@@ -304,6 +323,58 @@ fn fenced(status: &RequestStatus, claim: &AttemptClaim) -> bool {
                 )
         })
 }
+/// This control-plane observation relies on the worker's original positive
+/// close machinery: failed P/R owners publish Closed only after their actual
+/// cleanup and original coordinator join. A Fence, 202 or absent owner carries
+/// no such conclusion; the row itself is not a physical release receipt.
+fn policy_refusal_cleanup_confirmed(status: &RequestStatus, claim: &AttemptClaim) -> bool {
+    status.binding == claim.binding
+        && status.disposition == RequestDisposition::Open
+        && status.winner_attempt_id.is_none()
+        && status.attempts.iter().any(|row| {
+            row.key == claim.key
+                && row.worker_instance_id == claim.worker_instance_id
+                && row.serving_generation == claim.serving_generation
+                && row.phase == AttemptPhase::Closed
+        })
+}
+
+pub(super) async fn policy_refusal_retry_ready(
+    state: &AppState,
+    claim: &AttemptClaim,
+    deadline: tokio::time::Instant,
+) -> bool {
+    // Wait only for this original, already fenced owner, within the SAME
+    // preparation cutoff. No task, cancellation or new allowance is minted.
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        let Ok(Some(status)) = current_status(state, &claim.binding, deadline).await else {
+            return false;
+        };
+        if policy_refusal_cleanup_confirmed(&status, claim) {
+            return true;
+        }
+        let original_still_closing = status.binding == claim.binding
+            && status.disposition == RequestDisposition::Open
+            && status.winner_attempt_id.is_none()
+            && status.attempts.iter().any(|row| {
+                row.key == claim.key
+                    && row.worker_instance_id == claim.worker_instance_id
+                    && row.serving_generation == claim.serving_generation
+                    && matches!(row.phase, AttemptPhase::Cleanup | AttemptPhase::Losing)
+            });
+        if !original_still_closing {
+            return false;
+        }
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + Duration::from_millis(50)),
+        )
+        .await;
+    }
+}
+
 fn retain_fence(original: &mut OriginalAttempt, status: &RequestStatus) -> Result<(), ApiError> {
     let row = status
         .attempts

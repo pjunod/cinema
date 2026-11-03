@@ -89,14 +89,13 @@ The two-node and exact-head gate results are recorded in the task PR.
 The finite qualification above separates implemented fixtures from executed
 results. Their presence does not close the historical all-path checklist.
 
-There is also genuine M2 implementation work: the selected finite path currently
-reads history for advisory comparisons in
-[`finite_software.rs`](../../crates/plurxd/src/vod/finite_software.rs), while
-`TrialMonitor`, `TrialBudget` and `GrowthState` have no daemon consumers.
-Connecting original-deadline trial control and owned stopping to the selected
-producer remains open. Preserve UnknownBounds/UnknownMemory refusals; priors
-alone never authorize expansion. No all-path or hard-memory acceptance closes
-with the publication repair.
+The local [production policy slice](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
+connects typed speculative refusals and bounded growth observations to actual
+finite admission/materialization. Qualification is pending. Unknown native
+peaks, startup/cleanup bounds, full inventory and pre-Winner ownership still
+block trial execution. `TrialMonitor` has no production trial owner; priors
+and growth stability never authorize expansion. M2 and hard-memory acceptance
+remain open.
 
 ## 2026-10-29 checkpoint — historical source-bound evidence
 

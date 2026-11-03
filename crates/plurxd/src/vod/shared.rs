@@ -159,6 +159,9 @@ pub(crate) struct PreparedAttemptCleanup {
 #[cfg(target_os = "linux")]
 pub(crate) struct AdaptiveBuildFailure {
     pub(crate) message: String,
+    /// Known refusal of speculative growth after ordinary admission failed.
+    /// This is neither a trial grant nor evidence that P/R cleanup completed.
+    pub(crate) trial_refusal: Option<plurx_core::resource_policy::TrialRefusal>,
     /// Present only when the original finite R was admitted and its exact
     /// closing owner was registered before this failure was returned.
     pub(crate) cleanup: Option<PreparedAttemptCleanup>,
@@ -169,6 +172,7 @@ impl AdaptiveBuildFailure {
     pub(crate) fn before_r(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            trial_refusal: None,
             cleanup: None,
         }
     }

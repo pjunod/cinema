@@ -412,6 +412,11 @@ async fn prepare_adaptive_origin(
             // No legacy fallback or new Claim until the SAME original row is
             // known fenced. Winner/unknown/deadline holds are returned intact.
             adaptive_retry::fence_original(state, context, &claim, deadline).await?;
+            // A typed growth refusal is not a cleanup receipt. Its fixed P/M
+            // may still be retained even though no new R was admitted.
+            let may_retry = may_retry
+                && (error.code() != Some(crate::media_sessions::ADAPTIVE_TRIAL_REFUSED)
+                    || adaptive_retry::policy_refusal_retry_ready(state, &claim, deadline).await);
             Err(if may_retry {
                 AdaptiveOriginFailure::NextWorker(error)
             } else {
@@ -459,7 +464,7 @@ async fn prepare_claimed_adaptive_origin(
                     admission,
                 )
                 .await
-                .map_err(ApiError::ServiceUnavailable)?
+                .map_err(adaptive_retry::local_prepare_refusal)?
             {
                 crate::transcode::adaptive_attempts::AdaptivePrepareStart::Prepared(reply) => {
                     prepared = Some(reply);
@@ -474,13 +479,18 @@ async fn prepare_claimed_adaptive_origin(
                         // The original owner keeps the attempt; the reason it
                         // gave is the only record of why this node's own
                         // preparation did not finish.
-                        Ok(Ok(Err(error))) => tracing::warn!(
-                            target: "plurxd::http::hls",
-                            attempt = %claim.key.attempt_id,
-                            ordinal = claim.key.ordinal,
-                            %error,
-                            "adaptive local Prepare failed"
-                        ),
+                        Ok(Ok(Err(error))) => {
+                            if error.trial_refusal.is_some() {
+                                return Err(adaptive_retry::local_prepare_refusal(error));
+                            }
+                            tracing::warn!(
+                                target: "plurxd::http::hls",
+                                attempt = %claim.key.attempt_id,
+                                ordinal = claim.key.ordinal,
+                                %error,
+                                "adaptive local Prepare failed"
+                            );
+                        }
                         Ok(Err(_)) | Err(_) => {}
                     }
                 }

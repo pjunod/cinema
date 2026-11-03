@@ -291,7 +291,12 @@ pub(crate) async fn adaptive_attempt_prepare(
             })),
         )
             .into_response(),
-        Err(_) => StatusCode::CONFLICT.into_response(),
+        Err(error) => match error.trial_refusal {
+            Some(reason) => crate::media_sessions::AdaptiveTrialRefusalV1::new(reason)
+                .into_api_error()
+                .into_response(),
+            None => StatusCode::CONFLICT.into_response(),
+        },
     }
 }
 
@@ -391,9 +396,21 @@ async fn adaptive_attempt_causal_prepare(
                         .await
                     {
                         Ok(reply) => (StatusCode::OK, Json(reply)).into_response(),
-                        Err(_) => StatusCode::ACCEPTED.into_response(),
+                        Err(error) => match error.trial_refusal {
+                            Some(reason) => {
+                                crate::media_sessions::AdaptiveTrialRefusalV1::new(reason)
+                                    .into_api_error()
+                                    .into_response()
+                            }
+                            None => StatusCode::ACCEPTED.into_response(),
+                        },
                     }
                 }
+                Err(crate::transcode::adaptive_attempts::RemoteGrantError::TrialRefused(
+                    reason,
+                )) => crate::media_sessions::AdaptiveTrialRefusalV1::new(reason)
+                    .into_api_error()
+                    .into_response(),
                 // Cluster-clock evidence is capacity-like, not a protocol
                 // fault: the registration stays ungranted and fenceable, and
                 // the coordinator retries its next candidate.

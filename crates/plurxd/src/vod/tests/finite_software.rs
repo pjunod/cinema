@@ -465,6 +465,20 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         .resource_service_sample(Instant::now())
         .expect("original accepted producer sample")
         .0;
+    let policy_before = runtime.finite_policy_service_diagnostics(Instant::now());
+    assert!(policy_before.accepted_samples > 0);
+    let policy_sample = policy_before
+        .last_sample
+        .expect("actual materialization reached node policy");
+    assert_eq!(policy_sample.generation, before_cache_read.generation);
+    assert_eq!(policy_sample.unit, before_cache_read.unit);
+    assert!(policy_sample.completed > 0 && policy_sample.completed <= before_cache_read.completed);
+    assert!(policy_sample.at <= before_cache_read.at);
+    assert_eq!(
+        policy_before.growth_refusal,
+        Some(plurx_core::resource_policy::TrialRefusal::GrowthNotStable),
+        "joined production clears positive evidence without a capacity cooldown"
+    );
     let retained_body = retained_file
         .read_all_bounded(retained_len, deadline)
         .await
@@ -497,6 +511,25 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
             before_cache_read.at,
         ),
         "retained reads cannot refresh the producer event or advance useful work"
+    );
+    let policy_after = runtime.finite_policy_service_diagnostics(Instant::now());
+    assert_eq!(policy_after.accepted_samples, policy_before.accepted_samples);
+    assert_eq!(
+        policy_after.last_sample.map(|sample| (
+            sample.generation,
+            sample.phase,
+            sample.unit,
+            sample.completed,
+            sample.at,
+        )),
+        policy_before.last_sample.map(|sample| (
+            sample.generation,
+            sample.phase,
+            sample.unit,
+            sample.completed,
+            sample.at,
+        )),
+        "cached S does not supply a fresh policy service sample"
     );
     drop(output); // The first rendition still owns S; this test alias is done.
     // A second ordinary selected finite builder really admits another R

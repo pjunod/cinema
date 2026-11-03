@@ -43,6 +43,39 @@ pub(crate) enum AdaptivePrepareReplay {
     Pending,
 }
 
+/// A failure from the SAME registered preparation, retaining authoritative
+/// policy evidence separately from its diagnostic. This never certifies cleanup.
+#[derive(Debug)]
+pub(crate) struct AdaptivePrepareError {
+    pub(crate) message: String,
+    pub(crate) trial_refusal: Option<plurx_core::resource_policy::TrialRefusal>,
+}
+impl From<String> for AdaptivePrepareError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            trial_refusal: None,
+        }
+    }
+}
+impl From<&str> for AdaptivePrepareError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl std::fmt::Display for AdaptivePrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+/// Requested inline channel payload, separate from the measured coordinator
+/// frame. Tokio's private channel allocation/producer peak remains unproven.
+fn adaptive_prepare_reply_payload_bytes() -> usize {
+    std::mem::size_of::<
+        Result<crate::media_sessions::AdaptiveAttemptPreparedV1, AdaptivePrepareError>,
+    >()
+}
+
 #[expect(
     clippy::large_enum_variant,
     reason = "Keep the original prepared acknowledgment inline in the bounded coordinator handoff; boxing introduces a new allocation beside the measured owner frame."
@@ -52,7 +85,7 @@ pub(crate) enum AdaptivePrepareStart {
     Pending,
     Started(
         tokio::sync::oneshot::Receiver<
-            Result<crate::media_sessions::AdaptiveAttemptPreparedV1, String>,
+            Result<crate::media_sessions::AdaptiveAttemptPreparedV1, AdaptivePrepareError>,
         >,
     ),
 }
@@ -69,12 +102,13 @@ pub(crate) enum AdaptiveRemoteRegistrationStart {
         deadline: std::time::Instant,
     },
 }
-/// A refused original grant. Only cluster-clock evidence is retryable: the
-/// registration stays ungranted, so the coordinator's Fence reaches this
-/// worker's original coordinator, which closes its own P/M.
+/// A refused original grant. Cluster-clock evidence leaves the registration
+/// ungranted and fenceable. A retained trial refusal is retryable only after
+/// the worker's original positive close machinery has also confirmed cleanup.
 #[derive(Debug)]
 pub(crate) enum RemoteGrantError {
     ClusterClock(plurx_core::cluster::clock::ClockRefusal),
+    TrialRefused(plurx_core::resource_policy::TrialRefusal),
     Refused(String),
 }
 impl From<String> for RemoteGrantError {
@@ -94,6 +128,7 @@ impl std::fmt::Display for RemoteGrantError {
                 f,
                 "cluster_clock: the cluster clock cannot prove the original grant ({reason})"
             ),
+            Self::TrialRefused(reason) => write!(f, "adaptive trial refused: {reason:?}"),
             Self::Refused(reason) => f.write_str(reason),
         }
     }
@@ -274,6 +309,7 @@ fn planning_application_metadata_bytes(
         planning_snapshot_requested_heap_bytes(snapshot)?,
         claim_requested_heap_bytes(claim)?,
         coordinator_frame_bytes,
+        adaptive_prepare_reply_payload_bytes(),
         std::mem::size_of::<AttemptEntry>(),
         std::mem::size_of::<PlanningFailedAttempt>(),
         2 * std::mem::size_of::<usize>(), // original Arc entry header
@@ -393,6 +429,7 @@ pub(super) fn projected_application_owner_bytes(
         )?
         .checked_add(rendition_key_capacity)?
         .checked_add(coordinator_frame_bytes)?
+        .checked_add(adaptive_prepare_reply_payload_bytes())?
         .checked_add(control_frame_bytes)?
         // One dormant-plan object and its canonical JSON are constructed
         // before Prepared; the retained original and one response copy can
@@ -435,6 +472,8 @@ pub(super) struct AttemptEntry {
     adopt_commit_pause: Mutex<Option<AdoptCommitPause>>,
     remote_changed: tokio::sync::Notify,
     remote_registration: Mutex<Option<RemoteRegistration>>,
+    // Inline reason belongs to this original owner, including failed replay.
+    trial_refusal: Mutex<Option<plurx_core::resource_policy::TrialRefusal>>,
     coordinator_frame_bytes: std::sync::atomic::AtomicUsize,
     attempt_id: Uuid,
     request_incarnation_id: Uuid,
@@ -617,6 +656,7 @@ impl AdaptiveAttemptRegistry {
             adopt_commit_pause: Mutex::new(None),
             remote_changed: tokio::sync::Notify::new(),
             remote_registration: Mutex::new(None),
+            trial_refusal: Mutex::new(None),
             coordinator_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
             attempt_id,
             request_incarnation_id,
@@ -708,6 +748,26 @@ impl AdaptiveAttemptRegistry {
 }
 
 impl AttemptEntry {
+    fn prepare_error(&self, message: String) -> AdaptivePrepareError {
+        AdaptivePrepareError {
+            message,
+            trial_refusal: *self
+                .trial_refusal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        }
+    }
+    fn retained_trial_refusal(&self) -> Option<AdaptivePrepareError> {
+        let reason = *self
+            .trial_refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reason.map(|reason| AdaptivePrepareError {
+            message: format!("adaptive trial refused: {reason:?}"),
+            trial_refusal: Some(reason),
+        })
+    }
+
     fn remote_requested_bytes(&self) -> Option<usize> {
         let held = self.remote_registration.lock().ok()?;
         let Some(remote) = held.as_ref() else {
@@ -1275,7 +1335,7 @@ impl super::TranscodeManager {
     pub(crate) async fn replay_registered_adaptive_prepare(
         &self,
         request: &crate::media_sessions::AdaptiveAttemptPrepareV1,
-    ) -> Result<Option<AdaptivePrepareReplay>, String> {
+    ) -> Result<Option<AdaptivePrepareReplay>, AdaptivePrepareError> {
         if !request.is_valid() {
             return Err("invalid original adaptive preparation".into());
         }
@@ -1295,7 +1355,13 @@ impl super::TranscodeManager {
         .await
         .map_err(str::to_owned)?;
         if let Some(reply) = self.replay_adaptive_prepared(attempt_id).await {
-            return reply.map(AdaptivePrepareReplay::Prepared).map(Some);
+            return reply
+                .map(AdaptivePrepareReplay::Prepared)
+                .map(Some)
+                .map_err(|error| existing.prepare_error(error));
+        }
+        if let Some(error) = existing.retained_trial_refusal() {
+            return Err(error);
         }
         Ok(Some(AdaptivePrepareReplay::Pending))
     }
@@ -1322,7 +1388,7 @@ impl super::TranscodeManager {
     pub(crate) async fn wait_remote_adaptive_prepared(
         &self,
         attempt_id: Uuid,
-    ) -> Result<crate::media_sessions::AdaptiveAttemptPreparedV1, String> {
+    ) -> Result<crate::media_sessions::AdaptiveAttemptPreparedV1, AdaptivePrepareError> {
         let entry = self
             .adaptive_attempts
             .get(attempt_id)
@@ -1334,7 +1400,10 @@ impl super::TranscodeManager {
             tokio::pin!(changed);
             changed.as_mut().enable();
             if let Some(reply) = self.replay_adaptive_prepared(attempt_id).await {
-                return reply;
+                return reply.map_err(|error| entry.prepare_error(error));
+            }
+            if let Some(error) = entry.retained_trial_refusal() {
+                return Err(error);
             }
             if !matches!(*entry.state().await, AttemptState::Reserved) {
                 return Err("original remote preparation ended without Prepared".into());
@@ -1503,6 +1572,11 @@ impl super::TranscodeManager {
                 .map(AdaptivePrepareReplay::Prepared)
                 .map_err(RemoteGrantError::Refused);
         }
+        if let Some(error) = entry.retained_trial_refusal() {
+            if let Some(reason) = error.trial_refusal {
+                return Err(RemoteGrantError::TrialRefused(reason));
+            }
+        }
         Ok(AdaptivePrepareReplay::Pending)
     }
 
@@ -1512,7 +1586,7 @@ impl super::TranscodeManager {
         request: crate::media_sessions::AdaptiveAttemptPrepareV1,
         deadline: std::time::Instant,
         restart_admission: crate::serving_fence::RestartAdmission,
-    ) -> Result<AdaptivePrepareStart, String> {
+    ) -> Result<AdaptivePrepareStart, AdaptivePrepareError> {
         self.verify_adaptive_claim(&request.claim)
             .await
             .map_err(str::to_owned)?;
@@ -1524,7 +1598,12 @@ impl super::TranscodeManager {
                 return Err("adaptive replay names a different original worker".into());
             }
             if let Some(reply) = self.replay_adaptive_prepared(attempt_id).await {
-                return reply.map(AdaptivePrepareStart::Prepared);
+                return reply
+                    .map(AdaptivePrepareStart::Prepared)
+                    .map_err(|error| existing.prepare_error(error));
+            }
+            if let Some(error) = existing.retained_trial_refusal() {
+                return Err(error);
             }
             return Ok(AdaptivePrepareStart::Pending);
         }
@@ -1544,9 +1623,15 @@ impl super::TranscodeManager {
                 async move {
                     let _restart_admission = restart_admission;
                     let result = manager
-                        .run_adaptive_prepare(state, request, original, deadline, frame_rx)
+                        .run_adaptive_prepare(
+                            state,
+                            request,
+                            Arc::clone(&original),
+                            deadline,
+                            frame_rx,
+                        )
                         .await;
-                    let _ = reply_tx.send(result);
+                    let _ = reply_tx.send(result.map_err(|error| original.prepare_error(error)));
                 },
                 frame_tx,
             )
@@ -1609,17 +1694,6 @@ impl super::TranscodeManager {
             }));
             return Err("adaptive planning lost its original deadline or serving authority".into());
         }
-        let trial_readiness = self
-            .vod
-            .observe_adaptive_trial_readiness(deadline, None)
-            .await;
-        tracing::debug!(
-            target: "plurxd::adaptive",
-            refusal = ?trial_readiness.refusal,
-            active_vod_sessions = trial_readiness.active_vod_sessions,
-            accepted_control_sessions = trial_readiness.accepted_control_sessions,
-            "adaptive trial readiness advisory; fixed admission remains authoritative"
-        );
         // The factory admits the original fixed P collector before source or
         // executable open and retains P through pure recipe construction.
         // No legacy prepare_vod_encoding_with_source or unowned FFprobe enters.
@@ -1671,6 +1745,7 @@ impl super::TranscodeManager {
             }
             let live_handoff_bytes = checked_caps([
                 coordinator_frame_bytes,
+                adaptive_prepare_reply_payload_bytes(),
                 request
                     .recipe
                     .requested_heap_bytes()
@@ -1741,7 +1816,15 @@ impl super::TranscodeManager {
             .await;
         let pending = match built {
             Ok(pending) => pending,
-            Err(crate::vodserve::AdaptiveBuildFailure { message, cleanup }) => {
+            Err(crate::vodserve::AdaptiveBuildFailure {
+                message,
+                cleanup,
+                trial_refusal,
+            }) => {
+                *entry
+                    .trial_refusal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = trial_refusal;
                 let mut state = entry.state().await;
                 if matches!(*state, AttemptState::Reserved) {
                     *state = AttemptState::PlanningFailed(Box::new(PlanningFailedAttempt {
@@ -3043,6 +3126,54 @@ async fn restart_guarded_adoption<T>(
     adoption.await
 }
 
+/// Task-join/control-protocol fixture only: no P/R/native work ever entered.
+/// The actual registered coordinator stays held until explicitly released;
+/// only production reconciliation may join it and publish the original Close.
+#[cfg(test)]
+impl super::TranscodeManager {
+    pub(crate) async fn reconcile_failed_adaptive_coordinator_for_test(&self) {
+        self.reconcile_adaptive_attempt_tasks().await;
+    }
+
+    pub(crate) async fn retain_empty_failed_adaptive_coordinator_for_test(
+        self: &Arc<Self>,
+        claim: AttemptClaim,
+    ) -> tokio::sync::oneshot::Sender<()> {
+        let entry = self
+            .adaptive_attempts
+            .reserve(
+                claim.key.attempt_id,
+                claim.key.request.request_incarnation_id,
+                claim.worker_instance_id,
+                claim.serving_generation,
+                None,
+                None,
+            )
+            .expect("original failed coordinator slot");
+        *entry.state().await = AttemptState::PlanningFailed(Box::new(PlanningFailedAttempt {
+            claim,
+            cleanup: None,
+            fence: None,
+            close: None,
+        }));
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        entry
+            .spawn_coordinator(
+                async move {
+                    frame_rx.await.expect("original registered frame");
+                    entered_tx.send(()).expect("original coordinator entered");
+                    released.await.expect("release same original coordinator");
+                },
+                frame_tx,
+            )
+            .expect("retain original task handle");
+        entered_rx.await.expect("registered coordinator is running");
+        release
+    }
+}
+
 /// Runs only from the existing selected-store/native finite fixture. The
 /// factory supplies the SAME original pending owner, never a DTO close proof.
 #[cfg(all(test, feature = "cluster-integration-tests"))]
@@ -3916,6 +4047,63 @@ mod tests {
             },
             receiver,
         )
+    }
+
+    #[test]
+    fn original_attempt_retains_trial_refusal_without_asserting_cleanup_or_growing_payload() {
+        use plurx_core::resource_policy::TrialRefusal;
+        let (fixture, _receiver) = remote_control_fixture();
+        let claim = fixture.claim;
+        let registry = AdaptiveAttemptRegistry::default();
+        let entry = registry
+            .reserve(
+                claim.key.attempt_id,
+                claim.key.request.request_incarnation_id,
+                claim.worker_instance_id,
+                claim.serving_generation,
+                None,
+                None,
+            )
+            .expect("original entry");
+        assert!(entry.retained_trial_refusal().is_none());
+        *entry.trial_refusal.lock().expect("inline reason") = Some(TrialRefusal::UnknownBounds);
+        let message = String::from("actual admission failure");
+        let allocation = message.as_ptr();
+        let error = entry.prepare_error(message);
+        assert_eq!(
+            error.message.as_ptr(),
+            allocation,
+            "move the existing diagnostic allocation"
+        );
+        assert_eq!(error.trial_refusal, Some(TrialRefusal::UnknownBounds));
+        assert_eq!(
+            entry
+                .retained_trial_refusal()
+                .expect("same reason")
+                .trial_refusal,
+            error.trial_refusal
+        );
+        assert!(
+            matches!(
+                entry.state.try_lock().as_deref(),
+                Ok(AttemptState::Reserved)
+            ),
+            "a refusal cannot assert original P/M/native cleanup"
+        );
+        assert!(
+            adaptive_prepare_reply_payload_bytes() >= std::mem::size_of::<AdaptivePrepareError>()
+        );
+        assert_eq!(
+            adaptive_prepare_reply_payload_bytes(),
+            std::mem::size_of::<Result<crate::media_sessions::AdaptiveAttemptPreparedV1, String>>(),
+            "the larger prepared reply already determines the result payload layout"
+        );
+        println!(
+            "adaptive prepare layout: error={} reply_payload={} entry={}",
+            std::mem::size_of::<AdaptivePrepareError>(),
+            adaptive_prepare_reply_payload_bytes(),
+            std::mem::size_of::<AttemptEntry>()
+        );
     }
 
     #[tokio::test]

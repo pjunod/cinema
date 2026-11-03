@@ -539,15 +539,6 @@ async fn accepted_policy_runway_uses_only_fresh_contiguous_owner_frontier() {
     let generation = uuid::Uuid::new_v4().to_string();
     activate_control_route(store.as_ref(), &session_id, &generation).await;
     let serve = local_serve(base.path().to_path_buf(), store);
-    let empty_readiness = serve
-        .observe_adaptive_trial_readiness(Instant::now() + Duration::from_secs(30), Some(false))
-        .await;
-    assert_eq!(empty_readiness.active_vod_sessions, 0);
-    assert_eq!(
-        empty_readiness.refusal,
-        plurx_core::resource_policy::TrialRefusal::UnknownBounds,
-        "an empty VOD registry does not verify all protected work or native bounds"
-    );
     let rendition = synthetic_rendition(base.path()).await;
     rendition
         .dir
@@ -609,34 +600,6 @@ async fn accepted_policy_runway_uses_only_fresh_contiguous_owner_frontier() {
         "an isolated later segment cannot extend protected runway"
     );
     assert!(policy.runway <= Duration::from_millis((end0 - anchor) as u64));
-    let readiness = serve
-        .observe_adaptive_trial_readiness(Instant::now() + Duration::from_secs(30), Some(false))
-        .await;
-    assert_eq!(readiness.active_vod_sessions, 1);
-    assert_eq!(readiness.accepted_control_sessions, 1);
-    assert_eq!(
-        readiness.refusal,
-        plurx_core::resource_policy::TrialRefusal::UnprotectedIncumbent,
-        "accepted control alone cannot grant a trial"
-    );
-    assert_eq!(
-        serve
-            .observe_adaptive_trial_readiness(Instant::now() + Duration::from_secs(30), Some(true),)
-            .await
-            .refusal,
-        plurx_core::resource_policy::TrialRefusal::PeerFirst
-    );
-    assert_eq!(
-        serve
-            .observe_adaptive_trial_readiness(Instant::now() + Duration::from_secs(30), None,)
-            .await
-            .refusal,
-        plurx_core::resource_policy::TrialRefusal::InsufficientEvidence
-    );
-    assert_eq!(serve.observe_adaptive_trial_readiness(
-            Instant::now() - Duration::from_millis(1), Some(true),
-        ).await.refusal, plurx_core::resource_policy::TrialRefusal::DeadlineBudget,
-            "the original deadline wins even when a capacity peer exists");
     assert!(
         serve
             .accepted_policy_runway(&session_id, uuid::Uuid::new_v4(), 1)

@@ -4,8 +4,9 @@
 resumed Claude's adaptive effort #1248. The effort remains a draft; no release
 qualification or deployment is claimed.
 
-Companion to [the plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) (requirements) and
-[finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) (the source checklist).
+[Plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) ·
+[finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) ·
+[production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) (local wiring).
 
 ## Current continuation — two-node publication and test isolation
 

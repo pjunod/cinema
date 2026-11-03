@@ -448,3 +448,248 @@ async fn grant_time_clock_refusal_retries_the_next_candidate_and_other_refusals_
         AdaptivePrepareFailure::Hold(_)
     ));
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn trial_policy_refusal_keeps_local_and_remote_reason_without_inventing_evidence() {
+    use axum::response::IntoResponse;
+    use plurx_core::resource_policy::TrialRefusal;
+    let refusal = crate::transcode::adaptive_attempts::AdaptivePrepareError {
+        message: "actual finite capacity refused".into(),
+        trial_refusal: Some(TrialRefusal::UnknownMemory),
+    };
+    let AdaptivePrepareFailure::Retry(local) = local_prepare_refusal(refusal) else {
+        panic!("known local policy refusal is a retry candidate, pending cleanup");
+    };
+    assert_eq!(
+        local.code(),
+        Some(crate::media_sessions::ADAPTIVE_TRIAL_REFUSED)
+    );
+    let body = axum::body::to_bytes(local.into_response().into_body(), 1024)
+        .await
+        .expect("bounded policy reply");
+    let decoded = crate::media_sessions::AdaptiveTrialRefusalV1::decode(&body)
+        .expect("strict worker version1 reply");
+    assert_eq!(decoded.reason, TrialRefusal::UnknownMemory);
+    let AdaptivePrepareFailure::Retry(remote) =
+        grant_http_refusal("node-b", reqwest::StatusCode::SERVICE_UNAVAILABLE, &body)
+    else {
+        panic!("known remote policy refusal is a retry candidate");
+    };
+    assert_eq!(
+        remote.code(),
+        Some(crate::media_sessions::ADAPTIVE_TRIAL_REFUSED)
+    );
+    assert!(matches!(
+        grant_http_refusal("node-b", reqwest::StatusCode::UNAUTHORIZED, &body),
+        AdaptivePrepareFailure::Hold(_)
+    ));
+
+    let valid: serde_json::Value = serde_json::from_slice(&body).expect("worker JSON");
+    for (key, value) in [
+        ("version", serde_json::json!(2)),
+        ("reason", serde_json::json!("unknown_future_reason")),
+        ("code", serde_json::json!("unknown_future_code")),
+        ("extra", serde_json::json!(true)),
+    ] {
+        let mut malformed = valid.clone();
+        malformed[key] = value;
+        let body = serde_json::to_vec(&malformed).expect("test wire");
+        assert!(crate::media_sessions::AdaptiveTrialRefusalV1::decode(&body).is_none());
+        let refusal = grant_http_refusal("node-b", reqwest::StatusCode::SERVICE_UNAVAILABLE, &body);
+        if key == "code" {
+            assert!(
+                matches!(refusal, AdaptivePrepareFailure::Retry(error) if error.code().is_none()),
+                "generic 503 without a policy code keeps its previous classification"
+            );
+        } else {
+            assert!(
+                matches!(refusal, AdaptivePrepareFailure::Hold(error) if error.code().is_none()),
+                "advertised but invalid policy evidence holds the original owner"
+            );
+        }
+    }
+    for missing in ["version", "code", "reason"] {
+        let mut malformed = valid.clone();
+        malformed.as_object_mut().expect("object").remove(missing);
+        let body = serde_json::to_vec(&malformed).expect("missing field wire");
+        assert!(crate::media_sessions::AdaptiveTrialRefusalV1::decode(&body).is_none());
+        if missing != "code" {
+            assert!(matches!(
+                grant_http_refusal("node-b", reqwest::StatusCode::SERVICE_UNAVAILABLE, &body),
+                AdaptivePrepareFailure::Hold(_)
+            ));
+        }
+    }
+    assert!(crate::media_sessions::AdaptiveTrialRefusalV1::decode(
+        br#"{"version":1,"code":"adaptive_trial_refused","message":"refused","reason":"unknown_memory","reason":"unknown_bounds"}"#,
+    ).is_none(), "duplicate evidence fields are malformed");
+    for body in [b"".as_slice(), b"{}", b"{", &[b' '; 1025]] {
+        assert!(crate::media_sessions::AdaptiveTrialRefusalV1::decode(body).is_none());
+    }
+    for body in [
+        br#"{"code":"adaptive_trial_refused","version":2}"#.as_slice(),
+        br#"{"code":"adaptive_trial_refused","reason":"unknown_memory""#,
+        br#"{"code":"adaptive_\u0074rial_refused","version":2}"#,
+        br#"{"code":"adaptive_\u0074rial_refused","reason":"#,
+        br#"{"code":"adaptive_\u0074rial_refused","code":"generic"}"#,
+        br#"{"code":"generic","code":"adaptive_\u0074rial_refused"}"#,
+        &[b' '; 1025],
+    ] {
+        assert!(
+            matches!(grant_http_refusal("node-b", reqwest::StatusCode::SERVICE_UNAVAILABLE, body),
+            AdaptivePrepareFailure::Hold(error) if error.code().is_none()),
+            "invalid/oversized advertised policy reply is protocol uncertainty"
+        );
+    }
+    for body in [
+        br#"{"error":"generic unavailable"}"#.as_slice(),
+        br#"{"code":"generic","error":"unavailable"}"#,
+        br#"{"code":42,"error":"unavailable"}"#,
+    ] {
+        assert!(
+            matches!(grant_http_refusal("node-b", reqwest::StatusCode::SERVICE_UNAVAILABLE, body),
+            AdaptivePrepareFailure::Retry(error) if error.code().is_none()),
+            "valid unadvertised generic JSON preserves its existing retry classification"
+        );
+    }
+    let generic = local_prepare_refusal("ordinary preparation failure".into());
+    assert!(matches!(generic, AdaptivePrepareFailure::Retry(error) if error.code().is_none()));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn trial_policy_retry_holds_cleanup_debt_and_requires_exact_original_closed_identity() {
+    let dir = crate::test_tempdir().expect("state dir");
+    let fixture = crate::transcode::HlsDeliveryFixture::publish_without_process(
+        dir.path(),
+        &Uuid::new_v4().to_string(),
+    )
+    .await;
+    let state = &fixture.state;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let (mut context, first) = request(state).await;
+    let first = claim(state, &mut context, first, deadline).await;
+    let original_binding = first.binding.clone();
+    assert!(!policy_refusal_retry_ready(state, &first, deadline).await);
+    fence_original(state, &mut context, &first, deadline)
+        .await
+        .expect("logical fence");
+    assert!(
+        !policy_refusal_retry_ready(
+            state,
+            &first,
+            tokio::time::Instant::now() + Duration::from_millis(120)
+        )
+        .await,
+        "absent original worker and logical Cleanup never certify native closure"
+    );
+    assert!(
+        !policy_refusal_retry_ready(state, &first, tokio::time::Instant::now()).await,
+        "the spent original cutoff never obtains a new allowance"
+    );
+    let status = current_status(state, &first.binding, deadline)
+        .await
+        .expect("status")
+        .expect("row");
+    assert_eq!(status.attempts[0].phase, AttemptPhase::Cleanup);
+    assert!(!policy_refusal_cleanup_confirmed(&status, &first));
+    assert_eq!(status.binding, original_binding);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn trial_policy_retry_waits_for_original_join_and_close_within_same_cutoff() {
+    let dir = crate::test_tempdir().expect("state dir");
+    let fixture = crate::transcode::HlsDeliveryFixture::publish_without_process(
+        dir.path(),
+        &Uuid::new_v4().to_string(),
+    )
+    .await;
+    let state = &fixture.state;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let (mut context, first) = request(state).await;
+    let first = claim(state, &mut context, first, deadline).await;
+    let original_binding = first.binding.clone();
+    let release = state
+        .transcode
+        .retain_empty_failed_adaptive_coordinator_for_test(first.clone())
+        .await;
+    fence_original(state, &mut context, &first, deadline)
+        .await
+        .expect("logical original fence");
+    let ready = policy_refusal_retry_ready(state, &first, deadline);
+    tokio::pin!(ready);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(75), &mut ready)
+            .await
+            .is_err(),
+        "the running original coordinator prevents Closed and keeps this waiter pending"
+    );
+    assert_eq!(
+        current_status(state, &first.binding, deadline)
+            .await
+            .expect("status")
+            .expect("row")
+            .attempts[0]
+            .phase,
+        AttemptPhase::Cleanup
+    );
+    release.send(()).expect("release same original task");
+    // Existing production reconciliation performs the actual JoinHandle join,
+    // seals the empty P state and publishes its retained original Close. This
+    // fixture proves task/protocol gating; no native work ever entered.
+    let drive_original_close = async {
+        loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "original close cutoff"
+            );
+            state
+                .transcode
+                .reconcile_failed_adaptive_coordinator_for_test()
+                .await;
+            let status = current_status(state, &first.binding, deadline)
+                .await
+                .expect("status")
+                .expect("row");
+            if policy_refusal_cleanup_confirmed(&status, &first) {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let (ready, status) = tokio::join!(ready, drive_original_close);
+    assert!(
+        ready,
+        "positive original close releases the already waiting retry"
+    );
+    assert_eq!(status.binding, original_binding);
+    assert!(next_claim_slot(Some(&status), "next-worker")
+        .expect("next slot")
+        .is_some());
+    let next = claim(
+        state,
+        &mut context,
+        candidate(&first, "next-worker"),
+        deadline,
+    )
+    .await;
+    assert_eq!(
+        next.binding, original_binding,
+        "same original deadline and quality/intent binding"
+    );
+    for changed in ["worker", "generation", "attempt", "phase"] {
+        let mut wrong = status.clone();
+        match changed {
+            "worker" => wrong.attempts[0].worker_instance_id = Uuid::new_v4(),
+            "generation" => wrong.attempts[0].serving_generation += 1,
+            "attempt" => wrong.attempts[0].key.attempt_id = Uuid::new_v4(),
+            _ => wrong.attempts[0].phase = AttemptPhase::Losing,
+        }
+        assert!(
+            !policy_refusal_cleanup_confirmed(&wrong, &first),
+            "{changed}"
+        );
+    }
+}

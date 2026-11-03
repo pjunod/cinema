@@ -42,6 +42,12 @@ pub(in crate::adaptive_resources::runtime) struct HistoryBasis {
     recipe: [u8; 32],
 }
 impl HistoryBasis {
+    /// Exact, conservatively narrow class for node-local service hysteresis.
+    /// It carries no admission or executable authority.
+    pub(in crate::adaptive_resources::runtime) fn policy_class(self) -> ([u8; 32], [u8; 32]) {
+        (self.runtime_epoch, self.workload)
+    }
+
     pub(in crate::adaptive_resources::runtime) fn with_mix(
         self,
         concurrent_mix: [u8; 32],
