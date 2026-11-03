@@ -41,7 +41,7 @@ final class OfflineBookManager: ObservableObject {
             configuration.timeoutIntervalForRequest = 90
             configuration.timeoutIntervalForResource = 60 * 60
             configuration.allowsExpensiveNetworkAccess = settings.offlineNetwork == .anyNetwork
-            self.session = URLSession(configuration: configuration)
+            self.session = ServerTrust.session(configuration: configuration)
         }
         Task {
             try? await catalog.reconcileLocalPublications()

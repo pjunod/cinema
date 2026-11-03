@@ -302,7 +302,8 @@ async fn sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_r
         Method::POST,
         "/api/v1/sharing/invitations",
         Some(&source_token),
-        Some(json!({"library_ids":[library["id"].as_i64().expect("library ID").to_string()]})),
+        // The disposable namespace and TLS proxy provide this fixture's connectivity.
+        Some(json!({"library_ids":[library["id"].as_i64().expect("library ID").to_string()],"include_network":false})),
     )
     .await;
     call(
@@ -369,7 +370,10 @@ async fn sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_r
     // recipient must recover its rotated credential to retrieve this revision;
     // its retained active label cannot satisfy this assertion.
     call(&client, &source, Method::PUT, "/api/v1/sharing/endpoints", Some(&source_token), Some(json!({"expected_revision":1,"endpoints":[{"ipv4":address.to_string(),"ts_fqdn":"source.fixture.ts.net","port":peer_port,"spki_sha256":source_pin}]}))).await;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // A healthy active import refreshes every 60s (ACTIVE_IMPORT_REFRESH).
+    // This Source write cannot wake the recipient's local claim loop. Allow
+    // one full refresh period plus 30s for authenticated transport/scheduling.
+    let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let recovered = import_state(&client, &mut recipient, &recipient_token, "active").await;
         if recovered["import"]["observed_endpoint_revision"] == 2 {
@@ -377,7 +381,8 @@ async fn sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_r
         }
         assert!(
             Instant::now() < deadline,
-            "recovered credential must authenticate the new manifest"
+            "recovered credential must authenticate the new manifest; observed revision={:?}",
+            recovered["import"]["observed_endpoint_revision"].as_i64()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

@@ -63,6 +63,7 @@ final class Session: @unchecked Sendable {
         authorizationObservers.removeValue(forKey: id)
     }
     func setCredentials(origin: String, token: String?) {
+        ServerTrust.allowFirstUse(origin: origin)
         nodeLock.lock()
         let changed = credentialOrigin != origin || credentialToken != token
         if changed { credentialGeneration += 1; readAfterPeers = [] }
@@ -113,6 +114,7 @@ final class Session: @unchecked Sendable {
                 && (!requiresTLS || candidate.hasPrefix("https://"))
                 && seen.insert(candidate).inserted
         }
+        origins.forEach { ServerTrust.allowFirstUse(origin: $0) }
         nodeLock.lock()
         mediaFailoverOrigins = origins
         mediaFailoverIndex = 0

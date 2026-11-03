@@ -134,8 +134,25 @@ impl ApiError {
     }
 }
 
+/// The typed `code` an [`ApiError`] answered with, carried on the response so
+/// a layer that never sees the error itself (the playback failure log in
+/// `http::hls::fence`) can still say which refusal a client received.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ApiErrorCode(pub(crate) &'static str);
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let code = self.code();
+        let mut response = self.render();
+        if let Some(code) = code {
+            response.extensions_mut().insert(ApiErrorCode(code));
+        }
+        response
+    }
+}
+
+impl ApiError {
+    fn render(self) -> Response {
         if let ApiError::FiniteMaterialization(failure) = self {
             return (
                 failure.status(),

@@ -2516,7 +2516,7 @@ class SeekDeferredBehindSwitchTest {
         assertTrue(attach.contains("heldSeek != null -> playerTimelinePositionMs(positionForPlaybackIntent())"))
         assertTrue(attach.indexOf("heldSeek != null") < attach.indexOf("player.currentPosition"),
             "a held seek wins over the successor's playhead")
-        assertTrue(retry.indexOf("player.setMediaItem(MediaItem.fromUri(next), attachPosition)") >
+        assertTrue(retry.indexOf("player.setMediaItem(if (directTransport) directMediaItem(next) else MediaItem.fromUri(next), attachPosition)") >
             retry.indexOf("val attachPosition = when {"))
         assertTrue(retry.contains("markIntentExecuted(sequence, recipe)"))
         // Still exactly two drains in the controller: this path takes, it does not drain.

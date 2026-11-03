@@ -1030,6 +1030,18 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
 /// same promise: a redirect must not take the token somewhere the viewer never
 /// named.
 final class LiveTvNoRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let response = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(response.0, response.1)
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let response = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(response.0, response.1)
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {

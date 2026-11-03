@@ -45,13 +45,18 @@
 > surfaces. A passing subset does not close the whole-app or physical-device
 > acceptance matrix, and no periodic schedule is introduced.
 
-> **Coverage amendment, 2026-10-11:** [coverage.yml](../.github/workflows/coverage.yml)
+> **Coverage amendment, 2026-10-29:** [coverage.yml](../.github/workflows/coverage.yml)
 > refreshes the dated unit coverage badge only by manual dispatch on `main`.
-> Its `ci-coverage` runner is a reserved VM outside the general merge pool;
-> the job has two CPUs, 6 GiB RAM, two Cargo jobs and two test threads.
-> A new request cancels the stale measurement. Failed runs retain the last
-> successful badge and its UTC measurement date. See
-> [runner recovery and budgets](ci/RUNNER-DISK.md#runner-recovery-and-memory-budgets).
+> It uses the existing capacity-one `unit-memory-16g` host registration, sharing
+> that queue with full-unit qualification rather than general merge jobs.
+> [The coverage command](../scripts/unit-coverage) launches a standard Docker
+> child with three CPUs, 16 GiB resident/18 GiB combined memory, one Cargo job
+> and two test threads. Its fixed corpus covers default workspace tests,
+> isolated sharing and replicated contracts; it preserves the existing source
+> exclusions and records exact source/artifact identities. Only successful
+> execution creates badge publication inputs. A failed or cancelled refresh
+> retains the previous successful badge and its UTC measurement date. See
+> [the repair ledger](ci/UNIT-COVERAGE-REPAIR.md) for corpus and evidence limits.
 
 
 **Status:** accepted and implemented · **Decider:** Paul · **Written:**

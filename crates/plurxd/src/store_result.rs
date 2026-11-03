@@ -106,6 +106,7 @@ operations! {
     ObserveMeasuredLinkPrior => "observe_measured_link_prior",
     ReclaimReceiverIngress => "reclaim_receiver_ingress",
     RevokeUnpublishedRemoteGrant => "revoke_unpublished_remote_grant",
+    CancelUnpublishedShareInvitation => "cancel_unpublished_share_invitation",
 }
 
 const OUTCOMES: [&str; 2] = ["ok", "error"];
@@ -425,8 +426,9 @@ mod tests {
     fn every_classified_failure_has_a_bounded_metric_row() {
         // 46 on main #793, plus the quality cancellation settlement, the
         // Jellyfin unbound media-link revocation, and the acknowledged Link
-        // negative's measured-Link prior fold (D6), and orphan grant revocation.
-        assert_eq!(Operation::ALL.len(), 51, "one fixed label per audited site");
+        // negative's measured-Link prior fold (D6), orphan grant revocation,
+        // and cancellation after a failed or undelivered sharing invitation.
+        assert_eq!(Operation::ALL.len(), 52, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {

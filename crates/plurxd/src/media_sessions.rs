@@ -7369,6 +7369,10 @@ fn take_stale_settlement_candidates(
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[path = "media_sessions/cleanup_tests.rs"]
+mod cleanup_tests;
+
 /// K-03: the takeover loop's switch reads, on a virtual clock.
 #[cfg(test)]
 mod takeover_gate_tests;

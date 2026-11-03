@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 72] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 77] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1733,9 +1733,18 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS dv_title_jobs_schema",
             // v115: the same strict empty-extension rewind removes handoffs.
             "CREATE TABLE IF NOT EXISTS playback_handoffs_schema",
-            // v120: managed rewind recognizes the exact v2 view/marker before
-            // removing the empty extension; v111 reconstructs its predecessor.
+            // v116-v119: the guarded current tail removes empty text cues and
+            // caption leases first; the exact translation drop plan removes
+            // the replacement trigger and continuity children before demands.
+            "CREATE TABLE subtitle_text_translation_schema",
+            "CREATE TABLE shared_caption_schema",
+            "DROP TRIGGER subtitle_translation_mutate",
+            "ADD COLUMN continuity_id",
+            // v120/v121: managed rewind recognizes the exact coupled v120/v2
+            // or v121/v3 view/marker before removing the empty extension;
+            // accepted artifact work still refuses and v111 reconstructs v1.
             "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2))",
+            "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=3))",
         ];
 
         assert!(

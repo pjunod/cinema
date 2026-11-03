@@ -1,4 +1,4 @@
-//! Bounded ownership for short-lived media inspection processes.
+//! Bounded ownership for short-lived helper processes.
 //!
 //! Startup probes are evidence, not services. They receive a small explicit
 //! environment, bounded output and wall time, and one owner that kills its
@@ -222,7 +222,15 @@ pub async fn output_command(
     max_output_bytes: usize,
     work: super::ChildWork,
 ) -> io::Result<Output> {
-    output_command_environment(command, wall_time, max_output_bytes, work, true).await
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Service,
+        None,
+    )
+    .await
 }
 
 /// Bounded CPU child with held descriptors and an LC_ALL-only environment.
@@ -239,7 +247,70 @@ pub async fn output_command_clean_env(
             "managed child executable must be absolute",
         ));
     }
-    output_command_environment(command, wall_time, max_output_bytes, work, false).await
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Clean,
+        None,
+    )
+    .await
+}
+
+/// Native host tools may require their existing user/IPC environment. Keep
+/// that environment intact while using the same bounded process-group owner.
+/// Inspection probes must continue using the service or clean environment APIs.
+pub async fn output_command_inherited_env(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+) -> io::Result<Output> {
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Inherited,
+        None,
+    )
+    .await
+}
+
+/// A clean-environment child whose stderr retains only selected complete lines.
+/// The selector receives each line with its original newline, if present. All
+/// stderr is drained; selected overflow or any line above 8 KiB fails at EOF.
+/// Stdout and child lifetime/cancellation retain the ordinary bounded semantics.
+pub async fn output_command_clean_env_selected_stderr(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+    select: fn(&[u8]) -> bool,
+) -> io::Result<Output> {
+    if !std::path::Path::new(command.as_std().get_program()).is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "managed child executable must be absolute",
+        ));
+    }
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Clean,
+        Some(select),
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum Environment {
+    Service,
+    Clean,
+    Inherited,
 }
 
 async fn output_command_environment(
@@ -247,18 +318,20 @@ async fn output_command_environment(
     wall_time: Duration,
     max_output_bytes: usize,
     work: super::ChildWork,
-    inherit_service_environment: bool,
+    environment: Environment,
+    stderr_selector: Option<fn(&[u8]) -> bool>,
 ) -> io::Result<Output> {
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
+    if !matches!(environment, Environment::Inherited) {
+        command.env_clear().env("LC_ALL", "C");
+    }
     command
-        .env_clear()
-        .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    if inherit_service_environment {
+    if matches!(environment, Environment::Service) {
         for name in [
             "PATH",
             "LD_LIBRARY_PATH",
@@ -310,8 +383,16 @@ async fn output_command_environment(
         reader: stderr,
         keeper: original_keeper(),
     };
-    let mut stdout = Some(tokio::spawn(drain_capped_owned(stdout, max_output_bytes)));
-    let mut stderr = Some(tokio::spawn(drain_capped_owned(stderr, max_output_bytes)));
+    let mut stdout = Some(tokio::spawn(drain_capped_owned(
+        stdout,
+        max_output_bytes,
+        None,
+    )));
+    let mut stderr = Some(tokio::spawn(drain_capped_owned(
+        stderr,
+        max_output_bytes,
+        stderr_selector,
+    )));
 
     let completed = tokio::select! {
         biased;
@@ -360,8 +441,12 @@ struct OriginalPipe<R> {
 async fn drain_capped_owned<R: AsyncRead + Unpin>(
     mut original: OriginalPipe<R>,
     cap: usize,
+    select: Option<fn(&[u8]) -> bool>,
 ) -> io::Result<Vec<u8>> {
-    let result = drain_capped(&mut original.reader, cap).await;
+    let result = match select {
+        Some(select) => drain_selected_lines(&mut original.reader, cap, select).await,
+        None => drain_capped(&mut original.reader, cap).await,
+    };
     if result.is_err() {
         retain_uncertainty(&original.keeper, OriginalWorkUncertainty::PipeDrainFailed);
     }
@@ -422,6 +507,62 @@ pub(super) async fn drain_capped(
     }
 }
 
+const SELECTED_STDERR_LINE_BYTES: usize = 8 * 1024;
+
+/// Retention is bounded independently of ignored metadata. Invalid input is
+/// remembered until EOF so no early error can close a full child pipe.
+async fn drain_selected_lines(
+    mut reader: impl AsyncRead + Unpin,
+    max_output_bytes: usize,
+    select: fn(&[u8]) -> bool,
+) -> io::Result<Vec<u8>> {
+    let mut retained = Vec::with_capacity(max_output_bytes.min(SELECTED_STDERR_LINE_BYTES));
+    let mut line = Vec::with_capacity(SELECTED_STDERR_LINE_BYTES);
+    let mut chunk = [0_u8; 8 * 1024];
+    let mut discarding_line = false;
+    let mut invalid = None;
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            if !discarding_line && !line.is_empty() && select(&line) {
+                if line.len() > max_output_bytes.saturating_sub(retained.len()) {
+                    invalid = Some("selected stderr exceeds retained byte limit");
+                } else {
+                    retained.reserve_exact(line.len());
+                    retained.extend_from_slice(&line);
+                }
+            }
+            return match invalid {
+                Some(reason) => Err(io::Error::new(io::ErrorKind::InvalidData, reason)),
+                None => Ok(retained),
+            };
+        }
+        for byte in &chunk[..read] {
+            if !discarding_line {
+                if line.len() == SELECTED_STDERR_LINE_BYTES {
+                    invalid = Some("stderr line exceeds 8 KiB");
+                    discarding_line = true;
+                    line.clear();
+                } else {
+                    line.push(*byte);
+                }
+            }
+            if *byte == b'\n' {
+                if !discarding_line && select(&line) {
+                    if line.len() > max_output_bytes.saturating_sub(retained.len()) {
+                        invalid = Some("selected stderr exceeds retained byte limit");
+                    } else {
+                        retained.reserve_exact(line.len());
+                        retained.extend_from_slice(&line);
+                    }
+                }
+                line.clear();
+                discarding_line = false;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,12 +610,113 @@ mod tests {
                 drops: Arc::clone(&drops),
             })),
         };
-        let unpolled = drain_capped_owned(original, 8);
+        let unpolled = drain_capped_owned(original, 8, None);
         drop(unpolled);
         assert_eq!(
             *drops.lock().expect("actual drop order"),
             ["reader", "keeper"]
         );
+    }
+
+    fn selected_record(line: &[u8]) -> bool {
+        line.starts_with(b"frame:")
+    }
+
+    #[tokio::test]
+    async fn selected_stderr_ignores_large_metadata_and_preserves_split_records() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(11);
+        let writing = tokio::spawn(async move {
+            writer.write_all(b"frame: first\n").await?;
+            for _ in 0..32768 {
+                writer
+                    .write_all(b"ignored metadata continuation and side data\n")
+                    .await?;
+            }
+            writer.write_all(b"frame: final without newline").await
+        });
+        let retained = tokio::time::timeout(
+            Duration::from_secs(10),
+            drain_selected_lines(reader, 64, selected_record),
+        )
+        .await
+        .expect("reader reaches EOF")
+        .expect("selected bounded records");
+        writing
+            .await
+            .expect("writer joined")
+            .expect("all metadata drained");
+        assert_eq!(retained, b"frame: first\nframe: final without newline");
+    }
+
+    #[tokio::test]
+    async fn selected_stderr_overflow_and_overlong_lines_drain_before_refusal() {
+        use tokio::io::AsyncWriteExt;
+        for (bytes, cap) in [
+            (b"frame: over cap\n".to_vec(), 3),
+            (
+                [
+                    vec![b'x'; SELECTED_STDERR_LINE_BYTES + 1],
+                    b"\nframe: valid\n".to_vec(),
+                ]
+                .concat(),
+                64,
+            ),
+            (vec![b'x'; SELECTED_STDERR_LINE_BYTES + 1], 64),
+        ] {
+            let (mut writer, reader) = tokio::io::duplex(7);
+            let writing = tokio::spawn(async move {
+                writer.write_all(&bytes).await?;
+                if bytes.last() == Some(&b'\n') {
+                    writer.write_all(b"ignored tail\n").await?;
+                }
+                Ok::<_, io::Error>(())
+            });
+            let failure = tokio::time::timeout(
+                Duration::from_secs(5),
+                drain_selected_lines(reader, cap, selected_record),
+            )
+            .await
+            .expect("refusal waits for EOF")
+            .expect_err("incomplete records cannot be accepted");
+            assert_eq!(failure.kind(), io::ErrorKind::InvalidData);
+            writing
+                .await
+                .expect("writer joined")
+                .expect("overflow did not close the pipe early");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selected_stderr_child_uses_existing_clean_environment_owner() {
+        let relative = output_command_clean_env_selected_stderr(
+            &mut Command::new("sh"),
+            Duration::from_secs(5),
+            64,
+            TEST_WORK,
+            selected_record,
+        )
+        .await
+        .expect_err("absolute executable required");
+        assert_eq!(relative.kind(), io::ErrorKind::InvalidInput);
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'ignored\\nframe: final\\n' >&2; printf '%s' \"$LC_ALL\"",
+        ]);
+        let output = output_command_clean_env_selected_stderr(
+            &mut command,
+            Duration::from_secs(5),
+            64,
+            TEST_WORK,
+            selected_record,
+        )
+        .await
+        .expect("owned selected output");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"C");
+        assert_eq!(output.stderr, b"frame: final\n");
     }
 
     #[tokio::test]
@@ -490,6 +732,33 @@ mod tests {
         .expect("bounded output");
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_helper_environment_preservation_is_explicit() {
+        for inherited in [false, true] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "printf %s \"$PLURX_NATIVE_HELPER_FIXTURE\""])
+                .env("PLURX_NATIVE_HELPER_FIXTURE", "native-host-value");
+            let output = if inherited {
+                output_command_inherited_env(&mut command, Duration::from_secs(5), 1024, TEST_WORK)
+                    .await
+            } else {
+                output_command(&mut command, Duration::from_secs(5), 1024, TEST_WORK).await
+            }
+            .expect("bounded native helper");
+            assert!(output.status.success());
+            assert_eq!(
+                output.stdout,
+                if inherited {
+                    b"native-host-value".as_slice()
+                } else {
+                    b"".as_slice()
+                }
+            );
+        }
     }
 
     #[cfg(unix)]

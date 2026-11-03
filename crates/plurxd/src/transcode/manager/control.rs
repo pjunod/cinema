@@ -1644,10 +1644,53 @@ impl TranscodeManager {
         mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
     ) {
         let mut grace = crate::serving_fence::SessionGrace::default();
+        struct OwnerActive<'a>(&'a AtomicBool);
+        impl Drop for OwnerActive<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Release);
+            }
+        }
+        self.outage_owner_active.store(true, Release);
+        let _owner_active = OwnerActive(&self.outage_owner_active);
+        // Set once an outage has been resolved `Expired`: its sessions are
+        // gone, and `Expired` stays on the channel until authority returns.
+        // Without it the loop would publish a fresh `Pending` for the same
+        // dead outage every grace, and every read held against it would wait
+        // a grace for a 503 it should get at once.
+        let mut torn_down: Option<u64> = None;
         loop {
             let state = *serving.borrow_and_update();
+            if let Some(expired_generation) = torn_down {
+                if !state.ready {
+                    // A recovery this loop never saw, then a new loss: there
+                    // is still nothing running to keep, and the gate stayed
+                    // closed throughout, so that loss is expired too.
+                    if state.loss_generation != expired_generation {
+                        self.publish_outage_expired(state.loss_generation);
+                        torn_down = Some(state.loss_generation);
+                    }
+                    self.serving_ready.store(false, Release);
+                    self.serving_loss_generation
+                        .store(state.loss_generation, Release);
+                    if serving.changed().await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                // Back: fall through, which opens the gate below.
+            }
             let previous_generation = self.serving_loss_generation.load(Acquire);
             if !state.ready || state.loss_generation != previous_generation {
+                // Publish this outage's deadline before waiting on it, so a
+                // held request waits exactly as long as these sessions may.
+                let lost_at = tokio::time::Instant::now();
+                self.outage_resolution
+                    .send_replace(crate::serving_fence::OutageResolution {
+                        loss_generation: state.loss_generation,
+                        state: crate::serving_fence::OutageState::Pending {
+                            expires_at: grace.deadline_for_loss(lost_at),
+                        },
+                    });
                 // Keep the gate closed until this transition is resolved. A
                 // racing registration either observes false in its final
                 // pre-insert check or publishes before this loop obtains the
@@ -1657,11 +1700,24 @@ impl TranscodeManager {
                 self.serving_ready.store(false, Release);
                 self.serving_loss_generation
                     .store(state.loss_generation, Release);
-                match grace.resolve_loss(&mut serving).await {
+                let outcome = grace.resolve_loss_from(&mut serving, lost_at).await;
+                self.hooks.get().after_outage_loss_resolved().await;
+                match outcome {
                     crate::serving_fence::LossOutcome::Recovered {
                         outage,
                         budget_spent,
+                        generation,
                     } => {
+                        // The generation authority came back under, read in
+                        // the same observation that saw it ready: a loss
+                        // published since is a new outage, never this
+                        // recovery's.
+                        self.outage_resolution.send_replace(
+                            crate::serving_fence::OutageResolution {
+                                loss_generation: generation,
+                                state: crate::serving_fence::OutageState::Recovered,
+                            },
+                        );
                         let kept = self.sessions.lock().await.len();
                         tracing::warn!(
                             target: "plurxd::transcode",
@@ -1673,9 +1729,15 @@ impl TranscodeManager {
                         );
                     }
                     crate::serving_fence::LossOutcome::Expired => {
+                        // Expired is published first: a held request must
+                        // not outwait a teardown that has already begun.
+                        let expired_generation = serving.borrow().loss_generation;
+                        self.publish_outage_expired(expired_generation);
                         self.stop_all_sessions_for_serving_fence().await;
+                        torn_down = Some(expired_generation);
                     }
                     crate::serving_fence::LossOutcome::Closed => {
+                        self.publish_outage_expired(serving.borrow().loss_generation);
                         self.stop_all_sessions_for_serving_fence().await;
                         break;
                     }
@@ -1686,13 +1748,62 @@ impl TranscodeManager {
                 .store(state.loss_generation, Release);
             self.serving_ready.store(state.ready, Release);
             if !state.ready {
-                // Lost again, or never recovered: resolve it on the next turn.
+                // Lost again, or never recovered: resolve it on the next turn
+                // (or, once torn down, wait there for authority to return).
                 continue;
             }
+            // Authority is back and the gate is open again, so the next loss
+            // has running work to keep and gets its own resolution.
+            torn_down = None;
             if serving.changed().await.is_err() {
                 break;
             }
         }
+    }
+
+    fn publish_outage_expired(&self, loss_generation: u64) {
+        self.outage_resolution
+            .send_replace(crate::serving_fence::OutageResolution {
+                loss_generation,
+                state: crate::serving_fence::OutageState::Expired,
+            });
+    }
+
+    /// Wait, read-only, for the outage after `baseline` to be resolved by
+    /// `serving_fence_loop` (see [`crate::serving_fence::wait_for_outage_resolution`]).
+    pub(crate) async fn wait_for_outage_resolution(
+        &self,
+        baseline: u64,
+        deadline: Instant,
+    ) -> crate::serving_fence::OutageWait {
+        if !self.outage_owner_active.load(Acquire) {
+            return crate::serving_fence::OutageWait::Expired;
+        }
+        let mut resolutions = self.outage_resolution.subscribe();
+        crate::serving_fence::wait_for_outage_resolution(
+            &mut resolutions,
+            baseline,
+            tokio::time::Instant::from_std(deadline),
+        )
+        .await
+    }
+
+    /// Test seams for the outage owner loop.
+    #[cfg(test)]
+    pub(crate) async fn outage_owner_started(&self) {
+        while !self.outage_owner_active.load(Acquire) {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outage_resolution_now(&self) -> crate::serving_fence::OutageResolution {
+        *self.outage_resolution.borrow()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn hold_sessions_for_test(&self) -> impl Sized + '_ {
+        self.sessions.lock().await
     }
 
     /// Abort a remote start only when this process can prove it owns the

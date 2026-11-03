@@ -1,6 +1,6 @@
 # Sharing host setup — configure the private connection when sharing is enabled
 
-**Status:** source implemented; broader qualification open · **Written:** 2026-10-28
+**Status:** source implemented; broader qualification open · **Updated:** 2026-10-29
 
 Companion to [the sharing implementation](SHARED-LIBRARIES-IMPLEMENTATION.md)
 (peer authority and transport) and [operations](../OPERATIONS.md#sharing-cinema-addresses--set-up-before-creating-invitations)
@@ -23,6 +23,19 @@ it never rejects or reverses the saved enable choice.
 ## 2. Host ownership and deployment
 
 Native hosts run bounded Tailscale operations as the Cinema process owner.
+Modern managed installations and verified legacy macOS `--server-only`
+LaunchAgents configure the native forward automatically. Legacy recognition
+requires launchd's first-level service attributes to match this exact PID,
+canonical executable and owned, non-writable-by-others LaunchAgent file.
+Nested, duplicate or mismatched observations cannot establish service identity.
+
+A manually launched native process is separate from a container. It observes
+Tailscale identity and forwarding without changing Serve, retains its observed
+native source address for private egress, and reports `native_setup_required`
+when forwarding is absent. An existing exact manual forward can be used but
+is never adopted as owned or removed on disable. Only an actual container or
+the explicit Docker bridge profile requests the external host worker.
+
 Docker uses an independently installed host worker. The container exchanges
 only a fixed desired-state request and bounded observations through its data
 directory; it receives neither the Docker socket nor the Tailscale socket.
@@ -45,6 +58,11 @@ to this flow.
 | Docker host | Bounded host worker and installer, explicit loopback publication and bridge configuration. | Fake Tailscale and filesystem lifecycle tests; exact-container/deployment checks; real host observation kept distinct from synthetic tests. |
 | Web | Show setup progress and actionable host failures; advanced address editing remains available. | Focused sharing-management and Settings regressions, including saved enablement despite failed setup. |
 | Integration | Preserve scoped pairing and certificate verification. | Native receiver to private Docker source identity/import/pairing; playback acceptance recorded separately. |
+
+Native regressions use an injected local CLI fixture: empty Serve state must
+produce only the fixed private forward, while unmanaged observation issues
+only `status` and `serve status` commands. Setup-mode and state transitions
+are logged without invitation secrets or account credentials.
 
 ### Install the Docker host component once
 

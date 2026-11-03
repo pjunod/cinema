@@ -119,6 +119,15 @@ func sharedArtworkThumbnail(_ bytes: SharedArtworkBytes, maximum: Int) throws ->
 
 /// Streaming operation retains admission through actual task/body retirement.
 final class SharedArtworkReadOperation: NSObject, URLSessionDataDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let decision = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(decision.0, decision.1)
+    }
+
     private let request: URLRequest
     private let configuration: URLSessionConfiguration
     private let current: () throws -> Void

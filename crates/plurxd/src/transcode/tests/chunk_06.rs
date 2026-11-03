@@ -1073,7 +1073,7 @@
                     Instant::now() + Duration::from_secs(1),
                 )
                 .await,
-            Err(MediaResponsePublicationRejection::StateChanged)
+            Err(MediaResponsePublicationRejection::AuthorityLost { .. })
         ));
     }
 
@@ -1165,7 +1165,7 @@
 
         assert!(matches!(
             authorization.await.expect("VOD authorization task"),
-            Err(MediaResponsePublicationRejection::StateChanged)
+            Err(MediaResponsePublicationRejection::AuthorityLost { .. })
         ));
         assert!(
             manager.serving_ready.load(Acquire),
@@ -1220,7 +1220,7 @@
             )
             .await
             .expect("a refused admission answers without waiting"),
-            Err(MediaResponsePublicationRejection::StateChanged)
+            Err(MediaResponsePublicationRejection::AuthorityLost { .. })
         ));
         assert!(
             !point.was_reached(),
@@ -1318,7 +1318,7 @@
                     Instant::now() + Duration::from_secs(1),
                 )
                 .await,
-            Err(MediaResponsePublicationRejection::StateChanged)
+            Err(MediaResponsePublicationRejection::AuthorityLost { .. })
         ));
     }
 
@@ -2739,4 +2739,219 @@
             session.child.lock().await.is_none(),
             "the unregistered child is synchronously reaped and released"
         );
+    }
+
+    /// A production-shaped rolling session for the C5 wait: actor-managed
+    /// pre-publication, a registered executor, one producer attempt that has
+    /// not published, and nothing on disk yet.
+    async fn prepublication_wait_fixture(
+        root: &std::path::Path,
+        session_id: &'static str,
+        policy: crate::playback_control::InitialProducerPolicy,
+    ) -> (
+        Arc<TranscodeManager>,
+        Arc<Session>,
+        crate::playback_control::RollingControlHandle,
+        crate::playback_control::RollingProducerExecutorRegistration,
+        u64,
+    ) {
+        use plurx_core::store::SqliteStore;
+
+        let scratch = root.join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create wait scratch");
+        let (control, mut registration) =
+            crate::playback_control::RollingControlHandle::spawn_prepublication_transcode_for_test(
+                session_id,
+            );
+        registration.register().await.expect("register executor");
+        let producer_attempt = control
+            .begin_initial_producer_attempt(policy)
+            .await
+            .expect("begin producer attempt");
+        let session = watchdog_session_with_control(
+            &scratch,
+            None,
+            false,
+            true,
+            control.clone(),
+            producer_attempt,
+        );
+        *session
+            .compatibility_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = producer_attempt;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert(session_id.to_owned(), Arc::clone(&session));
+        (manager, session, control, registration, producer_attempt)
+    }
+
+    fn spawn_init_wait(
+        manager: &Arc<TranscodeManager>,
+        session_id: &'static str,
+    ) -> tokio::task::JoinHandle<Result<SegmentPublication, SegmentOpenError>> {
+        let manager = Arc::clone(manager);
+        tokio::spawn(async move {
+            manager
+                .segment_for_publication_before(
+                    session_id,
+                    "init.mp4",
+                    Instant::now() + Duration::from_secs(120),
+                )
+                .await
+        })
+    }
+
+    /// C5 (M5), end to end on a paused clock: a `master.m3u8`/init wait on a
+    /// production-shaped session whose exact attempt loses its executor
+    /// before first media ends with `ProducerEnded` stamped with that
+    /// attempt on the next poll, not at the request deadline (the 55 s
+    /// `master.m3u8`). Before the loss the same wait keeps waiting.
+    #[tokio::test(start_paused = true)]
+    async fn an_init_wait_ends_on_the_next_poll_when_its_attempt_loses_its_executor() {
+        let root = crate::test_tempdir().expect("wait root");
+        let (manager, _session, control, registration, attempt) = prepublication_wait_fixture(
+            root.path(),
+            "c5-lost",
+            crate::playback_control::InitialProducerPolicy::software(
+                "c5-lost-contract".to_owned(),
+                PROGRESS_STALL,
+            ),
+        )
+        .await;
+        let request = spawn_init_wait(&manager, "c5-lost");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!request.is_finished(), "a running attempt is waited for");
+
+        let lost_at = tokio::time::Instant::now();
+        drop(registration);
+        let outcome = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .expect("the wait ends within a second of the loss")
+            .expect("wait task")
+            .expect("wait resolution");
+        assert!(
+            lost_at.elapsed() <= Duration::from_millis(200),
+            "ended on the next poll, not later: {:?}",
+            lost_at.elapsed()
+        );
+        let SegmentPublication::Failed(failure) = outcome else {
+            panic!("a dead producer's waiter must be failed, not left pending or missing");
+        };
+        assert_eq!(
+            failure.error,
+            PlaylistError::ProducerEnded("executor_lost".to_owned())
+        );
+        assert_eq!(
+            failure.owner.expect("stamped owner").log_identity(),
+            ("rolling", Some(attempt)),
+            "stamped with the attempt the request waited on"
+        );
+        let snapshot = control.snapshot().await.expect("actor still answers");
+        assert_eq!(
+            snapshot.terminal, None,
+            "the session itself is not terminal: only the exact-attempt check could end it"
+        );
+
+        // A segment request on the same dead attempt gets the same verdict,
+        // and it may be published: its 502 is authorized by that verdict,
+        // not refused as `response_state_changed` for want of published
+        // media.
+        let segment = manager
+            .segment_for_publication_before(
+                "c5-lost",
+                "seg00003.ts",
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("segment resolution");
+        let SegmentPublication::Failed(segment_failure) = segment else {
+            panic!("a segment of the dead attempt is failed too");
+        };
+        let owner = segment_failure.owner.as_ref().expect("stamped owner");
+        assert_eq!(owner.log_identity(), ("rolling", Some(attempt)));
+        assert!(
+            manager
+                .authorize_playlist_error_publication(
+                    "c5-lost",
+                    owner,
+                    &segment_failure.error,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .is_ok(),
+            "the exact attempt's pre-publication verdict authorizes its ProducerEnded"
+        );
+        assert!(
+            manager
+                .authorize_playlist_error_publication(
+                    "c5-lost",
+                    owner,
+                    &PlaylistError::ProducerEnded("startup_deadline".to_owned()),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .is_err(),
+            "a different reason than the actor's is never published"
+        );
+    }
+
+    /// C5 (M5), end to end on a paused clock: a retained `Retry` decision for
+    /// the attempt means a successor is coming, so the wait is still pending
+    /// a full second after the decision.
+    #[tokio::test(start_paused = true)]
+    async fn an_init_wait_keeps_waiting_through_a_retry_decision() {
+        let root = crate::test_tempdir().expect("wait root");
+        let (manager, _session, control, _registration, attempt) = prepublication_wait_fixture(
+            root.path(),
+            "c5-retry",
+            crate::playback_control::InitialProducerPolicy::hardware_with_startup(
+                "c5-retry-contract".to_owned(),
+                // Longer than the hardware startup budget, so the startup
+                // deadline is the one that decides.
+                Duration::from_secs(120),
+                crate::playback_control::ValidatedRetryRecipe::new(
+                    "cpu-safe".to_owned(),
+                    "c5-retry-recipe".to_owned(),
+                    "c5-retry-contract".to_owned(),
+                    crate::playback_control::ProducerStartupKind::Software,
+                ),
+                crate::playback_control::ProducerStartupKind::Hardware,
+            ),
+        )
+        .await;
+        let request = spawn_init_wait(&manager, "c5-retry");
+        // Past the hardware startup budget: the actor retains a retry.
+        let decided = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let snapshot = control.snapshot().await.expect("actor answers");
+                if let Some(decision) = snapshot.producer_control.failed_attempt_decision {
+                    return decision;
+                }
+            }
+        })
+        .await
+        .expect("the startup budget retains a decision");
+        assert!(
+            decided.retry && decided.failed_attempt == attempt,
+            "a retry for this attempt: {decided:?}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            !request.is_finished(),
+            "a retry keeps the wait pending a second after the decision"
+        );
+        request.abort();
     }

@@ -7,8 +7,10 @@ import kotlinx.serialization.Serializable
 @Serializable data class CaptionCapability(val supported: Boolean, val reason: String? = null)
 @Serializable data class CaptionAudio(val index: Long, val audio_ordinal: Long? = null, val source_index: Long? = null,
     val capability: CaptionCapability? = null, val normalized_language: String? = null, val language: String? = null, val title: String? = null, val default: Boolean = false)
+@Serializable data class CaptionCoreWindow(val core_ms: Long)
 @Serializable data class CaptionProfile(val profile_id: String, val model_id: String, val task: String,
-    val output_language: String? = null, val input_languages: List<String>, val label: String? = null, val default: Boolean? = null)
+    val output_language: String? = null, val input_languages: List<String>, val label: String? = null, val default: Boolean? = null,
+    val model_sha256: String? = null, val timeline_contract: String? = null, val window: CaptionCoreWindow? = null)
 @Serializable data class CaptionAsset(val asset_id: String, val operation_id: String, val source_size: String,
     val source_mtime: String, val profile_id: String, val audio_index: Long, val spoken_language: String,
     val output_language: String, val content_revision: String, val timeline_contract: String)
@@ -43,13 +45,14 @@ import kotlinx.serialization.Serializable
     val operation_epoch: String, val view_revision: String, val state: String? = null, val asset_id: String? = null,
     val demand_id: String? = null, val demand_generation: String? = null, val server_now_ms: Long, val continuity_id: String? = null)
 @Serializable data class CaptionSourceCheck(val state: String, val bytes_read: String, val total_bytes: String)
-@Serializable data class CaptionJob(val phase: String, val reason: String? = null)
+@Serializable data class CaptionJob(val phase: String, val reason: String? = null, val state: String? = null, val core_index: Long? = null)
 @Serializable data class CaptionOperation(val version: Int, val operation_id: String, val operation_epoch: String,
     val view_revision: String, val state: String, val reason: String? = null, val retryable: Boolean,
     val asset_id: String? = null, val content_revision: String? = null, val source_size: String, val source_mtime: String, val audio_index: Long,
     val task: String, val spoken_language: String, val output_language: String, val profile_id: String,
     val source_check: CaptionSourceCheck, val active_job: CaptionJob? = null, val server_now_ms: Long,
-    val failed_ranges: List<CaptionFailedRange> = emptyList(), val failed_ranges_next_cursor: String? = null)
+    val failed_ranges: List<CaptionFailedRange> = emptyList(), val failed_ranges_next_cursor: String? = null,
+    val file_id: String? = null, val model_id: String? = null, val model_sha256: String? = null, val timeline_contract: String? = null)
 @Serializable data class CaptionSnapshot(val lease_id: String, val revision: String, val expires_in_ms: Long)
 @Serializable data class CaptionOperationView(val operation_id: String, val epoch: String, val state: String, val reason: String? = null)
 @Serializable data class CaptionSegmentRef(val segment_id: String, val digest: String, val start_ms: Long, val end_ms: Long)

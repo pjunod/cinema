@@ -18,6 +18,7 @@ naming it there.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import re
 import unittest
@@ -89,14 +90,32 @@ def uncommented(text: str) -> list[str]:
     return [line for line in text.splitlines() if not line.lstrip().startswith("#")]
 
 
+
+def expanded_web_commands(text: str) -> str:
+    """Resolve only the reviewed fixed unit wrapper into its actual argv."""
+    selected = re.findall(r"python3 -m validation\.web_unit_receipts --command ([a-z-]+)(?=\s|$)", text)
+    if not selected:
+        return text
+    tree = ast.parse((ROOT / 'validation/web_unit_receipts.py').read_text(encoding='utf-8'))
+    maps = [ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == 'COMMANDS' for target in node.targets)]
+    assert maps == [{
+        'jsconfig-generated': ['node', 'tests/web/jsconfig-generated.test.js'],
+        'player-typedef': ['node', 'tests/web/player-typedef.test.js'],
+        'suite': ['make', 'web-unit-check'],
+    }], 'The authenticated unit wrapper must retain its exact command inventory'
+    assert all(name in maps[0] for name in selected), 'Unknown web wrapper route'
+    return text + '\n' + '\n'.join(' '.join(maps[0][name]) for name in selected)
+
+
 def workflow_commands() -> str:
     """Every non-comment line of every workflow and local action."""
     files = sorted((ROOT / ".github" / "workflows").glob("*.yml")) + sorted(
         (ROOT / ".github" / "actions").glob("**/*.yml")
     )
-    return "\n".join(
+    return expanded_web_commands("\n".join(
         line for path in files for line in uncommented(path.read_text(encoding="utf-8"))
-    )
+    ))
 
 
 MAKE_CALL = re.compile(r"(?:\bmake|\$\(MAKE\))((?:\s+-\S+)*)\s+([a-z][\w.-]*)")
@@ -144,9 +163,9 @@ def web_commands() -> list[str]:
 def lane_node_test_commands() -> list[str]:
     """What a pull request executes: web-unit-check, which the fast lane's web
     job runs, plus that job's own `node` lines."""
-    job = fast_lane_web_job()
-    assert re.search(r"(?m)^\s+run: make web-unit-check\s*$", job), (
-        f"{FAST_LANE} {WEB_JOB} no longer runs make web-unit-check"
+    job = expanded_web_commands(fast_lane_web_job())
+    assert re.search(r"(?m)^\s+run: (?:make web-unit-check|python3 -m validation\.web_unit_receipts --command suite)\s*$", job), (
+        f"{FAST_LANE} {WEB_JOB} no longer runs the exact web-unit-check command"
     )
     own = [
         re.sub(r"^run:\s*", "", line.strip())

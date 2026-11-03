@@ -82,6 +82,8 @@ struct CaptionLimits: Decodable {
               heartbeatIntervalMs <= 30_000, retryMaxMs <= 60_000 else { throw CaptionProtocolError.budget }
     }
 }
+struct CaptionCoreWindow: Decodable { let coreMs: Int }
+struct CaptionObservedJob: Decodable { let state: String; let coreIndex: Int? }
 struct CaptionProfile: Decodable, Identifiable {
     let profileId: String, modelId: String, modelSha256: String
     let task: CaptionTask
@@ -90,6 +92,7 @@ struct CaptionProfile: Decodable, Identifiable {
     let outputLanguage: String?
     let inputLanguages: [String]
     let timelineContract: String
+    var window: CaptionCoreWindow? = nil
     let limits: CaptionLimits
     var id: String { profileId }
     func validate() throws {
@@ -156,12 +159,39 @@ struct CaptionFailedRange: Decodable, Identifiable {
 struct CaptionOperation: Decodable {
     let version: Int, operationId: String, operationEpoch: String, viewRevision: String, state: String
     let reason: String?, assetId: String?, contentRevision: String?
+    let activeJob: CaptionObservedJob?
     let fileId: String, sourceSize: String, sourceMtime: String
+    let modelId: String?, modelSha256: String?, timelineContract: String?
     let audioIndex: Int, spokenLanguage: String, outputLanguage: String, task: CaptionTask, profileId: String
     let retryable: Bool
     let failedRanges: [CaptionFailedRange]
     let failedRangesNextCursor: String?
     let serverNowMs: Int
+
+    func currentFailure(position: Int, coreMs: Int?, covered: Bool, displayedFailures: [CaptionFailedRange]? = nil) -> CaptionFailedRange? {
+        guard !covered, let coreMs, coreMs > 0 else { return nil }
+        let core = max(0, position) / coreMs
+        if let activeJob, ["queued", "running", "cancelling"].contains(activeJob.state),
+           activeJob.coreIndex == nil || activeJob.coreIndex == core { return nil }
+        return (displayedFailures ?? failedRanges).first { $0.coreIndex == core }
+    }
+
+    /// A conflict handle grants no producer authority. Validate the full current
+    /// observation before making explicit Resume available.
+    func validateRecovery(id: String, file: Int, options: CaptionOptions, profile: CaptionProfile,
+                          audio: Int, language: String) throws {
+        guard CaptionValidation.uuid(id), version == 1, operationId == id, fileId == String(file),
+              sourceSize == options.sourceSize, sourceMtime == options.sourceMtime,
+              profileId == profile.profileId, modelId == profile.modelId,
+              modelSha256 == profile.modelSha256, timelineContract == profile.timelineContract,
+              audioIndex == audio, task == profile.task, spokenLanguage == language,
+              outputLanguage == (profile.task == .translate ? "en" : language),
+              CaptionValidation.counter(operationEpoch), CaptionValidation.counter(viewRevision),
+              ["checking_source", "waiting_model", "waiting_capacity", "translating", "partial", "suspended", "stopped", "complete", "failed"].contains(state),
+              assetId.map(CaptionValidation.digest) ?? true,
+              assetId == nil || contentRevision.map(CaptionValidation.digest) == true,
+              failedRanges.count <= 64 else { throw CaptionProtocolError.invalid }
+    }
 }
 struct CaptionRange: Decodable { let startMs: Int, endMs: Int }
 struct CaptionSegmentReference: Decodable {

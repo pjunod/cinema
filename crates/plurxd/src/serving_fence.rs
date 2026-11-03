@@ -4,6 +4,12 @@
 //! partition: that call owns a multi-second timeout, while the quorum
 //! watermark is already a short monotonic lease refreshed by the replication
 //! monitor. This projection turns that lease into one process-wide watch.
+//!
+//! Authority is current when this node has applied a quorum confirmation of
+//! the current generation that is still inside its own lease: the newest
+//! one at zero apply lag, or any one the passive metrics still keep
+//! (`PassiveRaftMetrics::eligible_serving_proof`). A newer confirmation this
+//! node has not applied yet does not take that away. No lease is extended.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -188,18 +194,89 @@ pub(crate) struct ServingState {
 /// watch consumer to mirror a loss into subsystem-local state.
 #[derive(Clone)]
 pub(crate) struct ServingAuthority {
-    ready: Arc<AtomicBool>,
-    loss_generation: Arc<AtomicU64>,
+    word: AuthorityWord,
     loss_transitions_pending: Arc<AtomicU64>,
     transition: Arc<tokio::sync::RwLock<()>>,
     restart_drain: Arc<RestartDrain>,
 }
 
+/// `ready` and the loss generation in one atomic word: the top bit is
+/// `ready`, the low 63 bits the generation. A loss clears `ready` and bumps
+/// the generation in one store, so a reader can never pair the new `ready`
+/// with the old generation.
+#[derive(Clone)]
+struct AuthorityWord(Arc<AtomicU64>);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AuthorityWordValue {
+    ready: bool,
+    loss_generation: u64,
+}
+
+const AUTHORITY_READY_BIT: u64 = 1 << 63;
+
+impl AuthorityWord {
+    fn new(ready: bool) -> Self {
+        Self(Arc::new(AtomicU64::new(if ready {
+            AUTHORITY_READY_BIT
+        } else {
+            0
+        })))
+    }
+
+    fn load(&self) -> AuthorityWordValue {
+        Self::decode(self.0.load(Ordering::Acquire))
+    }
+
+    fn decode(raw: u64) -> AuthorityWordValue {
+        AuthorityWordValue {
+            ready: raw & AUTHORITY_READY_BIT != 0,
+            loss_generation: raw & !AUTHORITY_READY_BIT,
+        }
+    }
+
+    /// Set `ready` to `desired`, bumping the generation when that is a loss.
+    /// Returns the value now published, or `None` when `ready` already was
+    /// `desired`.
+    fn publish(&self, desired: bool) -> Option<AuthorityWordValue> {
+        let mut published = None;
+        let _ = self
+            .0
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |raw| {
+                let current = Self::decode(raw);
+                if current.ready == desired {
+                    published = None;
+                    return None;
+                }
+                let next = AuthorityWordValue {
+                    ready: desired,
+                    loss_generation: if current.ready && !desired {
+                        (current.loss_generation + 1) & !AUTHORITY_READY_BIT
+                    } else {
+                        current.loss_generation
+                    },
+                };
+                published = Some(next);
+                Some(next.loss_generation | if desired { AUTHORITY_READY_BIT } else { 0 })
+            });
+        published
+    }
+}
+
+/// The generation last held, for a word and pending-loss count read together
+/// (see [`ServingAuthority::outage_baseline`]).
+fn outage_baseline_of(word: AuthorityWordValue, pending: u64) -> Option<u64> {
+    match (word.ready, pending) {
+        (true, 0) => None,
+        (true, _) => Some(word.loss_generation),
+        (false, _) => Some(word.loss_generation.saturating_sub(1)),
+    }
+}
+
 impl ServingAuthority {
     pub(crate) fn always_ready() -> Self {
         Self {
-            ready: Arc::new(AtomicBool::new(true)),
-            loss_generation: Arc::new(AtomicU64::new(0)),
+            word: AuthorityWord::new(true),
             loss_transitions_pending: Arc::new(AtomicU64::new(0)),
             transition: Arc::new(tokio::sync::RwLock::new(())),
             restart_drain: Arc::new(RestartDrain::default()),
@@ -271,7 +348,7 @@ impl ServingAuthority {
     /// holds the original work and restart drain, not unrelated placement.
     /// This does not acquire admission or substitute the generation loop.
     pub(crate) async fn accepting_new_media(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.word.load().ready
             && self.loss_transitions_pending.load(Ordering::Acquire) == 0
             && self.current_planned_outage().await.is_none()
     }
@@ -285,24 +362,57 @@ impl ServingAuthority {
     }
 
     pub(crate) fn state(&self) -> ServingState {
+        let (word, pending) = self.observe();
+        ServingState {
+            ready: word.ready && pending == 0,
+            loss_generation: word.loss_generation,
+        }
+    }
+
+    /// One coherent read of the authority word and the pending-loss count.
+    /// The word carries `ready` and the loss generation together, so the two
+    /// can never be seen half-published.
+    fn observe(&self) -> (AuthorityWordValue, u64) {
         loop {
-            let before = self.loss_generation.load(Ordering::Acquire);
             let pending_before = self.loss_transitions_pending.load(Ordering::Acquire);
-            let ready = self.ready.load(Ordering::Acquire);
-            let after = self.loss_generation.load(Ordering::Acquire);
+            let word = self.word.load();
             let pending_after = self.loss_transitions_pending.load(Ordering::Acquire);
-            if before == after && pending_before == pending_after {
-                return ServingState {
-                    ready: ready && pending_after == 0,
-                    loss_generation: after,
-                };
+            if pending_before == pending_after {
+                return (word, pending_after);
             }
         }
     }
 
     pub(crate) fn admit(&self) -> Option<u64> {
-        let state = self.state();
-        state.ready.then_some(state.loss_generation)
+        self.admit_or_outage_baseline().ok()
+    }
+
+    /// [`Self::admit`], and when it refuses, [`Self::outage_baseline`] from
+    /// the same observation, so a refusal always names the generation a
+    /// waiter should wait after (a recovery between two separate reads
+    /// would otherwise leave it with none).
+    pub(crate) fn admit_or_outage_baseline(&self) -> Result<u64, u64> {
+        let (word, pending) = self.observe();
+        match outage_baseline_of(word, pending) {
+            None => Ok(word.loss_generation),
+            Some(baseline) => Err(baseline),
+        }
+    }
+
+    /// When `admit` would refuse, the loss generation this node last held
+    /// authority under: the generation an outage resolution has to be newer
+    /// than before it says anything about the outage happening now. `None`
+    /// while authority is held.
+    ///
+    /// During the pending-loss window `ready` still reads true and the
+    /// generation has not moved, so the last held generation is the current
+    /// one. Once the loss is published the generation has already moved past
+    /// it by one: the two change in one atomic store, so no reader sees the
+    /// loss without its generation. Reading it this way means a waiter never
+    /// mistakes the previous outage's `Recovered` for this one's.
+    pub(crate) fn outage_baseline(&self) -> Option<u64> {
+        let (word, pending) = self.observe();
+        outage_baseline_of(word, pending)
     }
 
     pub(crate) fn is_current(&self, admitted_generation: u64) -> bool {
@@ -318,13 +428,111 @@ impl ServingAuthority {
         admitted_generation: u64,
         deadline: std::time::Instant,
     ) -> Option<tokio::sync::OwnedRwLockReadGuard<()>> {
+        self.commit_guard_or_refusal_before(admitted_generation, deadline)
+            .await
+            .ok()
+    }
+
+    /// [`Self::commit_guard_before`], saying why it refused: a response that
+    /// is still only buffered may wait out an authority loss, never a passed
+    /// deadline.
+    pub(crate) async fn commit_guard_or_refusal_before(
+        &self,
+        admitted_generation: u64,
+        deadline: std::time::Instant,
+    ) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, CommitGuardRefusal> {
         let guard = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             Arc::clone(&self.transition).read_owned(),
         )
         .await
-        .ok()?;
-        self.is_current(admitted_generation).then_some(guard)
+        .map_err(|_| CommitGuardRefusal::DeadlinePassed)?;
+        if self.is_current(admitted_generation) {
+            Ok(guard)
+        } else {
+            Err(CommitGuardRefusal::AuthorityLost)
+        }
+    }
+}
+
+/// Why [`ServingAuthority::commit_guard_before`] refused a commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommitGuardRefusal {
+    /// Serving authority was lost since the admission (the generation moved,
+    /// or the node is fenced now).
+    AuthorityLost,
+    /// The commit's deadline passed before the transition lock was free.
+    DeadlinePassed,
+}
+
+/// How the running-work owner's handling of one outage stands, as
+/// `TranscodeManager::serving_fence_loop` publishes it. HTTP only reads this:
+/// it never spends or resets the outage budget itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OutageResolution {
+    /// The serving loss generation this resolution describes: the one the
+    /// loss was observed at for `Pending`, and the one current when it ended
+    /// for `Recovered` and `Expired`.
+    pub(crate) loss_generation: u64,
+    pub(crate) state: OutageState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutageState {
+    /// The owner is waiting, at most until `expires_at`, for authority.
+    Pending { expires_at: tokio::time::Instant },
+    /// Authority came back inside the grace; running work was kept.
+    Recovered,
+    /// The grace ran out (or the fence closed); running work was ended.
+    Expired,
+}
+
+impl OutageResolution {
+    /// Nothing has been lost yet.
+    pub(crate) fn initial() -> Self {
+        Self {
+            loss_generation: 0,
+            state: OutageState::Recovered,
+        }
+    }
+}
+
+/// What a read-only waiter on an [`OutageResolution`] learned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutageWait {
+    /// The outage after `baseline` was resolved with authority back.
+    Recovered,
+    /// It ended with the grace spent, or the owner is gone.
+    Expired,
+    /// The waiter's own deadline, or the outage's `expires_at`, came first.
+    TimedOut,
+}
+
+/// Wait, read-only, until the outage after loss generation `baseline` is
+/// resolved, or `deadline` (bounded further by the outage's own
+/// `expires_at`) passes. A resolution counts only when it is newer than
+/// `baseline` and no longer pending, so the previous outage's `Recovered`
+/// never answers for this one.
+pub(crate) async fn wait_for_outage_resolution(
+    resolutions: &mut tokio::sync::watch::Receiver<OutageResolution>,
+    baseline: u64,
+    deadline: tokio::time::Instant,
+) -> OutageWait {
+    loop {
+        let resolution = *resolutions.borrow_and_update();
+        let mut until = deadline;
+        if resolution.loss_generation > baseline {
+            match resolution.state {
+                OutageState::Recovered => return OutageWait::Recovered,
+                OutageState::Expired => return OutageWait::Expired,
+                OutageState::Pending { expires_at } => until = until.min(expires_at),
+            }
+        }
+        match tokio::time::timeout_at(until, resolutions.changed()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return OutageWait::Expired,
+            Err(_) => return OutageWait::TimedOut,
+        }
     }
 }
 
@@ -361,6 +569,11 @@ pub(crate) enum LossOutcome {
         outage: Duration,
         /// The outage budget spent so far, this loss included.
         budget_spent: Duration,
+        /// The loss generation current in the observation that saw authority
+        /// ready. A loss published after that observation is a new outage,
+        /// so a recovery is only ever reported under this generation, never
+        /// under whatever the watch holds by the time the owner reads it.
+        generation: u64,
     },
     /// The grace ran out first. The owner ends its work.
     Expired,
@@ -403,43 +616,72 @@ impl SessionGrace {
         &mut self,
         serving: &mut tokio::sync::watch::Receiver<ServingState>,
     ) -> LossOutcome {
-        if self
-            .last_recovered_at
-            .is_some_and(|recovered| recovered.elapsed() >= SERVING_FENCE_SESSION_GRACE)
-        {
-            self.outage_spent = Duration::ZERO;
-        }
-        let remaining = SERVING_FENCE_SESSION_GRACE.saturating_sub(self.outage_spent);
-        let lost_at = tokio::time::Instant::now();
-        // `Some(true)`: authority came back inside the grace; `Some(false)`:
-        // the grace ran out; `None`: the fence is gone.
-        let recovered = if serving.borrow_and_update().ready {
-            Some(true)
+        self.resolve_loss_from(serving, tokio::time::Instant::now())
+            .await
+    }
+
+    /// When a loss observed at `lost_at` runs out of grace: `lost_at` plus
+    /// what is left of this outage's budget. A loss that starts a grace or
+    /// more after the last recovery starts a fresh budget. This is the bound
+    /// [`Self::resolve_loss_from`] waits to, computed the same way, so an
+    /// observer told this deadline is told the one the owner enforces.
+    pub(crate) fn deadline_for_loss(&self, lost_at: tokio::time::Instant) -> tokio::time::Instant {
+        lost_at + SERVING_FENCE_SESSION_GRACE.saturating_sub(self.spent_at(lost_at))
+    }
+
+    fn spent_at(&self, lost_at: tokio::time::Instant) -> Duration {
+        if self.last_recovered_at.is_some_and(|recovered| {
+            lost_at.saturating_duration_since(recovered) >= SERVING_FENCE_SESSION_GRACE
+        }) {
+            Duration::ZERO
         } else {
-            tokio::time::timeout(remaining, async {
+            self.outage_spent
+        }
+    }
+
+    /// [`Self::resolve_loss`] for a loss observed at `lost_at`, so an owner
+    /// that publishes [`Self::deadline_for_loss`] first waits to exactly that
+    /// deadline.
+    pub(crate) async fn resolve_loss_from(
+        &mut self,
+        serving: &mut tokio::sync::watch::Receiver<ServingState>,
+        lost_at: tokio::time::Instant,
+    ) -> LossOutcome {
+        let deadline = self.deadline_for_loss(lost_at);
+        self.outage_spent = self.spent_at(lost_at);
+        // `Some(Some(generation))`: authority came back inside the grace,
+        // under `generation`; `Some(None)`: the grace ran out; `None`: the
+        // fence is gone.
+        let observed = *serving.borrow_and_update();
+        let recovered = if observed.ready {
+            Some(Some(observed.loss_generation))
+        } else {
+            tokio::time::timeout_at(deadline, async {
                 loop {
                     if serving.changed().await.is_err() {
                         return None;
                     }
-                    if serving.borrow_and_update().ready {
-                        return Some(true);
+                    let observed = *serving.borrow_and_update();
+                    if observed.ready {
+                        return Some(Some(observed.loss_generation));
                     }
                 }
             })
             .await
-            .unwrap_or(Some(false))
+            .unwrap_or(Some(None))
         };
         match recovered {
-            Some(true) => {
+            Some(Some(generation)) => {
                 let outage = lost_at.elapsed();
                 self.outage_spent = self.outage_spent.saturating_add(outage);
                 self.last_recovered_at = Some(tokio::time::Instant::now());
                 LossOutcome::Recovered {
                     outage,
                     budget_spent: self.outage_spent,
+                    generation,
                 }
             }
-            Some(false) => {
+            Some(None) => {
                 self.outage_spent = Duration::ZERO;
                 self.last_recovered_at = None;
                 LossOutcome::Expired
@@ -458,14 +700,15 @@ pub(crate) struct ServingHttpPolicy {
     pub(crate) content_type: &'static str,
     pub(crate) body: &'static str,
     pub(crate) retry_after: bool,
+    /// The typed `code` in `body`, when it carries one.
+    pub(crate) code: Option<&'static str>,
 }
 
 #[derive(Clone)]
 pub(crate) struct ServingFence {
     metrics: PassiveRaftMetrics,
     quorum_managed: Arc<AtomicBool>,
-    ready: Arc<AtomicBool>,
-    loss_generation: Arc<AtomicU64>,
+    word: AuthorityWord,
     loss_transitions_pending: Arc<AtomicU64>,
     transition: Arc<tokio::sync::RwLock<()>>,
     state: tokio::sync::watch::Sender<ServingState>,
@@ -493,8 +736,7 @@ impl ServingFence {
         Self {
             metrics,
             quorum_managed: Arc::new(AtomicBool::new(quorum_managed)),
-            ready: Arc::new(AtomicBool::new(ready)),
-            loss_generation: Arc::new(AtomicU64::new(0)),
+            word: AuthorityWord::new(ready),
             loss_transitions_pending: Arc::new(AtomicU64::new(0)),
             transition,
             state,
@@ -508,8 +750,7 @@ impl ServingFence {
     }
 
     pub(crate) fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
-            && self.loss_transitions_pending.load(Ordering::Acquire) == 0
+        self.word.load().ready && self.loss_transitions_pending.load(Ordering::Acquire) == 0
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<ServingState> {
@@ -518,8 +759,7 @@ impl ServingFence {
 
     pub(crate) fn authority(&self) -> ServingAuthority {
         ServingAuthority {
-            ready: Arc::clone(&self.ready),
-            loss_generation: Arc::clone(&self.loss_generation),
+            word: self.word.clone(),
             loss_transitions_pending: Arc::clone(&self.loss_transitions_pending),
             transition: Arc::clone(&self.transition),
             restart_drain: Arc::clone(&self.restart_drain),
@@ -1022,31 +1262,35 @@ impl ServingFence {
                 content_type: "text/plain",
                 body: "ok\n",
                 retry_after: false,
+                code: None,
             }),
             "/readyz" if self.is_ready() => Some(ServingHttpPolicy {
                 status: 200,
                 content_type: "text/plain",
                 body: "ready\n",
                 retry_after: false,
+                code: None,
             }),
             "/readyz" => Some(ServingHttpPolicy {
                 status: 503,
                 content_type: "text/plain",
                 body: "quorum unavailable\n",
                 retry_after: false,
+                code: None,
             }),
             path if Self::requires_authority(path) && !self.is_ready() => Some(ServingHttpPolicy {
                 status: 503,
                 content_type: "application/json",
                 body: SERVING_FENCED_JSON,
                 retry_after: true,
+                code: Some("serving_fenced"),
             }),
             _ => None,
         }
     }
 
     async fn publish(&self, desired: bool) {
-        if self.ready.load(Ordering::Acquire) == desired {
+        if self.word.load().ready == desired {
             return;
         }
         // Announce authority loss before waiting for an EOF commit that
@@ -1055,21 +1299,17 @@ impl ServingFence {
         // change after every commit admitted before the loss was observed.
         // Count rather than boolean so overlapping publishers cannot clear
         // another publisher's pending fence.
-        let _pending_loss = (self.ready.load(Ordering::Acquire) && !desired)
+        let _pending_loss = (self.word.load().ready && !desired)
             .then(|| PendingLossTransition::new(Arc::clone(&self.loss_transitions_pending)));
         let _transition = self.transition.write().await;
-        let previous = self.ready.swap(desired, Ordering::AcqRel);
-        if previous == desired {
+        // One store: `ready` and the bumped generation become visible
+        // together (`ServingAuthority::outage_baseline` relies on it).
+        let Some(published) = self.word.publish(desired) else {
             return;
-        }
-        let loss_generation = if previous && !desired {
-            self.loss_generation.fetch_add(1, Ordering::AcqRel) + 1
-        } else {
-            self.loss_generation.load(Ordering::Acquire)
         };
         self.state.send_replace(ServingState {
-            ready: desired,
-            loss_generation,
+            ready: published.ready,
+            loss_generation: published.loss_generation,
         });
     }
 }
@@ -1103,15 +1343,21 @@ struct AuthorityOutcome {
 /// 3. a node that is *already serving* and has lost current eligibility may
 ///    continue on the proof it holds, for as long as that proof is valid on
 ///    its own original terms;
-/// 4. a node that is **not** already serving may never become ready this way.
+/// 4. a node that is **not** already serving may never become ready on a
+///    proof it retained. A fenced node may become ready again by having
+///    applied a still-live, quorum-confirmed index of the current generation
+///    (rule 2, through `authority_is_current`). No lease is extended.
+///    Eligibility is deliberately widened from "applied the newest
+///    confirmation" to "applied any live confirmation"
+///    (`docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md` §4.1).
 ///
-/// Rule 4 is the one that keeps this a continuation rather than a second route
-/// to authority. Once a loss is published the generation has bumped and every
-/// admission made under it refuses itself (existing sessions only survive a
-/// loss that a fresh proof ends within their grace), so returning on a
-/// retained proof would resume service on grounds this node had already
-/// declared insufficient.
-/// Recovery is a fresh proof's job, and only a fresh proof's.
+/// Rule 4 is the one that keeps retention a continuation rather than a
+/// second route to authority. Once a loss is published the generation has
+/// bumped and every admission made under it refuses itself (existing sessions
+/// only survive a loss that a fresh proof ends within their grace), so
+/// returning on a retained proof would resume service on grounds this node
+/// had already declared insufficient. Recovery is a live confirmation's job,
+/// and only a live confirmation's.
 fn decide_authority(
     unmanaged: bool,
     authority_is_current: bool,
@@ -1187,14 +1433,23 @@ impl ServingFence {
 
     async fn refresh(&self) {
         let snapshot = self.metrics.snapshot();
-        let authority_is_current = snapshot.watermark_valid
-            && snapshot.watermark.is_some_and(|watermark| {
-                if snapshot.watermark_requires_local_binding {
-                    snapshot.local_source && watermark.apply_lag_entries == Some(0)
-                } else {
-                    !snapshot.local_source && watermark.apply_lag_entries.is_none()
-                }
-            });
+        // On a locally bound node, any live confirmation of the current
+        // generation that this node has applied is current authority, not
+        // only the newest one at zero lag (rule 4, amended). Read once, so
+        // the proof captured below is the one that made this poll ready.
+        let applied_proof = snapshot
+            .watermark_requires_local_binding
+            .then(|| self.metrics.eligible_serving_proof())
+            .flatten();
+        let authority_is_current = applied_proof.is_some()
+            || (snapshot.watermark_valid
+                && snapshot.watermark.is_some_and(|watermark| {
+                    if snapshot.watermark_requires_local_binding {
+                        snapshot.local_source && watermark.apply_lag_entries == Some(0)
+                    } else {
+                        !snapshot.local_source && watermark.apply_lag_entries.is_none()
+                    }
+                }));
         let previous = self.is_ready();
         let outcome = decide_authority(
             !self.is_quorum_managed(),
@@ -1206,7 +1461,9 @@ impl ServingFence {
             || self.continues_on_the_retained_proof(),
         );
         match outcome.retain {
-            Retain::FromCurrentProof => self.retain(self.metrics.eligible_serving_proof()),
+            Retain::FromCurrentProof => {
+                self.retain(applied_proof.or_else(|| self.metrics.eligible_serving_proof()))
+            }
             Retain::Clear => self.retain(None),
             Retain::Unchanged => {}
         }
@@ -1567,6 +1824,109 @@ mod tests {
     }
 
     use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+    /// M2: in the pending-loss window `.admit()` already refuses while the
+    /// generation has not moved, so the previous outage's `Recovered` is
+    /// still the resolution on the channel. A waiter there must not take it
+    /// for this outage's: the baseline it waits after is the generation it
+    /// last held, and only a newer, non-pending resolution answers it.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_recovered_from_the_previous_loss_does_not_answer_this_one() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        fence.validation_set_ready(false).await;
+        fence.validation_set_ready(true).await;
+        let authority = fence.authority();
+        assert_eq!(authority.state().loss_generation, 1);
+        assert_eq!(authority.outage_baseline(), None, "authority is held");
+
+        // The second loss is announced but not yet published.
+        let pending = PendingLossTransition::new(Arc::clone(&fence.loss_transitions_pending));
+        assert_eq!(authority.admit(), None, "admission already refuses");
+        assert_eq!(
+            authority.state().loss_generation,
+            1,
+            "the generation has not moved"
+        );
+        let baseline = authority.outage_baseline().expect("refusing");
+        assert_eq!(baseline, 1);
+
+        let (resolutions, mut receiver) = tokio::sync::watch::channel(OutageResolution {
+            loss_generation: 1,
+            state: OutageState::Recovered,
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        assert_eq!(
+            wait_for_outage_resolution(&mut receiver, baseline, deadline).await,
+            OutageWait::TimedOut,
+            "the previous outage's Recovered must not consume this wait"
+        );
+
+        // Once published, the baseline is still the generation last held.
+        drop(pending);
+        fence.validation_set_ready(false).await;
+        assert_eq!(authority.state().loss_generation, 2);
+        assert_eq!(authority.outage_baseline(), Some(1));
+        let mut receiver = resolutions.subscribe();
+        resolutions.send_replace(OutageResolution {
+            loss_generation: 2,
+            state: OutageState::Pending {
+                expires_at: tokio::time::Instant::now() + Duration::from_secs(5),
+            },
+        });
+        let waiter = tokio::spawn(async move {
+            wait_for_outage_resolution(
+                &mut receiver,
+                1,
+                tokio::time::Instant::now() + Duration::from_secs(10),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        resolutions.send_replace(OutageResolution {
+            loss_generation: 2,
+            state: OutageState::Recovered,
+        });
+        assert_eq!(waiter.await.expect("waiter"), OutageWait::Recovered);
+    }
+
+    /// M2: the deadline published for an outage is the one `resolve_loss_from`
+    /// enforces, budget carry-over and fresh budget alike.
+    #[tokio::test(start_paused = true)]
+    async fn the_published_outage_deadline_is_the_enforced_one() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let mut serving = fence.subscribe();
+        let mut grace = SessionGrace::default();
+        fence.validation_set_ready(false).await;
+        let lost_at = tokio::time::Instant::now();
+        assert_eq!(
+            grace.deadline_for_loss(lost_at),
+            lost_at + SERVING_FENCE_SESSION_GRACE
+        );
+        let recovery = tokio::spawn({
+            let fence = fence.clone();
+            async move {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                fence.validation_set_ready(true).await;
+            }
+        });
+        assert!(matches!(
+            grace.resolve_loss_from(&mut serving, lost_at).await,
+            LossOutcome::Recovered { .. }
+        ));
+        recovery.await.expect("recovery");
+
+        // Inside a grace of the recovery: the budget carries over.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        fence.validation_set_ready(false).await;
+        let lost_at = tokio::time::Instant::now();
+        let published = grace.deadline_for_loss(lost_at);
+        assert_eq!(published, lost_at + Duration::from_secs(3));
+        assert_eq!(
+            grace.resolve_loss_from(&mut serving, lost_at).await,
+            LossOutcome::Expired
+        );
+        assert_eq!(tokio::time::Instant::now(), published);
+    }
 
     /// Continuity sustains an authority this node has; it never restores one
     /// it has lost, and it never runs on a node that is not managed.
