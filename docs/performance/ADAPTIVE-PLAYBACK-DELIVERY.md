@@ -30,6 +30,28 @@ under one lock order so a continuous handoff cannot vanish between snapshots.
 Guard regression, repeated two-node execution and gate results belong to the
 task PR; all-path acceptance and promotion remain open.
 
+## Next closure — separate authored fixtures from production policy
+
+At runtime source `5d65151d3`, the five affected daemon cases pass with zero
+ignored: overlapping ordinary/adaptive protection, generic lease classification,
+actual paused Adopt and liveness handoff, and both refused-Adopt cleanup cases.
+The two-node and exact-head gate results are recorded in the task PR.
+
+The next acceptance slice already has selected finite lifecycle and process-
+restart fixtures. Their existence is not a pass, but the historical checklist
+must not be read as proof that implementation is absent. Before the restart
+cell can run, its fixture must follow production storage canonicalization and
+Source enablement, and use recovery-aware directory creation.
+
+There is also genuine M2 implementation work: the selected finite path currently
+reads history for advisory comparisons in
+[`finite_software.rs`](../../crates/plurxd/src/vod/finite_software.rs), while
+`TrialMonitor`, `TrialBudget` and `GrowthState` have no daemon consumers.
+Connecting original-deadline trial control and owned stopping to the selected
+producer remains open. Preserve UnknownBounds/UnknownMemory refusals; priors
+alone never authorize expansion. No all-path or hard-memory acceptance closes
+with the publication repair.
+
 ## 2026-10-29 checkpoint — historical source-bound evidence
 
 **Historical checkpoint:** 2026-10-29. PR #1248 remains

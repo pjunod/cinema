@@ -31,8 +31,8 @@ epoch, pointer and live-lease guards. On source `4a6461e6214c`, five affected
 publication cases passed with SQLite and the real three-voter backend; neither
 new case passes the original behavior at `099eafdcee4c`. Pinned Rust 1.97.1
 workspace/all-target strict Clippy, including fixture/cluster features, and
-paperwork 15/15 passed. Two-node serving and development-gate results belong to
-the task PR; they do not imply M0–M7 qualification.
+paperwork 15/15 passed. The guard batch at `5d65151d3` passed 5/5, zero ignored.
+Two-node serving and development-gate results belong to the task PR; they do not imply M0–M7 qualification.
 
 The continuation also protects the committed-Adopt-to-attachment gap from
 stale settlement; the [delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md) records that
