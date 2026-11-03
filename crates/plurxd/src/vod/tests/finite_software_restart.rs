@@ -18,10 +18,12 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
     let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
     std::fs::create_dir_all(&target).expect("repo-local fixture root");
     let target = std::fs::canonicalize(target).expect("canonical native fixture ancestry");
-    let fixture = tempfile::Builder::new()
-        .prefix("finite-software-restart-")
-        .tempdir_in(&target)
-        .expect("repo-local restart fixture");
+    let fixture = FiniteLifecycleFixtureRoot(
+        tempfile::Builder::new()
+            .prefix("finite-software-restart-")
+            .tempdir_in(&target)
+            .expect("repo-local restart fixture"),
+    );
     let source_path = fixture.path().join("source.mkv");
     testfixtures::run(
         std::process::Command::new(testfixtures::ffmpeg())
@@ -211,17 +213,28 @@ async fn finite_restart_child(root: &std::path::Path) {
     // The normal rendition driver wakes on its ordinary kick. This avoids an
     // HTTP materialization watchdog outliving the first daemon in the test.
     rendition.kick();
-    let len = loop {
+    loop {
         assert!(Instant::now() < deadline, "first finite segment timed out");
-        match output
-            .file_len(plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile::Segment(0))
+        assert!(rendition.failure().is_none(), "first finite producer failed");
+        if rendition
+            .manifest
+            .lock()
             .await
-            .expect("first native publication state")
+            .state(0)
+            .is_some_and(|state| state.is_materialized() && state.bytes() > 0)
         {
-            Some(len) => break len,
-            None => tokio::time::sleep(Duration::from_millis(50)).await,
+            break;
         }
-    };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The real Materialized event follows durable publication. An output
+    // selector created before bootstrap has no file-lookup authority yet.
+    let len = output
+        .file_len(plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile::Segment(0))
+        .await
+        .expect("published native inventory")
+        .expect("durably published first segment");
+    assert!(len > 0);
     let mut ready = ReadyFile::Finite {
         output: output.clone(),
         file: plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile::Segment(0),

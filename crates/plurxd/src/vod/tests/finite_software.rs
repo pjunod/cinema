@@ -285,11 +285,28 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         .last()
         .expect("nonempty ordinary plan")
         .end_ticks();
-    assert_eq!(
-        service.completed,
-        u64::try_from(ticks_to_ms(end, rendition.timescale))
-            .expect("finite plan duration is nonnegative")
-    );
+    let final_ms = u64::try_from(ticks_to_ms(end, rendition.timescale))
+        .expect("finite plan duration is nonnegative");
+    // This is the last accepted one-second observation, not a synthetic
+    // completion sample. A short encode may publish several entries within
+    // one observation interval and retain the earlier durable frontier.
+    assert!(service.completed > 0 && service.completed <= final_ms);
+    let manifest = rendition.manifest.lock().await;
+    assert!(rendition.plan.entries.iter().any(|entry| {
+        u64::try_from(ticks_to_ms(entry.end_ticks(), rendition.timescale))
+            == Ok(service.completed)
+            && manifest
+                .state(entry.index)
+                .is_some_and(|state| state.is_materialized() && state.bytes() > 0)
+    }));
+    drop(manifest);
+    assert!(matches!(
+        service.units_per_second,
+        plurx_core::process::observation::Metric::Unknown(
+            plurx_core::process::observation::UnknownReason::InsufficientEvidence
+                | plurx_core::process::observation::UnknownReason::Stale
+        )
+    ));
     assert!(
         rendition
             .recipe
@@ -442,6 +459,11 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         file: FiniteFile::Segment(0),
         len: retained_len,
     };
+    let encoding = rendition.recipe.encoding.as_ref().expect("finite encoding");
+    let before_cache_read = encoding
+        .resource_service_sample(Instant::now())
+        .expect("original accepted producer sample")
+        .0;
     let retained_body = retained_file
         .read_all_bounded(retained_len, deadline)
         .await
@@ -450,6 +472,31 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     assert_eq!(retained_body.len() as u64, retained_len);
     drop(retained_body);
     drop(retained_file);
+    let after_cache_read = encoding
+        .resource_service_sample(Instant::now())
+        .expect("original producer sample survives retained reads")
+        .0;
+    assert_eq!(
+        (
+            after_cache_read.generation,
+            after_cache_read.phase,
+            after_cache_read.unit,
+            after_cache_read.completed,
+            after_cache_read.deadline_slack_ms,
+            after_cache_read.queued_bytes,
+            after_cache_read.at,
+        ),
+        (
+            before_cache_read.generation,
+            before_cache_read.phase,
+            before_cache_read.unit,
+            before_cache_read.completed,
+            before_cache_read.deadline_slack_ms,
+            before_cache_read.queued_bytes,
+            before_cache_read.at,
+        ),
+        "retained reads cannot refresh the producer event or advance useful work"
+    );
     // A second ordinary selected finite builder really admits another R
     // while the first S still owns every retained file and reader budget.
     let second_key = "b".repeat(64);

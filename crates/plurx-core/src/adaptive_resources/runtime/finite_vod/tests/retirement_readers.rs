@@ -2,16 +2,95 @@
 //! original operation and supplies no replacement close or refund proof.
 use super::*;
 use crate::adaptive_resources::runtime::finite_vod::{
-    cleanup_tests::original_entered_prefix_fixture, FiniteFile, FiniteOutput, FiniteReader,
-    FiniteResponseBuffer, FiniteVodError, FiniteWriterOutcome, SoftwareVodOwner,
+    cleanup_tests::original_software_fixture_with_producer, FiniteFile, FiniteOutput, FiniteReader,
+    FiniteResponseBuffer, FiniteVodError, FiniteWriterOutcome, SoftwareAvcPumpPlan,
+    SoftwareVodEvent, SoftwareVodOwner,
 };
 use crate::adaptive_resources::ResourceVector;
+use crate::fmp4::{CutPolicy, FiniteSegmenterLimits, FragmentReaderBounds, MergeMemoryLimits};
+use crate::segplan::{PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SEGPLAN_VERSION};
+use crate::vod_generation::GenerationMemoryLimits;
 use native_result_fixture::{Gate, Kind};
 use std::time::{Duration, Instant};
 use v2::scratch::ScratchLifecycleV1;
 
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(90)
+}
+
+fn complete_output_plan() -> SoftwareAvcPumpPlan {
+    let grid = crate::transcode::VodFrameGrid::new(24, 1).expect("canonical software grid");
+    let plan = SegmentPlan {
+        version: SEGPLAN_VERSION,
+        timescale: grid.numerator,
+        entries: vec![PlanEntry {
+            index: 0,
+            kind: PlanEntryKind::Video,
+            start_ticks: 0,
+            duration_ticks: u64::from(grid.numerator),
+            est_bytes: 1_000_000,
+            cut: PlanCut::EndOfStream,
+            fragments: 1,
+        }],
+        target_duration: 1,
+    };
+    let memory = GenerationMemoryLimits {
+        reader: FragmentReaderBounds {
+            buffer_bytes: 1024 * 1024,
+            unit_bytes: 1024 * 1024,
+            max_tracks: 8,
+            max_runs: 64,
+            max_samples: 4096,
+        },
+        read_chunk_bytes: 4096,
+        retained_fragment_memory_bytes: 1024 * 1024,
+        retained_fragments: 1,
+        init_memory_bytes: 1024 * 1024,
+        segmenter: FiniteSegmenterLimits {
+            merge: MergeMemoryLimits {
+                workspace_bytes: 1024 * 1024,
+                output_bytes: 1024 * 1024,
+                max_tracks: 8,
+                max_samples: 4096,
+            },
+            prefix_memory_bytes: 1024 * 1024,
+            split_memory_bytes: 1024 * 1024,
+            published_batch_bytes: 1024 * 1024,
+            retained_fragments: 1,
+        },
+    };
+    SoftwareAvcPumpPlan::new(
+        plan,
+        0,
+        grid,
+        CutPolicy::new(1, 1, 1024 * 1024, 2, grid.numerator),
+        memory,
+        4096,
+        1024,
+        "retirement-reader-test".into(),
+    )
+    .expect("explicit bounded complete-output profile before admission")
+}
+
+struct FixtureRoot(tempfile::TempDir);
+
+impl std::ops::Deref for FixtureRoot {
+    type Target = tempfile::TempDir;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for FixtureRoot {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.disable_cleanup(true);
+            eprintln!(
+                "retained failed retirement-reader fixture: {}",
+                self.0.path().display()
+            );
+        }
+    }
 }
 
 struct OriginalOutput {
@@ -22,7 +101,7 @@ struct OriginalOutput {
     output: FiniteOutput,
     init_len: u64,
     // Drop the installation after its original native selectors.
-    root: tempfile::TempDir,
+    root: FixtureRoot,
 }
 
 impl OriginalOutput {
@@ -31,18 +110,23 @@ impl OriginalOutput {
             .join("../../target/finite-vod-fixtures");
         std::fs::create_dir_all(&parent).expect("repo-local native fixture parent");
         let parent = std::fs::canonicalize(parent).expect("canonical native ancestry");
-        let root = tempfile::Builder::new()
-            .prefix("retirement-reader-")
-            .tempdir_in(parent)
-            .expect("actual finite installation");
+        let root = FixtureRoot(
+            tempfile::Builder::new()
+                .prefix("retirement-reader-")
+                .tempdir_in(parent)
+                .expect("actual finite installation"),
+        );
         let (runtime, mut owner, preparation, member) =
-            original_entered_prefix_fixture(root.path());
+            original_software_fixture_with_producer(root.path(), complete_output_plan());
         let mut events = owner.take_events().expect("original producer events");
         owner
             .start(deadline())
             .await
             .expect("actual software producer");
         let output = owner.output();
+        let mut initialized = 0_u32;
+        let mut materialized = 0_u32;
+        let mut published_bytes = 0_u64;
         let completion = {
             let joined = owner.join_producer();
             tokio::pin!(joined);
@@ -51,18 +135,40 @@ impl OriginalOutput {
                 tokio::select! {
                     result = &mut joined => break result.expect("original root and writer joins"),
                     event = events.recv(), if open => {
-                        if event.is_none() {
-                            open = false;
+                        match event {
+                            Some(SoftwareVodEvent::Initialized(_)) => initialized += 1,
+                            Some(SoftwareVodEvent::Materialized { entry, bytes, .. }) => {
+                                assert_eq!(entry, 0, "only the admitted segment is produced");
+                                materialized += 1;
+                                published_bytes += bytes;
+                            }
+                            None => open = false,
                         }
                     }
                 }
             }
         };
+        while let Ok(event) = events.try_recv() {
+            match event {
+                SoftwareVodEvent::Initialized(_) => initialized += 1,
+                SoftwareVodEvent::Materialized { entry, bytes, .. } => {
+                    assert_eq!(entry, 0, "only the admitted segment is produced");
+                    materialized += 1;
+                    published_bytes += bytes;
+                }
+            }
+        }
         drop(events);
-        assert!(completion
-            .root_status
-            .expect("actual root status")
-            .success());
+        eprintln!(
+            "original retirement fixture completion: {completion:?}; initialized={initialized}; materialized={materialized}; published_bytes={published_bytes}"
+        );
+        assert!(
+            completion
+                .root_status
+                .expect("actual root status")
+                .success(),
+            "actual producer failed before retirement behavior: {completion:?}"
+        );
         let writer = completion.writer.expect("actual writer completion");
         assert_eq!(writer.outcome, FiniteWriterOutcome::Ran);
         assert!(writer.completed_output);

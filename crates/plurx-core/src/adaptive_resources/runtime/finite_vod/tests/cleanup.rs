@@ -119,11 +119,55 @@ fn original_owner_at_generation(
     original_owner_with_cutoff(root, reject_prepare, generation_epoch, None)
 }
 
+/// A successful-output fixture selects its explicit parser bounds before R
+/// admission. Existing prefix/cleanup fixtures retain their original profile.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(in crate::adaptive_resources::runtime) fn original_software_fixture_with_producer(
+    root: &Path,
+    producer: SoftwareAvcPumpPlan,
+) -> (
+    Arc<NodeResourceRuntime>,
+    SoftwareVodOwner,
+    OwnedPreparation,
+    Uuid,
+) {
+    let (runtime, owner) = original_owner_with_producer(
+        root,
+        false,
+        SoftwareVodRequest::INITIAL_GENERATION_EPOCH,
+        None,
+        producer,
+    );
+    let owner = owner.expect("same original accepted command with explicit producer bounds");
+    let preparation = owner.preparation.clone();
+    let member = owner.scratch_member;
+    (runtime, owner, preparation, member)
+}
+
 fn original_owner_with_cutoff(
     root: &Path,
     reject_prepare: bool,
     generation_epoch: u64,
     continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
+) -> (
+    Arc<NodeResourceRuntime>,
+    Result<SoftwareVodOwner, FiniteVodError>,
+) {
+    original_owner_with_producer(
+        root,
+        reject_prepare,
+        generation_epoch,
+        continuous_entry_deadline,
+        super::tests::pump_plan(),
+    )
+}
+
+fn original_owner_with_producer(
+    root: &Path,
+    reject_prepare: bool,
+    generation_epoch: u64,
+    continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
+    producer: SoftwareAvcPumpPlan,
 ) -> (
     Arc<NodeResourceRuntime>,
     Result<SoftwareVodOwner, FiniteVodError>,
@@ -309,7 +353,7 @@ fn original_owner_with_cutoff(
             generation_epoch,
             recipe_source_binding: "actual-original-source".into(),
             command,
-            producer: super::tests::pump_plan(),
+            producer,
             sources: vec![FiniteSourceRequest {
                 path: source,
                 media_file_id: "1".into(),
