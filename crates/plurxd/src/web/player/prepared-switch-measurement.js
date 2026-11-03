@@ -116,7 +116,7 @@ function deferPreparedPredecessorRetirement(p,state,successor){
   let prior=null,advances=0;
   const next=()=>{
     if(!current()) return;
-    try{ state.retireFrameCallbackId=successor.requestVideoFrameCallback((_,meta)=>{
+    try{ state.retireFrameCallbackId=requestPlaybackVideoFrame(successor,(_,meta)=>{
       state.retireFrameCallbackId=null;
       if(!current()) return;
       const at=Number(meta&&meta.mediaTime);
@@ -134,8 +134,8 @@ function retirePreparedPredecessor(p,state){
   if(!state) return;
   const successor=state.retireElement;
   if(state.retireFrameCallbackId!=null&&state.retireElement
-    &&typeof state.retireElement.cancelVideoFrameCallback==="function")
-    try{ state.retireElement.cancelVideoFrameCallback(state.retireFrameCallbackId); }catch(e){}
+    )
+    try{ cancelPlaybackVideoFrame(state.retireElement,state.retireFrameCallbackId); }catch(e){}
   state.retireFrameCallbackId=null;
   if(state.retireIdleCallbackId!=null&&typeof window.cancelIdleCallback==="function")
     try{ window.cancelIdleCallback(state.retireIdleCallbackId); }catch(e){}
@@ -301,8 +301,8 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
     settled=true;
     if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
     state.frameBudgetUpdate=null;
-    if(state.frameCallbackId!=null&&typeof element.cancelVideoFrameCallback==="function")
-      try{ element.cancelVideoFrameCallback(state.frameCallbackId); }catch(e){}
+    if(state.frameCallbackId!=null)
+      try{ cancelPlaybackVideoFrame(element,state.frameCallbackId); }catch(e){}
     if(state.frameListener){
       try{ element.removeEventListener("timeupdate",state.frameListener); }catch(e){}
       state.frameListener=null;
@@ -344,7 +344,7 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
   // moving media clock. The finite outer timer owns engines with neither.
   if(streamHasVideo(p,element)){
     if(typeof element.requestVideoFrameCallback==="function"){
-      try{ state.frameCallbackId=element.requestVideoFrameCallback(()=>done()); return; }catch(e){}
+      try{ state.frameCallbackId=requestPlaybackVideoFrame(element,()=>done()); return; }catch(e){}
     }
     const frameCount=()=>{
       try{
@@ -418,16 +418,16 @@ function freePreparedReplacement(p,state){
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
   state.frameBudgetUpdate=null;
   if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
-  if(spare&&state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
-    try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
+  if(spare&&state.exposeFrameCallbackId!=null)
+    try{ cancelPlaybackVideoFrame(spare,state.exposeFrameCallbackId); }catch(e){}
   state.exposeFrameCallbackId=null;
   const incumbent=state.incumbentElement;
   if(incumbent&&state.handoffFrameCallbackId!=null
-    &&typeof incumbent.cancelVideoFrameCallback==="function")
-    try{ incumbent.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
+    )
+    try{ cancelPlaybackVideoFrame(incumbent,state.handoffFrameCallbackId); }catch(e){}
   state.handoffFrameCallbackId=null;
-  if(spare&&state.warmFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
-    try{ spare.cancelVideoFrameCallback(state.warmFrameCallbackId); }catch(e){}
+  if(spare&&state.warmFrameCallbackId!=null)
+    try{ cancelPlaybackVideoFrame(spare,state.warmFrameCallbackId); }catch(e){}
   state.warmFrameCallbackId=null;
   if(state.framePollTimer!=null){ clearTimeout(state.framePollTimer); state.framePollTimer=null; }
   if(state.frameListener&&spare){
@@ -525,8 +525,8 @@ function cancelPreparedFirstFrame(p){
     try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}
   }
   state.frameListener=null;
-  if(state.frameCallbackId!=null&&spare&&typeof spare.cancelVideoFrameCallback==="function"){
-    try{ spare.cancelVideoFrameCallback(state.frameCallbackId); }catch(e){}
+  if(state.frameCallbackId!=null&&spare){
+    try{ cancelPlaybackVideoFrame(spare,state.frameCallbackId); }catch(e){}
   }
   state.frameCallbackId=null;
   state.frameElement=null;

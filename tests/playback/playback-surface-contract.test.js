@@ -254,6 +254,22 @@ test(`the shipped web reducer runs all ${contract.cases.length} cases`, () => {
   for (const item of contract.cases) checkCase(item, policy, "web");
 });
 
+test("observation withdrawal supplies no presentation credit and retains authority", () => {
+  const item=contract.cases.find(row=>row.name==="observation_unavailable_withdraws_owned_progress_without_presenting_or_stopping");
+  let state=policy.initialSurfaceState();
+  for(const event of item.events){
+    const before=JSON.stringify(state);
+    const step=policy.presentSurface(state,event);
+    assert.equal(JSON.stringify(state),before,"withdrawal cannot mutate an earlier reducer state");
+    state=step.state;
+    assert.equal(state.presenting,false);
+    assert.equal(state.presentingSince,null);
+    assert.ok(state.faults.every(fault=>!fault.playerStopped));
+  }
+  assert.equal(state.faults.length,1);
+  assert.equal(state.faults[0].source,"degraded_notice");
+});
+
 test("a blocking surface is never rendered over a player nobody stopped", () => {
   // The whole point, asserted independently of any one case: replay every
   // case and fail if a blocking surface is ever drawn from a fault that did

@@ -184,6 +184,8 @@ pub(crate) fn spawn(
 ) -> Result<Spawned, String> {
     let mut command = tokio::process::Command::new(program);
     command.args(producer_args(options.progress, args));
+    #[cfg(target_os = "linux")]
+    command.process_group(0);
     configure_ffmpeg_runtime(&mut command, options.runtime_cache);
     for (key, value) in options.env {
         command.env(key, value);

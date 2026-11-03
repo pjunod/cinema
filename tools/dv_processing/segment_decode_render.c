@@ -42,16 +42,9 @@ struct rational {
 static struct rational window_start, window_end;
 static int64_t first_emitted_pts = AV_NOPTS_VALUE,
                last_emitted_end = AV_NOPTS_VALUE, boundary_pts = AV_NOPTS_VALUE;
-struct budget_io {
-  int fd;
-  uint64_t bytes;
-  bool exhausted;
-};
-static struct budget_io movie_io;
+#include "movie_source_io.h"
+static struct budget_io movie_io = {.fd = -1, .upstream = -1};
 static AVIOContext *movie_avio;
-#ifndef WINDOW_READ_LIMIT
-#define WINDOW_READ_LIMIT (128ULL * 1024 * 1024)
-#endif
 
 static FILE *rgb_output, *timing_output;
 static AVFormatContext *nut_output;
@@ -108,6 +101,7 @@ static int video_duration_ns(const char *text, int64_t *duration) {
 static void need(int ok, const char *reason) {
   if (!ok) {
     fprintf(stderr, "Segment refused: %s\n", reason);
+    movie_source_close(&movie_io);
     dv_exit(1);
   }
 }
@@ -163,47 +157,18 @@ static int compare_window(int64_t pts, struct rational value) {
   return av_compare_ts(pts, source_time_base, value.num,
                        (AVRational){1, value.den});
 }
-static int movie_read(void *opaque, uint8_t *buffer, int size) {
-  struct budget_io *io = opaque;
-  if (io->bytes >= WINDOW_READ_LIMIT) {
-    io->exhausted = true;
-    return AVERROR(ENOSPC);
-  }
-  size_t available = (size_t)(WINDOW_READ_LIMIT - io->bytes);
-  if ((size_t)size > available)
-    size = (int)available;
-  ssize_t n;
-  do {
-    n = read(io->fd, buffer, (size_t)size);
-  } while (n < 0 && errno == EINTR);
-  if (n < 0)
-    return AVERROR(errno);
-  if (n == 0)
-    return AVERROR_EOF;
-  io->bytes += (uint64_t)n;
-  return (int)n;
-}
-static int64_t movie_seek(void *opaque, int64_t offset, int whence) {
-  struct budget_io *io = opaque;
-  if (whence & AVSEEK_SIZE) {
-    struct stat st;
-    return fstat(io->fd, &st) == 0 ? st.st_size : AVERROR(errno);
-  }
-  off_t result = lseek(io->fd, (off_t)offset, whence & ~AVSEEK_FORCE);
-  return result < 0 ? AVERROR(errno) : (int64_t)result;
-}
 static void open_movie_io(AVFormatContext *input, const char *source) {
-  movie_io.fd = open(source, O_RDONLY | O_CLOEXEC);
-  struct stat st;
-  need(movie_io.fd >= 0 && fstat(movie_io.fd, &st) == 0 && S_ISREG(st.st_mode),
-       "held seekable regular movie source");
+  need(movie_source_open(&movie_io, source) >= 0,
+       "held seekable movie source or private source capability");
   uint8_t *buffer = av_malloc(65536);
   need(buffer != NULL, "bounded movie IO buffer");
   movie_avio = avio_alloc_context(buffer, 65536, 0, &movie_io, movie_read, NULL,
                                   movie_seek);
+  if (!movie_avio) av_free(buffer);
   need(movie_avio != NULL, "movie IO context");
   input->pb = movie_avio;
   input->flags |= AVFMT_FLAG_CUSTOM_IO;
+  need(movie_source_bind_demuxer(input) >= 0, "closed demux protocol authority");
 }
 // A queued export may still be sampling the decoded surfaces of the frame
 // just rendered; references held here keep the decoder from reusing them
@@ -1101,7 +1066,7 @@ int main(int argc, char **argv) {
   if (movie_avio) {
     av_freep(&movie_avio->buffer);
     avio_context_free(&movie_avio);
-    need(close(movie_io.fd) == 0, "close held movie IO");
+    movie_source_close(&movie_io);
   }
   if (window_mode) {
     printf("{\"kind\":\"window_complete\",\"requested_start\":\"%lld/"

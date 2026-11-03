@@ -43,6 +43,7 @@ use plurx_core::store::background_jobs_library::{
 use plurx_core::store::background_jobs_resources::StorageDomainMapping;
 use plurx_core::store::Store;
 use std::path::PathBuf;
+#[cfg(feature = "hiqlite-contract-tests")]
 use std::sync::Arc;
 
 /// Queue lease length from `background_jobs.rs` (`JOB_LEASE_MS`), pinned so

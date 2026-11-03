@@ -495,6 +495,23 @@ impl Shared {
         canonical_processing_key: Option<(String, Option<Arc<tokio::sync::OwnedSemaphorePermit>>)>,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
+        let source_telemetry = recipe.source_telemetry;
+        if source_telemetry {
+            let existing = {
+                self.renditions
+                    .lock()
+                    .await
+                    .get(key)
+                    .filter(|rendition| {
+                        rendition.failure().is_none() && !rendition.closed.load(Relaxed)
+                    })
+                    .cloned()
+            };
+            if let Some(existing) = existing {
+                existing.source_owners.declare_source_telemetry().await?;
+            }
+        }
+
         // Single-flight only this key. No Store, filesystem, process, manifest,
         // or reader await below owns the node-wide registry mutex.
         let existing = {
@@ -614,6 +631,9 @@ impl Shared {
                 (rendition, true)
             }
         };
+        if source_telemetry {
+            rendition.source_owners.declare_source_telemetry().await?;
+        }
         if installed {
             if rendition.ephemeral_processing {
                 let shared = Arc::clone(self);

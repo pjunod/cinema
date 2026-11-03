@@ -477,6 +477,10 @@ impl VodServe {
                     "the captured processing graph changed",
                 ));
             }
+            drop(cached);
+            if recipe.source_telemetry {
+                rendition.source_owners.declare_source_telemetry().await?;
+            }
             return Ok((
                 RenditionAttachment {
                     rendition,
@@ -890,6 +894,8 @@ impl VodServe {
             video,
         ));
         let recipe = Recipe {
+            source_telemetry: req.source_telemetry
+                == Some(crate::transcode::SourceTelemetry::FilmV1),
             retained_logical: incoming_logical.clone(),
             measured_candidate: prepared.measured_candidate.take(),
             file: file.clone(),
@@ -1333,37 +1339,64 @@ impl VodServe {
             }
         }
         let mut private_media = if continuous {
-            let permits = Self::reserve_media_group(&media, Some(admission_priority)).await?;
+            let deferred = |child: &Arc<Rendition>| {
+                req.continuous_media
+                    .as_ref()
+                    .is_some_and(|media| media.controlled && media.version == 2)
+                    && companion_rendition
+                        .as_ref()
+                        .is_some_and(|companion| Arc::ptr_eq(companion, child))
+            };
+            let admitted = media
+                .iter()
+                .filter(|child| !deferred(child))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut permits = Self::reserve_media_group(&admitted, Some(admission_priority))
+                .await?
+                .into_iter();
             media
                 .into_iter()
-                .zip(permits)
-                .map(|(child, permit)| ParentMediaReader {
-                    controlled: req
-                        .continuous_media
-                        .as_ref()
-                        .is_some_and(|media| media.controlled)
-                        && child
-                            .recipe
-                            .encoding
-                            .as_ref()
-                            .is_some_and(|encoding| encoding.shared_audio.is_none()),
-                    candidate_id: if Arc::ptr_eq(&child, &rendition) {
-                        req.candidate_context
-                            .as_ref()
-                            .map(|context| context.candidate_id)
-                    } else if companion_rendition
-                        .as_ref()
-                        .is_some_and(|companion| Arc::ptr_eq(&child, companion))
-                    {
-                        req.continuous_media
-                            .as_ref()
-                            .and_then(|media| media.autonomous_companion)
-                    } else {
+                .map(|child| {
+                    let companion_bootstrap = deferred(&child);
+                    let permit = if companion_bootstrap {
                         None
-                    },
-                    reader_id: uuid::Uuid::new_v4().to_string(),
-                    rendition: child,
-                    _reservation: Some(permit),
+                    } else {
+                        permits.next()
+                    };
+                    ParentMediaReader {
+                        versioned_family: req
+                            .continuous_media
+                            .as_ref()
+                            .is_some_and(|media| media.version == 2),
+                        companion_bootstrap,
+                        controlled: req
+                            .continuous_media
+                            .as_ref()
+                            .is_some_and(|media| media.controlled)
+                            && child
+                                .recipe
+                                .encoding
+                                .as_ref()
+                                .is_some_and(|encoding| encoding.shared_audio.is_none()),
+                        candidate_id: if Arc::ptr_eq(&child, &rendition) {
+                            req.candidate_context
+                                .as_ref()
+                                .map(|context| context.candidate_id)
+                        } else if companion_rendition
+                            .as_ref()
+                            .is_some_and(|companion| Arc::ptr_eq(&child, companion))
+                        {
+                            req.continuous_media
+                                .as_ref()
+                                .and_then(|media| media.autonomous_companion)
+                        } else {
+                            None
+                        },
+                        reader_id: uuid::Uuid::new_v4().to_string(),
+                        rendition: child,
+                        _reservation: permit,
+                    }
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -1661,8 +1694,17 @@ impl VodServe {
             );
             if Arc::ptr_eq(&child.rendition, &rendition) {
                 replacement_readers.insert(child.reader_id.clone(), {
-                    let mut reader = Reader::with_priority(entry, admission_priority);
+                    let mut reader = Reader::with_priority(
+                        entry,
+                        if child.companion_bootstrap {
+                            crate::admission::Priority::Speculative
+                        } else {
+                            admission_priority
+                        },
+                    );
                     reader.nonpreemptive_trial = nonpreemptive_trial;
+                    reader.companion_bootstrap = child.companion_bootstrap;
+                    reader.authority_only = child.companion_bootstrap;
                     reader
                 });
             } else {
@@ -1676,8 +1718,17 @@ impl VodServe {
                 }
                 .expect("private media reader guard");
                 readers.insert(child.reader_id.clone(), {
-                    let mut reader = Reader::with_priority(entry, admission_priority);
+                    let mut reader = Reader::with_priority(
+                        entry,
+                        if child.companion_bootstrap {
+                            crate::admission::Priority::Speculative
+                        } else {
+                            admission_priority
+                        },
+                    );
                     reader.nonpreemptive_trial = nonpreemptive_trial;
+                    reader.companion_bootstrap = child.companion_bootstrap;
+                    reader.authority_only = child.companion_bootstrap;
                     reader
                 });
                 *child.rendition.dormant_since.lock().expect("dormant lock") = None;
@@ -2814,6 +2865,8 @@ impl VodServe {
             ));
         }
         let recipe = Recipe {
+            source_telemetry: req.source_telemetry
+                == Some(crate::transcode::SourceTelemetry::FilmV1),
             measured_candidate: None,
             retained_logical: None,
             audio_delivery: prepared
@@ -2980,6 +3033,7 @@ mod principal_demand_tests {
             None,
         );
         let request = SessionRequest {
+            source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,
             control_sequence: None,

@@ -331,6 +331,9 @@ pub struct CreateSession {
     /// user agent, and must choose the conservative class whenever its
     /// transport could still fall back within the session.
     pub transport: Option<String>,
+    /// Explicit film-demand reporting; omission retains the legacy transfer
+    /// service class until actual accepted telemetry establishes film control.
+    pub source_telemetry: Option<crate::transcode::SourceTelemetry>,
 }
 
 /// A separate route prevents older parsers from silently accepting the
@@ -349,7 +352,7 @@ pub struct CreateContinuousFamily {
 
 impl CreateContinuousFamily {
     pub(super) fn valid(&self) -> bool {
-        self.version == 1
+        (self.version == 1 || self.version == 2 && self.controlled)
             && uuid::Uuid::parse_str(&self.family_generation).is_ok()
             && self.primary_candidate_id != self.companion_candidate_id
             && self.start.caps.is_some()
@@ -582,6 +585,7 @@ impl ContinuousQualityBootstrap {
 
 #[derive(Clone)]
 struct ContinuousFamilyStart {
+    version: u8,
     controlled: bool,
     family_generation: String,
     primary_candidate_id: plurx_core::playback::candidate::CandidateId,
@@ -717,6 +721,9 @@ impl CreateSession {
             presentation: crate::transcode::Presentation::Vod,
             block_budget_secs: self.block_budget_secs.filter(|s| s.is_finite() && *s > 0.0),
             transport,
+            source_telemetry: self
+                .source_telemetry
+                .filter(|value| *value == crate::transcode::SourceTelemetry::FilmV1),
         }
     }
 }
@@ -2378,7 +2385,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
                 companion_context.canonical_caps = Some(caps.clone());
                 companion_context.planning_binding = companion.binding.clone();
                 continuous_media = Some(Box::new(crate::transcode::ContinuousMediaRequest {
-                    version: 1,
+                    version: u32::from(family.version),
                     controlled: family.controlled,
                     family_generation: family.family_generation.clone(),
                     role: crate::transcode::ContinuousMediaRole::Video,
@@ -2683,6 +2690,7 @@ pub async fn create_continuous(
         ));
     }
     let purpose = ContinuousFamilyStart {
+        version: body.version,
         controlled: body.controlled,
         family_generation: body.family_generation,
         primary_candidate_id: body.primary_candidate_id,
@@ -3868,6 +3876,14 @@ async fn create_with_purpose_inner(
             .map(String::as_str),
         true,
     );
+
+    // A capability announcement cannot promise a channel the server disabled.
+    // Quality reports do not currently populate the replay-fenced, fresh
+    // film demand consumed by source sharing. Until that actual observation
+    // path is wired, control-off families use finite transfer service too.
+    if !advertise_control {
+        request.source_telemetry = None;
+    }
 
     let quality_enabled = continuous.is_some()
         || planning_snapshot

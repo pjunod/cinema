@@ -1344,6 +1344,7 @@ impl Drop for SourceReadFile {
 struct SourceFileReader {
     file: std::sync::Mutex<SourceReadFile>,
     guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,
+    _source_custody: Option<crate::source_custody::SourceCustody>,
 }
 static SOURCE_READ_JOBS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)));
@@ -1354,6 +1355,16 @@ async fn source_file_body(
     start: Option<u64>,
     #[cfg(test)] gate: Option<std::sync::Arc<SourceReadJobGate>>,
 ) -> Result<axum::body::Body, ApiError> {
+    let source_custody = match &guard.source_request {
+        Some(request) => Some(
+            request
+                .register(format!("range-{}-{len}", start.unwrap_or(0)))
+                .await
+                .map_err(|_| unavailable())?,
+        ),
+        None => None,
+    };
+    let source_observer = source_custody.as_ref().map(|custody| custody.observer());
     let conversion_guard = std::sync::Arc::clone(&guard);
     // Tokio may already own an outstanding blocking operation. The conversion
     // task is detached from waiter cancellation and holds the real barrier until
@@ -1371,6 +1382,7 @@ async fn source_file_body(
                 gate,
             }),
             guard: conversion_guard,
+            _source_custody: source_custody,
         }))
     });
     let reader = tokio::select! {biased;
@@ -1378,10 +1390,38 @@ async fn source_file_body(
         result=conversion=>result.map_err(|_|unavailable())?.map_err(|_|unavailable())?,
     };
     let stream = futures_util::stream::try_unfold(
-        (reader, len),
-        |(reader, remaining)| async move {
+        (
+            reader,
+            len,
+            source_observer,
+            None::<plurx_core::store::background_jobs_resources::SourceServiceGrant>,
+            0_u64,
+        ),
+        |(reader, remaining, observer, mut grant, mut used)| async move {
             if remaining == 0 {
                 return Ok(None);
+            }
+            if let (Some(observer), Some(current)) = (&observer, &grant) {
+                let now = crate::fragment_index_cluster::unix_ms();
+                if used >= current.foreground_bytes && now < current.expires_at_ms {
+                    observer.idle().await.map_err(std::io::Error::other)?;
+                    tokio::select! { biased;
+                        ()=reader.guard.cancelled()=>return Err(std::io::Error::other("Source body retired")),
+                        ()=tokio::time::sleep(std::time::Duration::from_millis((current.expires_at_ms-now) as u64))=>{},
+                    }
+                }
+                if used >= current.foreground_bytes
+                    || crate::fragment_index_cluster::unix_ms() >= current.expires_at_ms
+                {
+                    observer.refill().await.map_err(std::io::Error::other)?;
+                    grant = Some(
+                        observer
+                            .transfer_epoch()
+                            .await
+                            .map_err(std::io::Error::other)?,
+                    );
+                    used = 0;
+                }
             }
             // Wait for a read slot rather than failing a live body: a long
             // direct body and a segment share these slots. Retirement still
@@ -1391,8 +1431,16 @@ async fn source_file_body(
                 permit=std::sync::Arc::clone(&SOURCE_READ_JOBS).acquire_owned()=>permit.map_err(|_| std::io::Error::other("Source read capacity"))?,
             };
             let job_reader = std::sync::Arc::clone(&reader);
-            let size = remaining.min(64 * 1024) as usize;
+            let allowance = grant.as_ref().map_or(64 * 1024, |grant| {
+                grant.foreground_bytes.saturating_sub(used)
+            });
+            let size = remaining.min(64 * 1024).min(allowance) as usize;
+            let read_activity = match &observer {
+                Some(observer) => Some(observer.begin_read().await.map_err(std::io::Error::other)?),
+                None => None,
+            };
             let job = tokio::task::spawn_blocking(move || {
+                let read_activity = read_activity;
                 use std::io::Read;
                 let _permit = permit;
                 let mut bytes = vec![0; size];
@@ -1416,6 +1464,11 @@ async fn source_file_body(
                         .store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 bytes.truncate(n);
+                if n > 0 {
+                    if let Some(activity) = &read_activity {
+                        activity.completed();
+                    }
+                }
                 Ok::<_, std::io::Error>(bytes)
             });
             let bytes = tokio::select! {biased;
@@ -1428,8 +1481,22 @@ async fn source_file_body(
                     "Source resource truncated",
                 ));
             }
-            let remaining = remaining - bytes.len() as u64;
-            Ok(Some((bytes::Bytes::from(bytes), (reader, remaining))))
+            if grant.is_none() {
+                if let Some(observer) = &observer {
+                    grant = Some(
+                        observer
+                            .transfer_epoch()
+                            .await
+                            .map_err(std::io::Error::other)?,
+                    );
+                }
+            }
+            let count = bytes.len() as u64;
+            let remaining = remaining - count;
+            Ok(Some((
+                bytes::Bytes::from(bytes),
+                (reader, remaining, observer, grant, used + count),
+            )))
         },
     );
     Ok(axum::body::Body::from_stream(stream))

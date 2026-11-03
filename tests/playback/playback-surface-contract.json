@@ -366,7 +366,8 @@
     "A fault whose `attached` generation is retired stops being about anything and is dropped (`surface_cleared {by: attached_retired}`). That is identity, not one of the class's `retired_by` rules, so it applies to blocking faults too — otherwise a `stopped` prompt would outlive the attempt it described and sit over the next one.",
     "A retirement reason normally comes from the CLASS, but a source may declare an explicit `retired_by` override when its lifecycle is narrower. `system_interruption` uses that override because `system_resumed` retires that hold without retiring unrelated holds. `attached_retired` is an identity rule rather than either kind of retirement declaration, and the note above says why.",
     "`owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced.",
-    "`playback_not_requested` is the viewer no longer wanting media. A `buffering` fault is about a player that WANTS it — the wait is only a wait while something is trying to play — so a pause makes the fault about nothing and it is retired. It is on `buffering` and on no other class: a `preparing` start has not been paused by a viewer who has not seen it yet, and a blocking prompt is answered by the viewer rather than by a transport change. Resuming raises nothing back; the raise sites decide what comes back, which is the same rule every other retirement follows."
+    "`playback_not_requested` is the viewer no longer wanting media. A `buffering` fault is about a player that WANTS it — the wait is only a wait while something is trying to play — so a pause makes the fault about nothing and it is retired. It is on `buffering` and on no other class: a `preparing` start has not been paused by a viewer who has not seen it yet, and a blocking prompt is answered by the viewer rather than by a transport change. Resuming raises nothing back; the raise sites decide what comes back, which is the same rule every other retirement follows.",
+    "observation_unavailable carries an observation owner plus exact attached generation and viewer intent (including null). It withdraws only explicitly tagged client_preparing, media_waiting, owner_recovery_step or readiness_deadline_rungs_left faults in preparing/buffering/recovering; never authority, player_stopped faults, presentation proof, or owner success."
   ],
   "log_events": [
     "surface_raised",
@@ -3407,6 +3408,353 @@
           "surface": "blocking",
           "class": "stopped",
           "input_failed": true
+        }
+      ]
+    },
+    {
+      "name": "observation_unavailable_withdraws_owned_progress_without_presenting_or_stopping",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "raise": "client_preparing",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i1",
+          "observation_owner": "o1"
+        },
+        {
+          "t": 1,
+          "raise": "media_waiting",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i1",
+          "observation_owner": "o1"
+        },
+        {
+          "t": 2,
+          "raise": "owner_recovery_step",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i1",
+          "observation_owner": "o1"
+        },
+        {
+          "t": 3,
+          "raise": "readiness_deadline_rungs_left",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i1",
+          "observation_owner": "o1"
+        },
+        {
+          "t": 45000,
+          "observation_unavailable": "o1",
+          "attached": "g1",
+          "intent": "i1"
+        },
+        {
+          "t": 45000,
+          "raise": "degraded_notice",
+          "context": "attached",
+          "attached": "g1",
+          "title": "Playback observation is unavailable.",
+          "actions": [
+            "retry",
+            "close"
+          ]
+        },
+        {
+          "t": 90000,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 3,
+          "surface": "blocking",
+          "class": "recovering"
+        },
+        {
+          "at": 45000,
+          "surface": "banner",
+          "class": "degraded",
+          "actions": [
+            "retry",
+            "close"
+          ],
+          "input_failed": false
+        },
+        {
+          "at": 90000,
+          "surface": "banner",
+          "class": "degraded",
+          "actions": [
+            "retry",
+            "close"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "observation_withdrawal_is_fenced_by_generation_owner_and_exact_intent",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "raise": "client_preparing",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i1",
+          "observation_owner": "o1",
+          "title": "first"
+        },
+        {
+          "t": 1,
+          "raise": "client_preparing",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i1",
+          "observation_owner": "o2",
+          "title": "other owner"
+        },
+        {
+          "t": 2,
+          "raise": "client_preparing",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i2",
+          "observation_owner": "o1",
+          "title": "new intent"
+        },
+        {
+          "t": 3,
+          "observation_unavailable": "o1",
+          "attached": "g1",
+          "intent": "i1"
+        },
+        {
+          "t": 4,
+          "observation_unavailable": "o1",
+          "attached": "g2",
+          "intent": "i2"
+        },
+        {
+          "t": 5,
+          "observation_unavailable": "unknown",
+          "attached": "g1",
+          "intent": "i2"
+        },
+        {
+          "t": 6,
+          "observation_unavailable": "o1",
+          "attached": "g1",
+          "intent": "i1"
+        },
+        {
+          "t": 7,
+          "observation_unavailable": "o1",
+          "attached": "g1",
+          "intent": "i2"
+        },
+        {
+          "t": 8,
+          "observation_unavailable": "o2",
+          "attached": "g1",
+          "intent": "i1"
+        },
+        {
+          "t": 9,
+          "attach": "g2"
+        },
+        {
+          "t": 9,
+          "raise": "client_preparing",
+          "context": "attached",
+          "attached": "g2",
+          "intent": "i2",
+          "observation_owner": "o1",
+          "title": "successor"
+        },
+        {
+          "t": 10,
+          "observation_unavailable": "o1",
+          "attached": "g1",
+          "intent": "i2"
+        }
+      ],
+      "expect": [
+        {
+          "at": 3,
+          "surface": "blocking",
+          "title": "new intent"
+        },
+        {
+          "at": 4,
+          "surface": "blocking",
+          "title": "new intent"
+        },
+        {
+          "at": 5,
+          "surface": "blocking",
+          "title": "new intent"
+        },
+        {
+          "at": 6,
+          "surface": "blocking",
+          "title": "new intent"
+        },
+        {
+          "at": 7,
+          "surface": "blocking",
+          "title": "other owner"
+        },
+        {
+          "at": 8,
+          "surface": "none"
+        },
+        {
+          "at": 10,
+          "surface": "blocking",
+          "title": "successor"
+        }
+      ]
+    },
+    {
+      "name": "observation_withdrawal_never_clears_authority_or_a_stopped_owner",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "raise": "client_preparing",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i1",
+          "observation_owner": "o1"
+        },
+        {
+          "t": 1,
+          "raise": "segment_503_not_yet",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i1",
+          "observation_owner": "o1",
+          "title": "server pending"
+        },
+        {
+          "t": 2,
+          "raise": "media_owner_lost_410",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i1",
+          "observation_owner": "o1",
+          "title": "authority lost"
+        },
+        {
+          "t": 3,
+          "raise": "auth_401_403",
+          "context": "attached",
+          "attached": "g1",
+          "intent": "i1",
+          "observation_owner": "o1",
+          "title": "permission refused",
+          "player_stopped": true
+        },
+        {
+          "t": 4,
+          "observation_unavailable": "o1",
+          "attached": "g1",
+          "intent": "i1"
+        },
+        {
+          "t": 5,
+          "user_action": "close"
+        },
+        {
+          "t": 6,
+          "tick": true
+        }
+      ],
+      "expect": [
+        {
+          "at": 4,
+          "surface": "blocking",
+          "class": "stopped",
+          "title": "permission refused",
+          "actions": [
+            "sign_in",
+            "close"
+          ],
+          "input_failed": true
+        },
+        {
+          "at": 5,
+          "surface": "blocking",
+          "class": "recovering",
+          "title": "authority lost"
+        },
+        {
+          "at": 6,
+          "surface": "blocking",
+          "class": "recovering",
+          "title": "authority lost"
+        }
+      ]
+    },
+    {
+      "name": "untagged_observations_cannot_be_withdrawn_by_an_unknown_owner",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 0,
+          "raise": "client_preparing",
+          "context": "attached",
+          "attached": "g1",
+          "title": "untagged"
+        },
+        {
+          "t": 1,
+          "observation_unavailable": "o1",
+          "attached": "g1"
+        },
+        {
+          "t": 2,
+          "observation_unavailable": "",
+          "attached": "g1"
+        },
+        {
+          "t": 3,
+          "observation_unavailable": "o1",
+          "attached": "g2"
+        }
+      ],
+      "expect": [
+        {
+          "at": 1,
+          "surface": "blocking",
+          "title": "untagged"
+        },
+        {
+          "at": 2,
+          "surface": "blocking",
+          "title": "untagged"
+        },
+        {
+          "at": 3,
+          "surface": "blocking",
+          "title": "untagged"
         }
       ]
     }

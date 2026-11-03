@@ -649,9 +649,10 @@ fn continuous_media_is_autonomous(controlled: &bool) -> bool {
 
 impl ContinuousMediaRequest {
     pub fn valid_for(&self, request: &SessionRequest) -> bool {
-        self.version == 1
+        (self.version == 1 || self.version == 2 && self.controlled)
             && self.family_descriptor.as_ref().is_none_or(|description| {
                 description.valid()
+                    && u32::from(description.version) == self.version
                     && description.mode
                         == if self.controlled {
                             "controlled"
@@ -659,12 +660,13 @@ impl ContinuousMediaRequest {
                             "autonomous_reserved"
                         }
                     && self.role == ContinuousMediaRole::Video
-                    && self.autonomous_companion.is_some_and(|companion| {
-                        description
-                            .video
-                            .iter()
-                            .any(|row| row.candidate_id == companion)
-                    })
+                    && (description.version == 2 && description.video.len() == 1
+                        || self.autonomous_companion.is_some_and(|companion| {
+                            description
+                                .video
+                                .iter()
+                                .any(|row| row.candidate_id == companion)
+                        }))
                     && request.candidate_context.as_ref().is_none_or(|primary| {
                         description
                             .video
@@ -710,6 +712,16 @@ impl ContinuousMediaRequest {
                     })
             })
     }
+}
+
+/// A client's explicit promise to report accepted film demand. This is source
+/// service metadata, independent of HLS teardown and media recipe identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SourceTelemetry {
+    #[serde(rename = "film-v1")]
+    FilmV1,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -827,6 +839,8 @@ pub struct SessionRequest {
     /// recipe and a new node's recipe for the same request are byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_telemetry: Option<SourceTelemetry>,
 }
 
 /// How long a retired presentation is kept readable after the exact viewer

@@ -91,6 +91,8 @@ mod sharing_host;
 mod sharing_network;
 #[cfg(test)]
 mod sharing_protocol_fixture;
+mod source_custody;
+mod source_input;
 mod source_probe;
 mod state;
 mod store_result;

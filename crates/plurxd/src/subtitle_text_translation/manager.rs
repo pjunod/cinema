@@ -489,7 +489,8 @@ pub(crate) async fn worker_pass(
                 .ok_or_else(|| failure("worker_interrupted"))?,
             deadline,
             source.kind(),
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
         let operation = plurx_core::process::bounded::cancellable(

@@ -612,7 +612,8 @@ async fn pass(
                 .ok_or_else(|| StoreError::Task("copy claim missing token".into()))?,
             deadline,
             JobKind::ArtifactHydrate,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
         let result = {

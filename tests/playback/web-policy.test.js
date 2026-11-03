@@ -845,9 +845,7 @@ test("the rejection report carries the join, whatever the path built it", () => 
 
   // And both call sites go through it, so neither can drift back to spelling
   // the fields out — which is what made the old test a grep in the first place.
-  const wire = SHIPPED_UI.slice(
-    SHIPPED_UI.indexOf('v.addEventListener("error"'),
-  ).slice(0, 4000);
+  const wire = shippedSource("wirePlayerMedia");
   for (const [name, source] of [
     ["hls.js", shippedSource("onHlsError")],
     ["<video>", wire],

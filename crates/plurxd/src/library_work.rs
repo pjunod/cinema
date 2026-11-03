@@ -7,6 +7,8 @@ use plurx_core::store::background_jobs_library::{
 };
 #[path = "library_work/env.rs"]
 mod env;
+#[path = "library_work/probe_input.rs"]
+mod probe_input;
 
 impl JobManager {
     pub(super) async fn trigger(

@@ -15,7 +15,7 @@ ASSUME Backend \in {"sqlite", "hiqlite"}
 ASSUME Mutation \in {"none", "binding_ignored", "replay_fresh_fence",
                      "renewal_revives_cancel", "retry_stalls"}
 ASSUME Scenario \in {"fresh", "recovery"}
-ASSUME Fragment \in {"all", "claim", "publication", "binding", "renewal", "retention"}
+ASSUME Fragment \in {"all", "claim", "publication", "binding", "renewal", "retention", "source_pause"}
 ASSUME MaxBoots >= 2 /\ MaxClaims >= 2
 
 Samples == 0..3
@@ -33,6 +33,7 @@ NoLease == [owner |-> No, fence |-> 0, revision |-> 0, exp |-> 0]
 NoBinding == [exists |-> FALSE, job |-> No, node |-> No, boot |-> 0,
               claim |-> 0, jobFence |-> 0, domainFence |-> 0]
 NoRequest == [kind |-> No]
+NoPause == [phase |-> "none", identity |-> NoToken, renewed |-> FALSE, replayed |-> FALSE]
 Max(a,b) == IF a >= b THEN a ELSE b
 Min(a,b) == IF a <= b THEN a ELSE b
 
@@ -40,12 +41,12 @@ VARIABLES fragment, jobs, attempts, held, domain, binding, removed,
           workerBoot, tokens, localLease, phase, requests, publications,
           items, nextClaim, ledger, environment, renewed, domainChanged,
           replayed, resolved, pruned, compacted, retired, quorum,
-          now, polled, oldReply, recoveryDelay, claimRecords, callStarted, events
+          now, polled, oldReply, recoveryDelay, claimRecords, callStarted, sourceKey, sourcePause, events
 vars == <<fragment, jobs, attempts, held, domain, binding, removed,
           workerBoot, tokens, localLease, phase, requests, publications,
           items, nextClaim, ledger, environment, renewed, domainChanged,
           replayed, resolved, pruned, compacted, retired, quorum,
-          now, polled, oldReply, recoveryDelay, claimRecords, callStarted, events>>
+          now, polled, oldReply, recoveryDelay, claimRecords, callStarted, sourceKey, sourcePause, events>>
 
 JobType == [exists : BOOLEAN,
             state : {"queued","running","cancelling","cancelled","failed"},
@@ -72,6 +73,10 @@ BindingFor(j,d) == [exists |-> TRUE, job |-> j, node |-> jobs[j].owner.node,
 RowsCover(js, hs, j) == \A k \in ResourceKeys : \E r \in hs :
   r.job = j /\ r.fence = js[j].fence /\ r.key = k /\ r.exp >= js[j].exp
 Cover(j) == RowsCover(jobs,held,j)
+Paused(j) == sourcePause.phase = "paused" /\ sourcePause.identity = StableTuple(j)
+RenewCover(j) == \A k \in ResourceKeys :
+  (\E r \in held : r.job=j /\ r.fence=jobs[j].fence /\ r.key=k /\ r.exp>=jobs[j].exp)
+  \/ (k=sourceKey /\ Paused(j))
 Exact(t) == IF t=NoToken THEN FALSE ELSE jobs[t.job].exists /\ t = Token(t.job)
 SameExceptRevision(t) == t/=NoToken /\ jobs[t.job].exists /\
   TokenTuple(t) = StableTuple(t.job) /\ t.exp = jobs[t.job].exp
@@ -104,11 +109,11 @@ InitCommon ==
   /\ resolved = [w \in Workers |-> FALSE]
   /\ pruned = FALSE /\ compacted = FALSE /\ retired = FALSE /\ quorum = TRUE
   /\ now = 0 /\ polled = FALSE /\ oldReply = FALSE
+  /\ sourceKey \in ResourceKeys /\ sourcePause = NoPause
   /\ callStarted = FALSE
   /\ events = 0
 
   /\ requests = [w \in Workers |-> NoRequest]
-  /\ claimRecords = [w \in Workers |-> NoRequest]
   /\ publications = [w \in Workers |-> [precheck |-> -1, successor |-> -1,
        backend |-> -1, samples |-> <<>>, pred |-> NoLease, repl |-> NoLease,
        left |-> 4, outcome |-> No, committed |-> FALSE,refusalSample |-> -1,boot |-> 0]]
@@ -138,6 +143,9 @@ InitFresh ==
           ELSE BindingFor(j,domain)
      /\ phase = [v \in Workers |-> IF v=w /\ fragment/="claim"
           THEN IF fragment="binding" THEN "unbound" ELSE "ready" ELSE "idle"]
+     /\ claimRecords = [v \in Workers |-> IF fragment="source_pause" /\ v=w THEN
+          [kind |-> "claim_read",job |-> j,node |-> w,boot |-> b,claim |-> c,
+           expected |-> c+1,dispatched |-> 0,sample |-> 0] ELSE NoRequest]
      /\ attempts = IF fragment="claim" THEN {} ELSE
           {[job |-> j,claim |-> c,node |-> w,boot |-> b,fence |-> c+1,
             resolveUntil |-> 2,finished |-> FALSE]} \cup
@@ -150,6 +158,7 @@ InitFresh ==
 
 InitRecovery ==
   /\ InitCommon
+  /\ claimRecords = [w \in Workers |-> NoRequest]
   /\ nextClaim = 2
   /\ fragment = "recovery"
   /\ recoveryDelay \in {YieldMs,RetryMs}
@@ -177,7 +186,7 @@ Cancel(j) ==
   /\ jobs' = [jobs EXCEPT ![j].state = IF @ = "running" THEN "cancelling" ELSE "cancelled",
                ![j].revision = @ + 1, ![j].demand = FALSE]
   /\ environment' = TRUE
-  /\ UNCHANGED <<fragment,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        phase,requests,publications,items,nextClaim,ledger,renewed,domainChanged,replayed,resolved,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 Remove(w) ==
@@ -186,14 +195,14 @@ Remove(w) ==
   /\ domain' = IF domain.owner = w THEN [domain EXCEPT !.owner = No,
                           !.revision = @+1, !.exp = Min(@,0)] ELSE domain
   /\ environment' = TRUE
-  /\ UNCHANGED <<fragment,jobs,attempts,held,binding,workerBoot,tokens,localLease,phase,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,binding,workerBoot,tokens,localLease,phase,
        requests,publications,items,nextClaim,ledger,renewed,domainChanged,replayed,resolved,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 LoseResource(k) ==
   /\ ~environment
   /\ held' = {r \in held : r.key /= k}
   /\ environment' = TRUE
-  /\ UNCHANGED <<fragment,jobs,attempts,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,domain,binding,removed,workerBoot,tokens,localLease,
        phase,requests,publications,items,nextClaim,ledger,renewed,domainChanged,replayed,resolved,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 Takeover(j,w,b,c,sample) ==
@@ -208,12 +217,12 @@ Takeover(j,w,b,c,sample) ==
        {[job |-> j,fence |-> jobs[j].fence+1,key |-> k,exp |-> sample+LeaseMs] : k \in ResourceKeys}
   /\ ledger' = [ledger EXCEPT ![c] = [job |-> j,node |-> w,boot |-> b,claim |-> c,fence |-> jobs[j].fence+1]]
   /\ nextClaim' = c+1 /\ environment' = TRUE
-  /\ UNCHANGED <<fragment,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
        publications,items,renewed,domainChanged,replayed,resolved,pruned,compacted,retired,
        quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 Outage ==
   /\ ~environment /\ quorum /\ quorum' = FALSE /\ environment' = TRUE
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        phase,requests,publications,items,nextClaim,ledger,renewed,domainChanged,replayed,resolved,
        pruned,compacted,retired,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 
@@ -225,8 +234,34 @@ Restart(w) ==
   /\ tokens'=[tokens EXCEPT ![w]=NoToken]
   /\ localLease'=[localLease EXCEPT ![w]=NoLease]
   /\ environment'=TRUE
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,phase,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,phase,
        requests,publications,items,nextClaim,ledger,renewed,domainChanged,replayed,resolved,
+       pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
+
+\* One exact stable source-owner pause/reacquisition pair per execution.
+\* Physical stop/join, byte service and foreground-pressure veto are external.
+PauseSource(w,sample) ==
+  /\ quorum /\ sourcePause.phase="none" /\ tokens[w]/=NoToken
+  /\ LET t==tokens[w] j==t.job IN
+     /\ jobs[j].exists /\ TokenTuple(t)=StableTuple(j)
+     /\ jobs[j].state="running" /\ jobs[j].exp>sample /\ t.node \notin removed
+     /\ \E h \in held : h.job=j /\ h.fence=t.fence /\ h.key=sourceKey
+     /\ held'={h \in held : ~(h.job=j /\ h.fence=t.fence /\ h.key=sourceKey)}
+     /\ sourcePause'=[phase |-> "paused",identity |-> StableTuple(j),renewed |-> FALSE,replayed |-> FALSE]
+  /\ UNCHANGED <<sourceKey,fragment,jobs,attempts,domain,binding,removed,workerBoot,tokens,localLease,
+       phase,requests,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,
+       pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
+ResumeSource(w,sample) ==
+  /\ quorum /\ tokens[w]/=NoToken
+  /\ LET t==tokens[w] j==t.job IN
+     /\ jobs[j].exists /\ TokenTuple(t)=StableTuple(j) /\ Paused(j)
+     /\ jobs[j].state="running" /\ jobs[j].exp>sample /\ t.node \notin removed
+     /\ Cardinality({h \in held : h.key=sourceKey /\ h.exp>sample /\ h.job/=j})<2
+     /\ held'={h \in held : h.exp>sample} \cup
+          {[job |-> j,fence |-> t.fence,key |-> sourceKey,exp |-> jobs[j].exp]}
+     /\ sourcePause'=[sourcePause EXCEPT !.phase="active"]
+  /\ UNCHANGED <<sourceKey,fragment,jobs,attempts,domain,binding,removed,workerBoot,tokens,localLease,
+       phase,requests,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 
 \* An exact request can remain queued while cancellation changes revision.
@@ -234,7 +269,7 @@ SendRenew(w,sample) ==
   /\ ~renewed /\ tokens[w] /= NoToken /\ requests[w] = NoRequest
   /\ requests' = [requests EXCEPT ![w] = [kind |-> "renew",token |-> tokens[w],sample |-> sample]]
   /\ renewed' = TRUE
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,
        localLease,phase,publications,items,nextClaim,ledger,environment,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 ApplyRenew(w) ==
@@ -243,20 +278,21 @@ ApplyRenew(w) ==
          ok == /\ (IF Mutation = "renewal_revives_cancel" THEN SameExceptRevision(t) ELSE Exact(t))
                /\ (jobs[j].state = "running" \/
                     (Mutation = "renewal_revives_cancel" /\ jobs[j].state = "cancelling"))
-               /\ jobs[j].exp > r.sample /\ Cover(j) /\ t.node \notin removed
+               /\ jobs[j].exp > r.sample /\ RenewCover(j) /\ t.node \notin removed
          row == [jobs[j] EXCEPT !.state = "running",!.revision = @+1,!.exp = r.sample+LeaseMs]
          fresh == [t EXCEPT !.revision = row.revision,!.exp = row.exp]
      IN /\ jobs' = IF ok THEN [jobs EXCEPT ![j] = row] ELSE jobs
         /\ held' = IF ok THEN {IF h.job=j THEN [h EXCEPT !.exp=row.exp] ELSE h : h \in held} ELSE held
         /\ requests' = [requests EXCEPT ![w] = [kind |-> "renew_reply",ok |-> ok,token |-> fresh]]
-  /\ UNCHANGED <<fragment,attempts,domain,binding,removed,workerBoot,tokens,localLease,
+        /\ sourcePause' = IF ok /\ Paused(j) THEN [sourcePause EXCEPT !.renewed=TRUE] ELSE sourcePause
+  /\ UNCHANGED <<sourceKey,fragment,attempts,domain,binding,removed,workerBoot,tokens,localLease,
        phase,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 DeliverRenew(w) ==
   /\ requests[w].kind = "renew_reply"
   /\ tokens' = IF requests[w].ok /\ requests[w].token.boot=workerBoot[w] THEN [tokens EXCEPT ![w] = requests[w].token] ELSE tokens
   /\ requests' = [requests EXCEPT ![w] = NoRequest]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,localLease,
        phase,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 
@@ -270,7 +306,7 @@ DomainChange(w,sample,kind) ==
      IN /\ domain' = IF ok THEN repl ELSE domain
         /\ localLease' = IF ok THEN [localLease EXCEPT ![w] = repl] ELSE localLease
   /\ domainChanged' = TRUE
-  /\ UNCHANGED <<fragment,jobs,attempts,held,binding,removed,workerBoot,tokens,phase,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,binding,removed,workerBoot,tokens,phase,
        requests,publications,items,nextClaim,ledger,environment,renewed,replayed,resolved,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 
@@ -284,7 +320,7 @@ BindAttempt(w,sample) ==
      IN /\ binding'=IF ok THEN BindingFor(t.job,l) ELSE binding
         /\ phase'=[phase EXCEPT ![w]=IF ok THEN "ready" ELSE "bind_refused"]
   /\ publications'=[publications EXCEPT ![w].refusalSample=sample]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,removed,workerBoot,tokens,localLease,requests,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,removed,workerBoot,tokens,localLease,requests,
        items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,pruned,
        compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 RefusalRelease(w,sample) ==
@@ -292,7 +328,7 @@ RefusalRelease(w,sample) ==
   /\ domain'=IF domain=localLease[w] THEN [domain EXCEPT !.exp=Min(@,sample),!.revision=@+1] ELSE domain
   /\ phase'=[phase EXCEPT ![w]="refusal_settle"]
   /\ localLease'=[localLease EXCEPT ![w]=NoLease]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,binding,removed,workerBoot,tokens,requests,publications,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,binding,removed,workerBoot,tokens,requests,publications,
        items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,pruned,
        compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 RefusalSettle(w,sample) ==
@@ -303,7 +339,7 @@ RefusalSettle(w,sample) ==
      /\ held'=IF ok THEN {h \in held : h.job/=j} ELSE held
      /\ attempts'=IF ok THEN {IF a.job=j /\ a.fence=t.fence THEN [a EXCEPT !.finished=TRUE] ELSE a : a \in attempts} ELSE attempts
   /\ phase'=[phase EXCEPT ![w]="yielded"]
-  /\ UNCHANGED <<fragment,domain,binding,removed,workerBoot,tokens,localLease,requests,publications,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,domain,binding,removed,workerBoot,tokens,localLease,requests,publications,
        items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,pruned,
        compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 
@@ -311,7 +347,7 @@ RefusalSettle(w,sample) ==
 BypassBind(w) ==
   /\ Mutation="binding_ignored" /\ phase[w]="unbound"
   /\ phase'=[phase EXCEPT ![w]="ready"]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        requests,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 
@@ -322,7 +358,7 @@ FacadePrecheck(w,sample) ==
   /\ publications'=[publications EXCEPT ![w].precheck=sample, ![w].pred=localLease[w],![w].boot=workerBoot[w]]
   /\ phase'=[phase EXCEPT ![w]=IF localLease[w].exp>sample THEN "successor" ELSE "facade_error"]
   /\ localLease'=IF localLease[w].exp>sample THEN localLease ELSE [localLease EXCEPT ![w]=NoLease]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,requests,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,requests,
        items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,pruned,
        compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords>>
 ComputeSuccessor(w,sample) ==
@@ -331,7 +367,7 @@ ComputeSuccessor(w,sample) ==
      publications'=[publications EXCEPT ![w].successor=sample,
         ![w].repl=[pred EXCEPT !.revision=@+1,!.exp=Max(sample+PubTtlMs,pred.exp+1)]]
   /\ phase'=[phase EXCEPT ![w]="submit"]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        requests,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 Submit(w,sample,conflict) ==
@@ -340,7 +376,7 @@ Submit(w,sample,conflict) ==
   /\ publications'=[publications EXCEPT ![w].backend=sample,
                         ![w].samples=Append(@,sample),![w].left=@-1]
   /\ phase'=[phase EXCEPT ![w]="pending"]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 ApplyPublication(w,transactionSample) ==
@@ -362,7 +398,7 @@ ApplyPublication(w,transactionSample) ==
                             ![w].outcome=outcome,![w].committed=committed]
         /\ requests'=[requests EXCEPT ![w]=[kind |-> "publication_reply",outcome |-> outcome]]
   /\ phase'=[phase EXCEPT ![w]="reply"]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,binding,removed,workerBoot,tokens,localLease,
        nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 DeliverPublication(w,outcome) ==
@@ -374,7 +410,7 @@ DeliverPublication(w,outcome) ==
      /\ localLease'=[localLease EXCEPT ![w]=IF outcome \in {"ok","revoked"} /\ publications[w].boot=workerBoot[w]
                                                     THEN publications[w].repl ELSE NoLease]
   /\ requests'=[requests EXCEPT ![w]=NoRequest]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,
        publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 
@@ -386,13 +422,13 @@ SendClaim(w,j,sample) ==
        dispatched |-> sample,sample |-> sample]]
   /\ claimRecords'=[claimRecords EXCEPT ![w]=requests'[w]]
   /\ nextClaim'=nextClaim+1 /\ phase'=[phase EXCEPT ![w]="claiming"]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        publications,items,ledger,environment,renewed,domainChanged,replayed,resolved,pruned,
        compacted,retired,quorum,now,polled,oldReply,recoveryDelay,callStarted>>
 ReadClaim(w) ==
   /\ quorum /\ requests[w].kind="claim_read"
   /\ requests'=[requests EXCEPT ![w].kind="claim_cas"]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        phase,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 ApplyClaim(w) ==
@@ -415,7 +451,7 @@ ApplyClaim(w) ==
             {[job |-> j,fence |-> row.fence,key |-> k,exp |-> row.exp] : k \in ResourceKeys} ELSE held
         /\ ledger'=IF ok THEN [ledger EXCEPT ![r.claim]=TokenTuple(token)] ELSE ledger
         /\ requests'=[requests EXCEPT ![w]=[kind |-> "claim_reply",ok |-> ok,token |-> token]]
-  /\ UNCHANGED <<fragment,domain,binding,removed,workerBoot,tokens,localLease,phase,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,domain,binding,removed,workerBoot,tokens,localLease,phase,
        publications,items,nextClaim,environment,renewed,domainChanged,replayed,resolved,pruned,
        compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 DeliverClaim(w,lose) ==
@@ -423,7 +459,7 @@ DeliverClaim(w,lose) ==
   /\ tokens'=IF requests[w].ok /\ ~lose /\ requests[w].token.boot=workerBoot[w] THEN [tokens EXCEPT ![w]=requests[w].token] ELSE tokens
   /\ phase'=[phase EXCEPT ![w]="claimed"]
   /\ requests'=[requests EXCEPT ![w]=NoRequest]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,localLease,
        publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 ReplayClaim(w,sample) ==
@@ -431,13 +467,14 @@ ReplayClaim(w,sample) ==
   /\ LET r==claimRecords[w] j==r.job
          current==jobs[j].exists /\ jobs[j].owner=[node |-> r.node,boot |-> r.boot,claim |-> r.claim]
          window==sample>=r.dispatched /\ sample-r.dispatched<WindowMs
-         ok==current /\ window /\ r.boot=workerBoot[w] /\ jobs[j].state="running" /\ jobs[j].exp>sample /\ Cover(j) /\ r.node \notin removed
+         ok==current /\ window /\ r.boot=workerBoot[w] /\ jobs[j].state="running" /\ jobs[j].exp>sample /\ RenewCover(j) /\ r.node \notin removed
          mutate==Mutation="replay_fresh_fence" /\ current /\ window
      IN /\ jobs'=IF mutate THEN [jobs EXCEPT ![j].fence=@+1,![j].revision=@+1] ELSE jobs
         /\ tokens'=IF ok THEN [tokens EXCEPT ![w]=IF mutate THEN [Token(j) EXCEPT !.fence=@+1,!.revision=@+1] ELSE Token(j)] ELSE tokens
         /\ attempts'=IF mutate THEN {IF a.job=j /\ a.claim=r.claim THEN [a EXCEPT !.fence=@+1] ELSE a : a \in attempts} ELSE attempts
+        /\ sourcePause'=IF ok /\ Paused(j) THEN [sourcePause EXCEPT !.replayed=TRUE] ELSE sourcePause
   /\ replayed'=[replayed EXCEPT ![w]=TRUE]
-  /\ UNCHANGED <<fragment,held,domain,binding,removed,workerBoot,localLease,phase,
+  /\ UNCHANGED <<sourceKey,fragment,held,domain,binding,removed,workerBoot,localLease,phase,
        requests,publications,items,nextClaim,ledger,environment,renewed,domainChanged,resolved,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 ResolveClaim(w,sample) ==
@@ -446,10 +483,11 @@ ResolveClaim(w,sample) ==
          retained==\E a \in attempts : a.job=j /\ a.claim=r.claim /\ a.node=r.node /\ a.boot=r.boot
          ok== /\ retained /\ r.boot=workerBoot[w] /\ jobs[j].exists /\ jobs[j].owner=[node |-> r.node,boot |-> r.boot,claim |-> r.claim]
                /\ sample>=r.dispatched /\ sample-r.dispatched<WindowMs
-               /\ jobs[j].state="running" /\ jobs[j].exp>sample /\ Cover(j) /\ r.node \notin removed
-     IN tokens'=IF ok THEN [tokens EXCEPT ![w]=Token(j)] ELSE tokens
+               /\ jobs[j].state="running" /\ jobs[j].exp>sample /\ RenewCover(j) /\ r.node \notin removed
+     IN /\ tokens'=IF ok THEN [tokens EXCEPT ![w]=Token(j)] ELSE tokens
+        /\ sourcePause'=IF ok /\ Paused(j) THEN [sourcePause EXCEPT !.replayed=TRUE] ELSE sourcePause
   /\ resolved'=[resolved EXCEPT ![w]=TRUE]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,localLease,
+  /\ UNCHANGED <<sourceKey,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,localLease,
        phase,requests,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 
@@ -459,7 +497,7 @@ AcquireDomain(w,sample) ==
   /\ domain'=[owner |-> w,fence |-> domain.fence+1,revision |-> domain.revision+1,exp |-> sample+DomainTtlMs]
   /\ localLease'=[localLease EXCEPT ![w]=domain']
   /\ phase'=[phase EXCEPT ![w]="unbound"] /\ domainChanged'=TRUE
-  /\ UNCHANGED <<fragment,jobs,attempts,held,binding,removed,workerBoot,tokens,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,binding,removed,workerBoot,tokens,
        requests,publications,items,nextClaim,ledger,environment,renewed,replayed,resolved,
        pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 
@@ -471,7 +509,7 @@ PrepareRetention(j,age,pressure,pin,keep,user,legacy) ==
        ![j].retain=keep,![j].userScope=user,![j].legacy=legacy]
   /\ attempts'={IF a.job=j THEN [a EXCEPT !.finished=TRUE] ELSE a : a \in attempts}
   /\ environment'=TRUE
-  /\ UNCHANGED <<fragment,held,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,held,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
        publications,items,nextClaim,ledger,renewed,domainChanged,replayed,resolved,pruned,
        compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 PruneAttempts(sample) ==
@@ -480,7 +518,7 @@ PruneAttempts(sample) ==
                          (Cardinality({n \in attempts : n.job=a.job /\ n.finished /\ n.fence>a.fence})>=1
                           \/ (Cardinality(attempts)>=2 /\ \E n \in attempts : n.job=a.job /\ n.fence>a.fence)))}
   /\ pruned'=TRUE
-  /\ UNCHANGED <<fragment,jobs,held,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,held,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
        publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,
        compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 CompactInternalReceipts(j,expired,pressure) ==
@@ -489,7 +527,7 @@ CompactInternalReceipts(j,expired,pressure) ==
        (expired \/ (pressure /\ ~jobs[j].userScope /\ jobs[j].state \notin {"queued","running","cancelling"}))
        THEN FALSE ELSE @]
   /\ compacted'=TRUE
-  /\ UNCHANGED <<fragment,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
        publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,
        pruned,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 RetireTerminalJob(j) ==
@@ -499,7 +537,7 @@ RetireTerminalJob(j) ==
   /\ jobs'=[jobs EXCEPT ![j].exists=FALSE]
   /\ attempts'={a \in attempts : a.job/=j} /\ held'={h \in held : h.job/=j}
   /\ retired'=TRUE
-  /\ UNCHANGED <<fragment,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
        publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,
        pruned,compacted,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 
@@ -509,7 +547,7 @@ SafetyNext ==
   \/ \E k \in ResourceKeys : LoseResource(k)
   \/ \E j \in Jobs,w \in Workers,b \in 1..MaxBoots,c \in 1..MaxClaims,s \in Samples : Takeover(j,w,b,c,s)
   \/ Outage
-  \/ \E w \in Workers,s \in Samples : SendRenew(w,s) \/ BindAttempt(w,s) \/ RefusalRelease(w,s) \/ RefusalSettle(w,s) \/ FacadePrecheck(w,s)
+  \/ \E w \in Workers,s \in Samples : PauseSource(w,s) \/ ResumeSource(w,s) \/ SendRenew(w,s) \/ BindAttempt(w,s) \/ RefusalRelease(w,s) \/ RefusalSettle(w,s) \/ FacadePrecheck(w,s)
            \/ ComputeSuccessor(w,s) \/ ApplyPublication(w,s) \/ ReplayClaim(w,s) \/ ResolveClaim(w,s)
            \/ DomainChange(w,s,"renew") \/ DomainChange(w,s,"release") \/ AcquireDomain(w,s)
   \/ \E w \in Workers : ApplyRenew(w) \/ DeliverRenew(w) \/ BypassBind(w) \/ ReadClaim(w) \/ ApplyClaim(w)
@@ -528,7 +566,7 @@ SafetyNext ==
 FreshClaimHeld == jobs[Target].state="running" /\ jobs[Target].owner.claim=2
 RecoveryTick ==
   /\ ~FreshClaimHeld /\ now<3 /\ now'=now+1
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        phase,requests,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,polled,oldReply,recoveryDelay,claimRecords,callStarted,events>>
 RecoveryPoll ==
@@ -537,19 +575,19 @@ RecoveryPoll ==
   /\ polled'=TRUE
   /\ phase'=[phase EXCEPT ![Survivor]=IF now>=jobs[Target].notBefore /\ now>=jobs[Target].exp
                                                    THEN "send" ELSE "retry"]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        requests,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,oldReply,recoveryDelay,claimRecords,callStarted,events>>
 RecoveryRetry ==
   /\ phase[Survivor]="retry" /\ phase'=[phase EXCEPT ![Survivor]="idle"]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        requests,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted,events>>
 RecoverySend ==
   /\ phase[Survivor]="send"
   /\ requests'=[requests EXCEPT ![Survivor]=[kind |-> "recovery_claim",sample |-> now,expected |-> jobs[Target].revision]]
   /\ phase'=[phase EXCEPT ![Survivor]="apply"]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted,events>>
 RecoveryApply ==
@@ -564,20 +602,20 @@ RecoveryApply ==
      /\ held'={[job |-> j,fence |-> jobs[j].fence+1,key |-> k,exp |-> r.sample+LeaseMs] : k \in ResourceKeys}
      /\ ledger'=[ledger EXCEPT ![2]=[job |-> j,node |-> w,boot |-> 2,claim |-> 2,fence |-> jobs[j].fence+1]]
   /\ phase'=[phase EXCEPT ![Survivor]="ack"] /\ nextClaim'=3
-  /\ UNCHANGED <<fragment,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,domain,binding,removed,workerBoot,tokens,localLease,
        requests,publications,items,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted,events>>
 RecoveryAck ==
   /\ phase[Survivor]="ack"
   /\ tokens'=[tokens EXCEPT ![Survivor]=Token(Target)]
   /\ phase'=[phase EXCEPT ![Survivor]="done"]
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,localLease,
        requests,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted,events>>
 DeliverOldReply ==
   /\ ~oldReply /\ oldReply'=TRUE
   \* Reply belongs to boot1; current boot2 must not adopt it.
-  /\ UNCHANGED <<fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
        phase,requests,publications,items,nextClaim,ledger,environment,renewed,domainChanged,replayed,
        resolved,pruned,compacted,retired,quorum,now,polled,recoveryDelay,claimRecords,callStarted,events>>
 RecoveryNext == RecoveryTick \/ RecoveryPoll \/ RecoveryRetry \/ RecoverySend
@@ -595,6 +633,11 @@ TokenType == [job : Jobs,node : Workers,boot : 1..MaxBoots,claim : 1..MaxClaims,
               fence : 1..5,revision : 1..8,exp : 0..8]
 LeaseType == [owner : Workers \cup {No},fence : 0..5,revision : 0..8,exp : 0..8]
 S0_TypeAndIdentity ==
+  /\ sourceKey \in ResourceKeys
+  /\ sourcePause.phase \in {"none","paused","active"}
+  /\ sourcePause.renewed \in BOOLEAN /\ sourcePause.replayed \in BOOLEAN
+  /\ (sourcePause.phase/="none" => \E j \in Jobs,n \in Workers,b \in 1..MaxBoots,c \in 1..MaxClaims,f \in 1..5 :
+        sourcePause.identity=[job |-> j,node |-> n,boot |-> b,claim |-> c,fence |-> f])
   /\ jobs \in [Jobs -> JobType]
   /\ workerBoot \in [Workers -> 1..MaxBoots]
   /\ tokens \in [Workers -> TokenType \cup {NoToken}]
@@ -632,6 +675,25 @@ S7_RejectionPreservesCatalogue ==
       (phase[w]="pending" /\ phase'[w]="reply" /\
        publications'[w].outcome \in {"invalid","fence_rejected","identity_conflict"})
          => (items'=items /\ domain'=domain)]_vars
+S8_PausedSourceIsUnreserved == \A j \in Jobs : Paused(j) =>
+  ~\E h \in held : h.job=j /\ h.fence=jobs[j].fence /\ h.key=sourceKey
+\* This subset is a concrete reachability probe, not exhaustive safety evidence.
+PauseCompositionNext == Next /\ CASE
+  events=0 -> PauseSource(Survivor,0)
+  [] events=1 -> SendRenew(Survivor,0)
+  [] events=2 -> ApplyRenew(Survivor)
+  [] events=3 -> DeliverRenew(Survivor)
+  [] events=4 -> ReplayClaim(Survivor,0)
+  [] events=5 -> ResumeSource(Survivor,0)
+  [] events=6 -> FacadePrecheck(Survivor,0)
+  [] events=7 -> ComputeSuccessor(Survivor,0)
+  [] events=8 -> Submit(Survivor,0,FALSE)
+  [] events=9 -> ApplyPublication(Survivor,0)
+  [] OTHER -> FALSE
+PauseCompositionSpec == Init /\ [][PauseCompositionNext]_vars
+Witness_PauseComposition == ~(sourcePause.phase="active" /\ sourcePause.renewed /\ sourcePause.replayed /\
+  \E it \in items : it.association.job=sourcePause.identity.job /\
+    it.association.jobFence=sourcePause.identity.fence)
 \* Reachability probes are deliberately false invariants. A violated probe
 \* yields an actual reachable path. They never replace positive checks.
 Witness_ThreeSamples == ~\E w \in Workers :
@@ -700,6 +762,6 @@ ModelView == <<fragment,[j \in Jobs |-> JobView(jobs[j])],attempts,held,domain,b
   Cardinality(items),{EventView(it) : it \in items},
   nextClaim,ledger,environment,renewed,domainChanged,replayed,resolved,
   pruned,compacted,retired,quorum,now,polled,oldReply,recoveryDelay,
-  [w \in Workers |-> ClaimRecordView(claimRecords[w])],callStarted,events>>
+  [w \in Workers |-> ClaimRecordView(claimRecords[w])],callStarted,sourceKey,sourcePause,events>>
 Symm == Permutations(Workers) \cup Permutations(ResourceKeys) \cup Permutations(Jobs)
 =============================================================================

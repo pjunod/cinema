@@ -913,8 +913,8 @@ test_anchor = "transcode_capacity_pending"
 [[fixes]]
 id = "web.frame-callback-registration-lifecycle"
 commits = ["790ffc9da", "4c8830b2c", "b217c615e", "85b177a1b", "3d22d5ee2"]
-source = "crates/plurxd/src/web/player/decode-tiers.js"
-source_anchor = "if(id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;"
+source = "crates/plurxd/src/web/player/video-frames.js"
+source_anchor = "function requestPlaybackVideoFrame(video,callback){"
 test = "tests/playback/web-control.test.js"
 test_anchor = "loadeddata during the initial seek must not strand a frame request"
 
@@ -996,7 +996,7 @@ test_anchor = "testColdCommandsComposeIntoTheActualSessionRequestAndRejectStaleD
 id = "web.bounded-preparation-and-retained-observers"
 commits = ["0a70d6fb"]
 source = "crates/plurxd/src/web/player/stall-diagnosis.js"
-source_anchor = "function playbackOwnsAttachedMedia(p)"
+source_anchor = "function playbackOwnsAttachedMedia(p,sourceAuthority=false){"
 test = "tests/playback/web-control.test.js"
 test_anchor = "HLS callbacks cannot replace the original preparation deadline"
 
@@ -8313,3 +8313,12 @@ source = "clients/linux-player/packaging/patches/mpv/0005-osc-draw-a-film-timeli
 source_anchor = "+-- A film timeline the embedding application sets in user-data/osc/film as"
 test = "clients/linux-player/tests/test_packaging.py"
 test_anchor = "def test_the_osc_reads_the_film_timeline_and_hands_back_outside_seeks(self):"
+
+# PR #1366: missing native-frame callbacks may retire only the observation claim; real playback failures keep authority.
+[[fixes]]
+id = "web.native-hls-observation-deadline-ownership"
+commits = ["dac9e2c7e"]
+source = "crates/plurxd/src/web/player/player.js"
+source_anchor = "function concludeNativeHlsObservation(player,episode){"
+test = "tests/playback/native-hls-startup.test.js"
+test_anchor = "native observer conclusion preserves later physical-freeze recovery and real element rejection"

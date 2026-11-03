@@ -5,6 +5,60 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Playback startup custody — scoped source review on 2026-11-03
+
+Codex agent `/root/other_formal_correspondence` compared base
+`bd213c81942175f591912e4bb0a2cc10f2a7a195` with source candidate
+`594210a783986d4da5ec7184f0895433ffe98b90`. All prior live mapped source
+fingerprints match that base. This is an authored correspondence audit,
+not an independent review or an execution receipt.
+
+[Queue ownership](../../crates/plurxd/src/background_jobs.rs) now registers
+and activates source custody before starting the heartbeat. Its existing
+`finish` order still joins the heartbeat and retires the token; it then
+awaits joined-source settlement before returning. Journal persistence,
+replicated settlement proof and exact custody deletion retry until they
+succeed. [The environment](../../crates/plurxd/src/library_work/env.rs)
+retains physical admission through an `Arc` owned by the processing future;
+`JoinWork` consumes that future before domain release, queue retirement and
+`DropAdmission`. Physical admission is distinct from the durable source slot:
+[the source driver](../../crates/plurxd/src/source_probe.rs) can pause that
+slot after verified quiescence and reacquire it before resuming reads.
+[Library probe inputs](../../crates/plurxd/src/library_work/probe_input.rs)
+close and join their private source bridge before reporting probe completion.
+
+These are additional source dependencies, not new modeled transitions.
+Custody registration/activation, pause/reacquisition, byte pacing, private
+source input, process-group quiescence and journal/settlement replay are
+outside this finite protocol argument. The existing external-return premises
+do not prove those mechanisms terminate: a failed journal write or unsettled
+custody can retain physical admission indefinitely after queue retirement.
+The model's cleanup and useful-progress results therefore supply no progress
+or starvation-freedom guarantee for these new paths. No historical schedule
+or model receipt is extended to cover them.
+
+[Core queue SQL](../../crates/plurx-core/src/store/background_jobs.rs) adds
+custody/foreground occupancy to claim eligibility and accepts exact paused
+reservations during renewal; it preserves the selected voter-only kind
+boundary. Those additional eligibility and reservation states are not modeled.
+[The Hiqlite facade](../../crates/plurx-core/src/store/hiqlite.rs) adds source
+and managed-v4 schema installation; mapped transaction timeout bodies remain
+unchanged. [Bounded processes](../../crates/plurx-core/src/process/bounded.rs)
+retain the cancellation scope and add owned pause/group-join behavior, whose
+termination is outside this package's filesystem-return premise.
+
+The selected domain/token/publication bodies, library iteration/reconciliation
+body, try-only physical admission, worker-loop signatures and main worker
+spawn anchor remain. The library entry file adds a probe-input module;
+[manager construction](../../crates/plurxd/src/transcode/manager/construct.rs),
+[state](../../crates/plurxd/src/state.rs) and
+[startup](../../crates/plurxd/src/main.rs) wire source identity, custody replay
+and modules around those retained boundaries. This audit does not establish
+whole-daemon lock ordering or liveness. Only reviewed whole-file fingerprints
+follow the candidate; exact anchors, historical `source-anchors.json`, model,
+configurations, properties, bounds, fairness and toolchain remain unchanged.
+Static mapping validation is separate from TLC or runtime qualification.
+
 ## HTTP-to-HTTPS redirect — scoped source audit on 2026-11-01
 
 Codex landing agent `/root/triage_ready_prs` compared PR #1308's integrated

@@ -122,6 +122,7 @@ impl SourceViewerActor {
         Ok(SourceResponseGuard {
             owner: Arc::clone(&self.0),
             source: None,
+            source_request: None,
         })
     }
     /// The published direct session for Start replay and status. It renews
@@ -199,6 +200,16 @@ impl SourceViewerActor {
             .clone()
             .ok_or(SourceWorkerError::Unavailable)??;
         let mut guard = self.reserve_direct_body(&start)?;
+        guard.source_request =
+            self.0.manager.upgrade().and_then(|manager| {
+                manager.foreground_source_request(
+                &direct.file,
+                &self.0.assignment.binding().incarnation_id().to_string(),
+                self.0.assignment.binding().incarnation_id(),
+                plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+            ).map(|request|request.object_version(&direct.object_version))
+            });
+
         let initial = self.0.gate.current_owned(&self.0.assignment).await?;
         initial
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())

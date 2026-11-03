@@ -1,10 +1,14 @@
 # Durable jobs — check bounded publication authority with TLC
 
-**Status:** implemented and independently reviewed; all 16 bounded configurations
-and 11 focused runtime tests qualified. Delivery and CI are tracked in the status page. This package checks a finite model of bound
-`library_scan` / `metadata_refresh` workers publishing through
-`insert_item_fenced`. It is a bounded protocol check and a source mapping,
-not a refinement theorem or a result about the entire cluster.
+**Status:** the original 16 configurations and 11 focused runtime tests have
+historical qualification. On 2026-11-03 all 18 registered configurations
+returned their expected outcomes in individual local runs on the updated
+model. Exact input identities, bounds and receipts are recorded in
+[CONTRACT.md](CONTRACT.md); CI and promotion qualification remain separate.
+This package checks a finite model of bound `library_scan` /
+`metadata_refresh` workers publishing through `insert_item_fenced`. It is a
+bounded protocol check and a source mapping, not a refinement theorem or a
+result about the entire cluster.
 
 Read [CONTRACT.md](CONTRACT.md) for source guards, transaction boundaries,
 caller classifications and backend examples. The
@@ -60,7 +64,8 @@ samples, transaction application and facade delivery are separate actions.
 Bind refusal, domain release and queue settlement are separate actions too.
 
 Each execution explores one queue heartbeat, one domain acquire/renew/release
-operation, one selected environment displacement (cancellation, removal,
+operation, at most one source pause/reacquisition pair, one selected
+environment displacement (cancellation, removal,
 resource loss, takeover, outage or restart), and **one facade publication
 call** with up to four identity-conflict submissions. Each worker can issue
 one initial claim and one replay/resolution. Finite claim identities never
@@ -69,19 +74,47 @@ workers and sufficient remaining job-attempt budget for their bounded claims.
 
 This excludes arbitrary repeated fault combinations, repeated publication
 calls, a full daemon lifecycle, general queue admission fairness and
-cross-seed lifecycle composition. Local deadline/revocation mechanisms are
+cross-seed lifecycle composition. Arbitrary repeated source pressure and
+physical stop/read/join correctness are excluded; the pause pair is a finite
+protocol bound, not a progress guarantee. Local deadline/revocation mechanisms are
 represented only through lost local authority, reboot and post-commit facade
 outcomes, not every runtime timer. Old pending publication samples remain
 unchanged while other authority changes occur; they are never clamped away
 or automatically failed for age.
 
+## A paused source owner retains identity, not a reservation
+
+One nondeterministically selected `sourceKey` identifies the represented
+source-reader key; the remaining resource keys still need actual covering
+reservations. `PauseSource` removes only that source reservation and records
+job/node/boot/claim/fence. `RenewCover` accepts that exact paused identity for
+queue renewal, replay and resolution. Its stable identity survives ordinary
+renewal revisions. `ResumeSource` needs the same live running owner and a
+free source slot, then installs a real reservation at the current expiry.
+`BindAttempt`, `LiveBound` and publication `Authority` continue to use `Cover`.
+S8 checks that a current paused identity has no source reservation. Pausing
+therefore never supplies binding or publication authority.
+
+The ten-step witness starts from the existing bound publication shape plus
+a retained successful claim request, then uses real shared actions. Its
+action filter is reachability evidence only; `source-pause.cfg` uses the
+unfiltered safety relation. Both `sourceKey` and the complete pause record
+remain in `ModelView`; their values can affect future guards. Initial key
+selection preserves resource-key symmetry. No pressure, byte service or
+physical-read permission is inferred from this model. Extra foreground and
+custody admission checks may veto claim/resume transitions; their physical
+and scheduling state is outside this finite model. No fairness premise says
+a paused worker eventually receives a slot.
+
 ## Finite bounds are part of the result
 
 | Configuration | Jobs / workers / boots per worker / claims / domains / resource keys | Event horizon | Properties / intended outcome |
 |---|---|---|---|
-| `smoke.cfg` | 1 / 2 / 2 / 2 / 1 / 2 | 6 | S0–S7; complete without violation |
-| `baseline.cfg` | 2 / 2 / 2 / 3 / 1 / 2 | 8 | S0–S7; complete without violation |
-| `lifecycle.cfg` | 1 / 2 / 2 / 3 / 1 / 2 | 11 | S0–S7 from claim seeds through commit and facade delivery |
+| `smoke.cfg` | 1 / 2 / 2 / 2 / 1 / 2 | 6 | S0–S8; complete without violation |
+| `baseline.cfg` | 2 / 2 / 2 / 3 / 1 / 2 | 8 | S0–S8; complete without violation |
+| `lifecycle.cfg` | 1 / 2 / 2 / 3 / 1 / 2 | 11 | S0–S8 from claim seeds through commit and facade delivery |
+| `source-pause.cfg` | 1 / 2 / 2 / 2 / 1 / 2 | 6 | S0–S8 from a bound seed retaining its successful claim record; shared `SafetyNext` |
+| `witness-source-pause.cfg` | Same small domains | 10 | S0–S4/S8 plus named witness for pause→renew→replay→reacquire→publication commit; explicit ten-step subset of shared `Next` |
 | `control-binding-ignored.cfg` | 1 / 2 / 2 / 2 / 1 / 2 | 6 | S2 violation after removing the backend binding guard |
 | `control-replay-fresh-fence.cfg` | Same small domains | 6 | S4 violation after replay manufactures a new fence for the same identity |
 | `control-renewal-revives-cancel.cfg` | Same small domains | 6 | S5 action-property violation after relaxing both state and exact revision guards |

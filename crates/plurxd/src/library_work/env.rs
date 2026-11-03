@@ -50,7 +50,7 @@ pub(super) struct TokioEnvironment<'a> {
     publisher: Option<PublicationStore<'a>>,
     cancellation: CancellationToken,
     lease: Option<Arc<ActiveJobLease>>,
-    admission: Option<crate::transcode::FragmentAdmission>,
+    admission: Option<Arc<crate::transcode::FragmentAdmission>>,
     active: Option<crate::background_jobs::ActiveBackgroundJob>,
     // Plain data and borrows: no release order to preserve.
     manager: &'a Arc<JobManager>,
@@ -77,7 +77,7 @@ impl<'a> TokioEnvironment<'a> {
             library_id,
             fence: active.fence(),
             active: Some(active),
-            admission: Some(admission),
+            admission: Some(Arc::new(admission)),
             lease: None,
             publisher: None,
             cancellation: CancellationToken::new(),
@@ -113,12 +113,34 @@ impl<'a> TokioEnvironment<'a> {
             .take()
             .expect("Process requires the bound publisher");
         let cancellation = self.cancellation.clone();
+        let admission = Arc::clone(
+            self.admission
+                .as_ref()
+                .expect("Process retains physical admission"),
+        );
+        let transcode = self.transcode;
+        let shutdown = queue_loss.clone();
         // The future owns its publisher and a domain reference. It stays in this
         // Option across RevokeDomain and CancelWork and is consumed by JoinWork.
         self.work = Some(Box::pin(async move {
-            let result = plurx_core::process::bounded::cancellable(
-                cancellation,
-                manager.process_library_requests(&job_id, library_id, &lease, &publisher, &fence),
+            // This is the library job's owned stop/read-join driver. Its
+            // controller reaches the probe child and the private source bridge
+            // through the directly awaited task-local scope. Finite byte holds
+            // exclude active probe time only after every child and daemon read
+            // has been verified stopped; the helper retains a finite wall age.
+            let result = crate::source_probe::run_source_admitted_probe(
+                transcode,
+                &admission,
+                &cancellation,
+                &shutdown,
+                None,
+                &fence,
+                || async { true },
+                plurx_core::scan::probe::with_probe_inputs(
+                    Arc::new(super::probe_input::LibraryProbeInputs(fence.clone())),
+                    manager
+                        .process_library_requests(&job_id, library_id, &lease, &publisher, &fence),
+                ),
             )
             .await;
             (publisher, result)
@@ -156,6 +178,11 @@ impl<'a> TokioEnvironment<'a> {
                 }
                 Selected::Tick => {
                     let pressured = !self.transcode.fragment_worker_idle(admission);
+                    // On Linux the owned source driver above handles source
+                    // pressure by verified suspension and slot reacquisition.
+                    #[cfg(not(target_os = "linux"))]
+                    let pressured =
+                        pressured || !self.fence.source_may_continue().await.unwrap_or(false);
                     #[cfg(test)]
                     let pressured =
                         pressured || crate::background_jobs::faults::worker::force_pressure();

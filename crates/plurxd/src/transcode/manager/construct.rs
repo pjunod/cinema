@@ -45,6 +45,7 @@ impl TranscodeManager {
             runtime_cache.clone(),
         ));
         TranscodeManager {
+            source_identity: None,
             source_workers: source_actor::SourceWorkerRegistry::default(),
             source_http_starts: crate::http::shared_source_playback::SourceStartRegistry::default(),
             vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
@@ -366,6 +367,9 @@ impl TranscodeManager {
                 "could not create ffmpeg runtime cache: {err}"
             );
         }
+        if let Some(identity) = &self.source_identity {
+            self.vod.set_source_identity(identity.clone());
+        }
         self.cache = Some(CacheConfig {
             dir: cache_dir,
             ffmpeg_build,
@@ -374,8 +378,33 @@ impl TranscodeManager {
         self
     }
 
+    pub(crate) fn with_source_identity(mut self, node_id: String, boot_id: uuid::Uuid) -> Self {
+        let identity = crate::source_custody::SourceIdentity { node_id, boot_id };
+        self.vod.set_source_identity(identity.clone());
+        if let Some(jobs) = &self.subtitle_jobs {
+            jobs.configure_source_identity(identity.clone());
+        }
+        self.source_identity = Some(identity);
+        self
+    }
+
+    pub(crate) fn foreground_source_request(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        lifetime: &str,
+        incarnation: uuid::Uuid,
+        policy: plurx_core::store::background_jobs_resources::ForegroundSourcePolicy,
+    ) -> Option<crate::source_custody::SourceRequest> {
+        self.source_identity.as_ref().map(|identity| {
+            identity.request(Arc::clone(&self.store), file, lifetime, incarnation, policy)
+        })
+    }
+
     pub(crate) fn with_subtitle_jobs(mut self, jobs: Arc<crate::state::JobManager>) -> Self {
         jobs.share_subtitle_admissions(self.admissions.clone());
+        if let Some(identity) = &self.source_identity {
+            jobs.configure_source_identity(identity.clone());
+        }
         self.subtitle_jobs = Some(jobs);
         self
     }

@@ -1807,3 +1807,54 @@ async fn preparation_history_uses_source_identity_parent_metadata_and_published_
     assert!(plan.contains("background_jobs_file_source"), "{plan}");
     assert!(!plan.contains("SCAN background_jobs"), "{plan}");
 }
+
+#[tokio::test]
+async fn artifact_job_source_registration_is_not_required_during_foreground_startup_but_lost_fence_stays_lost(
+) {
+    use super::background_jobs_resources::{BackgroundSourceOwner, BackgroundSourceRegistration};
+    let store = SqliteStore::open_in_memory().expect("real migrated store");
+    // Simulate an already-admitted global original reader. An artifact-only
+    // job must neither depend on that source file nor acquire source credit.
+    store.queue_sql("INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES('active-original','{}','[\"source_io\"]',1,'startup','{\"source_quiescent\":false}',1000,1000,30000) RETURNING CASE WHEN json_valid($1) THEN 'true' ELSE 'false' END AS result_json".into(),"{}".into(),true,true).await.expect("foreground pressure fixture");
+    let mut request = enqueue(1000);
+    request.payload = JobPayload::ArtifactHydrate {
+        artifact_key: format!("fragment:{}", "a".repeat(64)),
+        target_node_id: "node-a".into(),
+    };
+    let id = request.id.clone();
+    store
+        .enqueue_job(request)
+        .await
+        .expect("real artifact work");
+    let mut attempt = claim(&id, 0, 1001);
+    attempt.kind = JobKind::ArtifactHydrate;
+    let job = claimed(&store, attempt).await;
+    let token = job.token.expect("exact live artifact claim");
+    assert!(matches!(
+        store
+            .register_background_source_custody(
+                BackgroundSourceOwner::Job {
+                    token: token.clone()
+                },
+                1002
+            )
+            .await
+            .expect("no original input"),
+        BackgroundSourceRegistration::NotRequired
+    ));
+    assert!(!store
+        .source_io_holders(1002)
+        .await
+        .expect("source holder projection")
+        .iter()
+        .any(|holder| holder.work_id == id));
+    let mut wrong = token;
+    wrong.fence += 1;
+    assert!(matches!(
+        store
+            .register_background_source_custody(BackgroundSourceOwner::Job { token: wrong }, 1003)
+            .await
+            .expect("invalid owner remains distinct"),
+        BackgroundSourceRegistration::LostOwnership
+    ));
+}

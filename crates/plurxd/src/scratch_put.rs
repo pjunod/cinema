@@ -1346,24 +1346,27 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 /// log lines can be logged without handing out a write capability.
 pub(crate) fn redact(text: &str) -> String {
     const MARKER: &str = "http://127.0.0.1:";
-    if !text.contains(MARKER) {
-        return text.to_owned();
-    }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find(MARKER) {
         let after = at + MARKER.len();
         out.push_str(&rest[..after]);
         rest = &rest[after..];
-        let port_end = rest.find('/').unwrap_or(rest.len());
+        let port_end = rest.bytes().take_while(u8::is_ascii_digit).count();
         out.push_str(&rest[..port_end]);
         rest = &rest[port_end..];
-        if let Some(path) = rest.strip_prefix('/') {
-            let token_end = path.find('/').unwrap_or(path.len());
-            let token = &path[..token_end];
-            if token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                out.push_str("/REDACTED");
-                rest = &path[token_end..];
+        if port_end > 0 {
+            if let Some(path) = rest.strip_prefix('/') {
+                // Both source input and scratch capabilities use exactly 32
+                // hex bytes. A diagnostic commonly adds quotes/punctuation
+                // directly after the URL; those are not part of the nonce.
+                if path.len() >= 32
+                    && path.as_bytes()[..32].iter().all(u8::is_ascii_hexdigit)
+                    && !path.as_bytes().get(32).is_some_and(u8::is_ascii_hexdigit)
+                {
+                    out.push_str("/REDACTED");
+                    rest = &path[32..];
+                }
             }
         }
     }

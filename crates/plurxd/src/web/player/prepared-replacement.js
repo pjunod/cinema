@@ -382,7 +382,7 @@ function beginPreparedReplacement(p,action,sharedContext=null){
     spare.style.zIndex="1";
     spare.style.display="";
     if(typeof spare.requestVideoFrameCallback==="function"){
-      try{ state.warmFrameCallbackId=spare.requestVideoFrameCallback(()=>{
+      try{ state.warmFrameCallbackId=requestPlaybackVideoFrame(spare,()=>{
         state.warmFrameCallbackId=null;
         if(preparedState(p)===state) state.warmFrameReady=true;
       }); }catch(e){}
@@ -922,14 +922,14 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     if(settled) return;
     settled=true;
     if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
-    if(state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
-      try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
+    if(state.exposeFrameCallbackId!=null)
+      try{ cancelPlaybackVideoFrame(spare,state.exposeFrameCallbackId); }catch(e){}
     state.exposeFrameCallbackId=null;
-    if(state.warmFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
-      try{ spare.cancelVideoFrameCallback(state.warmFrameCallbackId); }catch(e){}
+    if(state.warmFrameCallbackId!=null)
+      try{ cancelPlaybackVideoFrame(spare,state.warmFrameCallbackId); }catch(e){}
     state.warmFrameCallbackId=null;
-    if(state.handoffFrameCallbackId!=null&&typeof v.cancelVideoFrameCallback==="function")
-      try{ v.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
+    if(state.handoffFrameCallbackId!=null)
+      try{ cancelPlaybackVideoFrame(v,state.handoffFrameCallbackId); }catch(e){}
     state.handoffFrameCallbackId=null;
     if(!live()) return;
     if(voluntary&&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10
@@ -962,7 +962,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   };
   const requestFrame=()=>{
     if(settled) return;
-    try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
+    try{ state.exposeFrameCallbackId=requestPlaybackVideoFrame(spare,observe); }
     catch(e){ finish(false,"frame-callback-error"); }
   };
   const exposeAfterIncumbentFrame=()=>{
@@ -999,7 +999,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   const requestIncumbentFrame=()=>{
     if(settled) return;
     try{
-      state.handoffFrameCallbackId=v.requestVideoFrameCallback((now,meta)=>{
+      state.handoffFrameCallbackId=requestPlaybackVideoFrame(v,(now,meta)=>{
         state.handoffFrameCallbackId=null;
         if(settled) return;
         if(!live()){ finish(false,"stale-owner"); return; }
