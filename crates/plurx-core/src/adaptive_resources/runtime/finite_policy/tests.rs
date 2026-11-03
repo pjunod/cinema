@@ -51,7 +51,14 @@ fn finite_trial_adapter_keeps_original_preparation_cutoff_and_unknown_bounds() {
 #[tokio::test]
 async fn finite_trial_refusal_uses_same_live_continuous_cutoff_and_refuses_missing_moved_or_expired_deadline(
 ) {
-    let root = tempfile::tempdir().expect("real custody policy adapter fixture");
+    let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/finite-policy-fixtures");
+    std::fs::create_dir_all(&parent).expect("protected policy fixture parent");
+    let parent = std::fs::canonicalize(parent).expect("canonical policy fixture ancestry");
+    let root = tempfile::Builder::new()
+        .prefix("continuous-cutoff-")
+        .tempdir_in(parent)
+        .expect("real custody policy adapter fixture");
     let runtime = NodeResourceRuntime::open(super::super::tests::options(
         root.path(),
         super::super::daemon_owner("finite-policy-node".into(), "finite-policy-cluster".into()),
