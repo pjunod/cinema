@@ -1,5 +1,5 @@
 //! Bounded, prearmed sync over the SAME held child and exact file inventory.
-use super::publication::queue_output_change;
+use super::publication::{queue_output_change, wait_for_io_slot, NativeIoStep};
 use super::*;
 use crate::fs_secure::{
     sync_files::{SyncFile, SyncIo, SyncRequest},
@@ -212,13 +212,16 @@ impl NodeResourceRuntime {
     }
 
     /// Wait for the SAME bundle lock before registering sync against observed
-    /// outputs. The caller retains its output selection across the wait.
+    /// outputs. The caller retains its output selection across the wait. A
+    /// slot held by another committed operation is waited out until
+    /// `deadline`, exactly as for a publication queue.
     pub(in crate::adaptive_resources::runtime) async fn queue_scratch_sync_wait(
         &self,
         owner: &OwnedPreparation,
         index: usize,
         member: Uuid,
         outputs: &[OutputKey],
+        deadline: Instant,
     ) -> Result<Uuid, OperationError> {
         self.validate_preparation(owner)?;
         if outputs.is_empty()
@@ -227,8 +230,14 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
-        let mut bundle = owner.state.lock().await;
-        self.queue_scratch_sync_locked(&mut bundle, index, member, outputs)
+        loop {
+            let mut bundle = owner.state.lock().await;
+            if let Some(progress) = self.scratch_io_slot_busy(&bundle, index, member) {
+                wait_for_io_slot(bundle, progress, deadline).await?;
+                continue;
+            }
+            return self.queue_scratch_sync_locked(&mut bundle, index, member, outputs);
+        }
     }
 
     fn queue_scratch_sync_locked(
@@ -350,7 +359,28 @@ impl NodeResourceRuntime {
         deadline: Instant,
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
-        let mut bundle = owner.state.lock().await;
+        loop {
+            let mut bundle = owner.state.lock().await;
+            match self
+                .sync_scratch_outputs_locked(&mut bundle, index, member, sync_id, deadline)
+                .await?
+            {
+                NativeIoStep::Done => return Ok(()),
+                NativeIoStep::SlotBusy(progress) => {
+                    wait_for_io_slot(bundle, progress, deadline).await?
+                }
+            }
+        }
+    }
+
+    async fn sync_scratch_outputs_locked(
+        &self,
+        bundle: &mut Bundle,
+        index: usize,
+        member: Uuid,
+        sync_id: Uuid,
+        deadline: Instant,
+    ) -> Result<NativeIoStep, OperationError> {
         if !bundle.installed {
             return Err(OperationError::State);
         }
@@ -361,7 +391,7 @@ impl NodeResourceRuntime {
             .and_then(|b| b.sync.as_ref())
             .is_some_and(|s| s.request.is_some());
         if needs_entry {
-            self.eligible(&bundle)?;
+            self.eligible(bundle)?;
         }
         let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
@@ -374,7 +404,7 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         if sync.acknowledged {
-            return Ok(());
+            return Ok(NativeIoStep::Done);
         }
         resume_change(&self.journal, role, member, deadline)?;
         if role.transition.is_some() {
@@ -387,6 +417,25 @@ impl NodeResourceRuntime {
             .ok_or(OperationError::State)?
             .state();
         let sync = bootstrap.sync.as_ref().ok_or(OperationError::State)?;
+        if sync.request.is_some()
+            && state.asset.totals.pending_jobs != 0
+            && state
+                .asset
+                .head
+                .as_ref()
+                .is_none_or(|h| h.operation_id != sync.io)
+            && bootstrap
+                .publication
+                .as_ref()
+                .is_none_or(|run| run.ready_for_transfer())
+        {
+            // A reader armed its operation between this registration and
+            // our arm; wait for its acknowledged observe and re-check.
+            if Instant::now() >= deadline {
+                return Err(OperationError::Deadline);
+            }
+            return Ok(NativeIoStep::SlotBusy(Arc::clone(&bootstrap.io_progress)));
+        }
         if sync.request.is_some() && state.asset.totals.pending_jobs == 0 {
             if Instant::now() >= deadline {
                 return Err(OperationError::Deadline);
@@ -499,7 +548,7 @@ impl NodeResourceRuntime {
             .ok_or(OperationError::State)?;
         held.files.insert(copy, directory);
         sync.acknowledged = true;
-        Ok(())
+        Ok(NativeIoStep::Done)
     }
 }
 

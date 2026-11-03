@@ -13,6 +13,7 @@ pub(super) enum Kind {
     BootstrapChild,
     Publication,
     Sync,
+    ReaderRead,
     CleanupRemoveFile,
     CleanupSyncChild,
     CleanupRemoveChild,

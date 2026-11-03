@@ -496,6 +496,13 @@ impl ReaderCell {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let file = self.file.take().ok_or_else(invalid)?;
         let mut buffer = self.buffer.take().ok_or_else(invalid)?;
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        let fixture_io = io_id.uuid();
         let (enter, registered) = oneshot::channel();
         self.pending = Some(runtime.spawn_blocking(move || {
             if registered.blocking_recv().is_err() {
@@ -510,6 +517,18 @@ impl ReaderCell {
                 };
             }
             let result = file.read_at(&mut buffer[..len], range.start);
+            #[cfg(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            if result.is_ok() {
+                super::super::super::native_result_fixture::after_result(
+                    super::super::super::native_result_fixture::Kind::ReaderRead,
+                    fixture_io,
+                );
+            }
             JobResult::Read {
                 file,
                 buffer,
@@ -517,6 +536,18 @@ impl ReaderCell {
                 result,
             }
         }));
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        super::super::super::native_result_fixture::bind_next(
+            super::super::super::native_result_fixture::Kind::ReaderRead,
+            self.lease.lease_id.uuid(),
+            fixture_io,
+            self.pending.as_ref().expect("same original read job").id(),
+        );
         self.pending_kind = Some(JobKind::Read);
         self.read_fact = Some(ReaderReadFact {
             io_id,

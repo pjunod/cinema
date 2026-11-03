@@ -594,6 +594,7 @@ impl CopyOutput {
                 self.member,
                 OutputKey::Playlist,
                 &mut bytes,
+                deadline,
             )
             .await?;
         self.runtime

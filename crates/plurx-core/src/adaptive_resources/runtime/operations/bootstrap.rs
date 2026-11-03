@@ -14,6 +14,11 @@ pub(in crate::adaptive_resources::runtime) mod readers;
 #[cfg(unix)]
 pub(in crate::adaptive_resources::runtime) mod retirement;
 
+/// Heap bytes of one member's shared `io_progress` notification.
+pub(super) fn io_progress_heap_bytes() -> usize {
+    std::mem::size_of::<tokio::sync::Notify>() + 2 * std::mem::size_of::<usize>()
+}
+
 pub(super) struct BootstrapMember {
     plan: ScratchPlanV3,
     fold: Option<BootstrapFold>,
@@ -21,6 +26,10 @@ pub(super) struct BootstrapMember {
     root_arm: Option<(v2::Id, v2::Id)>,
     root_ready: bool,
     next_arm: Option<(v2::Id, BootstrapIoV1)>,
+    /// Signalled by every acknowledged change of THIS member. The asset has a
+    /// single journaled I/O slot; a producer publication or sync that finds
+    /// it held by a reader's armed operation waits here, never retries blind.
+    io_progress: Arc<tokio::sync::Notify>,
     #[cfg(unix)]
     native_root: Option<native::RootCell>,
     #[cfg(unix)]
@@ -253,6 +262,9 @@ impl PreparedBootstrapTransfer {
             root_arm: None,
             root_ready: true,
             next_arm: None,
+            // The same notification: a producer waiting on the original
+            // member is woken by the adopted member's acknowledgements.
+            io_progress: Arc::clone(&source.io_progress),
             native_root: source.native_root.take(),
             publication: source.publication.take(),
             publication_registered: source.publication_registered,
@@ -445,6 +457,7 @@ impl BootstrapMember {
             root_arm: None,
             root_ready: true,
             next_arm: None,
+            io_progress: Arc::new(tokio::sync::Notify::new()),
             native_root: Some(native_root),
             publication: None,
             publication_registered: false,
@@ -718,6 +731,7 @@ impl NodeResourceRuntime {
                     root_arm: None,
                     root_ready: false,
                     next_arm: None,
+                    io_progress: Arc::new(tokio::sync::Notify::new()),
                     #[cfg(unix)]
                     native_root: None,
                     #[cfg(unix)]
@@ -998,6 +1012,9 @@ pub(super) fn acknowledge(role: &mut OwnedRole, member: Uuid) -> Result<(), Oper
         .get_mut(&member)
         .ok_or(OperationError::State)?;
     bootstrap.change.take().ok_or(OperationError::State)?;
+    // Under the bundle lock, after the change is cleared: a waiter that
+    // registered before its locked slot check cannot miss this wakeup.
+    bootstrap.io_progress.notify_waiters();
     #[cfg(unix)]
     readers::notify_progress(bootstrap);
     #[cfg(target_os = "linux")]

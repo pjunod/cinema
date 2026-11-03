@@ -2732,6 +2732,311 @@ async fn copy_missing_registered_sync_owner_holds_r_until_same_owner_restored() 
     missing_registered_native_io_keeps_original_charge(false).await;
 }
 
+/// Which producer step finds the asset's single journaled I/O slot held by a
+/// client's in-flight `ReadRange`.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlotWaiter {
+    /// `queue_scratch_publication_wait` for the next segment.
+    PublicationQueue,
+    /// `publish_scratch_output` after the queue, before its arm.
+    PublicationArm,
+    /// `queue_scratch_sync_wait` for the published segment.
+    SyncQueue,
+    /// `sync_scratch_outputs` after the queue, before its arm.
+    SyncArm,
+}
+
+// A real reader of the published Init holds the asset's one pending slot
+// (armed, entered, unobserved) with the bundle lock free while the producer
+// takes its next step. Before the fix each step refused with `State`, which
+// the segment pump reports as a sink fault and the daemon answers by killing
+// FFmpeg. The producer must instead wait for the read's acknowledged observe
+// and then complete; the one-pending journal invariant is unchanged.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+async fn producer_waits_for_reader_held_io_slot(waiter: SlotWaiter) {
+    use super::super::native_result_fixture::{Gate, Kind};
+    use v2::scratch::OutputKey;
+    let root = tempfile::tempdir().expect("actual reader/producer slot fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    original_prefix(&runtime, &mut owner, &preparation).await;
+    let member = output_member(&preparation).await;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("original lease before closing");
+    let init = b"\0\0\0\x18ftypisom\0\0\0\0isomiso6".to_vec();
+    let mut payload = init.clone();
+    let publication = runtime
+        .queue_scratch_publication(&preparation, 0, member, OutputKey::Init, &mut payload)
+        .expect("queue original init publication");
+    runtime
+        .publish_scratch_output(&preparation, 0, member, publication, deadline())
+        .await
+        .expect("original init publication");
+    let sync = runtime
+        .queue_scratch_sync(&preparation, 0, member, &[OutputKey::Init])
+        .expect("queue original init sync");
+    runtime
+        .sync_scratch_outputs(&preparation, 0, member, sync, deadline())
+        .await
+        .expect("original init sync");
+
+    let segment = OutputKey::Segment { index: 0 };
+    let segment_bytes = b"\0\0\0\x10moof\0\0\0\x08mdat".to_vec();
+    let mut segment_payload = segment_bytes.clone();
+    let mut queued_publication = None;
+    let mut queued_sync = None;
+    match waiter {
+        SlotWaiter::PublicationQueue => {}
+        SlotWaiter::PublicationArm => {
+            queued_publication = Some(
+                runtime
+                    .queue_scratch_publication(
+                        &preparation,
+                        0,
+                        member,
+                        segment,
+                        &mut segment_payload,
+                    )
+                    .expect("queue segment while the slot is free"),
+            );
+        }
+        SlotWaiter::SyncQueue | SlotWaiter::SyncArm => {
+            let id = runtime
+                .queue_scratch_publication(&preparation, 0, member, segment, &mut segment_payload)
+                .expect("queue segment while the slot is free");
+            runtime
+                .publish_scratch_output(&preparation, 0, member, id, deadline())
+                .await
+                .expect("segment publication while the slot is free");
+            if waiter == SlotWaiter::SyncArm {
+                queued_sync = Some(
+                    runtime
+                        .queue_scratch_sync(&preparation, 0, member, &[segment])
+                        .expect("queue segment sync while the slot is free"),
+                );
+            }
+        }
+    }
+
+    let len = init.len() as u64;
+    let reader = runtime
+        .prepare_finite_reader(&preparation, 0, member, OutputKey::Init, 0, len, len)
+        .await
+        .expect("client reader of the published init");
+    let gate = Gate::install_next(Kind::ReaderRead, reader.fixture_lease_id());
+    let mut read = Box::pin(reader.next_chunk(deadline()));
+    tokio::select! {
+        result = &mut read => panic!("read returned before its native result was delayed: {}", result.is_ok()),
+        result = tokio::time::timeout(Duration::from_secs(10), gate.reached()) => {
+            result.expect("original reader pread watchdog");
+        }
+    }
+    // Only the borrowed waiter leaves: the armed ReadRange, its native job
+    // and its lease stay in the SAME reader cell, with the bundle lock free.
+    drop(read);
+    let pending = |bundle: &Bundle| {
+        bundle.roles[0].bootstrap[&member]
+            .fold()
+            .expect("original fold")
+            .state()
+            .asset
+            .totals
+            .pending_jobs
+    };
+    assert_eq!(
+        pending(&*preparation.state.lock().await),
+        1,
+        "the reader holds the asset's single journaled I/O slot"
+    );
+
+    if waiter == SlotWaiter::PublicationQueue {
+        // A bounded wait that expires is a Deadline (TimedOut at the pump),
+        // never a State refusal, and it leaves the caller's payload intact.
+        let mut expiring = segment_bytes.clone();
+        let expired = runtime
+            .queue_scratch_publication_wait(
+                &preparation,
+                0,
+                member,
+                segment,
+                &mut expiring,
+                Instant::now() + Duration::from_millis(200),
+            )
+            .await;
+        assert!(
+            matches!(expired, Err(OperationError::Deadline)),
+            "expiry is Deadline: {expired:?}"
+        );
+        assert_eq!(expiring, segment_bytes, "rejected wait keeps the payload");
+    }
+
+    let step = async {
+        match waiter {
+            SlotWaiter::PublicationQueue => {
+                let id = runtime
+                    .queue_scratch_publication_wait(
+                        &preparation,
+                        0,
+                        member,
+                        segment,
+                        &mut segment_payload,
+                        deadline(),
+                    )
+                    .await?;
+                queued_publication = Some(id);
+                Ok(())
+            }
+            SlotWaiter::PublicationArm => {
+                runtime
+                    .publish_scratch_output(
+                        &preparation,
+                        0,
+                        member,
+                        queued_publication.expect("queued segment"),
+                        deadline(),
+                    )
+                    .await
+            }
+            SlotWaiter::SyncQueue => {
+                let id = runtime
+                    .queue_scratch_sync_wait(&preparation, 0, member, &[segment], deadline())
+                    .await?;
+                queued_sync = Some(id);
+                Ok(())
+            }
+            SlotWaiter::SyncArm => {
+                runtime
+                    .sync_scratch_outputs(
+                        &preparation,
+                        0,
+                        member,
+                        queued_sync.expect("queued segment sync"),
+                        deadline(),
+                    )
+                    .await
+            }
+        }
+    };
+    let mut step = Box::pin(step);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut step)
+            .await
+            .is_err(),
+        "{waiter:?} must wait for the reader-held slot, not refuse"
+    );
+    drop(gate);
+    let (chunk, stepped) = tokio::join!(reader.next_chunk(deadline()), step);
+    stepped.unwrap_or_else(|error| panic!("{waiter:?} after the read: {error:?}"));
+    let chunk = chunk
+        .expect("original reader resumes its SAME armed read")
+        .expect("init bytes");
+    assert_eq!(chunk.as_ref(), init.as_slice());
+    drop(chunk);
+
+    // The producer survives: its remaining steps complete on the same slot.
+    match waiter {
+        SlotWaiter::PublicationQueue | SlotWaiter::PublicationArm => {
+            assert!(segment_payload.is_empty(), "runtime adopted the payload");
+            if waiter == SlotWaiter::PublicationQueue {
+                runtime
+                    .publish_scratch_output(
+                        &preparation,
+                        0,
+                        member,
+                        queued_publication.expect("queued segment"),
+                        deadline(),
+                    )
+                    .await
+                    .expect("segment publication after the read");
+            }
+            let id = runtime
+                .queue_scratch_sync_wait(&preparation, 0, member, &[segment], deadline())
+                .await
+                .expect("segment sync queue after the read");
+            runtime
+                .sync_scratch_outputs(&preparation, 0, member, id, deadline())
+                .await
+                .expect("segment sync after the read");
+        }
+        SlotWaiter::SyncQueue => {
+            runtime
+                .sync_scratch_outputs(
+                    &preparation,
+                    0,
+                    member,
+                    queued_sync.expect("queued segment sync"),
+                    deadline(),
+                )
+                .await
+                .expect("segment sync after the read");
+        }
+        SlotWaiter::SyncArm => {}
+    }
+    {
+        let bundle = preparation.state.lock().await;
+        assert_eq!(pending(&bundle), 0, "slot released, one-pending kept");
+        let fold = bundle.roles[0].bootstrap[&member]
+            .fold()
+            .expect("original fold");
+        assert!(
+            fold.files()
+                .iter()
+                .any(|file| !file.temporary && file.published == Some(segment)),
+            "the segment is published in the journal-known inventory"
+        );
+    }
+    reader
+        .close(deadline())
+        .await
+        .expect("positive close of the original reader");
+    drop(reader);
+    retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn copy_publication_queue_waits_for_reader_held_io_slot() {
+    producer_waits_for_reader_held_io_slot(SlotWaiter::PublicationQueue).await;
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn copy_publication_arm_waits_for_reader_held_io_slot() {
+    producer_waits_for_reader_held_io_slot(SlotWaiter::PublicationArm).await;
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn copy_sync_queue_waits_for_reader_held_io_slot() {
+    producer_waits_for_reader_held_io_slot(SlotWaiter::SyncQueue).await;
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn copy_sync_arm_waits_for_reader_held_io_slot() {
+    producer_waits_for_reader_held_io_slot(SlotWaiter::SyncArm).await;
+}
+
 // Each irreversible errno filter runs in its own harness subprocess and on
 // its current Tokio thread. These cases require actual kernel syscall errors;
 // absence of the expected syscall/errno fails rather than supplying coverage.

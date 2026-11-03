@@ -690,11 +690,11 @@ impl FiniteOutput {
         }
         self.validate_sources().await?;
         let publication = self
-            .queue_file_wait(FiniteFile::CompleteArtifactManifest, bytes)
+            .queue_file_wait(FiniteFile::CompleteArtifactManifest, bytes, deadline)
             .await?;
         self.finish(&publication, deadline).await?;
         let sync = self
-            .queue_sync_one_wait(FiniteFile::CompleteArtifactManifest)
+            .queue_sync_one_wait(FiniteFile::CompleteArtifactManifest, deadline)
             .await?;
         self.finish(&sync, deadline).await?;
         self.validate_sources().await
@@ -745,10 +745,18 @@ impl FiniteOutput {
         &self,
         file: FiniteFile,
         bytes: &mut Vec<u8>,
+        deadline: Instant,
     ) -> Result<PublicationTicket, FiniteVodError> {
         let id = self
             .runtime
-            .queue_scratch_publication_wait(&self.preparation, 0, self.member, file.key(), bytes)
+            .queue_scratch_publication_wait(
+                &self.preparation,
+                0,
+                self.member,
+                file.key(),
+                bytes,
+                deadline,
+            )
             .await?;
         Ok(PublicationTicket {
             id,
@@ -758,10 +766,11 @@ impl FiniteOutput {
     async fn queue_sync_one_wait(
         &self,
         file: FiniteFile,
+        deadline: Instant,
     ) -> Result<PublicationTicket, FiniteVodError> {
         let id = self
             .runtime
-            .queue_scratch_sync_wait(&self.preparation, 0, self.member, &[file.key()])
+            .queue_scratch_sync_wait(&self.preparation, 0, self.member, &[file.key()], deadline)
             .await?;
         Ok(PublicationTicket {
             id,

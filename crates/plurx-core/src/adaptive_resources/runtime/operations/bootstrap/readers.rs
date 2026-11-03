@@ -37,6 +37,12 @@ impl Drop for FiniteReader {
     }
 }
 impl FiniteReader {
+    /// Fixture selector only: the original lease whose next native read a
+    /// result gate may delay. It grants no read, close or custody.
+    #[cfg(all(test, feature = "fixtures"))]
+    pub(in crate::adaptive_resources::runtime) fn fixture_lease_id(&self) -> Uuid {
+        self.lease
+    }
     pub async fn next_chunk(
         &self,
         deadline: Instant,
