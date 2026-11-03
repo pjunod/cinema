@@ -1358,22 +1358,29 @@ fn cropped_wide_sdr_hevc_is_heavy_but_unqualified_hardware_stays_software() {
         "24/1",
         None,
     ));
-    let plan = resolve(
-        Encoder::Qsv,
-        Pipeline::Cpu,
+    let caps = capabilities_with_qualified_software(
         &input,
-        &capabilities(vec![capability(
+        Pipeline::Cpu,
+        Encoder::Qsv,
+        SubtitleRendering::None,
+        vec![capability(
             DecodeBackend::Qsv,
             "hevc",
             None,
             None,
             CapabilityStatus::Advertised,
-        )]),
-        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )],
+    );
+    let plan = resolve(
+        Encoder::Qsv,
+        Pipeline::Cpu,
+        &input,
+        &caps,
+        DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
     )
-    .expect("legacy extraction remains neutral");
+    .expect("qualified software fallback remains available");
     assert_eq!(plan.decode().backend(), DecodeBackend::Software);
-    assert_eq!(plan.decode().reason(), DecodeReason::LegacyPreference);
+    assert_eq!(plan.decode().reason(), DecodeReason::CapabilityFallback);
 }
 
 #[test]

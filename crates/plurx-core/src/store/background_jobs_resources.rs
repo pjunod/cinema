@@ -363,7 +363,7 @@ pub(super) async fn release_foreground<T: QueueSql>(
     if !token.owner.valid() || token.fence <= 0 || now_ms < 0 {
         return Err(StoreError::Task("invalid foreground source release".into()));
     }
-    let rows=store.queue_sql("DELETE FROM foreground_source_owners WHERE owner_id=json_extract($1,'$.owner.owner_id') AND identity_json=json_extract($1,'$.owner') AND fence=json_extract($1,'$.fence') AND settlement_proof IS NOT NULL RETURNING 'true' AS result_json".into(),encode(&token)?,true,true).await?;
+    let rows=store.queue_sql("DELETE FROM foreground_source_owners WHERE owner_id=json_extract($1,'$.owner.owner_id') AND identity_json=json_extract($1,'$.owner') AND fence=json_extract($1,'$.fence') AND settlement_proof IS NOT NULL RETURNING 'true' AS result_json".into(),encode(&serde_json::json!(token))?,true,true).await?;
     Ok(!rows.is_empty())
 }
 
@@ -419,7 +419,7 @@ pub(super) async fn mark_foreground_settled<T: QueueSql>(
     }
     let rows = store.queue_sql(
         "UPDATE foreground_source_owners SET settlement_proof='joined' WHERE owner_id=json_extract($1,'$.owner.owner_id') AND identity_json=json_extract($1,'$.owner') RETURNING 'true' AS result_json".into(),
-        encode(&token)?, true, true,
+        encode(&serde_json::json!(token))?, true, true,
     ).await?;
     Ok(!rows.is_empty())
 }
@@ -427,7 +427,7 @@ pub(super) async fn mark_foreground_settled<T: QueueSql>(
 pub(super) async fn settled_foreground_custody<T: QueueSql>(
     store: &T,
 ) -> Result<Vec<ForegroundSourceToken>, StoreError> {
-    store.queue_sql(format!("SELECT {} AS result_json FROM foreground_source_owners WHERE settlement_proof IS NOT NULL ORDER BY started_at_ms,owner_id LIMIT 128", token_json()), "{}".into(), false, true).await?
+    store.queue_sql(format!("SELECT {} AS result_json FROM foreground_source_owners WHERE settlement_proof IS NOT NULL ORDER BY started_at_ms,owner_id LIMIT CAST(json_extract($1,'$.limit') AS INTEGER)", token_json()), encode(&serde_json::json!({"limit":128}))?, false, true).await?
         .iter().map(|row| decode(row)).collect()
 }
 
@@ -609,7 +609,7 @@ mod source_tests {
           CREATE TABLE background_storage_domains(library_id INTEGER,root_path TEXT,domain_id TEXT);
           CREATE TABLE background_jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,fence INTEGER,owner_node_id TEXT,owner_boot_id TEXT,claim_id TEXT,lease_expires_ms INTEGER,priority INTEGER DEFAULT 0);
           CREATE TABLE background_job_commands(id TEXT PRIMARY KEY,operation TEXT,request_json TEXT,result_json TEXT);
-          CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER,request_digest TEXT,job_id TEXT,consumer_kind TEXT,consumer_ref TEXT,priority INTEGER,deadline_ms INTEGER,PRIMARY KEY(request_scope,request_id));
+          CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER,request_digest TEXT,job_id TEXT,consumer_kind TEXT,consumer_ref TEXT,priority INTEGER,deadline_ms INTEGER,target_node_id TEXT,PRIMARY KEY(request_scope,request_id));
           CREATE TABLE media_session_requests(user_id INTEGER,playback_id TEXT,incarnation_id TEXT,state TEXT,claim_expires_at_ms INTEGER);
           CREATE TABLE media_sessions(user_id INTEGER,playback_id TEXT,incarnation_id TEXT,state TEXT,lease_expires_at_ms INTEGER,recipe_json TEXT);
           CREATE TABLE media_playback_pointers(user_id INTEGER,playback_id TEXT,current_incarnation_id TEXT);
@@ -677,6 +677,65 @@ mod source_tests {
             .expect("charged source");
         token
     }
+    #[tokio::test]
+    async fn typed_foreground_identity_roundtrips_through_projection_replay_and_join() {
+        let store = fixture();
+        let original =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Rolling), 1000, 2000)
+                .await
+                .expect("register exact owner")
+                .expect("typed token");
+        assert_eq!(
+            resolve_foreground(&store, original.clone())
+                .await
+                .expect("resolve typed registration"),
+            Some(original.clone())
+        );
+        assert!(activate_foreground_custody(
+            &store,
+            original.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("arm exact owner"));
+        let current =
+            project_foreground(&store, original.clone(), sharing(1, 100, 1001), 1001, 2000)
+                .await
+                .expect("update exact owner")
+                .expect("projected token");
+        assert_eq!(
+            resolve_foreground(&store, original.clone())
+                .await
+                .expect("resolve current revision"),
+            Some(current.clone())
+        );
+        let mut wrong_attempt = current.clone();
+        wrong_attempt.owner.producer_attempt = "another producer".into();
+        assert!(!mark_foreground_settled(&store, wrong_attempt.clone())
+            .await
+            .expect("wrong attempt cannot prove join"));
+        assert!(!release_foreground(&store, wrong_attempt, 1002)
+            .await
+            .expect("wrong attempt cannot delete"));
+        assert!(!release_foreground(&store, current.clone(), 1002)
+            .await
+            .expect("unjoined reader stays charged"));
+        assert!(mark_foreground_settled(&store, current.clone())
+            .await
+            .expect("exact physical join"));
+        let replay = settled_foreground_custody(&store)
+            .await
+            .expect("bounded replay page");
+        assert_eq!(replay, vec![current.clone()]);
+        assert!(release_foreground(&store, replay[0].clone(), 1003)
+            .await
+            .expect("replayed exact deletion"));
+        assert!(resolve_foreground(&store, current)
+            .await
+            .expect("row is retired")
+            .is_none());
+    }
+
     #[tokio::test]
     async fn committed_activation_with_lost_ack_aborts_only_exact_nonce() {
         let store = fixture();
@@ -1373,7 +1432,7 @@ mod source_tests {
                 .expect("existing authority reduction");
             connection.execute("INSERT INTO analysis_requests VALUES(?1,'worker',0,'queued',0,0,'generation',1,100,1,'foreground','playback',1000,0,'fragment_index')",[&analysis]).expect("durable preparation");
             for (consumer, user) in [("viewer-a", 1), ("viewer-b", 2)] {
-                connection.execute("INSERT INTO background_job_waiters VALUES('playback-analysis',?1,'pending',1000,'generation',?2,'playback_analysis',?3,3,10000)",rusqlite::params![consumer,analysis,serde_json::json!({"user_id":user,"playback_id":"movie","file_id":1,"analysis_request_id":analysis}).to_string()]).expect("separate viewer");
+                connection.execute("INSERT INTO background_job_waiters(request_scope,request_id,state,updated_at_ms,request_digest,job_id,consumer_kind,consumer_ref,priority,deadline_ms) VALUES('playback-analysis',?1,'pending',1000,'generation',?2,'playback_analysis',?3,3,10000)",rusqlite::params![consumer,analysis,serde_json::json!({"user_id":user,"playback_id":"movie","file_id":1,"analysis_request_id":analysis}).to_string()]).expect("separate viewer");
             }
             connection
                 .execute(
@@ -2076,7 +2135,7 @@ pub(super) async fn mark_background_settled<T: QueueSql>(
 pub(super) async fn settled_background_custody<T: QueueSql>(
     store: &T,
 ) -> Result<Vec<BackgroundSourceCustodyToken>, StoreError> {
-    store.queue_sql("SELECT json_object('custody_id',custody_id,'owner',json(owner_json)) AS result_json FROM background_source_custody WHERE settlement_proof IS NOT NULL ORDER BY started_at_ms,custody_id LIMIT 128".into(),"{}".into(),false,true).await?
+    store.queue_sql("SELECT json_object('custody_id',custody_id,'owner',json(owner_json)) AS result_json FROM background_source_custody WHERE settlement_proof IS NOT NULL ORDER BY started_at_ms,custody_id LIMIT CAST(json_extract($1,'$.limit') AS INTEGER)".into(),encode(&serde_json::json!({"limit":128}))?,false,true).await?
         .iter().map(|row| decode(row)).collect()
 }
 
@@ -2181,7 +2240,7 @@ pub(super) async fn resolve_foreground<T: QueueSql>(
             "invalid foreground custody resolution".into(),
         ));
     }
-    let rows=store.queue_sql(format!("SELECT {} AS result_json FROM foreground_source_owners WHERE owner_id=json_extract($1,'$.owner.owner_id') AND identity_json=json_extract($1,'$.owner')",token_json()),encode(&token)?,false,true).await?;
+    let rows=store.queue_sql(format!("SELECT {} AS result_json FROM foreground_source_owners WHERE owner_id=json_extract($1,'$.owner.owner_id') AND identity_json=json_extract($1,'$.owner')",token_json()),encode(&serde_json::json!(token))?,false,true).await?;
     rows.first().map(|row| decode(row)).transpose()
 }
 

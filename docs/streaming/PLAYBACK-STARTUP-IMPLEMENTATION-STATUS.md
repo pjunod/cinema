@@ -48,6 +48,14 @@ CPUs; C controls are being prepared. No behavioral regression has run.
 The [Astra dispositions](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) distinguish
 source changes from findings that are reviewed and qualified.
 
+Qualification update: both C controls, the Apple model test (1) and Android
+model tests (10) pass on matching source hashes. The first focused Rust run
+retained 35 passes, found 11 confirmed failures, and left 39 cases incomplete
+after a test-thread stack abort. Receipt identity encoding and bounded replay
+queries are corrected; a decoder fixture now exercises its intended enforced
+policy. Retries use the repository's documented 8 MiB test-stack convention.
+Only failed, incomplete and newly added cases will execute again.
+
 ## 1. Work lanes
 
 | Order | Lane | State | Owner |
