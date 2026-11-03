@@ -10,7 +10,8 @@ qualification or deployment is claimed.
 
 ## Current continuation — two-node publication and test isolation
 
-Task PRs #1293, #1338 and #1360–#1365 are merged into effort #1248.
+Task PRs #1293, #1338, #1360–#1365 and #1368 are merged into effort #1248.
+PR #1368 landed at `8aa9cae1b28dd6d6dc9fdb5db3265ef549e8d2f7`; gate 6411 passed.
 PR #1365 landed at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e` after its
 nine-job development gate passed. The current [finite lifecycle and restart
 qualification](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)

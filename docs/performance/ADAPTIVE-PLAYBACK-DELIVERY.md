@@ -1,8 +1,8 @@
 # Adaptive playback — finite delivery closure
 
 **Status:** open · implementation active · updated 2026-11-03. Task PRs #1293,
-#1338 and #1360–#1365 are merged into draft effort #1248. This finite follow-up
-starts at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e`; the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#current-continuation--two-node-publication-and-test-isolation)
+#1338, #1360–#1365 and #1368 are merged into draft effort #1248. Finite PR #1368
+landed at `8aa9cae1b28dd6d6dc9fdb5db3265ef549e8d2f7` after gate 6411 passed; the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#current-continuation--two-node-publication-and-test-isolation)
 records the publication repair and current qualification scope. V1–V5 and final
 qualification remain open. The checklist below retains its historical source
 and evidence limits; a merged component does not close all-path acceptance.

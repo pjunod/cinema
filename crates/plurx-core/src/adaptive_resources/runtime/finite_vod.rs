@@ -836,6 +836,13 @@ impl NodeResourceRuntime {
 }
 
 impl SoftwareVodOwner {
+    /// Original typed scratch/task epoch, fixed before admission. This is
+    /// observation identity, not a session UUID or cleanup authority.
+    #[cfg(target_os = "linux")]
+    pub fn generation_epoch(&self) -> u64 {
+        self.policy_generation
+    }
+
     /// A terminal/failed driver clears positive service evidence without
     /// erasing the class cooldown or announcing native cleanup.
     #[cfg(target_os = "linux")]

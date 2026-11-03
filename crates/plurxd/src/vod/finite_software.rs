@@ -38,6 +38,7 @@ fn speculative_capacity_refusal(refusal: plurx_core::adaptive_resources::Admissi
 /// only core's original receipts and known journal commits release resources.
 pub(crate) struct FiniteSoftwareProducer {
     owner: Mutex<SoftwareVodOwner>,
+    generation_epoch: u64,
     cache_grant: std::sync::Mutex<Option<crate::playback_cache::FiniteCacheReservation>>,
     compatibility: std::sync::Mutex<Option<crate::vodencode::FiniteSoftwareCompatibility>>,
     // Captured before publication. Source-spec paths are only removed and
@@ -90,6 +91,7 @@ impl FiniteSoftwareProducer {
     ) -> Self {
         Self {
             control: owner.control(),
+            generation_epoch: owner.generation_epoch(),
             owner_heap_bound: owner.requested_heap_bytes(),
             owner: Mutex::new(owner),
             cache_grant: std::sync::Mutex::new(Some(cache_grant)),
@@ -100,6 +102,9 @@ impl FiniteSoftwareProducer {
             driver_state: AtomicU8::new(DRIVER_UNREGISTERED),
             driver_change: Notify::new(),
         }
+    }
+    pub(crate) fn generation_epoch(&self) -> u64 {
+        self.generation_epoch
     }
     pub(super) fn take_cache_grant(&self) -> Option<crate::playback_cache::FiniteCacheReservation> {
         self.cache_grant

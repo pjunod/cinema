@@ -173,6 +173,13 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         rendition.dir.is_finite(),
         "ordinary route must select finite custody"
     );
+    let producer_generation = rendition
+        .dir
+        .finite_producer()
+        .expect("original finite producer")
+        .generation_epoch();
+    assert_ne!(producer_generation, 0);
+    assert_eq!(rendition.gen_epoch.load(Acquire), producer_generation);
     let output = rendition
         .dir
         .finite_output()
