@@ -17,6 +17,7 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
 
     let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
     std::fs::create_dir_all(&target).expect("repo-local fixture root");
+    let target = std::fs::canonicalize(target).expect("canonical native fixture ancestry");
     let fixture = tempfile::Builder::new()
         .prefix("finite-software-restart-")
         .tempdir_in(&target)
@@ -275,10 +276,17 @@ async fn finite_restart_open(
     plurx_core::cluster::migration::SelectedStore,
     Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
 ) {
-    let config = finite_restart_config(root);
+    let mut config = finite_restart_config(root);
+    crate::canonicalize_storage_roots(&mut config)
+        .expect("production non-destructive storage preflight before Store ownership");
     let mut selected = crate::sharing_fixture_clock::select_applied_singleton(&config)
         .await
         .expect("actual selected local voter");
+    selected
+        .store
+        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "true")
+        .await
+        .expect("save Source enablement before this fixture's real schema startup");
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("production pre-serving schema"));
@@ -295,7 +303,8 @@ async fn finite_restart_attach(
     runtime: &Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
     file: &plurx_core::domain::MediaFile,
 ) -> (Arc<VodServe>, Arc<Rendition>) {
-    let dirs = crate::create_dirs_for_config(config).expect("production managed directories");
+    let dirs = crate::create_dirs_for_config_with_runtime(config, Some(runtime.as_ref()))
+        .expect("production recovery-aware managed directories");
     let store = Arc::clone(&selected.store);
     let serve = VodServe::new_cluster_with_runtime(
         dirs.renditions.clone(),

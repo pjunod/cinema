@@ -13,10 +13,12 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
     std::fs::create_dir_all(&target).expect("repo-local fixture root");
     let target = std::fs::canonicalize(target).expect("canonical native fixture ancestry");
-    let base = tempfile::Builder::new()
-        .prefix("finite-software-vod-")
-        .tempdir_in(&target)
-        .expect("repo-local finite fixture");
+    let base = FiniteLifecycleFixtureRoot(
+        tempfile::Builder::new()
+            .prefix("finite-software-vod-")
+            .tempdir_in(&target)
+            .expect("repo-local finite fixture"),
+    );
     let source_path = base.path().join("source.mkv");
     // A short, actual media source keeps the native writer and test bounded.
     testfixtures::run(
@@ -565,6 +567,28 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     assert_eq!(final_snapshot.held, 0);
     assert_eq!(final_snapshot.unknown_peak_producers, 0);
     assert_eq!(final_snapshot.used, Default::default());
+}
+
+/// Keep the failed installation and journal available for diagnosis.
+struct FiniteLifecycleFixtureRoot(tempfile::TempDir);
+
+impl std::ops::Deref for FiniteLifecycleFixtureRoot {
+    type Target = tempfile::TempDir;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for FiniteLifecycleFixtureRoot {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.disable_cleanup(true);
+            eprintln!(
+                "retained failed finite lifecycle fixture: {}",
+                self.0.path().display()
+            );
+        }
+    }
 }
 
 /// Advance only the existing terminal-response retention policy after actual
