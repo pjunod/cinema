@@ -2064,7 +2064,7 @@ mod dv_title_companion {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn budgeted_companion_inherits_no_raw_source_and_refused_pass_joins_its_input() {
-        use plurx_core::transcode::{DvBackendIdentity, DvDigest};
+        use plurx_core::transcode::dv_processing::{DvBackendIdentity, DvDigest};
         use std::os::unix::fs::PermissionsExt;
         let directory = crate::test_tempdir().expect("companion custody fixture");
         let scanner = directory.path().join("scanner");

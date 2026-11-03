@@ -1,6 +1,6 @@
 # Playback startup, Resume and native callback implementation status
 
-**Status:** six Astra findings source-verified; pending companion selection correction awaits final verification · **Owner:** Codex/root · **Branch:**
+**Status:** Astra source review closed all seven findings on `bd3bfffba2feacc22ee85dfd323f3e15c6539b6d`; focused tests and CI remain pending · **Owner:** Codex/root · **Branch:**
 `codex/playback-startup-fixes` · **Base:** `bd213c819` · **Updated:**
 2026-11-03
 
@@ -23,15 +23,27 @@ companion retains normal source batching; optional work has revocable bounds.
 Production/core compilation passed on frozen pre-findings candidate
 `2bc1e54e1`; it does not qualify the changed source. The learner compiler slot
 is prepared with pinned Rust 1.97.1, a warm task cache, four CPUs and an 18 GiB
-memory cap. No behavioral tests, final finding verification or merge
-qualification are recorded yet.
+memory cap. Renderer and complete-title C controls pass on the reviewed source hashes.
+Focused Rust, Apple/Android and main fast-lane qualification remain pending. Final source review is recorded below;
+CI and merge qualification remain pending.
 
-Astra's focused verification closes findings 1, 2, 3, 5, 6 and 7 by source
-inspection. Finding 4 remains open: a selected pending companion must acquire
-accepted source purpose before init discovery, rather than waiting for a
-Prepare that discovery itself gates. The correction accepts the exact parent selection and acquires existing
-controlled admission before discovery. Independent parent-selection and quality
-requirements preserve each owner; Astra verification is pending. No behavioral tests have run.
+Astra's follow-up review closed all seven findings against exact source commit
+`bd3bfffba2feacc22ee85dfd323f3e15c6539b6d`. The private
+`ASTRA-REVIEW-COMMIT-BINDING.json` records that reviewed diff SHA-256
+`531f1000fc09e8a5f2b2cda0888b602f8dc2134fe3de49cd87e3ab16758c186a` maps to
+that commit. A selected pending companion now acquires controlled source
+admission from the exact accepted parent selection before init discovery.
+`control_required` and `quality_required` remain independent facts; the
+persistent companion is Live while either owner requires it. Init verification
+still gates family publication and Prepare. This closes the source-review
+finding, while focused regression execution, current Linux compilation, CI, and
+merge qualification remain pending.
+
+The normal pinned Mac commit hook passed on
+`bd3bfffba2feacc22ee85dfd323f3e15c6539b6d`. The earlier Linux production/core
+compile remains bound to frozen pre-findings `2bc1e54e1`. Current Linux
+all-target Clippy is running on the eligible learner with 18 GiB and four
+CPUs; C controls are being prepared. No behavioral regression has run.
 
 The [Astra dispositions](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) distinguish
 source changes from findings that are reviewed and qualified.
@@ -40,14 +52,14 @@ source changes from findings that are reviewed and qualified.
 
 | Order | Lane | State | Owner |
 |---:|---|---|---|
-| 1 | Per-element callback multiplexer and native discontinuity renewal; preserve Resume/seek proof and scope renewal evidence to native-src. | Drafted; mux, four consumer migrations and scoped native observation-unavailable surface added. Review and validation pending. | Codex/root |
-| 2 | Typed pending-family retry under the original deadline. | Drafted; final review and validation pending. | Sol |
-| 3 | One shared heavy-source predicate for decode and filter planning, including cropped UHD. | Drafted; shared predicate and regressions added. Tests not run; final review pending. | Codex/root |
-| 4 | Resume through the retained-incumbent owner. | Drafted; awaiting final review and validation. | Codex/root |
-| 5 | Native clock and buffer ownership across attachment/source execution. | Drafted; delayed native source fences clock, buffers and events. Validation pending. | Codex/root |
-| 6 | Continuous companion deferral plus client binding and versioned-family-update consumption. | Drafted; final review and validation pending. | Sol |
-| 7 | M3 short-window first publication while retaining steady continuity reserve. | Drafted; awaiting final review and validation. | Codex/root |
-| 8 | M1 shared source ledger and sparse subtitle-read cancellation with bounded fairness. | Drafted: shared physical custody, finite service, sparse cancellation, durable hashes and verified quota holds cover the reader inventory, including isolated probes. Compiler and review pending. | Sol / Codex/root |
+| 1 | Per-element callback multiplexer and native discontinuity renewal; preserve Resume/seek proof and scope renewal evidence to native-src. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Codex/root |
+| 2 | Typed pending-family retry under the original deadline. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Sol |
+| 3 | One shared heavy-source predicate for decode and filter planning, including cropped UHD. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Codex/root |
+| 4 | Resume through the retained-incumbent owner. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Codex/root |
+| 5 | Native clock and buffer ownership across attachment/source execution. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Codex/root |
+| 6 | Continuous companion deferral plus client binding and versioned-family-update consumption. | Astra source review closed, including accepted parent selection before discovery and independent `control_required` / `quality_required` ownership; focused regressions remain pending. | Sol |
+| 7 | M3 short-window first publication while retaining steady continuity reserve. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Codex/root |
+| 8 | M1 shared source ledger and sparse subtitle-read cancellation with bounded fairness. | Astra source review closed across custody, finite service, sparse cancellation, durable hashes and verified quota holds, including isolated probes; focused regressions remain pending. | Sol / Codex/root |
 
 The user's one-batched-main-PR instruction supersedes Fable's separate-PR
 sequence. Keep the order above in reviewable commits within the batch. The
@@ -128,8 +140,9 @@ when fresh decode/clock progress conflicts with silent callbacks. It withdraws
 only exact owner/generation/intent observational claims and offers a nonblocking
 Try again / Close notice. It neither pauses playback nor certifies presentation
 or seek landing; genuine freezes and authoritative failures retain their owners.
-Web syntax and Swift model type-checks passed; regression execution and final
-review remain pending. Compiler checks execute no unit tests.
+Web syntax and Swift model type-checks passed; regression execution remains
+pending. The final source review closed all seven findings on the bound commit
+above. Compiler checks execute no unit tests.
 
 The strict parser keeps its existing isolation and execution identity. Linux
 source reads pass through its existing notification supervisor, WASI reads
@@ -142,12 +155,14 @@ boundaries require Linux and packaged-parser qualification after review.
 
 | Check | Current result |
 |---|---|
-| Pinned Mac workspace Clippy, all targets, formatting, catalog and served JS syntax | Passed through the normal commit hooks. |
+| Pinned Mac workspace Clippy, all targets, formatting, catalog and served JS syntax | Passed through the normal commit hook on `bd3bfffba2feacc22ee85dfd323f3e15c6539b6d`. |
 | Web TypeScript baseline | Passed without raising the baseline. |
 | Pinned Linux production daemon and core all-target compilation | Passed on frozen pre-findings candidate `2bc1e54e1`; it does not qualify the changed source. |
 | Full Linux renderer SDK plus CPU harness compilation | Passed; renderer/header hashes match the current code. No renderer regression has executed. |
-| Full Linux daemon test-target compilation | Exceeds the voter compiler's 8 GiB limit, including with incremental compilation disabled. A larger eligible builder is being prepared after `lab3` was confirmed a learner. The voter cap stays intact. |
-| Final review, focused regressions and main fast lane | Pending; finding 5 RPC-wait accounting is not yet resolved. |
+| Current Linux all-target Clippy | Running on the eligible learner with 18 GiB and four CPUs. |
+| Full Linux daemon test-target compilation and C controls | Pending; the eligible builder is ready and C controls are being prepared. |
+| Astra source review | Closed all seven findings on `bd3bfffba2feacc22ee85dfd323f3e15c6539b6d`; the private binding receipt ties the reviewed diff to this commit. |
+| Focused behavioral regressions, main fast lane and merge qualification | Pending; no behavioral tests have run. |
 
 Private compiler logs, archive checksums and source ownership handoffs live in
 the workflow's durable evidence directory, outside its disposable build cache.
