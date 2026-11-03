@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Web Local and Shared playback resume partial rewatches even when watched
+  history is already recorded.
+- Enhanced DV preparation overlaps optional cache inventory with full validation.
+
 - Nightly deep validation and mutation tests use the app's shipped FFmpeg
   package; obsolete FFmpeg 6 runner capacity and recovery entries are retired.
 

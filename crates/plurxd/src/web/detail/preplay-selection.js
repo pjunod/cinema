@@ -352,6 +352,17 @@ function acceptItemPage(page){
   clearPrePlay();
   page.files.forEach(f=>{ITEM_FOR_FILE[playbackFileKey(f.fileContext)]=page.id;});
 }
+function playbackResumeMs(watch,durationMs){
+  const position=watch?.position_ms;
+  if(!Number.isSafeInteger(position)||position<=3000)return 0;
+  const duration=Number.isSafeInteger(durationMs)&&durationMs>0?durationMs:
+    (Number.isSafeInteger(watch.duration_ms)&&watch.duration_ms>0?watch.duration_ms:0);
+  // Watched records history and remains true during a rewatch. A current
+  // partial position still resumes; the server's 95% completion boundary,
+  // rather than that historical flag, identifies a finished playback.
+  if(duration>0)return position<duration*0.95?position:0;
+  return watch.watched?0:position;
+}
 function itemPageModel(id,d,libs){
   const it=d.item;
   const lib=libs.find(l=>l.id===it.library_id);
@@ -373,7 +384,7 @@ function itemPageModel(id,d,libs){
   // rather than "you tapped it"; it appears on the button label, on the start-
   // over affordance and in the autoplay path, and a layout that rounded it
   // differently would offer to resume something the player restarts.
-  const resume=it.watch&&it.watch.position_ms>3000&&!it.watch.watched?it.watch.position_ms:0;
+  const resume=playbackResumeMs(it.watch,runtime);
   // The years a container spans, gathered from its seasons' air dates plus its
   // own. A show wears a range; a season wears one year; everything else wears
   // its year. Derived here because it is a fact about the item, not a choice

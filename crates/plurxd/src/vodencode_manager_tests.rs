@@ -5,9 +5,14 @@
 #[tokio::test]
 #[ignore = "requires an actual HDR source, reviewed helper bundle and proved VAAPI device"]
 async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_seek() {
+    let profile = std::env::var("PLURX_DV_WINDOW_PROFILE").is_ok_and(|value| value == "1");
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_max_level(tracing::Level::WARN)
+        .with_env_filter(if profile {
+            "warn,plurxd::dv=debug"
+        } else {
+            "warn"
+        })
         .try_init();
     use plurx_core::store::SqliteStore;
     use plurx_core::transcode::dv_processing::{
@@ -82,6 +87,31 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             .expect("isolated preference");
     }
     let file = store.get_file(id).await.expect("file").expect("attested");
+    // An explicit read-only cache root makes the ordinary reservation part of
+    // this physical control. No owner is registered, so this control cannot
+    // evict production media. Its only writer grant is settled at zero.
+    let cache_budget = std::env::var("PLURX_DV_WINDOW_CACHE_ROOT")
+        .ok()
+        .map(|root| {
+            let root = PathBuf::from(root);
+            assert!(root.is_dir(), "physical inventory root must exist");
+            crate::playback_cache::PlaybackCacheBudget::new(
+                Arc::clone(&store),
+                vec![root, base.path().to_owned()],
+            )
+        });
+    if let Some(budget) = &cache_budget {
+        budget
+            .used_bytes()
+            .await
+            .expect("registered cache inventory");
+    }
+    let compare_cache =
+        std::env::var("PLURX_DV_WINDOW_CACHE_COMPARE").is_ok_and(|value| value == "1");
+    assert!(
+        !compare_cache || cache_budget.is_some(),
+        "cache comparison requires its real inventory root"
+    );
     let mut manager = TranscodeManager::new(
         Arc::clone(&store),
         base.path().join("runtime"),
@@ -362,7 +392,10 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         // a second play is not given another graph (it keeps its ordinary
         // converted copy, or an unprocessed recipe), never a second slot.
         assert!(runtime.reconstruction_slot.is_some());
-        assert_eq!(manager.processed_reconstruction_slots.available_permits(), 0);
+        assert_eq!(
+            manager.processed_reconstruction_slots.available_permits(),
+            0
+        );
         let second = manager
             .prepare_vod_encoding(
                 &SessionRequest {
@@ -375,14 +408,16 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             .await
             .expect("second play keeps an ordinary route");
         assert!(
-            second.as_ref().is_none_or(|second| !matches!(
-                second.dv_processing,
-                DvSelection::Selected(_)
-            )),
+            second
+                .as_ref()
+                .is_none_or(|second| !matches!(second.dv_processing, DvSelection::Selected(_))),
             "a second live reconstruction must not be admitted on this worker"
         );
         drop(second);
-        assert_eq!(manager.processed_reconstruction_slots.available_permits(), 0);
+        assert_eq!(
+            manager.processed_reconstruction_slots.available_permits(),
+            0
+        );
     }
     let luma = processed_window_luma(&verified.bytes, raster, false);
     println!(
@@ -404,14 +439,43 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         &[1, 2, 360]
     };
     // A short excerpt has no twelve-minute window; it checks the ones it has.
-    let entries: Vec<usize> = entries
-        .iter()
-        .copied()
-        .filter(|at| *at < segment_plan.entries.len())
-        .collect();
+    let requested_entries = std::env::var("PLURX_DV_WINDOW_ENTRIES").ok().map(|value| {
+        let entries: Vec<usize> = value
+            .split(',')
+            .map(|entry| entry.parse().expect("integer entry"))
+            .collect();
+        assert!(
+            !entries.is_empty() && entries.len() <= 32,
+            "bounded physical window sample"
+        );
+        entries
+    });
+    let entries: Vec<usize> = if let Some(requested) = requested_entries {
+        assert!(
+            requested.iter().all(|at| *at < segment_plan.entries.len()),
+            "explicit physical window is outside the source timeline"
+        );
+        requested
+    } else {
+        entries
+            .iter()
+            .copied()
+            .filter(|at| *at < segment_plan.entries.len())
+            .collect()
+    };
     let entries = entries.as_slice();
+    if compare_cache {
+        assert!(
+            entries.len() >= 4
+                && entries.len().is_multiple_of(4)
+                && entries
+                    .chunks(4)
+                    .all(|block| block.iter().all(|at| *at == block[0])),
+            "ABBA requires complete four-sample blocks of the same source entry"
+        );
+    }
     let mut target_digest = None;
-    for &at in entries {
+    for (sample, &at) in entries.iter().enumerate() {
         let entry = &segment_plan.entries[at];
         let bundle = crate::vodencode::admit_frozen_preparation(
             &manager.admissions,
@@ -423,6 +487,21 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         )
         .await
         .expect("actual graph resources");
+        // Balanced ABBA control: holding the operation makes optional warming
+        // skip immediately. Release it before the mandatory reservation; all
+        // rendering, validation and publication-capacity checks still run.
+        let warm = !compare_cache || matches!(sample % 4, 1 | 2);
+        let operation = if warm {
+            None
+        } else {
+            Some(
+                cache_budget
+                    .as_ref()
+                    .expect("cache comparison")
+                    .inventory_operation_for_control()
+                    .await,
+            )
+        };
         let started = Instant::now();
         let (verified, plan) = match runtime
             .execute_policy_until(
@@ -447,6 +526,22 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 panic!("actual graph was cancelled instead of verifying its window")
             }
         };
+        let inventory_completed = cache_budget
+            .as_ref()
+            .is_some_and(|budget| budget.inventory_warmed_since_for_control(started));
+        drop(operation);
+        let reservation_started = Instant::now();
+        if cache_budget.is_some() {
+            crate::playback_cache::reserve(
+                &base.path().join("reservation-control"),
+                verified.bytes.len() as u64,
+            )
+            .await
+            .expect("ordinary publication capacity")
+            .expect("registered budget")
+            .commit(0);
+        }
+        let reservation_ms = reservation_started.elapsed().as_millis();
         if let Some(target) = display_target {
             if sdr {
                 assert_eq!(
@@ -547,7 +642,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         let luma = processed_window_luma(&verified.bytes, raster, at == 360);
         println!(
             "{}",
-            serde_json::json!({"entry":at,"target_nits":display_target.map(|target| target.nits()),
+            serde_json::json!({"entry":at,"inventory_warm_allowed":warm,"inventory_completed":inventory_completed,"reservation_ms":reservation_ms,"target_nits":display_target.map(|target| target.nits()),
             "target_rows":verified.observed.display_target_rows,"elapsed_ms":elapsed.as_millis(),
             "decoder":format!("{:?}", verified.observed.decoder),"luma":luma,
             "bytes":verified.bytes.len(),"plan":plan.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
