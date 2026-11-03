@@ -2266,3 +2266,283 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     drop(node_b);
     drop(node_a);
 }
+
+/// One voter with cross-node placement enabled takes the adaptive attempt
+/// protocol for its own create. The original local worker Adopts, attaches
+/// and publishes its route, so the ingress serves it: a 200 and a listed
+/// segment. Before the worker published its Adopt this create was refused
+/// with "media-session response publication lost its exact activation".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn single_voter_adaptive_create_publishes_its_locally_adopted_route() {
+    let Ok(ffmpeg) = std::env::var("PLURX_FFMPEG") else {
+        eprintln!("SKIP: PLURX_FFMPEG is unset; the adaptive worker needs a real encoder");
+        return;
+    };
+    let root = canonical_tempdir();
+    let media = root.path().join("media");
+    std::fs::create_dir_all(&media).expect("media directory");
+    let fixture = media.join("Adaptive Single Voter (2024).mkv");
+    let generated = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=640x360:rate=24:duration=8",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=8",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-g",
+            "48",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-y",
+        ])
+        .arg(&fixture)
+        .output()
+        .expect("run ffmpeg fixture generator");
+    assert!(
+        generated.status.success(),
+        "ffmpeg fixture failed: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let mut ports = reserved_ports(3).into_iter();
+    let mut http = ports.next().expect("HTTP reservation");
+    let mut raft = ports.next().expect("Raft reservation");
+    let mut api = ports.next().expect("API reservation");
+    let data = root.path().join("node-a");
+    std::fs::create_dir_all(&data).expect("node data");
+    drop(SqliteStore::open(&data.join("plurx.db")).expect("legacy SQLite source"));
+    let config = root.path().join("node-a.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[server]\nbind = \"127.0.0.1:{}\"\n\
+             [storage]\ndata_dir = \"{}\"\n\
+             [cluster]\nraft_bind = \"127.0.0.1:{}\"\n\
+             api_bind = \"127.0.0.1:{}\"\n\
+             advertise_host = \"127.0.0.1\"\n\
+             join_url = \"http://127.0.0.1:{}\"\n\
+             artwork_url = \"http://127.0.0.1:{}\"\n",
+            http.port,
+            toml_path(&data),
+            raft.port,
+            api.port,
+            http.port,
+            http.port,
+        ),
+    )
+    .expect("node config");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(45))
+        .build()
+        .expect("test client");
+    let port = http.port;
+    http.release();
+    raft.release();
+    api.release();
+    let mut node = Daemon::spawn(&config, root.path().join("node-a.log"), "plurx-node-a");
+    wait_ready(&client, &mut node, port).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let setup = client
+        .post(format!("{base}/api/v1/setup"))
+        .json(&json!({"username":"owner","password":"cluster-proof-password"}))
+        .send()
+        .await
+        .expect("setup request");
+    assert_eq!(setup.status(), StatusCode::OK);
+    let token = setup.json::<Value>().await.expect("setup JSON")["token"]
+        .as_str()
+        .expect("setup token")
+        .to_owned();
+    let enabled = client
+        .put(format!("{base}/api/v1/settings"))
+        .bearer_auth(&token)
+        .json(&json!({"cluster_media_pool_enabled": true}))
+        .send()
+        .await
+        .expect("enable adaptive placement");
+    assert_eq!(enabled.status(), StatusCode::OK);
+    let library = client
+        .post(format!("{base}/api/v1/libraries"))
+        .bearer_auth(&token)
+        .json(&json!({"name":"Adaptive","kind":"movies","paths":[media.to_string_lossy()]}))
+        .send()
+        .await
+        .expect("create library");
+    assert_eq!(library.status(), StatusCode::OK);
+    let library_id = library.json::<Value>().await.expect("library JSON")["id"]
+        .as_i64()
+        .expect("library id");
+    let (_, file_id) = wait_for_library_file(
+        &client,
+        &mut node,
+        &base,
+        &token,
+        library_id,
+        "Adaptive Single Voter",
+        false,
+    )
+    .await;
+    // VOD refuses to start until the fragment index is durable.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !node.diagnostics().lines().any(|line| {
+        let line = strip_ansi_csi(line);
+        line.contains("fragment indexing pass finished") && line.contains("built=1")
+    }) {
+        node.assert_running("waiting for the fragment index");
+        assert!(
+            Instant::now() < deadline,
+            "fragment index was not built:\n{}",
+            node.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The create takes the adaptive protocol exactly when this node offers
+    // itself as an eligible software worker for the rendition height. With
+    // no media peer nothing probes the library roots, so the source is
+    // verified the way a client verifies it before a create: the playback
+    // decision's presence check, which holds for a minute.
+    let node_id = client
+        .get(format!("{base}/api/v1/cluster/media"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("cluster media directory")
+        .json::<Value>()
+        .await
+        .expect("cluster media JSON")["nodes"][0]["node_id"]
+        .as_str()
+        .expect("own node id")
+        .to_owned();
+    let height = 240;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        node.assert_running("waiting for the local adaptive quote");
+        let decision = client
+            .get(format!("{base}/api/v1/files/{file_id}/decision"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .expect("playback decision");
+        assert!(
+            decision.status().is_success(),
+            "playback decision refused: {}",
+            decision.text().await.unwrap_or_default()
+        );
+        let offers = client
+            .post(format!("{base}/api/v1/cluster/media/offers"))
+            .bearer_auth(&token)
+            .json(&json!({"file_id": file_id, "target_height": height}))
+            .send()
+            .await
+            .expect("diagnostic offers")
+            .json::<Value>()
+            .await
+            .unwrap_or_default();
+        let eligible = offers["offers"].as_array().is_some_and(|offers| {
+            offers.iter().any(|offer| {
+                offer["node_id"] == node_id.as_str()
+                    && offer["eligible"] == true
+                    && offer["encoder"] == "software"
+            })
+        });
+        if eligible {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the voter never offered itself as an adaptive software worker: {offers}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    let budgets = create_budget_lines(&node.diagnostics()).len();
+    let response = client
+        .post(format!("{base}/api/v1/files/{file_id}/hls/sessions"))
+        .bearer_auth(&token)
+        .json(&json!({"playback_id": "adaptive-single-voter", "height": height}))
+        .send()
+        .await
+        .expect("adaptive create");
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "adaptive create refused: {body}\nlog:\n{}",
+        node.diagnostics()
+    );
+    let line = create_budget_lines(&node.diagnostics())
+        .into_iter()
+        .nth(budgets)
+        .expect("the create logged its budget line");
+    assert!(
+        !line.phases.contains("worker:"),
+        "the create took the legacy local worker path, not the adaptive protocol: {line:?}"
+    );
+    let started: Value = serde_json::from_str(&body).expect("start JSON");
+    let playlist = started["playlist_url"].as_str().expect("playlist URL");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        node.assert_running("reading the adaptive rendition");
+        let text = client
+            .get(format!("{base}{playlist}"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .expect("playlist request")
+            .text()
+            .await
+            .unwrap_or_default();
+        if let Some(segment) = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let directory = playlist.rsplit_once('/').map_or("", |(dir, _)| dir);
+            let url = if segment.starts_with('/') {
+                format!("{base}{segment}")
+            } else {
+                format!("{base}{directory}/{segment}")
+            };
+            let fetched = client
+                .get(url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("segment request");
+            let status = fetched.status();
+            let bytes = fetched.bytes().await.expect("segment body");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "listed segment {segment} was refused: {}\nlog:\n{}",
+                String::from_utf8_lossy(&bytes),
+                node.diagnostics()
+            );
+            assert!(!bytes.is_empty(), "listed segment {segment} was empty");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "playlist never listed a segment: {text}\nlog:\n{}",
+            node.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    drop(node);
+}

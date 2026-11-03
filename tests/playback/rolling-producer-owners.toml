@@ -1082,7 +1082,15 @@ also_in = ["crates/plurxd/src/transcode"]
 # fixtures under a paused clock; one in publication.rs is a source-pin
 # string (`match_indices`) proving the 100 ms init poll is the only sleep in
 # both pre-object wait branches. No shipped sleep is added.
-expected_occurrences = 101
+# Clock split: +2, test-only. `local_adopt_inside_the_activation_allowance_survives_the_prepare_cutoff`
+# sleeps past the 350 ms P/R entry cutoff, then past the full allowance, to prove
+# Adopt keeps the SAME original deadline; no shipped sleep is added.
+# Adaptive publication: +1 shipped. `publish_adopted_route` replays the SAME
+# retained Adopt DTO through `publish_adaptive_adoption` after an unknown Store
+# outcome, at a 100 ms cadence bounded by the attempt's original Adopt deadline
+# and its current serving authority. It is the bounded replay of one exact
+# idempotent operation, not a watchdog: a definite refusal returns at once.
+expected_occurrences = 104
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1752,7 +1760,11 @@ pattern = "ServingAuthority"
 # M4 follow-on: The genuine refused-Adopt fixture passes the original ServingAuthority; no new production grant.
 # PR1341: +3 in serving_fence.rs: the packed ready+generation word and
 # `admit_or_outage_baseline` project the same ServingAuthority.
-expected_occurrences = 42
+# +2 with adaptive publication: `publish_adopted_route` borrows the attempt's
+# original serving authority and re-checks it before every exact publication
+# replay; the finite worker regression passes the fixture's authority. Neither
+# mints, widens or projects authority.
+expected_occurrences = 44
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -2047,7 +2059,14 @@ pattern = "publication_ready_at_ms"
 # claim/adopt/origin readiness to MEDIA_SESSION_PUBLICATION_BLOCKED; one terminal_memory.rs
 # destructuring occurrence sizes the actual retained route.
 # M4 follow-on: The genuine refused-Adopt fixture constructs the same blocked original activation DTO before actual Store refusal.
-expected_occurrences = 169
+# 169 -> 174 with adaptive publication. Shipped: the worker accepts only an
+# exact published (0) adopted route from `publish_adaptive_adoption`; the
+# ingress's existing adopted-route check now expects 0 instead of BLOCKED
+# (count unchanged). Test-only: the finite worker regression's BLOCKED Adopt
+# DTO and its published-route assertion, and the two `chunk_04` fixtures for
+# `route_matches_adoption`. The only new writer of the fence is the Store's
+# exact BLOCKED -> 0 publication of a committed Adopt by its own worker.
+expected_occurrences = 174
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -2118,7 +2137,11 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # Adaptive source audit e1d42fb2: The three new MEDIA_SESSION_PUBLICATION_BLOCKED references
 # are the same origin/adoption/claim readiness guards; they add no publication authority.
 # M4 follow-on: The actual refused-Adopt input preserves the original prepublication-blocked sentinel; no publication or close proof.
-expected_occurrences = 64
+# 64 -> 65 with adaptive publication: -1 shipped (the ingress no longer
+# requires an adopted route to stay BLOCKED; the worker publishes it), +2
+# test-only (the finite worker regression's Adopt DTO and the `chunk_04`
+# adoption fixture's activation).
+expected_occurrences = 65
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -2299,7 +2322,9 @@ pattern = "terminal_reason"
 # Adaptive source audit e1d42fb2: playback_control.rs excludes a replaced route from unrelated
 # End authority; terminal_memory.rs adds destructuring and actual optional-string sizing of
 # terminal_reason.
-expected_occurrences = 58
+# +1: the `chunk_04` adoption fixture's route literal (`terminal_reason:
+# None`). Test-only; no new writer of a terminal cause.
+expected_occurrences = 59
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -5408,7 +5433,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # select_next and dropped with the test. No production constructor changed.
 # Main 7ea74370b into effort ca95fde57: measured on the merge base, not its stale
 # census; every changed file composes exactly as ours + theirs - base: effort 2087 + main (1954 - 1905).
-expected_occurrences = 2136
+# Clock split: +2, the same two test-only sleeps in
+# `local_adopt_inside_the_activation_allowance_survives_the_prepare_cutoff`.
+# Adaptive publication: +2 shipped, the bounded replay's `tokio::time::timeout`
+# (one Store call capped by the original Adopt deadline) and its 100 ms
+# `tokio::time::sleep` cadence in `publish_adopted_route`.
+expected_occurrences = 2140
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

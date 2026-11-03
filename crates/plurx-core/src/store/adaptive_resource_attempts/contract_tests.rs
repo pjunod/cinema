@@ -730,7 +730,7 @@ async fn ready_adoption_recipe(
         context: MutationContext {
             operation_id: Uuid::new_v4(),
             expected_request_sequence: sealed.sequence,
-            expected_attempt_sequence: sealed.attempts[0].sequence,
+            expected_attempt_sequence: attempt_sequence(&sealed, &prepared.key),
             now_ms: 10_003,
         },
         binding: prepared.binding.clone(),
@@ -746,6 +746,16 @@ async fn ready_adoption_recipe(
     adoption_from_won(prepared, won, recipe)
 }
 
+/// A retried request carries every earlier attempt; select by exact key.
+fn attempt_sequence(status: &RequestStatus, key: &AttemptKey) -> i64 {
+    status
+        .attempts
+        .iter()
+        .find(|attempt| attempt.key == *key)
+        .expect("exact attempt row")
+        .sequence
+}
+
 fn adoption_from_won(
     prepared: PreparedAttempt,
     won: RequestStatus,
@@ -755,7 +765,7 @@ fn adoption_from_won(
         context: MutationContext {
             operation_id: Uuid::new_v4(),
             expected_request_sequence: won.sequence,
-            expected_attempt_sequence: won.attempts[0].sequence,
+            expected_attempt_sequence: attempt_sequence(&won, &prepared.key),
             now_ms: 10_004,
         },
         binding: prepared.binding.clone(),
@@ -848,6 +858,116 @@ async fn adopt_rechecks_winner_epoch_predecessor_and_maintenance() {
             .await
             .expect("adopted is still physical debt");
         assert_eq!(page.entries.len(), 1);
+    })
+    .await;
+}
+
+/// Adopt leaves the route BLOCKED; only the original worker's exact
+/// publication clears it, after which the ingress publication accepts it.
+async fn assert_adopt_publishes_once_worker_publishes(
+    store: &dyn Store,
+    backend: &str,
+    adoption: &AdaptiveAdoption,
+) {
+    let committed = match store
+        .adopt_adaptive_winner(adoption)
+        .await
+        .expect("atomic adoption")
+    {
+        AttemptAdoption::Applied(outcome) => outcome,
+        other => panic!("{backend}: {other:?}"),
+    };
+    assert_eq!(
+        committed.route.publication_ready_at_ms,
+        MEDIA_SESSION_PUBLICATION_BLOCKED
+    );
+    let principal = &adoption.binding.principal;
+    let request = &adoption.binding.key.request_id;
+    let route = &adoption.activation.incarnation_id;
+    assert_eq!(
+        store
+            .publish_media_session_activation(principal, request, route, 10_005)
+            .await
+            .expect("ingress publication of a BLOCKED adoption"),
+        None,
+        "{backend}: a committed Adopt alone is never publishable"
+    );
+    let published = store
+        .publish_adaptive_adoption(adoption, 10_005)
+        .await
+        .expect("worker publication")
+        .expect("exact adopted route");
+    assert_eq!(published.route.state, "active", "{backend}");
+    assert_eq!(published.route.publication_ready_at_ms, 0, "{backend}");
+    assert_eq!(
+        published.route.owner_epoch, adoption.key.owner_epoch,
+        "{backend}: the attempt epoch, which is its ordinal"
+    );
+    let replay = store
+        .publish_adaptive_adoption(adoption, 10_006)
+        .await
+        .expect("replayed worker publication")
+        .expect("same published route");
+    assert_eq!(
+        replay.route, published.route,
+        "{backend}: a replay changes no row"
+    );
+    let ingress = store
+        .publish_media_session_activation(principal, request, route, 10_007)
+        .await
+        .expect("ingress publication")
+        .expect("the ingress accepts the worker-published adoption");
+    assert_eq!(ingress.incarnation_id, *route, "{backend}");
+    assert_eq!(ingress.owner_epoch, adoption.key.owner_epoch, "{backend}");
+    assert_eq!(ingress.publication_ready_at_ms, 0, "{backend}");
+}
+
+#[tokio::test]
+async fn adopted_route_is_published_by_its_worker_then_by_the_ingress() {
+    for_each_adaptive_backend(|store, backend| async move {
+        let fixture = AttemptFixture::new(store.as_ref()).await;
+        let adoption = ready_adoption(store.as_ref(), &fixture).await;
+        assert_eq!(adoption.key.owner_epoch, 1);
+        assert_adopt_publishes_once_worker_publishes(store.as_ref(), backend, &adoption).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn retried_attempt_is_published_at_its_ordinal_owner_epoch() {
+    for_each_adaptive_backend(|store, backend| async move {
+        let fixture = AttemptFixture::new(store.as_ref()).await;
+        let first = applied(
+            store
+                .claim_adaptive_attempt(&fixture.claim)
+                .await
+                .expect("original ordinal-1 attempt"),
+        );
+        let fenced = applied(
+            store
+                .fence_adaptive_attempt(&AttemptFence {
+                    context: MutationContext {
+                        operation_id: Uuid::new_v4(),
+                        expected_request_sequence: first.sequence,
+                        expected_attempt_sequence: attempt_sequence(&first, &fixture.claim.key),
+                        now_ms: 10_001,
+                    },
+                    binding: fixture.claim.binding.clone(),
+                    key: fixture.claim.key.clone(),
+                    cancel_request: false,
+                })
+                .await
+                .expect("fence ordinal 1"),
+        );
+        let retry = AttemptFixture {
+            claim: fixture.second(&fenced, false),
+        };
+        assert_eq!(
+            (retry.claim.key.ordinal, retry.claim.key.owner_epoch),
+            (2, 2)
+        );
+        let adoption = ready_adoption(store.as_ref(), &retry).await;
+        assert_adopt_publishes_once_worker_publishes(store.as_ref(), backend, &adoption).await;
     })
     .await;
 }

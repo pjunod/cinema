@@ -563,24 +563,28 @@ impl Sink for FiniteSink<'_> {
     }
 }
 
+/// One bound for the whole segment: the queue, publication, sync queue and
+/// sync each wait out a reader's turn on the asset's single journaled I/O
+/// slot within it. Expiry surfaces as `TimedOut`, not as a sink fault.
 async fn publish(output: &FiniteOutput, file: FiniteFile, bytes: &mut Vec<u8>) -> io::Result<()> {
     output.validate_sources().await.map_err(io::Error::other)?;
+    let deadline = deadline()?;
     let ticket = output
-        .queue_file_wait(file, bytes)
+        .queue_file_wait(file, bytes, deadline)
         .await
-        .map_err(io::Error::other)?;
+        .map_err(|error| error.into_io_error())?;
     output
-        .finish(&ticket, deadline()?)
+        .finish(&ticket, deadline)
         .await
-        .map_err(io::Error::other)?;
+        .map_err(|error| error.into_io_error())?;
     let ticket = output
-        .queue_sync_one_wait(file)
+        .queue_sync_one_wait(file, deadline)
         .await
-        .map_err(io::Error::other)?;
+        .map_err(|error| error.into_io_error())?;
     output
-        .finish(&ticket, deadline()?)
+        .finish(&ticket, deadline)
         .await
-        .map_err(io::Error::other)?;
+        .map_err(|error| error.into_io_error())?;
     output.validate_sources().await.map_err(io::Error::other)
 }
 fn deadline() -> io::Result<Instant> {

@@ -154,5 +154,9 @@ required-features = ["cluster-integration-tests"]
 name = "live_tv_two_node"
 required-features = ["cluster-integration-tests"]
 
+[[test]]
+name = "adaptive_two_node"
+required-features = ["cluster-integration-tests"]
+
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 wat = "=1.261.0"

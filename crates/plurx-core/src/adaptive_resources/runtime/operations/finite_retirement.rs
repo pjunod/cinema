@@ -739,6 +739,7 @@ pub(in crate::adaptive_resources::runtime) fn finite_retained_structural_bytes(
         .checked_add(std::mem::size_of::<FamilyIdentity>())?
         .checked_add(btree_requested_upper_bound::<ReservationBinding, ()>(1)?)?
         .checked_add(bootstrap_node)?
+        .checked_add(bootstrap::io_progress_heap_bytes())?
         .checked_add(btree_requested_upper_bound::<Uuid, ()>(1)?.checked_mul(2)?)?
         .checked_add(std::mem::size_of::<v2::MemberPlan>())?
         .checked_add(std::mem::size_of::<

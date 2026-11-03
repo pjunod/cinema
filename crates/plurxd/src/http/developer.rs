@@ -221,7 +221,60 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
                      two consecutive rounds above {CLOCK_OFFSET_REFUSAL_MS} ms make /readyz \
                      answer 503. Startup is never refused. Now: {current}; \
                      plurx_cluster_clock_advisory_refusals_total counts what it would have \
-                     refused while off"
+                     refused while off. Independently of this switch, a cross-node adaptive \
+                     preparation grant always needs this same evidence when it is issued and \
+                     accepted; once accepted, only the local clock can close it. \
+                     plurx_cluster_clock_continuous_refusals_total counts both seams"
+                ),
+            },
+        ],
+    }
+}
+
+/// Cross-node adaptive placement has no switch: a fresh peer quote is used
+/// whenever the create can prove its grant. Facts only, never a gate.
+fn adaptive_remote_placement(state: &AppState) -> DeveloperEnableItem {
+    use crate::media_pool::{remote_placement_count, RemotePlacementOutcome};
+    let policy = state.membership.clock_guard().check_evidence();
+    DeveloperEnableItem {
+        id: "adaptive_remote_placement",
+        title: "Cross-node adaptive placement",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "remote_grant_policy",
+                title: "Cluster clock admits a cross-node grant",
+                status: if policy.is_ok() {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: match policy {
+                    Ok(()) => "Current evidence admits a grant: an adaptive create may be \
+                               prepared on a peer whose quote is fresh"
+                        .to_owned(),
+                    Err(cause) => format!(
+                        "Current evidence refuses a grant ({cause}): adaptive creates pass \
+                         over peer workers before Claim and place on this node or the next \
+                         candidate"
+                    ),
+                },
+            },
+            DeveloperRequirement {
+                id: "remote_placements",
+                title: "Where peer encode time went",
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "Since this process started, as coordinator: {} adaptive create(s) placed \
+                     on a peer, {} peer(s) passed over because the cluster clock could not \
+                     grant them, {} registered peer attempt(s) fenced after the cluster clock \
+                     refused their grant. plurx_adaptive_remote_placements_total carries these \
+                     counts; plurx_cluster_clock_continuous_refusals_total separates grant \
+                     from entry refusals",
+                    remote_placement_count(RemotePlacementOutcome::Placed),
+                    remote_placement_count(RemotePlacementOutcome::ClockSkipped),
+                    remote_placement_count(RemotePlacementOutcome::GrantRefused),
                 ),
             },
         ],
@@ -569,6 +622,7 @@ pub(crate) async fn readiness(
                     jellyfin_standard_port(&state)],
             },
             clock_measurement(&state, clock_guard_enforced),
+            adaptive_remote_placement(&state),
             durable_cluster_work(&state).await,
             bounded_catalogue_reads(
                 &state,

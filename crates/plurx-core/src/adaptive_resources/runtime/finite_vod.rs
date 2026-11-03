@@ -141,9 +141,11 @@ pub struct SoftwareVodRequest {
     /// a separate lifetime slot from Rendition metadata and response bodies.
     pub application_owner_bytes: u64,
     pub output: FiniteOutputLimits,
-    /// The original continuous create cutoff carried from a remote grant
-    /// through P into this R owner. It is checked before any constructor IO
-    /// and then at every fresh arm and native entry; `None` for local work.
+    /// The original continuous create cutoff, carried through P into this R
+    /// owner: a local create's own ingress cutoff or a remote grant. It is
+    /// checked before any constructor IO and then at every fresh arm and
+    /// native entry, on local clock evidence only; `None` when the platform
+    /// has no continuous clock or the work has no create scope.
     pub continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
 }
 
@@ -688,11 +690,11 @@ impl FiniteOutput {
         }
         self.validate_sources().await?;
         let publication = self
-            .queue_file_wait(FiniteFile::CompleteArtifactManifest, bytes)
+            .queue_file_wait(FiniteFile::CompleteArtifactManifest, bytes, deadline)
             .await?;
         self.finish(&publication, deadline).await?;
         let sync = self
-            .queue_sync_one_wait(FiniteFile::CompleteArtifactManifest)
+            .queue_sync_one_wait(FiniteFile::CompleteArtifactManifest, deadline)
             .await?;
         self.finish(&sync, deadline).await?;
         self.validate_sources().await
@@ -743,10 +745,18 @@ impl FiniteOutput {
         &self,
         file: FiniteFile,
         bytes: &mut Vec<u8>,
+        deadline: Instant,
     ) -> Result<PublicationTicket, FiniteVodError> {
         let id = self
             .runtime
-            .queue_scratch_publication_wait(&self.preparation, 0, self.member, file.key(), bytes)
+            .queue_scratch_publication_wait(
+                &self.preparation,
+                0,
+                self.member,
+                file.key(),
+                bytes,
+                deadline,
+            )
             .await?;
         Ok(PublicationTicket {
             id,
@@ -756,10 +766,11 @@ impl FiniteOutput {
     async fn queue_sync_one_wait(
         &self,
         file: FiniteFile,
+        deadline: Instant,
     ) -> Result<PublicationTicket, FiniteVodError> {
         let id = self
             .runtime
-            .queue_scratch_sync_wait(&self.preparation, 0, self.member, &[file.key()])
+            .queue_scratch_sync_wait(&self.preparation, 0, self.member, &[file.key()], deadline)
             .await?;
         Ok(PublicationTicket {
             id,
@@ -1179,7 +1190,7 @@ impl NodeResourceRuntime {
             &Arc<super::finite_lifetime::FiniteAppState>,
         ) -> Result<T, FiniteVodError>,
     ) -> Result<(SoftwareVodOwner, T), FiniteVodError> {
-        // Before any metadata IO or reservation: a remote grant whose original
+        // Before any metadata IO or reservation: a create whose original
         // continuous cutoff already passed admits no R owner at all.
         if super::operations::continuous_window_closed(request.continuous_entry_deadline.as_ref()) {
             return Err(OperationError::BeforeReservation(

@@ -34,6 +34,76 @@ pub(super) fn prepare_http_refusal(status: reqwest::StatusCode) -> AdaptivePrepa
     }
 }
 
+/// The coordinator could not mint the original grant after Register. Only a
+/// cluster-clock refusal is retryable: the registration is still ungranted,
+/// so [`fence_original`] reaches the worker's own cleanup of its P/M before
+/// the next candidate. A spent or absent original allowance holds.
+#[cfg(target_os = "linux")]
+pub(super) fn original_grant_refusal(
+    refusal: crate::media_pool::RemoteGrantRefusal,
+) -> AdaptivePrepareFailure {
+    let error = ApiError::ServiceUnavailable(refusal.to_string());
+    match refusal {
+        crate::media_pool::RemoteGrantRefusal::ClusterClock(_) => {
+            crate::media_pool::record_remote_placement(
+                crate::media_pool::RemotePlacementOutcome::GrantRefused,
+            );
+            AdaptivePrepareFailure::Retry(error)
+        }
+        _ => AdaptivePrepareFailure::Hold(error),
+    }
+}
+
+/// The worker answered the original Grant with a refusal. Its typed
+/// cluster-clock 503 is retryable and named as such; every other status
+/// keeps [`prepare_http_refusal`]'s classification.
+#[cfg(target_os = "linux")]
+pub(super) fn grant_http_refusal(
+    worker: &str,
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> AdaptivePrepareFailure {
+    let clock = status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        && serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
+            value["code"].as_str() == Some(crate::media_sessions::ADAPTIVE_GRANT_CLOCK_REFUSED)
+        });
+    if !clock {
+        return prepare_http_refusal(status);
+    }
+    crate::media_pool::record_remote_placement(
+        crate::media_pool::RemotePlacementOutcome::GrantRefused,
+    );
+    AdaptivePrepareFailure::Retry(ApiError::ServiceUnavailable(format!(
+        "cluster_clock: media worker {worker} could not prove the original grant on its cluster clock"
+    )))
+}
+
+/// A remote candidate this create could never grant, asked before Claim.
+/// The query is the same strict policy the grant mint applies and has no
+/// side effect beyond the clock's refusal counter.
+#[cfg(target_os = "linux")]
+pub(super) fn remote_candidate_refusal(
+    local_node_id: &str,
+    candidate: &str,
+    deadline: tokio::time::Instant,
+) -> Option<ApiError> {
+    if candidate == local_node_id {
+        return None;
+    }
+    let refusal = crate::media_pool::create_remote_grant(deadline).err()?;
+    if matches!(
+        refusal,
+        crate::media_pool::RemoteGrantRefusal::ClusterClock(_)
+    ) {
+        crate::media_pool::record_remote_placement(
+            crate::media_pool::RemotePlacementOutcome::ClockSkipped,
+        );
+    }
+    Some(ApiError::ServiceUnavailable(format!(
+        "media worker {candidate} was not offered this create: {refusal}"
+    )))
+}
+
 pub(super) struct AdaptiveOriginContext {
     pub binding: RequestBinding,
     // Cardinality is bounded by the durable three-attempt contract. This is

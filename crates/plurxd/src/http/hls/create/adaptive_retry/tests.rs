@@ -366,3 +366,85 @@ fn original_fence_budget_counts_unknown_worker_offer_and_all_stale_reply_traces(
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn remote_candidate_with_unknown_cluster_clock_is_skipped_before_claim() {
+    use crate::media_pool::{remote_placement_count, CreateStartupBudget, RemotePlacementOutcome};
+    // Replicated, roster never proved: the grant-time policy is Unknown, as
+    // with one voter down or just after a restart.
+    let unproved = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(true));
+    let budget = CreateStartupBudget::new_with_clock(5_000, &unproved);
+    let deadline = budget.deadline;
+    budget
+        .scope(async {
+            let before = remote_placement_count(RemotePlacementOutcome::ClockSkipped);
+            assert!(
+                remote_candidate_refusal("node-a", "node-a", deadline).is_none(),
+                "local placement never needs a cross-node grant"
+            );
+            let Some(ApiError::ServiceUnavailable(reason)) =
+                remote_candidate_refusal("node-a", "node-b", deadline)
+            else {
+                panic!("an ungrantable peer is passed over before Claim");
+            };
+            assert!(
+                reason.contains("node-b") && reason.contains("cluster clock"),
+                "the refusal names the cluster clock: {reason}"
+            );
+            assert!(remote_placement_count(RemotePlacementOutcome::ClockSkipped) > before);
+        })
+        .await;
+    let standalone = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(false));
+    let budget = CreateStartupBudget::new_with_clock(5_000, &standalone);
+    let deadline = budget.deadline;
+    budget
+        .scope(async {
+            assert!(remote_candidate_refusal("node-a", "node-b", deadline).is_none());
+        })
+        .await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn grant_time_clock_refusal_retries_the_next_candidate_and_other_refusals_keep_their_class() {
+    use crate::media_pool::RemoteGrantRefusal;
+    use axum::response::IntoResponse;
+    use plurx_core::cluster::clock::ClockRefusal;
+    assert!(matches!(
+        original_grant_refusal(RemoteGrantRefusal::ClusterClock(ClockRefusal::Unknown)),
+        AdaptivePrepareFailure::Retry(_)
+    ));
+    assert!(matches!(
+        original_grant_refusal(RemoteGrantRefusal::Spent),
+        AdaptivePrepareFailure::Hold(_)
+    ));
+    assert!(matches!(
+        original_grant_refusal(RemoteGrantRefusal::NoOriginalCutoff),
+        AdaptivePrepareFailure::Hold(_)
+    ));
+    // The worker's own typed answer, as its Grant handler renders it.
+    let worker = ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        crate::media_sessions::ADAPTIVE_GRANT_CLOCK_REFUSED,
+        "cluster_clock: refused",
+    )
+    .into_response();
+    let body = axum::body::to_bytes(worker.into_body(), 4096)
+        .await
+        .expect("typed worker body");
+    let AdaptivePrepareFailure::Retry(ApiError::ServiceUnavailable(reason)) =
+        grant_http_refusal("node-b", reqwest::StatusCode::SERVICE_UNAVAILABLE, &body)
+    else {
+        panic!("a worker's cluster-clock grant refusal retries the next candidate");
+    };
+    assert!(reason.contains("node-b") && reason.contains("cluster clock"));
+    assert!(matches!(
+        grant_http_refusal("node-b", reqwest::StatusCode::SERVICE_UNAVAILABLE, b""),
+        AdaptivePrepareFailure::Retry(_)
+    ));
+    assert!(matches!(
+        grant_http_refusal("node-b", reqwest::StatusCode::PRECONDITION_REQUIRED, &body),
+        AdaptivePrepareFailure::Hold(_)
+    ));
+}

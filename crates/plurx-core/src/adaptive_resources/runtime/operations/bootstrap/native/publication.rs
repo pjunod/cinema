@@ -228,7 +228,9 @@ impl NodeResourceRuntime {
 
     /// Wait for the SAME bundle lock before adopting a producer payload. The
     /// caller retains the payload for the entire wait; every rejection leaves
-    /// it untouched.
+    /// it untouched. While the asset's single journaled I/O slot is held by
+    /// another committed operation, wait for its acknowledgement until
+    /// `deadline`; every permanent refusal is still the locked check's.
     pub(in crate::adaptive_resources::runtime) async fn queue_scratch_publication_wait(
         &self,
         owner: &OwnedPreparation,
@@ -236,10 +238,63 @@ impl NodeResourceRuntime {
         member: Uuid,
         output: OutputKey,
         payload: &mut Vec<u8>,
+        deadline: Instant,
     ) -> Result<Uuid, OperationError> {
         self.validate_preparation(owner)?;
-        let mut bundle = owner.state.lock().await;
-        self.queue_scratch_publication_locked(&mut bundle, index, member, output, payload)
+        loop {
+            let mut bundle = owner.state.lock().await;
+            if let Some(progress) = self.scratch_io_slot_busy(&bundle, index, member) {
+                wait_for_io_slot(bundle, progress, deadline).await?;
+                continue;
+            }
+            return self.queue_scratch_publication_locked(
+                &mut bundle,
+                index,
+                member,
+                output,
+                payload,
+            );
+        }
+    }
+
+    /// Whether a producer queue may wait instead of refusing: only while the
+    /// SAME asset's single journaled I/O slot is held by another committed
+    /// operation (a reader's armed range, open or close) or by this member's
+    /// own change in flight. Each clears only through `bootstrap::acknowledge`,
+    /// which signals the returned notification under this same bundle lock.
+    /// Every other condition is permanent and is left to the locked check.
+    pub(super) fn scratch_io_slot_busy(
+        &self,
+        bundle: &Bundle,
+        index: usize,
+        member: Uuid,
+    ) -> Option<Arc<tokio::sync::Notify>> {
+        if !bundle.installed || self.eligible(bundle).is_err() {
+            return None;
+        }
+        let role = bundle.roles.get(index)?;
+        if role.refunded
+            || !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
+            || role
+                .transition
+                .as_ref()
+                .is_some_and(|transition| transition.effect != Effect::Bootstrap(member))
+        {
+            return None;
+        }
+        let bootstrap = role.bootstrap.get(&member)?;
+        let state = bootstrap.fold.as_ref()?.state();
+        if state.bootstrap.phase != BootstrapPhase::SinkReady
+            || state.asset.lifecycle != v2::scratch::ScratchLifecycleV1::Open
+            || bootstrap.next_arm.is_some()
+            || !bootstrap.native_io_ready()
+        {
+            return None;
+        }
+        (role.transition.is_some()
+            || bootstrap.change.is_some()
+            || state.asset.totals.pending_jobs != 0)
+            .then(|| Arc::clone(&bootstrap.io_progress))
     }
 
     fn queue_scratch_publication_locked(
@@ -422,7 +477,28 @@ impl NodeResourceRuntime {
         deadline: Instant,
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
-        let mut bundle = owner.state.lock().await;
+        loop {
+            let mut bundle = owner.state.lock().await;
+            match self
+                .publish_scratch_output_locked(&mut bundle, index, member, publication_id, deadline)
+                .await?
+            {
+                NativeIoStep::Done => return Ok(()),
+                NativeIoStep::SlotBusy(progress) => {
+                    wait_for_io_slot(bundle, progress, deadline).await?
+                }
+            }
+        }
+    }
+
+    async fn publish_scratch_output_locked(
+        &self,
+        bundle: &mut Bundle,
+        index: usize,
+        member: Uuid,
+        publication_id: Uuid,
+        deadline: Instant,
+    ) -> Result<NativeIoStep, OperationError> {
         if !bundle.installed {
             return Err(OperationError::State);
         }
@@ -435,7 +511,7 @@ impl NodeResourceRuntime {
             .and_then(|b| b.publication.as_ref())
             .is_some_and(|p| p.request.is_some());
         if needs_entry {
-            self.eligible(&bundle)?;
+            self.eligible(bundle)?;
         }
         let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
@@ -448,7 +524,7 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         if publication.acknowledged {
-            return Ok(());
+            return Ok(NativeIoStep::Done);
         }
         resume_change(&self.journal, role, member, deadline)?;
         if role.transition.is_some() {
@@ -467,6 +543,29 @@ impl NodeResourceRuntime {
             .publication
             .as_ref()
             .ok_or(OperationError::State)?;
+        if publication.request.is_some()
+            && state.asset.totals.pending_jobs != 0
+            && state
+                .asset
+                .head
+                .as_ref()
+                .is_none_or(|h| h.operation_id != publication.io_id)
+            && bootstrap
+                .sync
+                .as_ref()
+                .is_none_or(|run| run.ready_for_transfer())
+        {
+            // A reader armed its operation between this registration and
+            // our arm. The slot stays exactly one-pending; wait for that
+            // operation's acknowledged observe, then re-run every check.
+            if !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed) {
+                return Err(OperationError::State);
+            }
+            if Instant::now() >= deadline {
+                return Err(OperationError::Deadline);
+            }
+            return Ok(NativeIoStep::SlotBusy(Arc::clone(&bootstrap.io_progress)));
+        }
         if publication.request.is_some() && state.asset.totals.pending_jobs == 0 {
             if !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
                 || Instant::now() >= deadline
@@ -704,8 +803,32 @@ impl NodeResourceRuntime {
             .release_completed_payload()
             .ok_or(OperationError::State)?;
         publication.acknowledged = true;
-        Ok(())
+        Ok(NativeIoStep::Done)
     }
+}
+
+/// One locked pass over a registered publication or sync.
+pub(super) enum NativeIoStep {
+    Done,
+    /// Another committed operation holds the asset's single I/O slot.
+    SlotBusy(Arc<tokio::sync::Notify>),
+}
+
+/// Register on `progress` while still holding the bundle lock (every
+/// `bootstrap::acknowledge` signal is sent under it), then release the lock
+/// and wait for the slot holder's acknowledgement, bounded by `deadline`.
+pub(super) async fn wait_for_io_slot(
+    bundle: tokio::sync::MutexGuard<'_, Bundle>,
+    progress: Arc<tokio::sync::Notify>,
+    deadline: Instant,
+) -> Result<(), OperationError> {
+    let notified = progress.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    drop(bundle);
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), notified)
+        .await
+        .map_err(|_| OperationError::Deadline)
 }
 
 pub(in crate::adaptive_resources::runtime::operations) fn queue_output_change(

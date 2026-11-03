@@ -87,6 +87,40 @@ pub(crate) async fn commit_adoption<B: Backend>(
     Ok(Some(outcome(store, &plan.input).await?))
 }
 
+/// The retained Adopt DTO's own activation shape. It never reads the clock,
+/// so the original worker's later publication checks the SAME bytes.
+fn exact_activation(input: &AdaptiveAdoption) -> Result<bool, StoreError> {
+    let binding = &input.binding;
+    let key = &input.key;
+    let activation = &input.activation;
+    Ok(
+        !(activation.incarnation_id != key.route_incarnation_id.to_string()
+            || activation.session_id != key.session_id.to_string()
+            || activation.principal != binding.principal
+            || activation.playback_id != binding.playback_id
+            || activation.recovery_epoch != binding.recovery_epoch.to_string()
+            || activation.request_id.as_deref() != Some(binding.key.request_id.as_str())
+            || activation.request_fingerprint != binding.request_fingerprint
+            || activation.owner_node_id != key.worker_node_id
+            || !activation.fence_predecessor
+            || activation.expected_predecessor_incarnation_id
+                != binding
+                    .expected_predecessor_incarnation_id
+                    .map(|id| id.to_string())
+            || activation.expected_desired_revision != binding.expected_desired_revision
+            || activation.publication_ready_at_ms
+                != crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+            || activation.now_ms != input.context.now_ms
+            || activation.lease_expires_at_ms <= activation.now_ms
+            || activation.recipe_json.len() > 32 * 1024
+            || selected_recipe_digest(&activation.recipe_json)?
+                != input.worker.selected_recipe_digest
+            || activation.response_json.len() > 64 * 1024
+            || serde_json::from_str::<serde_json::Value>(&activation.recipe_json).is_err()
+            || serde_json::from_str::<serde_json::Value>(&activation.response_json).is_err()),
+    )
+}
+
 pub(crate) async fn adopt<B: Backend>(
     store: &B,
     input: &AdaptiveAdoption,
@@ -106,34 +140,12 @@ pub(crate) async fn adopt<B: Backend>(
             AttemptMutation::Applied(_) => Err(invalid()),
         };
     }
+    if !exact_activation(input)? {
+        return Ok(AttemptAdoption::Refused(AttemptRefusal::Conflict));
+    }
     let binding = &input.binding;
     let key = &input.key;
     let activation = &input.activation;
-    if activation.incarnation_id != key.route_incarnation_id.to_string()
-        || activation.session_id != key.session_id.to_string()
-        || activation.principal != binding.principal
-        || activation.playback_id != binding.playback_id
-        || activation.recovery_epoch != binding.recovery_epoch.to_string()
-        || activation.request_id.as_deref() != Some(binding.key.request_id.as_str())
-        || activation.request_fingerprint != binding.request_fingerprint
-        || activation.owner_node_id != key.worker_node_id
-        || !activation.fence_predecessor
-        || activation.expected_predecessor_incarnation_id
-            != binding
-                .expected_predecessor_incarnation_id
-                .map(|id| id.to_string())
-        || activation.expected_desired_revision != binding.expected_desired_revision
-        || activation.publication_ready_at_ms != crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
-        || activation.now_ms != input.context.now_ms
-        || activation.lease_expires_at_ms <= activation.now_ms
-        || activation.recipe_json.len() > 32 * 1024
-        || selected_recipe_digest(&activation.recipe_json)? != input.worker.selected_recipe_digest
-        || activation.response_json.len() > 64 * 1024
-        || serde_json::from_str::<serde_json::Value>(&activation.recipe_json).is_err()
-        || serde_json::from_str::<serde_json::Value>(&activation.response_json).is_err()
-    {
-        return Ok(AttemptAdoption::Refused(AttemptRefusal::Conflict));
-    }
     let Some(current) = status(store, &binding.key, &binding.principal).await? else {
         return Ok(AttemptAdoption::Refused(AttemptRefusal::StaleBinding));
     };
@@ -223,4 +235,59 @@ pub(crate) async fn adopt<B: Backend>(
     };
     let outcome = store.attempt_activate(&plan).await?.ok_or_else(invalid)?;
     Ok(AttemptAdoption::Applied(outcome))
+}
+
+/// The original worker's exact publication of its own committed Adopt, once
+/// it has attached the Rendition under its serving admission: the adaptive
+/// analog of the ordinary owner's Confirm (every activation begins BLOCKED;
+/// only an owner that observes the exact commit while retaining serving
+/// authority clears it). Adopt itself never commits 0, so a late Adopt or a
+/// failed attach stays unpublishable. Only the route's BLOCKED -> 0 column
+/// moves: no second owner and no ledger phase. A replay of an already
+/// published route changes no row and still passes; an ended, expired or
+/// re-pointed route fails the assertion and surfaces as a database error.
+pub(crate) async fn publish<B: Backend>(
+    store: &B,
+    input: &AdaptiveAdoption,
+    now_ms: i64,
+) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+    input.context.validate()?;
+    input.key.validate(&input.binding)?;
+    input.worker.validate(&input.binding, &input.key)?;
+    let Some(user) = input.binding.principal.local_user_id().filter(|id| *id > 0) else {
+        return Ok(None);
+    };
+    if now_ms <= 0
+        || !exact_activation(input)?
+        || readiness(store).await? != AttemptSchemaReadiness::Ready
+    {
+        return Ok(None);
+    }
+    let binding = &input.binding;
+    let key = &input.key;
+    let activation = &input.activation;
+    let layout = store.attempt_layout().await?;
+    let owner = quote(&binding.principal.owner_key());
+    let playback = quote(&binding.playback_id);
+    let route = quote(&key.route_incarnation_id.to_string());
+    let worker = quote(&key.worker_node_id);
+    let attempt = quote(&key.attempt_id.to_string());
+    let response = quote(&activation.response_json);
+    let epoch = key.owner_epoch;
+    let pointer_owner = layout.owner("pointer");
+    let root_owner = layout.owner("root");
+    // The committed Adopt's custody, re-asserted for a replay as well.
+    let custody=format!("EXISTS(SELECT 1 FROM media_playback_pointers pointer WHERE {pointer_owner}={owner} AND pointer.playback_id={playback} AND pointer.current_incarnation_id={route}) AND EXISTS(SELECT 1 FROM media_session_requests root WHERE {root_owner}={owner} AND root.request_id={} AND root.incarnation_id={route} AND root.owner_node_id={worker} AND root.state='resolved' AND root.response_json={response}) AND EXISTS(SELECT 1 FROM media_resource_requests r WHERE {} AND r.binding_json={} AND r.disposition='adopted' AND r.winner_attempt_id={attempt}) AND EXISTS(SELECT 1 FROM media_resource_attempts a WHERE a.attempt_id={attempt} AND a.key_json={} AND a.worker_json={}) AND EXISTS(SELECT 1 FROM job_leases l WHERE l.resource={} AND l.owner_node_id={worker} AND l.fence={epoch} AND l.expires_at_ms>{now_ms})",quote(&binding.key.request_id),request_predicate(binding,"r"),quote(&encode(binding)?),quote(&encode(key)?),quote(&encode(&input.worker)?),quote(&format!("session:{}",key.route_incarnation_id)));
+    let exact=format!("incarnation_id={route} AND session_id={} AND user_id={user} AND playback_id={playback} AND request_fingerprint={} AND recovery_epoch={} AND owner_node_id={worker} AND owner_epoch={epoch} AND state='active' AND recipe_json={} AND response_json={response} AND media_origin_ms={} AND lease_expires_at_ms>{now_ms}",quote(&key.session_id.to_string()),quote(&binding.request_fingerprint),quote(&binding.recovery_epoch.to_string()),quote(&activation.recipe_json),activation.media_origin_ms);
+    let statements = vec![
+        schema::assertion(&schema::ready_guard_for(layout, store.attempt_outage_fence())),
+        format!("UPDATE media_sessions SET publication_ready_at_ms=0,updated_at_ms={now_ms} WHERE {exact} AND publication_ready_at_ms={} AND lease_expires_at_ms={} AND ({custody})",crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,activation.lease_expires_at_ms),
+        schema::assertion(&format!("EXISTS(SELECT 1 FROM media_sessions WHERE {exact} AND publication_ready_at_ms=0) AND ({custody})")),
+    ];
+    store.attempt_transaction(statements).await?;
+    let outcome = outcome(store, input).await?;
+    Ok(
+        (outcome.route.state == "active" && outcome.route.publication_ready_at_ms == 0)
+            .then_some(outcome),
+    )
 }

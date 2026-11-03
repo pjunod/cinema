@@ -69,6 +69,35 @@ pub(crate) enum AdaptiveRemoteRegistrationStart {
         deadline: std::time::Instant,
     },
 }
+/// A refused original grant. Only cluster-clock evidence is retryable: the
+/// registration stays ungranted, so the coordinator's Fence reaches this
+/// worker's original coordinator, which closes its own P/M.
+#[derive(Debug)]
+pub(crate) enum RemoteGrantError {
+    ClusterClock(plurx_core::cluster::clock::ClockRefusal),
+    Refused(String),
+}
+impl From<String> for RemoteGrantError {
+    fn from(reason: String) -> Self {
+        Self::Refused(reason)
+    }
+}
+impl From<&str> for RemoteGrantError {
+    fn from(reason: &str) -> Self {
+        Self::Refused(reason.to_owned())
+    }
+}
+impl std::fmt::Display for RemoteGrantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClusterClock(reason) => write!(
+                f,
+                "cluster_clock: the cluster clock cannot prove the original grant ({reason})"
+            ),
+            Self::Refused(reason) => f.write_str(reason),
+        }
+    }
+}
 struct RemoteRegistration {
     claim: AttemptClaim,
     nonce: Uuid,
@@ -85,7 +114,7 @@ impl RemoteRegistration {
         claim: &AttemptClaim,
         nonce: Uuid,
         allowance_ms: u32,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteGrantError> {
         if nonce.is_nil() || allowance_ms == 0 || allowance_ms > 9_750 {
             return Err("deadline_budget: invalid original grant".into());
         }
@@ -99,12 +128,14 @@ impl RemoteRegistration {
             // Exact replay preserves W0/cutoff, even after expiry. It can
             // only replay the already owned original task/result.
         } else {
+            // Grant-time cluster policy: the W0 admission evidence must be
+            // unchanged and the CURRENT clock policy must admit. After this
+            // the deadline closes on local evidence only. A refusal leaves
+            // the grant unsent, so the original registration stays fenceable.
             let deadline = self
                 .anchor
-                .deadline_after(std::time::Duration::from_millis(u64::from(allowance_ms)))
-                .map_err(|error| {
-                    format!("deadline_budget: original remote grant expired: {error}")
-                })?;
+                .grant_deadline_after(std::time::Duration::from_millis(u64::from(allowance_ms)))
+                .map_err(RemoteGrantError::ClusterClock)?;
             let sender = self.grant.take().ok_or("original grant sender is absent")?;
             self.granted_ms = Some(allowance_ms);
             self.deadline = Some(deadline.clone());
@@ -413,6 +444,17 @@ pub(super) struct AttemptEntry {
     /// coordinator and control futures have both been joined.
     finishing_lease: Mutex<Option<FiniteApplicationLease>>,
     charged_control_frame_bytes: std::sync::atomic::AtomicUsize,
+    /// A local create's original continuous preparation cutoff, fixed when
+    /// the entry is first reserved inside its create scope; a replay selects
+    /// the existing entry and never replaces it. A remote registration keeps
+    /// its accepted grant in `remote_registration` instead. Stored inline, so
+    /// the `size_of::<AttemptEntry>()` term of every precharged application
+    /// total already covers it; the clock guard it shares is node-owned.
+    local_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
+    /// The SAME local create's full-allowance cutoff, fixed with
+    /// `local_cutoff`. It bounds only Adopt, the activation step the create
+    /// keeps its last allowance for; P and R entry stay on `local_cutoff`.
+    local_activation_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
 }
 
 enum PlanningState {
@@ -530,6 +572,8 @@ impl AdaptiveAttemptRegistry {
         request_incarnation_id: Uuid,
         worker_instance_id: Uuid,
         serving_generation: u64,
+        local_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
+        local_activation_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     ) -> Result<Arc<AttemptEntry>, &'static str> {
         if attempt_id.is_nil() || request_incarnation_id.is_nil() || worker_instance_id.is_nil() {
             return Err("adaptive attempt has a nil identity");
@@ -571,9 +615,38 @@ impl AdaptiveAttemptRegistry {
             control: Mutex::new(None),
             finishing_lease: Mutex::new(None),
             charged_control_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
+            local_cutoff,
+            local_activation_cutoff,
         });
         *vacant = Some(Arc::clone(&entry));
         Ok(entry)
+    }
+
+    /// Reserve a fresh LOCAL attempt inside its create scope. Only the actual
+    /// create scope proves the remaining monotonic preparation allowance and
+    /// its paired continuous cutoff; both are read here for the entry being
+    /// reserved, so the local cutoff is fixed exactly once with the slot.
+    fn reserve_local(
+        &self,
+        claim: &AttemptClaim,
+        deadline: std::time::Instant,
+    ) -> Result<(Arc<AttemptEntry>, std::time::Instant), String> {
+        let original_cutoff = crate::media_pool::create_preparation_deadline()
+            .ok_or("insufficient_evidence: original local create deadline is absent")?
+            .into_std();
+        let deadline = deadline.min(original_cutoff);
+        if std::time::Instant::now() >= deadline {
+            return Err("deadline_budget: original local preparation allowance expired".into());
+        }
+        let entry = self.reserve(
+            claim.key.attempt_id,
+            claim.key.request.request_incarnation_id,
+            claim.worker_instance_id,
+            claim.serving_generation,
+            crate::media_pool::create_continuous_entry_deadline(),
+            crate::media_pool::create_continuous_activation_deadline(),
+        )?;
+        Ok((entry, deadline))
     }
 
     pub(super) fn get(&self, attempt_id: Uuid) -> Option<Arc<AttemptEntry>> {
@@ -669,6 +742,27 @@ impl AttemptEntry {
             .lock()
             .map(|held| held.as_ref().and_then(|remote| remote.deadline.clone()))
             .map_err(|_| "remote original deadline is uncertain".into())
+    }
+    /// The original continuous entry condition this attempt carries into P
+    /// and R: the accepted remote grant, else the local create's own cutoff.
+    fn continuous_entry_deadline(
+        &self,
+    ) -> Result<Option<plurx_core::cluster::clock::ContinuousDeadline>, String> {
+        Ok(self
+            .remote_deadline()?
+            .or_else(|| self.local_cutoff.clone()))
+    }
+    /// The original continuous bound on this attempt's Adopt: the accepted
+    /// remote grant, else the local create's full-allowance cutoff (its
+    /// prepare cutoff only if that pairing is somehow absent).
+    fn continuous_activation_deadline(
+        &self,
+    ) -> Result<Option<plurx_core::cluster::clock::ContinuousDeadline>, String> {
+        Ok(self.remote_deadline()?.or_else(|| {
+            self.local_activation_cutoff
+                .clone()
+                .or_else(|| self.local_cutoff.clone())
+        }))
     }
     fn remote_failure_fence(
         &self,
@@ -983,7 +1077,7 @@ impl super::TranscodeManager {
                     .await
                     .map_err(|_| "original remote registration expired without grant")?
                     .map_err(|_| "original remote grant was cancelled")?;
-                continuous.remaining().map_err(|error| {
+                continuous.entry_remaining().map_err(|error| {
                     format!("original remote clock before source entry: {error}")
                 })?;
                 deadline = deadline.min(
@@ -1000,6 +1094,24 @@ impl super::TranscodeManager {
             }
             .await;
             if let Err(error) = granted {
+                handoff_planning_cleanup(&mut planning);
+                return Err(error);
+            }
+        } else if let Some(local) = entry.local_cutoff.clone() {
+            // A local create retains its own original cutoff on the SAME
+            // charged P owner before source entry, exactly as a grant does.
+            let retained = local
+                .monotonic_cutoff()
+                .map_err(|error| format!("original local clock before source entry: {error}"))
+                .and_then(|cutoff| {
+                    deadline = deadline.min(cutoff);
+                    owner
+                        .retain_continuous_entry_deadline(local)
+                        .map_err(|error| {
+                            format!("retaining original continuous P entry condition: {error}")
+                        })
+                });
+            if let Err(error) = retained {
                 handoff_planning_cleanup(&mut planning);
                 return Err(error);
             }
@@ -1217,7 +1329,7 @@ impl super::TranscodeManager {
                 .remote_deadline()?
                 .ok_or("original remote grant is absent")?;
             original
-                .remaining()
+                .entry_remaining()
                 .map_err(|error| format!("original remote response deadline: {error}"))?;
             tokio::time::timeout_at(
                 original
@@ -1266,6 +1378,8 @@ impl super::TranscodeManager {
                 request.claim.key.request.request_incarnation_id,
                 request.claim.worker_instance_id,
                 request.claim.serving_generation,
+                None,
+                None,
             )
             .map_err(str::to_owned)?;
         let (grant_tx, grant_rx) = tokio::sync::oneshot::channel();
@@ -1346,7 +1460,7 @@ impl super::TranscodeManager {
         claim: &AttemptClaim,
         nonce: Uuid,
         allowance_ms: u32,
-    ) -> Result<AdaptivePrepareReplay, String> {
+    ) -> Result<AdaptivePrepareReplay, RemoteGrantError> {
         if nonce.is_nil() || allowance_ms == 0 || allowance_ms > 9_750 {
             return Err("deadline_budget: invalid original grant".into());
         }
@@ -1371,7 +1485,9 @@ impl super::TranscodeManager {
             remote.apply_original_grant(claim, nonce, allowance_ms)?;
         }
         if let Some(reply) = self.replay_adaptive_prepared(claim.key.attempt_id).await {
-            return reply.map(AdaptivePrepareReplay::Prepared);
+            return reply
+                .map(AdaptivePrepareReplay::Prepared)
+                .map_err(RemoteGrantError::Refused);
         }
         Ok(AdaptivePrepareReplay::Pending)
     }
@@ -1399,24 +1515,12 @@ impl super::TranscodeManager {
             return Ok(AdaptivePrepareStart::Pending);
         }
         // Only the actual local create scope proves its remaining monotonic
-        // preparation allowance. Preserve registered replay above even after
-        // caller cancellation; refuse fresh registration without that scope.
-        let original_cutoff = crate::media_pool::create_preparation_deadline()
-            .ok_or("insufficient_evidence: original local create deadline is absent")?
-            .into_std();
-        let deadline = deadline.min(original_cutoff);
-        if std::time::Instant::now() >= deadline {
-            return Err("deadline_budget: original local preparation allowance expired".into());
-        }
-        let entry = self
+        // preparation allowance and continuous cutoff. Preserve registered
+        // replay above even after caller cancellation; refuse fresh
+        // registration without that scope.
+        let (entry, deadline) = self
             .adaptive_attempts
-            .reserve(
-                attempt_id,
-                request.claim.key.request.request_incarnation_id,
-                request.claim.worker_instance_id,
-                request.claim.serving_generation,
-            )
-            .map_err(str::to_owned)?;
+            .reserve_local(&request.claim, deadline)?;
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let manager = Arc::clone(self);
@@ -1531,10 +1635,10 @@ impl super::TranscodeManager {
                 return Err(error);
             }
         };
-        if let Some(original) = entry.remote_deadline()? {
+        if let Some(original) = entry.continuous_entry_deadline()? {
             original
-                .remaining()
-                .map_err(|error| format!("original remote preparation expired: {error}"))?;
+                .entry_remaining()
+                .map_err(|error| format!("original create preparation expired: {error}"))?;
             deadline = deadline.min(
                 original
                     .monotonic_cutoff()
@@ -1609,9 +1713,9 @@ impl super::TranscodeManager {
             settings,
             planning_application_limit_bytes: _,
         } = planned;
-        // The SAME original remote grant P retained; a local create carries
-        // none, so its R keeps the original local monotonic deadline.
-        let continuous_entry_deadline = entry.remote_deadline()?;
+        // The SAME original continuous condition P retained (remote grant or
+        // local create cutoff) closes every fresh R arm and native entry.
+        let continuous_entry_deadline = entry.continuous_entry_deadline()?;
         let built = self
             .vod
             .build_adaptive_recipe(
@@ -1697,6 +1801,68 @@ impl super::TranscodeManager {
         Ok(receiver)
     }
 
+    /// BLOCKED -> 0 of this worker's own committed Adopt, replaying the SAME
+    /// retained DTO until the original deadline. An unknown Store outcome is
+    /// retried; a definite refusal, lost serving authority or the deadline
+    /// leaves this owner held with its Adopt, exactly as a failed attach does.
+    async fn publish_adopted_route(
+        &self,
+        entry: &AttemptEntry,
+        adoption: &plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
+        authority: &crate::serving_fence::ServingAuthority,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        loop {
+            if !authority.is_current(entry.serving_generation()) {
+                return Err(
+                    "adaptive worker lost its serving authority before publication; owner remains held"
+                        .into(),
+                );
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(
+                    "adaptive adopted route publication reached its deadline; owner remains held"
+                        .into(),
+                );
+            }
+            match tokio::time::timeout(
+                remaining,
+                self.store
+                    .publish_adaptive_adoption(adoption, crate::media_sessions::unix_ms()),
+            )
+            .await
+            {
+                Ok(Ok(Some(outcome)))
+                    if outcome.route.incarnation_id == adoption.activation.incarnation_id
+                        && outcome.route.owner_node_id == adoption.worker.node_id
+                        && outcome.route.owner_epoch == adoption.key.owner_epoch
+                        && outcome.route.state == "active"
+                        && outcome.route.publication_ready_at_ms == 0 =>
+                {
+                    return Ok(())
+                }
+                Ok(Ok(_)) => {
+                    return Err(
+                        "adaptive adopted route could not be published; owner remains held".into(),
+                    )
+                }
+                Ok(Err(error)) => tracing::debug!(
+                    attempt_id = %entry.attempt_id(),
+                    %error,
+                    "adaptive adopted route publication is unknown; replaying the same Adopt"
+                ),
+                Err(_) => continue,
+            }
+            tokio::time::sleep(
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(std::time::Duration::from_millis(100)),
+            )
+            .await;
+        }
+    }
+
     pub(crate) fn begin_adaptive_cancel(
         self: &Arc<Self>,
         fence: plurx_core::store::adaptive_resource_attempts::AttemptFence,
@@ -1756,18 +1922,9 @@ impl super::TranscodeManager {
         adoption: plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
         preview_json: String,
         authority: crate::serving_fence::ServingAuthority,
-        mut deadline: std::time::Instant,
+        deadline: std::time::Instant,
     ) -> Result<crate::vodserve::VodStart, String> {
-        if let Some(original) = entry.remote_deadline()? {
-            original
-                .remaining()
-                .map_err(|error| format!("original remote activation deadline: {error}"))?;
-            deadline = deadline.min(
-                original
-                    .monotonic_cutoff()
-                    .map_err(|error| error.to_string())?,
-            );
-        }
+        let deadline = original_adopt_deadline(entry, deadline)?;
         if !authority.is_current(entry.serving_generation())
             || std::time::Instant::now() >= deadline
         {
@@ -1876,6 +2033,7 @@ impl super::TranscodeManager {
         {
             return Err("adaptive Adopt committed a different route".into());
         }
+        let publication_authority = authority.clone();
         let start = rich
             .pending
             .attach_after_store_adopt(
@@ -1897,6 +2055,12 @@ impl super::TranscodeManager {
                 "adaptive activation preview duration differs from the attached plan".into(),
             );
         }
+        // Adopt committed the route BLOCKED. This original owner observed
+        // that exact commit and attached its Rendition under the same serving
+        // admission, so it alone clears the fence; the ingress cannot read
+        // `adopted` before the route is publishable.
+        self.publish_adopted_route(entry, original, &publication_authority, deadline)
+            .await?;
         let AttemptState::Rich(rich) = std::mem::replace(&mut *state, AttemptState::Adopted) else {
             unreachable!();
         };
@@ -2910,6 +3074,8 @@ impl super::TranscodeManager {
                 claim.key.request.request_incarnation_id,
                 claim.worker_instance_id,
                 claim.serving_generation,
+                None,
+                None,
             )
             .expect("original bounded worker slot");
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
@@ -3319,6 +3485,264 @@ impl super::TranscodeManager {
     }
 }
 
+/// Runs from the same selected-store/native finite fixture as the foreign
+/// fence case, but this original owner wins, Adopts, attaches and publishes.
+#[cfg(all(test, feature = "cluster-integration-tests"))]
+impl super::TranscodeManager {
+    pub(crate) async fn adopted_publication_regression<F, Fut>(
+        self: &Arc<Self>,
+        claim: AttemptClaim,
+        selected_recipe_json: String,
+        key_capacity: usize,
+        settings: crate::vodserve::VodSettings,
+        authority: crate::serving_fence::ServingAuthority,
+        make_pending: F,
+    ) where
+        F: FnOnce(usize) -> Fut + Send + 'static,
+        Fut: Future<
+                Output = (
+                    PreparedAttemptRendition,
+                    plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
+                ),
+            > + Send
+            + 'static,
+    {
+        use plurx_core::store::adaptive_resource_attempts::WinnerSelection;
+        assert!(matches!(
+            self.store
+                .claim_media_session_request(
+                    &claim.binding.principal,
+                    &claim.binding.key.request_id,
+                    &claim.binding.request_fingerprint,
+                    &claim.binding.playback_id,
+                    &claim.binding.key.request_incarnation_id.to_string(),
+                    claim.context.now_ms,
+                    claim.binding.original_deadline_ms,
+                )
+                .await
+                .expect("real original root request"),
+            plurx_core::domain::MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(matches!(
+            self.store
+                .claim_adaptive_attempt(&claim)
+                .await
+                .expect("real Claim"),
+            AttemptMutation::Applied(_)
+        ));
+        let entry = self
+            .adaptive_attempts
+            .reserve(
+                claim.key.attempt_id,
+                claim.key.request.request_incarnation_id,
+                claim.worker_instance_id,
+                claim.serving_generation,
+                None,
+                None,
+            )
+            .expect("original bounded worker slot");
+        let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
+        let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let manager = Arc::clone(self);
+        let original = Arc::clone(&entry);
+        let original_claim = claim.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        entry
+            .spawn_coordinator(
+                async move {
+                    let actual_frame = frame_rx.await.expect("same registered frame measurement");
+                    let application_bytes = projected_application_owner_bytes(
+                        &original_claim,
+                        &selected_recipe_json,
+                        key_capacity,
+                        actual_frame,
+                        crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES,
+                    )
+                    .expect("actual recipe and coordinator application projection");
+                    let (pending, output_alias) = make_pending(application_bytes).await;
+                    manager
+                        .record_adaptive_prepared(
+                            &original,
+                            original_claim,
+                            selected_recipe_json,
+                            pending,
+                            settings,
+                            deadline,
+                            application_bytes,
+                        )
+                        .await
+                        .expect("same actual pending owner reaches Store Prepared");
+                    assert!(
+                        prepared_tx.send(output_alias).is_ok(),
+                        "real original output alias"
+                    );
+                    release_rx
+                        .await
+                        .expect("release same original coordinator frame");
+                },
+                frame_tx,
+            )
+            .expect("retain original coordinator before entry");
+        let escaped = prepared_rx.await.expect("actual original Prepared");
+        assert_eq!(
+            self.adaptive_attempt_local_status(claim.key.attempt_id)
+                .await,
+            "prepared_owner_held"
+        );
+        let (worker, preview_json, recipe_json) = {
+            let state = entry.state().await;
+            let AttemptState::Rich(rich) = &*state else {
+                panic!("actual original finite owner is prepared")
+            };
+            (
+                rich.prepared
+                    .as_ref()
+                    .expect("actual original Prepared")
+                    .worker
+                    .clone(),
+                rich.preview_json.clone().expect("actual original preview"),
+                rich.selected_recipe_json.clone(),
+            )
+        };
+        let sequences = |status: &plurx_core::store::adaptive_resource_attempts::RequestStatus| {
+            let row = status
+                .attempts
+                .iter()
+                .find(|row| row.key == claim.key)
+                .expect("same original row");
+            (status.sequence, row.sequence)
+        };
+        let status = self
+            .store
+            .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+            .await
+            .expect("actual Prepared status")
+            .expect("same original request");
+        let (request_sequence, attempt_sequence) = sequences(&status);
+        let won = match self
+            .store
+            .select_adaptive_winner(&WinnerSelection {
+                context: MutationContext {
+                    operation_id: Uuid::new_v4(),
+                    expected_request_sequence: request_sequence,
+                    expected_attempt_sequence: attempt_sequence,
+                    now_ms: crate::media_sessions::unix_ms(),
+                },
+                binding: claim.binding.clone(),
+                key: claim.key.clone(),
+                worker: worker.clone(),
+            })
+            .await
+            .expect("real Winner")
+        {
+            AttemptMutation::Applied(status) => status,
+            other => panic!("original Winner: {other:?}"),
+        };
+        let (request_sequence, attempt_sequence) = sequences(&won);
+        let preview: crate::media_sessions::RemoteStartResponse =
+            serde_json::from_str(&preview_json).expect("same actual prepared preview");
+        let mut public = serde_json::to_value(&preview).expect("actual preview JSON");
+        public["height"] = serde_json::json!(preview.target_height);
+        public["media_origin_ms"] =
+            serde_json::json!((preview.media_origin_seconds * 1_000.0).round() as i64);
+        public["delivered_audio"] =
+            serde_json::to_value(&preview.audio_delivery).expect("actual audio delivery");
+        public["ladder"] = serde_json::json!([]);
+        let public: crate::http::hls::StartResponse =
+            serde_json::from_value(public).expect("real public activation response shape");
+        let now_ms = crate::media_sessions::unix_ms();
+        let adoption = plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: request_sequence,
+                expected_attempt_sequence: attempt_sequence,
+                now_ms,
+            },
+            binding: claim.binding.clone(),
+            key: claim.key.clone(),
+            worker,
+            activation: plurx_core::domain::MediaSessionActivation {
+                incarnation_id: claim.key.route_incarnation_id.to_string(),
+                session_id: claim.key.session_id.to_string(),
+                principal: claim.binding.principal.clone(),
+                playback_id: claim.binding.playback_id.clone(),
+                recovery_epoch: claim.binding.recovery_epoch.to_string(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: true,
+                request_id: Some(claim.binding.key.request_id.clone()),
+                request_fingerprint: claim.binding.request_fingerprint.clone(),
+                owner_node_id: claim.key.worker_node_id.clone(),
+                recipe_json,
+                response_json: serde_json::to_string(&public).expect("canonical public response"),
+                publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: (preview.media_origin_seconds * 1_000.0).round() as i64,
+                now_ms,
+                lease_expires_at_ms: claim.binding.original_deadline_ms,
+                expected_desired_revision: claim.binding.expected_desired_revision,
+            },
+        };
+        let start = self
+            .begin_adaptive_adopt(adoption, preview_json, authority, deadline)
+            .expect("same registered original Adopt control")
+            .await
+            .expect("actual original Adopt reply")
+            .expect("the original owner adopts, attaches and publishes");
+        assert_eq!(start.session_id, claim.key.session_id.to_string());
+        let route = self
+            .store
+            .media_session_route_by_incarnation(&claim.key.route_incarnation_id.to_string())
+            .await
+            .expect("adopted route read")
+            .expect("adopted route");
+        assert_eq!(route.state, "active");
+        assert_eq!(
+            route.publication_ready_at_ms, 0,
+            "the worker cleared its own Adopt fence before reporting adopted"
+        );
+        assert_eq!(route.owner_epoch, claim.key.owner_epoch);
+        assert_eq!(
+            self.adaptive_attempt_local_status(claim.key.attempt_id)
+                .await,
+            "adopted"
+        );
+        let ingress = self
+            .store
+            .publish_media_session_activation(
+                &claim.binding.principal,
+                &claim.binding.key.request_id,
+                &claim.key.route_incarnation_id.to_string(),
+                crate::media_sessions::unix_ms(),
+            )
+            .await
+            .expect("ingress publication")
+            .expect("the ingress publishes the worker-published adoption");
+        assert_eq!(ingress.incarnation_id, route.incarnation_id);
+        release_tx.send(()).expect("release same original frame");
+        drop(escaped);
+    }
+}
+
+/// Adopt is activation, not preparation: it is bounded by the create's full
+/// original allowance (or the accepted remote grant), never by the earlier
+/// cutoff P and R entry use.
+fn original_adopt_deadline(
+    entry: &AttemptEntry,
+    deadline: std::time::Instant,
+) -> Result<std::time::Instant, String> {
+    let Some(original) = entry.continuous_activation_deadline()? else {
+        return Ok(deadline);
+    };
+    original
+        .entry_remaining()
+        .map_err(|error| format!("original create activation deadline: {error}"))?;
+    Ok(deadline.min(
+        original
+            .monotonic_cutoff()
+            .map_err(|error| error.to_string())?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3428,7 +3852,170 @@ mod tests {
             .as_ref()
             .expect("same retained original deadline");
         assert_eq!(retained.monotonic_cutoff().expect("same cutoff"), cutoff);
-        assert!(retained.remaining().is_err());
+        assert!(retained.entry_remaining().is_err());
+    }
+
+    #[tokio::test]
+    async fn local_attempt_carries_the_create_cutoff_into_entry_deadline() {
+        let (fixture, _receiver) = remote_control_fixture();
+        let claim = fixture.claim;
+        let registry = AdaptiveAttemptRegistry::default();
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        assert!(registry.reserve_local(&claim, later).is_err());
+        // An unproved replicated cluster: local evidence alone carries the cutoff.
+        let clock = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(true));
+        let budget = crate::media_pool::CreateStartupBudget::new_with_clock(1_000, &clock);
+        let (entry, deadline) = budget
+            .scope(async { registry.reserve_local(&claim, later) })
+            .await
+            .expect("fresh local reservation inside its create");
+        let original = budget
+            .scope(async { crate::media_pool::create_continuous_entry_deadline() })
+            .await
+            .expect("the create's own continuous cutoff");
+        let carried = entry
+            .continuous_entry_deadline()
+            .expect("readable entry condition")
+            .expect("local create cutoff carried into P and R");
+        assert_eq!(
+            carried.mint(),
+            plurx_core::cluster::clock::ContinuousMint::Local
+        );
+        let cutoff = original.monotonic_cutoff().expect("original cutoff");
+        assert_eq!(carried.monotonic_cutoff().expect("same cutoff"), cutoff);
+        assert!(deadline <= cutoff);
+        carried
+            .entry_remaining()
+            .expect("local entry needs no cluster evidence");
+        // A replay in another create selects the SAME entry and condition.
+        let other = crate::media_pool::CreateStartupBudget::new_with_clock(5_000, &clock);
+        let (replay, _) = other
+            .scope(async { registry.reserve_local(&claim, later) })
+            .await
+            .expect("replay of the same attempt");
+        assert!(Arc::ptr_eq(&entry, &replay));
+        assert_eq!(
+            replay
+                .continuous_entry_deadline()
+                .expect("readable")
+                .expect("retained")
+                .monotonic_cutoff()
+                .expect("same cutoff"),
+            cutoff
+        );
+    }
+
+    #[tokio::test]
+    async fn local_adopt_inside_the_activation_allowance_survives_the_prepare_cutoff() {
+        let (fixture, _receiver) = remote_control_fixture();
+        let claim = fixture.claim;
+        let registry = AdaptiveAttemptRegistry::default();
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let clock = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(true));
+        // 600 ms create: P/R entry closes at 350 ms, activation at 600 ms.
+        let budget = crate::media_pool::CreateStartupBudget::new_with_clock(600, &clock);
+        let (entry, _) = budget
+            .scope(async { registry.reserve_local(&claim, later) })
+            .await
+            .expect("fresh local reservation inside its create");
+        let early = original_adopt_deadline(&entry, later).expect("adopt before both cutoffs");
+        assert!(early < later && early > std::time::Instant::now());
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(
+            entry
+                .continuous_entry_deadline()
+                .expect("readable")
+                .expect("local P/R cutoff")
+                .entry_remaining()
+                .is_err(),
+            "P and R entry stay closed after the prepare cutoff"
+        );
+        let adopted = original_adopt_deadline(&entry, later)
+            .expect("an Adopt inside the activation allowance is not refused");
+        assert_eq!(
+            adopted, early,
+            "the SAME full-allowance cutoff, never renewed"
+        );
+        tokio::time::sleep(
+            early.saturating_duration_since(std::time::Instant::now())
+                + std::time::Duration::from_millis(20),
+        )
+        .await;
+        assert!(
+            original_adopt_deadline(&entry, later).is_err(),
+            "real expiry of the full allowance still closes Adopt"
+        );
+    }
+
+    #[tokio::test]
+    async fn cluster_clock_grant_refusal_stays_ungranted_so_the_original_fence_reaches_its_cleanup()
+    {
+        let (mut original, receiver) = remote_control_fixture();
+        // A replicated guard whose roster was never proved: grant-time policy
+        // is Unknown, exactly the one-voter-down / just-restarted cluster.
+        let unproved = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(true));
+        original.anchor = unproved
+            .capture_continuous()
+            .expect("local capture needs no cluster evidence");
+        original.ready = true; // control gate premise only, not a P ACK claim
+        let claim = original.claim.clone();
+        let nonce = original.nonce;
+        assert!(matches!(
+            original.apply_original_grant(&claim, nonce, 500),
+            Err(RemoteGrantError::ClusterClock(
+                plurx_core::cluster::clock::ClockRefusal::Unknown
+            ))
+        ));
+        assert!(
+            original.grant.is_some()
+                && original.granted_ms.is_none()
+                && original.deadline.is_none(),
+            "a refused grant mints nothing and keeps the original registration ungranted"
+        );
+        // The coordinator's retry Fences this attempt through its worker;
+        // the existing ungranted branch drops the unsent grant so the SAME
+        // original coordinator closes its own P/M.
+        let state = crate::http::internal_media_sessions::output_capture_test_state();
+        let entry = state
+            .transcode
+            .adaptive_attempts
+            .reserve(
+                claim.key.attempt_id,
+                claim.key.request.request_incarnation_id,
+                claim.worker_instance_id,
+                claim.serving_generation,
+                None,
+                None,
+            )
+            .expect("original registration slot");
+        *entry.remote_registration.lock().expect("registration") = Some(original);
+        let fence = plurx_core::store::adaptive_resource_attempts::AttemptFence {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: 1,
+                expected_attempt_sequence: 1,
+                now_ms: crate::media_sessions::unix_ms(),
+            },
+            binding: claim.binding.clone(),
+            key: claim.key.clone(),
+            cancel_request: false,
+        };
+        let cancelled = state
+            .transcode
+            .begin_adaptive_cancel(fence.clone())
+            .expect("the original worker accepts its own Fence");
+        assert!(
+            cancelled.await.expect("cancel answer").is_err(),
+            "the answer never asserts native extinction"
+        );
+        assert!(
+            receiver.await.is_err(),
+            "the unsent original grant is dropped, so the coordinator closes P/M"
+        );
+        let held = entry.remote_registration.lock().expect("registration");
+        let remote = held.as_ref().expect("same original registration");
+        assert_eq!(remote.fence.as_ref(), Some(&fence));
+        assert!(remote.grant.is_none() && remote.granted_ms.is_none());
     }
 
     #[tokio::test]
@@ -3506,14 +4093,14 @@ mod tests {
         let request = Uuid::new_v4();
         let worker = Uuid::new_v4();
         let entry = registry
-            .reserve(attempt, request, worker, 7)
+            .reserve(attempt, request, worker, 7, None, None)
             .expect("reserve");
         let replay = registry
-            .reserve(attempt, request, worker, 7)
+            .reserve(attempt, request, worker, 7, None, None)
             .expect("replay");
         assert!(Arc::ptr_eq(&entry, &replay));
         assert!(registry
-            .reserve(attempt, request, Uuid::new_v4(), 7)
+            .reserve(attempt, request, Uuid::new_v4(), 7, None, None)
             .is_err());
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();

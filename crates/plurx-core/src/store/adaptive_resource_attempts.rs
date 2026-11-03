@@ -280,6 +280,14 @@ pub trait AdaptiveResourceAttemptStore: Send + Sync {
         &self,
         adoption: &AdaptiveAdoption,
     ) -> Result<AttemptAdoption, StoreError>;
+    /// The original worker publishes its own committed Adopt (BLOCKED -> 0)
+    /// after attaching the Rendition, replaying the SAME retained DTO. `None`
+    /// is a definite refusal; a database error is unknown and replayable.
+    async fn publish_adaptive_adoption(
+        &self,
+        adoption: &AdaptiveAdoption,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
     async fn fence_adaptive_attempt(
         &self,
         fence: &AttemptFence,

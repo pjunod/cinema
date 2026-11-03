@@ -425,9 +425,16 @@ pub(crate) struct BudgetedCatalogRequest {
 
 #[derive(Clone)]
 pub(crate) struct CreateStartupBudget {
-    /// Linux original elapsed-time cutoff, independent of Tokio suspension.
-    /// Absence refuses new remote grants; it does not mint fallback time.
+    /// Linux original elapsed-time cutoff, independent of Tokio suspension,
+    /// captured on local evidence at ingress. A local attempt carries it into
+    /// P and R; a remote grant is derived from it under the strict cluster
+    /// policy. Absence refuses new remote grants; it does not mint fallback
+    /// time.
     continuous_prepare_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
+    /// The SAME capture's full-allowance cutoff, paired with `deadline`. It
+    /// bounds a local attempt's Adopt: activation is what the
+    /// [`CREATE_ACTIVATION_ALLOWANCE`] between the two cutoffs is kept for.
+    continuous_activation_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     pub deadline: tokio::time::Instant,
     calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     binding: std::sync::Arc<std::sync::Mutex<Option<PlanningBinding>>>,
@@ -485,6 +492,7 @@ impl CreateStartupBudget {
         Self {
             deadline: tokio::time::Instant::now() + Duration::from_millis(remaining_ms.min(10_000)),
             continuous_prepare_cutoff: None,
+            continuous_activation_cutoff: None,
             calls: Default::default(),
             binding: Default::default(),
             advisory: Default::default(),
@@ -494,9 +502,11 @@ impl CreateStartupBudget {
     }
     /// Production ingress captures the original elapsed budget before any
     /// awaited work. The standard instant starts before the potentially
-    /// contended strict capture; neither lock wait nor scope transfer can
-    /// renew B. Unknown continuous evidence keeps local scheduling bounded
-    /// and refuses fresh cross-node grants.
+    /// contended capture; neither lock wait nor scope transfer can renew B.
+    /// The capture is local evidence only, so a cluster-clock lapse cannot
+    /// remove a local create's cutoff; an unreadable BOOTTIME or a local
+    /// discontinuity keeps local scheduling bounded and refuses fresh
+    /// cross-node grants.
     pub(crate) fn new_with_clock(
         remaining_ms: u64,
         clock: &std::sync::Arc<plurx_core::cluster::clock::ClusterClockGuard>,
@@ -507,12 +517,11 @@ impl CreateStartupBudget {
         let mut budget = Self::new(remaining_ms);
         budget.deadline = started + allowance;
         if let Some(original) = original {
-            if let Some(paired) = original
-                .deadline_after(allowance)
-                .ok()
-                .and_then(|total| total.monotonic_cutoff().ok())
-            {
-                budget.deadline = budget.deadline.min(paired.into());
+            if let Ok(total) = original.deadline_after(allowance) {
+                if let Ok(paired) = total.monotonic_cutoff() {
+                    budget.deadline = budget.deadline.min(paired.into());
+                    budget.continuous_activation_cutoff = Some(total);
+                }
             }
             budget.continuous_prepare_cutoff = allowance
                 .checked_sub(CREATE_ACTIVATION_ALLOWANCE)
@@ -600,28 +609,156 @@ pub(crate) fn create_preparation_deadline() -> Option<tokio::time::Instant> {
         .ok()
 }
 
+/// The same original continuous preparation cutoff that pairs with
+/// [`create_preparation_deadline`], for a local attempt to carry into P and
+/// R. Absent outside a create scope or without a healthy local BOOTTIME.
+#[cfg(target_os = "linux")]
+pub(crate) fn create_continuous_entry_deadline(
+) -> Option<plurx_core::cluster::clock::ContinuousDeadline> {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| budget.continuous_prepare_cutoff.clone())
+        .ok()
+        .flatten()
+}
+
+/// The same original full-allowance continuous cutoff that pairs with the
+/// create's own `deadline`, for a local attempt's Adopt. Absent outside a
+/// create scope or without a healthy local BOOTTIME.
+#[cfg(target_os = "linux")]
+pub(crate) fn create_continuous_activation_deadline(
+) -> Option<plurx_core::cluster::clock::ContinuousDeadline> {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| budget.continuous_activation_cutoff.clone())
+        .ok()
+        .flatten()
+}
+
+/// Why this create cannot hand a cross-node worker an original grant.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteGrantRefusal {
+    /// No original continuous cutoff: outside a create scope, or ingress had
+    /// no healthy local BOOTTIME.
+    NoOriginalCutoff,
+    /// The cluster clock does not currently admit a cross-node deadline.
+    ClusterClock(plurx_core::cluster::clock::ClockRefusal),
+    /// The original preparation allowance is spent.
+    Spent,
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for RemoteGrantRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoOriginalCutoff => {
+                f.write_str("deadline_budget: no proved original create allowance remains")
+            }
+            Self::ClusterClock(reason) => write!(
+                f,
+                "cluster_clock: the cluster clock cannot prove a cross-node deadline ({reason})"
+            ),
+            Self::Spent => f.write_str("deadline_budget: the original create allowance is spent"),
+        }
+    }
+}
+
 /// Grant duration is derived only after the genuine registration receipt.
 /// Both original clocks and the caller's already clipped stage constrain it.
 /// Millisecond flooring never grants the fractional tail to the worker.
+/// This is where the strict cluster-clock policy applies to a create; it
+/// has no side effect beyond the clock's refusal counter, so placement also
+/// asks it before Claim to skip a worker it could never grant.
 #[cfg(target_os = "linux")]
-pub(crate) fn create_remote_grant_ms(stage_deadline: tokio::time::Instant) -> Option<u32> {
+pub(crate) fn create_remote_grant(
+    stage_deadline: tokio::time::Instant,
+) -> Result<u32, RemoteGrantRefusal> {
     CREATE_STARTUP_BUDGET
         .try_with(|budget| {
             let continuous = budget
                 .continuous_prepare_cutoff
-                .as_ref()?
-                .remaining()
-                .ok()?;
-            let cutoff =
-                stage_deadline.min(budget.deadline.checked_sub(CREATE_ACTIVATION_ALLOWANCE)?);
-            let remaining =
-                continuous.min(cutoff.checked_duration_since(tokio::time::Instant::now())?);
+                .as_ref()
+                .ok_or(RemoteGrantRefusal::NoOriginalCutoff)?
+                .grant_remaining()
+                .map_err(RemoteGrantRefusal::ClusterClock)?;
+            let cutoff = budget
+                .deadline
+                .checked_sub(CREATE_ACTIVATION_ALLOWANCE)
+                .map(|prepare| stage_deadline.min(prepare))
+                .ok_or(RemoteGrantRefusal::Spent)?;
+            let remaining = cutoff
+                .checked_duration_since(tokio::time::Instant::now())
+                .map(|monotonic| continuous.min(monotonic))
+                .ok_or(RemoteGrantRefusal::Spent)?;
             u32::try_from(remaining.as_millis())
                 .ok()
                 .filter(|millis| *millis != 0)
+                .ok_or(RemoteGrantRefusal::Spent)
         })
-        .ok()
-        .flatten()
+        .unwrap_or(Err(RemoteGrantRefusal::NoOriginalCutoff))
+}
+
+#[cfg(all(target_os = "linux", test))]
+pub(crate) fn create_remote_grant_ms(stage_deadline: tokio::time::Instant) -> Option<u32> {
+    create_remote_grant(stage_deadline).ok()
+}
+
+/// Remote adaptive placement outcomes on this coordinator: what a peer's
+/// encode time was spent on, and why a peer was passed over. Closed label
+/// vocabulary; no node, session or caller-supplied labels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemotePlacementOutcome {
+    /// A peer prepared the attempt and was selected as its worker.
+    Placed,
+    /// Skipped before Claim: the cluster clock could not grant that peer.
+    ClockSkipped,
+    /// Registered, then the grant was refused on cluster-clock evidence; the
+    /// original attempt was fenced through its worker and placement moved on.
+    GrantRefused,
+    /// Any other refused or uncertain remote attempt.
+    Failed,
+}
+
+impl RemotePlacementOutcome {
+    const ALL: [Self; 4] = [
+        Self::Placed,
+        Self::ClockSkipped,
+        Self::GrantRefused,
+        Self::Failed,
+    ];
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Placed => "placed",
+            Self::ClockSkipped => "clock_skipped",
+            Self::GrantRefused => "grant_refused",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+static REMOTE_PLACEMENTS: [std::sync::atomic::AtomicU64; 4] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+pub(crate) fn record_remote_placement(outcome: RemotePlacementOutcome) {
+    REMOTE_PLACEMENTS[outcome as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn remote_placement_count(outcome: RemotePlacementOutcome) -> u64 {
+    REMOTE_PLACEMENTS[outcome as usize].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn prometheus_remote_placements() -> String {
+    let mut out = String::from(
+        "# HELP plurx_adaptive_remote_placements_total Adaptive creates this coordinator offered to a peer worker, by outcome.\n\
+         # TYPE plurx_adaptive_remote_placements_total counter\n",
+    );
+    for outcome in RemotePlacementOutcome::ALL {
+        out.push_str(&format!(
+            "plurx_adaptive_remote_placements_total{{outcome=\"{}\"}} {}\n",
+            outcome.label(),
+            remote_placement_count(outcome)
+        ));
+    }
+    out
 }
 
 pub(crate) fn create_stage_deadline(maximum: Duration) -> tokio::time::Instant {
@@ -914,7 +1051,9 @@ pub(crate) struct MediaPool {
 impl MediaPool {
     /// Advisory worker identity from the same bounded snapshot cache used by
     /// placement. The worker rechecks its actual owner and generation when it
-    /// receives Claim; this cached quote never grants native authority.
+    /// receives Claim; this cached quote never grants native authority. A
+    /// remote quote must be fresh and same-protocol: its deadline evidence
+    /// comes from the causal Register/Grant exchange, not from the quote.
     #[cfg_attr(
         not(target_os = "linux"),
         allow(
@@ -933,10 +1072,16 @@ impl MediaPool {
                 .adaptive_worker_quote
                 .filter(AdaptiveWorkerQuote::valid);
         }
-        // Fresh remote placement stays unadvertised until the causal P path
-        // is composed with the SAME continuous guard on dormant finite R
-        // Source/root entry. Identity alone cannot authorize that boundary.
-        None
+        let now = tokio::time::Instant::now();
+        self.snapshots
+            .read()
+            .await
+            .get(node_id)
+            .filter(|cached| {
+                now <= cached.expires_at && cached.snapshot.protocol_version == PROTOCOL_VERSION
+            })
+            .and_then(|cached| cached.snapshot.adaptive_worker_quote.clone())
+            .filter(AdaptiveWorkerQuote::valid)
     }
 
     pub(crate) async fn retained_output_receiver(&self, node_id: &str) -> bool {
@@ -2677,6 +2822,13 @@ mod tests {
                     create_preparation_deadline().expect("actual local scheduling budget")
                         > tokio::time::Instant::now()
                 );
+                // The ingress capture is local evidence: a local attempt still
+                // carries its cutoff; only the cross-node grant is refused.
+                let local = create_continuous_entry_deadline()
+                    .expect("local continuous cutoff without cluster evidence");
+                local
+                    .entry_remaining()
+                    .expect("local entry needs no cluster evidence");
                 assert!(create_remote_grant_ms(budget.deadline).is_none());
             })
             .await;
@@ -2881,23 +3033,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_peer_identity_quote_cannot_replace_original_deadline_evidence() {
+    async fn fresh_same_protocol_peer_quote_is_offered_and_stale_or_old_protocol_quote_is_not() {
         let state = crate::http::internal_media_sessions::output_capture_test_state();
-        let peer = "peer-without-original-create-clock";
-        let mut observed = snapshot(peer, &["h264"], 1080);
-        observed.adaptive_worker_quote = Some(AdaptiveWorkerQuote {
+        let peer = "peer-with-causal-grant-path";
+        let quote = AdaptiveWorkerQuote {
             version: 1,
             owner_id: uuid::Uuid::new_v4(),
             serving_generation: 7,
-        });
+        };
+        let mut observed = snapshot(peer, &["h264"], 1080);
+        observed.adaptive_worker_quote = Some(quote.clone());
         assert!(snapshot_is_bounded(&observed, peer));
         state.media_pool.cache_snapshot_for_test(observed).await;
-        assert!(state.media_pool.snapshots.read().await[peer]
-            .snapshot
-            .adaptive_worker_quote
+        // Identity only: the deadline evidence arrives with the causal grant.
+        assert_eq!(
+            state.media_pool.adaptive_worker_quote(&state, peer).await,
+            Some(quote.clone())
+        );
+        let set = |edit: fn(&mut CachedSnapshot)| {
+            let pool = std::sync::Arc::clone(&state.media_pool);
+            async move {
+                edit(
+                    pool.snapshots
+                        .write()
+                        .await
+                        .get_mut(peer)
+                        .expect("cached peer"),
+                );
+            }
+        };
+        set(|cached| cached.snapshot.protocol_version = PROTOCOL_VERSION - 1).await;
+        assert!(state
+            .media_pool
+            .adaptive_worker_quote(&state, peer)
+            .await
+            .is_none());
+        set(|cached| cached.snapshot.protocol_version = PROTOCOL_VERSION).await;
+        set(|cached| {
+            cached.snapshot.adaptive_worker_quote = Some(AdaptiveWorkerQuote {
+                version: 1,
+                owner_id: uuid::Uuid::nil(),
+                serving_generation: 7,
+            })
+        })
+        .await;
+        assert!(state
+            .media_pool
+            .adaptive_worker_quote(&state, peer)
+            .await
+            .is_none());
+        set(|cached| {
+            cached.snapshot.adaptive_worker_quote = Some(AdaptiveWorkerQuote {
+                version: 1,
+                owner_id: uuid::Uuid::from_u128(1),
+                serving_generation: 7,
+            })
+        })
+        .await;
+        assert!(state
+            .media_pool
+            .adaptive_worker_quote(&state, peer)
+            .await
             .is_some());
-        assert!(state.media_pool.adaptive_worker_quote(&state, peer).await.is_none(),
-            "current identity/readiness cannot authorize remote native entry without the original deadline");
+        set(|cached| cached.expires_at = tokio::time::Instant::now() - Duration::from_secs(1))
+            .await;
+        assert!(state
+            .media_pool
+            .adaptive_worker_quote(&state, peer)
+            .await
+            .is_none());
+        assert!(state
+            .media_pool
+            .adaptive_worker_quote(&state, "never-advertised")
+            .await
+            .is_none());
         state.shutdown.cancel();
     }
 

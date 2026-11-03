@@ -65,10 +65,26 @@ mod tests {
     fn continuous_capture_does_not_soften_unknown_when_clock_enforcement_is_off() {
         let guard = Arc::new(ClusterClockGuard::new(true));
         assert!(!guard.is_enforced());
+        // Capture is local evidence only; the unproved roster is refused
+        // where a deadline would cross nodes, with enforcement off.
+        let original = guard
+            .capture_continuous()
+            .expect("healthy local BOOTTIME on an unproved cluster");
         assert!(matches!(
-            guard.capture_continuous(),
+            original.grant_deadline_after(Duration::from_secs(1)),
             Err(ClockRefusal::Unknown)
         ));
+        let local = original
+            .deadline_after(Duration::from_secs(1))
+            .expect("local mint needs no cluster evidence");
+        assert_eq!(local.mint(), ContinuousMint::Local);
+        assert!(matches!(
+            local.grant_remaining(),
+            Err(ClockRefusal::Unknown)
+        ));
+        local
+            .entry_remaining()
+            .expect("local entry needs no cluster evidence");
     }
 
     #[cfg(target_os = "linux")]
@@ -113,8 +129,12 @@ mod tests {
             .deadline_after(Duration::from_secs(1))
             .expect("live original cutoff");
         let cutoff = deadline.cutoff_ns;
-        let before = deadline.remaining().expect("first actual BOOTTIME read");
-        let after = deadline.remaining().expect("second actual BOOTTIME read");
+        let before = deadline
+            .entry_remaining()
+            .expect("first actual BOOTTIME read");
+        let after = deadline
+            .entry_remaining()
+            .expect("second actual BOOTTIME read");
         assert!(after <= before);
         assert_eq!(deadline.cutoff_ns, cutoff);
         assert_eq!(
@@ -131,9 +151,120 @@ mod tests {
             .expect("original clock lock")
             .anchor_wall_ms = Some(0);
         assert!(matches!(
-            deadline.remaining(),
+            deadline.entry_remaining(),
             Err(ClockRefusal::LocalDiscontinuity)
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn accepted_grant(guard: &Arc<ClusterClockGuard>) -> ContinuousDeadline {
+        let accepted = guard
+            .capture_continuous()
+            .expect("healthy local BOOTTIME")
+            .grant_deadline_after(Duration::from_secs(5))
+            .expect("a bounded cluster admits the grant");
+        assert_eq!(accepted.mint(), ContinuousMint::ClusterGrant);
+        accepted
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn roster_hiccup_does_not_close_an_accepted_continuous_deadline() {
+        // Advisory default: neither seam consults the operator switch.
+        let guard = Arc::new(ClusterClockGuard::new(true));
+        publish_offset(&guard, 0, 1_000);
+        let accepted = accepted_grant(&guard);
+        guard.roster_failed();
+        accepted
+            .entry_remaining()
+            .expect("a roster read timeout leaves local evidence intact");
+        assert!(matches!(
+            accepted.grant_remaining(),
+            Err(ClockRefusal::GenerationChanged)
+        ));
+
+        publish_offset(&guard, 0, 1_000);
+        let accepted = accepted_grant(&guard);
+        guard.inner.lock().expect("clock lock").snapshot.peers =
+            bounded(Instant::now() - Duration::from_secs(26));
+        accepted
+            .entry_remaining()
+            .expect("a missed probe leaves local evidence intact");
+        assert!(matches!(
+            accepted.grant_remaining(),
+            Err(ClockRefusal::Unknown)
+        ));
+
+        publish_offset(&guard, 0, 1_000);
+        let accepted = accepted_grant(&guard);
+        publish_offset(&guard, 2_500_000, 1_000);
+        accepted
+            .entry_remaining()
+            .expect("an offset past refusal is grant-time policy");
+        assert!(matches!(
+            accepted.grant_remaining(),
+            Err(ClockRefusal::Offset)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_boottime_expiry_still_closes_entry() {
+        let guard = Arc::new(ClusterClockGuard::new(false));
+        let deadline = guard
+            .capture_continuous()
+            .expect("healthy local BOOTTIME")
+            .deadline_after(Duration::from_millis(50))
+            .expect("live original cutoff");
+        let scheduled = deadline.monotonic_cutoff().expect("scheduling instant");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(matches!(
+            deadline.entry_remaining(),
+            Err(ClockRefusal::Unknown)
+        ));
+        assert_eq!(deadline.monotonic_cutoff().expect("unchanged"), scheduled);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_discontinuity_closes_entry_without_cluster_evidence() {
+        let guard = Arc::new(ClusterClockGuard::new(true));
+        publish_offset(&guard, 0, 1_000);
+        let accepted = accepted_grant(&guard);
+        accepted.entry_remaining().expect("accepted and live");
+        // The cluster evidence is still bounded; only the local clock moved.
+        guard.inner.lock().expect("clock lock").anchor_wall_ms = Some(0);
+        assert!(matches!(
+            accepted.entry_remaining(),
+            Err(ClockRefusal::LocalDiscontinuity)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn continuous_refusals_split_grant_from_entry_seams() {
+        let guard = Arc::new(ClusterClockGuard::new(true));
+        let original = guard.capture_continuous().expect("healthy local BOOTTIME");
+        assert!(original
+            .grant_deadline_after(Duration::from_secs(1))
+            .is_err());
+        let line = |seam: &str, cause: &str, count: u64| {
+            format!("plurx_cluster_clock_continuous_refusals_total{{seam=\"{seam}\",cause=\"{cause}\"}} {count}\n")
+        };
+        let metrics = guard.prometheus();
+        assert!(metrics.contains(&line("grant", "unknown", 1)), "{metrics}");
+        assert!(metrics.contains(&line("entry", "unknown", 0)), "{metrics}");
+        // A local mint is not a seam; its later expiry is an entry refusal.
+        let short = guard
+            .capture_continuous()
+            .expect("healthy local BOOTTIME")
+            .deadline_after(Duration::from_millis(20))
+            .expect("live local cutoff");
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(short.entry_remaining().is_err());
+        let metrics = guard.prometheus();
+        assert!(metrics.contains(&line("grant", "unknown", 1)), "{metrics}");
+        assert!(metrics.contains(&line("entry", "unknown", 1)), "{metrics}");
     }
 
     #[test]
@@ -1551,29 +1682,100 @@ pub struct ContinuousClockCapture {
     captured_ns: u64,
 }
 
+/// Which evidence minted a continuous deadline. Diagnostics and tests only:
+/// no entry seam branches on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContinuousMint {
+    /// Local evidence only: a create's own ingress capture, or the worker's
+    /// inert CONTROL cutoff at registration.
+    Local,
+    /// A worker accepted a coordinator's grant under the strict cluster policy.
+    ClusterGrant,
+}
+
+/// Where a continuous deadline was refused, for the refusal counter. Closed
+/// vocabulary: no target, session or caller-supplied labels.
+#[derive(Clone, Copy)]
+enum ContinuousSeam {
+    Grant,
+    Entry,
+}
+
+impl ContinuousSeam {
+    const ALL: [Self; 2] = [Self::Grant, Self::Entry];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Grant => 0,
+            Self::Entry => 1,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Grant => "grant",
+            Self::Entry => "entry",
+        }
+    }
+}
+
 /// One immutable cutoff on the SAME original continuous anchor. Cloning this
 /// value retains its deadline and guard identity; it never samples a new start.
+///
+/// Cluster evidence (roster, peer offsets, admission generation) is checked
+/// only where a deadline crosses nodes: `grant_deadline_after` and
+/// `grant_remaining`. Once accepted, the deadline closes only on local
+/// evidence (`entry_remaining`): BOOTTIME reaching the cutoff, an unreadable
+/// BOOTTIME, or a local wall/monotonic discontinuity. A missed peer probe or
+/// a roster read timeout cannot close work that was already admitted.
 #[derive(Clone)]
 pub struct ContinuousDeadline {
     capture: ContinuousClockCapture,
     cutoff_ns: u64,
+    mint: ContinuousMint,
 }
 
 impl ContinuousClockCapture {
-    /// Fix a cutoff from the original anchor, not from the time of this call.
-    /// A delayed grant therefore expires instead of receiving a fresh window.
-    pub fn deadline_after(&self, allowance: Duration) -> Result<ContinuousDeadline, ClockRefusal> {
+    /// Fixed arithmetic only: the cutoff is the original anchor plus the
+    /// allowance, never the time of this call.
+    fn deadline(
+        &self,
+        allowance: Duration,
+        mint: ContinuousMint,
+    ) -> Result<ContinuousDeadline, ClockRefusal> {
         let nanos = u64::try_from(allowance.as_nanos()).map_err(|_| ClockRefusal::Unknown)?;
         let cutoff_ns = self
             .captured_ns
             .checked_add(nanos)
             .ok_or(ClockRefusal::Unknown)?;
-        let deadline = ContinuousDeadline {
+        Ok(ContinuousDeadline {
             capture: self.clone(),
             cutoff_ns,
-        };
-        deadline.remaining()?;
+            mint,
+        })
+    }
+
+    /// Local mint: fix a cutoff from the original anchor, validated on local
+    /// evidence only. A delayed caller therefore expires instead of receiving
+    /// a fresh window. Used by local creates and the worker's CONTROL cutoff.
+    pub fn deadline_after(&self, allowance: Duration) -> Result<ContinuousDeadline, ClockRefusal> {
+        let deadline = self.deadline(allowance, ContinuousMint::Local)?;
+        deadline.entry_window()?;
         Ok(deadline)
+    }
+
+    /// Grant mint: the same arithmetic on the same anchor, admitted only
+    /// under the strict cluster policy (same guard, unchanged continuity,
+    /// the admission generation captured at W0, CURRENT acquisition
+    /// policy). The operator's advisory switch never softens it.
+    pub fn grant_deadline_after(
+        &self,
+        allowance: Duration,
+    ) -> Result<ContinuousDeadline, ClockRefusal> {
+        let result = self
+            .deadline(allowance, ContinuousMint::ClusterGrant)
+            .and_then(|deadline| deadline.grant_window().map(|_| deadline));
+        self.guard.count_continuous(ContinuousSeam::Grant, result)
     }
 }
 
@@ -1586,8 +1788,9 @@ impl ContinuousDeadline {
             && self.cutoff_ns == other.cutoff_ns
     }
     /// A conservative local scheduling instant paired BEFORE the original
-    /// BOOTTIME read. This never replaces remaining(): the standard monotonic
-    /// clock may pause during suspend, so native entry retains this whole value.
+    /// BOOTTIME read. This never replaces entry_remaining(): the standard
+    /// monotonic clock may pause during suspend, so native entry retains this
+    /// whole value.
     pub fn monotonic_cutoff(&self) -> Result<Instant, ClockRefusal> {
         let nanos = self
             .cutoff_ns
@@ -1599,17 +1802,47 @@ impl ContinuousDeadline {
             .ok_or(ClockRefusal::Unknown)
     }
 
-    /// Strict, serialized revalidation, independent of the operator's advisory
-    /// cluster-clock enforcement switch. Expiry only rejects new work; owners
-    /// must still join/close already acquired work through their original APIs.
-    ///
-    /// Any lapse of the strict evidence closes the window: expiry, a clock
-    /// discontinuity, an admission-generation move, and also a stale peer
-    /// sample or an offset past refusal. On a cluster with enforcement off a
-    /// missed clock probe therefore closes every in-flight causal deadline.
-    /// That is why fresh remote placement stays suppressed until local-entry
-    /// revalidation is split from grant-time cluster policy.
-    pub fn remaining(&self) -> Result<Duration, ClockRefusal> {
+    /// The evidence this deadline was minted on.
+    #[must_use]
+    pub fn mint(&self) -> ContinuousMint {
+        self.mint
+    }
+
+    /// Local entry: serialized local continuity on this capture's own guard
+    /// plus BOOTTIME now in `[captured, cutoff)`. An unreadable BOOTTIME, a
+    /// backwards sample, a moved local clock generation or a reached cutoff
+    /// fails closed. Cluster evidence is deliberately not consulted, so a
+    /// roster hiccup or a stale peer sample cannot close admitted work. This
+    /// is the only query entry seams use. Expiry only rejects new work;
+    /// owners still join/close acquired work through their original APIs.
+    pub fn entry_remaining(&self) -> Result<Duration, ClockRefusal> {
+        let result = self.entry_window();
+        self.capture
+            .guard
+            .count_continuous(ContinuousSeam::Entry, result)
+    }
+
+    /// Grant-time: the strict cluster policy plus the same BOOTTIME window.
+    /// Only a coordinator deriving a cross-node grant uses it.
+    pub fn grant_remaining(&self) -> Result<Duration, ClockRefusal> {
+        let result = self.grant_window();
+        self.capture
+            .guard
+            .count_continuous(ContinuousSeam::Grant, result)
+    }
+
+    fn entry_window(&self) -> Result<Duration, ClockRefusal> {
+        let mut remaining = None;
+        self.capture
+            .guard
+            .revalidate_local_with(self.capture.decision, |_| {
+                remaining = Some(self.boottime_window()?);
+                Ok(())
+            })?;
+        remaining.ok_or(ClockRefusal::Unknown)
+    }
+
+    fn grant_window(&self) -> Result<Duration, ClockRefusal> {
         let ticket = ClockAcquisitionTicket {
             guard: &self.capture.guard,
             decision: self.capture.decision,
@@ -1618,19 +1851,24 @@ impl ContinuousDeadline {
         };
         let mut remaining = None;
         self.capture.guard.revalidate_strict_with(&ticket, |_| {
-            let now = continuous_clock_ns()?;
-            if now < self.capture.captured_ns {
-                return Err(ClockRefusal::LocalDiscontinuity);
-            }
-            let nanos = self
-                .cutoff_ns
-                .checked_sub(now)
-                .filter(|value| *value != 0)
-                .ok_or(ClockRefusal::Unknown)?;
-            remaining = Some(Duration::from_nanos(nanos));
+            remaining = Some(self.boottime_window()?);
             Ok(())
         })?;
         remaining.ok_or(ClockRefusal::Unknown)
+    }
+
+    /// BOOTTIME now against the fixed original window, read under the
+    /// caller's serialized guard state.
+    fn boottime_window(&self) -> Result<Duration, ClockRefusal> {
+        let now = continuous_clock_ns()?;
+        if now < self.capture.captured_ns {
+            return Err(ClockRefusal::LocalDiscontinuity);
+        }
+        self.cutoff_ns
+            .checked_sub(now)
+            .filter(|value| *value != 0)
+            .map(Duration::from_nanos)
+            .ok_or(ClockRefusal::Unknown)
     }
 }
 
@@ -1813,6 +2051,8 @@ pub struct ClusterClockGuard {
     enforced: AtomicBool,
     refusals: [[AtomicU64; 4]; 3],
     advisory_refusals: [[AtomicU64; 4]; 3],
+    /// Continuous create-deadline refusals by seam (grant, entry) and cause.
+    continuous_refusals: [[AtomicU64; 4]; 2],
 }
 
 fn wall_ms() -> Option<i64> {
@@ -1832,6 +2072,9 @@ impl ClusterClockGuard {
             enforced: AtomicBool::new(false),
             refusals: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
             advisory_refusals: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            continuous_refusals: std::array::from_fn(|_| {
+                std::array::from_fn(|_| AtomicU64::new(0))
+            }),
             inner: Mutex::new(ClockInner {
                 admission_generation: 0,
                 snapshot: ClockSnapshot {
@@ -1893,11 +2136,15 @@ impl ClusterClockGuard {
         }
     }
 
-    /// Capture one original continuous elapsed-time anchor. The first sample
-    /// precedes any potentially contended clock-state lock, so waiting here
-    /// cannot renew the original create/registration budget. Strict evidence
-    /// and both serialized generations are retained from THIS guard. This API
-    /// does not use decide(): advisory mode cannot soften an unknown clock.
+    /// Capture one original continuous elapsed-time anchor on LOCAL evidence
+    /// only. The first sample precedes the potentially contended clock-state
+    /// lock, so waiting here cannot renew the original create/registration
+    /// budget. Under the lock local continuity is checked and a second
+    /// BOOTTIME read must not precede the first. The clock and admission
+    /// generations are retained from THIS guard so a later grant can require
+    /// the admission evidence to be unchanged since W0; cluster policy itself
+    /// is not consulted here (see `grant_deadline_after`). This API does not
+    /// use decide(): advisory mode cannot soften a grant.
     pub fn capture_continuous(self: &Arc<Self>) -> Result<ContinuousClockCapture, ClockRefusal> {
         // This private identity distinguishes independent captures even if
         // platform clock resolution gives them equal timestamp/counter data.
@@ -1909,21 +2156,39 @@ impl ClusterClockGuard {
                 current.checked_add(1)
             })
             .map_err(|_| ClockRefusal::Unknown)?;
-        let (ticket, strict) = self.capture_with(|_| {
-            if continuous_clock_ns()? < captured_ns {
-                return Err(ClockRefusal::LocalDiscontinuity);
-            }
-            Ok(())
-        });
-        strict?;
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Refresh only so the retained admission generation is current; a
+        // membership change is a grant-time refusal, never a capture one.
+        self.refresh_membership(&mut inner);
+        let generation = inner.snapshot.clock_generation;
+        let before = Instant::now();
+        let decision = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
+        if decision.clock_generation != generation || continuous_clock_ns()? < captured_ns {
+            return Err(ClockRefusal::LocalDiscontinuity);
+        }
         Ok(ContinuousClockCapture {
             identity,
             monotonic_before,
             guard: Arc::clone(self),
-            decision: ticket.decision,
-            admission_generation: ticket.admission_generation,
+            decision,
+            admission_generation: inner.admission_generation,
             captured_ns,
         })
+    }
+
+    /// Count a continuous-deadline refusal at its seam; pass the result on.
+    fn count_continuous<T>(
+        &self,
+        seam: ContinuousSeam,
+        result: Result<T, ClockRefusal>,
+    ) -> Result<T, ClockRefusal> {
+        if let Err(cause) = &result {
+            self.continuous_refusals[seam.index()][cause.index()].fetch_add(1, Ordering::Relaxed);
+        }
+        result
     }
 
     /// Apply the operator's enforcement setting. Off (the default) makes
@@ -2300,6 +2565,29 @@ impl ClusterClockGuard {
             return Err(ClockRefusal::GenerationChanged);
         }
         Self::acquisition_policy(&inner)?;
+        also(&inner)
+    }
+
+    /// Local revalidation for a continuous deadline already admitted: local
+    /// wall/monotonic continuity under the lock and an unchanged clock
+    /// generation, plus a check read under the SAME serialized state. No
+    /// admission-generation compare, no acquisition policy and no membership
+    /// refresh: this runs under the resource ledger lock, and the membership
+    /// watch must never be entered from there.
+    fn revalidate_local_with(
+        &self,
+        decision: ClockDecisionTicket,
+        also: impl FnOnce(&ClockInner) -> Result<(), ClockRefusal>,
+    ) -> Result<(), ClockRefusal> {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = Instant::now();
+        let current = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
+        if current.clock_generation != decision.clock_generation {
+            return Err(ClockRefusal::LocalDiscontinuity);
+        }
         also(&inner)
     }
 
@@ -2973,6 +3261,16 @@ impl ClusterClockGuard {
                 let decision = decision.label();
                 let cause = cause.label();
                 out.push_str(&format!("plurx_cluster_clock_advisory_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} {count}\n"));
+            }
+        }
+        out.push_str("# HELP plurx_cluster_clock_continuous_refusals_total Continuous create deadlines refused, by seam: grant (strict cluster policy when a grant is derived or accepted) or entry (local evidence at source/native entry).\n# TYPE plurx_cluster_clock_continuous_refusals_total counter\n");
+        for seam in ContinuousSeam::ALL {
+            for cause in ClockRefusal::ALL {
+                let count =
+                    self.continuous_refusals[seam.index()][cause.index()].load(Ordering::Relaxed);
+                let seam = seam.label();
+                let cause = cause.label();
+                out.push_str(&format!("plurx_cluster_clock_continuous_refusals_total{{seam=\"{seam}\",cause=\"{cause}\"}} {count}\n"));
             }
         }
         out.push_str(&format!("# HELP plurx_cluster_clock_enforced Whether the cluster clock guard refuses decisions (1) or is advisory only (0).\n# TYPE plurx_cluster_clock_enforced gauge\nplurx_cluster_clock_enforced {}\n", u8::from(self.is_enforced())));

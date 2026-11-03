@@ -242,21 +242,23 @@ impl CopySink {
             .validate_copy_sources(&self.preparation, 0)
             .await
             .map_err(io::Error::other)?;
+        let deadline = std::time::Instant::now() + self.operation_timeout;
         let publication = self
             .runtime
-            .queue_scratch_publication_wait(&self.preparation, 0, self.member, output, &mut bytes)
+            .queue_scratch_publication_wait(
+                &self.preparation,
+                0,
+                self.member,
+                output,
+                &mut bytes,
+                deadline,
+            )
             .await
             .map_err(io::Error::other)?;
         // A rejected queue still leaves the original bytes here; after a
         // known queue the original runtime cell owns them across cancellation.
         self.runtime
-            .publish_scratch_output(
-                &self.preparation,
-                0,
-                self.member,
-                publication,
-                std::time::Instant::now() + self.operation_timeout,
-            )
+            .publish_scratch_output(&self.preparation, 0, self.member, publication, deadline)
             .await
             .map_err(io::Error::other)?;
         self.runtime

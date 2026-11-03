@@ -1268,7 +1268,35 @@ async fn refused_adopt_past_original_deadline_fences_same_finite_owner_without_o
     Box::pin(foreign_finite_fence_cleanup(true, true)).await;
 }
 
+#[tokio::test]
+async fn adopted_finite_owner_publishes_its_route_before_reporting_adopted() {
+    Box::pin(finite_attempt_case(FiniteAttemptCase::Adopted)).await;
+}
+
 async fn foreign_finite_fence_cleanup(refused_adopt: bool, expire_after_refusal: bool) {
+    finite_attempt_case(FiniteAttemptCase::Fenced {
+        refused_adopt,
+        expire_after_refusal,
+    })
+    .await;
+}
+
+enum FiniteAttemptCase {
+    Fenced {
+        refused_adopt: bool,
+        expire_after_refusal: bool,
+    },
+    Adopted,
+}
+
+async fn finite_attempt_case(case: FiniteAttemptCase) {
+    let (refused_adopt, expire_after_refusal) = match case {
+        FiniteAttemptCase::Fenced {
+            refused_adopt,
+            expire_after_refusal,
+        } => (refused_adopt, expire_after_refusal),
+        FiniteAttemptCase::Adopted => (false, false),
+    };
     use plurx_core::store::adaptive_resource_attempts::{
         AttemptClaim, AttemptKey, MutationContext, RequestBinding, RequestKey,
     };
@@ -1422,6 +1450,77 @@ async fn foreign_finite_fence_cleanup(refused_adopt: bool, expire_after_refusal:
     serving.validation_set_ready(false).await;
     serving.validation_set_ready(true).await;
     assert_eq!(serving.authority().admit(), Some(claim.serving_generation));
+    if matches!(case, FiniteAttemptCase::Adopted) {
+        // Adopt attaches through the envelope's own request, so the pending
+        // owner is resolved and built from that request the production way.
+        let serve = Arc::clone(&fixture.serve);
+        let request = envelope.request.clone();
+        let file = recipe.file.clone();
+        let encoding = Arc::clone(
+            recipe
+                .encoding
+                .as_ref()
+                .expect("actual frozen software encoding"),
+        );
+        manager
+            .adopted_publication_regression(
+                claim,
+                selected_recipe_json,
+                key_capacity,
+                fixture.settings.clone(),
+                serving.authority(),
+                move |application_bytes| async move {
+                    let mut recipe_request = VodRecipeRequest {
+                        request: &request,
+                        root_admission: None,
+                        soundtrack: None,
+                        companion: None,
+                        encoding: Some(encoding),
+                        retained_capture: RetainedOutputCapture::New,
+                        measured_candidate: None,
+                    };
+                    let prepared = serve
+                        .resolve_adaptive_recipe(&mut recipe_request, &file, &settings)
+                        .await
+                        .expect("same actual selected recipe");
+                    let pending = serve
+                        .build_adaptive_recipe(prepared, &settings, application_bytes, None)
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("actual original finite pending: {}", error.message)
+                        });
+                    let alias = pending
+                        .rendition()
+                        .dir
+                        .finite_output()
+                        .expect("actual same output alias");
+                    (pending, alias)
+                },
+            )
+            .await;
+        return;
+    }
+    let make_pending = move |application_bytes| async move {
+        let pending = shared
+            .prepare_adaptive_attempt(
+                key,
+                identity,
+                None,
+                recipe,
+                duration_ms,
+                &settings,
+                application_bytes,
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("actual original finite pending: {}", error.message));
+        let alias = pending
+            .rendition()
+            .dir
+            .finite_output()
+            .expect("actual same output alias");
+        (pending, alias)
+    };
     manager
         .foreign_fence_cleanup_regression(
             claim,
@@ -1430,29 +1529,7 @@ async fn foreign_finite_fence_cleanup(refused_adopt: bool, expire_after_refusal:
             fixture.settings.clone(),
             refused_adopt.then(|| serving.authority()),
             expire_after_refusal,
-            move |application_bytes| async move {
-                let pending = shared
-                    .prepare_adaptive_attempt(
-                        key,
-                        identity,
-                        None,
-                        recipe,
-                        duration_ms,
-                        &settings,
-                        application_bytes,
-                        None,
-                    )
-                    .await
-                    .unwrap_or_else(|error| {
-                        panic!("actual original finite pending: {}", error.message)
-                    });
-                let alias = pending
-                    .rendition()
-                    .dir
-                    .finite_output()
-                    .expect("actual same output alias");
-                (pending, alias)
-            },
+            make_pending,
         )
         .await;
 }

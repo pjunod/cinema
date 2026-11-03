@@ -540,3 +540,140 @@ async fn cancelled_waiter_and_late_commit_remain_blocked_until_exact_status() {
     })
     .await;
 }
+
+async fn adaptive_route(store: &dyn Store, adoption: &AdaptiveAdoption) -> MediaSessionRoute {
+    store
+        .media_session_route_by_incarnation(&adoption.activation.incarnation_id)
+        .await
+        .expect("route read")
+        .expect("route retained")
+}
+
+async fn committed_adoption(store: &dyn Store) -> (AttemptFixture, AdaptiveAdoption) {
+    let fixture = AttemptFixture::new(store).await;
+    let adoption = ready_adoption(store, &fixture).await;
+    assert!(matches!(
+        store.adopt_adaptive_winner(&adoption).await.expect("adopt"),
+        AttemptAdoption::Applied(_)
+    ));
+    (fixture, adoption)
+}
+
+/// The worker's publication clears only the route its exact Adopt still
+/// holds. Every refusal leaves the row BLOCKED for its original owner.
+#[tokio::test]
+async fn adaptive_publication_refuses_without_the_exact_committed_adoption() {
+    for_each_adaptive_strandable_backend(|store, backend, raw| async move {
+        let store = store.as_ref();
+        // Before Adopt the provisional route is not the worker's to publish.
+        let fixture = AttemptFixture::new(store).await;
+        let adoption = ready_adoption(store, &fixture).await;
+        assert!(
+            store
+                .publish_adaptive_adoption(&adoption, 10_005)
+                .await
+                .is_err(),
+            "{backend}: publication before Adopt"
+        );
+        let route = adaptive_route(store, &adoption).await;
+        assert_eq!(route.state, "starting", "{backend}");
+        assert_eq!(
+            route.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED
+        );
+
+        // After the activation lease (30 000) expired.
+        assert!(matches!(
+            store.adopt_adaptive_winner(&adoption).await.expect("adopt"),
+            AttemptAdoption::Applied(_)
+        ));
+        assert!(
+            store
+                .publish_adaptive_adoption(&adoption, 30_001)
+                .await
+                .is_err(),
+            "{backend}: publication after the lease"
+        );
+        let route = adaptive_route(store, &adoption).await;
+        assert_eq!(route.state, "active", "{backend}");
+        assert_eq!(
+            route.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED
+        );
+
+        // A different Adopt DTO is a definite refusal, not a second owner.
+        let (_, adoption) = committed_adoption(store).await;
+        let mut changed = adoption.clone();
+        changed.activation.response_json = "{\"changed\":true}".into();
+        assert!(
+            !matches!(
+                store.publish_adaptive_adoption(&changed, 10_005).await,
+                Ok(Some(_))
+            ),
+            "{backend}: changed response"
+        );
+        let mut epoch = adoption.clone();
+        epoch.key.owner_epoch = 2;
+        assert!(
+            !matches!(
+                store.publish_adaptive_adoption(&epoch, 10_005).await,
+                Ok(Some(_))
+            ),
+            "{backend}: wrong owner epoch"
+        );
+        assert_eq!(
+            adaptive_route(store, &adoption)
+                .await
+                .publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED
+        );
+
+        // The pointer moved off the route (an ordinary writer may point it
+        // at a non-attempt incarnation; the route itself stays active).
+        let (_, adoption) = committed_adoption(store).await;
+        let moved = format!(
+            "UPDATE media_playback_pointers SET current_incarnation_id='{}' WHERE playback_id='{}'",
+            Uuid::new_v4(),
+            adoption.binding.playback_id
+        );
+        assert!(
+            !raw_refused(raw.as_ref(), &moved).await,
+            "{backend}: ordinary pointer move"
+        );
+        assert!(
+            store
+                .publish_adaptive_adoption(&adoption, 10_006)
+                .await
+                .is_err(),
+            "{backend}: publication after the pointer moved"
+        );
+        let route = adaptive_route(store, &adoption).await;
+        assert_eq!(route.state, "active", "{backend}");
+        assert_eq!(
+            route.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED
+        );
+
+        // The route ended.
+        let (_, adoption) = committed_adoption(store).await;
+        store
+            .end_media_session(&adoption.activation.session_id, "admin_stop", 10_005)
+            .await
+            .expect("end")
+            .expect("ended route");
+        assert!(
+            store
+                .publish_adaptive_adoption(&adoption, 10_006)
+                .await
+                .is_err(),
+            "{backend}: publication after end"
+        );
+        let route = adaptive_route(store, &adoption).await;
+        assert_eq!(route.state, "ended", "{backend}");
+        assert_eq!(
+            route.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED
+        );
+    })
+    .await;
+}
