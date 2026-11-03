@@ -64,7 +64,8 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
         .expect("persisted media lookup")
         .expect("persisted media row");
     assert_eq!(file.path, source_path);
-    let (serve, rendition) = finite_restart_attach(&config, &selected, &runtime, &file).await;
+    let (serve, rendition, playback_cache) =
+        finite_restart_attach(&config, &selected, &runtime, &file).await;
     assert_eq!(rendition.key, expected_key, "same finite recipe key");
     assert!(rendition.dir.is_finite(), "ordinary route imports finite S");
     assert!(
@@ -128,6 +129,7 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
     assert_eq!(final_snapshot.used, Default::default());
     drop(output);
     drop(serve);
+    drop(playback_cache);
     let runtime =
         Arc::try_unwrap(runtime).unwrap_or_else(|_| panic!("recovered runtime still owned"));
     runtime.drain().expect("drain recovered custody worker");
@@ -191,7 +193,8 @@ async fn finite_restart_child(root: &std::path::Path) {
         .expect("source lookup")
         .expect("source row");
     std::fs::write(root.join("media-id"), id.to_string()).expect("fixture source row identity");
-    let (serve, rendition) = finite_restart_attach(&config, &selected, &runtime, &file).await;
+    let (serve, rendition, playback_cache) =
+        finite_restart_attach(&config, &selected, &runtime, &file).await;
     assert!(
         rendition.dir.is_finite(),
         "ordinary route selects finite custody"
@@ -250,6 +253,7 @@ async fn finite_restart_child(root: &std::path::Path) {
     drop(output);
     drop(rendition);
     drop(serve);
+    drop(playback_cache);
     drop(store);
     let runtime = Arc::try_unwrap(runtime).unwrap_or_else(|_| panic!("first runtime still owned"));
     runtime.drain().expect("drain first custody worker");
@@ -302,7 +306,11 @@ async fn finite_restart_attach(
     selected: &plurx_core::cluster::migration::SelectedStore,
     runtime: &Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
     file: &plurx_core::domain::MediaFile,
-) -> (Arc<VodServe>, Arc<Rendition>) {
+) -> (
+    Arc<VodServe>,
+    Arc<Rendition>,
+    Arc<crate::playback_cache::PlaybackCacheBudget>,
+) {
     let dirs = crate::create_dirs_for_config_with_runtime(config, Some(runtime.as_ref()))
         .expect("production recovery-aware managed directories");
     let store = Arc::clone(&selected.store);
@@ -315,6 +323,11 @@ async fn finite_restart_attach(
         None,
         Some(Arc::clone(runtime)),
     );
+    let playback_cache = crate::playback_cache::PlaybackCacheBudget::new(
+        Arc::clone(&store),
+        vec![dirs.renditions.clone()],
+    );
+    serve.register_playback_cache(&playback_cache);
     let manager = crate::transcode::TranscodeManager::new(
         Arc::clone(&store),
         dirs.transcode.clone(),
@@ -362,5 +375,5 @@ async fn finite_restart_attach(
         .await
         .expect("ordinary selected VOD creation");
     let rendition = rendition_of(&serve, "finite-software-restart").await;
-    (serve, rendition)
+    (serve, rendition, playback_cache)
 }

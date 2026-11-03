@@ -96,10 +96,14 @@ impl NodeResourceRuntime {
         if std::time::Instant::now() >= deadline {
             return Err(OperationError::Deadline);
         }
-        let slot = {
+        let slot = loop {
             let bundle = owner.state.lock().await;
             self.eligible(&bundle)?;
             let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+            if let Some(progress) = bootstrap::finite_handoff_progress(role, requested_member) {
+                bootstrap::wait_for_handoff(bundle, progress, deadline).await?;
+                continue;
+            }
             let member = if role.bootstrap.contains_key(&requested_member) {
                 requested_member
             } else {
@@ -116,10 +120,11 @@ impl NodeResourceRuntime {
             {
                 return Err(OperationError::State);
             }
-            role.response_budget
+            break role
+                .response_budget
                 .as_ref()
                 .ok_or(OperationError::State)?
-                .reserve(capacity)?
+                .reserve(capacity)?;
         };
         if std::time::Instant::now() >= deadline {
             return Err(OperationError::Deadline);

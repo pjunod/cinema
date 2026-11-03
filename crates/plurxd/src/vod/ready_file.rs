@@ -179,7 +179,7 @@ impl ReadyFile {
             Self::Finite { output, file, len } => {
                 let buffer = timeout(deadline, output.allocate_response_buffer(size, deadline))
                     .await?
-                    .map_err(|error| finite_body_stage_error("response allocation", error))?;
+                    .map_err(finite_error)?;
                 if *len == 0 {
                     return Ok(ReadyBytes::Finite(buffer));
                 }
@@ -194,16 +194,9 @@ impl ReadyFile {
                     ),
                 )
                 .await?
-                .map_err(|error| finite_body_stage_error("reader preparation", error))?;
+                .map_err(finite_error)?;
                 let result = read_finite_all(&mut reader, buffer, size, deadline).await;
-                #[cfg(test)]
-                if let Err(error) = &result {
-                    eprintln!("finite body read phase: {error:?}");
-                }
-                let closed = reader
-                    .close(deadline)
-                    .await
-                    .map_err(|error| finite_body_stage_error("reader close", error));
+                let closed = reader.close(deadline).await.map_err(finite_error);
                 match (result, closed) {
                     (Err(error), _) => Err(error),
                     (Ok(_), Err(error)) => Err(error),
@@ -337,11 +330,7 @@ async fn next_range_chunk(
             mut remaining,
             deadline,
         } => {
-            let Some(chunk) = reader
-                .next_chunk(deadline)
-                .await
-                .map_err(|error| finite_body_stage_error("reader chunk", error))?
-            else {
+            let Some(chunk) = reader.next_chunk(deadline).await.map_err(finite_error)? else {
                 if remaining != 0 {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -378,11 +367,7 @@ async fn read_finite_all(
     deadline: Instant,
 ) -> io::Result<FiniteResponseBuffer> {
     while result.len() < size {
-        let Some(chunk) = reader
-            .next_chunk(deadline)
-            .await
-            .map_err(|error| finite_body_stage_error("buffered reader chunk", error))?
-        else {
+        let Some(chunk) = reader.next_chunk(deadline).await.map_err(finite_error)? else {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "short finite file",
@@ -412,13 +397,4 @@ async fn timeout<T>(
 #[cfg(unix)]
 fn finite_error(error: FiniteVodError) -> io::Error {
     error.into_io_error()
-}
-
-#[cfg(unix)]
-fn finite_body_stage_error(stage: &'static str, error: FiniteVodError) -> io::Error {
-    #[cfg(test)]
-    eprintln!("finite body {stage}: {error:?}");
-    #[cfg(not(test))]
-    let _ = stage;
-    finite_error(error)
 }

@@ -18,6 +18,7 @@ struct ReaderControl {
     closing: AtomicBool,
     terminal: AtomicBool,
     ready: Arc<tokio::sync::Notify>,
+    asset_ready: Arc<tokio::sync::Notify>,
 }
 
 /// Drop requests closure; it never reports a closed File or returns credit.
@@ -36,6 +37,7 @@ impl Drop for FiniteReader {
     fn drop(&mut self) {
         self.control.closing.store(true, Ordering::Release);
         self.control.ready.notify_one();
+        self.control.asset_ready.notify_waiters();
     }
 }
 impl FiniteReader {
@@ -199,8 +201,11 @@ pub(in crate::adaptive_resources::runtime::operations) fn notify_progress(
 /// would observe it until a later `prepare_reader` drain.
 fn dropped_slot_holder(role: &OwnedRole, member: Uuid) -> Option<Uuid> {
     let transition = role.transition.as_ref().map(|t| t.operation.id);
-    role.bootstrap
-        .get(&member)?
+    let bootstrap = role.bootstrap.get(&member)?;
+    let idle = role.transition.is_none()
+        && bootstrap.change.is_none()
+        && bootstrap.fold.as_ref()?.state().asset.totals.pending_jobs == 0;
+    bootstrap
         .readers
         .iter()
         .find(|(_, entry)| {
@@ -209,7 +214,7 @@ fn dropped_slot_holder(role: &OwnedRole, member: Uuid) -> Option<Uuid> {
                 && entry
                     .current
                     .as_ref()
-                    .is_some_and(|io| io.armed || transition == Some(io.io.uuid()))
+                    .is_some_and(|io| idle || io.armed || transition == Some(io.io.uuid()))
         })
         .map(|(lease, _)| *lease)
 }
@@ -233,6 +238,45 @@ pub(super) fn transfer_readers_match(
                     !cell.has_pending_native() && expected.contains(&lease)
                 })
         })
+}
+
+/// Unacknowledged reader metadata cannot be cloned into a frozen snapshot.
+/// Wait for that same reader to advance, or drive its requested drop in place.
+pub(in crate::adaptive_resources::runtime::operations) fn transfer_pending(
+    bootstrap: &BootstrapMember,
+) -> bool {
+    bootstrap.readers.values().any(|entry| {
+        !entry.terminal
+            && (entry.current.is_some()
+                || entry
+                    .cell
+                    .as_ref()
+                    .is_some_and(|cell| cell.has_pending_native()))
+    })
+}
+
+/// Only drive_reader may acknowledge its Arm/Observe and advance the matching
+/// in-memory IO state. Generic freeze reconciliation must leave that pair
+/// together, including after the response's journal wait was cancelled.
+pub(super) fn reader_transition_progress(
+    role: &OwnedRole,
+    member: Uuid,
+) -> Option<Arc<tokio::sync::Notify>> {
+    let transition = role.transition.as_ref()?;
+    if transition.effect != Effect::Bootstrap(member) {
+        return None;
+    }
+    let bootstrap = role.bootstrap.get(&member)?;
+    bootstrap
+        .readers
+        .values()
+        .any(|entry| {
+            entry.current.as_ref().is_some_and(|io| {
+                transition.operation.id == io.io.uuid()
+                    || transition.operation.id == io.observe.uuid()
+            })
+        })
+        .then(|| Arc::clone(&bootstrap.io_progress))
 }
 
 impl NodeResourceRuntime {
@@ -280,6 +324,14 @@ impl NodeResourceRuntime {
         let mut bundle = loop {
             let bundle = owner.state.lock().await;
             self.eligible(&bundle)?;
+            if let Some(progress) = bundle
+                .roles
+                .get(index)
+                .and_then(|role| finite_handoff_progress(role, requested_member))
+            {
+                native::publication::wait_for_io_slot(bundle, progress, deadline).await?;
+                continue;
+            }
             // Selection arms nothing, but its locked check reads settled
             // totals. While another client's read, a publication or a sync
             // holds this asset's single journaled I/O slot, wait for that
@@ -383,6 +435,7 @@ impl NodeResourceRuntime {
             closing: AtomicBool::new(false),
             terminal: AtomicBool::new(false),
             ready: Arc::new(tokio::sync::Notify::new()),
+            asset_ready: Arc::clone(&bootstrap.io_progress),
         });
         bootstrap.readers.insert(
             io.uuid(),
@@ -500,7 +553,7 @@ impl NodeResourceRuntime {
     /// operation is pending, so the slot stays one-pending. Its acknowledge
     /// signals `io_progress` for every other waiter. A live holder is waited
     /// for as before.
-    pub(in crate::adaptive_resources::runtime::operations::bootstrap) async fn wait_for_io_slot(
+    pub(in crate::adaptive_resources::runtime::operations) async fn wait_for_io_slot(
         &self,
         mut bundle: tokio::sync::MutexGuard<'_, Bundle>,
         index: usize,
@@ -508,12 +561,21 @@ impl NodeResourceRuntime {
         progress: Arc<tokio::sync::Notify>,
         deadline: Instant,
     ) -> Result<(), OperationError> {
+        // Drop does not take the bundle lock. Register before checking its
+        // closing flag so that a departing unarmed reader cannot lose the
+        // only wakeup of a retirement waiting for transferable metadata.
+        let notified = progress.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         let holder = bundle
             .roles
             .get(index)
             .and_then(|role| dropped_slot_holder(role, member));
         let Some(lease) = holder else {
-            return native::publication::wait_for_io_slot(bundle, progress, deadline).await;
+            drop(bundle);
+            return tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), notified)
+                .await
+                .map_err(|_| OperationError::Deadline);
         };
         let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
@@ -543,7 +605,10 @@ impl NodeResourceRuntime {
                 Err(error) => return Err(error),
             }
         }
-        native::publication::wait_for_io_slot(bundle, progress, deadline).await
+        drop(bundle);
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), notified)
+            .await
+            .map_err(|_| OperationError::Deadline)
     }
 
     async fn drive_reader(
