@@ -1587,20 +1587,51 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         ledger.latest_intent_revision = 2;
         assert!(store.write_quality_ledger(&ledger, "node-a", 1, now_ms()).await.expect("accepted prepare"));
         serve.settle_controlled_video(&first, &owner, &ledger).await.expect("prepare settlement");
-        assert!(serve.control(control(1, crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple)))
-            .await.expect("parent exists").is_err(), "a stale sequence cannot undo selection");
-        assert_eq!(companion.readers.lock().await["first-companion"].admission_priority, crate::admission::Priority::Live);
+        let replay = serve.control(control(1, crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple)))
+            .await.expect("parent exists").expect("same sequence replays");
+        assert_eq!(replay.disposition, crate::playback_control::ControlDisposition::Replay);
+        assert_eq!(replay.accepted_sequence, 1);
+        {
+            let readers = companion.readers.lock().await;
+            assert!(readers["first-companion"].control_required);
+            assert!(readers["first-companion"].quality_required);
+            assert_eq!(readers["first-companion"].admission_priority, crate::admission::Priority::Live,
+                "replay cannot undo the accepted selection");
+            assert!(!readers["other-companion"].control_required);
+            assert!(!readers["other-companion"].quality_required);
+            assert_eq!(readers["other-companion"].admission_priority, crate::admission::Priority::Speculative,
+                "replay cannot borrow another viewer's selection");
+        }
         let incumbent = crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple);
+        // A new accepted sequence must also honor the control fence's 250 ms
+        // rate limit; the replay above does not advance that interval.
+        tokio::time::sleep(Duration::from_millis(260)).await;
         let restored = serve.control(control(2, incumbent)).await.expect("parent exists").expect("accepted incumbent");
         assert_eq!(restored.accepted_sequence, 2);
-        assert_eq!(companion.readers.lock().await["first-companion"].admission_priority,
-            crate::admission::Priority::Live, "incumbent control cannot revoke accepted Preparing");
+        {
+            let readers = companion.readers.lock().await;
+            assert!(!readers["first-companion"].control_required);
+            assert!(readers["first-companion"].quality_required);
+            assert_eq!(readers["first-companion"].admission_priority,
+                crate::admission::Priority::Live, "incumbent control cannot revoke accepted Preparing");
+            assert!(!readers["other-companion"].control_required);
+            assert!(!readers["other-companion"].quality_required);
+            assert_eq!(readers["other-companion"].admission_priority, crate::admission::Priority::Speculative);
+        }
         ledger.transactions[1].intent_superseded = true;
         ledger.transactions[1].cancel_requested = true;
         assert!(store.write_quality_ledger(&ledger, "node-a", 2, now_ms()).await.expect("accepted cancellation"));
         serve.settle_controlled_video(&first, &owner, &ledger).await.expect("cancellation settlement");
-        assert_eq!(companion.readers.lock().await["first-companion"].admission_priority,
-            crate::admission::Priority::Speculative, "supersession returns optional source service");
+        {
+            let readers = companion.readers.lock().await;
+            assert!(!readers["first-companion"].control_required);
+            assert!(!readers["first-companion"].quality_required);
+            assert_eq!(readers["first-companion"].admission_priority,
+                crate::admission::Priority::Speculative, "supersession returns optional source service");
+            assert!(!readers["other-companion"].control_required);
+            assert!(!readers["other-companion"].quality_required);
+            assert_eq!(readers["other-companion"].admission_priority, crate::admission::Priority::Speculative);
+        }
     }
 
     #[tokio::test]

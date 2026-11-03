@@ -56,6 +56,14 @@ queries are corrected; a decoder fixture now exercises its intended enforced
 policy. Retries use the repository's documented 8 MiB test-stack convention.
 Only failed, incomplete and newly added cases will execute again.
 
+Further targeted qualification retained 68 Rust passes. Parser diagnostics
+identified a 5,915,304-byte collection future and an 11,830,744-byte spawn frame
+in the test build. The collection and platform futures are now heap-pinned
+before nested owner scopes; ownership and cancellation stay with the existing
+collector. A VOD fixture now asserts the protocol's idempotent Replay behavior,
+and the browser options type matches its existing optional defaults. Failed,
+incomplete and new cases remain the only pending Rust executions.
+
 ## 1. Work lanes
 
 | Order | Lane | State | Owner |

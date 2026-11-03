@@ -4517,9 +4517,13 @@ impl DecodeFactCache {
         // or restore the shared source offset before kill/reap completes.
         let collection = tokio::spawn(async move {
             let phase_started = std::time::Instant::now();
+            // Keep the parser state behind one pointer before composing the
+            // request, pause-session, and budget scopes. Embedding that state
+            // in each scope can make the spawned future several MiB, so even
+            // Tokio's automatic boxing first overflows its spawn stack frame.
             let collecting = crate::source_custody::with_request(
                 source.source_foreground.clone(),
-                collect(
+                Box::pin(collect(
                     &owned_probe,
                     DecodeFactCollectionSource {
                         handle: Arc::clone(&source.handle),
@@ -4533,7 +4537,7 @@ impl DecodeFactCache {
                     selected_stream,
                     remaining,
                     owned_cancelled.as_ref(),
-                ),
+                )),
             );
             #[cfg(target_os = "linux")]
             let controlled = async {
@@ -5381,9 +5385,18 @@ async fn collect(
     #[cfg(target_os = "linux")]
     {
         let permission = source_reads::ReadPermission::for_source(&source.handle).await?;
+        // The platform collector owns pipe buffers and process supervision.
+        // Keep that state out of the enclosing task-local permission future.
         source_reads::scope(
             permission,
-            collect_platform(probe, source, catalog, selected_stream, budget, cancelled),
+            Box::pin(collect_platform(
+                probe,
+                source,
+                catalog,
+                selected_stream,
+                budget,
+                cancelled,
+            )),
         )
         .await
     }

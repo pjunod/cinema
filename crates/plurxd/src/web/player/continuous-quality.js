@@ -168,7 +168,7 @@ async function continuousQualityBootstrapFamily(url,signal,exchange=continuousQu
 // Discovery belongs to the existing directed-change deadline and signal.
 // Only the immutable bootstrap companion may still be absent from revision 1.
 async function continuousQualityDiscoverCandidate(candidateId,bootstrap,lookup,refresh,
-  {signal,deadlineMs,live=()=>true,now=()=>performance.now(),wait=(ms,signal)=>playbackRetryDelay(ms,signal)}){
+  {signal=null,deadlineMs=NaN,live=()=>true,now=()=>performance.now(),wait=(ms,signal)=>playbackRetryDelay(ms,signal)}){
   let row=lookup();
   if(row||candidateId!==bootstrap.companion_candidate_id)return row;
   for(;;){
