@@ -365,6 +365,8 @@ function clusterClockCard(settings,readiness){
     ${devReq(readiness,"cluster_clock","upper_bound","Worst observed offset within 2 s","Absolute offset plus uncertainty over voters; an unknown member has no numeric offset.")}
     ${devReq(readiness,"cluster_clock","ntp","NTP running on every node","Check chronyd or systemd-timesyncd on each node; this server cannot see them.")}
     ${devReq(readiness,"cluster_clock","consequence","What enforcement refuses","While enforced, one down voter blocks takeover, the expiry scan and membership changes on every node until it returns or is removed. A down or out-of-bound learner blocks only the takeover of its own sessions and its own promotion, until it returns, is back within the bound, or is removed.")}
+    ${devReq(readiness,"adaptive_remote_placement","remote_grant_policy","Cluster clock admits a cross-node grant","Independently of the switch above, an adaptive create is prepared on a peer only while this evidence admits its grant; otherwise the peer is passed over before any work is charged to it.")}
+    ${devReq(readiness,"adaptive_remote_placement","remote_placements","Where peer encode time went","Adaptive creates this node placed on a peer, peers it passed over on clock evidence, and registered peer attempts it fenced when their grant was refused.")}
     <p class="hint">Requirements are advisory and never prevent saving, in either direction.</p>
     <div class="err" id="cluster-clock-error" role="alert"></div>${setCardFoot("saveClusterClockGuard")}`,{id:"cluster-clock-settings"});
 }

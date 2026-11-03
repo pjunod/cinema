@@ -8640,6 +8640,9 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // member to observe, so coverage and the consequence row are
             // `met` and the offset and NTP rows `unobservable`.
             "cluster_clock",
+            // Facts only, no switch: whether a cross-node adaptive grant is
+            // currently provable, and where peer encode time went.
+            "adaptive_remote_placement",
             "durable_cluster_work",
             "bounded_catalogue_reads",
             "cluster_backup",
@@ -8860,6 +8863,10 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // Network priors' two rows say what the switch does.
             "priors_cold_start",
             "priors_history",
+            // Cross-node adaptive placement: a standalone clock admits a
+            // grant, and the placement counts are read from this process.
+            "remote_grant_policy",
+            "remote_placements",
             "retention_budget",
             "retention_cleanup_pending",
             "retention_live_bytes",
