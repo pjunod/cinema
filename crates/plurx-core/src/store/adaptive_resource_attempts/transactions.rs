@@ -11,7 +11,7 @@ use super::{
 };
 
 mod adoption;
-pub(crate) use adoption::{adopt, commit_adoption, AdoptionPlan};
+pub(crate) use adoption::{adopt, commit_adoption, publish, AdoptionPlan};
 
 macro_rules! impl_attempt_store {
     ($store:ty) => {
@@ -60,6 +60,17 @@ macro_rules! impl_attempt_store {
                 crate::error::StoreError,
             > {
                 crate::store::adaptive_resource_attempts::transactions::adopt(self, input).await
+            }
+            async fn publish_adaptive_adoption(
+                &self,
+                input: &crate::store::adaptive_resource_attempts::AdaptiveAdoption,
+                now_ms: i64,
+            ) -> Result<
+                Option<crate::domain::MediaSessionActivationOutcome>,
+                crate::error::StoreError,
+            > {
+                crate::store::adaptive_resource_attempts::transactions::publish(self, input, now_ms)
+                    .await
             }
             async fn fence_adaptive_attempt(
                 &self,
