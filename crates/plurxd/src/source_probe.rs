@@ -12,7 +12,7 @@ pub(crate) use dv_title::{publish_title_for_control, publish_title_with_tools_fo
 use crate::state::AppState;
 use plurx_core::store::background_jobs_probe::{ProbeOutput, MAX_PROBE_RESULT_BYTES};
 use plurx_core::{
-    error::StoreError,
+    error::{ProbeError, StoreError},
     scan::probe,
     store::background_jobs::{
         CandidateCursor, CandidateQuery, ClaimJob, JobKind, JobPayload, JobSettlement,
@@ -234,7 +234,9 @@ async fn pass(
             token,
             deadline,
             JobKind::MediaProbe,
-        ) {
+        )
+        .await
+        {
             Ok(active) => active,
             Err(error) => {
                 tracing::warn!(%error, "probe heartbeat failed");
@@ -292,13 +294,79 @@ async fn execute(
             .jobs
             .start_probe_progress(token, file.id, file.size.max(0) as u64)
     });
-    let result = run_admitted_probe(
+    let source_version = crate::fragment_index_cluster::inspect_source(&file)
+        .await
+        .ok();
+    let probe_digest = match &payload {
+        JobPayload::MediaProbe { probe_digest, .. } => probe_digest,
+        _ => unreachable!(),
+    };
+    let result = run_source_admitted_probe(
         &state.transcode,
         &admission,
         &cancel,
         shutdown,
         progress.as_ref(),
-        probe::probe_single_threaded(&file.path),
+        &fence,
+        || async {
+            source_version.is_some()
+                && crate::fragment_index_cluster::inspect_source(&file)
+                    .await
+                    .ok()
+                    == source_version
+                && probe::pipeline_digest().await.as_ref() == Some(probe_digest)
+        },
+        async {
+            let input =
+                crate::source_input::SourceInput::open_background(&file, fence.source_budget())
+                    .await
+                    .map_err(|reason| ProbeError::Transient {
+                        path: file.path.display().to_string(),
+                        reason,
+                    })?;
+            let result = probe::probe_single_threaded(std::path::Path::new(input.url())).await;
+            input
+                .close_and_wait()
+                .await
+                .map_err(|error| ProbeError::Transient {
+                    path: file.path.display().to_string(),
+                    reason: format!("joining probe source input: {error}"),
+                })?;
+            let mut result = result?;
+            if source_version.is_none()
+                || crate::fragment_index_cluster::inspect_source(&file)
+                    .await
+                    .ok()
+                    != source_version
+            {
+                return Err(ProbeError::Transient {
+                    path: file.path.display().to_string(),
+                    reason: "source changed during admitted probe".into(),
+                });
+            }
+            // The private capability URL deliberately has no media extension.
+            // Preserve the catalog container classification from the real path.
+            if let Some(raw) = result.raw_json.as_deref() {
+                if let Ok(mut document) = serde_json::from_str::<serde_json::Value>(raw) {
+                    if let Some(format) = document
+                        .get_mut("format")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        format.insert(
+                            "filename".into(),
+                            serde_json::Value::String(file.path.to_string_lossy().into_owned()),
+                        );
+                    }
+                    result.raw_json = serde_json::to_string(&document).ok();
+                }
+            }
+            result.container = file
+                .path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(str::to_lowercase);
+            Ok(result)
+        },
     )
     .await;
     // Bounded process cancellation kills and reaps before returning above.
@@ -393,6 +461,139 @@ where
             () = tokio::time::sleep(Duration::from_millis(250)) => {
                 if shutdown.is_cancelled() || !transcode.fragment_worker_idle(admission) { cancel.cancel(); }
                 if let Some(progress) = progress { progress.stage("probing"); }
+            }
+        }
+    }
+}
+
+/// Source pressure suspends the exact owned scan; CPU/GPU preemption keeps
+/// the ordinary cancel-and-reap policy. The ledger, never the notification,
+/// authorizes slot release/reacquisition under the existing job fence.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owned scan retains both physical and durable controls plus source/tool identity validation"
+)]
+pub(crate) async fn run_source_admitted_probe<F, T, E, V, VF>(
+    transcode: &crate::transcode::TranscodeManager,
+    admission: &crate::transcode::FragmentAdmission,
+    cancel: &CancellationToken,
+    shutdown: &CancellationToken,
+    progress: Option<&crate::state::AnalysisProgressGuard>,
+    fence: &crate::background_jobs::JobFence,
+    validate_resume: V,
+    work: F,
+) -> Result<T, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    V: Fn() -> VF,
+    VF: std::future::Future<Output = bool>,
+{
+    let source_budget = fence.source_budget();
+    let work = crate::background_jobs::budgeted(Arc::clone(&source_budget), work);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (fence, validate_resume);
+        run_admitted_probe(transcode, admission, cancel, shutdown, progress, work).await
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use plurx_core::process::bounded::{SourcePauseController, SourcePausePhase};
+        let control = SourcePauseController::new(Duration::from_secs(18 * 60 * 60));
+        // Close the claim-to-first-read race before polling the producer. An
+        // empty scope can acknowledge source quiescence without spawning.
+        if !fence.source_may_continue().await.unwrap_or(false) {
+            fence.source_budget().invalidate_grant();
+            control.request_pause();
+        }
+        let work = plurx_core::process::bounded::pausable(
+            control.clone(),
+            plurx_core::process::bounded::cancellable(cancel.clone(), work),
+        );
+        tokio::pin!(work);
+        let mut source_paused = false;
+        let mut pacing_hold = false;
+        loop {
+            if shutdown.is_cancelled()
+                || !transcode.fragment_worker_idle(admission)
+                || control.pause_budget_exhausted()
+            {
+                cancel.cancel();
+            }
+            let observation = control.observation();
+            if observation.phase == SourcePausePhase::Paused
+                && !source_paused
+                && !cancel.is_cancelled()
+            {
+                match fence.pause_source().await {
+                    Ok(true) => {
+                        source_paused = true;
+                        tracing::debug!(
+                            pause_revision = observation.revision,
+                            source_pacing_hold = pacing_hold,
+                            "owned source scan paused with its claim retained"
+                        );
+                    }
+                    _ => cancel.cancel(),
+                }
+            }
+            if source_paused && source_budget.pacing_waiters() == 0 && !cancel.is_cancelled() {
+                if !validate_resume().await {
+                    cancel.cancel();
+                } else if fence.resume_source().await.unwrap_or(false) {
+                    fence.source_budget().invalidate_grant();
+                    if !control.resume(observation.revision) {
+                        cancel.cancel();
+                    } else {
+                        source_paused = false;
+                        tracing::debug!(
+                            pause_ms = observation.paused_for.as_millis(),
+                            source_pacing_hold = pacing_hold,
+                            timing_class = if pacing_hold {
+                                "source_paced"
+                            } else {
+                                "source_pressure"
+                            },
+                            "owned source scan resumed after source-slot reacquisition"
+                        );
+                        pacing_hold = false;
+                    }
+                }
+            }
+            tokio::select! {
+                result = &mut work => {
+                    // A completed/no-child stage cannot let the next stage
+                    // access source while this same claim's slot is paused.
+                    while source_paused && !cancel.is_cancelled() {
+                        if shutdown.is_cancelled() || !transcode.fragment_worker_idle(admission)
+                            || control.pause_budget_exhausted() || !validate_resume().await { cancel.cancel(); break; }
+                        if fence.resume_source().await.unwrap_or(false) {
+                            control.resume(control.observation().revision);
+                            break;
+                        }
+                        tokio::select! {
+                            ()=cancel.cancelled()=>{},
+                            ()=crate::source_custody::source_pressure_changed().notified()=>{},
+                            ()=tokio::time::sleep(Duration::from_millis(250))=>{},
+                        }
+                    }
+                    return result;
+                },
+                ()=crate::source_custody::source_pressure_changed().notified()=>{},
+                ()=tokio::time::sleep(Duration::from_millis(250))=>{},
+            }
+            if !cancel.is_cancelled() {
+                let pressure = !fence.source_may_continue().await.unwrap_or(false);
+                let paced = source_budget.pacing_waiters() != 0;
+                if pressure || paced {
+                    pacing_hold |= paced;
+                    if pressure && control.observation().phase == SourcePausePhase::Running {
+                        source_budget.invalidate_grant();
+                    }
+                    control.request_pause();
+                }
+            }
+            if let Some(progress) = progress {
+                progress.stage("probing");
             }
         }
     }

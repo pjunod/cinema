@@ -715,7 +715,8 @@ async fn pass(
                 .ok_or_else(|| StoreError::Task("artwork claim missing token".into()))?,
             deadline,
             kind,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
         let result = {

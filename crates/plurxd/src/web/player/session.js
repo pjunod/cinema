@@ -250,8 +250,9 @@ function playbackControlSnapshot(v,p){
   // healthy incumbent at first_served_at + 30 s while it was visibly playing.
   const pendingSeek=p.controlSeek||null;
   const attachedSeek=pendingSeek&&pendingSeek.executed?pendingSeek:null;
-  const seeking=!!attachedSeek || !!v.seeking || p._seekPreview!=null;
-  const hinted=!p.started&&p.controlPositionHintSec!=null?p.controlPositionHintSec:null;
+  const pendingSource=!!p.mediaAttachment?.nativePositionPending;
+  const seeking=!!attachedSeek || (!pendingSource&&!!v.seeking) || p._seekPreview!=null;
+  const hinted=(pendingSource||!p.started)&&p.controlPositionHintSec!=null?p.controlPositionHintSec:null;
   const preview=!attachedSeek&&seeking&&p._seekPreview!=null
     ? Math.max(0,p._seekPreview-((p.bookOffset||0)/1000)) : null;
   let positionMs=Math.max(0,Math.round((hinted!=null?hinted:
@@ -263,12 +264,13 @@ function playbackControlSnapshot(v,p){
   // `ended` means the end of the bytes the browser received, not necessarily
   // the title. The legacy early-end handler reopens a truncated stream, so it
   // is active failed demand until it is actually within the completion slack.
-  const terminalEnded=!!v.ended && (!(duration>0)
+  const terminalEnded=!pendingSource&&!!v.ended && (!(duration>0)
     || positionMs>=Math.max(0,duration-ENDED_SLACK_SEC*1000));
   const wantsPlayback=p.wantsPlayback??!v.paused;
-  const demand=(terminalEnded?"end":v.ended?"active":wantsPlayback?"active":"hold");
+  const demand=(terminalEnded?"end":!pendingSource&&v.ended?"active":wantsPlayback?"active":"hold");
   let render="rendering";
-  if(v.error) render="failed";
+  if(pendingSource) render=attachedSeek?"seeking":"starting";
+  else if(v.error) render="failed";
   else if(v.ended) render=terminalEnded?"ended":"failed";
   else if(p.controlRenderOverride) render=p.controlRenderOverride;
   else if(seeking) render="seeking";
@@ -281,11 +283,11 @@ function playbackControlSnapshot(v,p){
   let dropped=null;
   try{
     const q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
-    if(q&&Number.isFinite(q.droppedVideoFrames)) dropped=Math.max(0,Math.round(q.droppedVideoFrames));
+    if(!pendingSource&&q&&Number.isFinite(q.droppedVideoFrames)) dropped=Math.max(0,Math.round(q.droppedVideoFrames));
   }catch(e){}
-  const observation={decoder_state:v.error?"failed":render==="stalled"?"starved":p.started?"ready":"unknown"};
+  const observation={decoder_state:pendingSource?"unknown":v.error?"failed":render==="stalled"?"starved":p.started?"ready":"unknown"};
   if(dropped!=null) observation.dropped_frames=dropped;
-  if(v.error){ observation.error_code="media"; observation.error_detail=`media_code_${v.error.code||0}`; }
+  if(!pendingSource&&v.error){ observation.error_code="media"; observation.error_detail=`media_code_${v.error.code||0}`; }
   // The element-level error is a generic fallback. A recovery callback may
   // know the actual HLS class, so its bounded evidence takes precedence.
   const triggerObservation=playbackControlObservationOverride(p.controlObservationOverride);

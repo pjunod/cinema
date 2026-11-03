@@ -4525,8 +4525,8 @@ fn preferred_backend(
         }
         _ => {}
     }
-    let heavy = matches!(facts.codec(), Some("hevc" | "h265" | "hevc10"))
-        && (facts.is_hdr() || facts.height().is_some_and(|height| height >= 2160));
+    let heavy =
+        super::heavy_hevc_source(facts.codec(), facts.is_hdr(), facts.width(), facts.height());
     let backend = match encoder {
         Encoder::Software => DecodeBackend::Software,
         Encoder::Nvenc => DecodeBackend::Cuda,

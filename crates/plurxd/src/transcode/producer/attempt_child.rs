@@ -480,6 +480,7 @@ pub(super) struct AttemptChild {
     /// The supervisor's pause points; see [`AttemptChildHooks`]. The supervisor
     /// task runs through a clone of this one.
     hooks: Arc<dyn AttemptChildHooks>,
+    pub(super) source_observer: Option<crate::source_custody::SourceObserver>,
 }
 
 #[derive(Clone)]
@@ -541,9 +542,11 @@ impl AttemptChild {
             control,
             diagnostics,
             Arc::new(AttemptChildPauses::default()),
+            None,
         )
     }
 
+    #[cfg(test)]
     pub(super) fn new_with_job(
         producer_attempt: u64,
         child: Child,
@@ -558,6 +561,26 @@ impl AttemptChild {
             control,
             diagnostics,
             Arc::new(NoopAttemptChildHooks),
+            None,
+        )
+    }
+
+    pub(super) fn new_with_source_job(
+        producer_attempt: u64,
+        child: Child,
+        child_job: Option<crate::process_control::ChildJob>,
+        control: crate::playback_control::RollingControlHandle,
+        diagnostics: Option<crate::decoder_health::ObservedDiagnostics>,
+        custody: Option<crate::source_input::SourceInput>,
+    ) -> Self {
+        Self::new_with_hooks(
+            producer_attempt,
+            child,
+            child_job,
+            control,
+            diagnostics,
+            Arc::new(NoopAttemptChildHooks),
+            custody,
         )
     }
 
@@ -568,6 +591,7 @@ impl AttemptChild {
         control: crate::playback_control::RollingControlHandle,
         diagnostics: Option<crate::decoder_health::ObservedDiagnostics>,
         hooks: Arc<dyn AttemptChildHooks>,
+        custody: Option<crate::source_input::SourceInput>,
     ) -> Self {
         let pid = child.id();
         // Owned by the supervisor alone. Nothing else may take it: two owners
@@ -587,13 +611,15 @@ impl AttemptChild {
             terminal_notify,
             commands,
             hooks,
+            source_observer: custody.as_ref().map(|custody| custody.observer()),
         };
         let supervisor_hooks = Arc::clone(&this.hooks);
         tokio::spawn(async move {
             let _child_job = child_job;
+            let mut source_custody = custody;
             let mut command_open = true;
             let mut terminate_replies = Vec::new();
-            let terminal = loop {
+            let mut terminal = loop {
                 if !command_open {
                     break Self::record_wait_result(&control, producer_attempt, child.wait().await);
                 }
@@ -704,6 +730,21 @@ impl AttemptChild {
                     }
                 }
             };
+            if matches!(terminal, AttemptChildTerminal::WaitFailed(_, _)) {
+                if let Some(custody) = source_custody.take() {
+                    custody.cleanup_pending();
+                }
+            }
+            // Process wait alone is not the original-input read join. A body
+            // read may still be blocked in the daemon after FFmpeg died.
+            if let Some(input) = source_custody.take() {
+                if let Err(error) = input.close_and_wait().await {
+                    terminal = AttemptChildTerminal::WaitFailed(
+                        error.kind(),
+                        format!("source input settlement: {error}"),
+                    );
+                }
+            }
             *supervisor_terminal
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(terminal.clone());
@@ -1010,7 +1051,7 @@ fn signal_owned_pid(
     let Some(pid) = pid else {
         return Ok(false);
     };
-    crate::process_control::signal(pid, signal).map_err(|error| {
+    crate::source_custody::signal_group(pid, signal).map_err(|error| {
         std::io::Error::new(
             error.kind(),
             format!("signaling producer attempt {producer_attempt}: {error}"),

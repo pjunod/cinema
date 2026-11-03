@@ -118,7 +118,15 @@ impl<'a> TokioEnvironment<'a> {
         self.work = Some(Box::pin(async move {
             let result = plurx_core::process::bounded::cancellable(
                 cancellation,
-                manager.process_library_requests(&job_id, library_id, &lease, &publisher, &fence),
+                crate::background_jobs::budgeted(
+                    fence.source_budget(),
+                    plurx_core::scan::probe::with_probe_inputs(
+                        Arc::new(super::probe_input::LibraryProbeInputs(fence.clone())),
+                        manager.process_library_requests(
+                            &job_id, library_id, &lease, &publisher, &fence,
+                        ),
+                    ),
+                ),
             )
             .await;
             (publisher, result)
@@ -155,7 +163,8 @@ impl<'a> TokioEnvironment<'a> {
                     return WorkOutcome::Completed { ok };
                 }
                 Selected::Tick => {
-                    let pressured = !self.transcode.fragment_worker_idle(admission);
+                    let pressured = !self.transcode.fragment_worker_idle(admission)
+                        || !self.fence.source_may_continue().await.unwrap_or(false);
                     #[cfg(test)]
                     let pressured =
                         pressured || crate::background_jobs::faults::worker::force_pressure();

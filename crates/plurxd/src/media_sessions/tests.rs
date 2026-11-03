@@ -315,6 +315,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         typeless_playlist: true,
         library_channel: None,
         request: SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,

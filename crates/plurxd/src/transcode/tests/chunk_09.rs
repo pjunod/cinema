@@ -1476,7 +1476,7 @@ async fn install_stand_in_producer(
 ) -> Result<(), String> {
     if pipe {
         session
-            .spawn_and_install_prepublication_pipe_child(producer_attempt, || {
+            .spawn_and_install_prepublication_pipe_child(producer_attempt, |_| {
                 let mut child = tokio::process::Command::new("sleep")
                     .arg("60")
                     .stdout(std::process::Stdio::piped())
@@ -1490,7 +1490,7 @@ async fn install_stand_in_producer(
             .map(drop)
     } else {
         session
-            .spawn_and_install_prepublication_child(producer_attempt, || {
+            .spawn_and_install_prepublication_child(producer_attempt, |_| {
                 Ok(ObservedFfmpeg::for_test(long_running_child()))
             })
             .await
@@ -2106,6 +2106,7 @@ fn actual_audio_delivery_changes_manifest_codec_and_rung_budget() {
 fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
     use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
     let mut request = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -2246,6 +2247,7 @@ async fn candidate_catalog_and_execution_share_typed_audio_recipe_identity() {
         }],
     };
     let mut request = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -2465,6 +2467,7 @@ async fn retained_audio_consumer_case(encoded: bool) {
         reason: "retained actual producer".into(),
     };
     let mut request = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -2722,7 +2725,7 @@ async fn queued_transcode_publishes_while_holding_its_own_admission() {
         claimed.token.expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(30),
         JobKind::TranscodePrepare,
-    )
+    ).await
     .expect("active job");
     let fence = PretranscodeFence::new(job, active.fence(), admission);
     let source = pretranscode_source_snapshot(&file, &[media.path().to_path_buf()])

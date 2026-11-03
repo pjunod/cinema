@@ -447,6 +447,7 @@ pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
 
 fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
     SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -894,6 +895,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {
+            source_telemetry:false,
             retained_logical: None,
             measured_candidate: None,
             file: media_file_at(PathBuf::from("unused.mkv"), ms),

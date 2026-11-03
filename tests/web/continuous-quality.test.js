@@ -224,3 +224,108 @@ test('attached quality preparation follows a newer cold seek without reviving a 
   player.continuousQuality={};assert.equal(adapter.noteSeek(100),false,'replaced attachment cannot mutate this owner');
  }
 });
+
+test('typed pending family retries the same session under the original preparation signal',async()=>{
+ const owner=new AbortController(),requests=[],waits=[];let calls=0;
+ const family={version:2,family_revision:1};
+ const result=await context.continuousQualityBootstrapFamily('/api/v1/hls/retained/quality-family',owner.signal,
+  async(url,body,options)=>{requests.push({url,body,signal:options.signal});if(++calls<3)
+    throw Object.assign(new Error('still producing'),{status:503,streamFailure:{code:'segment_pending'},retryAfterMs:10});return family;},
+  async(ms,signal)=>waits.push({ms,signal}));
+ assert.equal(result,family);assert.equal(requests.length,3);
+ assert.ok(requests.every(row=>row.url===requests[0].url&&row.body===null&&row.signal===owner.signal));
+ assert.ok(waits.every(row=>row.signal===owner.signal&&row.ms===10));
+});
+test('pending family abort and terminal refusals do not create another retry budget',async()=>{
+ const owner=new AbortController();let calls=0;
+ await assert.rejects(context.continuousQualityBootstrapFamily('/same-family',owner.signal,async()=>{
+  calls++;throw Object.assign(new Error('pending'),{status:503,streamFailure:{code:'segment_pending'}});
+ },async()=>owner.abort()),{name:'AbortError'});
+ assert.equal(calls,1);
+ for(const refusal of [{status:500,streamFailure:{code:'segment_pending'}},{status:503,streamFailure:{code:'media_owner_transition'}},{status:503}]){
+  calls=0;await assert.rejects(context.continuousQualityBootstrapFamily('/same-family',new AbortController().signal,async()=>{
+   calls++;throw Object.assign(new Error('terminal'),refusal);
+  },async()=>assert.fail('terminal refusals never wait')),/terminal/);assert.equal(calls,1);
+ }
+});
+test('continuous fetch preserves bounded typed refusal and retry-after',async()=>{
+ const scope=vm.createContext({AbortController,TextDecoder,setTimeout,clearTimeout,
+  fetch:async()=>new Response(JSON.stringify({code:'segment_pending',message:'Verified initialization is pending.'}),
+   {status:503,headers:{'retry-after':'1'}}),PlaybackPolicy:{parseStreamFailure:({status,body})=>({status,...JSON.parse(body)})}});
+ vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),scope);
+ await assert.rejects(scope.continuousQualityFetch('/family'),error=>error.status===503&&error.retryAfterMs===1000
+  &&error.streamFailure.code==='segment_pending'&&error.message==='Verified initialization is pending.');
+ scope.fetch=async()=>new Response('x'.repeat(16385),{status:503});
+ await assert.rejects(scope.continuousQualityFetch('/family'),/response bound/);
+});
+function startupFamily(){
+ const row=(id,height)=>({candidate_id:id.repeat(32),rendition_id:id.repeat(64),init_id:'e'.repeat(64),codec:'avc1.640032',
+  width:height===720?1280:1920,height,timescale:24000,frame_ticks:1001,segment_ticks:48048,peak_bps:1000000,
+  playlist:`video/${id.repeat(64)}/index.m3u8`});
+ return {version:2,family_revision:1,mode:'controlled',family_id:'f'.repeat(64),master:'master.m3u8',video:[row('a',720)],audio:null,
+  companion:row('b',1080)};
+}
+test('versioned family accepts primary-only startup and only additive verified updates',()=>{
+ const {companion,...first}=startupFamily(),next={...clone(first),family_revision:2,video:[...clone(first.video),companion]};
+ assert.equal(context.continuousQualityFamily(first),true);
+ assert.equal(context.continuousQualityFamily({...first,version:1}),false);
+ assert.equal(context.continuousQualityFamilyUpdate(first,next),true);
+ assert.equal(context.continuousQualityFamilyUpdate(next,first),false);
+ assert.equal(context.continuousQualityFamilyUpdate(first,{...next,family_id:'0'.repeat(64)}),false);
+ const replaced=clone(next);replaced.video[0].init_id='0'.repeat(64);
+ assert.equal(context.continuousQualityFamilyUpdate(first,replaced),false);
+ assert.equal(context.continuousQualityFamilyUpdate(first,{...next,family_revision:1}),false);
+});
+test('primary-only continuous bootstrap retains work until its owner aborts or a terminal refusal',async()=>{
+ for(const outcome of ['ready','abort','terminal']){
+  const {companion,...family}=startupFamily(),session=uuid(71),owner=new AbortController(),released=[],gets=[],waits=[];
+  const candidate={id:family.video[0].candidate_id,route:'encode',target_height:720};
+  const pair={primary_candidate_id:candidate.id,companion_candidate_id:companion.candidate_id};
+  const selection={quality:{mode:'manual',height:720}},player={};let count=0;
+  const scope=vm.createContext({AbortController,TextDecoder,setTimeout,clearTimeout,crypto:require('node:crypto').webcrypto,
+   Hls:{isSupported:()=>true},window:{Hls:{}},playbackControlSelection:()=>clone(selection),qualityMediaIntent:()=>({}),
+   releaseSession:id=>released.push(id),playbackRetryDelay:async(ms,signal)=>{waits.push(signal);if(outcome==='abort')owner.abort();},
+   api:async(url,opts)=>url.endsWith('continuous-candidates')?{version:1,candidates:[candidate],pairs:[pair]}:
+    {version:1,playback:{session_id:session},quality:{generation:uuid(72),control_epoch:1,
+     schedule_url:`/api/v1/hls/${session}/quality-schedule`,family_url:`/api/v1/hls/${session}/quality-family`}}});
+  vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),scope);
+  scope.continuousQualityFetch=async(url,body,options)=>{
+   gets.push({url,signal:options.signal});if(++count===1)throw Object.assign(new Error('pending'),
+    {status:503,streamFailure:{code:outcome==='terminal'?'response_state_changed':'segment_pending'},retryAfterMs:1});
+   return clone(family);
+  };
+  const opening=scope.openContinuousQualitySession(1,{transport:'hlsjs',height:720,caps:{},request_id:'one'},player,owner.signal);
+  if(outcome==='ready'){
+   const info=await opening;assert.equal(info.session_id,session);assert.equal(info.continuous_quality.family.video.length,1);
+   assert.equal(info.continuous_quality.companion_candidate_id,companion.candidate_id);assert.deepEqual(released,[]);
+   assert.equal(gets.length,2);assert.ok(gets.every(row=>row.signal===owner.signal));
+  }else{await assert.rejects(opening);assert.deepEqual(released,[session]);assert.equal(gets.length,1);}
+ }
+});
+
+test('bundled hls additive family levels retain incumbent indexes audio groups and media ownership',()=>{
+ class Surface{addEventListener(){}removeEventListener(){}static isTypeSupported(){return true;}}
+ const world={navigator:{userAgent:'fixture'},MediaSource:Surface,location:{href:'http://localhost/'},URL};
+ const scope=vm.createContext({self:world,window:world,navigator:world.navigator,exports:{},module:{exports:{}},
+  console,performance,setTimeout,clearTimeout,setInterval,clearInterval,URL,location:world.location});
+ vm.runInContext(fs.readFileSync('crates/plurxd/src/web/hls.min.js','utf8'),scope);
+ scope.Hls=scope.module.exports;
+ vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),scope);
+ const hls=new scope.Hls({autoStartLoad:false,enableWorker:false,preferManagedMediaSource:false});
+ assert.equal(scope.Hls.version,'1.6.19');
+ const {companion,...first}=startupFamily(),prefix='/api/v1/hls/retained/';
+ const parser=hls.networkControllers.find(controller=>typeof controller.handleMasterPlaylist==='function');assert.ok(parser);
+ const master=`#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="shared",NAME="Audio",DEFAULT=YES,AUTOSELECT=YES,URI="audio/shared/index.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=1192000,RESOLUTION=1280x720,CODECS="avc1.640032,mp4a.40.2",AUDIO="shared"\n${first.video[0].playlist}\n`;
+ parser.handleMasterPlaylist({data:master,url:'http://localhost'+prefix+'master.m3u8'},
+  {parsing:{start:0,end:0},loading:{start:0,end:0}},{url:'http://localhost'+prefix+'master.m3u8',type:'manifest'},null);
+ assert.equal(hls.levels.length,1);const incumbent=hls.levels[0];hls.startLevel=0;
+ let detached=0,manifest=0;hls.on(scope.Hls.Events.MEDIA_DETACHING,()=>detached++);hls.on(scope.Hls.Events.MANIFEST_LOADING,()=>manifest++);
+ const next={...first,family_revision:2,video:[...first.video,companion]};
+ const updated=scope.continuousQualityFamilyLevels(hls,next,first.video[0],prefix);
+ hls.trigger(scope.Hls.Events.LEVELS_UPDATED,{levels:updated});
+ assert.equal(hls.levels.length,2);assert.equal(hls.levels[0],incumbent);assert.equal(hls.startLevel,0);
+ assert.equal(hls.levels[1].url[0],'http://localhost'+prefix+companion.playlist);
+ assert.deepEqual(clone(hls.levels[1].audioGroups),clone(incumbent.audioGroups));
+ assert.equal(hls.levels[1].videoCodec,companion.codec);assert.equal(detached,0);assert.equal(manifest,0);
+ hls.destroy();
+});

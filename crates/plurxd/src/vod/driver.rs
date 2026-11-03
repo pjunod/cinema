@@ -202,9 +202,90 @@ pub(super) async fn perform_driver_step(
     rendition: &Rendition,
     step: Step,
 ) -> std::io::Result<Performed> {
+    if matches!(
+        step,
+        Step::Resume | Step::Start { .. } | Step::Restart { .. }
+    ) {
+        if let Some(observer) = rendition
+            .source_owners
+            .source_observer(rendition.gen_epoch.load(Relaxed))
+        {
+            observer.refill().await.map_err(std::io::Error::other)?;
+        }
+    }
     let performed = rendition.slot.perform(step, || {}).await?;
     record_performed_step(shared, rendition, step);
+    project_source_sharing(shared, rendition).await;
     Ok(performed)
+}
+
+/// Every live reader of this physical producer must offer fresh contiguous
+/// media lead. A cached segment GET never creates an original-source owner.
+async fn project_source_sharing(shared: &Shared, rendition: &Rendition) {
+    let Some(observer) = rendition
+        .source_owners
+        .source_observer(rendition.gen_epoch.load(Relaxed))
+    else {
+        return;
+    };
+    let readers = rendition.readers.lock().await.clone();
+    let sessions = shared.sessions.lock().await;
+    let manifest = rendition.manifest.lock().await;
+    let mut lead = None::<u64>;
+    let mut low = 1_u64;
+    let mut high = 2_u64;
+    let mut fresh = !readers.is_empty();
+    let mut telemetry_capable = false;
+    for (id, reader) in &readers {
+        if reader.authority_only || reader.draining_after_prepared_commit {
+            continue;
+        }
+        let Some(session) = sessions.get(id) else {
+            fresh = false;
+            continue;
+        };
+        let Some((demand, observed)) = session
+            .last_control_snapshot
+            .as_ref()
+            .zip(session.control_observed_at)
+        else {
+            fresh = false;
+            continue;
+        };
+        telemetry_capable = true;
+        let age = observed.elapsed();
+        if age > Duration::from_secs(5)
+            || demand.render_state != crate::playback_control::RenderState::Rendering
+        {
+            fresh = false;
+        }
+        let rate = demand.playback_rate.clamp(0.25, 4.0);
+        let reserve = ((48_000.0 * rate).ceil() as u64).clamp(48_000, 124_000);
+        low = low.max(reserve);
+        high = high.max(reserve.saturating_add((32_000.0 * rate).ceil() as u64));
+        let mut end = None;
+        for index in reader.frontier..rendition.plan.len() as u32 {
+            if !matches!(manifest.state(index), Some(SegState::Materialized { .. })) {
+                break;
+            }
+            let Some(entry) = rendition.plan.entry(index) else {
+                break;
+            };
+            end = Some(entry.end_ticks().saturating_mul(1_000) / u64::from(rendition.timescale));
+        }
+        let position =
+            crate::playback_control::rolling_estimated_position_ms(demand, age).max(0) as u64;
+        let current = end.unwrap_or(0).saturating_sub(position);
+        lead = Some(lead.map_or(current, |previous| previous.min(current)));
+    }
+    drop(manifest);
+    drop(sessions);
+    let held = matches!(rendition.slot.belief().await, Producer::Stopped { .. })
+        && crate::source_custody::stopped_group(Some(rendition.last_child_pid.load(Relaxed))).await;
+    if telemetry_capable && observer.declare_rolling_policy().await.is_err() {
+        return;
+    }
+    let _ = observer.rolling(lead, low, high, held, fresh).await;
 }
 
 /// An encoded rendition that wanted to start was refused an encoder permit.
@@ -529,6 +610,7 @@ fn arm_handoff_expiry(rendition: &Arc<Rendition>) {
 
 /// One pass: demand → decide → step → carry it out.
 pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
+    project_source_sharing(shared, rendition).await;
     let mut prepared_permit = None;
     loop {
         if rendition.closed.load(Relaxed) {

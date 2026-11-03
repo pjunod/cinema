@@ -4,6 +4,7 @@ use super::*;
 /// cache's key discipline (plan §2.4).
 #[derive(Debug, Clone)]
 pub(super) struct Recipe {
+    pub(super) source_telemetry: bool,
     pub(super) retained_logical: Option<super::retained_manifest::LogicalOutput>,
     pub(super) measured_candidate: Option<RetainedCandidateBinding>,
     pub(super) file: MediaFile,

@@ -30,6 +30,10 @@ mod metrics;
 use metrics::Event;
 pub(crate) use metrics::{accepted_claims, prometheus};
 
+#[path = "background_jobs/source.rs"]
+mod source;
+pub(crate) use source::{budgeted, source_budget, SourcePacingClock, SourceReadBudget};
+
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
 
 /// Why one claimed copy/encoded output preparation ended without publishing.
@@ -258,6 +262,11 @@ struct Inner {
     lost: CancellationToken,
     /// Historical acknowledged completion only; never artifact authority.
     copy_output_completed: AtomicBool,
+    /// Retained independently of the renewable/retired job token. Only an
+    /// explicit finish after physical join may settle this source custody.
+    source_custody:
+        Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
+    source_budget: Arc<SourceReadBudget>,
 }
 
 #[derive(Clone)]
@@ -386,7 +395,7 @@ async fn claim_with_resolution_inner(
 }
 
 impl ActiveBackgroundJob {
-    pub(crate) fn start(
+    pub(crate) async fn start(
         store: Arc<dyn Store>,
         authority: Arc<dyn ClusterJobAuthority>,
         token: JobToken,
@@ -399,6 +408,39 @@ impl ActiveBackgroundJob {
                 "background claim acknowledgement arrived after its deadline".to_owned(),
             ));
         }
+        let registration = store
+            .register_background_source_custody(
+                plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
+                    token: token.clone(),
+                },
+                unix_ms()?,
+            )
+            .await?;
+        let source_custody=match registration {
+            plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)=>Some(receipt),
+            plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired=>None,
+            plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership=>return Err(StoreError::Task("source custody claim unavailable before execution".into())),
+        };
+        if Instant::now() >= deadline {
+            // No input began, so even a resolved expired registration can
+            // safely settle using its original physical-custody receipt.
+            if let Some(custody) = source_custody {
+                let _ = store
+                    .release_background_source_custody(custody, unix_ms()?)
+                    .await;
+            }
+            return Err(StoreError::Task(
+                "source custody registration exceeded the claim deadline".into(),
+            ));
+        }
+        let lost = CancellationToken::new();
+        let source_budget = SourceReadBudget::new(
+            Arc::clone(&store),
+            plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
+                token: token.clone(),
+            },
+            lost.clone(),
+        );
         let (deadline, _) = watch::channel(deadline);
         let fence = JobFence(Arc::new(Inner {
             kind,
@@ -410,8 +452,10 @@ impl ActiveBackgroundJob {
                 cancelling: false,
             }),
             deadline,
-            lost: CancellationToken::new(),
+            lost,
             copy_output_completed: AtomicBool::new(false),
+            source_custody,
+            source_budget,
         }));
         let stop = CancellationToken::new();
         let heartbeat_stop = stop.clone();
@@ -481,6 +525,24 @@ impl ActiveBackgroundJob {
         if let Err(error) = self.fence.retire().await {
             tracing::warn!(%error, "background retirement remains ambiguous");
         }
+        if let Some(custody) = self.fence.0.source_custody.clone() {
+            match self
+                .fence
+                .0
+                .store
+                .release_background_source_custody(custody.clone(), unix_ms().unwrap_or_default())
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => tracing::debug!(
+                    custody_id = custody.custody_id,
+                    "source custody already settled"
+                ),
+                Err(error) => {
+                    tracing::warn!(custody_id=custody.custody_id,%error,"joined source custody settlement remains pending")
+                }
+            }
+        }
         metrics::execution(self.fence.0.kind, self.fence.0.started.elapsed());
     }
 }
@@ -490,8 +552,8 @@ impl Drop for ActiveBackgroundJob {
         self.fence.0.lost.cancel();
         self.stop.cancel();
         // Do not release a durable reservation here: a dropped caller is not
-        // proof that its child exited. The lease remains until explicit join
-        // and finish, or expiry. Dropping JoinHandle does not abort its write.
+        // proof that its child exited. Physical custody survives expiry until
+        // explicit join+finish. Dropping JoinHandle does not abort writes.
     }
 }
 
@@ -499,6 +561,10 @@ impl JobFence {
     pub(crate) fn copy_output_completed(&self) -> bool {
         self.0.copy_output_completed.load(Ordering::Acquire)
     }
+    pub(crate) fn source_budget(&self) -> Arc<SourceReadBudget> {
+        Arc::clone(&self.0.source_budget)
+    }
+
     pub(crate) fn loss_token(&self) -> CancellationToken {
         self.0.lost.clone()
     }
@@ -512,6 +578,84 @@ impl JobFence {
             return None;
         }
         state.token.clone()
+    }
+
+    pub(crate) async fn source_may_continue(&self) -> Result<bool, StoreError> {
+        let Some(token) = self.snapshot().await else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .background_source_may_continue(
+                plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job { token },
+                unix_ms()?,
+            )
+            .await
+    }
+
+    /// Caller must hold a verified whole-group stop acknowledgement.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn pause_source(&self) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if state.cancelling || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .pause_background_source(token, unix_ms()?)
+            .await
+    }
+
+    /// Source capacity is reacquired atomically before the caller sends CONT.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn resume_source(&self) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if state.cancelling
+            || !self.may_publish()
+            || !self.0.authority.may_execute_job(self.0.kind).await
+        {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .resume_background_source(token, unix_ms()?)
+            .await
+    }
+
+    pub(crate) async fn source_checkpoint_artifacts(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        self.0.store.source_checkpoint_artifacts(node_id).await
+    }
+
+    /// The artifact must already be atomically durable. Serialize this update
+    /// with renewal/settlement so its token cannot race our own heartbeat.
+    pub(crate) async fn checkpoint(
+        &self,
+        checkpoint: serde_json::Value,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if self.0.lost.is_cancelled()
+            || state.cancelling
+            || Instant::now() >= *self.0.deadline.borrow()
+            || !self.0.authority.may_execute_job(self.0.kind).await
+        {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .checkpoint_job(token, checkpoint, unix_ms()?)
+            .await
     }
 
     async fn renew(&self) -> Result<bool, StoreError> {
@@ -1787,7 +1931,8 @@ pub(crate) async fn claim_pretranscode(
                     })?,
                     deadline,
                     JobKind::EncodedOutputPrepare,
-                )?;
+                )
+                .await?;
                 return Ok(Some(PreparationClaim::Encoded(job, active, admission)));
             }
             if let JobPayload::CopyOutputPrepare {
@@ -1833,7 +1978,8 @@ pub(crate) async fn claim_pretranscode(
                     })?,
                     deadline,
                     JobKind::CopyOutputPrepare,
-                )?;
+                )
+                .await?;
                 return Ok(Some(PreparationClaim::Copy(job, active, admission)));
             }
             let JobPayload::TranscodePrepare {
@@ -1897,7 +2043,8 @@ pub(crate) async fn claim_pretranscode(
                     .ok_or_else(|| StoreError::Task("claimed job has no ownership token".into()))?,
                 deadline,
                 JobKind::TranscodePrepare,
-            )?;
+            )
+            .await?;
             let fence = crate::transcode::PretranscodeFence::new(
                 projection.clone(),
                 active.fence(),
@@ -2076,7 +2223,8 @@ pub(crate) async fn claim_fragment(
                     .ok_or_else(|| StoreError::Task("claimed fragment has no token".into()))?,
                 deadline,
                 kind,
-            )?;
+            )
+            .await?;
             return Ok(Some((projection, active, admission)));
         }
         cursor = page.next;
@@ -2220,7 +2368,8 @@ pub(crate) async fn fragment_siblings(
                 token,
                 deadline,
                 JobKind::FragmentIndexBuild,
-            )?;
+            )
+            .await?;
             found.push((projection, Some(active)));
         }
         cursor = page.next;
@@ -2435,7 +2584,8 @@ pub(crate) async fn claim_library(
                     .ok_or_else(|| StoreError::Task("library claim has no owner".into()))?,
                 deadline,
                 kind,
-            )?;
+            )
+            .await?;
             return Ok(Some((job, active, admission)));
         }
         cursor = page.next;
@@ -2525,7 +2675,8 @@ pub(crate) async fn claim_subtitle(
                     .ok_or_else(|| StoreError::Task("subtitle claim has no owner".into()))?,
                 deadline,
                 JobKind::SubtitleExtract,
-            )?;
+            )
+            .await?;
             return Ok(Some((job, active)));
         }
         cursor = page.next;
@@ -2537,7 +2688,7 @@ pub(crate) async fn claim_subtitle(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use plurx_core::cluster::coordination::UnclusteredJobAuthority;
     use plurx_core::store::background_jobs::{
@@ -2975,7 +3126,68 @@ mod tests {
         active.finish().await;
     }
 
-    async fn active() -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
+    #[tokio::test]
+    async fn source_checkpoint_keeps_ownership_revision_and_survives_yield_without_accepting_stale_writers(
+    ) {
+        let (store, id, active) = active().await;
+        let fence = active.fence();
+        let token = fence.snapshot().await.expect("current ownership");
+        let reference = serde_json::json!({"version":1,"node_id":"node-a","artifact":format!("{}.json", "a".repeat(64)),"offset":65});
+        assert!(fence
+            .checkpoint(serde_json::json!({"source_attestation":reference}))
+            .await
+            .expect("checkpoint write"));
+        assert_eq!(fence.snapshot().await.expect("still owned"), token);
+        let mut stale = token.clone();
+        stale.fence += 1;
+        assert!(!store
+            .checkpoint_job(
+                stale,
+                serde_json::json!({"source_attestation":null}),
+                unix_ms().expect("clock")
+            )
+            .await
+            .expect("stale fence"));
+        assert!(fence
+            .settle(JobSettlement::Yield {
+                error_code: Some("foreground_preempted".into()),
+                checkpoint: Some(serde_json::json!({"staging_node_id":"node-a"})),
+                not_before_ms: unix_ms().expect("clock")
+            })
+            .await
+            .expect("yield"));
+        let job = store
+            .background_job(&id)
+            .await
+            .expect("job read")
+            .expect("job");
+        assert_eq!(
+            job.checkpoint.as_ref().expect("queued checkpoint")["source_attestation"],
+            reference
+        );
+        assert_eq!(
+            job.checkpoint.as_ref().expect("queued checkpoint")["staging_node_id"],
+            "node-a"
+        );
+        assert!(!store
+            .checkpoint_job(
+                token,
+                serde_json::json!({"source_attestation":null}),
+                unix_ms().expect("clock")
+            )
+            .await
+            .expect("settled writer"));
+        assert_eq!(
+            store
+                .source_checkpoint_artifacts("node-a")
+                .await
+                .expect("owned artifacts"),
+            vec![format!("{}.json", "a".repeat(64))]
+        );
+        active.finish().await;
+    }
+
+    pub(crate) async fn active() -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
         active_with_deadline(None).await
     }
 
@@ -3080,6 +3292,7 @@ mod tests {
             local_deadline.map_or(deadline, |duration| Instant::now() + duration),
             JobKind::FragmentIndexBuild,
         )
+        .await
         .expect("start");
         (store, id, active)
     }

@@ -137,7 +137,8 @@ pub(super) async fn run(
                 .ok_or_else(|| anyhow::anyhow!("embedding claim missing token"))?,
             deadline,
             JobKind::SemanticEmbedding,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
         let result: Result<bool> = async {

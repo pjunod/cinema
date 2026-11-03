@@ -2044,6 +2044,7 @@ impl HiqliteAuthStore {
         }
         store.install_remote_schema(None).await?;
         store.install_invitation_schema(None).await?;
+        store.install_source_arbitration_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
         store.install_subtitle_text_translation_schema(None).await?;
@@ -2234,6 +2235,7 @@ impl HiqliteAuthStore {
                 SchemaMigrationAction::Current => {
                     self.install_remote_schema(admission).await?;
                     self.install_invitation_schema(admission).await?;
+                    self.install_source_arbitration_schema(admission).await?;
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
                     self.install_subtitle_text_translation_schema(admission)
@@ -3946,6 +3948,68 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn source_arbitration_shape(&self) -> Result<Option<bool>, StoreError> {
+        let expected = super::background_jobs_resources::source_arbitration_objects()?;
+        let names = expected
+            .iter()
+            .map(|(name, _)| format!("'{}'", name.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        // authority: all canonical source-owner objects must match the committed extension, not just its singleton marker.
+        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>(format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
+        if installed.is_empty() {
+            return Ok(None);
+        }
+        if installed.len() != expected.len()
+            || installed
+                .iter()
+                .zip(&expected)
+                .any(|(row, (name, sql))| row.name != *name || row.sql != *sql)
+        {
+            return Err(StoreError::Migration(
+                "foreground source arbitration extension has incompatible shape".into(),
+            ));
+        }
+        let marker=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",params!()).await?;
+        Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
+    }
+    async fn install_source_arbitration_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        match self.source_arbitration_shape().await? {
+            Some(true) => return Ok(()),
+            Some(false) => {
+                return Err(StoreError::Migration(
+                    "foreground source arbitration marker missing".into(),
+                ))
+            }
+            None => {}
+        }
+        let expected = super::background_jobs_resources::source_arbitration_objects()?;
+        let names = expected
+            .iter()
+            .map(|(name, _)| format!("'{}'", name.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statements=vec![(format!("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ({names})) THEN 1 ELSE json('source arbitration extension raced') END"),params!())];
+        statements.extend(
+            super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA
+                .split("-- next statement\n")
+                .filter(|sql| !sql.trim().is_empty())
+                .map(|sql| (sql.to_owned(), params!())),
+        );
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        if self.source_arbitration_shape().await? == Some(true) {
+            return Ok(());
+        }
+        attempt?;
+        Err(StoreError::Migration(
+            "foreground source arbitration extension did not settle".into(),
+        ))
+    }
+
     async fn subtitle_managed_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
@@ -3983,7 +4047,7 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.subtitle_managed_schema_version().await?;
-        if version == Some(3) {
+        if version == Some(4) {
             return Ok(());
         }
         if version.is_none() {
@@ -4039,6 +4103,25 @@ impl HiqliteAuthStore {
             }
         }
         if self.subtitle_managed_schema_version().await? == Some(3) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::PREPARED_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::prepared_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::prepared_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? != Some(4) {
+                result?;
+                return Err(StoreError::Migration(
+                    "managed prepared-artifact schema upgrade did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(4) {
             return Ok(());
         }
         Err(StoreError::Migration(

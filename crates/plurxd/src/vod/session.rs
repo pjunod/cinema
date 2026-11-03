@@ -751,6 +751,10 @@ pub(super) struct ResolvedMediaReader {
 /// opaque reader id is independent of the public capability, so delayed old
 /// cleanup cannot remove a replacement parent's demand on shared media.
 pub(super) struct ParentMediaReader {
+    pub(super) versioned_family: bool,
+    /// Optional startup work stays dormant until the first presented primary.
+    /// Once activated, retain its demand until verified init can be advertised.
+    pub(super) companion_bootstrap: bool,
     /// Only a controlled video child can release and reacquire its credit.
     pub(super) controlled: bool,
     pub(super) candidate_id: Option<plurx_core::playback::candidate::CandidateId>,

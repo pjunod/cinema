@@ -951,9 +951,9 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         {
             let mut sessions = serve.shared.sessions.lock().await;
             let session = sessions.get_mut(VIEWER).expect("parent");
-            session.children.push(ParentMediaReader { controlled: false, candidate_id: None, reader_id: "private-audio".into(),
+            session.children.push(ParentMediaReader { versioned_family: false, companion_bootstrap: false, controlled: false, candidate_id: None, reader_id: "private-audio".into(),
                 rendition: Arc::clone(&soundtrack), _reservation: None });
-            session.children.push(ParentMediaReader { controlled: false, candidate_id: None, reader_id: "private-root".into(),
+            session.children.push(ParentMediaReader { versioned_family: false, companion_bootstrap: false, controlled: false, candidate_id: None, reader_id: "private-root".into(),
                 rendition: Arc::clone(&rendition), _reservation: None });
         }
         let control = |sequence, snapshot| crate::playback_control::LocalControlRequest {
@@ -1501,7 +1501,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         };
         let permit = admissions.try_admit_bundle(0, 1, &estimate, crate::admission::Priority::Speculative)
             .expect("one retained credit");
-        serve.shared.sessions.lock().await.get_mut(parent).expect("parent").children.push(ParentMediaReader {
+        serve.shared.sessions.lock().await.get_mut(parent).expect("parent").children.push(ParentMediaReader { versioned_family: false, companion_bootstrap: false,
             controlled: true, candidate_id: Some(plurx_core::playback::candidate::CandidateId([1;16])),
             reader_id: "target".into(), rendition: Arc::clone(&rendition), _reservation: Some(permit.into()),
         });
@@ -2096,6 +2096,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                 "shipped-shape",
                 None,
                 Recipe {
+            source_telemetry:false,
                     retained_logical: None,
                     measured_candidate: None,
                     file,
@@ -2980,7 +2981,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         {
             let mut sessions = serve.shared.sessions.lock().await;
             let parent = sessions.get_mut("target").expect("prepared family");
-            parent.children.push(ParentMediaReader {
+            parent.children.push(ParentMediaReader { versioned_family: false, companion_bootstrap: false,
                 controlled: true, candidate_id: None, reader_id: "owned-child".into(),
                 rendition: Arc::clone(&rendition), _reservation: None,
             });
@@ -3010,7 +3011,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         insert_control_session(&serve, "old", Arc::clone(&rendition), Instant::now()).await;
         rendition.attach_reader("old-child", 7).await;
         rendition.attach_reader("other", 3).await;
-        serve.shared.sessions.lock().await.get_mut("old").expect("old").children.push(ParentMediaReader {
+        serve.shared.sessions.lock().await.get_mut("old").expect("old").children.push(ParentMediaReader { versioned_family: false, companion_bootstrap: false,
             controlled: false, candidate_id: None, reader_id: "old-child".into(),
             rendition: Arc::clone(&rendition), _reservation: None,
         });
@@ -3954,6 +3955,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
     fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         let index = synthetic_index(24);
         let recipe = Recipe {
+            source_telemetry:false,
             retained_logical: None,
             measured_candidate: None,
             file: media_file_at(PathBuf::from("unused.mkv"), 0),

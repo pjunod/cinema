@@ -14,7 +14,7 @@ function pbTotalSec(){ const v=document.getElementById("video");
   // none: pbTick draws an indeterminate bar and seekTo refuses fraction seeks.
   if(PLAYER&&PLAYER.method&&PLAYER.method!=='direct_play') return 0;
   return (v&&isFinite(v.duration)&&v.duration>0)?((PLAYER&&PLAYER.offset)||0)+v.duration:0; }
-function pbPosSec(){ const v=document.getElementById("video"); return ((PLAYER&&PLAYER.bookOffset)||0)/1000+((PLAYER&&PLAYER.offset)||0)+((v&&v.currentTime)||0); }
+function pbPosSec(){ const v=document.getElementById("video"); if(PLAYER?.mediaAttachment?.nativePositionPending)return ((PLAYER.bookOffset||0)/1000)+(PLAYER.controlPositionHintSec||0); return ((PLAYER&&PLAYER.bookOffset)||0)/1000+((PLAYER&&PLAYER.offset)||0)+((v&&v.currentTime)||0); }
 // A stream-changing command issued while a seek is still landing belongs at
 // the seek destination, not at the predecessor element's last observed clock.
 // The committed target is the playback intent; currentTime is only evidence
@@ -355,10 +355,47 @@ function playbackProgressTick(v,p,frameSample=false){
       if(Number.isFinite(q?.totalVideoFrames)){frames=q.totalVideoFrames; frameSource="quality";}
     }catch(e){}
   }
+  // Independent progress diagnoses the observation channel, never proves a
+  // displayed frame or repairs a request. Renewal belongs to native events.
+  // Use the existing sampler and preserve the original startup/seek deadline.
+  if(p.hlsStartup?.transport==="native"&&frameSource==="callbacks"&&!v.seeking){
+    let decoded=null;
+    try{const q=v.getVideoPlaybackQuality?.();if(Number.isFinite(q?.totalVideoFrames))decoded=q.totalVideoFrames;}catch(e){}
+    let observer=p.controlFrameObservation;
+    if(!observer||observer.attachment!==p.mediaAttachment||observer.element!==v
+      ||observer.epoch!==(p.controlPresentationEpoch||0)||observer.intent!==(pending?.sequence||0)
+      ||observer.intentGeneration!==(p.controlIntentGeneration||0)){
+      observer=p.controlFrameObservation={attachment:p.mediaAttachment,element:v,
+        epoch:p.controlPresentationEpoch||0,intent:pending?.sequence||0,
+        intentGeneration:p.controlIntentGeneration||0,clock,decoded,frames,since:now,lastAdvanceAt:null,unavailable:false};
+    }else{
+      if(frames!==observer.frames){observer.since=now;observer.unavailable=false;observer.lastAdvanceAt=null;}
+      else if(decoded!=null&&observer.decoded!=null&&decoded>observer.decoded&&clock>observer.clock+0.01){
+        observer.lastAdvanceAt=now;
+        if(now-observer.since>=PERSISTENT_STALL_MS&&!observer.unavailable){
+          observer.unavailable=true;
+          clientLog(Object.assign({level:"warn",event:"native_frame_observation",detail:"observation_unavailable",
+            message:"Native clock and decode progressed without frame callbacks; presentation remains unproven."},playbackContext()));
+        }
+      }
+      observer.clock=clock;observer.decoded=decoded;observer.frames=frames;
+    }
+  }else p.controlFrameObservation=null;
   const key=`${p._seekToken||0}:${p.controlIntentGeneration||0}:${pending?.sequence||0}:${frameSource}`;
   let watch=p.progressWatch;
   if(!watch||watch.key!==key||watch.attachment!==p.mediaAttachment||watch.element!==v){
     watch=p.progressWatch={key,attachment:p.mediaAttachment,element:v,clock,frames,at:now,startedAt:now,fired:false};
+  }
+  const observer=p.controlFrameObservation;
+  if(observer?.unavailable&&observer.lastAdvanceAt!=null){
+    // Missing observations with independent progress cannot authorize a
+    // destructive freeze recovery. A real freeze still ages from the last
+    // independent advance and takes the normal existing bounded path.
+    watch.at=Math.max(watch.at,observer.lastAdvanceAt);
+    if(now-observer.lastAdvanceAt<PLAYBACK_SAMPLING_PERIOD_MS*3){
+      if(p.waitAt!=null)endWait(false);
+      return;
+    }
   }
   const moved=clock>watch.clock+0.01 && (frames==null||frames>watch.frames);
   if(frameSample){
@@ -570,14 +607,20 @@ function playerWantsPlayback(v){
 // a change it started meanwhile owns the media and the boundary stands down.
 async function resumeQualityBoundary(p){
   if(!p||qualityForce()!=='auto') return false;
-  const intent=p.controlSeek, attachment=p.mediaAttachment;
+  const intent=p.controlSeek, attachment=p.mediaAttachment, selected=p.qualityCandidateId, generation=p.controlIntentGeneration;
   const candidate=await naturalBoundaryQualityCandidate(p,intent);
   if(!candidate||PLAYER!==p||p.controlSeek!==intent||p.mediaAttachment!==attachment
+    ||p.qualityCandidateId!==selected||p.controlIntentGeneration!==generation
     ||p.wantsPlayback===false||qualityForce()!=='auto'||hasPendingPlaybackOpen(p)
     ||p.pendingMediaChange||p.autoFallbackInFlight||(p.abr&&p.abr.switching)
     ||(p.directedChange&&!p.directedChange.settled)) return false;
-  await seekTo(pbPosSec(),false,null,false,null,true,candidate);
-  return true;
+  // An optional quality trial must acquire the retained-incumbent owner
+  // before creating any synthetic seek. Failure leaves Resume playing the
+  // existing route; real viewer seeks keep their separate execution path.
+  const current=(p.qualityCandidates||[]).find(row=>row.id===p.qualityCandidateId);
+  const video=document.getElementById("video");
+  if(!current||!video)return false;
+  return switchAutoCandidate(p,video,current,{candidate,reason:"resume_quality_boundary",transition:"upgrade"});
 }
 // Desired state shares the viewer transport owner, including pending opens.
 function setPlayerPlaying(playing){

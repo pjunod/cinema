@@ -1145,6 +1145,7 @@ impl TranscodeManager {
                 CandidateRoute::Original => continue,
             };
             let request = SessionRequest {
+                source_telemetry: None,
                 dv_processing_destination: None,
                 sdr_master_codecs: None,
                 continuous_media: None,
@@ -3981,6 +3982,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             assert!(!TranscodeManager::vod_reorder_from_snapshot(&snapshot));
         }
         let request = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -4256,6 +4258,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
                 tokio::time::Instant::now() + Duration::from_secs(10),
                 JobKind::CopyOutputPrepare,
             )
+            .await
             .expect("metadata fence");
             (claimed, active)
         }
@@ -4926,6 +4929,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
         context.planning_binding =
             Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
         let mut request = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,

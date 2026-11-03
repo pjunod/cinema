@@ -359,7 +359,13 @@ impl VodServe {
             if !preparing {
                 reader.preparation_frontier = None;
             }
-            if keep.contains(rendition.key.as_str()) {
+            if keep.contains(rendition.key.as_str())
+                || session.children.iter().any(|child| {
+                    child.reader_id == *id
+                        && child.companion_bootstrap
+                        && child._reservation.is_some()
+                })
+            {
                 continue;
             }
             reader.authority_only = true;
@@ -777,6 +783,46 @@ impl VodServe {
         )
         .await
         .map_err(|_| "controlled settlement exceeded its response deadline".to_owned())??;
+        // First-frame proof releases optional startup work. Its own speculative
+        // admission cannot fail an already accepted presentation acknowledgement.
+        if snapshot
+            .ledger
+            .transactions
+            .iter()
+            .any(|tx| tx.first_presented_tick.is_some())
+        {
+            let companion = {
+                let sessions = self.shared.sessions.lock().await;
+                sessions.get(session_id).and_then(|session| {
+                    session
+                        .children
+                        .iter()
+                        .find(|child| child.companion_bootstrap && child._reservation.is_none())
+                        .map(|child| child.rendition.key.clone())
+                })
+            };
+            if let Some(companion) = companion {
+                let frontier_ms = snapshot
+                    .ledger
+                    .transactions
+                    .iter()
+                    .filter_map(|tx| {
+                        tx.first_presented_tick.and_then(|tick| {
+                            tx.appended.first().map(|interval| {
+                                ((u128::from(tick) * 1000) / u128::from(interval.timescale)) as i64
+                            })
+                        })
+                    })
+                    .max()
+                    .unwrap_or(0);
+                if let Err(error) = self
+                    .admit_controlled_video_before(session_id, &companion, frontier_ms, deadline)
+                    .await
+                {
+                    tracing::debug!(session_id, %error, "optional continuous companion remains deferred");
+                }
+            }
+        }
         Ok(QualityScheduleResponse {
             version: 1,
             generation: request.generation.clone(),

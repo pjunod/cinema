@@ -1403,7 +1403,8 @@ pub(crate) async fn worker_pass(
                 .ok_or_else(|| StoreError::Task("subtitle claim token missing".into()))?,
             deadline,
             kind,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
         let operation = async {
@@ -1561,6 +1562,13 @@ pub(crate) async fn worker_pass(
             }
         };
         let operation = plurx_core::process::bounded::cancellable(cancel.clone(), operation);
+        let operation = async {
+            if generation {
+                crate::background_jobs::budgeted(fence.source_budget(), operation).await
+            } else {
+                operation.await
+            }
+        };
         tokio::pin!(operation);
         let result = loop {
             tokio::select! {

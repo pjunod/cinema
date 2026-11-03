@@ -2152,6 +2152,7 @@ fn staged_source_file() -> plurx_core::domain::MediaFile {
 
 fn staged_candidate_request() -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,

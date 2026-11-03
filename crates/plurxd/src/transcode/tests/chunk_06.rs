@@ -381,6 +381,8 @@
             recovery: None,
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: None,
+            fallback_analysis_interest: std::sync::Mutex::new(None),
+        source_request: None,
             rolling_provenance: None,
             rolling_collection: None,
             rolling_artifact: None,

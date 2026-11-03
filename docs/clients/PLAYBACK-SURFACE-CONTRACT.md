@@ -538,6 +538,18 @@ PiP report presenting through the platform's own flags
 a fault raised before the page was hidden is neither cleared nor promoted
 until it is visible again.
 
+An observation owner may conclude `observation_unavailable` without claiming
+presentation or recovery success. The event carries its exact `attached`
+generation, `intent` (including null), and owner; only that currently attached
+scope's explicitly tagged `observation_owner` progress faults can be withdrawn.
+Eligible sources are `client_preparing`, `media_waiting`, `owner_recovery_step`
+and `readiness_deadline_rungs_left`, in `preparing`/`buffering`/`recovering`, with
+`player_stopped=false`. Permission/server authority, stopped faults and other
+owners or intents remain. The native owner offers a nonblocking notice with
+explicit Try again / Close actions; the reducer supplies no transport effects
+or presentation/seek proof. The shared fixture exercises this event on all
+three clients.
+
 ### 3.5 The fixture
 
 `tests/playback/playback-surface-contract.json`, in the shape of

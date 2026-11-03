@@ -1405,12 +1405,15 @@ pub(crate) struct DvTitleRide {
 /// preemption, an early return — aborts the task, and the task's child is
 /// killed with it; a bare `JoinHandle` would leave the scan reading on.
 #[cfg(target_os = "linux")]
-struct DvTitleScan(tokio::task::JoinHandle<Result<plurx_core::process::bounded::Output, String>>);
+struct DvTitleScan {
+    task: tokio::task::JoinHandle<Result<plurx_core::process::bounded::Output, String>>,
+    cancel: tokio_util::sync::CancellationToken,
+}
 
 #[cfg(target_os = "linux")]
 impl Drop for DvTitleScan {
     fn drop(&mut self) {
-        self.0.abort();
+        self.cancel.cancel();
     }
 }
 
@@ -1458,28 +1461,70 @@ impl DvTitleRide {
         };
         let scanner = self.tools.scanner.clone();
         let index = self.stream_index.to_string();
-        Some(DvTitleScan(tokio::spawn(async move {
-            use std::os::fd::AsRawFd;
-            let mut command = tokio::process::Command::new(&scanner);
-            command.args(["/proc/self/fd/3", &index]);
-            crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-                &mut command,
-                &[(held.as_raw_fd(), 3)],
-                None,
-            );
-            let output = plurx_core::process::bounded::output_command_clean_env(
-                &mut command,
-                wall_time,
-                64 * 1024,
-                plurx_core::process::ChildWork::background(
-                    "complete-title Dolby Vision scan (content-analysis pass)",
-                ),
-            )
-            .await
-            .map_err(|error| error.to_string());
-            drop(held);
-            output
-        })))
+        let source_budget = crate::background_jobs::source_budget();
+        let pause = plurx_core::process::bounded::source_pause_controller();
+        let cancel = plurx_core::process::bounded::cancellation()
+            .unwrap_or_default()
+            .child_token();
+        let worker_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let work = async move {
+                use std::os::fd::AsRawFd;
+                let input = match crate::background_jobs::source_budget() {
+                    Some(budget) => Some(
+                        crate::source_input::SourceInput::open_background_held(
+                            crate::fragment_index_cluster::SourceFence::clone_current_held(&held)?,
+                            "application/octet-stream",
+                            budget,
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                };
+                let mut command = tokio::process::Command::new(&scanner);
+                command.args([
+                    input
+                        .as_ref()
+                        .map_or("/proc/self/fd/3", |input| input.url()),
+                    &index,
+                ]);
+                crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
+                    &mut command,
+                    &[(held.as_raw_fd(), 3)],
+                    None,
+                );
+                let output = plurx_core::process::bounded::output_command_clean_env(
+                    &mut command,
+                    wall_time,
+                    64 * 1024,
+                    plurx_core::process::ChildWork::background(
+                        "complete-title Dolby Vision scan (content-analysis pass)",
+                    ),
+                )
+                .await
+                .map_err(|error| error.to_string());
+                if let Some(input) = input {
+                    input
+                        .close_and_wait()
+                        .await
+                        .map_err(|error| format!("joining companion source input: {error}"))?;
+                }
+                drop(held);
+                output
+            };
+            let work = plurx_core::process::bounded::cancellable(worker_cancel, work);
+            let work = async move {
+                match source_budget {
+                    Some(budget) => crate::background_jobs::budgeted(budget, work).await,
+                    None => work.await,
+                }
+            };
+            match pause {
+                Some(pause) => plurx_core::process::bounded::pausable(pause, work).await,
+                None => work.await,
+            }
+        });
+        Some(DvTitleScan { task, cancel })
     }
 
     /// The scan's aggregate when the pass's lead output built; anything else
@@ -1492,21 +1537,21 @@ impl DvTitleRide {
         wait: Duration,
     ) -> Option<PendingDvTitle> {
         if !lead_built {
-            task.0.abort();
-            let _ = (&mut task.0).await;
+            task.cancel.cancel();
+            let _ = (&mut task.task).await;
             return None;
         }
         let refused = |reason: String| {
             tracing::info!(file_id, %reason, "the index pass kept no Dolby Vision title aggregate");
             None
         };
-        let output = match tokio::time::timeout(wait, &mut task.0).await {
+        let output = match tokio::time::timeout(wait, &mut task.task).await {
             Ok(Ok(Ok(output))) => output,
             Ok(Ok(Err(error))) => return refused(format!("scanner did not run: {error}")),
             Ok(Err(error)) => return refused(format!("scanner task failed: {error}")),
             Err(_) => {
-                task.0.abort();
-                let _ = (&mut task.0).await;
+                task.cancel.cancel();
+                let _ = (&mut task.task).await;
                 return refused("scanner did not finish within the pass budget".to_owned());
             }
         };
@@ -2495,6 +2540,32 @@ async fn build_attested_pass(
             Some(ride) => ride.spawn(source, budget).map(|task| (ride, task)),
             None => None,
         };
+        let input_bridge = match crate::background_jobs::source_budget() {
+            Some(budget) => match crate::fragment_index_cluster::SourceFence::clone_held(
+                source,
+                source_object_version,
+            ) {
+                Ok(held) => match crate::source_input::SourceInput::open_background_held(
+                    held,
+                    crate::http::stream::file_content_type(&file.path),
+                    budget,
+                )
+                .await
+                {
+                    Ok(input) => Some(input),
+                    Err(error) => {
+                        return refuse_all(IndexOutcome::Unsupported(format!(
+                            "source input unavailable: {error}"
+                        )))
+                    }
+                },
+                Err(error) => return refuse_all(IndexOutcome::Unsupported(error)),
+            },
+            None => None,
+        };
+        let input = input_bridge
+            .as_ref()
+            .map_or(input, |bridge| bridge.url().to_owned());
         let pass = shared_index_pass(file, outputs, Some(&input), probed.expectation, plan);
         #[cfg(unix)]
         let (source_fd, source_handoff) = {
@@ -2515,6 +2586,13 @@ async fn build_attested_pass(
             cancel,
         )
         .await;
+        if let Some(input) = input_bridge {
+            if let Err(error) = input.close_and_wait().await {
+                return refuse_all(IndexOutcome::Unsupported(format!(
+                    "source input cleanup did not settle: {error}"
+                )));
+            }
+        }
         #[allow(unused_mut)]
         let mut built = built;
         #[cfg(target_os = "linux")]
@@ -2523,8 +2601,10 @@ async fn build_attested_pass(
                 built.first().map(|build| &build.outcome),
                 Some(IndexOutcome::Built(_))
             );
+            let paused = plurx_core::process::bounded::source_pause_controller()
+                .map_or(Duration::ZERO, |control| control.paused_duration());
             let wait = budget
-                .saturating_sub(started.elapsed())
+                .saturating_sub(started.elapsed().saturating_sub(paused))
                 .max(DV_TITLE_SCAN_GRACE);
             let pending = ride.finish(file.id, task, lead_built, wait).await;
             if let Some(first) = built.first_mut() {
@@ -2780,6 +2860,23 @@ async fn build_with_args_owned(
             ));
         }
     }
+    let source_pause = plurx_core::process::bounded::source_pause_controller();
+    let source_cancel = cancel.cloned().unwrap_or_default();
+    let source_pause_guard = match source_pause.as_ref() {
+        Some(control) => match control.enlist(&source_cancel).await {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                return all(IndexOutcome::Unsupported(format!(
+                    "source scan did not enter active service: {error}"
+                )))
+            }
+        },
+        None => None,
+    };
+    #[cfg(unix)]
+    if source_pause_guard.is_some() {
+        command.process_group(0);
+    }
     let (mut child, _child_job) = match crate::process_control::spawn_job_owned(
         &mut command,
         crate::process_control::ChildWork::background("fragment index"),
@@ -2803,6 +2900,7 @@ async fn build_with_args_owned(
             )));
         }
     };
+    let source_pause_pid = source_pause_guard.as_ref().and_then(|_| child.id());
     // The child holds its own copies now. Ours must close, or a sibling's
     // reader would wait forever for the EOF our copy keeps from it.
     #[cfg(unix)]
@@ -2931,10 +3029,28 @@ async fn build_with_args_owned(
             shared,
         )));
     }
-    let stream = tokio::time::timeout(
-        budget.saturating_sub(started.elapsed()),
-        futures_util::future::join_all(streams),
-    );
+    let paused = source_pause
+        .as_ref()
+        .map_or(Duration::ZERO, |control| control.paused_duration());
+    let active_budget = budget.saturating_sub(started.elapsed().saturating_sub(paused));
+    let stream = async {
+        let collecting = futures_util::future::join_all(streams);
+        match (source_pause_guard.as_ref(), source_pause_pid) {
+            (Some(guard), Some(pid)) => {
+                guard
+                    .run_group(pid, active_budget, async { Ok(collecting.await) })
+                    .await
+            }
+            _ => tokio::time::timeout(active_budget, collecting)
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "index active budget exhausted",
+                    )
+                }),
+        }
+    };
     tokio::pin!(stream);
     let result = tokio::select! {
         result = &mut stream => Some(result),
@@ -2968,6 +3084,10 @@ async fn build_with_args_owned(
         }
     };
     if deadline_fired {
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = source_pause_pid {
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        }
         let _ = child.start_kill();
     }
     let status =
@@ -3070,6 +3190,16 @@ async fn build_with_args_owned(
                 Ok(_) => break,
                 Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
             }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = source_pause_pid {
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        while !plurx_core::process::bounded::source_group_quiescent(pid as i32, false)
+            .await
+            .unwrap_or(false)
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
     // `scan` is `None` unless the reader ran to the end of the stream: a

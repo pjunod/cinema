@@ -2329,6 +2329,7 @@ async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_
                 plan,
                 &source,
                 &[],
+                true,
                 work.path(),
                 &lost,
                 Some(&transcode),
@@ -2345,7 +2346,7 @@ async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_
         crate::subtitle_ride_along::RideAlongPlan::standalone(work.path(), 8, stamp, vec![0])
             .expect("foreground plan");
     assert!(
-        run_subtitle_source_pass(plan, &source, &[], work.path(), &lost, None, &|| {})
+        run_subtitle_source_pass(plan, &source, &[], true, work.path(), &lost, None, &|| {})
             .await
             .is_ok()
     );

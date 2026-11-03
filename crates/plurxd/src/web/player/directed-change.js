@@ -713,7 +713,7 @@ function startPlaybackControl(v,p,bootstrap){
     // A prepared commit swaps the DOM video while retaining this reporter to
     // deliver the acknowledgement on the predecessor's control session.
     // Sample the visible successor after that swap, never the retired node.
-    const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p)
+    const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p,true)
       ?PlurxPlaybackControl.capture(playbackControlSnapshot(document.getElementById("video"),p),
         p.controlIntentGeneration||0,owner):null;
     // A Shared session also names B's successor transaction; dual-player
@@ -726,7 +726,7 @@ function startPlaybackControl(v,p,bootstrap){
         p.controlReporter===reporter&&p.mediaAttachment===attachment?candidateLinkReceipt(p,p.fileId):null),
       onExchange:({request,response,error,capture:captured})=>{
         if(continueStoppingPlaybackControl(p,reporter,v,request,response,captured)) return;
-        if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter
+        if(!playbackOwnsAttachedMedia(p,true)||p.controlReporter!==reporter
           ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
         if(captured.intentGeneration===(p.controlIntentGeneration||0)){
@@ -840,7 +840,7 @@ function startPlaybackControl(v,p,bootstrap){
 async function openSession(fileId, opts, signal=null, requestId=null, restartSessionId=null){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
-    {playback_id:PLAYBACK_ID,request_id:requestId||newRequestId()},contract.session);
+    {playback_id:PLAYBACK_ID,request_id:requestId||newRequestId(),source_telemetry:"film-v1"},contract.session);
   // The capabilities the plan was derived from, on the request that acts on
   // it. Without this the server has only the body's echo of its own decision
   // to go on, and an echo cannot carry `convert_dolby_vision` — no client has

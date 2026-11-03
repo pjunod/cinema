@@ -25,6 +25,8 @@ pub struct JobAttemptObservation {
 /// from lease renewal. `None` means useful progress is not observable here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceIoHolder {
+    #[serde(default = "source_occupancy_default")]
+    pub active_occupancy: bool,
     pub resource_key: String,
     pub work_id: String,
     pub kind: String,
@@ -35,11 +37,14 @@ pub struct SourceIoHolder {
     pub last_phase_at_ms: Option<i64>,
 }
 
+fn source_occupancy_default() -> bool {
+    true
+}
 pub(super) const SOURCE_IO_HOLDERS_SQL: &str = r#"
 SELECT json_object('resource_key', resource_key, 'work_id', work_id,
     'kind', kind, 'priority', priority, 'started_at_ms', started_at_ms,
     'lease_expires_at_ms', lease_expires_at_ms, 'phase', phase,
-    'last_phase_at_ms', last_phase_at_ms) AS result_json
+    'last_phase_at_ms', last_phase_at_ms, 'active_occupancy',json(CASE WHEN active_occupancy=1 THEN 'true' ELSE 'false' END)) AS result_json
 FROM (
   SELECT held.resource_key, held.job_id AS work_id, job.kind,
     CASE WHEN EXISTS (SELECT 1 FROM background_job_waiters viewer
@@ -49,7 +54,7 @@ FROM (
       THEN 'viewer' ELSE 'maintenance' END AS priority,
     COALESCE(attempt.started_at_ms, job.updated_at_ms) AS started_at_ms,
     held.expires_at_ms AS lease_expires_at_ms,
-    NULL AS phase, NULL AS last_phase_at_ms
+    NULL AS phase, NULL AS last_phase_at_ms, 1 AS active_occupancy
   FROM background_job_reservations held JOIN background_jobs job ON job.id = held.job_id
   LEFT JOIN background_job_attempts attempt ON attempt.job_id = held.job_id
     AND attempt.fence = held.fence
@@ -64,14 +69,38 @@ FROM (
       THEN 'viewer' ELSE 'maintenance' END AS priority,
     COALESCE(attempt.started_at_ms, request.updated_at_ms) AS started_at_ms,
     held.expires_at_ms AS lease_expires_at_ms,
-    attempt.phase AS phase, attempt.phase_updated_at_ms AS last_phase_at_ms
+    attempt.phase AS phase, attempt.phase_updated_at_ms AS last_phase_at_ms, 1 AS active_occupancy
   FROM analysis_source_reservations held
   JOIN analysis_requests request ON request.request_id = held.request_id
   LEFT JOIN analysis_attempts attempt ON attempt.request_id = held.request_id
     AND attempt.claim_epoch = held.fence
   WHERE (held.resource_key = 'source_io' OR held.resource_key GLOB 'source_io:*')
     AND held.expires_at_ms > json_extract($1, '$.now_ms')
-) ORDER BY started_at_ms, work_id LIMIT 16
+  UNION ALL
+  SELECT resource.resource_key,owner.owner_id,'foreground_source','foreground',owner.started_at_ms,
+    owner.lease_expires_at_ms,CASE WHEN owner.lease_expires_at_ms<=json_extract($1,'$.now_ms')
+      AND json_extract(owner.projection_json,'$.source_quiescent')!=1 THEN 'cleanup_pending' ELSE owner.phase END,owner.updated_at_ms,
+    CASE WHEN owner.phase IN ('source_idle','sharing') AND json_extract(owner.projection_json,'$.source_quiescent')=1 THEN 0 ELSE 1 END
+  FROM foreground_source_owners owner JOIN foreground_source_required_resources resource ON resource.owner_id=owner.owner_id
+  WHERE owner.lease_expires_at_ms>json_extract($1,'$.now_ms') OR json_extract(owner.projection_json,'$.source_quiescent')!=1
+  UNION ALL
+  SELECT resource.value,custody.work_id,'background_source','maintenance',custody.started_at_ms,custody.authority_expires_at_ms,
+    CASE WHEN custody.phase='paused' THEN 'source_paused' WHEN custody.authority_expires_at_ms>json_extract($1,'$.now_ms')
+      THEN CASE custody.owner_kind WHEN 'lease' THEN 'read_attestation' WHEN 'offline' THEN 'offline_source' ELSE custody.phase END ELSE 'cleanup_pending' END,custody.updated_at_ms,
+    CASE WHEN custody.phase='paused' THEN 0 ELSE 1 END
+  FROM background_source_current_owners custody,json_each(custody.resource_keys_json) resource
+  WHERE NOT EXISTS(SELECT 1 FROM background_job_reservations held WHERE custody.owner_kind='job' AND held.job_id=custody.work_id
+      AND held.fence=custody.fence AND held.resource_key=resource.value AND held.expires_at_ms>json_extract($1,'$.now_ms'))
+    AND NOT EXISTS(SELECT 1 FROM analysis_source_reservations held WHERE custody.owner_kind='analysis' AND held.request_id=custody.work_id
+      AND held.fence=custody.fence AND held.resource_key=resource.value AND held.expires_at_ms>json_extract($1,'$.now_ms'))
+    AND NOT EXISTS(SELECT 1 FROM background_source_pauses paused WHERE custody.owner_kind='job' AND paused.job_id=custody.work_id
+      AND paused.fence=custody.fence AND paused.phase='paused')
+  UNION ALL
+  SELECT resource.value,job.id,job.kind,'maintenance',paused.paused_at_ms,job.lease_expires_ms,'source_paused',paused.paused_at_ms,0
+  FROM background_source_pauses paused JOIN background_jobs job ON job.id=paused.job_id AND job.fence=paused.fence,
+    json_each(paused.resource_keys_json) resource
+  WHERE paused.phase='paused' AND job.state IN ('running','cancelling') AND job.lease_expires_ms>json_extract($1,'$.now_ms')
+) ORDER BY (priority='foreground') DESC,started_at_ms, work_id LIMIT 128
 "#;
 
 pub(super) const COUNTS_SQL: &str = r#"

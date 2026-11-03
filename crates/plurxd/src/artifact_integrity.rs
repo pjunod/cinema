@@ -281,7 +281,8 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                     })?,
                     deadline,
                     JobKind::ArtifactVerify,
-                )?;
+                )
+                .await?;
                 let fence = active.fence();
                 let settlement = if let Some(location) = location {
                     let loss = fence.loss_token();

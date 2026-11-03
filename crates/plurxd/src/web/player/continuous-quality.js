@@ -68,8 +68,9 @@ function continuousQualitySustained(row){
   return row.sustained_bps==null||continuousQualityInteger(row.sustained_bps,1)&&row.sustained_bps<=row.peak_bps;
 }
 function continuousQualityFamily(value){
-  if(!value||value.version!==1||!['autonomous_reserved','controlled'].includes(value.mode)||!continuousQualityArtifact(value.family_id)
-    ||value.master!=='master.m3u8'||!Array.isArray(value.video)||value.video.length<2||value.video.length>8)return false;
+  if(!value||![1,2].includes(value.version)||!['autonomous_reserved','controlled'].includes(value.mode)||!continuousQualityArtifact(value.family_id)
+    ||value.master!=='master.m3u8'||!Array.isArray(value.video)||value.video.length<(value.version===2?1:2)||value.video.length>8
+    ||value.version===2&&(value.mode!=='controlled'||value.video.length>2||value.family_revision!==value.video.length))return false;
   const rows=value.video;
   if(!rows.every(row=>row&&typeof row.candidate_id==='string'&&/^[0-9a-f]{32}$/.test(row.candidate_id)
     &&continuousQualityArtifact(row.rendition_id)&&continuousQualityArtifact(row.init_id)
@@ -91,6 +92,35 @@ function continuousQualityFamily(value){
     &&audio.playlist===`audio/${audio.rendition_id}/index.m3u8`
     &&!rows.some(row=>row.rendition_id===audio.rendition_id));
 }
+// Same attachment authority, monotonically additive verified media. Existing
+// init/audio objects and candidate bindings cannot be replaced by a refresh.
+function continuousQualityFamilyUpdate(previous,next){
+  if(!continuousQualityFamily(next)||previous.version!==2||next.version!==2
+    ||next.family_id!==previous.family_id||next.mode!==previous.mode
+    ||next.family_revision<previous.family_revision
+    ||JSON.stringify(next.audio)!==JSON.stringify(previous.audio))return false;
+  return previous.video.every(row=>next.video.some(other=>JSON.stringify(row)===JSON.stringify(other)))
+    &&(next.family_revision!==previous.family_revision||JSON.stringify(next)===JSON.stringify(previous));
+}
+// hls.js 1.6.19's content-steering integration publishes Level objects through
+// LEVELS_UPDATED. Keep that pinned API covered by the bundled-library test.
+function continuousQualityFamilyLevels(hls,next,wanted,parentPath){
+  const levels=hls.levels.slice(),template=levels.find(level=>level.url.some(url=>new URL(url,location.href).pathname===parentPath+wanted.playlist));
+  if(!template||typeof hls.trigger!=='function'||!Hls.Events.LEVELS_UPDATED)throw new Error('Continuous level update unavailable');
+  for(const row of next.video){
+    const url=new URL(parentPath+row.playlist,location.href).href;
+    if(levels.some(level=>level.url.includes(url)))continue;
+    // Use the bundled hls.js Level/AttrList implementations, as its content
+    // steering path does. Preserve existing Level objects and indexes so
+    // in-flight fragments, SourceBuffers and shared audio keep their owner.
+    const attrs=new template.attrs.constructor({...template.attrs,
+      RESOLUTION:`${row.width}x${row.height}`,BANDWIDTH:String(row.peak_bps+(next.audio?.peak_bps||0))});
+    levels.push(new template.constructor({attrs,url,width:row.width,height:row.height,
+      bitrate:row.peak_bps+(next.audio?.peak_bps||0),videoCodec:row.codec,
+      audioCodec:template.audioCodec,name:template.name}));
+  }
+  return levels;
+}
 async function continuousQualityFetch(url,body,{signal=null,limit=270336,timeoutMs=14000}={}){
   const controller=new AbortController(),abort=()=>controller.abort();
   const timer=setTimeout(abort,timeoutMs);let reader=null;
@@ -98,12 +128,9 @@ async function continuousQualityFetch(url,body,{signal=null,limit=270336,timeout
   try{
     const response=await fetch(url,{method:body?'POST':'GET',signal:controller.signal,
       cache:'no-store',headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):null});
-    if(!response.ok){
-      const retry=response.headers.get('retry-after');
-      const retryAfterMs=retry!=null&&/^\d+$/.test(retry)?Math.min(1000,Number(retry)*1000):1000;
-      throw Object.assign(new Error(`Continuous quality request refused (${response.status})`),
-        {status:response.status,retryAfterMs});
-    }
+    // Refusals have the same bounded streaming decoder as successful replies.
+    // Keep their typed identity: bootstrap pending owns this exact session.
+    if(!response.ok)limit=Math.min(limit,16384);
     const declared=response.headers.get('content-length');
     if(declared!=null&&(!/^\d+$/.test(declared)||Number(declared)>limit))throw new Error('Continuous quality response bound');
     if(!response.body||!response.body.getReader)throw new Error('Continuous quality response stream missing');
@@ -111,10 +138,31 @@ async function continuousQualityFetch(url,body,{signal=null,limit=270336,timeout
     for(;;){const {done,value}=await reader.read();if(done)break;length+=value.length;
       if(length>limit)throw new Error('Continuous quality response bound');chunks.push(value);}
     const bytes=new Uint8Array(length);let at=0;for(const chunk of chunks){bytes.set(chunk,at);at+=chunk.length;}
-    return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
+    const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+    if(!response.ok){
+      const retry=response.headers.get('retry-after');
+      const retryAfterMs=retry!=null&&/^\d+$/.test(retry)?Math.max(1,Math.min(1000,Number(retry)*1000)):1000;
+      const failure=PlaybackPolicy.parseStreamFailure({status:response.status,body:text});
+      throw Object.assign(new Error(failure?.message||`Continuous quality request refused (${response.status})`),
+        {status:response.status,retryAfterMs,streamFailure:failure});
+    }
+    return JSON.parse(text);
   }finally{
     clearTimeout(timer);if(signal)signal.removeEventListener('abort',abort);
     if(reader){try{await reader.cancel();}catch(e){}reader.releaseLock();}
+  }
+}
+// The preparation owner's abort signal is its original absolute deadline.
+// Pending metadata retries the same GET; it never re-creates or releases work
+// that is still needed to satisfy that GET, nor creates another timeout budget.
+async function continuousQualityBootstrapFamily(url,signal,exchange=continuousQualityFetch,wait=playbackRetryDelay){
+  for(;;){
+    if(signal?.aborted)throw Object.assign(new Error('Playback preparation superseded.'),{name:'AbortError'});
+    try{return await exchange(url,null,{signal,limit:32768});}
+    catch(error){
+      if(!signal||signal.aborted||error.status!==503||error.streamFailure?.code!=='segment_pending')throw error;
+      await wait(Math.max(1,Math.min(1000,error.retryAfterMs||1000)),signal);
+    }
   }
 }
 function continuousQualityProtocol(bootstrap,attachment,exchange=continuousQualityFetch,
@@ -219,7 +267,8 @@ function continuousQualitySelectionCompatible(player,selection){
   if(!['audio_track','audio_offset_ms','codec','dynamic_range'].every(key=>selection[key]===base[key])
     ||JSON.stringify(selection.subtitle)!==JSON.stringify(base.subtitle))return false;
   const candidate=continuousQualityCandidate(player,selection);
-  return !!candidate&&controller.family.video.some(row=>row.candidate_id===candidate.id);
+  return !!candidate&&(controller.family.video.some(row=>row.candidate_id===candidate.id)
+    ||controller.family.version===2&&player.continuousQualityBootstrap.companion_candidate_id===candidate.id);
 }
 // Auto compares a measured link against this cost, so it is the rate each
 // role needs from a link (video plus the shared soundtrack). peak_bps is one
@@ -268,7 +317,7 @@ async function openContinuousQualitySession(fileId,body,player,signal,restartSes
   }
   let response;
   try{response=await api(`/files/${fileId}/hls/continuous-sessions`,{method:'POST',signal,
-    body:{version:1,controlled:true,family_generation:attempts.get(attemptKey),...pair,start}});}
+    body:{version:2,controlled:true,family_generation:attempts.get(attemptKey),...pair,start}});}
   catch(error){if(error.status===404||error.status===405)return null;throw error;}
   const playback=response?.playback,bootstrap=response?.quality;
   try{
@@ -277,17 +326,18 @@ async function openContinuousQualitySession(fileId,body,player,signal,restartSes
       ||bootstrap.schedule_url!==`/api/v1/hls/${playback.session_id}/quality-schedule`
       ||bootstrap.family_url!==`/api/v1/hls/${playback.session_id}/quality-family`)
       throw new Error('Continuous family bootstrap shape');
-    const family=await continuousQualityFetch(bootstrap.family_url,null,{signal,limit:32768});
+    const family=await continuousQualityBootstrapFamily(bootstrap.family_url,signal);
     if(!continuousQualityFamily(family)||!family.video.some(row=>row.candidate_id===candidate.id)
-      ||!family.video.some(row=>row.candidate_id===pair.companion_candidate_id))throw new Error('Continuous family catalog binding');
+      ||!family.video.some(row=>row.candidate_id===pair.companion_candidate_id)&&family.version!==2
+      ||family.video.some(row=>![candidate.id,pair.companion_candidate_id].includes(row.candidate_id)))throw new Error('Continuous family catalog binding');
     return {...playback,quality_candidates:continuousQualityBoundCatalog(catalog.candidates,family),
-      continuous_quality:{...bootstrap,family,primary_candidate_id:candidate.id,selection}};
+      continuous_quality:{...bootstrap,family,primary_candidate_id:candidate.id,companion_candidate_id:pair.companion_candidate_id,selection}};
   }catch(error){if(playback?.session_id)releaseSession(playback.session_id);throw error;}
 }
 // Attachment-owned hls.js adapter. Optional choices affect future loads only;
 // already exposed or appended bytes retain their fact/disposal owner.
 function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=continuousQualityFetch){
-  const family=bootstrap.family;
+  let family=bootstrap.family;
   if(!continuousQualityFamily(family))throw new Error('Continuous quality family metadata');
   const holder=player.abr||player;
   const lifetime=holder.mediaIntent?.lifetimeId||newRequestId();
@@ -295,6 +345,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   const protocol=continuousQualityProtocol(bootstrap,{client_instance_id:CONTROL_CLIENT_ID,
     lifetime_id:lifetime,attachment_id:continuousQualityNewIdentity(),family_id:family.family_id},exchange);
   const readers=new Map(),records=new Map(),buffers=new Set(),loaders=new Set();
+  const familyAbort=new AbortController();
   const verifier=continuousMediaVerifier();
   let hls=null,closed=false,mediaDetached=false,transaction=null,revision=0,frontier=0,frameToken=null;
   const pendingAppends=new Map(),pendingDisposals=new Set();
@@ -305,6 +356,24 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   if(!wanted)throw new Error('Continuous quality initial candidate');
   const origin=new URL(bootstrap.schedule_url,location.href).origin;
   const parentPath=new URL(bootstrap.schedule_url,location.href).pathname.replace(/quality-schedule$/,'');
+  let familyFlight=null;
+  function refreshFamily(){
+    if(!current()||family.version!==2||family.family_revision>=2)return Promise.resolve();
+    if(!familyFlight)familyFlight=readFamily().finally(()=>{familyFlight=null;});
+    return familyFlight;
+  }
+  async function readFamily(){
+    const next=await exchange(bootstrap.family_url,null,{signal:familyAbort.signal,limit:32768});
+    if(!current())return;
+    if(!continuousQualityFamilyUpdate(family,next)
+      ||next.video.some(row=>![bootstrap.primary_candidate_id,bootstrap.companion_candidate_id].includes(row.candidate_id)))
+      throw new Error('Continuous family update identity');
+    if(next.family_revision===family.family_revision)return;
+    const levels=continuousQualityFamilyLevels(hls,next,wanted,parentPath);
+    family=next;bootstrap.family=next;
+    player.qualityCandidates=continuousQualityBoundCatalog(player.qualityCandidates,family);
+    hls.trigger(Hls.Events.LEVELS_UPDATED,{levels});
+  }
   function resource(url){
     const parsed=new URL(url,location.href);
     if(parsed.origin!==origin||!parsed.pathname.startsWith(parentPath))return null;
@@ -523,7 +592,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   }
   function frames(){
     if(closed||typeof video.requestVideoFrameCallback!=='function')return;
-    frameToken=video.requestVideoFrameCallback((wall,metadata)=>{
+    frameToken=requestPlaybackVideoFrame(video,(wall,metadata)=>{
       frameToken=null;if(!current()){frames();return;}
       const width=metadata.width||video.videoWidth,height=metadata.height||video.videoHeight;
       const matches=Array.from(records.values()).filter(row=>row.type==='video'&&row.appended&&!row.removed&&!row.disposed&&!row.presented
@@ -556,7 +625,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     });
   }
   const adapter={
-    protocol,family,get wanted(){return wanted;},get frontier(){return frontier;},get closed(){return closed;},
+    protocol,get family(){return family;},get wanted(){return wanted;},get frontier(){return frontier;},get closed(){return closed;},
     transactionRoot:root,
     loader:Base=>class {
       constructor(config){this.base=new Base(config);this.aborted=false;this.destroyed=false;this.context=null;loaders.add(this);}
@@ -567,6 +636,8 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
           if(this.aborted||this.destroyed||!current())return;
           let found;try{found=resource(ctx.url);}catch(error){callbacks.onError({code:0,text:error.message},ctx,network,stats);return;}
           if(!found){if(!this.aborted)callbacks.onSuccess(response,stats,ctx,network);return;}
+          if(player.continuousQualityPresented&&family.version===2&&family.family_revision<2)
+            refreshFamily().catch(note);
           serial(()=>this.aborted||this.destroyed||!current()?null:authorize(found,response.data,captured)).then(record=>{
             if(this.aborted||!current())return;
             if(record){record.exposed=true;if(found.type==='video')frontier=Math.max(frontier,record.interval.through_tick);}
@@ -633,6 +704,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     },
     choose(candidateId,live=()=>true){return serial(async()=>{
       if(!current())return 'superseded';
+      try{await refreshFamily();}catch(error){note(error);}
       const next=family.video.find(row=>row.candidate_id===candidateId);if(!next)return 'outside_family';
       if(next.rendition_id===wanted.rendition_id)return 'continuous';
       const previous=wanted,old=transaction,choiceSeek=seekRevision;
@@ -696,9 +768,9 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     });},
     detached(){
       if(!mediaDetached)return Promise.reject(new Error('Continuous media disposal needs detach receipt'));
-      if(closed)return;closed=true;verifier.close();
+      if(closed)return;closed=true;familyAbort.abort();verifier.close();
       if(disposalTimer!=null){clearTimeout(disposalTimer);disposalTimer=null;}
-      if(frameToken!=null)try{video.cancelVideoFrameCallback(frameToken);}catch(e){}
+      if(frameToken!=null)try{cancelPlaybackVideoFrame(video,frameToken);}catch(e){}
       for(const loader of loaders)loader.abort();loaders.clear();
       // Called only after the hls.js MediaSource has detached. Include pins
       // never delivered to the loader, but never use End as this barrier.

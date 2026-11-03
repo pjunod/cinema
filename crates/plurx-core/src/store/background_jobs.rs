@@ -588,14 +588,20 @@ WHERE id = json_extract($1, '$.job_id')
   -- The outer CAS already fixes id to this request. Bind resource lookup to
   -- that same value so SQLite pushes the identity into every UNION branch
   -- of the resource view instead of scanning all jobs under the Raft writer.
+  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required JOIN source_io_occupancy held
+      ON (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
+    WHERE required.job_id=json_extract($1,'$.job_id') AND held.custody_id IS NOT NULL
+      AND held.active_occupancy=1 AND held.expires_at_ms<=json_extract($1,'$.now_ms'))
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = json_extract($1, '$.job_id') AND ((SELECT COUNT(*) FROM background_job_reservations held
-      WHERE held.resource_key = required.resource_key AND held.expires_at_ms > json_extract($1, '$.now_ms')
-        AND held.job_id != json_extract($1, '$.job_id'))
-      + (SELECT COUNT(*) FROM analysis_source_reservations held
-          WHERE held.resource_key = required.resource_key
-            AND held.expires_at_ms > json_extract($1, '$.now_ms')))
-      >= 2)
+    JOIN foreground_source_permissions fg ON required.resource_key LIKE 'source_io%'
+      AND (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
+    WHERE required.job_id=json_extract($1,'$.job_id') AND (fg.lease_expires_at_ms>json_extract($1,'$.now_ms') OR fg.custody_held=1)
+      AND (fg.lease_expires_at_ms<=json_extract($1,'$.now_ms') OR COALESCE(fg.permits_through_ms,0)<=json_extract($1,'$.now_ms')))
+  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = json_extract($1, '$.job_id') AND (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
+      WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.active_occupancy=1
+        AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)
+        AND (held.work_id!=json_extract($1,'$.job_id') OR held.custody_id IS NOT NULL))>=2)
   -- A second source reader is reserved for live demand. Classification uses
   -- durable consumer ownership, never the job's caller-supplied priority.
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
@@ -630,7 +636,7 @@ WHERE id = json_extract($1, '$.job_id')
                     AND request.trigger = 'playback'
                     AND request.state IN ('queued','running')))))
       AND ((SELECT COUNT(*) FROM background_job_reservations held
-          WHERE held.resource_key = required.resource_key
+          WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
             AND held.expires_at_ms > json_extract($1, '$.now_ms')
             AND held.job_id != background_jobs.id
             AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
@@ -663,13 +669,17 @@ WHERE id = json_extract($1, '$.job_id')
                           AND request.trigger = 'playback'
                           AND request.state IN ('queued','running'))))))
         + (SELECT COUNT(*) FROM analysis_source_reservations held
-            WHERE held.resource_key = required.resource_key
+            WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
               AND held.expires_at_ms > json_extract($1, '$.now_ms')
               AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
                   WHERE viewer.request_scope = 'playback-analysis'
                     AND viewer.job_id = held.request_id
                     AND viewer.state = 'pending'
-                    AND viewer.deadline_ms > json_extract($1, '$.now_ms'))) >= 1))
+                    AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
+        + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
+          WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
+            AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
+            AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)) >= 1))
 "#
 );
 
@@ -695,7 +705,11 @@ WITH inputs AS (
                     SELECT 1 FROM background_job_reservations held
                     WHERE held.job_id = job.id AND held.fence = job.fence
                         AND held.resource_key = required.resource_key
-                        AND held.expires_at_ms >= job.lease_expires_ms))
+                        AND held.expires_at_ms >= job.lease_expires_ms)
+                  AND NOT EXISTS(SELECT 1 FROM background_source_pauses paused,json_each(paused.resource_keys_json) resource
+                    WHERE paused.job_id=job.id AND paused.fence=job.fence AND paused.node_id=job.owner_node_id
+                      AND paused.boot_id=job.owner_boot_id AND paused.claim_id=job.claim_id AND paused.phase='paused'
+                      AND resource.value=required.resource_key))
     AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > now_ms)
     AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || job.owner_node_id)
     AND job.revision < 9223372036854775807
@@ -717,13 +731,23 @@ UPDATE background_jobs SET
   failure_policy = COALESCE(json_extract($1, '$.failure_policy'), CASE json_extract($1, '$.settlement.disposition')
     WHEN 'retry' THEN 'retry' WHEN 'fail' THEN 'terminal' END),
   not_before_ms = COALESCE(json_extract($1, '$.settlement.not_before_ms'), not_before_ms),
-  checkpoint_json = CASE WHEN json_extract($1, '$.settlement.disposition') != 'yield' THEN checkpoint_json
+  checkpoint_json = CASE WHEN json_extract($1, '$.settlement.disposition') = 'yield'
+      AND json_type(checkpoint_json, '$.source_attestation') = 'object'
+    THEN json_set((
+CASE WHEN json_extract($1, '$.settlement.disposition') != 'yield' THEN checkpoint_json
     WHEN json_extract(checkpoint_json, '$.effective_recipe_hash') IS NOT NULL THEN json_set(
       CASE WHEN json_type($1, '$.settlement.checkpoint') = 'object' THEN json_extract($1, '$.settlement.checkpoint')
         ELSE checkpoint_json END,
       '$.effective_recipe_hash', json_extract(checkpoint_json, '$.effective_recipe_hash'),
       '$.recipe_node_id', json_extract(checkpoint_json, '$.recipe_node_id'))
-    ELSE COALESCE(json_extract($1, '$.settlement.checkpoint'), checkpoint_json) END,
+    ELSE COALESCE(json_extract($1, '$.settlement.checkpoint'), checkpoint_json) END), '$.source_attestation', json_extract(checkpoint_json, '$.source_attestation'))
+    ELSE CASE WHEN json_extract($1, '$.settlement.disposition') != 'yield' THEN checkpoint_json
+    WHEN json_extract(checkpoint_json, '$.effective_recipe_hash') IS NOT NULL THEN json_set(
+      CASE WHEN json_type($1, '$.settlement.checkpoint') = 'object' THEN json_extract($1, '$.settlement.checkpoint')
+        ELSE checkpoint_json END,
+      '$.effective_recipe_hash', json_extract(checkpoint_json, '$.effective_recipe_hash'),
+      '$.recipe_node_id', json_extract(checkpoint_json, '$.recipe_node_id'))
+    ELSE COALESCE(json_extract($1, '$.settlement.checkpoint'), checkpoint_json) END END,
   retry_deadline_ms = COALESCE(json_extract($1, '$.retry_deadline_ms'), retry_deadline_ms),
   index_diagnostic_json = COALESCE(json_extract($1, '$.index_diagnostic_json'), index_diagnostic_json),
   attempt_errors = CASE WHEN json_extract($1, '$.settlement.disposition') IN ('retry','fail') THEN
@@ -2339,10 +2363,105 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn job_labels(&self, ids: &[String]) -> Result<Vec<JobLabel>, StoreError>;
     async fn job_counts(&self, now_ms: i64) -> Result<Vec<JobCount>, StoreError>;
     async fn source_io_holders(&self, now_ms: i64) -> Result<Vec<SourceIoHolder>, StoreError>;
+    async fn register_foreground_source(
+        &self,
+        owner: super::background_jobs_resources::ForegroundSourceOwner,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn project_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        projection: super::background_jobs_resources::ForegroundSourceProjection,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn release_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn foreground_source_pressure(
+        &self,
+        file_id: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn list_foreground_source_owners(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn resolve_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
+    async fn register_background_source_custody(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::BackgroundSourceRegistration, StoreError>;
+    async fn claim_background_source_service(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::BackgroundSourceServiceGrant>, StoreError>;
+    async fn release_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn close_read_attestation_source_lease(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn suspend_playback_analysis_interest(
+        &self,
+        receipt: super::background_jobs_resources::PlaybackAnalysisSuspension,
+        now_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::PlaybackAnalysisSuspension>, StoreError>;
+    async fn restore_playback_analysis_interest(
+        &self,
+        receipt: super::background_jobs_resources::PlaybackAnalysisSuspension,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn background_source_may_continue(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn pause_background_source(
+        &self,
+        token: JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn resume_background_source(
+        &self,
+        token: JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
     async fn job_attempts(&self, job_id: &str) -> Result<Vec<JobAttemptObservation>, StoreError>;
     async fn list_jobs(&self, query: JobQuery) -> Result<JobPage, StoreError>;
     async fn job_candidates(&self, query: CandidateQuery) -> Result<CandidatePage, StoreError>;
     async fn renew_jobs(&self, request: RenewJobs) -> Result<Vec<RenewOutcome>, StoreError>;
+    /// Node-local continuation artifacts still referenced by live jobs or
+    /// analysis requests. Used only for orphan retention.
+    async fn source_checkpoint_artifacts(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
+    /// Save resumable input under an exact analysis request incarnation.
+    async fn checkpoint_analysis_source(
+        &self,
+        request: super::fragment_index_cluster::AnalysisRequest,
+        checkpoint: serde_json::Value,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    /// Save resumable input without releasing the running attempt's source
+    /// reservation or advancing its ownership revision.
+    async fn checkpoint_job(
+        &self,
+        token: JobToken,
+        checkpoint: serde_json::Value,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     /// True acknowledges this token's transition. Read current job state
     /// separately: per-interest reduction and a new claim may advance it.
     async fn settle_job(&self, request: SettleJob) -> Result<bool, StoreError>;
@@ -2395,7 +2514,11 @@ const CLAIM_RESOURCE_SNAPSHOT: &str = r#"NOT EXISTS (
         SELECT 1 FROM background_job_reservations held
         WHERE held.job_id = background_jobs.id AND held.fence = background_jobs.fence
             AND held.resource_key = required.resource_key
-            AND held.expires_at_ms >= background_jobs.lease_expires_ms))"#;
+            AND held.expires_at_ms >= background_jobs.lease_expires_ms)
+      AND NOT EXISTS(SELECT 1 FROM background_source_pauses paused,json_each(paused.resource_keys_json) resource
+        WHERE paused.job_id=background_jobs.id AND paused.fence=background_jobs.fence
+          AND paused.node_id=background_jobs.owner_node_id AND paused.boot_id=background_jobs.owner_boot_id
+          AND paused.claim_id=background_jobs.claim_id AND paused.phase='paused' AND resource.value=required.resource_key))"#;
 
 #[derive(Deserialize)]
 struct ClaimSnapshot {
@@ -3571,6 +3694,87 @@ LIMIT 1
         Ok(!rows.is_empty())
     }
 
+    async fn source_checkpoint_artifacts(&self, node_id: &str) -> Result<Vec<String>, StoreError> {
+        if !identifier(node_id) {
+            return Err(invalid("invalid checkpoint node"));
+        }
+        self.queue_sql(
+            r#"SELECT json_quote(json_extract(checkpoint_json, '$.source_attestation.artifact')) AS result_json
+            FROM background_jobs WHERE state IN ('queued','running','cancelling')
+                AND json_extract(checkpoint_json, '$.source_attestation.node_id') = json_extract($1, '$.node_id')
+                AND json_type(checkpoint_json, '$.source_attestation.artifact') = 'text'
+            UNION
+            SELECT json_quote(json_extract(reference.artifact_json, '$.source_attestation.artifact'))
+            FROM analysis_source_checkpoints reference JOIN analysis_requests request USING(request_id)
+            WHERE request.state IN ('queued','running') AND request.cancel_requested = 0
+                AND reference.owner_node_id = json_extract($1, '$.node_id')
+                AND json_type(reference.artifact_json, '$.source_attestation.artifact') = 'text'"#.into(),
+            encode(&serde_json::json!({"node_id":node_id}))?, false, true,
+        ).await?.iter().map(|row| decode(row)).collect()
+    }
+
+    async fn checkpoint_analysis_source(
+        &self,
+        request: super::fragment_index_cluster::AnalysisRequest,
+        checkpoint: serde_json::Value,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if now_ms < 0
+            || request.fence <= 0
+            || !identifier(&request.owner_node_id)
+            || encode(&checkpoint)?.len() > MAX_CHECKPOINT_BYTES
+            || !checkpoint.is_object()
+        {
+            return Err(invalid("invalid analysis source checkpoint"));
+        }
+        let rows = self.queue_sql(
+            r#"INSERT INTO analysis_source_checkpoints(request_id, fence, owner_node_id, artifact_json)
+            SELECT request_id, fence, owner_node_id, json_extract($1, '$.checkpoint')
+            FROM analysis_requests WHERE request_id = json_extract($1, '$.request.request_id')
+                AND state = 'running' AND cancel_requested = 0
+                AND fence = json_extract($1, '$.request.fence')
+                AND owner_node_id = json_extract($1, '$.request.owner_node_id')
+                AND requested_generation = json_extract($1, '$.request.requested_generation')
+                AND lease_expires_ms > json_extract($1, '$.now_ms')
+            ON CONFLICT(request_id) DO UPDATE SET fence=excluded.fence,
+                owner_node_id=excluded.owner_node_id, artifact_json=excluded.artifact_json
+            RETURNING 'true' AS result_json"#.into(),
+            encode(&serde_json::json!({"request":request,"checkpoint":checkpoint,"now_ms":now_ms}))?,
+            true, true,
+        ).await?;
+        Ok(!rows.is_empty())
+    }
+
+    async fn checkpoint_job(
+        &self,
+        token: JobToken,
+        checkpoint: serde_json::Value,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        token.validate()?;
+        if now_ms < 0
+            || encode(&checkpoint)?.len() > MAX_CHECKPOINT_BYTES
+            || !checkpoint.is_object()
+        {
+            return Err(invalid("invalid background checkpoint"));
+        }
+        let rows = self.queue_sql(
+            r#"UPDATE background_jobs SET checkpoint_json = json_patch(COALESCE(checkpoint_json, '{}'), json_extract($1, '$.checkpoint')),
+                updated_at_ms = json_extract($1, '$.now_ms')
+            WHERE id = json_extract($1, '$.token.job_id') AND state = 'running'
+                AND owner_node_id = json_extract($1, '$.token.node_id')
+                AND owner_boot_id = json_extract($1, '$.token.boot_id')
+                AND claim_id = json_extract($1, '$.token.claim_id')
+                AND fence = json_extract($1, '$.token.fence')
+                AND revision = json_extract($1, '$.token.revision')
+                AND lease_expires_ms > json_extract($1, '$.now_ms')
+            RETURNING 'true' AS result_json"#.into(),
+            encode(&serde_json::json!({"token":token,"checkpoint":checkpoint,"now_ms":now_ms}))?,
+            true, true,
+        ).await?;
+        Ok(!rows.is_empty())
+    }
+
     async fn settle_job(&self, request: SettleJob) -> Result<bool, StoreError> {
         request.token.validate()?;
         if request.now_ms < 0 {
@@ -3990,6 +4194,127 @@ LIMIT 1
         .collect()
     }
 
+    async fn register_foreground_source(
+        &self,
+        owner: super::background_jobs_resources::ForegroundSourceOwner,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
+        super::background_jobs_resources::register_foreground(
+            self,
+            owner,
+            now_ms,
+            lease_expires_at_ms,
+        )
+        .await
+    }
+    async fn project_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        projection: super::background_jobs_resources::ForegroundSourceProjection,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
+        super::background_jobs_resources::project_foreground(
+            self,
+            token,
+            projection,
+            now_ms,
+            lease_expires_at_ms,
+        )
+        .await
+    }
+    async fn release_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::release_foreground(self, token, now_ms).await
+    }
+    async fn foreground_source_pressure(
+        &self,
+        file_id: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::foreground_pressure(self, file_id, now_ms).await
+    }
+    async fn list_foreground_source_owners(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
+        super::background_jobs_resources::foreground_owners(self, node_id).await
+    }
+    async fn resolve_foreground_source(
+        &self,
+        token: super::background_jobs_resources::ForegroundSourceToken,
+    ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
+        super::background_jobs_resources::resolve_foreground(self, token).await
+    }
+    async fn register_background_source_custody(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::BackgroundSourceRegistration, StoreError> {
+        super::background_jobs_resources::register_background_typed(self, owner, now_ms).await
+    }
+    async fn claim_background_source_service(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::BackgroundSourceServiceGrant>, StoreError>
+    {
+        super::background_jobs_resources::claim_background_service(self, owner, now_ms).await
+    }
+    async fn release_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::release_background_custody(self, token, now_ms).await
+    }
+    async fn close_read_attestation_source_lease(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::close_read_attestation_lease(self, owner, now_ms).await
+    }
+    async fn suspend_playback_analysis_interest(
+        &self,
+        receipt: super::background_jobs_resources::PlaybackAnalysisSuspension,
+        now_ms: i64,
+    ) -> Result<Option<super::background_jobs_resources::PlaybackAnalysisSuspension>, StoreError>
+    {
+        super::background_jobs_resources::suspend_analysis_interest(self, receipt, now_ms).await
+    }
+    async fn restore_playback_analysis_interest(
+        &self,
+        receipt: super::background_jobs_resources::PlaybackAnalysisSuspension,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::restore_analysis_interest(self, receipt, now_ms).await
+    }
+    async fn background_source_may_continue(
+        &self,
+        owner: super::background_jobs_resources::BackgroundSourceOwner,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::background_may_continue(self, owner, now_ms).await
+    }
+    async fn pause_background_source(
+        &self,
+        token: JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::pause_background(self, token, now_ms).await
+    }
+    async fn resume_background_source(
+        &self,
+        token: JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::resume_background(self, token, now_ms).await
+    }
     async fn job_attempts(&self, job_id: &str) -> Result<Vec<JobAttemptObservation>, StoreError> {
         if uuid::Uuid::parse_str(job_id).is_err() {
             return Err(invalid("invalid job identity"));

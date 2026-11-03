@@ -16,6 +16,7 @@ pub async fn start(
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
 ) -> Result<Json<StartResponse>, ApiError> {
     let legacy = CreateSession {
+        source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         intent: None,
         // No control exchange precedes a legacy start, so there is no
         // ordering for it to be stale against.

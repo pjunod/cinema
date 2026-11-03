@@ -1354,3 +1354,21 @@ async fn a_cue_indexed_window_reads_only_its_span() {
         "{window}"
     );
 }
+
+#[tokio::test]
+async fn canceled_sparse_attempt_cannot_turn_into_full_source_demux() {
+    let directory = tempfile::tempdir().expect("subtitle fixture");
+    let file = media_file(directory.path().join("must-not-open-source.mkv"));
+    let output = directory.path().join("must-not-publish.vtt");
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+    let result = plurx_core::process::bounded::cancellable(
+        cancellation,
+        super::extract_vtt(&output, &file, 0, super::TEST_TRACK),
+    )
+    .await;
+    assert!(result
+        .expect_err("cancellation must stop rather than demux")
+        .contains("cancelled"));
+    assert!(!output.exists());
+}

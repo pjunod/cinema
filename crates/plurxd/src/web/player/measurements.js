@@ -420,6 +420,14 @@ function stallRecoverySnapshot(p,v,{began,kind,cause,action,position,targetHeigh
 // and explicit quality choices remain exact.
 async function persistentWait(v,p,began,generation,actionGeneration){
   if(!playbackOwnsAttachedMedia(p)) return;
+  const observer=p.controlFrameObservation;
+  if(observer?.unavailable&&observer.attachment===p.mediaAttachment&&observer.element===v
+    &&observer.epoch===(p.controlPresentationEpoch||0)
+    &&observer.intent===(p.controlSeek?.sequence||0)
+    &&observer.intentGeneration===(p.controlIntentGeneration||0)&&!v.seeking
+    &&performance.now()-observer.lastAdvanceAt<PLAYBACK_SAMPLING_PERIOD_MS*3){
+      endWait(false);return;
+    }
   if(PLAYER!==p || p.waitAt!==began || !(p.started||p.controlSeek?.executed) ||
      (p._seekToken||0)!==generation ||
      (p.controlIntentGeneration||0)!==actionGeneration ||

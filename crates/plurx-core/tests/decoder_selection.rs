@@ -3,10 +3,10 @@ use plurx_core::domain::{
     FieldOrder, MediaFile, ScanType, CONTINUATION_DECODE_RESTRICTION_VERSION,
 };
 use plurx_core::transcode::{
-    hls_args, resolve_transcode, ArtifactQualification, AttemptRestrictions, CapabilityStatus,
-    DecodeBackend, DecodeCacheIdentity, DecodeCapabilities, DecodeCapability,
-    DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence, DecodeFacts,
-    DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
+    heavy_source, hls_args, hls_args_for_plan, resolve_transcode, ArtifactQualification,
+    AttemptRestrictions, CapabilityStatus, DecodeBackend, DecodeCacheIdentity, DecodeCapabilities,
+    DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence,
+    DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
     DecodeSurfaceContract, Deinterlace, DiagnosticLogging, EffectiveRateControl, Encoder,
     FrameDomain, FrameRateProvenance, InterlaceVerdict, OutputGrade, Pacing, Pipeline,
     PipelineDigest, PlanError, PlanSourceBinding, Recipe, SoftwareDecoder,
@@ -1337,7 +1337,16 @@ fn heavy_legacy_qsv_and_vaapi_inputs_preserve_hardware_decode() {
 }
 
 #[test]
-fn cropped_sdr_hevc_does_not_claim_a_measured_hardware_preference() {
+fn cropped_wide_sdr_hevc_is_heavy_but_unqualified_hardware_stays_software() {
+    let mut source = execution_file("/fixture/cropped.mkv");
+    source.video_codec = Some("hevc".into());
+    source.width = Some(3840);
+    source.height = Some(1600);
+    assert!(
+        heavy_source(&source),
+        "3840-wide HEVC remains heavy when cropped"
+    );
+
     let input = facts(video(
         0,
         Some("hevc"),
@@ -1365,6 +1374,141 @@ fn cropped_sdr_hevc_does_not_claim_a_measured_hardware_preference() {
     .expect("legacy extraction remains neutral");
     assert_eq!(plan.decode().backend(), DecodeBackend::Software);
     assert_eq!(plan.decode().reason(), DecodeReason::LegacyPreference);
+}
+
+#[test]
+fn cropped_uhd_classifier_matches_decode_and_filter_setup() {
+    let cases = [
+        (
+            "hevc",
+            3840,
+            2076,
+            Some("main 10"),
+            Some("yuv420p10le"),
+            true,
+        ),
+        ("hevc", 3840, 1600, Some("main"), Some("yuv420p"), true),
+        ("hevc", 1920, 1080, Some("main"), Some("yuv420p"), false),
+        ("h264", 3840, 2160, Some("high"), Some("yuv420p"), false),
+    ];
+    for (codec, width, height, profile, pixel_format, heavy) in cases {
+        let mut source = execution_file("/fixture/source.mkv");
+        source.video_codec = Some(codec.to_owned());
+        source.video_profile = profile.map(str::to_owned);
+        source.width = Some(width);
+        source.height = Some(height);
+        source.bit_depth = Some(
+            if pixel_format.is_some_and(|format| format.contains("10")) {
+                10
+            } else {
+                8
+            },
+        );
+        assert_eq!(
+            heavy_source(&source),
+            heavy,
+            "filter classifier for {codec} {width}x{height}"
+        );
+
+        let input = facts(video(
+            0,
+            Some(codec),
+            profile,
+            width,
+            height,
+            pixel_format,
+            "24/1",
+            "24/1",
+            None,
+        ));
+        let caps = capabilities(vec![]);
+        let plan = resolve(
+            Encoder::Qsv,
+            Pipeline::Cpu,
+            &input,
+            &caps,
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("legacy decode plan");
+        assert_eq!(
+            plan.decode().backend(),
+            if heavy {
+                DecodeBackend::Qsv
+            } else {
+                DecodeBackend::Software
+            },
+            "decoder classifier for {codec} {width}x{height}"
+        );
+
+        let execution = TranscodeExecution::from_options(
+            &source,
+            &execution_options(),
+            Pacing::unpaced(),
+            "/fixture/out",
+        )
+        .expect("execution");
+        let args = hls_args_for_plan(&plan, &execution);
+        let qsv_decode = args
+            .windows(2)
+            .any(|pair| pair[0] == "-hwaccel" && pair[1] == "qsv");
+        let hardware_download = args.iter().any(|argument| argument.contains("hwdownload"));
+        assert_eq!(
+            qsv_decode, heavy,
+            "filter graph decoder for {codec} {width}x{height}"
+        );
+        assert_eq!(
+            hardware_download, heavy,
+            "filter graph download for {codec} {width}x{height}"
+        );
+    }
+
+    // The source predicate recognizes all supported HEVC spellings.
+    for codec in ["hevc", "h265", "hevc10"] {
+        let mut source = execution_file("/fixture/source.mkv");
+        source.video_codec = Some(codec.to_owned());
+        source.width = Some(3840);
+        source.height = Some(2076);
+        assert!(heavy_source(&source), "cropped UHD {codec}");
+    }
+
+    let input = facts(video(
+        0,
+        Some("hevc"),
+        Some("main 10"),
+        3840,
+        2076,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        None,
+    ));
+    let forced = resolve_transcode(
+        &TranscodeRequest::new(Encoder::Qsv, options(Pipeline::Cpu)),
+        &input,
+        &capabilities(vec![]),
+        &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some("off")),
+        &AttemptRestrictions::none(),
+    )
+    .expect("explicit software decode override");
+    assert_eq!(forced.decode().backend(), DecodeBackend::Software);
+    let mut forced_source = execution_file("/fixture/cropped-main10.mkv");
+    forced_source.video_codec = Some("hevc".into());
+    forced_source.width = Some(3840);
+    forced_source.height = Some(2076);
+    forced_source.bit_depth = Some(10);
+    assert!(heavy_source(&forced_source));
+    let execution = TranscodeExecution::from_options(
+        &forced_source,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("execution");
+    let args = hls_args_for_plan(&forced, &execution);
+    assert!(!args
+        .windows(2)
+        .any(|pair| pair[0] == "-hwaccel" && pair[1] == "qsv"));
+    assert!(!args.iter().any(|argument| argument.contains("hwdownload")));
 }
 
 #[test]

@@ -13,6 +13,14 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
+mod pause;
+#[cfg(target_os = "linux")]
+pub use pause::verified_group as source_group_quiescent;
+pub use pause::{
+    pausable, source_pause_controller, ChildPauseGuard, SourcePauseController,
+    SourcePauseObservation, SourcePausePhase, SourceQuotaWait,
+};
+
 tokio::task_local! {
     static WORK_CANCELLATION: CancellationToken;
 }
@@ -27,7 +35,10 @@ pub async fn cancellable<T>(
     WORK_CANCELLATION.scope(cancellation, operation).await
 }
 
-pub(crate) fn cancellation() -> Option<CancellationToken> {
+/// Capture the current operation's cancellation for explicitly owned blocking
+/// helpers. Task-local scopes do not automatically propagate into worker threads;
+/// callers must keep awaiting those helpers until their reads have settled.
+pub fn cancellation() -> Option<CancellationToken> {
     WORK_CANCELLATION.try_with(Clone::clone).ok()
 }
 
@@ -75,6 +86,33 @@ impl OwnedChild {
             .await?;
         self.child = None;
         Ok(status)
+    }
+
+    async fn wait_pausable(
+        &mut self,
+        guard: &ChildPauseGuard,
+        active_budget: Duration,
+    ) -> io::Result<ExitStatus> {
+        let process_id = self
+            .child
+            .as_ref()
+            .and_then(Child::id)
+            .ok_or_else(|| io::Error::other("source child has no live process identity"))?;
+        guard
+            .run_group(process_id, active_budget, self.wait())
+            .await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn wait_group_settled(group: Option<i32>) {
+        if let Some(group) = group {
+            // Returning a killed leader is not proof that a D-state helper
+            // stopped reading. Keep the cleanup owner until all group threads
+            // are dead or gone; neither a timeout nor SIGKILL invents credit.
+            while !pause::verified_group(group, false).await.unwrap_or(false) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
     }
 
     async fn kill_and_reap(&mut self) {
@@ -267,6 +305,18 @@ async fn output_command_environment(
     #[cfg(unix)]
     command.process_group(0);
 
+    let controller = source_pause_controller();
+    #[cfg(not(target_os = "linux"))]
+    if controller.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "source pause requires verified Linux process groups",
+        ));
+    }
+    let pause_guard = match controller.as_ref() {
+        Some(controller) => Some(controller.enlist(&cancellation).await?),
+        None => None,
+    };
     let (mut child, job) = super::spawn_job_owned(command, work)?;
     let stdout = child
         .stdout
@@ -284,16 +334,27 @@ async fn output_command_environment(
         }
     });
     let mut child = OwnedChild::new(child, job);
+    #[cfg(target_os = "linux")]
+    let source_group = pause_guard.as_ref().and(child.process_group);
+    let deadline = controller.as_ref().map_or_else(
+        || tokio::time::Instant::now() + wall_time,
+        |controller| controller.hard_deadline(wall_time),
+    );
 
     let completed = tokio::select! {
         biased;
         () = cancellation.cancelled() => Ok(Err(io::Error::new(
             io::ErrorKind::Interrupted, "work cancelled"))),
-        result = tokio::time::timeout(wall_time, async {
-        let status = child.wait().await?;
+        result = tokio::time::timeout_at(deadline, async {
+        let status = match pause_guard.as_ref() {
+            Some(guard) => child.wait_pausable(guard, wall_time).await?,
+            None => child.wait().await?,
+        };
         // A short-lived probe may not daemonize. Once its leader exits, kill
         // any descendant left in the owned group before waiting for pipe EOF.
         child.kill_process_group();
+        #[cfg(target_os = "linux")]
+        OwnedChild::wait_group_settled(source_group).await;
         let stdout = (&mut stdout)
             .await
             .map_err(|error| io::Error::other(error.to_string()))??;
@@ -311,6 +372,8 @@ async fn output_command_environment(
         Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => {
             child.kill_and_reap().await;
+            #[cfg(target_os = "linux")]
+            OwnedChild::wait_group_settled(source_group).await;
             if !stdout.is_finished() {
                 stdout.abort();
                 let _ = stdout.await;
@@ -323,6 +386,8 @@ async fn output_command_environment(
         }
         Err(_) => {
             child.kill_and_reap().await;
+            #[cfg(target_os = "linux")]
+            OwnedChild::wait_group_settled(source_group).await;
             if !stdout.is_finished() {
                 stdout.abort();
                 let _ = stdout.await;
@@ -675,6 +740,111 @@ mod tests {
             "unreaped child outlived its admission"
         );
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn owned_group_pause_preserves_active_budget_and_cancel_reaps_the_stopped_group() {
+        let directory = tempfile::tempdir().expect("source pause fixture");
+        let leader = directory.path().join("leader.pid");
+        let helper = directory.path().join("helper.pid");
+        let progress = directory.path().join("progress");
+        let control = SourcePauseController::new(Duration::from_secs(8));
+        let cancellation = CancellationToken::new();
+        let worker_control = control.clone();
+        let worker_cancel = cancellation.clone();
+        let args=vec!["-c".to_owned(),
+            "echo $$ > \"$1\"; (while :; do printf x >> \"$2\"; sleep 0.02; done) & echo $! > \"$3\"; wait".to_owned(),
+            "pause-fixture".to_owned(),leader.to_string_lossy().into_owned(),progress.to_string_lossy().into_owned(),helper.to_string_lossy().into_owned()];
+        let child = tokio::spawn(async move {
+            pausable(
+                worker_control,
+                cancellable(
+                    worker_cancel,
+                    output("/bin/sh", &args, Duration::from_secs(2), 1024, TEST_WORK),
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !leader.exists() || !helper.exists() || !progress.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the owned group is reading");
+        let pid: i32 = tokio::fs::read_to_string(&leader)
+            .await
+            .expect("leader")
+            .trim()
+            .parse()
+            .expect("pid");
+        let first = control.request_pause();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while control.observation().phase != SourcePausePhase::Paused {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("every group thread stopped");
+        assert!(source_group_quiescent(pid, true)
+            .await
+            .expect("whole group observation"));
+        let before = tokio::fs::metadata(&progress)
+            .await
+            .expect("progress")
+            .len();
+        tokio::time::sleep(Duration::from_millis(2200)).await;
+        assert_eq!(
+            before,
+            tokio::fs::metadata(&progress)
+                .await
+                .expect("held progress")
+                .len()
+        );
+        assert!(
+            !child.is_finished(),
+            "verified holds do not consume the two-second active budget"
+        );
+        assert!(!control.resume(first + 1));
+        assert!(control.resume(first));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&progress)
+                .await
+                .expect("resumed progress")
+                .len()
+                == before
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the same helper resumes progress");
+        let second = control.request_pause();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while control.observation().phase != SourcePausePhase::Paused {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("second owned pause");
+        assert!(!control.resume(first));
+        assert!(second > first);
+        cancellation.cancel();
+        let failure = tokio::time::timeout(Duration::from_secs(5), child)
+            .await
+            .expect("stopped group cleanup")
+            .expect("owner joined")
+            .expect_err("cancelled while paused");
+        assert_eq!(failure.kind(), io::ErrorKind::Interrupted);
+        assert!(source_group_quiescent(pid, false)
+            .await
+            .expect("no live reading thread"));
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "leader reaped before ownership returns"
+        );
     }
 
     #[tokio::test]

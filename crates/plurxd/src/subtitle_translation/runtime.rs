@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::{
     io::{Read, Seek, SeekFrom},
+    sync::Arc,
     time::Duration,
 };
 #[cfg(unix)]
@@ -562,13 +563,36 @@ impl SourceHash {
         &mut self,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, StoreError> {
+        self.step_with_limit(cancel, 128 * 1024)
+    }
+    pub(crate) fn step_budgeted(
+        &mut self,
+        cancel: &CancellationToken,
+        budget: &crate::background_jobs::SourceReadBudget,
+    ) -> Result<Option<String>, StoreError> {
+        let limit = budget
+            .allowance_blocking(128 * 1024, cancel)
+            .map_err(|_| failure("worker_interrupted"))?;
+        self.step_with_limit(cancel, limit)
+    }
+    fn step_with_limit(
+        &mut self,
+        cancel: &CancellationToken,
+        limit: usize,
+    ) -> Result<Option<String>, StoreError> {
         interrupted(cancel)?;
         let mut buffer = [0_u8; 128 * 1024];
+        let limit = limit.min(buffer.len());
+        if limit == 0 {
+            return Err(failure("worker_source_unavailable"));
+        }
         let length = self
             .held
-            .read(&mut buffer)
+            .read(&mut buffer[..limit])
             .map_err(|_| failure("worker_source_unavailable"))?;
-        interrupted(cancel)?;
+        // Commit this settled read into the prefix before the async owner
+        // observes late cancellation and caches the paused continuation. The
+        // file cursor and byte count must advance together exactly once.
         if length == 0 {
             if self.bytes != self.expected.size
                 || std_file_identity(&self.held).ok() != Some(self.expected)
@@ -588,15 +612,28 @@ impl SourceHash {
         Ok(None)
     }
 }
+#[cfg(test)]
 fn hash_source(
     held: std::fs::File,
     expected: FileIdentity,
     cancel: &CancellationToken,
 ) -> Result<String, StoreError> {
+    hash_source_budgeted(held, expected, cancel, None)
+}
+fn hash_source_budgeted(
+    held: std::fs::File,
+    expected: FileIdentity,
+    cancel: &CancellationToken,
+    budget: Option<Arc<crate::background_jobs::SourceReadBudget>>,
+) -> Result<String, StoreError> {
     interrupted(cancel)?;
     let mut hash = SourceHash::new(held, expected)?;
     loop {
-        if let Some(digest) = hash.step(cancel)? {
+        let next = match budget.as_ref() {
+            Some(budget) => hash.step_budgeted(cancel, budget)?,
+            None => hash.step(cancel)?,
+        };
+        if let Some(digest) = next {
             return Ok(digest);
         }
     }
@@ -634,12 +671,15 @@ pub(crate) async fn verify_source(
             .handle
             .try_clone()
             .map_err(|_| failure("worker_source_unavailable"))?;
+        let hash_budget = crate::background_jobs::source_budget();
         let hash_cancel = cancel.clone();
         // Never race/drop this JoinHandle on Stop. The owned loop checks the
         // manager-derived token between bounded chunks; always await its exit.
-        let sha256 = tokio::task::spawn_blocking(move || hash_source(held, identity, &hash_cancel))
-            .await
-            .map_err(|_| failure("worker_source_unavailable"))??;
+        let sha256 = tokio::task::spawn_blocking(move || {
+            hash_source_budgeted(held, identity, &hash_cancel, hash_budget)
+        })
+        .await
+        .map_err(|_| failure("worker_source_unavailable"))??;
         let verified = VerifiedSource {
             fence: source,
             identity,
@@ -649,9 +689,13 @@ pub(crate) async fn verify_source(
         verified.recheck(state, file, &cancel).await?;
         Ok(verified)
     };
+    let source_budget = crate::background_jobs::source_budget();
     tokio::pin!(operation);
     tokio::select! {
         result = &mut operation => result,
+        ()=async {match source_budget.as_ref() {Some(budget)=>budget.wait_pressure().await,None=>std::future::pending().await}}=>{
+            cancel.cancel(); operation.await
+        },
         () = crate::subtitle_transcription::watch_speech_capacity(&state.transcode, admission) => {
             cancel.cancel();
             operation.await
@@ -850,20 +894,46 @@ async fn selected_clock(
 ) -> Result<super::SourceClock, StoreError> {
     let probe = media_program(&crate::ffmpeg::ffprobe_bin(), cancel).await?;
     rewind(&source.fence.handle)?;
+    let source_input = match crate::background_jobs::source_budget() {
+        Some(budget) => Some(
+            crate::source_input::SourceInput::open_background_held(
+                SourceFence::clone_held(&source.fence.handle, source.fence.object_version())
+                    .map_err(|_| failure("source_changed"))?,
+                "application/octet-stream",
+                budget,
+            )
+            .await
+            .map_err(|_| failure("worker_source_unavailable"))?,
+        ),
+        None => None,
+    };
     let mut command = tokio::process::Command::new(probe);
     command.args([
         "-v",
         "error",
         "-protocol_whitelist",
-        "file,pipe",
+        if source_input.is_some() {"file,pipe,http,tcp"} else {"file,pipe"},
         "-show_entries",
         "stream=index,codec_type,start_time,start_pts,time_base,duration:stream_tags:format=start_time",
         "-of",
         "json",
-        "/dev/fd/3",
+        source_input.as_ref().map_or("/dev/fd/3",|input|input.url()),
     ]);
     crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.fence.handle, 3)]);
-    let output = child_output(&mut command, Duration::from_secs(15), 1024 * 1024, false).await?;
+    let source_budget = crate::background_jobs::source_budget();
+    let output = child_output(&mut command, Duration::from_secs(15), 1024 * 1024, false);
+    tokio::pin!(output);
+    let output = tokio::select! {
+        result=&mut output=>result,
+        ()=async {match source_budget.as_ref() {Some(budget)=>budget.wait_pressure().await,None=>std::future::pending().await}}=>{cancel.cancel();output.await},
+    };
+    if let Some(input) = source_input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|_| failure("worker_source_unavailable"))?;
+    }
+    let output = output?;
     if output.stderr.iter().any(|byte| !byte.is_ascii_whitespace()) {
         return Err(failure("source_clock_unsupported"));
     }
@@ -957,6 +1027,23 @@ async fn decode_window(
     let wav = scratch.join("audio.wav");
     let decoder = media_program(decoder, cancel).await?;
     rewind(source)?;
+    let source_input = if matches!(window.purpose, Purpose::Range) {
+        match crate::background_jobs::source_budget() {
+            Some(budget) => Some(
+                crate::source_input::SourceInput::open_background_held(
+                    SourceFence::clone_current_held(source)
+                        .map_err(|_| failure("source_changed"))?,
+                    "application/octet-stream",
+                    budget,
+                )
+                .await
+                .map_err(|_| failure("worker_source_unavailable"))?,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
     let mut decode = tokio::process::Command::new(decoder);
     let filter = format!(
         "asettb=1/16000,ashowinfo,aresample=16000:async=1:first_pts={begin_sample}:min_comp=0:min_hard_comp=0:max_soft_comp=0,atrim=start_pts={begin_sample}:end_pts={end_sample},ashowinfo,asetpts=PTS-STARTPTS"
@@ -976,7 +1063,11 @@ async fn decode_window(
             "-copyts",
             "-start_at_zero",
             "-protocol_whitelist",
-            "file,pipe",
+            if source_input.is_some() {
+                "file,pipe,http,tcp"
+            } else {
+                "file,pipe"
+            },
             "-threads",
             "1",
             "-filter_threads",
@@ -984,7 +1075,9 @@ async fn decode_window(
             "-ss",
             &format!("{}.{:03}", preroll / 1_000, preroll % 1_000),
             "-i",
-            "/dev/fd/3",
+            source_input
+                .as_ref()
+                .map_or("/dev/fd/3", |input| input.url()),
             "-map",
             &format!("0:a:{}", window.audio_index),
             "-vn",
@@ -1016,15 +1109,30 @@ async fn decode_window(
         Purpose::Range => Duration::from_secs(120),
         Purpose::TranslationSelfTest => Duration::from_secs(30),
     };
-    let decoded = plurx_core::process::bounded::output_command_clean_env_selected_stderr(
+    let decoding = plurx_core::process::bounded::output_command_clean_env_selected_stderr(
         &mut decode,
         wall,
         MAX_CHILD_LOG,
         plurx_core::process::ChildWork::background("progressive subtitle translation"),
         clock_frame_record,
-    )
-    .await
-    .map_err(|_| failure("decode_failed"))?;
+    );
+    tokio::pin!(decoding);
+    let source_budget = if matches!(window.purpose, Purpose::Range) {
+        crate::background_jobs::source_budget()
+    } else {
+        None
+    };
+    let decoded = tokio::select! {
+        result=&mut decoding=>result,
+        ()=async {match source_budget.as_ref() {Some(budget)=>budget.wait_pressure().await,None=>std::future::pending().await}}=>{cancel.cancel();decoding.await},
+    };
+    if let Some(input) = source_input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|_| failure("worker_source_unavailable"))?;
+    }
+    let decoded = decoded.map_err(|_| failure("decode_failed"))?;
     if !decoded.status.success() {
         return Err(failure("decode_failed"));
     }

@@ -1748,6 +1748,7 @@ fn sub(codec: &str, language: &str, title: &str, default: bool, forced: bool) ->
 #[test]
 fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
     let request = CreateSession {
+        source_telemetry: None,
         intent: None,
         control_sequence: None,
         playback_id: "player".into(),
@@ -1782,6 +1783,7 @@ fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
 #[test]
 fn bitmap_fallback_still_carries_an_explicit_burn_request() {
     let request = CreateSession {
+        source_telemetry: None,
         intent: None,
         control_sequence: None,
         playback_id: "apple-bitmap".into(),
