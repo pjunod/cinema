@@ -19,6 +19,14 @@ Main10) and whose RPU is the source RPU converted with `To81` and the
 applied mapping removed. Without it the client gets the plain conversion:
 the original base layer, the enhancement layer dropped.
 
+**Measurement update, 2026-11-03:** the old YUV-to-RGB scoring path adds
+colour error on both system FFmpeg 5.1.9 and supported Jellyfin 8.1.3.
+[The quality repair](DV_HDR_QUALITY_REPAIR.md) records the independent
+control, prepared conversion fix and new encoder experiments. Retain the
+historical measurements below; their swscale-derived RGB scores and verdicts
+need remeasurement before current quality acceptance. This does not revoke
+byte, metadata, timing or process-ownership evidence.
+
 ## 1. Why it was "not available" — the root causes
 
 | Where | What stopped the route | Fix |

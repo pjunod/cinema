@@ -10,6 +10,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Original HDR10-E processing uses a measured source-aware bitrate within
+  decoder limits; selected encode rungs keep their chosen rate, and cached
+  renditions must match the actual frozen rate and VBV peak.
+
+- Dolby Vision enhancement quality checks use an accurate BT.2020/PQ colour
+  conversion and remeasure verdicts made with the old conversion.
+
 - Nightly deep validation and mutation tests use the app's shipped FFmpeg
   package; obsolete FFmpeg 6 runner capacity and recovery entries are retired.
 
