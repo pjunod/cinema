@@ -27,8 +27,12 @@ not performance under naturally selected placement.
 A separate publication race occurs when the exact attached owner renews its
 lease after Adopt but before publication. Publication must compare the current
 matching route/job-lease copies, while retaining the original custody, owner,
-epoch, pointer and live-lease guards. Regression and compiler validation of
-this continuation are pending; authored tests are not execution evidence.
+epoch, pointer and live-lease guards. On source `4a6461e6214c`, five affected
+publication cases passed with SQLite and the real three-voter backend; neither
+new case passes the original behavior at `099eafdcee4c`. Pinned Rust 1.97.1
+workspace/all-target strict Clippy, including fixture/cluster features, and
+paperwork 15/15 passed. Two-node serving and development-gate results belong to
+the task PR; they do not imply M0–M7 qualification.
 
 Still open: M0 coverage/contracts, M3a/C2 native and allocator containment,
 V1–V5 acceptance, broader adapter/platform qualification, integrating the

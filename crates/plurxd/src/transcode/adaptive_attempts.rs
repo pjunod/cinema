@@ -424,7 +424,15 @@ pub(super) struct AdaptiveAttemptRegistry {
     slots: Mutex<[Option<Arc<AttemptEntry>>; MAX_LOCAL_ATTEMPTS]>,
 }
 
+#[cfg(test)]
+struct AdoptCommitPause {
+    committed: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
 pub(super) struct AttemptEntry {
+    #[cfg(test)]
+    adopt_commit_pause: Mutex<Option<AdoptCommitPause>>,
     remote_changed: tokio::sync::Notify,
     remote_registration: Mutex<Option<RemoteRegistration>>,
     coordinator_frame_bytes: std::sync::atomic::AtomicUsize,
@@ -601,6 +609,8 @@ impl AdaptiveAttemptRegistry {
             .find(|slot| slot.is_none())
             .ok_or("adaptive attempt owner registry is full")?;
         let entry = Arc::new(AttemptEntry {
+            #[cfg(test)]
+            adopt_commit_pause: Mutex::new(None),
             remote_changed: tokio::sync::Notify::new(),
             remote_registration: Mutex::new(None),
             coordinator_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -2032,6 +2042,21 @@ impl super::TranscodeManager {
                 != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
         {
             return Err("adaptive Adopt committed a different route".into());
+        }
+        #[cfg(test)]
+        {
+            let pause = entry
+                .adopt_commit_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(pause) = pause {
+                let _ = pause.committed.send(());
+                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), pause.resume)
+                    .await
+                    .map_err(|_| "adaptive commit pause exceeded the original deadline")?
+                    .map_err(|_| "adaptive commit pause lost its original waiter")?;
+            }
         }
         let publication_authority = authority.clone();
         let start = rich
@@ -3682,12 +3707,45 @@ impl super::TranscodeManager {
                 expected_desired_revision: claim.binding.expected_desired_revision,
             },
         };
-        let start = self
+        let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        *entry
+            .adopt_commit_pause
+            .lock()
+            .expect("original commit pause") = Some(AdoptCommitPause {
+            committed: committed_tx,
+            resume: resume_rx,
+        });
+        let reply = self
             .begin_adaptive_adopt(adoption, preview_json, authority, deadline)
-            .expect("same registered original Adopt control")
+            .expect("same registered original Adopt control");
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), committed_rx)
             .await
+            .expect("Store Adopt reaches its bounded test barrier")
+            .expect("actual Store Adopt committed before attachment");
+        let now = crate::media_sessions::unix_ms();
+        let routes = self
+            .store
+            .owned_media_sessions(&claim.key.worker_node_id, now)
+            .await
+            .expect("actual owned lease inventory after Adopt");
+        crate::media_sessions::assert_adaptive_adopt_lease_transition(
+            &routes,
+            &claim.key.session_id.to_string(),
+            self.renewable_session_ids().await,
+            now,
+        );
+        resume_tx.send(()).expect("resume the same adopted worker");
+        let start = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), reply)
+            .await
+            .expect("original Adopt completes within its own deadline")
             .expect("actual original Adopt reply")
             .expect("the original owner adopts, attaches and publishes");
+        assert!(
+            !crate::media_sessions::settlement_protected_ids()
+                .contains(&claim.key.session_id.to_string()),
+            "established local worker takes over liveness"
+        );
         assert_eq!(start.session_id, claim.key.session_id.to_string());
         let route = self
             .store

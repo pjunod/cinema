@@ -7260,6 +7260,50 @@ fn lease_tick_active<'a>(
         .collect()
 }
 
+/// Classify the real post-Adopt lease through the production lease tick.
+/// The attempt is paused before attachment, so no worker frontier exists yet.
+#[cfg(all(test, feature = "cluster-integration-tests"))]
+pub(crate) fn assert_adaptive_adopt_lease_transition(
+    routes: &[OwnedMediaSessionLease],
+    session_id: &str,
+    renewable: Vec<String>,
+    now_ms: i64,
+) {
+    assert!(
+        routes.iter().any(|route| route.session_id == session_id),
+        "committed owner is inventoried"
+    );
+    assert!(
+        !renewable.iter().any(|id| id == session_id),
+        "worker is not attached at the barrier"
+    );
+    let live = lease_tick_live(renewable);
+    assert!(
+        live.contains(session_id),
+        "Adopt-to-attach gap must retain durable ownership"
+    );
+    assert!(
+        !lease_tick_active(routes, &live, now_ms)
+            .iter()
+            .any(|route| route.session_id == session_id),
+        "no frontier means no renewal"
+    );
+    let stale = take_stale_settlement_candidates(
+        routes,
+        &live,
+        &mut HashSet::new(),
+        &mut HashMap::new(),
+        tokio::time::Instant::now(),
+        now_ms,
+    );
+    assert!(
+        !stale
+            .iter()
+            .any(|(route, _)| route.session_id == session_id),
+        "stale settlement must not race adaptive attachment"
+    );
+}
+
 /// Whether this owned route is draining and its deadline has passed.
 ///
 /// `None` is not draining, which is every ordinary session. The comparison is
