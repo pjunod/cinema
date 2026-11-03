@@ -145,7 +145,9 @@ name = "gha-lab5-general-03"
 host = "lab5"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+# Provisioned proof owner from codex/async-store-refinement (f14b400bc).
+# Keep its reserved label; the branch owns proof admission and qualification.
+labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04", "async-proof-owned"]
 
 [[runners]]
 name = "gha-lab5-general-04"
@@ -228,9 +230,9 @@ labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
 # --- maca / macb: laptops, non-voters -----------------------------------------
 # Apple CI uses the M4 Air (`maca`) as primary and the M3 Max Pro (`macb`)
 # as standby; deploy/apple-runner controls eligibility during outages. The two
-# Linux ARM64 guests are Lima VMs registered by hand rather than by ansible, and
-# they are
-# the required `ci-arm64` packaging pool: `macb` is primary, `maca` is backup.
+# Linux ARM64 guests are Lima VMs registered by hand rather than by ansible.
+# Their Forgejo roles are separate: `maca` serves release-arm64 only; `macb`
+# supplies ci-arm64. The release guest has no qualified CI fallback role.
 [[runners]]
 name = "gha-maca-apple-01"
 host = "maca"
@@ -245,14 +247,15 @@ os = "macOS"
 arch = "ARM64"
 labels = ["lab", "apple", "xcode-27", "backup", "xcode-27.2"]
 
-# This VM also runs a Forgejo runner carrying `release-arm64`: the release
-# image's arm64 leg builds there natively instead of under QEMU on X64.
+# The existing Forgejo registration is release-only: the release image's
+# arm64 leg builds natively instead of under QEMU on X64. Do not add ci-arm64
+# or backup eligibility without separately qualifying that workload here.
 [[runners]]
 name = "gha-maca-linux-arm-01"
 host = "maca"
 os = "Linux"
 arch = "ARM64"
-labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "backup", "release-arm64"]
+labels = ["lab", "ubuntu-26.04", "release-arm64"]
 
 [[runners]]
 name = "gha-macb-linux-arm-01"

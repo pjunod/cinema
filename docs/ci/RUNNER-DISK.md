@@ -1,6 +1,6 @@
 # Runner disk — what fills a CI runner, and what is bounded
 
-**Status:** live · **Reconciled:** 2026-10-26
+**Status:** live · **Reconciled:** 2026-11-02
 
 Companion to [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md)
 (how the lanes are meant to get faster) — this is *where the bytes go, who
@@ -8,6 +8,36 @@ deletes them, and what to do when a runner fills anyway*.
 
 Read this before adding a cache to any workflow, and before believing a
 `ld terminated with signal 7 [Bus error]` in a CI log.
+
+## Current runner roles and reserved labels
+
+The 2026-11-02 roster reconciliation records the existing Forgejo
+registrations. Neutral names in `validation/runner-fleet.toml` describe logical
+placements; the fleet collector maps live host names through its private alias
+configuration. Keep the existing registration IDs and UUIDs when reconciling
+names.
+
+The Linux ARM64 roles are separate. `gha-maca-linux-arm-01` carries
+`release-arm64` for the native release-image build;
+`gha-macb-linux-arm-01` carries `ci-arm64` for CI packaging. The release guest
+was recovered with its original registration and release-only labels. Its
+online state establishes availability, not a passing release build or permission
+to add CI fallback eligibility. This current placement supersedes the older
+two-runner `ci-arm64` description in the acceleration plan.
+
+Keep `async-proof-owned` on the existing `gha-lab5-general-03` slot.
+The owning `codex/async-store-refinement` branch records its target-only
+provisioning in commit `f14b400bc` (2026-10-29): one dedicated-label carrier,
+preserved registration identity and a private durable proof-storage binding.
+That branch owns the dispatch identity, resource admission and proof
+qualification rules. The main-branch roster records the observed label; it
+imports no proof workflow, activates no proof session and grants no proof
+credit. Removing the label because main has no requesting workflow would break
+its existing branch consumer.
+
+`unit-memory-12g`, `ci-coverage`, `primary` and `backup` also retain their
+documented compatibility, diagnostic or operational roles. A current workflow
+scan alone does not establish that a label is obsolete.
 
 ## Runner recovery and memory budgets
 
@@ -400,6 +430,49 @@ which on that runner is a killed Xcode build. So on macOS the idle check is the
 whole safety mechanism rather than a courtesy, and it is stricter: the daemon
 must have no child processes **and** its work root must have been untouched for
 two minutes.
+
+**A user-owned Apple standby uses its controller.** The root janitor scans
+system LaunchDaemons, which cannot cover a user LaunchAgent. Upgrade the
+existing [`plurx-apple-standby`](../../deploy/apple-runner/plurx-apple-standby)
+while idle, preserving registration and supervision. Add this member to its
+existing JSON configuration. Preserve any `probe_expected_stdout`: its response
+must match byte-for-byte.
+
+```json
+"janitor": {}
+```
+
+Defaults: 20 GiB cache budget, 25 GiB free-space reserve, hourly inspection and
+120 seconds of `_work` quiet. Runner YAML must explicitly set a nonzero
+`runner.shutdown_timeout` and `cache.dir: runner_directory/cache`. The runner
+directory must be canonical and owned by the controller's user. Symlinked
+caches and directories without cache-server markers are refused.
+
+Maintenance holds the controller's existing lock, preventing runner startup
+during deletion. Busy work is deferred; an idle runner receives one graceful
+SIGTERM. After its exit, remaining descendants and quiet time are checked
+again. The complete index/blob directory is renamed to
+`cache.janitor-retired` before deletion. There is no `launchctl bootout`, forced
+kill, `_work` deletion or borrowed operator pause marker. ci-fleet Resume
+cannot bypass maintenance; an existing operator pause survives it.
+
+**Read the user receipt.** Set the ci-fleet agent's `janitor_state` to the
+absolute path of `~/.local/state/plurx-ci-janitor/last-run.json`.
+`janitor.state_dir` overrides its directory. `instances: 1` covers the standby;
+`state` distinguishes `healthy`, `waiting_for_idle`, `waiting_for_exit`,
+`reset`, `below_reserve_small_cache` and `error`. A small cache under disk
+pressure is reported without a useless reset. Failed deletion retires data
+outside the active namespace so the runner can create a consistent fresh
+cache. The retained directory keeps reporting an error until inspected;
+preserve the new active cache when resolving it. An unreadable process
+snapshot never establishes idleness.
+
+Run `python3 -m unittest tests.operations.test_apple_runner_standby` before
+upgrading. That [suite](../../tests/operations/test_apple_runner_standby.py)
+checks busy work, pickup races, pause and failed cleanup. `janitor.budget_gb`,
+`reserve_gb`, `quiet_seconds` and `interval_seconds` override defaults;
+`quiet_seconds` cannot be below 120. Omit `janitor` for existing system-managed
+runners.
 
 **What a pass does.** For every `forgejo-runner*.service` on the host it reads
 that runner's own `config.yml` for its `cache.dir`, and if the directory is

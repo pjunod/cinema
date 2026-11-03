@@ -8,3 +8,6 @@ xcode_version=$(DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer /usr/bi
 /usr/bin/grep -Fx 'Build version 27B52' <<< "$xcode_version" >/dev/null
 /usr/bin/curl --fail --silent --max-time 4 \
   http://192.168.4.7:3000/api/v1/version >/dev/null
+# Strict standby probes compare this validated version/build response exactly.
+# Emit it only after the service, toolchain and forge checks all succeed.
+printf '%s\n' "$xcode_version"

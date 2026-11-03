@@ -1,6 +1,6 @@
 # HDR enhancement quality — preserve the benefit in the delivered picture
 
-**Status:** open; measurement repair prepared, production quality work in
+**Status:** open; measurement repair qualified in isolation, production quality work in
 progress · **Written:** 2026-11-03 · **Owner:** Codex, with Astra consultation
 
 Companion to [the processing ledger](DV_HDR_PROCESSING_STATUS.md),
@@ -91,12 +91,35 @@ The legacy and supported executables are not interchangeable evidence.
 
 ## 4. Production repair — choose from measured final-delivery results
 
-The first supported-encoder screen uses the same unencoded source pixels,
-60 Mb/s target and 90 Mb/s VBV ceiling. On sample B's four-frame startup
-window, mid-brightness mean Delta E ITP is 3.385 for VAAPI, 2.476 for x265
-medium and 2.368 for x265 slow; the unencoded export is 0.775. Those numbers
-use the corrected inverse and a reference-defined 1–100-nit band. They
-justify a full-window comparison, not a production preset decision.
+The supported-encoder screen now covers 48 consecutive sample-B pictures.
+An initial software screen omitted input colour tags and is invalidated;
+its retained output is not evidence for a preset decision. The corrected
+60 Mb/s, 90 Mb/s VBV comparison gives mid-brightness mean/p99 Delta E ITP
+of 3.041/9.335 for VAAPI, 2.623/7.566 for x265 medium and 2.516/7.703
+for x265 slow. Medium takes 42.8 seconds and slow 121.3 seconds for a
+2.002-second window. This supports investigating prepared production;
+it does not establish live feasibility or held-out acceptance.
+
+A separate HDR10-E window uses the same exact source identities, a
+1,000-nit target, actual RPU L5 active area and four chroma phases.
+Its current Original path inherits the ordinary 20 Mb/s 4K rung after
+processing turns source copy into an encode. Raising only the bitrate
+to 60 Mb/s, while retaining VAAPI policy 19, improves all measured bands:
+
+| Reference band | 20 Mb/s mean / p99 | 60 Mb/s mean / p99 |
+|---|---|---|
+| Dark | 3.466 / 9.840 | 2.646 / 7.751 |
+| Mid | 4.440 / 13.873 | 3.198 / 10.145 |
+| Bright | 3.156 / 11.903 | 2.454 / 8.139 |
+
+These compare decoded delivery to the helper's target output, so they
+isolate export/encode preservation rather than independent Dolby mapping
+accuracy. Source-aware, raise-only rate handling for Original playback is
+being implemented with decoder/delivery bounds, unchanged explicit encode
+rungs, frozen recipe identity, accurate advertised costs and root-reuse
+checks. The policy-0 screen does not improve every dark metric, so it is
+not part of that change. Independent mapping comparison and weaker-source
+coverage remain required.
 
 1. **Finish the full-window comparison.** Measure 48 consecutive pictures,
    actual encoded segment peaks, time and per-frame/band errors. Compare
@@ -127,9 +150,9 @@ source fences, cancellation/reap, storage accounting and resumable ownership.
 
 | Milestone | Required evidence | State |
 |---|---|---|
-| M0 trustworthy conversion | Independent H.273 10/16-bit and 4:4:4/4:2:0 controls; unchanged RGB branch; old verdict invalidation; independent diff review and focused checks | Source prepared; focused qualification pending |
-| M1 loss isolation | Exact frame bindings, representation/codec split, true fallback, full 48-frame weak/strong FEL comparisons on supported tools | Four-frame diagnostics retained; full window in progress |
-| M2 production improvement | A measured recipe/export change delivered through supported ownership, admission and metadata paths | Not yet implemented |
+| M0 trustworthy conversion | Independent H.273 10/16-bit and 4:4:4/4:2:0 controls; unchanged RGB branch; old verdict invalidation; independent diff review and focused checks | Focused native/core/daemon checks and Astra review passed; effort integration pending |
+| M1 loss isolation | Exact frame bindings, representation/codec split, true fallback, full 48-frame weak/strong FEL comparisons on supported tools | Full sample-B window measured; weaker-source and independent mapping coverage open |
+| M2 production improvement | A measured recipe/export change delivered through supported ownership, admission and metadata paths | Source-aware HDR10-E Original implementation under independent review |
 | M3 enhancement acceptance | Held-out scenes and final decoded outputs: dark detail, neutral/saturated colour, highlights, grain and temporal stability; CM4/CM29, P7/P8 and both destinations; then physical client checks | Open |
 
 Use mean and tail error, per-frame and luminance-band results together.
