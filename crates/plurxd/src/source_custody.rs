@@ -389,7 +389,7 @@ async fn replay_local_settlements_at(store: &Arc<dyn Store>, dir: &Path) -> Resu
                 }
             }
         }
-        clear_settlement_receipt(&receipt)?;
+        clear_settlement_receipt_at(dir, &receipt)?;
     }
     Ok(())
 }

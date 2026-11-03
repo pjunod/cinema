@@ -1356,7 +1356,7 @@ fn cropped_wide_sdr_hevc_is_heavy_but_unqualified_hardware_stays_software() {
         Some("yuv420p"),
         "24/1",
         "24/1",
-        None,
+        Some("bt709"),
     ));
     let caps = capabilities_with_qualified_software(
         &input,
