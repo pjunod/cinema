@@ -3274,6 +3274,196 @@ async fn copy_concurrent_readers_wait_for_io_slot_and_asset_stays_healthy() {
     retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
 }
 
+/// Reserved live handles of the member: one per opened, unclosed reader.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn reserved_handles(bundle: &Bundle, member: Uuid) -> u64 {
+    u64::from(
+        bundle.roles[0].bootstrap[&member]
+            .fold()
+            .expect("the member keeps its fold")
+            .state()
+            .asset
+            .totals
+            .handles_reserved,
+    )
+}
+
+/// Well under every waiter's `deadline()`: a waiter that instead sits out its
+/// deadline on a slot nobody will acknowledge fails here, not after 60 s.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const PROMPT: Duration = Duration::from_secs(5);
+
+// A client disconnects mid-read: its response body (the FiniteReader) is
+// dropped while its ReadRange is armed and entered, so the read still holds
+// the asset's single journaled I/O slot and nothing of that client remains to
+// observe it. A reader that is already streaming the same asset must not sit
+// out its whole deadline on that orphaned slot: as soon as the dropped read's
+// native result exists, the waiter observes and acknowledges that SAME read
+// and closes its lease, then carries on. Before the fix the streaming reader
+// waited on `io_progress` until its deadline, because only a later
+// `prepare_reader` ever drained dropped bodies.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn copy_reader_dropped_mid_read_does_not_stall_a_streaming_reader() {
+    use v2::scratch::OutputKey;
+    let root = tempfile::tempdir().expect("actual dropped reader fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    original_prefix(&runtime, &mut owner, &preparation).await;
+    let member = output_member(&preparation).await;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("original lease before closing");
+    let init = publish_synced_init(&runtime, &preparation, member).await;
+    let baseline = reserved_handles(&*preparation.state.lock().await, member);
+    let len = init.len() as u64;
+    let half = len / 2;
+    let (front, back) = init.split_at(usize::try_from(half).expect("fixture length"));
+    let dropped = runtime
+        .prepare_finite_reader(
+            &preparation,
+            0,
+            member,
+            OutputKey::Init,
+            0,
+            len,
+            half,
+            deadline(),
+        )
+        .await
+        .expect("client reader that will disconnect");
+    let streaming = runtime
+        .prepare_finite_reader(
+            &preparation,
+            0,
+            member,
+            OutputKey::Init,
+            0,
+            len,
+            half,
+            deadline(),
+        )
+        .await
+        .expect("client reader that keeps streaming");
+    let chunk = streaming
+        .next_chunk(deadline())
+        .await
+        .expect("streaming reader opens and reads")
+        .expect("front half");
+    assert_eq!(chunk.as_ref(), front);
+    drop(chunk);
+
+    let gate = hold_read_in_slot(&dropped).await;
+    // The client disconnects: its body is dropped mid-read.
+    drop(dropped);
+    assert_eq!(
+        slot_pending(&*preparation.state.lock().await, member),
+        1,
+        "the dropped read still holds the slot"
+    );
+    let mut next = Box::pin(streaming.next_chunk(deadline()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut next)
+            .await
+            .is_err(),
+        "no native result yet: the streaming reader cannot arm into the slot"
+    );
+    // The dropped read's native result now exists.
+    drop(gate);
+    let chunk = tokio::time::timeout(PROMPT, next)
+        .await
+        .expect("the streaming reader proceeds promptly, not at its deadline")
+        .expect("streaming reader reads once the dropped read is settled")
+        .expect("back half");
+    assert_eq!(chunk.as_ref(), back);
+    drop(chunk);
+    {
+        let bundle = preparation.state.lock().await;
+        assert_eq!(slot_pending(&bundle, member), 0, "slot released");
+        assert_eq!(
+            reserved_handles(&bundle, member),
+            baseline + 1,
+            "the dropped lease is closed; only the streaming reader is open"
+        );
+    }
+    streaming
+        .close(deadline())
+        .await
+        .expect("positive close of the streaming reader");
+    drop(streaming);
+    // The asset stays healthy: fold present, slot free, producer carries on.
+    publish_synced_segment(&runtime, &preparation, member).await;
+    retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
+}
+
+// Same disconnect, with the producer's next publication as the waiter. A
+// producer step that sat out its deadline on the orphaned slot would report a
+// sink fault and kill FFmpeg: the live stream for every other viewer. Here the
+// dropped read's native result already exists when the producer arrives; the
+// publication must settle that SAME read and proceed at once.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn copy_reader_dropped_mid_read_does_not_stall_the_producer_publication() {
+    use v2::scratch::OutputKey;
+    let root = tempfile::tempdir().expect("actual dropped reader producer fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    original_prefix(&runtime, &mut owner, &preparation).await;
+    let member = output_member(&preparation).await;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("original lease before closing");
+    let init = publish_synced_init(&runtime, &preparation, member).await;
+    let baseline = reserved_handles(&*preparation.state.lock().await, member);
+    let len = init.len() as u64;
+    let dropped = runtime
+        .prepare_finite_reader(
+            &preparation,
+            0,
+            member,
+            OutputKey::Init,
+            0,
+            len,
+            len,
+            deadline(),
+        )
+        .await
+        .expect("client reader that will disconnect");
+    let gate = hold_read_in_slot(&dropped).await;
+    drop(dropped);
+    // The native read completes; nothing of the client remains to observe it.
+    drop(gate);
+    assert_eq!(
+        slot_pending(&*preparation.state.lock().await, member),
+        1,
+        "the dropped read still holds the slot"
+    );
+    tokio::time::timeout(
+        PROMPT,
+        publish_synced_segment(&runtime, &preparation, member),
+    )
+    .await
+    .expect("the producer publication proceeds promptly, not at its deadline");
+    assert_eq!(
+        reserved_handles(&*preparation.state.lock().await, member),
+        baseline,
+        "the dropped lease is closed"
+    );
+    retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
+}
+
 // The journal commits a change before `apply_committed` folds it, and `apply`
 // consumes the fold. A change the fold would refuse (here a second ArmIo while
 // a client's ReadRange holds the single slot) must be refused BEFORE it is

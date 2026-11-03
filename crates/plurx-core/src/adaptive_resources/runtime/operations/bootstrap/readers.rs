@@ -21,7 +21,9 @@ struct ReaderControl {
 }
 
 /// Drop requests closure; it never reports a closed File or returns credit.
-/// Normal body completion calls close. Later serving/eviction also drains
+/// Normal body completion calls close. An operation the dropped body left in
+/// the asset's single I/O slot is settled by the next caller that waits on
+/// that slot (`wait_for_io_slot`); later serving/eviction also drains
 /// requested closes through the same retained entries, without a watchdog.
 pub struct FiniteReader {
     runtime: Arc<NodeResourceRuntime>,
@@ -165,9 +167,9 @@ fn id() -> Result<v2::Id, OperationError> {
 enum ReaderProgress {
     Continue,
     Wait(Arc<tokio::sync::Notify>),
-    /// Another operation holds the asset's single journaled I/O slot. Wait on
-    /// this member's `io_progress`, registered under the bundle lock.
-    SlotBusy(Arc<tokio::sync::Notify>),
+    /// Another operation holds the asset's single journaled I/O slot of this
+    /// member. Wait on its `io_progress`, registered under the bundle lock.
+    SlotBusy(Uuid, Arc<tokio::sync::Notify>),
     Chunk(FiniteReadChunk),
     Closed,
 }
@@ -188,6 +190,28 @@ pub(in crate::adaptive_resources::runtime::operations) fn notify_progress(
     for entry in bootstrap.readers.values() {
         entry.control.ready.notify_one();
     }
+}
+
+/// The reader whose response body was dropped (closure requested, no caller
+/// left to drive it) while its in-flight operation holds THIS member's single
+/// journaled I/O slot: armed, or its own ArmIo still in the role transition.
+/// Only that reader's SAME operation can release the slot, and nothing else
+/// would observe it until a later `prepare_reader` drain.
+fn dropped_slot_holder(role: &OwnedRole, member: Uuid) -> Option<Uuid> {
+    let transition = role.transition.as_ref().map(|t| t.operation.id);
+    role.bootstrap
+        .get(&member)?
+        .readers
+        .iter()
+        .find(|(_, entry)| {
+            !entry.terminal
+                && entry.control.closing.load(Ordering::Acquire)
+                && entry
+                    .current
+                    .as_ref()
+                    .is_some_and(|io| io.armed || transition == Some(io.io.uuid()))
+        })
+        .map(|(lease, _)| *lease)
 }
 
 pub(super) fn transfer_readers_match(
@@ -273,11 +297,12 @@ impl NodeResourceRuntime {
                 {
                     return None;
                 }
-                io_slot_held(role, member)
+                io_slot_held(role, member).map(|progress| (member, progress))
             });
             match held {
-                Some(progress) => {
-                    native::publication::wait_for_io_slot(bundle, progress, deadline).await?;
+                Some((member, progress)) => {
+                    self.wait_for_io_slot(bundle, index, member, progress, deadline)
+                        .await?;
                 }
                 None => break bundle,
             }
@@ -446,8 +471,9 @@ impl NodeResourceRuntime {
                 ReaderProgress::Closed => return Ok(None),
                 ReaderProgress::Chunk(chunk) if !closing => return Ok(Some(chunk)),
                 ReaderProgress::Chunk(chunk) => drop(chunk),
-                ReaderProgress::SlotBusy(progress) => {
-                    native::publication::wait_for_io_slot(bundle, progress, deadline).await?;
+                ReaderProgress::SlotBusy(member, progress) => {
+                    self.wait_for_io_slot(bundle, index, member, progress, deadline)
+                        .await?;
                 }
                 ReaderProgress::Wait(notification) => {
                     drop(bundle);
@@ -460,6 +486,64 @@ impl NodeResourceRuntime {
                 }
             }
         }
+    }
+
+    /// Wait for `member`'s single journaled I/O slot, which the caller found
+    /// held under `bundle`. A response body dropped mid-read leaves its armed
+    /// operation in that slot with no caller left to observe it, so a waiter
+    /// (a streaming reader, a new reader, the producer's publication or sync)
+    /// would otherwise sit out its whole deadline on `io_progress`. Such a
+    /// holder is settled first, in place and under the same lock: the waiter
+    /// drives that reader's SAME armed operation to its acknowledged observe,
+    /// awaiting only its native result, then closes the lease, exactly as
+    /// `close_dropped_finite_readers` does. Nothing new arms while that
+    /// operation is pending, so the slot stays one-pending. Its acknowledge
+    /// signals `io_progress` for every other waiter. A live holder is waited
+    /// for as before.
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) async fn wait_for_io_slot(
+        &self,
+        mut bundle: tokio::sync::MutexGuard<'_, Bundle>,
+        index: usize,
+        member: Uuid,
+        progress: Arc<tokio::sync::Notify>,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        let holder = bundle
+            .roles
+            .get(index)
+            .and_then(|role| dropped_slot_holder(role, member));
+        let Some(lease) = holder else {
+            return native::publication::wait_for_io_slot(bundle, progress, deadline).await;
+        };
+        let bundle_id = bundle.id;
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(OperationError::Deadline);
+            }
+            match self
+                .drive_reader(role, bundle_id, member, lease, true, deadline)
+                .await
+            {
+                Ok(ReaderProgress::Continue) => {}
+                Ok(ReaderProgress::Chunk(chunk)) => drop(chunk),
+                // Closed: the caller re-checks the slot under the lock.
+                Ok(ReaderProgress::Closed) => return Ok(()),
+                // It can go no further until another committed operation is
+                // acknowledged: wait for that like any other holder.
+                Ok(ReaderProgress::Wait(_) | ReaderProgress::SlotBusy(..)) => break,
+                // The departed client's own read or open failure, already
+                // acknowledged in its observe: close that lease and carry on.
+                // A failure that left it holding the slot is the waiter's.
+                Err(OperationError::Physical(error)) => {
+                    if dropped_slot_holder(role, member) == Some(lease) {
+                        return Err(OperationError::Physical(error));
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        native::publication::wait_for_io_slot(bundle, progress, deadline).await
     }
 
     async fn drive_reader(
@@ -529,7 +613,7 @@ impl NodeResourceRuntime {
                 // the asset's single journaled I/O slot: wait for its
                 // acknowledgement rather than arm into the occupied slot.
                 if let Some(progress) = io_slot_held(role, member) {
-                    return Ok(ReaderProgress::SlotBusy(progress));
+                    return Ok(ReaderProgress::SlotBusy(member, progress));
                 }
                 native::publication::queue_output_change(
                     &self.journal,
