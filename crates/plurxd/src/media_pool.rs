@@ -517,7 +517,7 @@ impl CreateStartupBudget {
         let mut budget = Self::new(remaining_ms);
         budget.deadline = started + allowance;
         if let Some(original) = original {
-            if let Some(total) = original.deadline_after(allowance).ok() {
+            if let Ok(total) = original.deadline_after(allowance) {
                 if let Ok(paired) = total.monotonic_cutoff() {
                     budget.deadline = budget.deadline.min(paired.into());
                     budget.continuous_activation_cutoff = Some(total);

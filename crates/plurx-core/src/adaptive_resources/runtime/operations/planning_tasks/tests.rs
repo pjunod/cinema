@@ -535,7 +535,10 @@ async fn roster_hiccup_keeps_an_accepted_continuous_cutoff_attachable_to_plannin
         .expect("actual Linux clock")
         .grant_deadline_after(Duration::from_secs(5))
         .expect("accepted original grant");
-    assert_eq!(limit.mint(), crate::cluster::clock::ContinuousMint::ClusterGrant);
+    assert_eq!(
+        limit.mint(),
+        crate::cluster::clock::ContinuousMint::ClusterGrant
+    );
     // A roster read timeout moves cluster admission evidence only; the
     // accepted cutoff still attaches to the SAME never-entered P owner.
     clock.roster_failed();

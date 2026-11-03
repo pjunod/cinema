@@ -3932,7 +3932,10 @@ mod tests {
         );
         let adopted = original_adopt_deadline(&entry, later)
             .expect("an Adopt inside the activation allowance is not refused");
-        assert_eq!(adopted, early, "the SAME full-allowance cutoff, never renewed");
+        assert_eq!(
+            adopted, early,
+            "the SAME full-allowance cutoff, never renewed"
+        );
         tokio::time::sleep(
             early.saturating_duration_since(std::time::Instant::now())
                 + std::time::Duration::from_millis(20),
@@ -3964,7 +3967,9 @@ mod tests {
             ))
         ));
         assert!(
-            original.grant.is_some() && original.granted_ms.is_none() && original.deadline.is_none(),
+            original.grant.is_some()
+                && original.granted_ms.is_none()
+                && original.deadline.is_none(),
             "a refused grant mints nothing and keeps the original registration ungranted"
         );
         // The coordinator's retry Fences this attempt through its worker;

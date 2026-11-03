@@ -100,7 +100,10 @@ async fn advertised_snapshot(
     [(HeaderName, &'static str); 1],
     Json<crate::media_pool::MediaNodeSnapshot>,
 ) {
-    (private_no_store_headers(), Json(local_snapshot(state).await))
+    (
+        private_no_store_headers(),
+        Json(local_snapshot(state).await),
+    )
 }
 
 fn private_no_store_headers() -> [(HeaderName, &'static str); 1] {

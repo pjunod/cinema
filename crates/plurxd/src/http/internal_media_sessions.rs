@@ -397,14 +397,14 @@ async fn adaptive_attempt_causal_prepare(
                 // Cluster-clock evidence is capacity-like, not a protocol
                 // fault: the registration stays ungranted and fenceable, and
                 // the coordinator retries its next candidate.
-                Err(error @ crate::transcode::adaptive_attempts::RemoteGrantError::ClusterClock(_)) => {
-                    super::error::ApiError::typed(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        crate::media_sessions::ADAPTIVE_GRANT_CLOCK_REFUSED,
-                        error.to_string(),
-                    )
-                    .into_response()
-                }
+                Err(
+                    error @ crate::transcode::adaptive_attempts::RemoteGrantError::ClusterClock(_),
+                ) => super::error::ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    crate::media_sessions::ADAPTIVE_GRANT_CLOCK_REFUSED,
+                    error.to_string(),
+                )
+                .into_response(),
                 Err(_) => StatusCode::PRECONDITION_REQUIRED.into_response(),
             }
         }

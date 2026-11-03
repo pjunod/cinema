@@ -541,7 +541,8 @@ impl Cluster {
             let directory = self.get_json(&self.a_base, "/api/v1/cluster/media").await;
             let quoted = directory["nodes"].as_array().is_some_and(|nodes| {
                 nodes.iter().any(|node| {
-                    node["node_id"] == self.b_id.as_str() && node["adaptive_worker_quote"].is_object()
+                    node["node_id"] == self.b_id.as_str()
+                        && node["adaptive_worker_quote"].is_object()
                 })
             });
             if quoted {
@@ -571,7 +572,9 @@ impl Cluster {
                                 && offer["encoder"] == "software"
                         })
                     };
-                    if offers.first().is_some_and(|offer| offer["node_id"] == self.b_id.as_str())
+                    if offers
+                        .first()
+                        .is_some_and(|offer| offer["node_id"] == self.b_id.as_str())
                         && eligible(&self.b_id)
                         && eligible(&self.a_id)
                     {
@@ -630,7 +633,10 @@ impl Cluster {
     ) -> Result<Value, String> {
         let response = self
             .client
-            .post(format!("{}/api/v1/files/{file_id}/hls/sessions", self.a_base))
+            .post(format!(
+                "{}/api/v1/files/{file_id}/hls/sessions",
+                self.a_base
+            ))
             .bearer_auth(&self.token)
             .json(&json!({"playback_id": playback, "height": height}))
             .send()
@@ -693,7 +699,13 @@ impl Cluster {
 
 fn metric(text: &str, series: &str) -> u64 {
     text.lines()
-        .find_map(|line| line.strip_prefix(series)?.strip_prefix(' ')?.trim().parse().ok())
+        .find_map(|line| {
+            line.strip_prefix(series)?
+                .strip_prefix(' ')?
+                .trim()
+                .parse()
+                .ok()
+        })
         .unwrap_or(0)
 }
 
@@ -766,7 +778,10 @@ async fn scan_fixture(cluster: &mut Cluster, media: &Path) -> i64 {
     let file_id = loop {
         cluster.node_a.assert_running("waiting for the scan");
         let page = cluster
-            .get_json(&cluster.a_base, &format!("/api/v1/libraries/{library_id}/items"))
+            .get_json(
+                &cluster.a_base,
+                &format!("/api/v1/libraries/{library_id}/items"),
+            )
             .await;
         if let Some(item_id) = page["items"]
             .as_array()
@@ -900,7 +915,12 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
     let before_a = cluster.metrics(&a_base).await;
     let prepares = cluster.proxy_b.hits(PREPARE_PATH);
     let height = cluster
-        .create_until(file_id, "adaptive-two-node-skip", "clock_skipped", &mut refused)
+        .create_until(
+            file_id,
+            "adaptive-two-node-skip",
+            "clock_skipped",
+            &mut refused,
+        )
         .await;
     let view = cluster.placement_view(file_id, height).await;
     let after_a = cluster.metrics(&a_base).await;
@@ -937,7 +957,12 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
     let prepares = cluster.proxy_b.hits(PREPARE_PATH);
     let cancels = cluster.proxy_b.hits(CANCEL_PATH);
     cluster
-        .create_until(file_id, "adaptive-two-node-refused", "grant_refused", &mut refused)
+        .create_until(
+            file_id,
+            "adaptive-two-node-refused",
+            "grant_refused",
+            &mut refused,
+        )
         .await;
     let after_a = cluster.metrics(&a_base).await;
     let after_b = cluster.metrics(&b_base).await;
