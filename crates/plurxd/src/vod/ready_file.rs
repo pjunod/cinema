@@ -266,7 +266,7 @@ impl ReadyFile {
             Self::Copy { output, file, .. } => {
                 let reader = timeout(
                     deadline,
-                    output.prepare_reader(file, start, end_exclusive, chunk_capacity_u64),
+                    output.prepare_reader(file, start, end_exclusive, chunk_capacity_u64, deadline),
                 )
                 .await?
                 .map_err(finite_error)?;

@@ -48,6 +48,26 @@ pub(super) struct BootstrapMember {
     prefix_removal: Option<prefix_removal::LiveRemoval>,
 }
 
+/// Fixture only: stage one output change through the SAME fold admission and
+/// journal submission every runtime producer and reader uses. It grants no
+/// native operation, result or acknowledgement.
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(super) fn fixture_queue_output_change(
+    journal: &CustodyJournal,
+    role: &mut OwnedRole,
+    member: Uuid,
+    operation: Uuid,
+    event: AssetEventV1,
+    deadline: Instant,
+) -> Result<(), OperationError> {
+    native::publication::queue_output_change(journal, role, member, operation, event, deadline)
+}
+
 // Negative fixture custody only: each variant retains the actual acknowledged
 // owner taken from the original slot. This type cannot create a run or receipt.
 #[cfg(all(test, target_os = "linux", feature = "fixtures"))]
@@ -941,9 +961,53 @@ fn queue_root(
             operation: BootstrapIoV1::OpenNamespaceRoot { copy_id },
         },
     };
-    bootstrap.change = Some((io_id, change.clone()));
+    stage_change(bootstrap, io_id, change)?;
     bootstrap.root_arm = Some((io_id, copy_id));
     resume_change(journal, role, member, deadline)
+}
+
+/// Stage `change` as this member's one retained journal command, only if the
+/// member's fold admits it now. The journal commits a change before
+/// `apply_committed` folds it, so the fold's own preconditions (chain linkage
+/// and the asset's single pending I/O slot) are checked here, before the
+/// change can reach the journal. A refusal stages nothing and leaves the fold,
+/// the role and the journal untouched.
+fn stage_change(
+    bootstrap: &mut BootstrapMember,
+    id: v2::Id,
+    change: AssetChangeV3,
+) -> Result<(), OperationError> {
+    bootstrap
+        .fold
+        .as_ref()
+        .ok_or(OperationError::State)?
+        .admits(&bootstrap.plan, id, &change)
+        .map_err(|_| OperationError::State)?;
+    bootstrap.change = Some((id, change));
+    Ok(())
+}
+
+/// Whether THIS member's single journaled I/O slot is held by work that clears
+/// only through `acknowledge`, which signals the returned notification under
+/// the bundle lock: the member's own committed transition, its staged change,
+/// or an armed native operation not yet observed (a client's read, a
+/// publication or a sync). A transition of another effect is not this slot's
+/// and is left to the caller's own check.
+#[cfg(unix)]
+fn io_slot_held(role: &OwnedRole, member: Uuid) -> Option<Arc<tokio::sync::Notify>> {
+    if role
+        .transition
+        .as_ref()
+        .is_some_and(|transition| transition.effect != Effect::Bootstrap(member))
+    {
+        return None;
+    }
+    let bootstrap = role.bootstrap.get(&member)?;
+    let state = bootstrap.fold.as_ref()?.state();
+    (role.transition.is_some()
+        || bootstrap.change.is_some()
+        || state.asset.totals.pending_jobs != 0)
+        .then(|| Arc::clone(&bootstrap.io_progress))
 }
 
 // A command may be retained before queue submission fails (e.g. its deadline).

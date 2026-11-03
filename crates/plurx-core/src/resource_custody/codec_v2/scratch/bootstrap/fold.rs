@@ -248,6 +248,55 @@ impl BootstrapFold {
             && reference.member_id == self.member
             && reference.directory_id == directory.observed.directory_id
     }
+    /// The journal commits a change before the runtime folds it, and `apply`
+    /// consumes the fold. A runtime therefore stages a change only after this
+    /// check: the chain linkage and the single pending I/O slot preconditions
+    /// `apply` enforces for bootstrap and output events alike, evaluated
+    /// without consuming or changing the fold. A change it refuses must never
+    /// be journaled.
+    pub(crate) fn admits(
+        &self,
+        plan: &ScratchPlanV3,
+        operation_id: Id,
+        change: &AssetChangeV3,
+    ) -> Result<(), CustodyError> {
+        if change.scratch_member_id != self.member
+            || change.asset_id != plan.asset_id
+            || change.generation_epoch != plan.generation_epoch
+            || change.previous != self.output.state.head
+            || self
+                .output
+                .state
+                .head
+                .as_ref()
+                .is_some_and(|h| h.operation_id == operation_id)
+        {
+            return Err(codec::invalid());
+        }
+        let admitted = match &change.event {
+            AssetEventV3::ArmBootstrapV1 { io_id, .. } => {
+                *io_id == operation_id && self.pending.is_none() && !self.output.has_pending()
+            }
+            AssetEventV3::ObserveBootstrapV1 { io_id, .. } => {
+                *io_id != operation_id
+                    && self
+                        .pending
+                        .as_ref()
+                        .is_some_and(|(armed, _)| armed == io_id)
+            }
+            AssetEventV3::OutputV2 { event } => {
+                if !matches!(event, AssetEventV1::Fence { .. }) && self.pending.is_some() {
+                    return Err(codec::invalid());
+                }
+                return self.output.admits_slot(operation_id, event);
+            }
+        };
+        if admitted {
+            Ok(())
+        } else {
+            Err(codec::invalid())
+        }
+    }
     pub(crate) fn apply(
         mut self,
         plan: &ScratchPlanV3,

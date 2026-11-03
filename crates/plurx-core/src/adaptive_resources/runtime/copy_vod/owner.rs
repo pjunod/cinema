@@ -397,10 +397,18 @@ impl CopyOutput {
         start: u64,
         end_exclusive: u64,
         memory_cap: u64,
+        deadline: Instant,
     ) -> Result<FiniteReader, FiniteVodError> {
         if file == CopyFile::Playlist {
             return Err(invalid());
         }
+        // As for a finite output: a body dropped mid-read keeps its armed
+        // native read in the asset's single I/O slot until its retained entry
+        // is driven to close. Drain those before selecting, so a new client
+        // waits only on reads that are actually being served.
+        self.runtime
+            .close_dropped_finite_readers(&self.preparation, 0, deadline)
+            .await?;
         self.runtime
             .prepare_finite_reader(
                 &self.preparation,
@@ -410,6 +418,7 @@ impl CopyOutput {
                 start,
                 end_exclusive,
                 memory_cap,
+                deadline,
             )
             .await
             .map_err(Into::into)
@@ -440,6 +449,7 @@ impl CopyOutput {
                 0,
                 length as u64,
                 u64::try_from(length.min(64 * 1024)).map_err(|_| invalid())?,
+                deadline,
             )
             .await?;
         while response.len() < length {

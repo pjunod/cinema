@@ -736,7 +736,7 @@ impl NodeResourceRuntime {
                     result: audit,
                 },
             };
-            bootstrap.change = Some((observe_id, change.clone()));
+            stage_change(bootstrap, observe_id, change.clone())?;
             start_named_transition(
                 &self.journal,
                 role,

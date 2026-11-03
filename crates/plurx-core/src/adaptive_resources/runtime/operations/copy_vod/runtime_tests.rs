@@ -2828,7 +2828,16 @@ async fn producer_waits_for_reader_held_io_slot(waiter: SlotWaiter) {
 
     let len = init.len() as u64;
     let reader = runtime
-        .prepare_finite_reader(&preparation, 0, member, OutputKey::Init, 0, len, len)
+        .prepare_finite_reader(
+            &preparation,
+            0,
+            member,
+            OutputKey::Init,
+            0,
+            len,
+            len,
+            deadline(),
+        )
         .await
         .expect("client reader of the published init");
     let gate = Gate::install_next(Kind::ReaderRead, reader.fixture_lease_id());
@@ -3035,6 +3044,334 @@ async fn copy_sync_queue_waits_for_reader_held_io_slot() {
 #[tokio::test]
 async fn copy_sync_arm_waits_for_reader_held_io_slot() {
     producer_waits_for_reader_held_io_slot(SlotWaiter::SyncArm).await;
+}
+
+/// Publish and sync the original Init: a finite asset ready for client reads.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+async fn publish_synced_init(
+    runtime: &NodeResourceRuntime,
+    preparation: &OwnedPreparation,
+    member: Uuid,
+) -> Vec<u8> {
+    use v2::scratch::OutputKey;
+    let init = b"\0\0\0\x18ftypisom\0\0\0\0isomiso6".to_vec();
+    let mut payload = init.clone();
+    let publication = runtime
+        .queue_scratch_publication(preparation, 0, member, OutputKey::Init, &mut payload)
+        .expect("queue original init publication");
+    runtime
+        .publish_scratch_output(preparation, 0, member, publication, deadline())
+        .await
+        .expect("original init publication");
+    let sync = runtime
+        .queue_scratch_sync(preparation, 0, member, &[OutputKey::Init])
+        .expect("queue original init sync");
+    runtime
+        .sync_scratch_outputs(preparation, 0, member, sync, deadline())
+        .await
+        .expect("original init sync");
+    init
+}
+
+/// Drive `reader` until its next `ReadRange` is armed, entered and not yet
+/// observed, then leave only the borrowed waiter: the read keeps the asset's
+/// single journaled I/O slot, with the bundle lock free, until the gate drops.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+async fn hold_read_in_slot(
+    reader: &super::super::bootstrap::readers::FiniteReader,
+) -> super::super::native_result_fixture::Gate {
+    use super::super::native_result_fixture::{Gate, Kind};
+    let gate = Gate::install_next(Kind::ReaderRead, reader.fixture_lease_id());
+    let mut read = Box::pin(reader.next_chunk(deadline()));
+    tokio::select! {
+        result = &mut read => panic!("read returned before its native result was delayed: {}", result.is_ok()),
+        result = tokio::time::timeout(Duration::from_secs(10), gate.reached()) => {
+            result.expect("original reader pread watchdog");
+        }
+    }
+    drop(read);
+    gate
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn slot_pending(bundle: &Bundle, member: Uuid) -> u64 {
+    u64::from(
+        bundle.roles[0].bootstrap[&member]
+            .fold()
+            .expect("the member keeps its fold")
+            .state()
+            .asset
+            .totals
+            .pending_jobs,
+    )
+}
+
+/// The producer's next segment publication and sync, waiting for the slot.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+async fn publish_synced_segment(
+    runtime: &NodeResourceRuntime,
+    preparation: &OwnedPreparation,
+    member: Uuid,
+) {
+    use v2::scratch::OutputKey;
+    let segment = OutputKey::Segment { index: 0 };
+    let mut payload = b"\0\0\0\x10moof\0\0\0\x08mdat".to_vec();
+    let id = runtime
+        .queue_scratch_publication_wait(preparation, 0, member, segment, &mut payload, deadline())
+        .await
+        .expect("segment publication queue on the healthy asset");
+    runtime
+        .publish_scratch_output(preparation, 0, member, id, deadline())
+        .await
+        .expect("segment publication on the healthy asset");
+    let id = runtime
+        .queue_scratch_sync_wait(preparation, 0, member, &[segment], deadline())
+        .await
+        .expect("segment sync queue on the healthy asset");
+    runtime
+        .sync_scratch_outputs(preparation, 0, member, id, deadline())
+        .await
+        .expect("segment sync on the healthy asset");
+    let bundle = preparation.state.lock().await;
+    assert_eq!(slot_pending(&bundle, member), 0, "slot released");
+    assert!(
+        bundle.roles[0].bootstrap[&member]
+            .fold()
+            .expect("the member keeps its fold")
+            .files()
+            .iter()
+            .any(|file| !file.temporary && file.published == Some(segment)),
+        "the segment is published in the journal-known inventory"
+    );
+}
+
+// Two client readers of ONE published asset: two players, or one player's
+// parallel segment fetches. While the first reader's ReadRange holds the
+// asset's single journaled I/O slot (armed, entered, unobserved), the second
+// reader's next ReadRange must wait for that read's acknowledged observe,
+// not arm into the occupied slot. Before the fix the second arm was handed
+// to the journal, which the fold's one-pending invariant refuses: the role
+// was left holding a command it can never apply, the first read could never
+// be observed, and the asset was dead for every client and the producer.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn copy_concurrent_readers_wait_for_io_slot_and_asset_stays_healthy() {
+    use v2::scratch::OutputKey;
+    let root = tempfile::tempdir().expect("actual concurrent reader fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    original_prefix(&runtime, &mut owner, &preparation).await;
+    let member = output_member(&preparation).await;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("original lease before closing");
+    let init = publish_synced_init(&runtime, &preparation, member).await;
+    let len = init.len() as u64;
+    let half = len / 2;
+    let (front, back) = init.split_at(usize::try_from(half).expect("fixture length"));
+    // Half-size chunks: each reader opens, reads, and has a next ReadRange.
+    let first = runtime
+        .prepare_finite_reader(
+            &preparation,
+            0,
+            member,
+            OutputKey::Init,
+            0,
+            len,
+            half,
+            deadline(),
+        )
+        .await
+        .expect("first client reader");
+    let second = runtime
+        .prepare_finite_reader(
+            &preparation,
+            0,
+            member,
+            OutputKey::Init,
+            0,
+            len,
+            half,
+            deadline(),
+        )
+        .await
+        .expect("second client reader of the same asset");
+    let chunk = second
+        .next_chunk(deadline())
+        .await
+        .expect("second reader opens and reads")
+        .expect("front half");
+    assert_eq!(chunk.as_ref(), front);
+    drop(chunk);
+
+    let gate = hold_read_in_slot(&first).await;
+    let sequence = {
+        let bundle = preparation.state.lock().await;
+        assert_eq!(
+            slot_pending(&bundle, member),
+            1,
+            "first read holds the slot"
+        );
+        bundle.roles[0].sequence
+    };
+    let mut next = Box::pin(second.next_chunk(deadline()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut next)
+            .await
+            .is_err(),
+        "the second ReadRange must wait for the held slot, not arm into it"
+    );
+    {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        assert!(role.transition.is_none(), "no command for the waiting read");
+        assert_eq!(role.sequence, sequence, "nothing journaled while waiting");
+        assert_eq!(
+            slot_pending(&bundle, member),
+            1,
+            "first read still holds it"
+        );
+    }
+    drop(gate);
+    let (first_chunk, second_chunk) = tokio::join!(first.next_chunk(deadline()), next);
+    let first_chunk = first_chunk
+        .expect("first reader resumes its SAME armed read")
+        .expect("front half");
+    assert_eq!(first_chunk.as_ref(), front);
+    drop(first_chunk);
+    let second_chunk = second_chunk
+        .expect("second reader reads once the slot is released")
+        .expect("back half");
+    assert_eq!(second_chunk.as_ref(), back);
+    drop(second_chunk);
+
+    first
+        .close(deadline())
+        .await
+        .expect("positive close of the first reader");
+    second
+        .close(deadline())
+        .await
+        .expect("positive close of the second reader");
+    drop((first, second));
+    // The asset stays healthy: fold present, slot free, producer carries on.
+    publish_synced_segment(&runtime, &preparation, member).await;
+    retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
+}
+
+// The journal commits a change before `apply_committed` folds it, and `apply`
+// consumes the fold. A change the fold would refuse (here a second ArmIo while
+// a client's ReadRange holds the single slot) must be refused BEFORE it is
+// staged or submitted: the member keeps its exact fold, no command is staged
+// or journaled, and the held read and the producer carry on.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn copy_fold_refused_change_is_never_journaled_and_keeps_the_fold() {
+    use v2::scratch::{AssetEventV1, AssetIoV1, ByteRangeV1, OutputKey};
+    let root = tempfile::tempdir().expect("actual refused change fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    original_prefix(&runtime, &mut owner, &preparation).await;
+    let member = output_member(&preparation).await;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("original lease before closing");
+    let init = publish_synced_init(&runtime, &preparation, member).await;
+    let len = init.len() as u64;
+    let reader = runtime
+        .prepare_finite_reader(
+            &preparation,
+            0,
+            member,
+            OutputKey::Init,
+            0,
+            len,
+            len,
+            deadline(),
+        )
+        .await
+        .expect("client reader of the published init");
+    let gate = hold_read_in_slot(&reader).await;
+    {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        let sequence = role.sequence;
+        let before = role.bootstrap[&member]
+            .fold()
+            .expect("original fold")
+            .state();
+        assert_eq!(
+            before.asset.totals.pending_jobs, 1,
+            "the read holds the slot"
+        );
+        let io = v2::Id::new(Uuid::new_v4()).expect("fixture IO id");
+        let refused = super::super::bootstrap::fixture_queue_output_change(
+            &runtime.journal,
+            role,
+            member,
+            io.uuid(),
+            AssetEventV1::ArmIo {
+                io_id: io,
+                operation: AssetIoV1::ReadRange {
+                    lease_id: v2::Id::new(reader.fixture_lease_id()).expect("lease id"),
+                    range: ByteRangeV1 {
+                        start: 0,
+                        end_exclusive: len,
+                    },
+                },
+            },
+            deadline(),
+        );
+        assert!(
+            matches!(refused, Err(OperationError::State)),
+            "a fold-refused change is refused before the journal: {refused:?}"
+        );
+        assert!(
+            role.transition.is_none(),
+            "nothing submitted to the journal"
+        );
+        assert_eq!(role.sequence, sequence, "nothing journaled");
+        assert!(
+            role.bootstrap[&member]
+                .fold()
+                .is_some_and(|fold| fold.state() == before),
+            "the member keeps its exact fold"
+        );
+    }
+    // No staged command blocks the held read's own observe or the producer.
+    drop(gate);
+    let chunk = reader
+        .next_chunk(deadline())
+        .await
+        .expect("held read resumes and is observed")
+        .expect("init bytes");
+    assert_eq!(chunk.as_ref(), init.as_slice());
+    drop(chunk);
+    reader
+        .close(deadline())
+        .await
+        .expect("positive close of the reader");
+    drop(reader);
+    publish_synced_segment(&runtime, &preparation, member).await;
+    retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
 }
 
 // Each irreversible errno filter runs in its own harness subprocess and on

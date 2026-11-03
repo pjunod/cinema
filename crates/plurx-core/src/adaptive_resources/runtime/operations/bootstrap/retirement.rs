@@ -307,7 +307,7 @@ fn queue_bootstrap_change(
             .head,
         event,
     };
-    bootstrap.change = Some((operation_id, change));
+    stage_change(bootstrap, operation_id, change)?;
     resume_change(journal, role, member, deadline)
 }
 fn retry_transition(

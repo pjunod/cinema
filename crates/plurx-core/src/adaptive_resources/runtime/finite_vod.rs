@@ -614,6 +614,7 @@ impl FiniteOutput {
                 start,
                 end_exclusive,
                 memory_cap,
+                deadline,
             )
             .await
             .map_err(Into::into)
