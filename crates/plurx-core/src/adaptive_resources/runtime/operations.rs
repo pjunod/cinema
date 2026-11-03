@@ -112,9 +112,9 @@ struct Bundle {
 
 struct OwnedRole {
     binding: ReservationBinding,
-    // The original continuous create cutoff a remote grant carried into this
-    // R owner. It closes fresh arm and native entry only; cleanup and joins
-    // never consult it.
+    // The original continuous create cutoff (local create or remote grant)
+    // carried into this R owner. It closes fresh arm and native entry only;
+    // cleanup and joins never consult it.
     continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     // The original prepare bundle tag is distinct from its journal obligation.
     // A conserving R→S commit replaces it with the selected target durable tag.

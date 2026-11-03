@@ -416,6 +416,13 @@ pub(super) struct AttemptEntry {
     /// coordinator and control futures have both been joined.
     finishing_lease: Mutex<Option<FiniteApplicationLease>>,
     charged_control_frame_bytes: std::sync::atomic::AtomicUsize,
+    /// A local create's original continuous preparation cutoff, fixed when
+    /// the entry is first reserved inside its create scope; a replay selects
+    /// the existing entry and never replaces it. A remote registration keeps
+    /// its accepted grant in `remote_registration` instead. Stored inline, so
+    /// the `size_of::<AttemptEntry>()` term of every precharged application
+    /// total already covers it; the clock guard it shares is node-owned.
+    local_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
 }
 
 enum PlanningState {
@@ -533,6 +540,7 @@ impl AdaptiveAttemptRegistry {
         request_incarnation_id: Uuid,
         worker_instance_id: Uuid,
         serving_generation: u64,
+        local_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     ) -> Result<Arc<AttemptEntry>, &'static str> {
         if attempt_id.is_nil() || request_incarnation_id.is_nil() || worker_instance_id.is_nil() {
             return Err("adaptive attempt has a nil identity");
@@ -574,9 +582,36 @@ impl AdaptiveAttemptRegistry {
             control: Mutex::new(None),
             finishing_lease: Mutex::new(None),
             charged_control_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
+            local_cutoff,
         });
         *vacant = Some(Arc::clone(&entry));
         Ok(entry)
+    }
+
+    /// Reserve a fresh LOCAL attempt inside its create scope. Only the actual
+    /// create scope proves the remaining monotonic preparation allowance and
+    /// its paired continuous cutoff; both are read here for the entry being
+    /// reserved, so the local cutoff is fixed exactly once with the slot.
+    fn reserve_local(
+        &self,
+        claim: &AttemptClaim,
+        deadline: std::time::Instant,
+    ) -> Result<(Arc<AttemptEntry>, std::time::Instant), String> {
+        let original_cutoff = crate::media_pool::create_preparation_deadline()
+            .ok_or("insufficient_evidence: original local create deadline is absent")?
+            .into_std();
+        let deadline = deadline.min(original_cutoff);
+        if std::time::Instant::now() >= deadline {
+            return Err("deadline_budget: original local preparation allowance expired".into());
+        }
+        let entry = self.reserve(
+            claim.key.attempt_id,
+            claim.key.request.request_incarnation_id,
+            claim.worker_instance_id,
+            claim.serving_generation,
+            crate::media_pool::create_continuous_entry_deadline(),
+        )?;
+        Ok((entry, deadline))
     }
 
     pub(super) fn get(&self, attempt_id: Uuid) -> Option<Arc<AttemptEntry>> {
@@ -672,6 +707,15 @@ impl AttemptEntry {
             .lock()
             .map(|held| held.as_ref().and_then(|remote| remote.deadline.clone()))
             .map_err(|_| "remote original deadline is uncertain".into())
+    }
+    /// The original continuous entry condition this attempt carries into P
+    /// and R: the accepted remote grant, else the local create's own cutoff.
+    fn continuous_entry_deadline(
+        &self,
+    ) -> Result<Option<plurx_core::cluster::clock::ContinuousDeadline>, String> {
+        Ok(self
+            .remote_deadline()?
+            .or_else(|| self.local_cutoff.clone()))
     }
     fn remote_failure_fence(
         &self,
@@ -1006,6 +1050,24 @@ impl super::TranscodeManager {
                 handoff_planning_cleanup(&mut planning);
                 return Err(error);
             }
+        } else if let Some(local) = entry.local_cutoff.clone() {
+            // A local create retains its own original cutoff on the SAME
+            // charged P owner before source entry, exactly as a grant does.
+            let retained = local
+                .monotonic_cutoff()
+                .map_err(|error| format!("original local clock before source entry: {error}"))
+                .and_then(|cutoff| {
+                    deadline = deadline.min(cutoff);
+                    owner
+                        .retain_continuous_entry_deadline(local)
+                        .map_err(|error| {
+                            format!("retaining original continuous P entry condition: {error}")
+                        })
+                });
+            if let Err(error) = retained {
+                handoff_planning_cleanup(&mut planning);
+                return Err(error);
+            }
         }
         if let Err(error) = owner.prepare_inputs(deadline).await {
             handoff_planning_cleanup(&mut planning);
@@ -1269,6 +1331,7 @@ impl super::TranscodeManager {
                 request.claim.key.request.request_incarnation_id,
                 request.claim.worker_instance_id,
                 request.claim.serving_generation,
+                None,
             )
             .map_err(str::to_owned)?;
         let (grant_tx, grant_rx) = tokio::sync::oneshot::channel();
@@ -1402,24 +1465,12 @@ impl super::TranscodeManager {
             return Ok(AdaptivePrepareStart::Pending);
         }
         // Only the actual local create scope proves its remaining monotonic
-        // preparation allowance. Preserve registered replay above even after
-        // caller cancellation; refuse fresh registration without that scope.
-        let original_cutoff = crate::media_pool::create_preparation_deadline()
-            .ok_or("insufficient_evidence: original local create deadline is absent")?
-            .into_std();
-        let deadline = deadline.min(original_cutoff);
-        if std::time::Instant::now() >= deadline {
-            return Err("deadline_budget: original local preparation allowance expired".into());
-        }
-        let entry = self
+        // preparation allowance and continuous cutoff. Preserve registered
+        // replay above even after caller cancellation; refuse fresh
+        // registration without that scope.
+        let (entry, deadline) = self
             .adaptive_attempts
-            .reserve(
-                attempt_id,
-                request.claim.key.request.request_incarnation_id,
-                request.claim.worker_instance_id,
-                request.claim.serving_generation,
-            )
-            .map_err(str::to_owned)?;
+            .reserve_local(&request.claim, deadline)?;
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let manager = Arc::clone(self);
@@ -1534,10 +1585,10 @@ impl super::TranscodeManager {
                 return Err(error);
             }
         };
-        if let Some(original) = entry.remote_deadline()? {
+        if let Some(original) = entry.continuous_entry_deadline()? {
             original
                 .entry_remaining()
-                .map_err(|error| format!("original remote preparation expired: {error}"))?;
+                .map_err(|error| format!("original create preparation expired: {error}"))?;
             deadline = deadline.min(
                 original
                     .monotonic_cutoff()
@@ -1612,9 +1663,9 @@ impl super::TranscodeManager {
             settings,
             planning_application_limit_bytes: _,
         } = planned;
-        // The SAME original remote grant P retained; a local create carries
-        // none, so its R keeps the original local monotonic deadline.
-        let continuous_entry_deadline = entry.remote_deadline()?;
+        // The SAME original continuous condition P retained (remote grant or
+        // local create cutoff) closes every fresh R arm and native entry.
+        let continuous_entry_deadline = entry.continuous_entry_deadline()?;
         let built = self
             .vod
             .build_adaptive_recipe(
@@ -1761,10 +1812,10 @@ impl super::TranscodeManager {
         authority: crate::serving_fence::ServingAuthority,
         mut deadline: std::time::Instant,
     ) -> Result<crate::vodserve::VodStart, String> {
-        if let Some(original) = entry.remote_deadline()? {
+        if let Some(original) = entry.continuous_entry_deadline()? {
             original
                 .entry_remaining()
-                .map_err(|error| format!("original remote activation deadline: {error}"))?;
+                .map_err(|error| format!("original create activation deadline: {error}"))?;
             deadline = deadline.min(
                 original
                     .monotonic_cutoff()
@@ -2913,6 +2964,7 @@ impl super::TranscodeManager {
                 claim.key.request.request_incarnation_id,
                 claim.worker_instance_id,
                 claim.serving_generation,
+                None,
             )
             .expect("original bounded worker slot");
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
@@ -3435,6 +3487,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_attempt_carries_the_create_cutoff_into_entry_deadline() {
+        let (fixture, _receiver) = remote_control_fixture();
+        let claim = fixture.claim;
+        let registry = AdaptiveAttemptRegistry::default();
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        assert!(registry.reserve_local(&claim, later).is_err());
+        // An unproved replicated cluster: local evidence alone carries the cutoff.
+        let clock = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(true));
+        let budget = crate::media_pool::CreateStartupBudget::new_with_clock(1_000, &clock);
+        let (entry, deadline) = budget
+            .scope(async { registry.reserve_local(&claim, later) })
+            .await
+            .expect("fresh local reservation inside its create");
+        let original = budget
+            .scope(async { crate::media_pool::create_continuous_entry_deadline() })
+            .await
+            .expect("the create's own continuous cutoff");
+        let carried = entry
+            .continuous_entry_deadline()
+            .expect("readable entry condition")
+            .expect("local create cutoff carried into P and R");
+        assert_eq!(
+            carried.mint(),
+            plurx_core::cluster::clock::ContinuousMint::Local
+        );
+        let cutoff = original.monotonic_cutoff().expect("original cutoff");
+        assert_eq!(carried.monotonic_cutoff().expect("same cutoff"), cutoff);
+        assert!(deadline <= cutoff);
+        carried
+            .entry_remaining()
+            .expect("local entry needs no cluster evidence");
+        // A replay in another create selects the SAME entry and condition.
+        let other = crate::media_pool::CreateStartupBudget::new_with_clock(5_000, &clock);
+        let (replay, _) = other
+            .scope(async { registry.reserve_local(&claim, later) })
+            .await
+            .expect("replay of the same attempt");
+        assert!(Arc::ptr_eq(&entry, &replay));
+        assert_eq!(
+            replay
+                .continuous_entry_deadline()
+                .expect("readable")
+                .expect("retained")
+                .monotonic_cutoff()
+                .expect("same cutoff"),
+            cutoff
+        );
+    }
+
+    #[tokio::test]
     async fn actual_late_or_unready_grant_cannot_consume_original_start() {
         let (mut original, mut receiver) = remote_control_fixture();
         let claim = original.claim.clone();
@@ -3509,14 +3611,14 @@ mod tests {
         let request = Uuid::new_v4();
         let worker = Uuid::new_v4();
         let entry = registry
-            .reserve(attempt, request, worker, 7)
+            .reserve(attempt, request, worker, 7, None)
             .expect("reserve");
         let replay = registry
-            .reserve(attempt, request, worker, 7)
+            .reserve(attempt, request, worker, 7, None)
             .expect("replay");
         assert!(Arc::ptr_eq(&entry, &replay));
         assert!(registry
-            .reserve(attempt, request, Uuid::new_v4(), 7)
+            .reserve(attempt, request, Uuid::new_v4(), 7, None)
             .is_err());
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();

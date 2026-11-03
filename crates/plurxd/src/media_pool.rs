@@ -425,8 +425,11 @@ pub(crate) struct BudgetedCatalogRequest {
 
 #[derive(Clone)]
 pub(crate) struct CreateStartupBudget {
-    /// Linux original elapsed-time cutoff, independent of Tokio suspension.
-    /// Absence refuses new remote grants; it does not mint fallback time.
+    /// Linux original elapsed-time cutoff, independent of Tokio suspension,
+    /// captured on local evidence at ingress. A local attempt carries it into
+    /// P and R; a remote grant is derived from it under the strict cluster
+    /// policy. Absence refuses new remote grants; it does not mint fallback
+    /// time.
     continuous_prepare_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     pub deadline: tokio::time::Instant,
     calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
@@ -494,9 +497,11 @@ impl CreateStartupBudget {
     }
     /// Production ingress captures the original elapsed budget before any
     /// awaited work. The standard instant starts before the potentially
-    /// contended strict capture; neither lock wait nor scope transfer can
-    /// renew B. Unknown continuous evidence keeps local scheduling bounded
-    /// and refuses fresh cross-node grants.
+    /// contended capture; neither lock wait nor scope transfer can renew B.
+    /// The capture is local evidence only, so a cluster-clock lapse cannot
+    /// remove a local create's cutoff; an unreadable BOOTTIME or a local
+    /// discontinuity keeps local scheduling bounded and refuses fresh
+    /// cross-node grants.
     pub(crate) fn new_with_clock(
         remaining_ms: u64,
         clock: &std::sync::Arc<plurx_core::cluster::clock::ClusterClockGuard>,
@@ -600,9 +605,22 @@ pub(crate) fn create_preparation_deadline() -> Option<tokio::time::Instant> {
         .ok()
 }
 
+/// The same original continuous preparation cutoff that pairs with
+/// [`create_preparation_deadline`], for a local attempt to carry into P and
+/// R. Absent outside a create scope or without a healthy local BOOTTIME.
+#[cfg(target_os = "linux")]
+pub(crate) fn create_continuous_entry_deadline(
+) -> Option<plurx_core::cluster::clock::ContinuousDeadline> {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| budget.continuous_prepare_cutoff.clone())
+        .ok()
+        .flatten()
+}
+
 /// Grant duration is derived only after the genuine registration receipt.
 /// Both original clocks and the caller's already clipped stage constrain it.
 /// Millisecond flooring never grants the fractional tail to the worker.
+/// This is where the strict cluster-clock policy applies to a create.
 #[cfg(target_os = "linux")]
 pub(crate) fn create_remote_grant_ms(stage_deadline: tokio::time::Instant) -> Option<u32> {
     CREATE_STARTUP_BUDGET
@@ -2677,6 +2695,13 @@ mod tests {
                     create_preparation_deadline().expect("actual local scheduling budget")
                         > tokio::time::Instant::now()
                 );
+                // The ingress capture is local evidence: a local attempt still
+                // carries its cutoff; only the cross-node grant is refused.
+                let local = create_continuous_entry_deadline()
+                    .expect("local continuous cutoff without cluster evidence");
+                local
+                    .entry_remaining()
+                    .expect("local entry needs no cluster evidence");
                 assert!(create_remote_grant_ms(budget.deadline).is_none());
             })
             .await;
