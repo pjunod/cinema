@@ -2882,6 +2882,91 @@ fn activation_confirmation_rejects_a_takeover_epoch_with_reused_ids() {
 }
 
 #[test]
+fn adopted_route_matches_its_attempt_ordinal_epoch_not_the_legacy_one() {
+    use plurx_core::store::adaptive_resource_attempts::{AttemptKey, RequestKey};
+    let key = AttemptKey {
+        request: RequestKey {
+            request_id: "adaptive-retry".to_owned(),
+            request_incarnation_id: uuid::Uuid::new_v4(),
+        },
+        attempt_id: uuid::Uuid::new_v4(),
+        route_incarnation_id: uuid::Uuid::new_v4(),
+        session_id: uuid::Uuid::new_v4(),
+        worker_node_id: "node-e".to_owned(),
+        owner_epoch: 2,
+        ordinal: 2,
+    };
+    let fingerprint = "e".repeat(64);
+    let response_json = r#"{"session":"adopted"}"#.to_owned();
+    let activation = MediaSessionActivation {
+        recovery_epoch: String::new(),
+        expected_desired_revision: None,
+        incarnation_id: key.route_incarnation_id.to_string(),
+        session_id: key.session_id.to_string(),
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+        playback_id: "adaptive-adoption".to_owned(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: true,
+        request_id: Some("adaptive-retry".to_owned()),
+        request_fingerprint: fingerprint.clone(),
+        owner_node_id: "node-e".to_owned(),
+        recipe_json: "{}".to_owned(),
+        response_json: response_json.clone(),
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: unix_ms(),
+        lease_expires_at_ms: unix_ms() + 60_000,
+    };
+    let mut route = MediaSessionRoute {
+        recovery_epoch: String::new(),
+        incarnation_id: activation.incarnation_id.clone(),
+        session_id: activation.session_id.clone(),
+        principal: activation.principal.clone(),
+        playback_id: activation.playback_id.clone(),
+        request_fingerprint: fingerprint,
+        owner_node_id: "node-e".to_owned(),
+        owner_epoch: 2,
+        lease_expires_at_ms: unix_ms() + 60_000,
+        state: "active".to_owned(),
+        terminal_reason: None,
+        publication_ready_at_ms: 0,
+        recipe_json: "{}".to_owned(),
+        response_json,
+        produced_playable_through_ms: 0,
+        fetched_through_ms: 0,
+        media_origin_ms: 0,
+        media_sequence: 0,
+        discontinuity_sequence: 0,
+        updated_at_ms: unix_ms(),
+        drain_deadline_ms: None,
+    };
+    assert!(
+        route_matches_adoption(&route, &activation, &key),
+        "a retried candidate is adopted at its ordinal epoch"
+    );
+    assert!(
+        !route_matches_activation(&route, &activation),
+        "the legacy predicate still mints only epoch 1"
+    );
+    for wrong in [1, 3] {
+        route.owner_epoch = wrong;
+        assert!(
+            !route_matches_adoption(&route, &activation, &key),
+            "epoch {wrong} is not this attempt's route"
+        );
+    }
+    route.owner_epoch = 2;
+    let mut other = key.clone();
+    other.worker_node_id = "node-f".to_owned();
+    assert!(
+        !route_matches_adoption(&route, &activation, &other),
+        "another worker's key cannot adopt this route"
+    );
+    route.state = "ended".to_owned();
+    assert!(!route_matches_adoption(&route, &activation, &key));
+}
+
+#[test]
 fn idempotent_publication_replay_accepts_the_current_takeover_epoch() {
     let now_ms = unix_ms();
     let observed = MediaSessionRoute {

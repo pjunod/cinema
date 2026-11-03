@@ -254,9 +254,8 @@ async fn adopt_adaptive_origin(
         .map_err(|error| session_store_error("reading adaptive adopted route", error))?
         .ok_or_else(|| ApiError::ServiceUnavailable("adaptive adopted route is absent".into()))?;
     // The original worker publishes its own Adopt after attaching, before
-    // it reports `adopted`.
-    if !route_matches_activation(&route, &activation)
-        || route.state != "active"
+    // it reports `adopted`; the route carries the attempt's ordinal epoch.
+    if !route_matches_adoption(&route, &activation, &selected.claim.key)
         || route.publication_ready_at_ms != 0
     {
         return Err(ApiError::ServiceUnavailable(
@@ -5428,6 +5427,13 @@ async fn create_with_purpose_inner(
     // read-budget line) even though the task is detached so it can outlive a
     // cancelled caller.
     let activation_counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
+    // An adopted route is owned at its attempt's epoch (the ordinal), not 1.
+    #[cfg(target_os = "linux")]
+    let adoption_key = adaptive_selection
+        .as_ref()
+        .map(|selected| selected.claim.key.clone());
+    #[cfg(not(target_os = "linux"))]
+    let adoption_key: Option<plurx_core::store::adaptive_resource_attempts::AttemptKey> = None;
     #[cfg(target_os = "linux")]
     let adaptive_activation_task =
         adaptive_selection.map(|selected| {
@@ -5611,8 +5617,10 @@ async fn create_with_purpose_inner(
     })?
     .map_err(|error| session_store_error("publishing the media-session response", error))?
     .filter(|route| {
-        let exact = route_matches_activation(route, &publication_activation)
-            && route.publication_ready_at_ms == 0;
+        let exact = adoption_key.as_ref().map_or_else(
+            || route_matches_activation(route, &publication_activation),
+            |key| route_matches_adoption(route, &publication_activation, key),
+        ) && route.publication_ready_at_ms == 0;
         if !exact {
             tracing::warn!(
                 target: "plurxd::http::hls",
@@ -5694,13 +5702,35 @@ pub(super) fn route_matches_activation(
     route: &MediaSessionRoute,
     activation: &MediaSessionActivation,
 ) -> bool {
+    route_matches_activation_at(route, activation, 1)
+}
+
+/// An adaptive route is minted by its attempt's Register at the attempt's
+/// owner epoch, which the attempt contract fixes to its ordinal: a retried
+/// candidate's first epoch is 2 or 3. Every other identity field is exact.
+pub(super) fn route_matches_adoption(
+    route: &MediaSessionRoute,
+    activation: &MediaSessionActivation,
+    key: &plurx_core::store::adaptive_resource_attempts::AttemptKey,
+) -> bool {
+    activation.incarnation_id == key.route_incarnation_id.to_string()
+        && activation.session_id == key.session_id.to_string()
+        && activation.owner_node_id == key.worker_node_id
+        && route_matches_activation_at(route, activation, key.owner_epoch)
+}
+
+fn route_matches_activation_at(
+    route: &MediaSessionRoute,
+    activation: &MediaSessionActivation,
+    owner_epoch: i64,
+) -> bool {
     route.incarnation_id == activation.incarnation_id
         && route.session_id == activation.session_id
         && route.principal == activation.principal
         && route.playback_id == activation.playback_id
         && route.request_fingerprint == activation.request_fingerprint
         && route.owner_node_id == activation.owner_node_id
-        && route.owner_epoch == 1
+        && route.owner_epoch == owner_epoch
         && route.state == "active"
         && route.lease_expires_at_ms > unix_ms()
         && route.recipe_json == activation.recipe_json
