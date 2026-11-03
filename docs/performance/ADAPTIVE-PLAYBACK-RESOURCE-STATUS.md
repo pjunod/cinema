@@ -30,41 +30,19 @@ matching route/job-lease copies, while retaining the original custody, owner,
 epoch, pointer and live-lease guards. Regression and compiler validation of
 this continuation are pending; authored tests are not execution evidence.
 
-Still open: M0 owned containment, V1–V5 acceptance, broader adapter and platform
-qualification, integrating the then-current main and the Main promotion gate.
+Still open: M0 coverage/contracts, M3a/C2 native and allocator containment,
+V1–V5 acceptance, broader adapter/platform qualification, integrating the
+then-current main and the Main promotion gate. The handoff calls the containment
+gap “M0 owned containment”; it is distinct from the plan’s M0 inventory.
 The handoff also records a pre-existing actor-application lease regression and
 an unresolved selected-static FFmpeg `-display_rotation` capability decision.
 Neither is silently accepted or closed by this task.
 
 ## 2026-10-29 checkpoint — historical source-bound evidence
 
-**Historical checkpoint:** 2026-10-29. PR #1248 remains
-the sole effort; task PR #1293 is unmerged. Current committed implementation
-`b1f2794d79b1012714a6de0644c72df44f10e9e1` includes effort
-`29a238af69bd2e101f0a5b4d6ed21fb1404f8ed1` and main
-`6c8c98c79b06ee3e814515fc168f7dd8c7408384`. Later main changes still require integration
-and qualification before final effort promotion.
-
-This exact implementation passed all three macOS compiler phases and Linux
-Core/daemon all-target strict Clippy with fixture/cluster features. Receipt
-SHA-256 values: host `8f3164937669c23f2da7bb8d95310f86e93f9723dfa763c96cb5973c94d1f75a`;
-native `32562e6e5124dca4f8ec3ecd106c1d50f466baa183fc566a4585835fdd4464da`.
-The first current Linux behavioral run selected 206 cases and stopped after
-**31 passes and one failure**, with zero ignored or incomplete executed cases.
-All five registered-planning entry/cancellation cases passed. Static playback
-failed during fixture recipe resolution: its legacy resolver rejects the zero
-software budget before the selected static worker is reached. That failure
-remains under repair; it is not a passing candidate. Behavioral receipt SHA-256:
-`7af46d30d2415dadffecc2c75a0a1e62c32d3669839d54c9403b812354b77aaf`. A diagnostic run continues independent
-cases; it grants no passing qualification before its final result. The focused
-web cleanup regression passed one case with zero skipped; receipt SHA-256:
-`c25142d8c361cc4eae1a956a80017b89b2d5935933db683772be12b5e413790c`.
-
-Earlier failed runs remain tied to their source and are preserved in the review
-history. The separately tested M2 observation and M4 outage components are not
-integrated into this candidate. Required behavioral tests are authorized; no
-full behavioral, model, mutation or workload acceptance is claimed. V1–V5 and
-R1/M0–M7 remain open. No external review service, deployment or restart is run.
+The earlier implementation and receipt identities are preserved in the
+[finite-delivery checkpoint](ADAPTIVE-PLAYBACK-DELIVERY.md#2026-10-29-checkpoint--historical-source-bound-evidence).
+They establish only the stated source/scope, not current acceptance.
 
 The copy driver retains the same NeverRoot/RootOnly/Joined witnesses and
 one-shot settlement. Positive post-Arm refusal may close the never-entered
