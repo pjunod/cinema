@@ -10,9 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- Original HDR10-E processing uses a measured source-aware bitrate within
-  decoder limits; selected encode rungs keep their chosen rate, and cached
-  renditions must match the actual frozen rate and VBV peak.
+- Original HDR10-E and reconstructed Dolby Vision processing preserve the
+  source bitrate budget without an arbitrary ceiling. Selected encode rungs
+  keep their chosen rate; codec signalling, cached renditions and quality
+  receipts bind the actual target, peak and buffer envelope.
 
 - Dolby Vision enhancement quality checks use an accurate BT.2020/PQ colour
   conversion and remeasure verdicts made with the old conversion.

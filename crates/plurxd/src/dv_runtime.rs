@@ -449,12 +449,12 @@ impl PrivateWindow {
         first_global_frame: u64,
         raster: (u32, u32),
         destination: plurx_core::transcode::dv_processing::DvDestination,
-        source_level: Option<u8>,
+        envelope: Option<plurx_core::transcode::EnhancementRateEnvelope>,
         runtime_cache: &Path,
         audio_channels: Option<u32>,
     ) -> Result<VerifiedWindow, String> {
         use plurx_core::transcode::dv_processing::{
-            dv_author_profile81_window, dv_validate_encoded_window, DvDestination,
+            dv_author_profile81_window_with_envelope, dv_validate_encoded_window, DvDestination,
         };
         if self
             .display_target
@@ -471,6 +471,14 @@ impl PrivateWindow {
         let origin =
             plurx_core::transcode::vod_reconstructed_video_origin(grid, first_global_frame)
                 .map_err(str::to_owned)?;
+        if let Some(envelope) = envelope {
+            let signalled_hrd = plurx_core::transcode::validate_encoded_enhancement_envelope(
+                &self.encoded,
+                envelope,
+            )
+            .map_err(str::to_owned)?;
+            tracing::debug!(target: "plurxd::dv", signalled_hrd, envelope = %envelope.identity(), "observed completed enhancement coded envelope");
+        }
         let bytes = match destination {
             DvDestination::Sdr => {
                 plurx_core::transcode::dv_processing::dv_author_sdr_window(&self.encoded)
@@ -489,14 +497,14 @@ impl PrivateWindow {
                 }
                 None => self.encoded,
             },
-            DvDestination::Profile81 => dv_author_profile81_window(
+            DvDestination::Profile81 => dv_author_profile81_window_with_envelope(
                 &self.encoded,
                 raster,
                 grid.numerator,
                 origin,
                 grid.denominator,
                 &rpus,
-                source_level.ok_or("held source has no DV level")?,
+                envelope.ok_or("frozen P81 rate envelope absent")?,
             )
             .map_err(|e| e.to_string())?,
         };
@@ -1250,9 +1258,7 @@ impl RuntimeRecipe {
                     first_frame,
                     raster,
                     self.destination,
-                    file.dolby_vision
-                        .level
-                        .and_then(|level| u8::try_from(level).ok()),
+                    plan.enhancement_rate_envelope(),
                     &self.runtime_cache,
                     plan.options()
                         .input_has_audio

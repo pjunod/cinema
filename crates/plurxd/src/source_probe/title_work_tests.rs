@@ -649,6 +649,7 @@ fn stored_title() -> TitleDemand {
         "mastering_luminance": {"state": "unknown"}, "mastering_primaries": {"state": "unknown"}
     });
     TitleDemand {
+        queued_job_id: None,
         file_id: 9,
         probe_revision: 7,
         source_size: 1,

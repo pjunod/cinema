@@ -22,6 +22,13 @@ encoding, metadata authoring and decoding. Shader agreement alone cannot
 establish final-delivery quality. Preserve native delivery where the client
 can compose the original layers without re-encoding.
 
+The owner further clarified that enhancements must not impose a lower
+bitrate than the source. The existing 20 Mb/s Original replacement and the
+initial 60 Mb/s repair ceiling both violate that intent for higher-rate
+sources. The 60 Mb/s implementation was not published and is superseded.
+An equal bitrate budget is necessary here; it does not make a lossy
+re-encode equivalent to preserving the original compressed video.
+
 ## 2. Measurement repair — an inverse conversion added error
 
 The old qualifier and standalone proof expanded limited-range BT.2020 YUV
@@ -114,12 +121,10 @@ to 60 Mb/s, while retaining VAAPI policy 19, improves all measured bands:
 
 These compare decoded delivery to the helper's target output, so they
 isolate export/encode preservation rather than independent Dolby mapping
-accuracy. Source-aware, raise-only rate handling for Original playback is
-implemented with decoder/delivery bounds, unchanged explicit encode
-rungs, frozen recipe identity, accurate advertised costs and root-reuse
-checks. The policy-0 screen does not improve every dark metric, so it is
-not part of that change. Independent mapping comparison and weaker-source
-coverage remain required.
+accuracy. The policy-0 screen does not improve every dark metric, so it is
+not part of the production change. The 60 Mb/s result diagnoses the old
+20 Mb/s loss; it is not the accepted replacement policy. Independent
+mapping comparison and weaker-source coverage remain required.
 
 Four full 4K frames from that same window (indices 0, 16, 32 and 47) have
 now been independently mapped with Dolby's reference tool at the same
@@ -146,16 +151,48 @@ Only five samples occupy the below-0.01-nit band, so this run cannot qualify
 black preservation. Weaker-FEL scenes, other targets and held-out content
 remain open.
 
-The source-aware rate implementation freezes its options before plan and
-recipe identity. Original/Remux replacement requires fresh native-copy
-eligibility; explicit encode rungs keep their selected rate. Unknown source
-rate or cadence cannot invent a higher rate. Cold descriptions select only
-exact currently legal recipes, with current audio costs and fresh physical
-qualification; wrong-rate held roots cannot satisfy the request. Publication,
-decoder admission and replay share the encoder's whole-kbps VBV calculation,
-including odd rates. Two core regressions with `hiqlite-store` and four daemon
-regressions pass; native/Mac compilation, normal workspace lint and Astra
-review pass. This is a scoped improvement, not final picture acceptance.
+The revised implementation preserves the source video budget for Original
+and Remux replacement, without a fixed ceiling. Prefer authoritative combined
+video rate; where that is unavailable, the container average is a conservative
+video budget, explicitly including audio and other stream overhead. A selected
+BL-only stream rate must not discard the separate EL budget. Round fractional
+kb/s upward. Explicit encode rungs retain the user's selected rate.
+
+Freeze the target, peak, buffer, HEVC tier/level and authored DV level before
+recipe identity, admission and resource accounting. Peak and buffer policy
+may adapt to real constraints while preserving target; an actual delivery
+budget below target is a specific conflict, not permission to lower quality
+silently. Raster and profile alone do not prove a client's maximum level.
+Derive codec level from rate and buffer as well as raster/cadence, and verify
+the resulting hvcC/VPS/SPS and DV configuration. The encoded stream, advertised
+CODECS, held-root reuse and measured recipe must agree.
+
+Different effective video envelopes need their own measured qualification
+variants. Persist bounded typed pending requests and source-bound completed
+variants in the existing title worker, preserving other variants and requests
+that arrive during measurement. Client identity and audio choices must not
+multiply identical video measurements. The old capped implementation's six
+focused passes and compiler/review receipts remain historical evidence only;
+they do not qualify the revised source. The revised candidate passes independent
+Astra review and ten focused core cases covering envelope arithmetic, encoder
+arguments, full hvcC/VPS/SPS/HRD inspection and authored DV signalling. The
+exact-variant storage regression executes on SQLite memory, SQLite file and
+an actual three-voter Hiqlite cluster, including Busy/preemption reclamation,
+late requests, source CAS and distinct-title family counts. Initial SQL-binding
+and malformed-fixture failures remain retained beside their corrected results.
+
+The revised native author also passes its reordered-packet control with actual
+three-frame synthetic FEL reconstruction and a legal Main10 High envelope.
+It verifies exact timing/RPU association, unchanged encoded base and decoded
+YUV, authored DV level and refusal cases. The shipping FFmpeg 8 fixture uses
+passthrough timestamps without the contradictory output `-r` accepted by older
+FFmpeg; the short NUT's estimated cadence is not source-clock authority.
+The exact staged native source passes all-target compilation and Clippy; all
+ten requested Linux daemon regressions execute successfully with zero ignored,
+covering Original rate/cost replay, reduced-raster execution, Busy/preemption,
+foreign-backend pending work and actual encoder binding. Integration remains
+pending.
+None of these controls establishes final movie-picture acceptance.
 
 The weaker-FEL sample A now has a matched 48-picture HDR10-E window at
 1,000 nits, using its actual title minimum 0.0001 nits and peak 1,000 nits.
@@ -169,12 +206,53 @@ Original RPU L5 defines the active area. Against its unencoded enhanced target:
 | Decoded 60 Mb/s | 2.959 / 9.752 | 3.767 / 13.136 | 3.637 / 13.922 |
 
 Higher bitrate helps this source too, but cannot recover losses already
-introduced by colour export. Even the unencoded export loses bright mean
-and all three tails to the no-FEL ablation. Decoder-aware luma compensation
-and chroma analysis matched to reconstruction are the next representation
-experiments; neither is implemented in production. Test both bilinear and
-bicubic reconstruction, exact colour controls and all four chroma phases
-before proceeding to a full-window encode comparison.
+introduced by colour export. Relative to this point-sampled helper reference,
+even the unencoded export loses bright mean and all three tails to the
+no-FEL ablation. That ablation does not establish the actual native-client
+fallback. The packaged Linux player composes original BL+EL locally using
+bilinear plane sampling; the server helper uses point sampling with a tie
+bias. Compare original and processed video with the same actual consumer
+before attributing a delivered regression to FEL. Do not smooth the reference
+and rename it an independent golden output.
+
+Matched source-budget screens preserve targets of 83,515 kb/s for sample A
+and 90,893 kb/s for sample B, conservatively derived from container averages.
+For sample B, a 90,893/130,000/160,000 target/peak/buffer envelope reduces
+mid-band mean/p99 to 2.713/8.384, compared with 4.440/13.873 at 20 Mb/s.
+Its HEVC Main10 High level is 5.1; the unconstrained preferred peak/buffer
+requires 5.2. Both retain the same target, with small measured differences
+between bands. No HRD is present in these diagnostic streams; command-line
+buffer settings are not evidence of signalled HRD.
+
+An independent identity/no-residual/no-mapping GPU control now isolates
+generation loss before encoding: luma round-trips exactly, while the current
+export changes chroma even when no enhancement is applied. Matched-consumer
+scoring, actual native-player capture, nonzero-residual controls and authored
+P8.1 colour-basis checks remain open. Private representation prototypes have
+not established a robust replacement and are not production changes.
+
+A direct horizontal sample with vertical averaging exactly recovers the
+identity fixture's original YUV codes, under all three matched consumer
+kernels. It fails the next test on real FEL pictures. Exporting the same
+frozen RGB16 master through both variants first reproduces the current
+production export byte-for-byte, then shows slightly worse means and tails
+with the direct variant on weak/strong pre-DM and post-DM frame-zero controls,
+using both bilinear and bicubic consumers. The direct variant is rejected;
+no full-window encode or production shader change follows that result.
+
+The installed baseline offline P8.1 author refuses the strong-source window's
+unsupported creative/complex metadata. That refusal is retained, with source
+metadata intact; it provides no authored colour-basis or P8.1 acceptance
+evidence for that source.
+
+An isolated Weston 16 headless output now supplies a measured 1,000-nit
+P3-D65 target, 0.005-nit black and 203-nit reference white to the packaged
+Linux player. A copied original P7 clip preserves BL+EL+RPU without encoding;
+all 48 reference BL hashes join uniquely after clock rebasing. Tagged 16-bit
+PQ captures confirm actual FEL residual shader execution and the intended
+mapping target. They remain provisional: seek-preroll decode warnings require
+verification of the actual paired EL and RPU, not BL hashes alone. A private
+instrumented build is being prepared; the installed player is unchanged.
 
 Further startup controls are retained as negative or limited evidence:
 

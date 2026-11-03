@@ -1391,6 +1391,13 @@ pub fn vod_completed_reconstructed_pipe_args(
     }
     let (width, height) = super::output_size(source, plan.options().target_height)
         .ok_or("reconstructed output raster unavailable")?;
+    if let Some(envelope) = plan.enhancement_rate_envelope() {
+        envelope.validate_picture(
+            u32::try_from(width).map_err(|_| "enhancement width")?,
+            u32::try_from(height).map_err(|_| "enhancement height")?,
+            (grid.numerator, grid.denominator),
+        )?;
+    }
     // The source soundtrack keeps the held demux origin the Encoding froze,
     // exactly as on the ordinary route; the reconstructed video input that
     // replaces the source decoder below carries its own verified origin.
@@ -1509,7 +1516,8 @@ pub fn vod_completed_reconstructed_pipe_args(
     let pixel_format = if matches!(
         output.encoder(),
         super::Encoder::Nvenc | super::Encoder::Vaapi
-    ) {
+    ) || plan.enhancement_rate_envelope().is_some()
+    {
         "p010le"
     } else {
         "yuv420p10le"
@@ -1537,7 +1545,8 @@ pub fn vod_completed_reconstructed_pipe_args(
     if matches!(
         output.encoder(),
         super::Encoder::Nvenc | super::Encoder::Vaapi
-    ) {
+    ) || plan.enhancement_rate_envelope().is_some()
+    {
         let mut index = args
             .iter()
             .rposition(|arg| arg == "-i")
@@ -1572,7 +1581,7 @@ pub fn vod_completed_reconstructed_pipe_args(
         }
         let at = args.len().saturating_sub(1);
         let mut encode = output.encode_args(plan.options().video_bitrate_kbps, true);
-        if output.encoder() == super::Encoder::Vaapi {
+        if output.encoder() == super::Encoder::Vaapi && plan.enhancement_rate_envelope().is_none() {
             // The shared VAAPI HDR10 recipe names level 4 (the ordinary
             // ladder's 1080p30 envelope). A reconstructed window carries the
             // level of its own raster and cadence, up to 4K60 and beyond.
@@ -2204,37 +2213,24 @@ mod tests {
     }
 
     #[test]
-    fn the_reconstructed_profile81_rate_is_the_source_average_capped_at_60_mbps() {
+    fn the_reconstructed_profile81_rate_preserves_source_average_and_unknown_is_unresolved() {
         let (mut source, ..) = encoded_recipe_fixture(true);
-        source.bitrate = Some(48_000_000);
-        assert_eq!(
-            crate::transcode::reconstructed_p81_video_kbps(&source),
-            48_000
-        );
-        source.bitrate = Some(95_000_000);
-        assert_eq!(
-            crate::transcode::reconstructed_p81_video_kbps(&source),
-            60_000
-        );
-        // No container bitrate: the whole file over its duration.
+        for kbps in [48_000, 95_000, 200] {
+            source.bitrate = Some(i64::from(kbps) * 1000);
+            assert_eq!(
+                crate::transcode::reconstructed_p81_video_kbps(&source),
+                Ok(kbps)
+            );
+        }
         source.bitrate = None;
         source.size = 45_000_000_000;
         source.duration_ms = Some(7_200_000);
         assert_eq!(
             crate::transcode::reconstructed_p81_video_kbps(&source),
-            50_000
+            Ok(50_000)
         );
         source.duration_ms = None;
-        assert_eq!(
-            crate::transcode::reconstructed_p81_video_kbps(&source),
-            60_000
-        );
-        source.bitrate = Some(200_000);
-        assert_eq!(
-            crate::transcode::reconstructed_p81_video_kbps(&source),
-            1_000,
-            "floor"
-        );
+        assert!(crate::transcode::reconstructed_p81_video_kbps(&source).is_err());
     }
 
     #[test]

@@ -600,6 +600,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     // three methods on every backend in store_contract/dv_title_jobs.rs.
     "put_dv_fel_verdict",
     "request_dv_fel_requalification",
+    "request_dv_fel_variant",
     "dv_fel_verdict_counts",
     "dv_fel_stale_titles",
     "dv_title_readiness",

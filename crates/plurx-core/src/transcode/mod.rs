@@ -20,6 +20,7 @@ pub mod dv_fel_qualification;
 pub mod dv_processing;
 pub mod dvconvert;
 mod encoder;
+mod enhancement_rate;
 pub mod health;
 pub mod hevc_census;
 mod hevc_scan;
@@ -58,7 +59,11 @@ pub use encoder::{
     CompletedReconstructedOutputContract, EffectiveRateControl, Encoder, EncoderCaps,
     EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
     QualityRateControlValidation, QualityRc, RateMode, VaapiHdrPolicy, VideoCodec,
-    RECONSTRUCTED_P81_MAX_VIDEO_KBPS, RECONSTRUCTED_P81_RECIPE,
+    RECONSTRUCTED_P81_RECIPE,
+};
+pub use enhancement_rate::{
+    enhancement_source_budget, enhancement_stream_rate, validate_encoded_enhancement_envelope,
+    EnhancementRateEnvelope, EnhancementRateLimits, EnhancementRateProvenance,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,

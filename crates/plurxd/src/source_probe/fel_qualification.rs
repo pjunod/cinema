@@ -22,7 +22,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 const RGB48_EXPORT: &str = "pq-bilinear-rgb48-v1";
-const YUV420P10_EXPORT: &str = "pq-bilinear-yuv420p10-v1";
+const YUV420P10_EXPORT: &str = q::FelRecipeOutput::EXPORT;
 /// One render, encode or decode of one 2 s window. A 4K FEL window renders in
 /// well under 30 s on the measured worker; a stuck child must not hold the
 /// node's reconstruction slot for the job's whole lease.
@@ -74,6 +74,7 @@ fn parse_ratio(value: Option<&serde_json::Value>) -> Option<(u32, u32)> {
 pub(crate) struct Clock {
     pub(crate) video_index: u8,
     pub(crate) raster: (u32, u32),
+    pub(crate) native_raster: (u32, u32),
     pub(crate) rate: (u32, u32),
     pub(crate) origin: Instant,
 }
@@ -102,8 +103,9 @@ impl Clock {
         let raster = dimension("width")
             .zip(dimension("height"))
             .ok_or("selected video raster is unknown")?;
-        let rate =
-            parse_ratio(stream.get("r_frame_rate")).ok_or("selected video cadence is unknown")?;
+        let rate = parse_ratio(stream.get("avg_frame_rate"))
+            .or_else(|| parse_ratio(stream.get("r_frame_rate")))
+            .ok_or("selected video cadence is unknown")?;
         let tick =
             parse_ratio(stream.get("time_base")).ok_or("selected video time base is unknown")?;
         let start = stream
@@ -115,6 +117,7 @@ impl Clock {
         Ok(Self {
             video_index,
             raster,
+            native_raster: raster,
             rate,
             origin,
         })
@@ -152,8 +155,8 @@ pub(crate) fn helper_args(
         fd(4),
         clock.video_index.to_string(),
         q::WINDOW_FRAMES.to_string(),
-        clock.raster.0.to_string(),
-        clock.raster.1.to_string(),
+        clock.native_raster.0.to_string(),
+        clock.native_raster.1.to_string(),
         "0".into(),
         "0".into(),
         "0".into(),
@@ -215,11 +218,19 @@ pub(crate) fn encode_args(
             clock.raster.0,
             clock.raster.1,
             clock.rate,
-            q::WINDOW_FRAMES,
+            plurx_core::transcode::VodFrameGrid::new(clock.rate.0, clock.rate.1)
+                .ok_or("FEL recipe cadence exceeds the frozen picture grid")?
+                .frames_per_segment,
         )
         .ok_or("no reconstructed 8.1 encode for this raster and cadence")?,
     );
-    args.extend(["-f".to_owned(), "mp4".to_owned(), "-y".to_owned()]);
+    args.extend([
+        "-movflags".to_owned(),
+        "+frag_keyframe+empty_moov+default_base_moof".to_owned(),
+        "-f".to_owned(),
+        "mp4".to_owned(),
+        "-y".to_owned(),
+    ]);
     args.push(output.to_string_lossy().into_owned());
     Ok(args)
 }
@@ -229,7 +240,7 @@ pub(crate) struct Sample<'a> {
     pub(crate) source: &'a std::fs::File,
     pub(crate) clock: Clock,
     pub(crate) duration_ms: i64,
-    pub(crate) video_kbps: u32,
+    pub(crate) envelope: plurx_core::transcode::EnhancementRateEnvelope,
     pub(crate) renderer: &'a Path,
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) ffmpeg: String,
@@ -396,7 +407,11 @@ async fn render(
     let mut consumer = tokio::process::Command::new(&sample.ffmpeg);
     match encode_to {
         Some(output) => {
-            consumer.args(encode_args(&sample.clock, sample.video_kbps, output)?);
+            let mut args = encode_args(&sample.clock, sample.envelope.target_kbps(), output)?;
+            sample
+                .envelope
+                .apply_args(&mut args, plurx_core::transcode::Encoder::Vaapi);
+            consumer.args(args);
             consumer.stdout(Stdio::null());
         }
         None => {
@@ -442,6 +457,11 @@ async fn render(
             ));
         }
         consumed?;
+        if let Some(output) = encode_to {
+            let bytes = std::fs::read(output).map_err(|e| e.to_string())?;
+            plurx_core::transcode::validate_encoded_enhancement_envelope(&bytes, sample.envelope)
+                .map_err(str::to_owned)?;
+        }
         if sample.decode == RendererDecode::Gpu && decoded_in_software(&trace?)? {
             return Err(
                 "the renderer decoded in software, but the qualification was admitted for \
@@ -705,19 +725,95 @@ pub(crate) async fn qualify_with(
     {
         return Ok(Qualification::NotDue);
     }
-    let identity = match state.transcode.fel_identity(&renderer.scanner).await {
+    let backend_identity = match state.transcode.fel_identity(&renderer.scanner).await {
         Ok(identity) => identity,
         Err(reason) => {
-            tracing::info!(target: "plurxd::dv", file_id = file.id, %reason,
-                "FEL qualification skipped: no encoder identity");
+            tracing::info!(target:"plurxd::dv",file_id=file.id,%reason,"FEL qualification has no encoder identity");
             return Ok(Qualification::NotDue);
         }
     };
-    if matches!(
-        q::verdict_state(Some(document), file.size, file.mtime, &identity),
-        q::VerdictState::Current(_)
-    ) {
+    // Read the latest durable request set, not only the title job's enqueue snapshot.
+    let current_document = state
+        .store
+        .get_file_probe_json(file.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| document.to_owned());
+    let pending = q::pending_recipes(&current_document, file.size, file.mtime);
+    let mut clock =
+        Clock::from_document(&serde_json::from_str(document).map_err(|e| e.to_string())?)?;
+    let request = if let Some(request) = pending
+        .iter()
+        .find(|request| request.backend_identity == backend_identity)
+    {
+        request.clone()
+    } else if !pending.is_empty() {
         return Ok(Qualification::NotDue);
+    } else {
+        let doc: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
+        let held_rate =
+            plurx_core::transcode::enhancement_stream_rate(&doc, u32::from(clock.video_index));
+        let (target, provenance) =
+            plurx_core::transcode::enhancement_source_budget(file, held_rate)
+                .map_err(str::to_owned)?;
+        let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+            target,
+            provenance,
+            clock.raster.0,
+            clock.raster.1,
+            clock.rate,
+            true,
+            Default::default(),
+        )
+        .map_err(str::to_owned)?;
+        q::FelRecipeRequest::new(
+            backend_identity,
+            file.size,
+            file.mtime,
+            envelope,
+            q::FelRecipeOutput::new(u32::from(clock.video_index), clock.raster, clock.rate),
+        )
+    };
+    if request.output.video_stream != u32::from(clock.video_index)
+        || request.output.rate
+            != q::FelRecipeOutput::new(u32::from(clock.video_index), clock.raster, clock.rate).rate
+    {
+        return Err("FEL recipe source stream or picture clock changed".into());
+    }
+    clock.raster = (request.output.width, request.output.height);
+    request
+        .envelope
+        .validate_picture(clock.raster.0, clock.raster.1, clock.rate)
+        .map_err(str::to_owned)?;
+    let identity = request.identity.clone();
+    if let q::VerdictState::Current(verdict) =
+        q::verdict_state(Some(&current_document), file.size, file.mtime, &identity)
+    {
+        // An identical late/idempotent request is satisfied by this exact
+        // receipt; consume only that request without re-running a renderer.
+        if pending.iter().any(|r| r.identity == identity) {
+            state
+                .store
+                .put_dv_fel_verdict(
+                    file.id,
+                    file.size,
+                    file.mtime,
+                    &serde_json::to_value(q::FelRecipeVerdict { request, verdict })
+                        .map_err(|e| e.to_string())?,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(Qualification::NotDue);
+    }
+    if !pending.iter().any(|r| r.identity == request.identity)
+        && !state
+            .store
+            .request_dv_fel_variant(file.id, &request)
+            .await
+            .map_err(|e| e.to_string())?
+    {
+        return Err("FEL recipe request could not retain its source-bound pending work".into());
     }
     // The slot is preemptible by a live reconstructed 8.1 (it cancels
     // `cancel`); the GPU graph is a claim on this job's own admission, so the
@@ -735,7 +831,6 @@ pub(crate) async fn qualify_with(
         }
     };
     let _extension = Extension(admission);
-    let document: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let mut environment = renderer.env.clone();
     if decode == RendererDecode::Gpu {
@@ -747,9 +842,9 @@ pub(crate) async fn qualify_with(
     }
     let sample = Sample {
         source: &source.handle,
-        clock: Clock::from_document(&document)?,
+        clock,
         duration_ms: file.duration_ms.ok_or("title duration is unknown")?,
-        video_kbps: plurx_core::transcode::reconstructed_p81_video_kbps(file),
+        envelope: request.envelope,
         renderer: renderer.path,
         renderer_env: environment,
         ffmpeg: crate::ffmpeg::ffmpeg_bin(),
@@ -787,7 +882,11 @@ pub(crate) async fn qualify_with(
             file.id,
             file.size,
             file.mtime,
-            &serde_json::to_value(&verdict).map_err(|e| e.to_string())?,
+            &serde_json::to_value(q::FelRecipeVerdict {
+                request,
+                verdict: verdict.clone(),
+            })
+            .map_err(|e| e.to_string())?,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -861,6 +960,64 @@ mod tests {
         let mut document = self::document();
         document["streams"][0]["r_frame_rate"] = "0/0".into();
         assert!(Clock::from_document(&document).is_err());
+    }
+
+    #[test]
+    fn reduced_fel_output_retains_native_bl_shape_and_freezes_export_clock() {
+        let mut clock = Clock::from_document(&document()).expect("source clock");
+        let native = clock.raster;
+        clock.raster = (1920, 1080);
+        let args = helper_args(
+            &clock,
+            clock.window_at(0).expect("window"),
+            "fel",
+            YUV420P10_EXPORT,
+        );
+        assert_eq!(
+            (&args[4], &args[5]),
+            (&native.0.to_string(), &native.1.to_string())
+        );
+        assert_eq!(
+            (&args[15], &args[16]),
+            (&"1920".to_owned(), &"1080".to_owned())
+        );
+        assert_eq!(args[17], q::FelRecipeOutput::EXPORT);
+        let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+            20_000,
+            plurx_core::transcode::EnhancementRateProvenance::ExplicitEncode,
+            1920,
+            1080,
+            clock.rate,
+            true,
+            Default::default(),
+        )
+        .expect("rung envelope");
+        let output =
+            q::FelRecipeOutput::new(u32::from(clock.video_index), clock.raster, clock.rate);
+        let scaled = q::FelRecipeRequest::new("a".repeat(64), 1, 1, envelope, output);
+        assert!(scaled.valid());
+        let native_request = q::FelRecipeRequest::new(
+            "a".repeat(64),
+            1,
+            1,
+            envelope,
+            q::FelRecipeOutput::new(u32::from(clock.video_index), native, clock.rate),
+        );
+        assert_ne!(scaled.identity, native_request.identity);
+        assert!(
+            !native_request.valid(),
+            "1080p level cannot qualify native4K export"
+        );
+        // Even when both rasters fit the same level, their pixel evidence stays distinct.
+        let other = q::FelRecipeRequest::new(
+            "a".repeat(64),
+            1,
+            1,
+            envelope,
+            q::FelRecipeOutput::new(u32::from(clock.video_index), (1280, 720), clock.rate),
+        );
+        assert!(other.valid());
+        assert_ne!(scaled.identity, other.identity);
     }
 
     #[test]
@@ -1170,11 +1327,33 @@ mod tests {
             .await
             .expect("probe")
             .expect("probe");
-        let identity = state
+        let backend = state
             .transcode
             .fel_identity(&renderer.scanner)
             .await
-            .expect("identity");
+            .expect("backend identity");
+        let clock = Clock::from_document(&serde_json::from_str(&document).expect("document"))
+            .expect("clock");
+        let (target, provenance) =
+            plurx_core::transcode::enhancement_source_budget(&file, None).expect("source budget");
+        let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+            target,
+            provenance,
+            clock.raster.0,
+            clock.raster.1,
+            clock.rate,
+            true,
+            Default::default(),
+        )
+        .expect("envelope");
+        let identity = q::FelRecipeRequest::new(
+            backend,
+            file.size,
+            file.mtime,
+            envelope,
+            q::FelRecipeOutput::new(u32::from(clock.video_index), clock.raster, clock.rate),
+        )
+        .identity;
         assert_eq!(
             q::verdict_state(Some(&stored), file.size, file.mtime, &identity),
             q::VerdictState::Current(verdict)
@@ -1266,7 +1445,207 @@ mod tests {
             .expect("probe");
         assert!(
             !stored.contains(q::PROBE_KEY),
-            "a preempted qualification stores nothing"
+            "a preempted qualification stores no completed verdict"
         );
+        assert!(!stored.contains(q::VARIANTS_KEY));
+        assert_eq!(q::pending_recipes(&stored, file.size, file.mtime).len(), 1);
+    }
+    #[tokio::test]
+    async fn a_busy_reduced_recipe_remains_pending_then_executes_its_exact_output() {
+        fn reduced_measurement<'a>(
+            sample: &'a Sample<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Measurement, String>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                assert_eq!(sample.clock.native_raster, (3840, 2160));
+                assert_eq!(sample.clock.raster, (1920, 1080));
+                assert_eq!(sample.clock.rate, (24000, 1001));
+                assert_eq!(sample.envelope.target_kbps(), 20_000);
+                Ok(Measurement {
+                    windows: Vec::new(),
+                    served: Vec::new(),
+                    dropped: Vec::new(),
+                })
+            })
+        }
+        let dir = crate::test_tempdir().expect("scratch");
+        let (state, file, document) = qualification_fixture(dir.path()).await;
+        let admission = state
+            .transcode
+            .admit_dv_title()
+            .await
+            .expect("title admission");
+        let path = dir.path().join("renderer");
+        let renderer = Renderer {
+            scanner: "a".repeat(64),
+            path: &path,
+            tools: None,
+            env: Vec::new(),
+            decode: RendererDecode::Gpu,
+        };
+        let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+            20_000,
+            plurx_core::transcode::EnhancementRateProvenance::ExplicitEncode,
+            1920,
+            1080,
+            (24000, 1001),
+            true,
+            Default::default(),
+        )
+        .expect("rung envelope");
+        let request = q::FelRecipeRequest::new(
+            state
+                .transcode
+                .fel_identity(&renderer.scanner)
+                .await
+                .expect("backend"),
+            file.size,
+            file.mtime,
+            envelope,
+            q::FelRecipeOutput::new(0, (1920, 1080), (24000, 1001)),
+        );
+        assert!(state
+            .store
+            .request_dv_fel_variant(file.id, &request)
+            .await
+            .expect("request"));
+        let live = state
+            .transcode
+            .acquire_reconstruction_slot(
+                plurx_core::transcode::dv_processing::DvDestination::Profile81,
+            )
+            .await
+            .expect("live slot");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        assert!(matches!(
+            qualify_with(
+                &state,
+                &file,
+                &document,
+                &renderer,
+                &admission,
+                &cancel,
+                reduced_measurement
+            )
+            .await
+            .expect("busy"),
+            Qualification::Busy
+        ));
+        let pending = state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        assert_eq!(
+            q::pending_recipes(&pending, file.size, file.mtime),
+            vec![request.clone()]
+        );
+        assert!(matches!(
+            q::verdict_state(Some(&pending), file.size, file.mtime, &request.identity),
+            q::VerdictState::Missing
+        ));
+        drop(live);
+        assert!(matches!(
+            qualify_with(
+                &state,
+                &file,
+                &document,
+                &renderer,
+                &admission,
+                &cancel,
+                reduced_measurement
+            )
+            .await
+            .expect("resumed exact recipe"),
+            Qualification::Stored(_)
+        ));
+        let completed = state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        assert!(q::pending_recipes(&completed, file.size, file.mtime).is_empty());
+        assert!(matches!(
+            q::verdict_state(Some(&completed), file.size, file.mtime, &request.identity),
+            q::VerdictState::Current(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_foreign_backend_recipe_request_stays_pending_without_measurement() {
+        let dir = crate::test_tempdir().expect("scratch");
+        let (state, file, document) = qualification_fixture(dir.path()).await;
+        let admission = state
+            .transcode
+            .admit_dv_title()
+            .await
+            .expect("title admission");
+        let path = dir.path().join("renderer");
+        let renderer = Renderer {
+            scanner: "a".repeat(64),
+            path: &path,
+            tools: None,
+            env: Vec::new(),
+            decode: RendererDecode::Gpu,
+        };
+        let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+            20_000,
+            plurx_core::transcode::EnhancementRateProvenance::ExplicitEncode,
+            3840,
+            2160,
+            (24, 1),
+            true,
+            Default::default(),
+        )
+        .expect("private requested envelope");
+        let request = q::FelRecipeRequest::new(
+            "f".repeat(64),
+            file.size,
+            file.mtime,
+            envelope,
+            q::FelRecipeOutput::new(0, (3840, 2160), (24, 1)),
+        );
+        assert_ne!(
+            request.backend_identity,
+            state
+                .transcode
+                .fel_identity(&renderer.scanner)
+                .await
+                .expect("local backend")
+        );
+        assert!(state
+            .store
+            .request_dv_fel_variant(file.id, &request)
+            .await
+            .expect("durable request"));
+        let outcome = qualify_with(
+            &state,
+            &file,
+            &document,
+            &renderer,
+            &admission,
+            &tokio_util::sync::CancellationToken::new(),
+            slow_measurement,
+        )
+        .await
+        .expect("wrong backend is not due");
+        assert!(matches!(outcome, Qualification::NotDue));
+        let stored = state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        assert_eq!(
+            q::pending_recipes(&stored, file.size, file.mtime),
+            vec![request.clone()]
+        );
+        assert!(matches!(
+            q::verdict_state(Some(&stored), file.size, file.mtime, &request.identity),
+            q::VerdictState::Missing
+        ));
     }
 }
