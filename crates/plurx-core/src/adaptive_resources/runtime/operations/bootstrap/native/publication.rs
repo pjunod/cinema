@@ -291,10 +291,7 @@ impl NodeResourceRuntime {
         {
             return None;
         }
-        (role.transition.is_some()
-            || bootstrap.change.is_some()
-            || state.asset.totals.pending_jobs != 0)
-            .then(|| Arc::clone(&bootstrap.io_progress))
+        io_slot_held(role, member)
     }
 
     fn queue_scratch_publication_locked(
@@ -817,7 +814,7 @@ pub(super) enum NativeIoStep {
 /// Register on `progress` while still holding the bundle lock (every
 /// `bootstrap::acknowledge` signal is sent under it), then release the lock
 /// and wait for the slot holder's acknowledgement, bounded by `deadline`.
-pub(super) async fn wait_for_io_slot(
+pub(in crate::adaptive_resources::runtime::operations::bootstrap) async fn wait_for_io_slot(
     bundle: tokio::sync::MutexGuard<'_, Bundle>,
     progress: Arc<tokio::sync::Notify>,
     deadline: Instant,

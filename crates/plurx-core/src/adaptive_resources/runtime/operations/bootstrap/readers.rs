@@ -165,6 +165,9 @@ fn id() -> Result<v2::Id, OperationError> {
 enum ReaderProgress {
     Continue,
     Wait(Arc<tokio::sync::Notify>),
+    /// Another operation holds the asset's single journaled I/O slot. Wait on
+    /// this member's `io_progress`, registered under the bundle lock.
+    SlotBusy(Arc<tokio::sync::Notify>),
     Chunk(FiniteReadChunk),
     Closed,
 }
@@ -247,10 +250,38 @@ impl NodeResourceRuntime {
         start: u64,
         end_exclusive: u64,
         memory_cap: u64,
+        deadline: Instant,
     ) -> Result<FiniteReader, OperationError> {
         self.validate_preparation(owner)?;
-        let mut bundle = owner.state.lock().await;
-        self.eligible(&bundle)?;
+        let mut bundle = loop {
+            let bundle = owner.state.lock().await;
+            self.eligible(&bundle)?;
+            // Selection arms nothing, but its locked check reads settled
+            // totals. While another client's read, a publication or a sync
+            // holds this asset's single journaled I/O slot, wait for that
+            // acknowledgement until `deadline` instead of refusing a
+            // concurrent client. Every permanent refusal is the locked check's.
+            let held = bundle.roles.get(index).and_then(|role| {
+                let member = resolve_member(role, requested_member).ok()?;
+                let lifecycle = role.bootstrap.get(&member)?.fold()?.state().asset.lifecycle;
+                if role.refunded
+                    || !matches!(
+                        lifecycle,
+                        v2::scratch::ScratchLifecycleV1::Open
+                            | v2::scratch::ScratchLifecycleV1::RetainedReadOnly
+                    )
+                {
+                    return None;
+                }
+                io_slot_held(role, member)
+            });
+            match held {
+                Some(progress) => {
+                    native::publication::wait_for_io_slot(bundle, progress, deadline).await?;
+                }
+                None => break bundle,
+            }
+        };
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         let member = resolve_member(role, requested_member)?;
         if role.refunded || role.transition.is_some() {
@@ -388,8 +419,8 @@ impl NodeResourceRuntime {
             if Instant::now() >= deadline {
                 return Err(OperationError::Deadline);
             }
+            let mut bundle = owner.state.lock().await;
             let progress = {
-                let mut bundle = owner.state.lock().await;
                 let bundle_id = bundle.id;
                 let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
                 let member = role.bootstrap.iter().find_map(|(member, bootstrap)| {
@@ -415,7 +446,11 @@ impl NodeResourceRuntime {
                 ReaderProgress::Closed => return Ok(None),
                 ReaderProgress::Chunk(chunk) if !closing => return Ok(Some(chunk)),
                 ReaderProgress::Chunk(chunk) => drop(chunk),
+                ReaderProgress::SlotBusy(progress) => {
+                    native::publication::wait_for_io_slot(bundle, progress, deadline).await?;
+                }
                 ReaderProgress::Wait(notification) => {
+                    drop(bundle);
                     tokio::time::timeout_at(
                         tokio::time::Instant::from_std(deadline),
                         notification.notified(),
@@ -490,6 +525,12 @@ impl NodeResourceRuntime {
         }
         if !io.armed {
             if role.transition.is_none() {
+                // A concurrent client's read, a publication or a sync holds
+                // the asset's single journaled I/O slot: wait for its
+                // acknowledgement rather than arm into the occupied slot.
+                if let Some(progress) = io_slot_held(role, member) {
+                    return Ok(ReaderProgress::SlotBusy(progress));
+                }
                 native::publication::queue_output_change(
                     &self.journal,
                     role,

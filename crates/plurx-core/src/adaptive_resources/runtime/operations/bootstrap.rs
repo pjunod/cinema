@@ -946,6 +946,29 @@ fn queue_root(
     resume_change(journal, role, member, deadline)
 }
 
+/// Whether THIS member's single journaled I/O slot is held by work that clears
+/// only through `acknowledge`, which signals the returned notification under
+/// the bundle lock: the member's own committed transition, its staged change,
+/// or an armed native operation not yet observed (a client's read, a
+/// publication or a sync). A transition of another effect is not this slot's
+/// and is left to the caller's own check.
+#[cfg(unix)]
+fn io_slot_held(role: &OwnedRole, member: Uuid) -> Option<Arc<tokio::sync::Notify>> {
+    if role
+        .transition
+        .as_ref()
+        .is_some_and(|transition| transition.effect != Effect::Bootstrap(member))
+    {
+        return None;
+    }
+    let bootstrap = role.bootstrap.get(&member)?;
+    let state = bootstrap.fold.as_ref()?.state();
+    (role.transition.is_some()
+        || bootstrap.change.is_some()
+        || state.asset.totals.pending_jobs != 0)
+        .then(|| Arc::clone(&bootstrap.io_progress))
+}
+
 // A command may be retained before queue submission fails (e.g. its deadline).
 // Retry that EXACT command/id, not a new native operation or an invented ack.
 fn resume_change(
