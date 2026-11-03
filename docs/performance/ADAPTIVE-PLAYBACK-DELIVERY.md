@@ -1,9 +1,9 @@
 # Adaptive playback — finite delivery closure
 
 **Status:** open · implementation active · updated 2026-11-03. Task PRs #1293,
-#1338 and #1360–#1364 are merged into draft effort #1248. Codex resumes at
-`b97188c9fd8e2de6caeea826b1c2acd14be2035a`; the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#current-continuation--two-node-publication-and-test-isolation)
-records the current two-node diagnosis and pending validation. V1–V5 and final
+#1338 and #1360–#1365 are merged into draft effort #1248. This finite follow-up
+starts at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e`; the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#current-continuation--two-node-publication-and-test-isolation)
+records the publication repair and current qualification scope. V1–V5 and final
 qualification remain open. The checklist below retains its historical source
 and evidence limits; a merged component does not close all-path acceptance.
 
@@ -30,6 +30,55 @@ under one lock order so a continuous handoff cannot vanish between snapshots.
 Guard regression, repeated two-node execution and gate results belong to the
 task PR; all-path acceptance and promotion remain open.
 
+## Finite lifecycle and restart qualification
+
+Runtime source `33de3681b1b2990b2021cd85fad19941f8a1f32e` passes four native
+reader regressions, zero ignored. Actual software production, root/writer joins,
+reader operations and journal settlement cover allocation/selection across
+freeze and joined-but-Open, retirement during a held read, and dropping an
+unarmed selection. Deadline expiry preserves IDs, census, pending work and full
+R charge; continuations transfer the same lease and clean up to zero.
+
+A reader opened before Fence/Freeze could still have pending I/O when retirement
+snapshotted it; the next response then refused Frozen. The fix waits for that
+same operation before transfer and admits waiting readers after S installation.
+Join still fences native opens; Open response allocation keeps its original
+budget. Final review also found that cancelled reader Arm/Observe journal waits
+bypassed this handoff predicate. Matching reader-owned transitions now wait;
+source `7f97d606c` passes both queued-ACK cancellation cases (2/2, zero
+ignored, 6.04 s). They cancel before ACK observation, retain exact commands and
+full R charge through timeouts, then resume the same reader through S and zero
+accounting. SQL may already have committed at the observation pause.
+No Frozen OpenReader exception, generic reader ACK or UnknownHeld reset is added.
+
+Ordinary lifecycle passes at `29e3252a4` with real retention time. Actual process
+restart passes at `b2a16c896`: successful first-process exit, same S/key, counted
+init/segment reads without an encoder, native eviction and final zero. Both have
+zero ignored cases. Fixtures follow production storage/schema/cache setup, await
+actual publication and drop selector aliases before eviction. Retained reads
+preserve the original raw service sample and timestamp; the one-second sampler
+may retain an earlier materialized frontier.
+
+The `33de3681b` restart committed S adoption, then installation rejected required
+directory facts. `29e3252a4` corrects those two presence checks, retaining dormancy,
+native identity, positive previous-owner exit and one-shot transfer. `b2a16c896`
+allows private S-recovery authority through native cleanup without a local R→S
+object; producer-R authority remains separate. The complete restart passes in
+85.49 s, including its successful 14.87 s child. Real terminal retention avoids
+skewing native `std::Instant` deadlines with Tokio clock advancement.
+
+Pinned Rust 1.97.1 workspace/all-target strict Clippy passes with fixture/cluster
+features. Native runs use a nonvoter Linux lab capped at 18 GiB, no swap, four
+CPUs and the repository's 8 MiB test stack. The new success fixture captures its
+bounded loader environment before admission; existing cleanup profiles retain
+their environment. Missing loader setup reproduced exit 127; the earlier 64 KiB
+parser bound was not proven causal. Failed installations and source-bound logs
+remain diagnostics, not passes.
+
+Scope is selected finite software custody and graceful exit/reopen. V1–V5,
+crash recovery, native/allocator containment, production trial execution and
+final promotion remain open.
+
 ## Next closure — separate authored fixtures from production policy
 
 At runtime source `5d65151d3`, the five affected daemon cases pass with zero
@@ -37,11 +86,8 @@ ignored: overlapping ordinary/adaptive protection, generic lease classification,
 actual paused Adopt and liveness handoff, and both refused-Adopt cleanup cases.
 The two-node and exact-head gate results are recorded in the task PR.
 
-The next acceptance slice already has selected finite lifecycle and process-
-restart fixtures. Their existence is not a pass, but the historical checklist
-must not be read as proof that implementation is absent. Before the restart
-cell can run, its fixture must follow production storage canonicalization and
-Source enablement, and use recovery-aware directory creation.
+The finite qualification above separates implemented fixtures from executed
+results. Their presence does not close the historical all-path checklist.
 
 There is also genuine M2 implementation work: the selected finite path currently
 reads history for advisory comparisons in

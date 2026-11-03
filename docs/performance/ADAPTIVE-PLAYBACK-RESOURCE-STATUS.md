@@ -9,12 +9,12 @@ Companion to [the plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) (requirements) and
 
 ## Current continuation — two-node publication and test isolation
 
-The continuation starts at effort `b97188c9fd8e2de6caeea826b1c2acd14be2035a`.
-Task PRs #1293, #1338 and #1360–#1364 are merged into that effort. They cover
-copy/start, M2/M4 components, causal deadlines, main integration, clock split
-and remote placement, concurrent scratch readers and dropped-reader settlement.
-This replaces the obsolete unmerged-task summary below; the earlier receipt
-identities remain historical evidence for their original source only.
+Task PRs #1293, #1338 and #1360–#1365 are merged into effort #1248.
+PR #1365 landed at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e` after its
+nine-job development gate passed. The current [finite lifecycle and restart
+qualification](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
+records six passing reader cases plus lifecycle and graceful restart passes.
+Earlier identities below remain historical evidence for their stated source.
 
 The retained two-node failures exposed two harness defects: arbitrary heights
 can snap to the same rendition key, and searching heights cannot override a
