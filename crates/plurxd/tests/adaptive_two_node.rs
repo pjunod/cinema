@@ -439,6 +439,16 @@ impl Cluster {
         }
     }
 
+    /// `plurxd::vodserve` logs every producer death as `producer failed`.
+    /// A served first segment does not prove its producer survived it.
+    fn producer_failures(&self) -> usize {
+        [self.node_a.diagnostics(), self.node_b.diagnostics()]
+            .iter()
+            .flat_map(|log| log.lines())
+            .filter(|line| line.contains("producer failed"))
+            .count()
+    }
+
     fn logs(&self) -> String {
         format!(
             "\nnode A log:\n{}\nnode B log:\n{}",
@@ -649,20 +659,26 @@ impl Cluster {
         }
         let started: Value = serde_json::from_str(&body).expect("start JSON");
         let playlist = started["playlist_url"].as_str().expect("playlist URL");
+        let failures = self.producer_failures();
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             self.node_a.assert_running("reading the adaptive rendition");
             self.node_b.assert_running("reading the adaptive rendition");
-            let text = self
+            let response = self
                 .client
                 .get(format!("{}{playlist}", self.a_base))
                 .bearer_auth(&self.token)
                 .send()
                 .await
-                .expect("playlist request")
-                .text()
-                .await
-                .unwrap_or_default();
+                .expect("playlist request");
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            // An error body is not an empty playlist to poll again.
+            assert!(
+                status.is_success(),
+                "playlist {playlist} for {playback}: {status} {text}{}",
+                self.logs()
+            );
             if let Some(segment) = text
                 .lines()
                 .map(str::trim)
@@ -674,17 +690,36 @@ impl Cluster {
                 } else {
                     format!("{}{base}/{segment}", self.a_base)
                 };
-                let bytes = self
+                let response = self
                     .client
                     .get(url)
                     .bearer_auth(&self.token)
                     .send()
                     .await
-                    .expect("segment request")
-                    .bytes()
-                    .await
-                    .expect("segment body");
+                    .expect("segment request");
+                let status = response.status();
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                let bytes = response.bytes().await.expect("segment body");
+                // A failed segment has a non-empty error body: the status
+                // and type, not the length, say whether media was served.
+                assert!(
+                    status.is_success() && !content_type.contains("json"),
+                    "segment {segment} for {playback}: {status} {content_type} {}{}",
+                    String::from_utf8_lossy(&bytes),
+                    self.logs()
+                );
                 assert!(!bytes.is_empty(), "listed segment {segment} was empty");
+                assert_eq!(
+                    self.producer_failures(),
+                    failures,
+                    "a producer died while segment {segment} of {playback} was served{}",
+                    self.logs()
+                );
                 return Ok(started);
             }
             assert!(
@@ -995,6 +1030,13 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
     assert!(
         refused.is_empty(),
         "placement held but publication refused: {refused:?}{}",
+        cluster.logs()
+    );
+    // A death just after a served first segment is still a failed create.
+    assert_eq!(
+        cluster.producer_failures(),
+        0,
+        "a producer died during the run{}",
         cluster.logs()
     );
 }
