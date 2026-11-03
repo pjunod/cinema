@@ -94,7 +94,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zeroize = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-wasmtime = { version = "=49.0.2", default-features = false, features = ["std", "runtime", "cranelift"] }
+wasmtime = { version = "=50.0.0", default-features = false, features = ["std", "runtime", "cranelift"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

@@ -132,10 +132,10 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         assertFocus(app.buttons["live-player-reveal"], in: app, context: "Hidden Live TV owns remote focus")
         assertHiddenFixtureVideoIsUnobstructed(in: app)
         remote.press(.right)
-        assertFocus(pause, in: app, context: "Live first Right reveals Pause")
+        assertFocus(pause, in: app, context: "Live first Right reveals Pause", captureOnSuccess: false)
         remote.press(.up)
         let activity = app.buttons.matching(NSPredicate(format: "label == %@", "Recording activity")).firstMatch
-        assertFocus(activity, in: app, context: "Live Up reaches Recording activity")
+        assertFocus(activity, in: app, context: "Live Up reaches Recording activity", captureOnSuccess: false)
         remote.press(.select)
         XCTAssertTrue(app.staticTexts["1 recording"].waitForExistence(timeout: 5), app.debugDescription)
         // Deliberately cross the four-second idle deadline while the sheet owns focus.
@@ -144,22 +144,22 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
             predicate: NSPredicate { _, _ in Date() >= afterHideDeadline }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [pastDeadline], timeout: 7), .completed)
         remote.press(.menu)
-        assertFocus(activity, in: app, context: "Recording activity Back restores its exact opener")
+        assertFocus(activity, in: app, context: "Recording activity Back restores its exact opener", captureOnSuccess: false)
         remote.press(.down)
-        assertFocus(pause, in: app, context: "Recording activity returns to playback controls")
+        assertFocus(pause, in: app, context: "Recording activity returns to playback controls", captureOnSuccess: false)
         let more = app.buttons["live-player-more"]
         XCTAssertEqual(pause.label, "Pause", "The reveal press must not pause playback")
         let leftEdgeDeadline = Date().addingTimeInterval(5)
         repeat {
             remote.press(.left)
-            assertFocus(pause, in: app, context: "Left edge retains Pause during active input")
+            assertFocus(pause, in: app, context: "Left edge retains Pause during active input", captureOnSuccess: false)
         } while Date() < leftEdgeDeadline
         // Exercise the actual four-step transport row. Generic geometric
         // discovery can spend the entire idle-hide interval taking snapshots
         // without delivering any remote input.
         for (identifier, name) in [("live-player-guide", "Guide"), ("live-player-channels", "Channels"), ("live-player-info", "Info"), ("live-player-more", "More")] {
             remote.press(.right)
-            assertFocus(app.buttons[identifier], in: app, context: "Live Right reaches " + name)
+            assertFocus(app.buttons[identifier], in: app, context: "Live Right reaches " + name, captureOnSuccess: false)
             if identifier == "live-player-guide" {
                 remote.press(.select)
                 let programme = app.buttons.matching(NSPredicate(format:
@@ -167,13 +167,13 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
                 )).firstMatch
                 assertFocus(programme, in: app, context: "Fullscreen guide enters the playing channel programme")
                 remote.press(.menu)
-                assertFocus(app.buttons[identifier], in: app, context: "Fullscreen guide Back restores Guide pill")
+                assertFocus(app.buttons[identifier], in: app, context: "Fullscreen guide Back restores Guide pill", captureOnSuccess: false)
                 remote.press(.select)
                 assertFocus(programme, in: app, context: "Fullscreen guide reopens at the playing programme")
                 remote.press(.up)
                 assertFocus(app.buttons["Close"], in: app, context: "Fullscreen guide Up reaches Close")
                 remote.press(.select)
-                assertFocus(app.buttons[identifier], in: app, context: "Fullscreen guide Close restores Guide pill")
+                assertFocus(app.buttons[identifier], in: app, context: "Fullscreen guide Close restores Guide pill", captureOnSuccess: false)
                 // Restoration must release ownership to the next remote move,
                 // including repeated moves across the former idle deadline.
                 for pass in 1...20 {
@@ -191,7 +191,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         let rightEdgeDeadline = Date().addingTimeInterval(5)
         repeat {
             remote.press(.right)
-            assertFocus(more, in: app, context: "Right edge retains More during active input")
+            assertFocus(more, in: app, context: "Right edge retains More during active input", captureOnSuccess: false)
         } while Date() < rightEdgeDeadline
         remote.press(.select)
         let report = app.buttons["diagnostics-open"]
@@ -202,7 +202,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         remote.press(.menu)
         assertFocus(report, in: app, context: "Live Report Back restores opener")
         remote.press(.menu)
-        assertFocus(more, in: app, context: "Live More Back restores pill")
+        assertFocus(more, in: app, context: "Live More Back restores pill", captureOnSuccess: false)
         remote.press(.menu)
         assertFocus(app.buttons["live-player-reveal"], in: app,
                     context: "Live controls Back returns to hidden video", timeout: 2)

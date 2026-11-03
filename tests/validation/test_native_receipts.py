@@ -3,6 +3,7 @@ import copy
 import io
 import hashlib
 import json
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 import urllib.request
@@ -27,10 +28,20 @@ class NativeReceiptTests(unittest.TestCase):
                     ('source_sha', 'b' * 40), ('source_tree_sha256', 'wrong'),
                     ('selected_tests', []), ('required_tests', ['Other/test']),
                     ('native_suite_complete', False), ('runtime', 'other'), ('xcode', 'other'),
+                    ('xcode', 'Xcode 27.1\nBuild version 27A9275'),
                     ('test_summary', {'passedTests': 1, 'failedTests': 0, 'skippedTests': 1}),
                     ('command', ['xcodebuild', 'test'])]:
                 with self.subTest(key=key), self.assertRaises(ReceiptError):
                     native.verify_tv({**receipt, key: value}, 'a' * 40)
+
+    def test_the_retired_xcode_27_1_pin_is_neither_the_toolchain_nor_the_route(self):
+        # The standby moved to Xcode 27.2 on 2026-10-30. A receipt or a job from
+        # the 27.1 pin must not be adopted, and the receipt and routing pins
+        # must move together.
+        self.assertEqual(native.XCODE, 'Xcode 27.2\nBuild version 27B52')
+        self.assertEqual(native.RUNS_ON[-1], 'xcode-27.2')
+        self.assertNotIn('xcode-27.1', native.RUNS_ON)
+        self.assertEqual(native.RUNS_ON[:-1], ['self-hosted', 'macOS', 'ARM64', 'lab', 'apple'])
 
     def test_archive_crc_duplicates_traversal_and_expansion_rejected(self):
         def archive(names):
@@ -123,6 +134,10 @@ class NativeReceiptTests(unittest.TestCase):
             self.assertEqual(record['commit'], commit)
             bind.assert_called_once_with(run, {'repository': 1, 'pr': 12})
             self.assertEqual(command.call_count, 2)
+            job['status'] = 'failure'
+            self.assertEqual(native.origin(API(), artifact, {'repository': 1, 'pr': 13},
+                                           'current', 20, tv_cases=True)['job'], 8)
+            job['status'] = 'success'
             for key, value in [('status', 'failure'), ('attempt', 2), ('repo_id', 2), ('runs_on', [])]:
                 saved = job[key]
                 job[key] = value
@@ -256,3 +271,152 @@ class NativeReceiptTests(unittest.TestCase):
                 self.assertEqual(record['run'], 10)
                 self.assertEqual(record['disposition'], 'adopted')
                 self.assertNotIn('status', record)
+
+
+class NativeCaseReceiptTests(unittest.TestCase):
+    def test_current_case_specs_match_reviewed_boundary_and_refuse_extensions(self):
+        root = Path(__file__).resolve().parents[2]
+        specs = native.FAMILY_SPECS['tv_navigation']
+        source = {path: (root / path).read_bytes() for path in specs}
+        tree = ''.join('100644 blob ' + 'a' * 40 + '\t' + path + '\0' for path in specs)
+        project = 'clients/apple/project.yml'
+        extension = b''
+
+        def show(command, timeout):
+            self.assertEqual(command[:2], ['git', 'show'])
+            self.assertEqual(len(command), 3)
+            self.assertEqual(timeout, 10)
+            commit, path = command[2].split(':', 1)
+            self.assertIn(commit, ('original', 'current'))
+            self.assertIn(path, specs)
+            return source[path] + (extension if path == project else b'')
+
+        with patch.object(native, 'regular_inputs'), \
+                patch.object(native, 'git', return_value=tree), \
+                patch.object(native.subprocess, 'check_output', side_effect=show):
+            self.assertEqual(native.case_input_compatibility('original', 'current'), set())
+            # Equal inputs still need the independently reviewed build boundary.
+            for extension in [b'\n  - path: "../../extra/F.swift"\n',
+                    b'\npackages: {Extra: ../Extra}\n',
+                    b'\npreBuildScripts: [{script: cat ../../extra/file}]\n']:
+                with self.subTest(extension=extension), self.assertRaisesRegex(
+                        ReceiptError, '^Unreviewed native build specification: clients/apple/project[.]yml$'):
+                    native.case_input_compatibility('original', 'current')
+
+    def receipt(self):
+        selected = ['Suite/testOne', 'Suite/testTwo']
+        return {'schema': 2, 'source_sha': 'a' * 40, 'source_dirty': False,
+            'source_tree_sha256': 'digest', 'required_tests': selected, 'selected_tests': selected,
+            'status': 'failed', 'xcode': native.XCODE, 'runtime': native.RUNTIME,
+            'source_unchanged': True,
+            'finished_source': {'sha': 'a' * 40, 'dirty': False, 'tree_sha256': 'digest'},
+            'command': ['xcodebuild', 'test', *['-only-testing:plurx-tvOSUITests/' + test for test in selected]],
+            'test_summary': {'passedTests': 1, 'failedTests': 1, 'skippedTests': 0},
+            'case_results': {'Suite/testOne': 'passed', 'Suite/testTwo': 'failed'}}
+
+    def log(self):
+        return ("Test Case '-[plurx_tvOSUITests.Suite testOne]' started.\n"
+                "Test Case '-[plurx_tvOSUITests.Suite testOne]' passed (1.234 seconds).\n"
+                "Test Case '-[plurx_tvOSUITests.Suite testTwo]' started.\n"
+                "Test Case '-[plurx_tvOSUITests.Suite testTwo]' failed (2.345 seconds).\n")
+
+    def test_failed_suite_retains_only_own_named_passes(self):
+        receipt = self.receipt()
+        receipt['suite_passes'] = {'Suite/testTwo': {'forged': True}}
+        with patch.object(native, 'required_tests', return_value=receipt['required_tests']), \
+                patch.object(native, 'full_source_digest', return_value='digest'):
+            self.assertEqual(native.verify_tv_cases(receipt, self.log(), 'a' * 40), {'Suite/testOne'})
+            for field, value in [('source_unchanged', False),
+                    ('test_summary', {'passedTests': 2, 'failedTests': 0, 'skippedTests': 0}),
+                    ('case_results', {'Suite/testOne': 'passed', 'Suite/testTwo': 'passed'})]:
+                with self.subTest(field=field), self.assertRaises(ReceiptError):
+                    native.verify_tv_cases({**receipt, field: value}, self.log(), 'a' * 40)
+
+    def test_case_parser_rejects_duplicate_unstarted_and_unknown_events(self):
+        selected = self.receipt()['selected_tests']
+        for log in [self.log() + self.log(), self.log().split('\n', 1)[1],
+                    self.log().replace('testOne', 'testUnexpected'),
+                    self.log().replace('passed (1.234 seconds).', 'passed without a native duration')]:
+            with self.subTest(log=log[:100]), self.assertRaises(ReceiptError):
+                native.case_outcomes(log, selected)
+
+    def test_legacy_failed_source_requires_the_exact_reviewed_full_producer(self):
+        receipt = self.receipt()
+        receipt['schema'] = 1
+        producer = b'reviewed producer'
+        with patch.object(native, 'required_tests', return_value=receipt['required_tests']), \
+                patch.object(native, 'full_source_digest', return_value='digest'), \
+                patch.object(native.subprocess, 'check_output', return_value=producer), \
+                patch.dict(native.BUILD_SPECS, {'scripts/apple-tv-navigation-test': hashlib.sha256(producer).hexdigest()}):
+            self.assertEqual(native.verify_tv_cases(receipt, self.log(), 'a' * 40), {'Suite/testOne'})
+            receipt['source_tree_sha256'] = 'wrong'
+            with self.assertRaises(ReceiptError):
+                native.verify_tv_cases(receipt, self.log(), 'a' * 40)
+
+    def test_fixture_compatibility_accepts_only_the_exact_reviewed_byte_pair(self):
+        path = 'clients/apple/UITests/TVNavigationTestCase.swift'
+        old, new = b'old fixture', b'reviewed fixture'
+        pair = (hashlib.sha256(old).hexdigest(), hashlib.sha256(new).hexdigest())
+        trees = [f'100644 blob {oid}\t{path}\0' for oid in ('a' * 40, 'b' * 40)]
+        with patch.object(native, 'regular_inputs'), \
+                patch.object(native, 'FAMILY_SPECS', {'tv_navigation': []}), \
+                patch.object(native, 'FIXTURE_TRANSITIONS', {path: pair}):
+            with patch.object(native, 'git', side_effect=trees), \
+                    patch.object(native.subprocess, 'check_output', side_effect=[old, new]):
+                self.assertEqual(native.case_input_compatibility('old', 'new'), native.TRANSITION_INVALIDATES)
+            with patch.object(native, 'git', side_effect=trees), \
+                    patch.object(native.subprocess, 'check_output', side_effect=[old, new + b' extra']), \
+                    self.assertRaises(ReceiptError):
+                native.case_input_compatibility('old', 'new')
+            with patch.object(native, 'git', side_effect=[trees[0], trees[1].replace('100644', '100755')]), \
+                    self.assertRaises(ReceiptError):
+                native.case_input_compatibility('old', 'new')
+
+    def test_local_resume_plan_requires_reauthenticated_original_records(self):
+        plan = {'scope': {'pr': 1}, 'current_commit': 'current', 'current_run': 2,
+                'tv_cases': {'passes': {'Suite/testOne': {'forged': True}}, 'pending': []}}
+        with patch.object(native, 'api_context', return_value=(None, {'pr': 1}, 'current', 2)), \
+                patch.object(native, 'safe_storage'), patch.object(native, 'REPORT') as report, \
+                patch.object(native, 'native_artifacts', return_value=[]), \
+                patch.object(native, 'adopt_tv_cases', return_value={'passes': {}, 'pending': ['Suite/testOne']}):
+            report.read_bytes.return_value = json.dumps(plan).encode()
+            with self.assertRaises(ReceiptError):
+                native.main(['--verify-tv-plan'])
+
+
+    def test_resume_verifies_each_exact_origin_once_without_new_discovery(self):
+        sources = {'Suite/testOne': {'artifact': 7}, 'Suite/testTwo': {'artifact': 7},
+                   'Suite/testThree': {'artifact': 9}}
+        cases = {'required_tests': list(sources), 'passes': sources, 'pending': []}
+        plan = {'scope': {'pr': 1}, 'current_commit': 'current', 'current_run': 2, 'tv_cases': cases}
+        class API:
+            def __init__(self):
+                self.paths = []
+            def get(self, path):
+                self.paths.append(path)
+                return {'id': int(path.rsplit('/', 1)[1])}
+        api = API()
+        with patch.object(native, 'api_context', return_value=(api, {'pr': 1}, 'current', 2)), \
+                patch.object(native, 'safe_storage'), patch.object(native, 'REPORT') as report, \
+                patch.object(native, 'native_artifacts', side_effect=AssertionError('No new discovery')), \
+                patch.object(native, 'adopt_tv_cases', return_value=cases) as adopt:
+            report.read_bytes.return_value = json.dumps(plan).encode()
+            native.main(['--verify-tv-plan'])
+            self.assertEqual(api.paths, ['/actions/artifacts/7', '/actions/artifacts/9'])
+            self.assertEqual(adopt.call_args.args[-1], [{'id': 7}, {'id': 9}])
+            adopt.return_value = {**cases, 'passes': {}}
+            with self.assertRaises(ReceiptError):
+                native.main(['--verify-tv-plan'])
+
+    def test_exact_origin_lookup_rejects_wrong_identity_and_missing_artifacts(self):
+        cases = {'required_tests': ['Suite/testOne'], 'passes': {'Suite/testOne': {'artifact': 7}}}
+        class API:
+            def get(self, path):
+                return {'id': 8}
+        with self.assertRaises(ReceiptError):
+            native.planned_artifacts(API(), cases)
+        with patch.object(API, 'get', side_effect=ReceiptError('Missing original artifact')), \
+                self.assertRaises(ReceiptError):
+            native.planned_artifacts(API(), cases)
+        with patch.object(API, 'get', side_effect=AssertionError('Empty plan needs no lookup')):
+            self.assertEqual(native.planned_artifacts(API(), {'required_tests': [], 'passes': {}}), [])

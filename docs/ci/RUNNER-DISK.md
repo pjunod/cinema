@@ -126,6 +126,12 @@ systemctl status plurx-runner-watchdog.timer --no-pager
 cat /var/lib/plurx-runner-watchdog/state.json
 ```
 
+The watchdog leaves alone any VM with a marker in
+`/var/lib/plurx-runner-watchdog/paused/` (it reports who paused it), and
+`plurx-runner-watchdog --vm <name>` runs one VM's pass on demand.
+[ci-fleet](http://forge.lan:3000/noirr/ci-fleet)'s Drain, Resume and Start VM use exactly these two;
+a drained runner is stopped only once it is idle.
+
 The reconciliation command keeps each existing registration and config credentials,
 backs up config with mode 0600, activates persistent guest swap, applies
 capacity/build/container/service budgets,
@@ -562,13 +568,16 @@ moves.
 
 `disk-gb` is a per-lane input and the janitor has one number for the host, so
 a lane asking for more than the janitor reserves keeps a band of its own.
-**`vod_web` asks for 45 G** — Playwright browsers plus an ffmpeg build on top
-of the workspace — and nothing reclaims the 25–45 G gap on its behalf. Raising
-`REQUIRED_GB` to 45 would not fix it either: that is over half a 78 GB guest,
-so it would be reported and ignored by the rule above. That lane needs a runner
-with the room. `test_no_lane_asks_for_more_disk_than_the_janitor_reserves`
-names it as a known exception and fails on any new one, so a second such lane
-is a decision rather than an accident.
+**`vod_web` asks for 45 G** for Playwright browsers and an ffmpeg build.
+**Release readiness's `release-check` also asks for 45 G** for its audited
+SDK package export, candidate-built shipping media/CI image, and full browser
+suite. Nightly deep validation and mutation also reserve 45 G for that
+same package export and shipping runtime build. All four lanes need this
+room on top of the workspace; nothing reclaims the
+25–45 G gap on their behalf. Raising `REQUIRED_GB` to 45 would put it over
+half a 78 GB guest, so that demand would be reported and ignored. Placement
+must provide the room. `test_no_lane_asks_for_more_disk_than_the_janitor_reserves`
+names and counts these exceptions, and fails if another lane copies the bar.
 
 ### Two side effects of raising the reserve, stated rather than discovered
 

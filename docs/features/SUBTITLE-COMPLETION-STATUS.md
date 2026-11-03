@@ -1,53 +1,92 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** deployed acceptance incomplete · reviewed repair in PR #1309, qualification running
+**Status:** ACTIVE · repair reviewed · all 21 focused regressions pass · deployed acceptance incomplete
 
-**Date:** 2026-10-25 · **Updated:** 2026-10-28 · **Owner:** Codex /root · **Branch:** `codex/subtitle-live-acceptance`
+**Date:** 2026-10-25 · **Updated:** 2026-10-29 · **Owner:** Codex /root · **Branch:** `codex/subtitle-artifact-admission`
 
-PR #1303 landed as `4be5ff26`; the maintainer deployed a later main containing
-that work. The live media worker reports revision `f2120bd9`. A fresh text-model
-download and three-cue production inference test succeeded. The installed Small
-speech model also passed its same-language caption test. These setup results do
-not yet prove captions render during playback or on the physical Apple TV.
+The current repair is [PR #1332](http://forge.lan:3000/noirr/plurx/pulls/1332).
+All 21 focused subtitle/storage cases and 2,129 policy cases have passed;
+unchanged passing evidence remains retained. Native qualification exposed two
+test interaction failures: Meridian setup steered vertically at a vertical
+rail, and successful diagnostic captures consumed the live controls' idle
+interval before Select. The fixture corrections preserve their assertions and
+failure captures. Authenticated per-case native reuse is being completed so
+only failed or missing journeys repeat. The web lane also retains its three
+Node unit commands from authenticated original execution with unchanged inputs;
+JavaScript parsing and TypeScript qualification remain active. Final independent
+review approves both receipt changes. A green final gate remains required; the PR records the live counts and owner. The maintainer deploys,
+then translation publication and visible generated/translated captions on the
+physical TV still require deployed acceptance.
 
-Live acceptance found concrete blockers. Text-model installation incorrectly
-shares the media-reader pool with library metadata work, causing a long setup
-queue before any download begins. Progressive range demand also needs the
-existing reserved live-reader slot under its durable authority predicates.
-The paused web panel's Refresh status action does not refresh choices or server
-time before an operation exists, leaving Start unable to recover after its
-four-minute action clock expires. Foreground existing-subtitle extraction also
-tries CPU admission once without registering live wait pressure, so background
-work never receives the cooperative yield signal. Active progressive inference
-also needs that signal before acquiring the shared heavy-worker lane. The fixes are implemented in [PR #1309](http://forge.lan:3000/noirr/plurx/pulls/1309),
-owned by Codex /root. Final adversarial review and the normal compile/lint hook
-passed. All 18 focused Rust cases passed, including real three-voter contracts
-and FFmpeg extraction. Formal source mappings and managed-v2 fixture inventories
-are corrected. Compatible passing cases are retained individually; only failed
-cases were rerun. Preflight retained 2,104 compatible Python passes and reran
-the two failed ownership-inventory methods successfully. Four type-only DOM
-casts resolve the remaining web compilation diagnostics.
+[PR #1309](http://forge.lan:3000/noirr/plurx/pulls/1309) merged as
+`f9074711`, and the maintainer has now deployed `10f45ae5`, which contains it.
+The running service is healthy with managed schema v2. A fresh Tiny English
+model transfer (77,704,715 bytes), pinned hash verification and speech
+self-test passed in about 26 seconds. A fresh request against the installed
+Marian model passed its three-cue inference check in about 20 seconds; that
+request reused existing model files.
 
-The main fast lane's live-identity guard now follows its documented head-only
-execution policy; adversarial review and the new identity regression passed.
-Source closures, authenticated origins, exact PR head and readiness checks
-remain required. Current-main integration also changes the whole-file hash of
-a mapped server source without changing its selected worker behavior. The
-reviewed mappings are being rebound before final qualification; model
-properties, bounds and authority claims remain unchanged.
-No production database edits, service restart or agent deployment has occurred.
+Actual German-to-English subtitle translation still exposed a queue blocker.
+The exact extracted WebVTT artifact exists and matches the requested input
+hash, but the translation job shares the background media-reader slot with
+unrelated extraction/indexing work. Its current worker can fall back to media
+extraction on a cache miss, so simply removing that reservation would be unsafe.
 
-The physical Apple TV responds through its existing Companion pairing;
-installed-app discovery and Cinema launch both succeeded. Its Xcode connection
-remains unavailable and actual native caption rendering is unverified. Cinema's
-server receiver registrations remain revoked despite the locally enabled
-phone-control setting; this does not prevent Companion control. The maintainer
-owns deployment of the reviewed repair, followed by deployed acceptance.
+The follow-up separates acquisition from artifact-only inference, uses a
+distinct job kind that older workers cannot claim, and adds append-only
+managed v3 / SQLite v121 resource upgrades. Legacy jobs keep their original
+reader fence and explicit Retry reacquires the original verified input.
+Implementation, the pinned workspace/all-target compiler check, normal
+format/Clippy/syntax hooks and final adversarial review pass. The review found
+one native pagination-status issue, which is fixed and covered by the new
+methods. The original 18 focused cases pass: seven new/expanded core, four daemon,
+three Web, two tvOS and two Android cases. Two additional changed managed-v3
+fixtures pass against real replicated stores, and the strict clock-header
+selector regression passes. This includes a real 40-second surround decode. Previously passing cases remain retained across main updates.
+The only integration conflict was adjacent changelog entries; both are kept.
+The unrelated sharing update does not change subtitle source or invalidate
+these passes. The repair PR records its current fast-lane result and merge state; a green
+gate remains required before merge.
+[Tracking issue #1329](http://forge.lan:3000/noirr/plurx/issues/1329) records
+ownership and the current repair branch; the PR carries gate/merge readiness.
+
+A second confirmed deployed client failure occurs when Create returns
+`operation_stopped` for the exact stopped recipe without an operation handle,
+leaving clients unable to offer the existing explicit Resume. The candidate
+returns that validated handle, adopts only matching read-only observation,
+and retains explicit fenced Resume.
+
+Fresh-file deployed acceptance now identified a separate concrete decoder
+failure. Source verification of the 5.72 GB test file succeeds, the current
+worker and speech-model receipt match, and browser playback advances through
+eight minutes. Requested ranges fail during decoding with
+`source_clock_unsupported`, leaving no committed cues. Exact source probing
+passes. A bounded decoder replay identifies the root cause: FFmpeg surround
+side-data continuation messages share the clock filter name but carry no frame
+timestamps. The parser treats them as malformed clock records. Those metadata
+messages also exhaust its byte cap before the window ends. The correction
+selects frame records before bounded retention, ignores metadata in clock
+parsing, and keeps malformed frame/overflow refusals and process ownership.
+Actual timestamp continuity and the requested anchor pass without loosening
+source-clock validation. The owned acceptance operation was stopped and its
+test tab closed after recording the failure; the user tab is preserved. The
+candidate reports current terminal range errors, including later failure
+pages, instead of leaving the UI saying it is still processing.
+
+On-the-fly generation and physical caption rendering remain unverified.
+The selected Apple TV responds through its existing Companion pairing and
+Cinema launches. An earlier 2160p HEVC remux route stalled near 90 seconds; manual playback
+advanced, and the fresh-file Auto route advanced beyond eight minutes.
+This is not a successful moving-playback or native-rendering acceptance result.
+The maintainer owns deployments; no agent deployment or production database
+mutation has occurred.
 
 Companion to the [subtitle generation plan](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md)
 and [progressive translation plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md).
 
-The implementation is built in one owned clone and batched in
+## Earlier completion and qualification evidence
+
+The earlier implementation was built in one owned clone and batched in
 [PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292), owned by Codex /root.
 The PR records current qualification results, merge blockers and the landing
 receipt. Independent review findings, including final worker and native lifecycle deltas, are resolved. The user owns deployment;

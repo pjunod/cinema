@@ -346,6 +346,37 @@ class DockerStartupBudgetTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
 
+    def test_memory_alias_repair_refuses_distinct_explicit_deploy_memory(self):
+        document = compose_document()
+        document["services"]["plurxd"].update({
+            "mem_reservation": "268435456",
+            "deploy": {"resources": {"reservations": {"memory": "134217728"}}},
+        })
+        result = subprocess.CompletedProcess([], 0, json.dumps(document), "")
+        with mock.patch.object(subprocess, "run", return_value=result) as run:
+            with self.assertRaisesRegex(BudgetError, "conflicting explicit memory"):
+                CHECKER["resolve_missing_memory_alias"](["docker", "compose", "config", "--format", "json"])
+        self.assertEqual(run.call_count, 1)
+
+    def test_memory_alias_repair_rechecks_other_compose_consistency(self):
+        document = compose_document()
+        document["services"]["plurxd"].update({
+            "mem_reservation": "268435456",
+            "deploy": {"resources": {"reservations": {"devices": []}}},
+        })
+        results = [subprocess.CompletedProcess([], 0, json.dumps(document), ""),
+                   subprocess.CompletedProcess([], 1, "", "network_mode and networks conflict")]
+        def compose(command, **options):
+            if "--no-interpolate" in command:
+                self.assertNotIn("--no-consistency", command)
+                repaired = json.loads(Path(command[command.index("-f") + 1]).read_text())
+                self.assertEqual(repaired["services"]["plurxd"]["deploy"]["resources"]["reservations"]["memory"], "268435456")
+            return results.pop(0)
+        with mock.patch.object(subprocess, "run", side_effect=compose):
+            with self.assertRaisesRegex(BudgetError, "network_mode and networks conflict"):
+                CHECKER["resolve_missing_memory_alias"](["docker", "compose", "config", "--format", "json"])
+        self.assertEqual(results, [])
+
     def test_cli_failure_does_not_echo_resolved_environment_secrets(self):
         secret = "do-not-print-this-secret"
         document = compose_document(

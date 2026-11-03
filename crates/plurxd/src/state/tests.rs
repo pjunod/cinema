@@ -13,7 +13,7 @@ fn subtitle_source_job_argv_has_no_index_pipe_and_ends_in_null_sentinel() {
     let plan =
         crate::subtitle_ride_along::RideAlongPlan::standalone(temp.path(), 7, stamp, vec![0])
             .expect("plan");
-    let argv = subtitle_source_argv("/dev/fd/3", &plan);
+    let argv = subtitle_source_argv("/dev/fd/3", &[], &plan);
     assert!(argv.iter().all(|arg| arg != "pipe:1"));
     assert!(argv.last().is_some_and(|arg| arg.ends_with("[f=null]-")));
     assert!(argv.windows(2).any(|pair| pair == ["-i", "/dev/fd/3"]));
@@ -2325,8 +2325,16 @@ async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_
             crate::subtitle_ride_along::RideAlongPlan::standalone(work.path(), 8, stamp, vec![0])
                 .expect("normal plan");
         assert!(matches!(
-            run_subtitle_source_pass(plan, &source, work.path(), &lost, Some(&transcode), &|| {},)
-                .await,
+            run_subtitle_source_pass(
+                plan,
+                &source,
+                &[],
+                work.path(),
+                &lost,
+                Some(&transcode),
+                &|| {},
+            )
+            .await,
             Err(AnalysisResolutionError::Retry {
                 code: "foreground_preempted",
                 charge_attempt: false,
@@ -2337,7 +2345,7 @@ async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_
         crate::subtitle_ride_along::RideAlongPlan::standalone(work.path(), 8, stamp, vec![0])
             .expect("foreground plan");
     assert!(
-        run_subtitle_source_pass(plan, &source, work.path(), &lost, None, &|| {})
+        run_subtitle_source_pass(plan, &source, &[], work.path(), &lost, None, &|| {})
             .await
             .is_ok()
     );

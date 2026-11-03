@@ -32,6 +32,17 @@ pub(crate) struct VodResponsePublication<T> {
 }
 
 impl MediaResponseOwner {
+    /// Which kind of owner this is, and the exact producer attempt a rolling
+    /// owner is bound to, for correlating a failed response in the log.
+    pub(crate) fn log_identity(&self) -> (&'static str, Option<u64>) {
+        match &self.0 {
+            MediaResponseOwnerKind::Rolling {
+                producer_attempt, ..
+            } => ("rolling", Some(*producer_attempt)),
+            MediaResponseOwnerKind::Vod(_) => ("vod", None),
+        }
+    }
+
     /// AVC is init-derived only for fMP4 sessions. Rolling full transcodes use
     /// MPEG-TS and have no initialization object to inspect.
     pub(crate) fn avc_master_uses_init(&self) -> bool {
@@ -82,6 +93,14 @@ pub(crate) enum MediaResponsePublicationRejection {
     OwnerGone,
     StateChanged,
     ProducerEnded(String),
+    /// Serving authority, and nothing else, caused the refusal: the node was
+    /// fenced at admission, or the loss generation moved after
+    /// `admitted_generation`. A buffered response may wait for the manager's
+    /// resolution of the outage after that generation and authorize again
+    /// from the top; nothing else may treat it as retryable.
+    AuthorityLost {
+        admitted_generation: u64,
+    },
 }
 
 /// Frozen presentation facts resolved without erasing the distinction between
@@ -130,6 +149,24 @@ impl PlaylistPublicationError {
         }
     }
 
+    /// A refusal bound to one exact attempt rather than to whichever attempt
+    /// is current when it is built: a waiter classifies the attempt its
+    /// capability was resolved against, and only that attempt's verdict may
+    /// be published to it.
+    pub(super) fn for_attempt(
+        error: PlaylistError,
+        session: &Arc<Session>,
+        producer_attempt: u64,
+    ) -> Self {
+        Self {
+            error,
+            owner: Some(MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                session: Arc::clone(session),
+                producer_attempt,
+            })),
+        }
+    }
+
     pub(super) fn without_owner(error: PlaylistError) -> Self {
         Self { error, owner: None }
     }
@@ -155,6 +192,7 @@ pub(super) enum MediaResponsePublicationBinding {
 /// The response class requested by HTTP before any bytes become visible.
 /// Object names are retained only for exact EOF/frontier accounting; actor
 /// admission is derived from this typed class, never from URL parsing.
+#[derive(Clone)]
 pub(crate) struct MediaResponsePublication {
     pub(super) kind: &'static str,
     pub(super) object_name: Option<String>,

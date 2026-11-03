@@ -3542,6 +3542,7 @@ impl LiveTvAuthority {
                     crate::serving_fence::LossOutcome::Recovered {
                         outage,
                         budget_spent,
+                        ..
                     } => {
                         resolved = serving.borrow_and_update().loss_generation;
                         tracing::info!(

@@ -314,7 +314,7 @@ final class SharedPlayerController: ObservableObject {
             throw CancellationError()
         }
         // Direct play reads the signed alias with no account header.
-        let item = AVPlayerItem(url: url)
+        let item = ServerTrust.playerItem(url: url)
         historyFrameObserved = false
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
         item.add(output); historyOutput = output
@@ -960,7 +960,7 @@ extension SharedPlayerController: PreparedSuccessorHost {
         guard !closing, player.currentItem != nil, let client, let adoption = preparedAdoption,
               adoption.playback.start.response.sessionId == action.sessionId,
               let url = try? client.playlistURL(playback: adoption.playback) else { return false }
-        let item = AVPlayerItem(url: url)
+        let item = ServerTrust.playerItem(url: url)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
         item.add(output)
         let successor = AVPlayer(playerItem: item)

@@ -29,6 +29,36 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Effort/main integration — source correspondence on 2026-11-02
+
+Claude (claude-opus-5-5) merged main `7ea74370b` into effort `ca95fde57` on
+task branch `claude/adaptive-integrate-main`. Main replaces the inline library
+worker with the shared `plurx_worker_control::library_driver` and its
+`library_work/env.rs` environment; its re-pointed rows (`env.rs`,
+`library_driver.rs`, `publication.rs`) are kept. The effort's original
+admission ownership is ported into that environment: it holds the same
+`Arc<FragmentAdmission>`, and the work future runs inside
+`with_original_work_keeper`, so native and filesystem workers keep that
+admission until they return. The effort's `finish_original_controller` anchor
+and the `drop.admission` last-alias gap stay authoritative; main's
+move-consuming `finish(mut self)` anchor does not exist in the merged source.
+Two durable-job citation rows into the removed inline controller are dropped
+with main, because their anchors no longer exist.
+
+`bounded.rs` keeps the effort's original pipe keeper and carries main's
+selected-stderr reader through that same owner. `Cargo.lock` is main's lock
+plus the effort's plurx-core `wasmtime`/`wat` edges; plurx-core's macOS
+Wasmtime pin follows main to `=50.0.0`. The other refreshed pins are files
+changed on both sides that merged without a textual conflict (Store queue,
+Hiqlite, SQLite, conformance parent, membership, `state.rs`, `main.rs`, manager
+construction). `state.rs` also gains main's sharing log buffer in its
+test-only store projection.
+
+Only whole-file pins move. Every exact anchor is unique; models,
+configurations, properties, bounds, validators and earlier review identities
+are unchanged. Offline `check-mapping` passes for all three packages. No
+model, behavioral or qualification result is claimed.
+
 ## Main and effort source binding — 2026-10-26
 
 Current source inspected: `2dc07bd0995f07f26281c72de80117f2c9afa9f0`,

@@ -6,6 +6,7 @@ import hashlib
 import json
 import importlib.machinery
 import importlib.util
+import re
 import unittest
 import tempfile
 from unittest import mock
@@ -148,7 +149,12 @@ class WorkerControlLinuxT6Tests(unittest.TestCase):
             runner.parser_stdlib_attestation(env)
 
     def test_original_rejected_t6_is_reparsed_without_solver_or_tool_normalization(self) -> None:
+        """Reparse the real format; its old module envelope cannot be adopted."""
         raw, provenance = real_linux_t6()
+        parsed = runner.verdict(raw, 0, provenance["harness"], None,
+            fmt_stdlib_sha256=provenance["tools"]["fmt_stdlib_sha256"],
+            parser_attestation=provenance["parser_stdlib_attestation"])
+        self.assertEqual(parsed["outcome"], "proved")
         base = ROOT / "target/worker-control-runner-fixtures"
         base.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=base) as directory:
@@ -163,13 +169,18 @@ class WorkerControlLinuxT6Tests(unittest.TestCase):
                 "unwinding_checks": True, "default_safety_checks": True, "log_sha256": runner.digest(log_path)}
             runner.write_json(prior / f"{name}.json", rejected)
             with mock.patch.object(runner, "validate_case_sources"), mock.patch.object(runner, "command", side_effect=AssertionError("solver replay forbidden")):
-                retained = runner.verify(Path("unused"), {}, output, harness, source, tools,
-                    manifest=output / "source/Cargo.toml", prior=prior, parser_attestation=provenance["parser_stdlib_attestation"])
-                self.assertEqual(retained["outcome"], "proved")
-                self.assertEqual(retained["tools"], tools)
-                self.assertEqual(retained["original_parser_rejection"]["error"], rejected["error"])
-                self.assertTrue(retained["parser_attestation_bridge"]["solver_tool_identity_unchanged"])
-                self.assertNotIn("slice_cmp_sha256", retained["tools"])
+                # Parsing success does not bind the new driver module to this
+                # historical solver execution. Preserve its original identity.
+                driver_input = f"{runner.CRATE}/src/library_driver.rs"
+                self.assertIn(driver_input, runner.PROOF_INPUTS)
+                self.assertNotIn(driver_input, source["files"])
+                self.assertNotIn("library_driver.rs", source["staging"]["source_files"])
+                self.assertIsNone(runner.retain_previous(prior, output, harness, source, tools, None, None,
+                    parser_attestation=provenance["parser_stdlib_attestation"]))
+                self.assertEqual(runner.digest(log_path), rejected["log_sha256"])
+                self.assertEqual(json.loads((prior / f"{name}.json").read_text()), rejected)
+                self.assertFalse((output / f"{name}.json").exists())
+                self.assertFalse((output / f"{name}.log").exists())
                 changed_tools = dict(tools, driver_sha256="different-native-binary")
                 self.assertIsNone(runner.retain_previous(prior, output, harness, source, changed_tools, None, None,
                     parser_attestation=provenance["parser_stdlib_attestation"]))
@@ -177,6 +188,34 @@ class WorkerControlLinuxT6Tests(unittest.TestCase):
 
 
 class WorkerControlInventoryTests(unittest.TestCase):
+    def test_every_declared_module_is_staged_from_hash_bound_source_bytes(self) -> None:
+        declared = set(re.findall(r"^\s*(?:pub\s+)?mod\s+(\w+)\s*;", (ROOT / f"{runner.CRATE}/src/lib.rs").read_text(), re.MULTILINE))
+        declared.add("proofs")  # lib.rs includes this cfg-gated module by filename.
+        self.assertEqual(set(runner.STAGED_RUST_SOURCES), {"lib.rs", *(name + ".rs" for name in declared)})
+        source_paths = {f"{runner.CRATE}/src/{name}" for name in runner.STAGED_RUST_SOURCES}
+        self.assertTrue(source_paths <= set(runner.GOVERNED))
+        scratch = ROOT / "target/worker-control-runner-fixtures"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+            output = Path(temporary)
+            files = {path: runner.digest(ROOT / path) for path in runner.GOVERNED}
+            _, packaging = runner.stage_sources(output, {"files": files})
+            self.assertEqual(set(packaging["source_files"]), set(runner.STAGED_RUST_SOURCES))
+            for name in runner.STAGED_RUST_SOURCES:
+                original = ROOT / runner.CRATE / "src" / name
+                staged = output / "source/src" / name
+                self.assertEqual(packaging["source_files"][name], runner.digest(original))
+                self.assertEqual(staged.read_bytes(), original.read_bytes())
+
+    def test_effect_interpreter_binds_the_proof_and_the_ci_selection(self) -> None:
+        # The driver in library_work.rs only dispatches; the effect interpreter
+        # that drives the shared controller lives in library_work/env.rs.
+        interpreter = "crates/plurxd/src/library_work/env.rs"
+        self.assertIn(interpreter, runner.GOVERNED)
+        self.assertIn(interpreter, runner.PROOF_INPUTS)
+        workflow = (ROOT / ".github/workflows/main-fast-lane.yml").read_text(encoding="utf-8")
+        self.assertIn(interpreter, workflow)
+
     def test_exact_six_names_and_counts_are_required(self) -> None:
         self.assertEqual(runner.parse_inventory(inventory()), list(runner.HARNESSES))
         for change in ("missing", "duplicate", "extra", "count", "contract", "version", "schema"):
@@ -282,6 +321,36 @@ class WorkerControlMutationTests(unittest.TestCase):
 
 
 class WorkerControlResumeTests(unittest.TestCase):
+    def test_old_candidate_without_driver_input_is_not_adopted(self) -> None:
+        base = ROOT / "target/worker-control-runner-fixtures"
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base) as directory:
+            prior, output = Path(directory) / "prior", Path(directory) / "next"
+            prior.mkdir(); output.mkdir()
+            name = HARNESS.rsplit("::", 1)[1]
+            log_path = prior / f"{name}.log"
+            log_path.write_text(log())
+            old_files = {path: "same-input" for path in runner.PROOF_INPUTS
+                         if not path.endswith("/library_driver.rs")}
+            old_source = {"head": "old", "files": old_files,
+                          "staging": {"manifest_sha256": "same-envelope", "source_files": {}}}
+            result = runner.verdict(log(), 0, HARNESS, None)
+            result.update({"source": old_source, "tools": {}, "command": [],
+                           "execution_directory": str(prior), "unwinding_checks": True,
+                           "default_safety_checks": True, "log_sha256": runner.digest(log_path)})
+            runner.write_json(prior / f"{name}.json", result)
+            current = {"head": "new", "files": {path: "same-input" for path in runner.PROOF_INPUTS},
+                       "staging": {"manifest_sha256": "same-envelope", "source_files": {}}}
+            def fresh_command(args, cwd, env, log_path, **kwargs):
+                log_path.write_text(log())
+                return 0, log()
+            with mock.patch.object(runner, "validate_case_sources"), \
+                    mock.patch.object(runner, "command", side_effect=fresh_command) as invoked:
+                fresh = runner.verify(Path("unused"), {}, output, HARNESS, current, {},
+                                      manifest=output / "source/Cargo.toml", prior=prior)
+                self.assertEqual(fresh["outcome"], "proved")
+                invoked.assert_called_once()
+
     def test_success_is_reparsed_and_preserves_original_candidate(self) -> None:
         base = ROOT / "target/worker-control-runner-fixtures"
         base.mkdir(parents=True, exist_ok=True)
@@ -317,7 +386,16 @@ class WorkerControlResumeTests(unittest.TestCase):
 
 class WorkerControlRejectedParserReuseTests(unittest.TestCase):
     def test_real_log_is_reused_after_parser_repair_but_bad_attempts_are_not(self) -> None:
-        raw, provenance = real_positive()
+        """Keep the landing-regression ID; real parsing and receipt reuse differ.
+
+        The real three-module log remains a parser fixture, never proof of the
+        new driver input. Promotion/negative cases below use a complete-schema
+        unit-contract receipt and synthetic log, not qualification evidence.
+        """
+        historical_raw, provenance = real_positive()
+        parsed = runner.verdict(historical_raw, 0, provenance["harness"], None,
+            fmt_stdlib_sha256=provenance["reparse_tools"]["fmt_stdlib_sha256"])
+        self.assertEqual(parsed["outcome"], "proved")
         harness = provenance["harness"]
         name = harness.rsplit("::", 1)[1]
         base = ROOT / "target/worker-control-runner-fixtures"
@@ -325,8 +403,29 @@ class WorkerControlRejectedParserReuseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=base) as directory:
             prior, output = Path(directory) / "prior", Path(directory) / "next"
             prior.mkdir(); output.mkdir()
-            source = copy.deepcopy(provenance["source_binding"])
+            historical_source = copy.deepcopy(provenance["source_binding"])
             tools = provenance["reparse_tools"]
+            historical_log = prior / f"{name}.log"
+            historical_log.write_text(historical_raw)
+            historical_case = {"harness": harness, "outcome": "rejected", "error": "old parser rejection",
+                "exit_code": 0, "source": historical_source, "tools": tools,
+                "command": ["cargo-kani", "--harness", harness, "--exact", "--output-format", "regular",
+                    "--manifest-path", str(prior / "source/Cargo.toml"), "--target-dir", str(prior / "build")],
+                "execution_directory": str(prior), "unwinding_checks": True, "default_safety_checks": True,
+                "log_sha256": runner.digest(historical_log)}
+            runner.write_json(prior / f"{name}.json", historical_case)
+            with mock.patch.object(runner, "validate_case_sources"):
+                self.assertIsNone(runner.retain_previous(prior, output, harness, historical_source, tools, None, None))
+            self.assertEqual(runner.digest(historical_log), historical_case["log_sha256"])
+            self.assertFalse((output / f"{name}.json").exists())
+
+            # This complete input schema is deliberately a unit fixture. Do not
+            # fill the absent driver identity into the real old provenance.
+            source = {"head": "unit-contract-fixture",
+                "files": {path: "fixture-input" for path in runner.PROOF_INPUTS},
+                "staging": {"manifest_sha256": "fixture-envelope",
+                    "source_files": {module: "fixture-input" for module in runner.STAGED_RUST_SOURCES}}}
+            raw = log(harness=harness, description="T2 complete-schema unit-contract assertion")
             def captured_command(args, cwd, env, log_path, **kwargs):
                 log_path.write_text(raw)
                 return 0, raw
@@ -341,11 +440,14 @@ class WorkerControlRejectedParserReuseTests(unittest.TestCase):
                 self.assertTrue(rejected["unwinding_checks"] and rejected["default_safety_checks"])
                 retained = runner.verify(Path("unused"), {}, output, harness, source, tools,
                                          manifest=output / "source/Cargo.toml", prior=prior)
-                self.assertEqual(executed.call_count, 1, "compatible raw proof must not execute the solver again")
+                self.assertEqual(executed.call_count, 1, "compatible unit receipt must not execute its mocked command again")
                 self.assertEqual(retained["outcome"], "proved")
                 self.assertEqual(retained["original_parser_rejection"]["error"], rejected["error"])
                 self.assertNotIn("error", retained)
                 self.assertEqual(retained["source"], source)
+                self.assertEqual(retained["tools"], tools)
+                self.assertTrue(retained["parser_attestation_bridge"]["solver_tool_identity_unchanged"])
+                self.assertEqual(retained["retained_from"]["log_sha256"], runner.digest(prior / f"{name}.log"))
                 self.assertEqual(retained["revalidated_by_parser_sha256"], runner.digest(ROOT / "scripts/check-worker-control"))
                 for kind in ("weak command", "timeout", "compiler", "missing harness"):
                     bad = copy.deepcopy(rejected)

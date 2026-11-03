@@ -8,7 +8,29 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- Nightly deep validation and mutation tests use the app's shipped FFmpeg
+  package; obsolete FFmpeg 6 runner capacity and recovery entries are retired.
+
+- Web copy/remux playback keeps decision and session-creation quality identities
+  consistent when selecting alternate audio tracks or applying audio offsets.
+- Weekly release readiness validates the shipped Jellyfin FFmpeg runtime in
+  a candidate-built CI image instead of waiting for obsolete FFmpeg 6 runners.
+
+- Apple clients remember selected self-signed server identities and use them
+  for HTTPS sign-in, artwork and playback without a manually installed certificate.
+- Apple TV Settings enters each category at its first setting and restores the
+  category when returning with Back. Picker controls expose their names and
+  selected values to accessibility.
+
+## [0.8.0] — 2026-10-29
+
 ### Added
+
+- Shared imports can have a household-friendly name when imported and can be
+  renamed from Shared libraries or Settings → Sharing. Names stay local and
+  survive re-pairing.
 
 - Progressive text subtitle translation can create and observe durable jobs,
   and shared playback can read committed caption assets from the Source under
@@ -58,6 +80,10 @@ bump may break compatibility and a **patch** bump never does.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
 
 ### Changed
+
+- Shared libraries has a searchable share directory with compact library
+  cards, availability filters and one bounded Continue Watching row labelled
+  by share. The layout adapts to desktop and phone screens.
 
 - Credential sign-in screens omit Report a problem. Connection setup, saved-
   session recovery, and signed-in reporting keep their entry points.
@@ -144,7 +170,93 @@ bump may break compatibility and a **patch** bump never does.
   streams historical authority and indexes per-asset reconstruction while
   preserving every historical migration row.
 - Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
+- Apple TV settings keep each setting name visible beside its selected value,
+  including Playback, Appearance and Live TV choices.
 
+- Playback cache admission reconciles concurrent cancelled writes instead of
+  failing a video producer as disk-full while capacity remains, preventing
+  repeated Apple TV buffering and stream retries.
+
+- **HTTP app addresses forward to HTTPS while it is active.** Temporary,
+  non-cached redirects preserve the requested path, query, method and body,
+  including remapped Docker HTTPS ports. Health, discovery, cluster RPC and
+  compatibility traffic keep working over their existing HTTP paths.
+
+- Shared libraries across Tailscale accounts: a Cinema running as the macOS
+  LaunchAgent can now observe its own Tailscale, so it binds its private
+  source address and can connect to other Cinemas (the Tailscale app answered
+  launchd-started CLI calls as its GUI and every check failed silently).
+  Settings → Sharing shows a connection checklist naming the host's Tailscale
+  account, the exact failing setup step, whether each saved connection is
+  reachable and — on Check connection — why not (share not accepted by this
+  account, source offline, port refused, certificate mismatch, no private
+  source address). The import form names the account that must accept the
+  Tailscale share; senders see whether, and by whom, each share was accepted.
+  A dedicated sharing activity log (`/api/v1/system/logs?scope=sharing`)
+  records setup changes, checks, shares and cleanup failures.
+
+- Embedded text subtitles in Matroska files are read through the file's own
+  cue index when it provably names every subtitle frame, instead of demuxing
+  the whole picture: a 4K remux's track takes a few thousand small reads
+  rather than a full-file scan, so windows land ahead of the playhead and the
+  whole track no longer times out. Other files keep the full demux.
+
+- Shared HDR10 playback builds a missing HEVC copy index instead of forcing
+  video encoding and SDR on hosts without an HDR10 encoder. Unsupported EAC3
+  audio converts to AAC while the HDR10 video and static metadata stay intact.
+
+- Sharing hides revoked recipients by default, explains pairing and viewer
+  assignment steps, and refreshes incoming requests automatically. Invitation
+  imports verify an existing private connection immediately, show actionable
+  failures with bounded retries, and log connection/import failure codes
+  without exposing invitation secrets or credentials.
+  Native Mac setup recognizes legacy installed services and no longer treats
+  ordinary native daemons as Docker containers. Shared playback accepts the
+  current audio downmix plans and excludes public-only output advisories from
+  peer decisions instead of reporting an unexplained preparation failure.
+  HTTP browser sessions generate UUID request identities even without
+  `crypto.randomUUID`, allowing shared playback to start. Source connection
+  failures have a distinct message and catalogue-stage diagnostics.
+
+- Progressive subtitle translation keeps FFmpeg progress updates out of source
+  clock evidence, preventing valid decoded ranges from failing before inference.
+
+- Shared playback handoff and quality reopen accept the producer's bounded
+  playlist start hint instead of returning 503 when playback resumes after zero.
+- Update the macOS source parser runtime to fix an abort in native exception
+  handling, preserving its deadline, memory, stack and capability limits.
+
+- Sharing-host setup reaps its helper before timeout or cancellation returns,
+  while retaining the helper's native user/IPC environment. The lifecycle
+  inventory now records the sharing-host and invitation owners and their tests.
+- Existing-text subtitle inference consumes verified caption artifacts without
+  waiting for unrelated media readers; legacy extraction jobs remain fenced.
+- Progressive captions decode valid surround audio without treating FFmpeg
+  side-data logs as malformed timestamps or losing the final window to log caps.
+- Progressive captions recover an existing stopped operation through a validated
+  read before explicit Resume, including operations without a published asset.
+  Current nonretryable range failures are visible without hiding available
+  coverage or offering unsupported retries.
+- Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
+- Sharing setup shows the Tailscale connection and saved account authorization
+  up front, confirms key saves by reading them back, and refreshes connection
+  status after setup. Cluster gateway addresses and node-local setup are labeled
+  separately.
+
+
+
+- Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
+- Progressive subtitle decoding resolves the normal PATH-based media tools to
+  canonical executables before launching its clean, descriptor-bound children.
+
+- Cluster maintenance commits its release intent with the elected coordinator's
+  exact lease, acknowledges the current process, and counts active sessions
+  before allowing maintenance exit.
+
+- Recording lists bind paging, state filters, and capture boundaries independently
+  instead of returning a database error.
+- Model and media-tool verification detects immediate same-size byte changes
+  even when filesystem timestamps coincide.
 - Cinema invitations now include external Tailscale device consent and resume import when the private connection is ready; account authorization, endpoint discovery and invitation cleanup are managed in Sharing.
 - Fresh macOS Vulkan media builds include libplacebo's pinned fast_float
   headers, allowing floating-point parsing with the macOS 12 deployment target.
@@ -404,6 +516,16 @@ bump may break compatibility and a **patch** bump never does.
   settling repeated attachment to the same player layer.
 - Apple Playback info reports the installed Auto rung after a prepared quality
   switch, so an encoded 720p stream no longer retains the original Remux label.
+
+- GitHub macOS releases sign and notarize the complete install archive in a
+  protected job before publication, retaining component hashes and the stapled
+  app ticket. A single canonical WASM parser is shared by both native slices
+  so host-specific floating-point folding cannot prevent universal assembly.
+  Manual installers publish independently of in-app upgrade
+  qualification; unqualified releases omit update metadata. Dry-run builds
+  remain available without Apple credentials. Linux release smoke tests force
+  reinstall before removal, preserve the missing-guard refusal, and retain
+  package-manager diagnostics on failure.
 
 ## [0.7.0] — 2026-10-17
 
@@ -3667,7 +3789,8 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.7.0
 [0.3.0]: https://github.com/pjunod/plurx/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/pjunod/plurx/compare/v0.2.7...v0.2.8

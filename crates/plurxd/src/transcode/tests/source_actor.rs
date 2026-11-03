@@ -229,6 +229,90 @@ async fn source_copy_preadmission_fixture_with_restart(
     fixed_case: Option<u8>,
     restart_case: Option<u8>,
 ) {
+    Box::pin(source_copy_preadmission_fixture_with_video(
+        mode,
+        SourceFixtureVideo::H264,
+        fixed_case,
+        restart_case,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_actor_builds_cold_hdr10_hevc_index_and_serves_hdr10_bytes() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        5,
+        SourceFixtureVideo::Hdr10,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_cold_hdr10_index_survives_cancelled_waiter_and_settles_on_revoke() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        6,
+        SourceFixtureVideo::Hdr10,
+    ))
+    .await;
+}
+
+#[derive(Clone, Copy)]
+enum SourceFixtureVideo {
+    H264,
+    Hdr10,
+    Hdr10Promotion,
+    Hdr10Retention,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_cold_hdr10_index_matches_probe_selected_promotion_recipe() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        5,
+        SourceFixtureVideo::Hdr10Promotion,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_cold_hdr10_index_matches_probe_selected_retention_recipe() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        5,
+        SourceFixtureVideo::Hdr10Retention,
+    ))
+    .await;
+}
+
+async fn source_fixture_probe(file: &std::path::Path) -> std::process::Output {
+    tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
+        .args([
+            "-v",
+            "error",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            "-of",
+            "json",
+        ])
+        .arg(file)
+        .output()
+        .await
+        .expect("actual scan fixture probe")
+}
+
+async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixtureVideo) {
+    Box::pin(source_copy_preadmission_fixture_with_video(
+        mode, video, None, None,
+    ))
+    .await;
+}
+
+async fn source_copy_preadmission_fixture_with_video(
+    mode: u8,
+    video: SourceFixtureVideo,
+    fixed_case: Option<u8>,
+    restart_case: Option<u8>,
+) {
+    let hdr10 = !matches!(video, SourceFixtureVideo::H264);
     use crate::http::hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget};
     use plurx_core::{
         config::Config,
@@ -354,22 +438,20 @@ async fn source_copy_preadmission_fixture_with_restart(
     } else {
         "source.mp4"
     });
-    let generated = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
-        .args([
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=s=128x72:r=24",
-            "-t",
-            "2",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-y",
-        ])
+    let mut generate = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    generate.args(["-v", "error", "-f", "lavfi", "-i", "color=s=128x72:r=24"]);
+    if hdr10 {
+        generate.args([
+            "-f", "lavfi", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000", "-c:a", "eac3",
+            "-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
+            "-color_trc", "smpte2084", "-color_primaries", "bt2020", "-colorspace", "bt2020nc",
+            "-x265-params", "pools=1:frame-threads=1:wpp=0:repeat-headers=1:keyint=12:min-keyint=12:scenecut=0:bframes=0:colorprim=9:transfer=16:colormatrix=9:hdr10=1:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
+        ]);
+    } else {
+        generate.args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+    }
+    let generated = generate
+        .args(["-t", "2", "-y"])
         .arg(&file)
         .output()
         .await
@@ -413,23 +495,44 @@ async fn source_copy_preadmission_fixture_with_restart(
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_secs() as i64;
-    let probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
-        .args([
-            "-v",
-            "error",
-            "-show_format",
-            "-show_streams",
-            "-show_chapters",
-            "-of",
-            "json",
-        ])
-        .arg(&file)
-        .output()
-        .await
-        .expect("actual scan fixture probe");
+    let probe = source_fixture_probe(&file).await;
     assert!(probe.status.success());
-    let probe = String::from_utf8(probe.stdout).expect("actual scan JSON");
+    let mut probe = String::from_utf8(probe.stdout).expect("actual scan JSON");
+    if hdr10 {
+        let source_probe: serde_json::Value =
+            serde_json::from_str(&probe).expect("actual HDR10 scan");
+        let video = source_probe["streams"]
+            .as_array()
+            .expect("source streams")
+            .iter()
+            .find(|stream| stream["codec_type"] == "video")
+            .expect("source video");
+        assert_eq!(video["pix_fmt"], "yuv420p10le");
+        assert_eq!(video["color_primaries"], "bt2020");
+        assert_eq!(video["color_transfer"], "smpte2084");
+    }
+    // Exercise stored recipe selection independently of the tiny constant-
+    // configuration media. Both Source indexing and VOD must use these same
+    // persisted promotion/retention facts, not a plain-copy index identity.
+    if matches!(
+        video,
+        SourceFixtureVideo::Hdr10Promotion | SourceFixtureVideo::Hdr10Retention
+    ) {
+        let mut document: serde_json::Value = serde_json::from_str(&probe).expect("scan document");
+        if matches!(video, SourceFixtureVideo::Hdr10Promotion) {
+            document["streams"][0]["extradata_size"] = serde_json::json!(23);
+        } else {
+            document[plurx_core::transcode::hevc_census::PROBE_KEY] = serde_json::json!({
+                "revision":plurx_core::transcode::hevc_census::REVISION,
+                "verdict":"varying","size":metadata.len(),"mtime":mtime,"samples":1,"differing":1
+            });
+        }
+        probe = serde_json::to_string(&document).expect("stored recipe facts");
+    }
     client.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,probe_json,scanned_at) VALUES(1,$1,$2,$3,$4,2000,'mp4','h264',128,72,8,100000,$5,$6)",hiqlite::params!(item,file.to_string_lossy().to_string(),metadata.len() as i64,mtime,probe,crate::fragment_index_cluster::unix_ms()/1000)).await.expect("actual file facts");
+    if hdr10 {
+        client.execute("UPDATE files SET video_codec='hevc',bit_depth=10,hdr='hdr10',audio_streams='[{\"index\":0,\"codec\":\"eac3\",\"channels\":6,\"default\":true}]' WHERE id=1", hiqlite::params!()).await.expect("actual HDR10 scan facts");
+    }
     if mode >= 21 {
         client
             .execute(
@@ -563,6 +666,10 @@ async fn source_copy_preadmission_fixture_with_restart(
         .expect("actual planning read")
         .is_some());
     let mut body:CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"copy-source","request_id":"copy-source-request","copy":true,"height":72,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}})).expect("actual Source request");
+    if hdr10 {
+        body.aac = Some(true);
+        body.caps = Some(serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"hevc","max_height":2160,"present":["pq","sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"progressive_hevc_sample_entries":["hvc1"]})).expect("HDR10 client"));
+    }
     if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
         body.copy = Some(false);
         body.height = Some(if mode == 31 { 144 } else { 36 });
@@ -606,12 +713,48 @@ async fn source_copy_preadmission_fixture_with_restart(
     } else {
         None
     };
+    let planning_probe = store
+        .get_file_probe_json(1)
+        .await
+        .expect("stored planning evidence");
     let preparation = Box::pin(prepare_source_playback(&state, &headers, target, body));
     eprintln!(
         "Source preparation future: {} bytes",
         std::mem::size_of_val(preparation.as_ref().get_ref())
     );
     let mut prepared = preparation.await.expect("actual Source engine preparation");
+    if hdr10 {
+        assert_eq!(
+            store
+                .get_file_probe_json(1)
+                .await
+                .expect("read-only Source planning"),
+            planning_probe,
+            "Source planning must not run a local census that invalidates its revision witness"
+        );
+        assert_eq!(
+            prepared.decision().decision.delivered_dynamic_range,
+            "hdr10"
+        );
+        assert!(matches!(
+            prepared.request().kind,
+            SessionKind::Copy { aac: true, .. }
+        ));
+        let options = plurx_core::transcode::CopyVideoOptions::from_probe(
+            prepared.file(),
+            planning_probe.as_deref(),
+            false,
+            false,
+        );
+        assert_eq!(
+            options.promotes_parameter_sets(),
+            matches!(video, SourceFixtureVideo::Hdr10Promotion)
+        );
+        assert_eq!(
+            options.retains_hevc_parameter_sets(),
+            matches!(video, SourceFixtureVideo::Hdr10Retention)
+        );
+    }
     if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
         assert!(
             matches!(prepared.request().kind, SessionKind::Transcode { .. }),
@@ -818,6 +961,22 @@ async fn source_copy_preadmission_fixture_with_restart(
             selected.identity.node_id.clone(),
             Some(membership.clone()),
             Some(runtime),
+        )
+    } else if hdr10 {
+        manager.with_cache(
+            directory.path().join("cache"),
+            "fixture".into(),
+            state.node_id.clone(),
+        )
+    } else {
+        manager
+    };
+    #[cfg(not(target_os = "linux"))]
+    let manager = if hdr10 {
+        manager.with_cache(
+            directory.path().join("cache"),
+            "fixture".into(),
+            state.node_id.clone(),
         )
     } else {
         manager
@@ -1235,6 +1394,8 @@ async fn source_actual_actor(
     restart_case: Option<u8>,
     client: hiqlite::Client,
 ) {
+    let hdr10 = prepared.file().hdr.as_deref() == Some("hdr10");
+    let delivered_fixture = prepared.file().path.with_extension("delivered.mp4");
     if mode == 55 {
         source_actual_unknown_register_reconciliation(state, manager, assignment).await;
         return;
@@ -1839,19 +2000,39 @@ async fn source_actual_actor(
             .await
             .expect("actual file")
             .expect("retained file");
+        let probe = state
+            .store
+            .get_file_probe_json(1)
+            .await
+            .expect("retained recipe facts");
+        let options = plurx_core::transcode::CopyVideoOptions::from_probe(
+            &file,
+            probe.as_deref(),
+            false,
+            false,
+        );
         let index = state
             .store
-            .fragment_index(
-                1,
-                &crate::fragindex::identity_for(
-                    &file,
-                    plurx_core::transcode::CopyVideoOptions::new(false, false),
-                ),
-            )
+            .fragment_index(1, &crate::fragindex::identity_for(&file, options))
             .await
             .expect("actual Source scan result")
             .expect("complete cold index retained");
         assert!(!index.rows.is_empty());
+        if hdr10 {
+            let object = crate::fragment_index_cluster::inspect_source(&file)
+                .await
+                .expect("actual source identity");
+            let proof = index
+                .promotion
+                .hevc_configuration
+                .as_ref()
+                .expect("original HEVC header proof");
+            assert!(proof.permits_on_node(&object, &state.node_id));
+            assert!(!proof.permits_on_node(&object, "another-node"));
+            assert!(!proof.permits_on_node("another-object", &state.node_id));
+            assert!(index.promotion.indexed_hdr10_metadata);
+            assert!(!index.promotion.hdr10_sei.is_empty());
+        }
     }
     let incarnation = assignment.binding().incarnation_id().to_string();
     let route = state
@@ -2544,10 +2725,84 @@ async fn source_actual_actor(
         .await
         .expect("actual verified open init");
     let (init_payload, init_guard) = init.into_parts();
-    let SourceResourcePayload::File(init_file) = init_payload else {
+    let SourceResourcePayload::File(mut init_file) = init_payload else {
         panic!("actual opened file")
     };
     assert!(init_file.len > 0);
+    if hdr10 {
+        let bytes = init_file
+            .file
+            .read_all_bounded(init_file.len, Instant::now() + Duration::from_secs(30))
+            .await
+            .expect("read delivered HDR10 init")
+            .to_vec();
+        let mut reader = plurx_core::fmp4::FragmentReader::new();
+        reader.push(&bytes);
+        let Some(plurx_core::fmp4::Unit::Init(init)) = reader.next_unit().expect("delivered init")
+        else {
+            panic!("HDR10 init must precede media");
+        };
+        plurx_core::fmp4::validate_hevc_decoder_configuration(&init)
+            .expect("delivered HEVC configuration");
+        let mut delivered = init.bytes.clone();
+        assert!(
+            init.bytes.windows(4).any(|bytes| bytes == b"mp4a"),
+            "EAC3 must be delivered as AAC beside copied HDR10 video"
+        );
+        assert!(init.bytes.windows(4).any(|bytes| bytes == b"mdcv"));
+        assert!(init.bytes.windows(4).any(|bytes| bytes == b"clli"));
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse("seg00000.m4s").expect("typed copied HDR10 segment"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("actual copied HDR10 segment");
+        let (payload, guard) = opened.into_parts();
+        let SourceResourcePayload::File(mut segment) = payload else {
+            panic!("copied media file")
+        };
+        let bytes = segment
+            .file
+            .read_all_bounded(segment.len, Instant::now() + Duration::from_secs(30))
+            .await
+            .expect("read copied HDR10 segment")
+            .to_vec();
+        reader.push(&bytes);
+        assert!(matches!(
+            reader.next_unit().expect("delivered media"),
+            Some(plurx_core::fmp4::Unit::Fragment(_))
+        ));
+        delivered.extend_from_slice(&bytes);
+        std::fs::write(&delivered_fixture, delivered).expect("delivered copy capture");
+        // Copy can signal color in the original SPS without an encoded
+        // rendition's mandatory colr box. Inspect the delivered media, not
+        // catalog tags or the encoder-only sample-entry contract.
+        let probe = source_fixture_probe(&delivered_fixture).await;
+        assert!(
+            probe.status.success(),
+            "{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let probe: serde_json::Value =
+            serde_json::from_slice(&probe.stdout).expect("delivered media probe");
+        let streams = probe["streams"].as_array().expect("delivered streams");
+        let video = streams
+            .iter()
+            .find(|stream| stream["codec_type"] == "video")
+            .expect("delivered video");
+        assert_eq!(video["codec_name"], "hevc");
+        assert_eq!(video["pix_fmt"], "yuv420p10le");
+        assert_eq!(video["color_transfer"], "smpte2084");
+        assert_eq!(video["color_primaries"], "bt2020");
+        assert_eq!(video["color_space"], "bt2020nc");
+        assert_eq!(video["width"], 128);
+        assert_eq!(video["height"], 72);
+        assert!(streams
+            .iter()
+            .any(|stream| stream["codec_type"] == "audio" && stream["codec_name"] == "aac"));
+        drop(guard);
+    }
     let file_id = assignment
         .binding()
         .file_id()

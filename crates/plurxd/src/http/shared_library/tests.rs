@@ -3666,17 +3666,17 @@ async fn sharing_source_preparation_uses_complete_live_file_and_real_principal_e
 }
 
 #[tokio::test]
-async fn shared_auto_uses_encoded_plan_for_unindexed_hevc_before_source_start() {
+async fn shared_auto_preserves_unindexed_hdr10_hevc_before_source_start() {
     use plurx_core::playback::PlaybackMethod;
     let _serial = BODY_FIXTURES.lock().await;
     let fixture = body_fixture().await;
     let source = fixture._directory.path().join("unindexed.mkv");
     std::fs::write(&source, b"planning fixture source presence").expect("source");
     let writer = rusqlite::Connection::open(&fixture.path).expect("writer");
-    writer.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate) VALUES(0,?1,?2,20,1000,60000,'mkv','hevc',1920,1080,8,1000000)",rusqlite::params![fixture.item,source.to_str().expect("path")]).expect("Source file");
+    writer.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,hdr,audio_streams) VALUES(0,?1,?2,20,1000,60000,'mkv','hevc',3840,2160,10,1000000,'hdr10','[{\"index\":0,\"codec\":\"eac3\",\"channels\":6,\"default\":true}]')",rusqlite::params![fixture.item,source.to_str().expect("path")]).expect("Source file");
     let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(json!({
-        "v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]},{"codec":"hevc","max_height":2160,"present":["sdr"]}],
-        "audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]
+        "v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]},{"codec":"hevc","max_height":2160,"present":["sdr","pq"]}],
+        "audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"progressive_hevc_sample_entries":["hvc1"]
     })).expect("caps");
     let query = |force: &str| super::super::stream::Caps {
         caps_v2: Some(caps.clone()),
@@ -3708,28 +3708,25 @@ async fn shared_auto_uses_encoded_plan_for_unindexed_hevc_before_source_start() 
         super::super::stream::decision_for_source_file(&fixture.state, file, query("transcode"))
             .await
             .expect("encoded decision");
-    assert_eq!(auto.decision.method, PlaybackMethod::Transcode);
-    assert_eq!(
+    assert_eq!(auto.decision.method, PlaybackMethod::Remux);
+    assert!(
         auto.decision.transcode_audio,
-        encoded.decision.transcode_audio
+        "EAC3 must convert without encoding video"
     );
-    assert_eq!(
-        auto.decision.preserve_dolby_vision,
-        encoded.decision.preserve_dolby_vision
-    );
-    assert_eq!(
-        auto.decision.delivered_dynamic_range,
-        encoded.decision.delivered_dynamic_range
+    assert_eq!(auto.decision.delivered_dynamic_range, "hdr10");
+    assert!(
+        !auto.vod_indexed,
+        "Source Start owns cold index preparation"
     );
     assert!(matches!(
         auto.delivery,
-        super::super::stream::DeliveryPlan::Transcode { .. }
+        super::super::stream::DeliveryPlan::Remux { .. }
     ));
-    assert!(auto
-        .decision
-        .reasons
-        .iter()
-        .any(|reason| reason.contains("Shared HEVC copy")));
+    assert_eq!(encoded.decision.method, PlaybackMethod::Transcode);
+    assert_eq!(
+        encoded.decision.delivered_dynamic_range, "sdr",
+        "fixture has no HDR encoder: copy must not depend on one"
+    );
     let mut hevc_only = query("auto");
     hevc_only
         .caps_v2
@@ -3737,28 +3734,37 @@ async fn shared_auto_uses_encoded_plan_for_unindexed_hevc_before_source_start() 
         .expect("caps")
         .video
         .retain(|video| video.codec == "hevc");
-    let unsupported_file = fixture
+    let file = fixture
         .state
         .store
         .get_file(0)
         .await
         .expect("read")
         .expect("file");
-    assert!(
-        super::super::stream::decision_for_source_file(&fixture.state, unsupported_file, hevc_only)
-            .await
-            .is_err(),
-        "a client without an H264 SDR decoder must not receive an encoded H264 plan"
-    );
-    assert!(
-        !auto
-            .decision
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("manual quality")),
-        "Auto fallback must not claim the viewer selected manual quality"
-    );
-    // The real Source preparation must freeze the same encoded request the
+    let copy = super::super::stream::decision_for_source_file(&fixture.state, file, hevc_only)
+        .await
+        .expect("HEVC-only HDR10 client");
+    assert_eq!(copy.decision.method, PlaybackMethod::Remux);
+    assert_eq!(copy.decision.delivered_dynamic_range, "hdr10");
+    let mut sdr_only = query("auto");
+    for video in &mut sdr_only.caps_v2.as_mut().expect("caps").video {
+        video
+            .present
+            .retain(|transfer| *transfer == plurx_core::playback::Transfer::Sdr);
+    }
+    let file = fixture
+        .state
+        .store
+        .get_file(0)
+        .await
+        .expect("read")
+        .expect("file");
+    let sdr = super::super::stream::decision_for_source_file(&fixture.state, file, sdr_only)
+        .await
+        .expect("SDR-only client");
+    assert_eq!(sdr.decision.method, PlaybackMethod::Transcode);
+    assert_eq!(sdr.decision.delivered_dynamic_range, "sdr");
+    // The real Source preparation must freeze the same copy request the
     // client builds from that decision, before any physical producer admission.
     use plurx_core::sharing_catalogue_details::CatalogueRevisionKey;
     use plurx_core::store::sharing_catalogue_details::SourceDetailsRead;
@@ -3820,22 +3826,23 @@ async fn shared_auto_uses_encoded_plan_for_unindexed_hevc_before_source_start() 
         "cinemashare-viewer",
         "a".repeat(64).parse().expect("viewer"),
     );
-    let body:super::super::hls::CreateSession=serde_json::from_value(json!({"playback_id":"shared-auto-regression","request_id":uuid::Uuid::new_v4(),"copy":false,"presentation":"vod","caps":caps})).expect("encoded request");
+    let body:super::super::hls::CreateSession=serde_json::from_value(json!({"playback_id":"shared-auto-regression","request_id":uuid::Uuid::new_v4(),"copy":true,"aac":true,"presentation":"vod","caps":caps})).expect("copy request");
     let prepared =
         super::super::hls::prepare_source_playback(&fixture.state, &headers, target, body)
             .await
-            .expect("Source encoded preparation");
+            .expect("Source HDR10 copy preparation");
+    assert_eq!(prepared.decision().decision.method, PlaybackMethod::Remux);
     assert_eq!(
-        prepared.decision().decision.method,
-        PlaybackMethod::Transcode
+        prepared.decision().decision.delivered_dynamic_range,
+        "hdr10"
     );
     assert!(matches!(
         prepared.request().kind,
-        crate::transcode::SessionKind::Transcode { .. }
+        crate::transcode::SessionKind::Copy { .. }
     ));
     // A cold H.264 Source can build its index; it still uses copy admission.
     writer
-        .execute("UPDATE files SET video_codec='h264' WHERE id=0", [])
+        .execute("UPDATE files SET video_codec='h264',hdr=NULL,bit_depth=8,width=1920,height=1080 WHERE id=0", [])
         .expect("H264 source");
     let h264 = fixture
         .state

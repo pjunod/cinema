@@ -350,9 +350,10 @@ class ApiDocRoutesTest(unittest.TestCase):
         self.assertEqual(zero, state)
         self.assertEqual(state, nested)
         self.assertIn("/sharing/settings", state)
-        self.assertEqual(len(state), 18)
+        self.assertEqual(len(state), 20)
         self.assertIn("/sharing/network-authorization", state)
         self.assertIn("/sharing/connection", state)
+        self.assertIn("/sharing/imports/{id}/name", state)
         self.assertIn("/sharing/imports/{import}/libraries", state)
         self.assertEqual(_merged_router_routes(".merge(super::shared_library::admin_library_router(state))"), {"/sharing/imports/{import}/libraries"})
         self.assertFalse(any(path.startswith("/sharing/v1/") for path in state),

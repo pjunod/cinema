@@ -113,6 +113,8 @@ pub(crate) fn admin_router(state: AppState) -> Router<AppState> {
             get(assignment_snapshot).put(assignments),
         )
         .route("/sharing/imports/{id}/endpoints", put(import_endpoints))
+        .route("/sharing/imports/{id}/name", put(import_name))
+        .route("/sharing/imports/{id}/connection", get(import_connection))
         .route("/sharing/imports/{id}", delete(disconnect))
         .merge(super::shared_library::admin_library_router(state))
         .layer(axum::middleware::from_fn(private_response))
@@ -854,24 +856,51 @@ async fn disconnect(
         .map_err(authority)?;
     Ok(Json(json!({"disabled":true})))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportNameRequest {
+    expected_name: String,
+    name: String,
+}
+async fn import_name(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(value): Path<String>,
+    raw: Body,
+) -> Result<Json<Value>, ApiError> {
+    let request: ImportNameRequest = body(raw).await?;
+    let name = request.name.trim();
+    if name.is_empty()
+        || name.len() > 128
+        || name.chars().any(char::is_control)
+        || request.expected_name.len() > 128
+        || request.expected_name.chars().any(char::is_control)
+    {
+        return Err(invalid());
+    }
+    mutation(
+        state
+            .store
+            .rename_share_import(id(&value)?, &request.expected_name, name, clock_ms())
+            .await
+            .map_err(authority)?,
+    )
+}
 
-fn peer_error(error: crate::sharing_client::PeerError) -> ApiError {
+pub(crate) fn peer_error_code(error: &crate::sharing_client::PeerError) -> &'static str {
     use crate::sharing_client::PeerError;
     match error {
-        PeerError::IdentityMismatch => {
-            failure(StatusCode::BAD_GATEWAY, "sharing_identity_mismatch")
-        }
-        PeerError::ProtocolUnsupported => {
-            failure(StatusCode::BAD_GATEWAY, "sharing_protocol_unsupported")
-        }
-        PeerError::Authentication => failure(StatusCode::BAD_GATEWAY, "sharing_peer_auth_failed"),
-        PeerError::InvalidResponse => {
-            failure(StatusCode::BAD_GATEWAY, "sharing_invalid_peer_response")
-        }
+        PeerError::IdentityMismatch => "sharing_identity_mismatch",
+        PeerError::ProtocolUnsupported => "sharing_protocol_unsupported",
+        PeerError::Authentication => "sharing_peer_auth_failed",
+        PeerError::InvalidResponse => "sharing_invalid_peer_response",
         PeerError::Unavailable | PeerError::Rejected(_) | PeerError::DolbyVisionUnsupported => {
-            failure(StatusCode::BAD_GATEWAY, "sharing_peer_unavailable")
+            "sharing_peer_unavailable"
         }
     }
+}
+fn peer_error(error: crate::sharing_client::PeerError) -> ApiError {
+    failure(StatusCode::BAD_GATEWAY, peer_error_code(&error))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -879,6 +908,8 @@ struct ImportRequest {
     #[serde(deserialize_with = "invitation_secret")]
     invitation: Secret,
     endpoint_overrides: Option<Vec<Endpoint>>,
+    #[serde(default)]
+    name: Option<String>,
 }
 fn invitation_secret<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -891,6 +922,14 @@ async fn verified_import(
     import_id: Uuid,
 ) -> Result<NewImport, ApiError> {
     use plurx_core::secrets::SharingSecretPurpose;
+    let local_name = request
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if local_name.is_some_and(|name| name.len() > 128 || name.chars().any(char::is_control)) {
+        return Err(invalid());
+    }
     if !crate::sharing::enabled(state.store.as_ref())
         .await
         .map_err(authority)?
@@ -927,13 +966,33 @@ async fn verified_import(
         }
         invitation.endpoints = endpoints;
     }
-    let (_peer, source) = crate::sharing_client::PeerConnection::verified(
+    let (_peer, source) = match crate::sharing_client::PeerConnection::verified(
         &state.sharing,
         &invitation.endpoints,
         &invitation.identity,
     )
     .await
-    .map_err(peer_error)?;
+    {
+        Ok(verified) => verified,
+        Err(error) => {
+            // Say why, not only that it failed: the same check the import
+            // form runs, so a legacy invitation gets an actionable answer.
+            let diagnosis = crate::sharing_diagnosis::diagnose_failure(
+                state,
+                &invitation.endpoints,
+                &invitation.identity,
+                &error,
+            )
+            .await;
+            crate::sharing_diagnosis::log(&diagnosis, "import", &import_id);
+            return Err(ApiError::typed_detail(
+                StatusCode::BAD_GATEWAY,
+                peer_error_code(&error),
+                diagnosis.summary.clone(),
+                json!({"diagnosis":diagnosis}),
+            ));
+        }
+    };
     let local = state
         .store
         .sharing_identity(clock_ms())
@@ -987,7 +1046,7 @@ async fn verified_import(
     Ok(NewImport {
         id: import_id,
         source: invitation.identity,
-        source_name: source.name,
+        source_name: local_name.map(str::to_owned).unwrap_or(source.name),
         claim_id: Uuid::new_v4(),
         credential,
         claim_secret,
@@ -1025,7 +1084,16 @@ async fn create_import(
     raw: Body,
 ) -> Result<Json<Value>, ApiError> {
     let import_id = Uuid::new_v4();
-    let import = verified_import(&state, body(raw).await?, import_id).await?;
+    let import = verified_import(&state, body(raw).await?, import_id)
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(
+                %import_id,
+                phase = "verify",
+                code = error.code().unwrap_or("sharing_import_failed"),
+                "sharing import did not complete"
+            );
+        })?;
     match state
         .store
         .create_share_import(import)
@@ -1046,9 +1114,22 @@ async fn create_import(
                 .await
                 .map_err(authority)?
             {
-                let _ = state.sharing.resume_import(&state, import).await;
+                if let Err(error) = state.sharing.resume_import(&state, import).await {
+                    tracing::warn!(
+                        %import_id,
+                        phase = "claim",
+                        code = peer_error_code(&error),
+                        "sharing import retained for claim retry"
+                    );
+                }
             }
-            Ok(Json(import_status(&state, import_id).await?))
+            let status = import_status(&state, import_id).await?;
+            tracing::info!(
+                %import_id,
+                state = status["import"]["state"].as_str().unwrap_or("unknown"),
+                "sharing import created"
+            );
+            Ok(Json(status))
         }
     }
 }
@@ -1076,6 +1157,7 @@ async fn re_pair(
         ImportRequest {
             invitation: request.invitation,
             endpoint_overrides: request.endpoint_overrides,
+            name: None,
         },
         import_id,
     )
@@ -1145,7 +1227,11 @@ async fn network_authorization(
     let request: NetworkAuthorizationRequest = body(raw).await?;
     crate::sharing_network::authorization(&state, request.token)
         .await
-        .map_err(|code| failure(StatusCode::CONFLICT, code))?;
+        .map_err(|code| {
+            tracing::warn!(code, "Tailscale account authorization was not saved");
+            failure(StatusCode::CONFLICT, code)
+        })?;
+    tracing::info!("Tailscale account authorization saved on this node");
     Ok(Json(json!({"configured":true})))
 }
 #[derive(Deserialize)]
@@ -1171,15 +1257,66 @@ async fn connection(
     if invite.expires_at_ms > now.saturating_add(MAX_INVITATION_TTL_MS + 300_000) {
         return Err(invalid());
     }
-    let connected = request.probe
-        && crate::sharing_client::PeerConnection::verified(
-            &state.sharing,
-            &invite.endpoints,
-            &invite.identity,
-        )
-        .await
-        .is_ok();
+    let diagnosis = if request.probe {
+        let diagnosis =
+            crate::sharing_diagnosis::diagnose(&state, &invite.endpoints, &invite.identity).await;
+        crate::sharing_diagnosis::log(&diagnosis, "invitation", &invite.id);
+        Some(diagnosis)
+    } else {
+        None
+    };
+    let connected = diagnosis.as_ref().is_some_and(|d| d.connected);
+    // The historical fixed codes remain for older clients; `diagnosis` says
+    // which stage refused and what to do about it.
+    let connection_error = diagnosis
+        .as_ref()
+        .filter(|d| !d.connected)
+        .map(|d| legacy_code(d.outcome));
+    if let Some(code) = connection_error {
+        tracing::warn!(
+            source_server_id = %invite.identity.server_id,
+            invitation_id = %invite.id,
+            phase = "probe",
+            code,
+            "sharing connection could not be verified"
+        );
+    }
     Ok(Json(
-        json!({"name":invite.name,"network":combined.network,"connected":connected}),
+        json!({"name":invite.name,"network":combined.network,"connected":connected,"connection_error":connection_error,"diagnosis":diagnosis}),
+    ))
+}
+fn legacy_code(outcome: &str) -> &'static str {
+    match outcome {
+        "identity_mismatch" => "sharing_identity_mismatch",
+        "protocol_unsupported" => "sharing_protocol_unsupported",
+        "auth_failed" => "sharing_peer_auth_failed",
+        "invalid_response" => "sharing_invalid_peer_response",
+        _ => "sharing_peer_unavailable",
+    }
+}
+/// Diagnose the saved import's approved endpoints from this serving node.
+/// Read-only: it persists nothing and sends no credential.
+async fn import_connection(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(value): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let import_id = id(&value)?;
+    let import = state
+        .store
+        .sharing_import(import_id)
+        .await
+        .map_err(authority)?
+        .ok_or_else(|| failure(StatusCode::NOT_FOUND, "sharing_not_found"))?;
+    let expected = SharingIdentity {
+        server_id: import.summary.source_server_id,
+        catalogue_epoch: import.summary.catalogue_epoch,
+        created_at_ms: 0,
+    };
+    let diagnosis =
+        crate::sharing_diagnosis::diagnose(&state, &import.summary.endpoints, &expected).await;
+    crate::sharing_diagnosis::log(&diagnosis, "import", &import_id);
+    Ok(Json(
+        json!({"import_id":import_id,"node_id":state.node_id,"diagnosis":diagnosis}),
     ))
 }

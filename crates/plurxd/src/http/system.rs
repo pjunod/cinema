@@ -979,10 +979,10 @@ pub async fn logs(
     State(state): State<AppState>,
     Query(q): Query<LogsQuery>,
 ) -> Json<Vec<crate::logbuf::LogEntry>> {
-    let buffer = if q.scope == "cluster" {
-        &state.cluster_logs
-    } else {
-        &state.logs
+    let buffer = match q.scope.as_str() {
+        "cluster" => &state.cluster_logs,
+        "sharing" => &state.sharing_logs,
+        _ => &state.logs,
     };
     Json(buffer.tail(&q.level, q.limit.min(2000)))
 }

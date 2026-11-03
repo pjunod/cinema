@@ -2434,13 +2434,13 @@ pub(crate) fn real_source_start_fixture_with_budget(
 }
 #[cfg(test)]
 fn real_source_start_fixture_at(
-    address: std::net::SocketAddr,
+    listener: tokio::net::TcpListener,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
     Box::pin(build_real_source_start_fixture(
         SourceFixtureMode::Copy,
         None,
-        Some(address),
+        Some(listener),
         fixture_body_budget,
     ))
 }
@@ -2501,7 +2501,7 @@ pub(crate) fn source_http_fixture_store(
 async fn build_real_source_start_fixture(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
-    advertised_http: Option<std::net::SocketAddr>,
+    advertised_http: Option<tokio::net::TcpListener>,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealSourceStartFixture {
     use plurx_core::{
@@ -2516,7 +2516,10 @@ async fn build_real_source_start_fixture(
     let directory = crate::test_tempdir().expect("real Source fixture");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
-    if let Some(address) = advertised_http {
+    if let Some(listener) = advertised_http.as_ref() {
+        let address = listener
+            .local_addr()
+            .expect("reserved HTTP observation address");
         config.server.bind = address;
         config.cluster.artwork_url = format!("http://{address}");
     }
@@ -2528,8 +2531,12 @@ async fn build_real_source_start_fixture(
     drop((raft, api));
     crate::canonicalize_storage_roots(&mut config)
         .expect("production non-destructive storage preflight before Store ownership");
-    let startup_clock =
-        advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));
+    let startup_clock = advertised_http.map(|listener| {
+        Arc::new(
+            crate::StartupObservationHttp::from_listener(listener)
+                .expect("owned HTTP observation listener"),
+        )
+    });
     eprintln!("real Source HTTP fixture: before original Store selector");
     let mut selected = source_http_fixture_store(config.clone(), startup_clock.clone())
         .await

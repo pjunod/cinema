@@ -147,6 +147,25 @@ final class ReadAfterHTTP: @unchecked Sendable {
 /// URLSession ordinarily forwards custom headers on redirects. Never forward
 /// this per-account floor, even if the destination happens to share a host.
 private final class ReadAfterRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let decision = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(decision.0, decision.1)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let decision = ServerTrust.shared.disposition(for: challenge)
+        completionHandler(decision.0, decision.1)
+    }
+
     private let refuse: Bool
     init(refuse: Bool) { self.refuse = refuse; super.init() }
     private let lock = NSLock()

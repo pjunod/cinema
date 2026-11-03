@@ -2330,3 +2330,7 @@ mod subject_wire_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "library_channels_http_tests.rs"]
+mod lifecycle_tests;

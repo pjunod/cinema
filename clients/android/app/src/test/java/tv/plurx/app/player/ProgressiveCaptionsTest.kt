@@ -126,6 +126,36 @@ class ProgressiveCaptionsTest {
         audio_index = 1, task = "transcribe", spoken_language = "ja", output_language = "ja", profile_id = hash,
         source_check = CaptionSourceCheck("verified", "9007199254740993", "9007199254740993"), server_now_ms = 1_000,
         failed_ranges = listOf(CaptionFailedRange(2, "9007199254740993", "worker_lost", true, 1)))
+    @Test fun stoppedCreateRecoveryRequiresItsExactSourceProfileAndLanguage() {
+        val id = "11111111-1111-4111-8111-111111111111"
+        val chosen = binding().let { it.copy(profile = it.profile.copy(model_sha256 = hash, timeline_contract = "source-clock-v1")) }
+        val value = partialOperation().copy(operation_id = id, state = "stopped", asset_id = null, content_revision = null,
+            file_id = "41", model_id = chosen.profile.model_id, model_sha256 = hash, timeline_contract = "source-clock-v1")
+        val refusal = parseRefusal(409, """{"code":"operation_stopped","message":"Stopped","operation_id":"$id"}""")!!
+        assertEquals(id, refusal.operationId)
+        captionValidateRecovery(value, refusal.operationId!!, 41, chosen)
+        for (changed in listOf(value.copy(file_id = "42"), value.copy(source_size = "42"), value.copy(profile_id = "b".repeat(64)),
+            value.copy(model_sha256 = "b".repeat(64)), value.copy(spoken_language = "en"), value.copy(audio_index = 9), value.copy(timeline_contract = "other"))) {
+            refuses { captionValidateRecovery(changed, id, 41, chosen) }
+        }
+        assertNull(parseRefusal(409, """{"code":"epoch_conflict","message":"Changed","operation_id":"$id"}""")!!.operationId)
+    }
+
+    @Test fun currentNonretryableFailureDoesNotHideCoverageOrRelevantActiveProgress() {
+        val value = partialOperation().copy(failed_ranges = listOf(CaptionFailedRange(2, "1", "source_clock_unsupported", false, 1)))
+        assertEquals("source_clock_unsupported", captionCurrentFailure(value, 30_000, 65_000, false)?.reason)
+        assertNull(captionCurrentFailure(value, 30_000, 1_000, false))
+        assertNull(captionCurrentFailure(value, 30_000, 65_000, true))
+        assertNull(captionCurrentFailure(value.copy(active_job = CaptionJob("decoding", state = "running", core_index = 2)), 30_000, 65_000, false))
+        assertNotNull(captionCurrentFailure(value.copy(active_job = CaptionJob("decoding", state = "running", core_index = 3)), 30_000, 65_000, false))
+        val firstPage = value.copy(failed_ranges = (0L..15L).map { CaptionFailedRange(it, "1", "source_clock_unsupported", false, 1) })
+        val displayedPage = firstPage.copy(failed_ranges = listOf(CaptionFailedRange(20, "1", "source_clock_unsupported", false, 1)))
+        assertNull(captionCurrentFailure(firstPage, 30_000, 605_000, false))
+        assertEquals("source_clock_unsupported", captionCurrentFailure(displayedPage, 30_000, 605_000, false)?.reason)
+        assertNull(captionCurrentFailure(displayedPage, 30_000, 605_000, true))
+        assertNull(captionCurrentFailure(displayedPage.copy(active_job = CaptionJob("decoding", state = "running", core_index = 20)), 30_000, 605_000, false))
+    }
+
     @Test fun partialOperationRetriesOnlyTheExactPublishedFailedRangeAndPreservesCues() {
         val operation = partialOperation()
         val target = captionRetryTarget(operation, operation.failed_ranges.single())

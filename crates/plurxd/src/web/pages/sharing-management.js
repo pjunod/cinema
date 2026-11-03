@@ -37,6 +37,12 @@ function sharingUUID(v){if(!sharedCatalogueUuid(v))throw new Error("Invalid Shar
 function sharingIds(rows){if(!Array.isArray(rows)||rows.length>64||new Set(rows).size!==rows.length||rows.some(v=>!sharedCatalogueId(v)))throw new Error("Invalid Source library scope");return rows;}
 function sharingCode(v){if(typeof v!=="string"||!/^[0-9a-f]{16}$/.test(v))throw new Error("Enter the exact 16-character pairing code from the importing Cinema");return v;}
 function sharingInvitation(v){if(typeof v!=="string"||!/^(?:cinema-share-v1:[A-Za-z0-9_-]{1,10923}|cinema-connect-v1:[A-Za-z0-9_-]{1,15000})$(?![\s\S])/.test(v))throw new Error("Paste a valid Cinema invitation");return v;}
+function sharingFriendlyName(value,optional=false){
+  if(typeof value!=="string")throw new Error("Enter a share name");
+  const name=value.trim();
+  if((!optional&&!name)||new TextEncoder().encode(name).length>128||/[\u0000-\u001f\u007f-\u009f]/.test(name))throw new Error("Use a share name of up to 128 bytes without control characters");
+  return name;
+}
 function sharingIPv6(v){
   if(typeof v!=="string"||! /^[0-9a-fA-F:]+$/.test(v)||v.split("::").length>2)throw new Error("Invalid private Tailnet IPv6");
   const halves=v.split("::"),parts=halves.map(h=>h?h.split(":"):[]);
@@ -96,14 +102,21 @@ function sharingMatrix(snapshot,scope,viewers,row){
   return {snapshot,groups,libraries,viewers:users};
 }
 function sharingLocalRows(rows,label){if(!Array.isArray(rows)||rows.length>4096||new Set(rows.map(r=>r.id)).size!==rows.length)throw new Error("Invalid local management list");rows.forEach(r=>{sharingInteger(r.id,0n);if(typeof r[label]!=="string")throw new Error("Invalid local label");});return rows;}
-let SHARING_MANAGEMENT=null,SHARING_AUTH_EPOCH=0;
+let SHARING_MANAGEMENT=null,SHARING_AUTH_EPOCH=0,SHARING_RENAME=null;
 function sharingCapture(){if(API!=="/api/v1"||!/^https?:$/.test(new URL(location.origin).protocol))throw new Error("Invalid B management origin");return {epoch:SHARING_AUTH_EPOCH,auth:AUTH_GENERATION,token:TOKEN,origin:API,bOrigin:location.origin,route:location.hash,page:PAGE_RENDER_GENERATION};}
-function sharingCurrent(c){return !!TOKEN&&c.epoch===SHARING_AUTH_EPOCH&&(!c.work||(SHARING_MANAGEMENT===c.state&&c.state.revision===c.stateRevision&&c.state.editor===c.editor&&(!c.editor||c.editor.revision===c.editRevision)))&&c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API&&c.bOrigin===location.origin&&c.route===location.hash&&c.page===PAGE_RENDER_GENERATION;}
+function sharingCurrent(c){return !!TOKEN&&c.epoch===SHARING_AUTH_EPOCH&&(!c.signal||!c.signal.aborted)&&(!c.observationState||(SHARING_MANAGEMENT===c.observationState&&(c.observationState.observationGeneration??0)===c.observationGeneration))&&(!c.work||(SHARING_MANAGEMENT===c.state&&c.state.revision===c.stateRevision&&c.state.editor===c.editor&&(!c.editor||c.editor.revision===c.editRevision)))&&c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API&&c.bOrigin===location.origin&&c.route===location.hash&&c.page===PAGE_RENDER_GENERATION;}
 function sharingRetire(reason=""){
+  SHARING_RENAME?.cancel();
   sharingQRStop();
   SHARING_AUTH_EPOCH++;
   if(SHARING_MANAGEMENT?.connectionTimer!=null&&typeof clearTimeout==="function")clearTimeout(SHARING_MANAGEMENT.connectionTimer);
   if(SHARING_MANAGEMENT?.setupTimer!=null&&typeof clearTimeout==="function")clearTimeout(SHARING_MANAGEMENT.setupTimer);
+  if(SHARING_MANAGEMENT?.refreshTimer!=null&&typeof clearTimeout==="function")clearTimeout(SHARING_MANAGEMENT.refreshTimer);
+  if(SHARING_MANAGEMENT?.setupDeadlineTimer!=null&&typeof clearTimeout==="function")clearTimeout(SHARING_MANAGEMENT.setupDeadlineTimer);
+  if(SHARING_MANAGEMENT?.freshnessTimer!=null&&typeof clearTimeout==="function")clearTimeout(SHARING_MANAGEMENT.freshnessTimer);
+  SHARING_MANAGEMENT?.setupController?.abort(new Error("Sharing page retired"));
+  if(SHARING_MANAGEMENT?.networkReadDeadlineTimer!=null&&typeof clearTimeout==="function")clearTimeout(SHARING_MANAGEMENT.networkReadDeadlineTimer);
+  SHARING_MANAGEMENT?.networkReadController?.abort(new Error("Sharing page retired"));
   if(SHARING_MANAGEMENT){const e=SHARING_MANAGEMENT.editor;if(e){e.text="";e.connection=null;e.waitingConnection=false;e.row=null;e.endpoints=[];e.matrix=null;e.selected=[];e.libraries=[];e.ready=false;}for(const r of [...SHARING_MANAGEMENT.imports,...SHARING_MANAGEMENT.exports])r.pairing_code="";if(SHARING_MANAGEMENT.invitation)SHARING_MANAGEMENT.invitation.invitation="";SHARING_MANAGEMENT.alive=false;SHARING_MANAGEMENT.revision++;SHARING_MANAGEMENT.editor=null;SHARING_MANAGEMENT.invitation=null;SHARING_MANAGEMENT.imports=[];SHARING_MANAGEMENT.exports=[];SHARING_MANAGEMENT=null;}
   if(typeof SETTINGS_DATA!=="undefined"){delete SETTINGS_DATA.sharingImports;delete SETTINGS_DATA.sharingExports;delete SETTINGS_DATA.sharingStatus;for(const k of ["sharingImports","sharingExports","sharingStatus"]){SETTINGS_LOADED.delete(k);if(typeof SETTINGS_LOADS!=="undefined")SETTINGS_LOADS.delete(k);}}
   if(typeof document!=="undefined"){const node=document.getElementById("sharing-management");if(node){node.replaceChildren();if(reason)node.textContent=reason;}}
@@ -122,42 +135,79 @@ async function sharingRequest(path,{method="GET",body=null,capture=sharingCaptur
   if(!sharingCurrent(capture))throw new Error("Sharing authorization changed");
   const parts=path.split("?");if(parts.length>2)throw new Error("Invalid management route");
   const segments=parts[0].split("/").slice(1);
-  let allowed=["/libraries","/users","/sharing/status","/sharing/imports","/sharing/exports","/sharing/invitations","/sharing/endpoints","/sharing/network-authorization","/sharing/connection"].includes(parts[0]);
+  let allowed=["/libraries","/users","/sharing/status","/sharing/imports","/sharing/exports","/sharing/invitations","/sharing/endpoints","/sharing/network-authorization","/sharing/connection"].includes(parts[0])||(parts[0]==="/system/logs"&&method==="GET");
   if(segments[0]==="sharing"&&["imports","exports","invitations"].includes(segments[1])&&segments.length>=3&&segments.length<=4){
-    sharingUUID(segments[2]);allowed=segments.length===3||(segments[1]==="imports"&&["re-pair","rotate","assignments","libraries","endpoints"].includes(segments[3]))||(segments[1]==="exports"&&["approve","libraries"].includes(segments[3]));
+    sharingUUID(segments[2]);allowed=segments.length===3||(segments[1]==="imports"&&["re-pair","rotate","assignments","libraries","endpoints","connection","name"].includes(segments[3]))||(segments[1]==="exports"&&["approve","libraries"].includes(segments[3]));
   }
   if(!allowed)throw new Error("Invalid management route");
-  if(parts.length===2){if(parts[0]!=="/sharing/exports"||!/^after=[0-9a-f-]+$/.test(parts[1]))throw new Error("Invalid management cursor");sharingUUID(parts[1].slice(6));}
+  if(parts[0]==="/system/logs"&&(parts.length!==2||!/^scope=sharing&level=(?:info|warn)&limit=[1-9][0-9]{0,2}$/.test(parts[1])))throw new Error("Invalid management route");
+  if(parts.length===2&&parts[0]!=="/system/logs"){if(parts[0]!=="/sharing/exports"||!/^after=[0-9a-f-]+$/.test(parts[1]))throw new Error("Invalid management cursor");sharingUUID(parts[1].slice(6));}
 
   const headers={authorization:"Bearer "+capture.token},floor=readAfterRequest();if(floor.index)headers["x-plurx-read-after"]=floor.index;
   const serialized=body===null?null:sharingJSONString(body);if(serialized!==null){if(new TextEncoder().encode(serialized).length>16384)throw new Error("Sharing update exceeds 16 KiB. No request sent.");headers["content-type"]="application/json";}
   if(method!=="GET"&&capture.work&&capture.editor)capture.editor.sent=true;
-  let res;try{res=await fetch(capture.origin+path,{method,headers,body:serialized,redirect:"error"});}catch(error){if(method!=="GET")forgetReadAfter(floor);throw error;}
+  if(method!=="GET"&&SHARING_MANAGEMENT)sharingInvalidateObservations(SHARING_MANAGEMENT);
+  let res;try{res=await fetch(capture.origin+path,{method,headers,body:serialized,redirect:"error",...(capture.signal?{signal:capture.signal}:{})});}catch(error){if(method!=="GET")forgetReadAfter(floor);throw error;}
   if(!sharingCurrent(capture)){if(res.body)await res.body.cancel().catch(()=>{});throw new Error("Sharing authorization changed");}
   const expected=new URL(capture.origin+path,capture.bOrigin).href;if(res.redirected||(res.url&&res.url!==expected))throw new Error("Sharing response changed B origin");
   const index=res.headers?.get("x-plurx-commit-index")??null;if(index==null&&method!=="GET")forgetReadAfter(floor);else observeReadAfter(index,floor);
   if(res.status===401||res.status===403){sharingRetire("Sharing authorization refused. Leave and reopen Sharing after restoring access.");if(res.status===401)clearLocalSession(capture.auth,"Your session ended on the server.");const error=new Error("Sharing authorization refused");Object.assign(error,{status:res.status});throw error;}
-  const limit=path==="/libraries"||path==="/users"||path.endsWith("/assignments")?4194304:131072;
+  const limit=path==="/libraries"||path==="/users"||path.endsWith("/assignments")||path.startsWith("/system/logs?")?4194304:131072;
   const data=await sharingBody(res,limit,capture);if(!sharingCurrent(capture))throw new Error("Sharing authorization changed");
-  if(!res.ok){const message=data?.code==="sharing_peer_unavailable"?"Could not verify the source Cinema’s private connection. Check both Cinemas’ Sharing setup status. If the source addresses or certificate changed, create a fresh invitation.":typeof data?.message==="string"?data.message:typeof data?.error==="string"?data.error:"Sharing request refused. Reload before trying again.";const error=new Error(message);Object.assign(error,{status:res.status,code:data?.code});throw error;}
+  if(!res.ok){const diagnosis=sharingDiagnosis(data?.diagnosis);const message=diagnosis?[diagnosis.summary,diagnosis.next_step].filter(Boolean).join(" "):data?.code==="sharing_peer_unavailable"?"Could not verify the source Cinema’s private connection. Check both Cinemas’ Sharing setup status. If the source addresses or certificate changed, create a fresh invitation.":typeof data?.message==="string"?data.message:typeof data?.error==="string"?data.error:"Sharing request refused. Reload before trying again.";const error=new Error(message);Object.assign(error,{status:res.status,code:data?.code,diagnosis});throw error;}
   return data;
 }
 async function sharingManagementRead(path,capture=sharingCapture()){
+  if(path==="/sharing/exports")return sharingReadExports(capture);
   const value=await sharingRequest(path,{capture});
   if(path==="/sharing/status"){
-    try{return {...value,address_manifest:await sharingReadManifest(capture)};}
-    catch(error){if(!sharingCurrent(capture))throw error;return {...value,address_manifest_error:error.message};}
+    const [addresses,authorization]=await Promise.allSettled([sharingReadManifest(capture),sharingReadNetworkAuthorization(capture,value.node_id)]);
+    if(!sharingCurrent(capture))throw new Error("Sharing authorization changed");
+    return {...value,...(addresses.status==="fulfilled"?{address_manifest:addresses.value}:{address_manifest_error:addresses.reason.message}),...(authorization.status==="fulfilled"?{network_authorization:authorization.value}:{network_authorization:null,network_authorization_error:authorization.reason.message})};
   }
-  return path==="/sharing/imports"?sharingRows(value,"imports",sharingImport):path==="/sharing/exports"?sharingRows(value,"exports",sharingExport):value;
+  return path==="/sharing/imports"?sharingRows(value,"imports",sharingImport):value;
+}
+async function sharingReadNetworkAuthorization(capture,expectedNodeId){
+  const value=await sharingRequest("/sharing/network-authorization",{capture});
+  if(typeof value?.configured!=="boolean")throw new Error("Saved Tailscale authorization could not be read");
+  if(typeof expectedNodeId!=="string"||!expectedNodeId||typeof value.node_id!=="string"||value.node_id!==expectedNodeId)throw new Error("Tailscale account status came from a different or unidentified node. Refresh connections before changing authorization.");
+  return value;
+}
+async function sharingReadNetworkAuthorizationBounded(capture,expectedNodeId){
+  const s=SHARING_MANAGEMENT;if(!s||!sharingCurrent(capture))throw new Error("Sharing authorization changed");
+  const controller=new AbortController();s.networkReadController=controller;
+  let aborted;
+  const stopped=new Promise((_,reject)=>{aborted=()=>reject(controller.signal.reason||new Error("Saved authorization check cancelled"));controller.signal.addEventListener("abort",aborted,{once:true});});
+  const deadline=setTimeout(()=>controller.abort(new Error("Saved authorization check timed out")),10000);s.networkReadDeadlineTimer=deadline;
+  try{return await Promise.race([sharingReadNetworkAuthorization({...capture,signal:controller.signal},expectedNodeId),stopped]);}
+  finally{
+    clearTimeout(deadline);controller.signal.removeEventListener("abort",aborted);controller.abort();
+    if(s.networkReadDeadlineTimer===deadline)s.networkReadDeadlineTimer=null;if(s.networkReadController===controller)s.networkReadController=null;
+  }
+}
+// History shares the API's UUID-ordered pages with current requests. Read the
+// bounded complete list so old revoked grants cannot hide a pending recipient.
+async function sharingReadExports(capture){
+  const exports=[],ids=new Set(),cursors=new Set();let next=null;
+  for(let page=0;page<128;page++){
+    const value=sharingRows(await sharingRequest("/sharing/exports"+(next?"?after="+sharingUUID(next):""),{capture}),"exports",sharingExport);
+    for(const row of value.exports){if(ids.has(row.grant.id))throw new Error("Repeated export page");ids.add(row.grant.id);exports.push(row);}
+    if(exports.length>4096)throw new Error("Connection list exceeds its bound");
+    if(value.next==null)return {exports,next:null};
+    sharingUUID(value.next);if(cursors.has(value.next))throw new Error("Export cursor did not advance");cursors.add(value.next);next=value.next;
+  }
+  throw new Error("Connection list exceeds its page bound");
 }
 // Transient form state is page/account scoped; successful mutations require a
 // fresh read before another edit. No request is automatically replayed.
 function sharingManagementPanel(data){
-  sharingRows(data.sharingImports,"imports",sharingImport);sharingRows(data.sharingExports,"exports",sharingExport);
+  sharingRows(data.sharingImports,"imports",sharingImport);sharingRows(data.sharingExports,"exports",sharingExport,4096);
   if(!SHARING_MANAGEMENT||!sharingCurrent(SHARING_MANAGEMENT.capture))SHARING_MANAGEMENT={capture:sharingCapture(),alive:true,revision:0,editor:null,invitation:null,imports:data.sharingImports.imports,exports:data.sharingExports.exports,next:data.sharingExports.next??null,error:"",busy:false};
   SHARING_MANAGEMENT.status=data.sharingStatus;
   sharingScheduleSetup();
-  return setHead("Sharing","Share selected libraries with another Cinema.","")+setCard(`<div id="sharing-management">${sharingManagementHTML()}</div>`)+setCard(`${cardHead("This node","Readiness is advisory. The saved switch remains available in Developer.","")}<p>${esc(data.sharingStatus?.listener||"Readiness unavailable")}</p>${sharingRecoveryHTML(data.sharingStatus)}<a href="#/settings/developer/cinema-sharing-settings">Enable shared libraries in Developer</a>`);
+  sharingScheduleRefresh();
+  sharingAutoCheck();
+  return setHead("Sharing","Send an invitation to share your libraries, or accept one from another owner.","")+setCard(`<div id="sharing-management">${sharingManagementHTML()}</div>`);
 }
 // Orphaned shared-playback routes this node recovers after a crash. An
 // observation of this node only; a stranded route keeps its exact lineage.
@@ -173,34 +223,269 @@ function sharingRequirementsHTML(status){
   const setup=status?.host_setup,automatic=setup&&typeof setup.message==="string",ready=automatic&&setup.state==="ready";
   const introduction=automatic?`<p>Cinema sets up its private Tailscale connection when sharing is enabled. No router configuration is needed.</p><p role="status">${esc(setup.message||"Checking private connection setup…")}</p>`:`<p>Both Cinemas need a private Tailscale connection and TCP Serve forwarding to the sharing TLS listener. This server version requires host setup before connecting.</p>`;
   const address=known?(manifest===null?(automatic?"Missing — Cinema is preparing this host’s addresses":"Missing — configure addresses before creating an invitation"):"Configured — reachability has not been verified"):"Not verified — address information could not be read";
-  return `<section><h3>Before connecting Cinemas</h3>${introduction}<ul><li>Local sharing TLS listener: ${status?.listener==="listening"?"Listening on this serving node":"Not confirmed listening"}${status?.listener?" · "+esc(status.listener.replaceAll("_"," ")):""}. This does not prove another Cinema can connect.</li><li>Sharing certificate: ${certificate?"Observed on this serving node · public-key pin <code>"+esc(pin)+"</code>":"Not observed on this serving node"}. Match each configured address to that host’s certificate.</li><li>This Cinema’s addresses: ${address}.</li><li>Private connection between Cinemas: ${ready?"Host setup is configured. Pair another Cinema to verify its access and certificate.":"Not verified by this Cinema. "+(automatic?"Follow the setup status above; Cinema retries automatically.":"Check Tailscale and private TCP forwarding on the serving host.")}</li></ul>${SHARING_MANAGEMENT?.editor?.mode==="manifest"?"":sharingButton(automatic?"Advanced addresses":"Configure this Cinema’s addresses",SHARING_MANAGEMENT?.editor?.mode==="invite"?"sharingConfigureAddresses()":"sharingOpen('manifest')",SHARING_MANAGEMENT?.busy)}<p>The Developer sharing switch remains available while setup is incomplete.</p></section>`;
+  return `<section><h3>Before connecting Cinemas</h3>${introduction}<ul><li>Local sharing TLS listener: ${status?.listener==="listening"?"Listening on this serving node":"Not confirmed listening"}${status?.listener?" · "+esc(status.listener.replaceAll("_"," ")):""}. This does not prove another Cinema can connect.</li><li>This node’s sharing certificate: ${certificate?"Observed on this serving node · public-key pin <code>"+esc(pin)+"</code>":"Not observed on this serving node"}. Match each configured address to that host’s certificate.</li><li>Cinema gateway addresses: ${address}.</li><li>Private connection between Cinemas: ${ready?"Host setup is configured. Pair another Cinema to verify its access and certificate.":"Not verified by this Cinema. "+(automatic?"Follow the setup status above; Cinema retries automatically.":"Check Tailscale and private TCP forwarding on the serving host.")}</li></ul>${SHARING_MANAGEMENT?.editor?.mode==="manifest"?"":sharingButton(automatic?"Advanced addresses":"Configure this Cinema’s addresses",SHARING_MANAGEMENT?.editor?.mode==="invite"?"sharingConfigureAddresses()":"sharingOpen('manifest')",SHARING_MANAGEMENT?.busy)}<p>The Developer sharing switch remains available while setup is incomplete.</p></section>`;
 }
 function sharingButton(label,action,disabled=false){return `<button class="ghost sm" onclick="${action}"${disabled?" disabled":""}>${esc(label)}</button>`;}
 function sharingInput(label,key,value,kind="text"){
   const e=SHARING_MANAGEMENT.editor;return `<label>${esc(label)}<input type="${kind}" value="${esc(value||"")}" autocomplete="off" autocapitalize="none" spellcheck="false" oninput="sharingEdit('${key}',this.value)"${e.busy?" disabled":""}></label>`;
 }
+// A recipient-owned label never changes the Source identity or viewer access.
+async function sharingRenameImport(importId,currentName){
+  sharingUUID(importId);
+  if(typeof currentName!=="string"||new TextEncoder().encode(currentName).length>128)throw new Error("Share name unavailable. Reload before renaming.");
+  SHARING_RENAME?.cancel();
+  const capture=sharingCapture(),previous=/** @type {HTMLElement|null} */(document.activeElement),dialog=document.createElement("dialog");
+  dialog.className="sharing-rename-dialog";dialog.setAttribute("aria-labelledby","sharing-rename-title");
+  dialog.innerHTML=`<form><h2 id="sharing-rename-title">Rename shared source</h2><label for="sharing-rename-name">Share name</label><input id="sharing-rename-name" name="name" autocomplete="off" value="${esc(currentName)}" required aria-describedby="sharing-rename-hint"><p id="sharing-rename-hint" class="hint">Use a name your household recognizes. This name is local to your Cinema.</p><p role="alert" class="sharing-rename-error"></p><div class="sharing-rename-actions"><button type="button" class="ghost">Cancel</button><button type="submit">Save name</button></div></form>`;
+  document.body.appendChild(dialog);
+  return new Promise(resolve=>{
+    const form=dialog.querySelector("form"),input=dialog.querySelector("input"),cancel=/** @type {HTMLButtonElement} */(dialog.querySelector('button[type="button"]')),save=/** @type {HTMLButtonElement} */(dialog.querySelector('button[type="submit"]')),error=dialog.querySelector('[role="alert"]');
+    let finished=false,busy=false;
+    const finish=value=>{if(finished)return;finished=true;if(SHARING_RENAME?.dialog===dialog)SHARING_RENAME=null;dialog.close();dialog.remove();if(sharingCurrent(capture))previous?.focus?.();resolve(value);};
+    SHARING_RENAME={dialog,cancel:()=>finish(null)};
+    cancel.addEventListener("click",()=>{if(!busy)finish(null);});
+    dialog.addEventListener("cancel",event=>{event.preventDefault();if(!busy)finish(null);});
+    form.addEventListener("submit",async event=>{
+      event.preventDefault();if(busy||finished)return;
+      try{
+        const name=sharingFriendlyName(input.value);if(name===currentName){finish(name);return;}
+        busy=true;input.disabled=true;cancel.disabled=true;save.disabled=true;save.textContent="Saving…";error.textContent="";
+        await sharingMutation("/sharing/imports/"+importId+"/name","PUT",{expected_name:currentName,name},capture);
+        if(!finished&&sharingCurrent(capture))finish(name);
+      }catch(problem){
+        if(finished)return;if(!sharingCurrent(capture)){finish(null);return;}
+        error.textContent=problem.status===409?"This share was renamed elsewhere. Close this dialog and reload before renaming it again.":problem.message;
+        // An uncertain save is never retried from this dialog.
+        if(busy){input.disabled=true;save.disabled=true;}else input.focus();
+        cancel.disabled=false;save.textContent="Save name";
+      }finally{busy=false;}
+    });
+    dialog.showModal();input.focus();input.select();
+  });
+}
+async function sharingRenameManaged(index){
+  const s=SHARING_MANAGEMENT,row=s?.imports[index];if(!row||s.busy||!sharingCurrent(s.capture))return;
+  try{const saved=await sharingRenameImport(row.import.id,row.import.source_name);if(saved!==null&&SHARING_MANAGEMENT===s&&sharingCurrent(s.capture)){row.import.source_name=saved;sharingPaint();}}
+  catch(error){if(SHARING_MANAGEMENT===s&&sharingCurrent(s.capture)){s.error=error.message;sharingPaint();}}
+}
+function sharingTime(ms){const n=Number(ms);return Number.isFinite(n)&&n>0?new Date(n).toLocaleTimeString():"";}
+function sharingCheckHTML(kind,label,text,detail=""){
+  const mark=kind==="ok"?"✓":kind==="bad"?"✗":"…";
+  return `<li class="sharing-check sharing-check-${kind}"><span class="sharing-check-mark" aria-hidden="true">${mark}</span><span class="sharing-check-text">${esc(label)}: ${esc(text)}${detail?`<span class="sharing-check-detail">${esc(detail)}</span>`:""}</span></li>`;
+}
+// The account and tailnet this Cinema's host is signed in to, if observed.
+function sharingIdentity(status){
+  const t=status?.host_setup?.tailscale;if(!t||typeof t!=="object")return null;
+  const text=v=>typeof v==="string"&&v.length<=256?v:null;
+  return {login:text(t.login_name),tailnet:text(t.tailnet),dns:text(t.dns_name),ipv4:text(t.ipv4)};
+}
+function sharingTailscaleCheck(status){
+  const setup=status?.host_setup,phase=setup?.state,checked=setup?.checked_at_ms,age=checked==null?null:Date.now()-Number(checked);
+  const stale=!!status?.observation_error||(age!=null&&(!Number.isFinite(age)||age>30000||age< -30000));
+  const label="Tailscale on this node",online=setup?.tailscale_online,id=sharingIdentity(status),detail=typeof setup?.detail==="string"?setup.detail:"";
+  if(stale)return sharingCheckHTML("wait",label,"Status unavailable — refresh or wait for the next check");
+  const who=id?[id.login?"signed in as "+id.login:"",id.tailnet&&id.tailnet!==id.login?"tailnet "+id.tailnet:"",id.dns?id.dns+(id.ipv4?" ("+id.ipv4+")":""):""].filter(Boolean).join(" · "):"";
+  if(typeof online==="boolean"&&checked!=null){
+    return online?sharingCheckHTML("ok",label,"Connected"+(who?" · "+who:"")):sharingCheckHTML("bad",label,"Disconnected"+(who?" · "+who:"")+". Check this host's network and Tailscale connection. Cinema checks again automatically.");
+  }
+  const text=phase==="sign_in_required"?"Not connected — open Tailscale on this host and sign in":phase==="tailscale_missing"?"Not installed on this host":phase==="disabled"?"Not checked — sharing is disabled":phase==="host_helper_required"?"Not visible from inside Cinema's container":phase==="pending"||!phase?"Checking…":phase==="ready"?"Running — connection not confirmed":"Could not be checked";
+  const kind=phase==="disabled"||phase==="pending"||!phase||phase==="host_helper_required"?"wait":phase==="ready"?"ok":"bad";
+  return sharingCheckHTML(kind,label,text+(who?" · "+who:""),detail&&phase!=="ready"?detail:"");
+}
+function sharingIncomingCheck(status){
+  const label="Other Cinemas can reach this server",setup=status?.host_setup,phase=setup?.state,detail=typeof setup?.detail==="string"?setup.detail:"";
+  if(status?.listener&&status.listener!=="listening")return sharingCheckHTML(status.listener==="disabled"?"wait":"bad",label,"Cinema's sharing listener is "+String(status.listener).replaceAll("_"," ")+".");
+  if(!phase)return sharingCheckHTML("wait",label,"Checking…");
+  if(phase==="ready"){
+    const manifest=status&&Object.hasOwn(status,"address_manifest")?status.address_manifest:undefined;
+    if(manifest===null)return sharingCheckHTML("wait",label,"Publishing this server's private address…");
+    return sharingCheckHTML("ok",label,"Ready — Tailscale forwards private port 32443 to Cinema and this server's address is published. The other Cinema's connection check confirms it end to end.");
+  }
+  if(phase==="disabled")return sharingCheckHTML("wait",label,"Not set up — sharing is disabled");
+  // The Tailscale line already shows the failing step unless it observed
+  // the host's connection; never print the same detail twice.
+  const shown=typeof setup?.tailscale_online==="boolean"?detail:"";
+  return sharingCheckHTML(phase==="pending"||phase==="host_helper_required"?"wait":"bad",label,typeof setup?.message==="string"?setup.message:"Not confirmed",shown);
+}
+function sharingAccountCheck(status){
+  const label="Inviting someone on another Tailscale account",a=status?.network_authorization,known=typeof a?.configured==="boolean";
+  if(!known)return sharingCheckHTML("wait",label,"The saved authorization could not be checked",status?.network_authorization_error||"");
+  if(!a.configured)return sharingCheckHTML("wait",label,"Not linked — no API key saved on this node. Only needed when the other owner uses a different Tailscale account: link this server's Tailscale account so each invitation carries a single-use Tailscale share of this server.");
+  const problem=a.observation_error==="sharing_network_rate_limited"?"Tailscale is rate-limiting this account's API requests; Cinema checks again shortly.":a.observation_error==="sharing_network_authorization_required"?"Tailscale refused the saved API key; it may have expired. Update the Tailscale account.":a.observation_error?"The Tailscale account check failed ("+String(a.observation_error).replaceAll("_"," ")+").":a.last_error?"Removing ended Tailscale shares is failing ("+String(a.last_error).replaceAll("_"," ")+"); Cinema retries every 30 seconds.":"";
+  return sharingCheckHTML(problem?"bad":"ok",label,"Tailscale account linked"+(typeof a.tailnet==="string"?" (tailnet "+a.tailnet+")":"")+" · API key saved on this node",problem);
+}
+// Whether each Tailscale device share this node issued has been accepted.
+function sharingShareRows(status){
+  const shares=status?.network_authorization?.shares;return Array.isArray(shares)?shares.slice(0,16).filter(r=>r&&typeof r.invitation_id==="string"&&Array.isArray(r.shares)):[];
+}
+function sharingShareStatusHTML(invite){
+  return invite.shares.slice(0,4).map(share=>{
+    const device=typeof share.device==="string"?share.device:"this server";
+    if(share.accepted===true)return `<li class="sharing-check sharing-check-ok"><span class="sharing-check-mark" aria-hidden="true">✓</span><span>Tailscale share of ${esc(device)} accepted${typeof share.accepted_by==="string"?" by "+esc(share.accepted_by):""}.</span></li>`;
+    if(share.accepted===false)return `<li class="sharing-check sharing-check-wait"><span class="sharing-check-mark" aria-hidden="true">…</span><span>Tailscale share of ${esc(device)} not accepted yet. The recipient opens the Tailscale link from the invitation while signed in to the Tailscale account their Cinema server uses.</span></li>`;
+    return `<li class="sharing-check sharing-check-wait"><span class="sharing-check-mark" aria-hidden="true">…</span><span>Tailscale share of ${esc(device)}: could not be checked${share.error?" ("+esc(String(share.error).replaceAll("_"," "))+")":""}.</span></li>`;
+  }).join("");
+}
+function sharingConnectionHTML(status){
+  const authorization=status?.network_authorization,saved=authorization?.configured===true;
+  const scope=typeof SERVER!=="undefined"&&SERVER?.cluster_enabled?"<p class=\"muted\">Cluster-wide libraries and gateways · connection checks for this node.</p>":"";
+  const exports=new Set((SHARING_MANAGEMENT?.exports||[]).map(r=>r.invitation_id));
+  // Only when every recipient is loaded can "not yet used" be known.
+  const waiting=SHARING_MANAGEMENT?.next?[]:sharingShareRows(status).filter(r=>!exports.has(r.invitation_id));
+  const sent=waiting.length?`<h4>Invitations not yet used</h4><ul class="sharing-checks">${waiting.map(r=>`<li><span>Invitation created ${esc(sharingTime(r.created_at_ms))}</span><ul class="sharing-checks">${sharingShareStatusHTML(r)}</ul></li>`).join("")}</ul>`:"";
+  return `<section class="sharing-connection"><h3>Connection status</h3>${scope}<ul class="sharing-checks" role="status">${sharingTailscaleCheck(status)}${sharingIncomingCheck(status)}${sharingAccountCheck(status)}</ul><p>${sharingButton(saved?"Update Tailscale account":"Connect Tailscale account","sharingOpen('network')",SHARING_MANAGEMENT?.busy||SHARING_MANAGEMENT?.editor?.mode==="network")}</p>${sent}</section>`;
+}
+function sharingDiagnosis(d){
+  if(!d||typeof d!=="object"||typeof d.outcome!=="string"||typeof d.summary!=="string"||typeof d.next_step!=="string"||!Array.isArray(d.attempts)||d.attempts.length>8)return null;
+  return {connected:d.connected===true,outcome:d.outcome,summary:d.summary,next_step:d.next_step,checked_at_ms:d.checked_at_ms,attempts:d.attempts.filter(a=>a&&typeof a.address==="string"&&typeof a.result==="string").map(a=>({address:a.address,ts_fqdn:typeof a.ts_fqdn==="string"?a.ts_fqdn:"",result:a.result,elapsed_ms:a.elapsed_ms,visible:a.visible}))};
+}
+function sharingDiagnosisHTML(d){
+  if(!d)return "";
+  const attempts=d.attempts.map(a=>`<li><code>${esc(a.address)}</code> (${esc(a.ts_fqdn)}): ${esc(a.result.replaceAll("_"," "))}${a.visible===false?" · not in this server's Tailscale network":a.visible===true?" · in this server's Tailscale network":""} · ${esc(String(a.elapsed_ms??""))} ms</li>`).join("");
+  return `<div class="sharing-diagnosis sharing-check-${d.connected?"ok":"bad"}" role="status"><p><strong>${esc(d.summary)}</strong></p>${d.next_step?`<p>${esc(d.next_step)}</p>`:""}${attempts?`<details><summary>Technical details${d.checked_at_ms!=null?" · checked "+esc(sharingTime(d.checked_at_ms)):""}</summary><ul>${attempts}</ul></details>`:""}</div>`;
+}
+const SHARING_IMPORT_CONNECTION={responding:"Reachable",unavailable:"Not reachable",identity_mismatch:"Reached a different Cinema",credential_rejected:"Refused this connection's credential",protocol_unsupported:"Incompatible Cinema version",invalid_response:"Invalid sharing response"};
+function sharingImportConnectionHTML(row,i,s){
+  const r=row.import;if(!["claiming","pending","active"].includes(r.state))return "";
+  const observed=(Array.isArray(s.status?.imports)?s.status.imports:[]).find(o=>o&&o.import_id===r.id);
+  const check=s.checks?.[r.id];
+  let line="";
+  if(observed&&typeof observed.connection==="string"&&observed.connection!=="unknown"){
+    const ok=observed.connection==="responding",label=Object.hasOwn(SHARING_IMPORT_CONNECTION,observed.connection)?SHARING_IMPORT_CONNECTION[observed.connection]:observed.connection.replaceAll("_"," ");
+    line=`<ul class="sharing-checks">${sharingCheckHTML(ok?"ok":"bad","Connection",label+(sharingTime(observed.checked_at_ms)?" · checked "+sharingTime(observed.checked_at_ms):"")+(ok?"":". Choose Check connection to see why."))}</ul>`;
+  }
+  const result=check?.busy?`<p role="status">Checking the connection to ${esc(r.source_name||"the source")}…</p>`:check?.error?`<p role="alert">${esc(check.error)}</p>`:sharingDiagnosisHTML(check?.diagnosis);
+  return line+result+`<p>${sharingButton(check?.busy?"Checking…":"Check connection",`sharingCheckImport(${i})`,!!check?.busy)}</p>`;
+}
+async function sharingCheckImport(index){
+  const s=SHARING_MANAGEMENT;if(!s||!sharingCurrent(s.capture))return;
+  const row=s.imports[index];if(!row)return;const id=sharingUUID(row.import.id),capture={...s.capture};
+  s.checks=s.checks||Object.create(null);if(s.checks[id]?.busy)return;
+  s.checks[id]={busy:true};sharingPaint();
+  let result;
+  try{const r=await sharingRequest("/sharing/imports/"+id+"/connection",{capture});const d=sharingDiagnosis(r?.diagnosis);if(!d)throw new Error("The connection check returned no result. Refresh and try again.");result={busy:false,diagnosis:d};}
+  catch(error){result={busy:false,error:error.message};}
+  if(SHARING_MANAGEMENT!==s||!sharingCurrent(capture))return;
+  s.checks[id]=result;sharingPaint();
+}
+// Explain a failing saved connection once per page without a click.
+function sharingAutoCheck(){
+  const s=SHARING_MANAGEMENT;if(!s||!sharingCurrent(s.capture))return;
+  s.autoChecked=s.autoChecked||new Set();
+  const observed=Array.isArray(s.status?.imports)?s.status.imports:[];
+  s.imports.forEach((row,i)=>{
+    const o=observed.find(v=>v&&v.import_id===row.import.id);
+    if(o&&typeof o.connection==="string"&&!["responding","unknown"].includes(o.connection)&&!s.autoChecked.has(row.import.id)&&s.autoChecked.size<4){s.autoChecked.add(row.import.id);sharingCheckImport(i);}
+  });
+}
+function sharingLogHTML(s){
+  const log=s.log;
+  const body=!log?"":log.busy?`<p role="status">Loading…</p>`:log.error?`<p role="alert">${esc(log.error)}</p>`:log.entries.length?`<ol class="sharing-log-entries">${log.entries.map(e=>`<li class="sharing-log-${esc(e.level.toLowerCase())}"><time>${esc(new Date(e.ts_ms).toLocaleString())}</time> <strong>${esc(e.level)}</strong> ${esc(e.message)}</li>`).join("")}</ol>`:`<p class="muted">No sharing activity recorded since this server started.</p>`;
+  return `<section class="sharing-log"><h3>Sharing activity log</h3><p class="muted">Setup changes, connection checks, Tailscale shares and pairing on this node, newest first.</p>${sharingButton(log?"Refresh log":"Show sharing activity","sharingLoadLog()",!!log?.busy)}${body}</section>`;
+}
+async function sharingLoadLog(){
+  const s=SHARING_MANAGEMENT;if(!s||!sharingCurrent(s.capture)||s.log?.busy)return;
+  const capture={...s.capture};s.log={busy:true,entries:s.log?.entries||[]};sharingPaint();
+  let log;
+  try{
+    const rows=await sharingRequest("/system/logs?scope=sharing&level=info&limit=300",{capture});
+    if(!Array.isArray(rows)||rows.length>300)throw new Error("The sharing log could not be read");
+    const entries=rows.filter(r=>r&&typeof r.level==="string"&&typeof r.message==="string").map(r=>({ts_ms:Number(r.ts_ms),level:r.level.slice(0,8),message:r.message.slice(0,2000)})).reverse();
+    log={busy:false,entries};
+  }catch(error){log={busy:false,entries:[],error:error.message};}
+  if(SHARING_MANAGEMENT!==s||!sharingCurrent(capture))return;
+  s.log=log;sharingPaint();
+}
 function sharingManagementHTML(){
   const s=SHARING_MANAGEMENT;if(!s)return "";
-  if(s.editor)return sharingRequirementsHTML(s.status)+sharingEditorHTML(s.editor);
+  const connection=`<div id="sharing-connection">${sharingConnectionHTML(s.status)}</div>`;
+  const advanced=`<details class="sharing-advanced"><summary>Connection details and advanced options</summary>${sharingRequirementsHTML(s.status)}${sharingButton("Edit this Cinema’s gateway addresses","sharingOpen('manifest')",s.busy)}${sharingRecoveryHTML(s.status)}<p><a href="#/settings/developer/cinema-sharing-settings">Sharing settings in Developer</a></p></details>`;
+  if(s.editor)return connection+sharingEditorHTML(s.editor)+advanced;
   const disabled=s.busy;
-  return sharingRequirementsHTML(s.status)+`<h3>Connect Cinemas</h3>${sharingButton("Create invitation","sharingOpen('invite')",disabled)} ${sharingButton("Import invitation","sharingOpen('import')",disabled)} ${sharingButton("This Cinema's endpoints","sharingOpen('manifest')",disabled)} ${sharingButton("Reload","sharingReload()",disabled)}${s.error?`<p role="alert">${esc(s.error)}</p>`:""}${s.invitation?sharingQRResultHTML(s):""}<h3>Private network</h3><p>Connect your Tailscale account once so a Cinema invitation can include access for someone outside your tailnet.</p>${sharingButton("Connect Tailscale account",`sharingOpen('network')`,disabled)}<h3>Imports</h3>${s.imports.map((row,i)=>`<section><h4>${esc(row.import.source_name||"Shared source")}</h4><p>${esc(row.import.state)} · Source ${esc(row.import.source_server_id)}</p>${sharingButton("Pairing code",`sharingOpen('code',${i})`,disabled)} ${sharingButton("Viewer assignments",`sharingOpen('matrix',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Source endpoints",`sharingOpen('endpoints',${i})`,disabled||!["claiming","pending","active"].includes(row.import.state))} ${sharingButton("Re-pair",`sharingOpen('repair',${i})`,disabled)} ${sharingButton("Rotate credential",`sharingOpen('rotate',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Disconnect",`sharingOpen('disconnect',${i})`,disabled)}</section>`).join("")||'<p class="muted">No imports.</p>'}<h3>Exports</h3>${s.exports.map((row,i)=>`<section><h4>${esc(row.recipient_name||"Recipient")}</h4><p>${esc(row.grant.state)} · Recipient ${esc(row.grant.recipient_server_id)}</p>${sharingButton("Approve pairing",`sharingOpen('approve',${i})`,disabled||row.grant.state!=="pending")} ${sharingButton("Library scope",`sharingOpen('scope',${i})`,disabled||row.grant.state!=="active")} ${sharingButton("Revoke",`sharingOpen('revoke',${i})`,disabled)}</section>`).join("")||'<p class="muted">No exports.</p>'}${s.next?sharingButton("More exports","sharingMoreExports()",disabled):""}`;
+  const imports=s.imports.map((row,i)=>{
+    const r=row.import,active=r.state==="active",pending=r.state==="pending",claiming=r.state==="claiming";
+    const message=active?"Paired. Assign these libraries to the local users who should see them, including yourself.":pending?"Waiting for the other owner to approve pairing. Send them this code:":claiming?"Contacting the other Cinema to request pairing. Refresh to check progress.":"Disconnected. Use a new invitation from the owner to reconnect.";
+    return `<section class="sharing-peer"><h4>${esc(r.source_name||"Shared source")}</h4><p>${message}</p>${pending?`<code class="sharing-pairing-code">${esc(row.pairing_code)}</code>`:""}${sharingImportConnectionHTML(row,i,s)}<p>${active?sharingButton("Assign viewers",`sharingOpen('matrix',${i})`,disabled):!pending&&!claiming?sharingButton("Use new invitation",`sharingOpen('repair',${i})`,disabled):""}</p><details><summary>Connection options</summary><p>Status: ${esc(r.state)} · Source ${esc(r.source_server_id)}</p>${sharingButton("Rename",`sharingRenameManaged(${i})`,disabled)} ${sharingButton("Pairing code",`sharingOpen('code',${i})`,disabled)} ${sharingButton("Source addresses",`sharingOpen('endpoints',${i})`,disabled||!["claiming","pending","active"].includes(r.state))} ${sharingButton("Re-pair",`sharingOpen('repair',${i})`,disabled)} ${sharingButton("Rotate credential",`sharingOpen('rotate',${i})`,disabled||!active)} ${sharingButton("Disconnect",`sharingOpen('disconnect',${i})`,disabled||["disabled","revoked"].includes(r.state))}</details></section>`;
+  }).join("");
+  const revoked=s.exports.filter(row=>row.grant.state==="revoked").length;
+  const exports=s.exports.map((row,i)=>({row,i})).filter(({row})=>s.showRevoked||row.grant.state!=="revoked").map(({row,i})=>{
+    const state=row.grant.state,message=state==="pending"?"Approval needed. Compare the pairing code with the other owner before approving.":state==="active"?`Sharing ${row.library_ids.length} ${row.library_ids.length===1?"library":"libraries"}.`:state==="revoked"?"Revoked. This connection no longer has access.":"This connection is disabled.";
+    const network=state!=="revoked"?sharingShareRows(s.status).find(r=>r.invitation_id===row.invitation_id):null;
+    return `<section class="sharing-peer"><h4>${esc(row.recipient_name||"Recipient")}</h4><p>${message}</p>${network?`<ul class="sharing-checks">${sharingShareStatusHTML(network)}</ul>`:""}${state==="pending"?sharingButton("Approve pairing",`sharingOpen('approve',${i})`,disabled):state==="active"?sharingButton("Choose libraries",`sharingOpen('scope',${i})`,disabled):""}${state!=="revoked"?`<details><summary>Connection options</summary><p>Status: ${esc(state)} · Recipient ${esc(row.grant.recipient_server_id)}</p>${sharingButton("Stop sharing",`sharingOpen('revoke',${i})`,disabled)}</details>`:""}</section>`;
+  }).join("");
+  return `${connection}<div class="sharing-actions">${sharingButton("Share my libraries","sharingOpen('invite')",disabled)} ${sharingButton("Accept an invitation","sharingOpen('import')",disabled)} ${sharingButton("Refresh connections","sharingReload()",disabled)}</div>${s.error?`<p role="alert">${esc(s.error)}</p>`:""}${s.invitation?sharingQRResultHTML(s):""}<h3>Libraries shared with me</h3>${imports||'<p class="muted">No connected libraries yet. Accept an invitation from another owner to get started.</p>'}<h3>People I share with</h3>${exports||'<p class="muted">No current recipients'+(s.next?' on this page':'')+'. Create an invitation and send it to the other owner. Their request appears here after they finish connecting.</p>'}${revoked?`<label class="sharing-history"><input type="checkbox" onchange="sharingShowRevoked(this.checked)"${s.showRevoked?" checked":""}> Show revoked connections (${revoked})</label>`:""}${s.next?sharingButton("Load more connections","sharingMoreExports()",disabled):""}${sharingLogHTML(s)}${advanced}`;
 }
-function sharingPaint(){if(!SHARING_MANAGEMENT||!sharingCurrent(SHARING_MANAGEMENT.capture))return;const node=document.getElementById("sharing-management");if(node)node.innerHTML=sharingManagementHTML();sharingScheduleSetup();sharingScheduleConnection();}
+function sharingShowRevoked(show){const s=SHARING_MANAGEMENT;if(!s||s.busy||!sharingCurrent(s.capture))return;s.showRevoked=!!show;sharingPaint();}
+function sharingPaint(){if(!SHARING_MANAGEMENT||!sharingCurrent(SHARING_MANAGEMENT.capture))return;const node=document.getElementById("sharing-management");if(node)node.innerHTML=sharingManagementHTML();sharingScheduleSetup();sharingScheduleConnection();sharingScheduleRefresh();sharingScheduleFreshness();}
+function sharingInvalidateObservations(s){
+  s.observationGeneration=(s.observationGeneration??0)+1;
+  s.setupController?.abort(new Error("Sharing operation superseded this observation"));
+}
+function sharingPaintObservation(){
+  const s=SHARING_MANAGEMENT;if(!s||!sharingCurrent(s.capture))return;
+  if(s.editor?.mode==="network"){
+    const node=document.getElementById("sharing-connection");if(node)node.innerHTML=sharingConnectionHTML(s.status);
+    sharingScheduleSetup();sharingScheduleFreshness();
+  }else sharingPaint();
+}
+function sharingScheduleFreshness(){
+  const s=SHARING_MANAGEMENT;if(!s||!sharingCurrent(s.capture)||typeof setTimeout!=="function")return;
+  if(s.freshnessTimer!=null){clearTimeout(s.freshnessTimer);s.freshnessTimer=null;}
+  const checked=s.status?.host_setup?.checked_at_ms;if(checked==null||(s.status?.host_setup?.state!=="ready"&&typeof s.status?.host_setup?.tailscale_online!=="boolean"))return;
+  const remaining=30001-(Date.now()-Number(checked));if(!Number.isFinite(remaining)||remaining<=0||remaining>60001)return;
+  s.freshnessTimer=setTimeout(()=>{s.freshnessTimer=null;if(SHARING_MANAGEMENT===s&&sharingCurrent(s.capture))sharingPaintObservation();},remaining);
+}
+function sharingScheduleRefresh(){
+  const s=SHARING_MANAGEMENT;
+  if(!s||s.editor||s.busy||s.refreshTimer!=null||!sharingCurrent(s.capture)||typeof setTimeout!=="function")return;
+  s.refreshTimer=setTimeout(async()=>{
+    s.refreshTimer=null;
+    if(SHARING_MANAGEMENT!==s||s.editor||s.busy||!sharingCurrent(s.capture))return;
+    const capture={...s.capture,work:true,state:s,stateRevision:s.revision,editor:null,observationState:s,observationGeneration:s.observationGeneration??0};
+    try{
+      const [imports,exports]=await Promise.all([sharingManagementRead("/sharing/imports",capture),sharingManagementRead("/sharing/exports",capture)]);
+      if(sharingCurrent(capture)){
+        const changed=sharingJSONString(s.imports)!==sharingJSONString(imports.imports)||sharingJSONString(s.exports)!==sharingJSONString(exports.exports);
+        s.imports=imports.imports;s.exports=exports.exports;s.next=exports.next??null;
+        if(changed)sharingPaint();
+      }
+    }catch(_){/* Keep the last confirmed connections; manual refresh reports errors. */}
+    sharingScheduleRefresh();
+  },5000);
+}
 function sharingScheduleSetup(){
   const s=SHARING_MANAGEMENT,phase=s?.status?.host_setup?.state;
-  if(!s||!sharingCurrent(s.capture)||s.setupTimer!=null||!phase||["ready","disabled"].includes(phase)||typeof setTimeout!=="function")return;
+  if(!s||!sharingCurrent(s.capture)||s.setupTimer!=null||s.setupInFlight||!phase||typeof setTimeout!=="function")return;
   s.setupTimer=setTimeout(async()=>{
     s.setupTimer=null;if(SHARING_MANAGEMENT!==s||!sharingCurrent(s.capture))return;
-    if(!s.busy&&(!s.editor||s.editor.mode==="invite")){
-      const capture=sharingCapture(),revision=s.revision,editor=s.editor;
-      try{const status=await sharingManagementRead("/sharing/status",capture);if(SHARING_MANAGEMENT===s&&sharingCurrent(capture)&&s.revision===revision&&s.editor===editor){s.status=status;if(editor){if(Object.hasOwn(status,"address_manifest"))editor.needsEndpoints=status.address_manifest===null;}sharingPaint();}}
-      catch(_){/* A failed observation never replays a write or replaces an editor. */}
+    if(!s.busy&&(!s.editor||["invite","network"].includes(s.editor.mode))){
+      s.setupInFlight=true;
+      const observation={...sharingCapture(),observationState:s,observationGeneration:s.observationGeneration??0},revision=s.revision,editor=s.editor;
+      const controller=new AbortController(),capture={...observation,signal:controller.signal};s.setupController=controller;
+      const accepts=()=>SHARING_MANAGEMENT===s&&sharingCurrent(observation)&&s.revision===revision&&s.editor===editor;
+      let aborted;
+      const stopped=new Promise((_,reject)=>{aborted=()=>reject(controller.signal.reason||new Error("Connection check cancelled"));controller.signal.addEventListener("abort",aborted,{once:true});});
+      s.setupDeadlineTimer=setTimeout(()=>controller.abort(new Error("Connection check timed out")),10000);
+      try{
+        const status=await Promise.race([sharingManagementRead("/sharing/status",capture),stopped]);
+        if(accepts()&&!controller.signal.aborted){
+          s.status=status;
+          if(editor){if(Object.hasOwn(status,"address_manifest"))editor.needsEndpoints=status.address_manifest===null;if(editor.mode==="network")editor.networkStatus=status.network_authorization??null;}
+          sharingPaintObservation();
+        }
+      }catch(error){if(accepts()){s.status={...s.status,observation_error:error.message};sharingPaintObservation();}}
+      finally{
+        controller.signal.removeEventListener("abort",aborted);controller.abort();
+        if(s.setupDeadlineTimer!=null){clearTimeout(s.setupDeadlineTimer);s.setupDeadlineTimer=null;}
+        if(s.setupController===controller)s.setupController=null;s.setupInFlight=false;
+      }
     }
     sharingScheduleSetup();
   },5000);
 }
-function sharingEdit(key,value){sharingQRStop();const s=SHARING_MANAGEMENT,e=s?.editor;if(!e||e.busy||!sharingCurrent(s.capture))return;e[key]=value;if(key==="text"){e.connection=null;e.connectionChecked=false;e.waitingConnection=false;}e.revision++;}
-function sharingCloseEditor(){sharingQRStop();const s=SHARING_MANAGEMENT;if(!s)return;if(s.editor?.returnInvite)return sharingReturnInvitation();s.revision++;s.editor=null;sharingPaint();}
+function sharingStopConnection(){const s=SHARING_MANAGEMENT;if(s?.connectionTimer!=null&&typeof clearTimeout==="function")clearTimeout(s.connectionTimer);if(s)s.connectionTimer=null;}
+function sharingEdit(key,value){sharingQRStop();const s=SHARING_MANAGEMENT,e=s?.editor;if(!e||e.busy||!sharingCurrent(s.capture))return;e[key]=value;if(key==="text"){sharingStopConnection();e.connection=null;e.connectionVerified=false;e.connectionAttempts=0;e.connectionError="";e.diagnosis=null;e.waitingConnection=false;}e.revision++;}
+function sharingCloseEditor(){sharingQRStop();sharingStopConnection();const s=SHARING_MANAGEMENT;if(!s)return;if(s.editor?.returnInvite)return sharingReturnInvitation();s.revision++;s.editor=null;sharingPaint();}
 async function sharingCopyInvitation(){
   const s=SHARING_MANAGEMENT,invitation=s?.invitation;if(!invitation||!sharingCurrent(s.capture))return;
   let copied=false;
@@ -215,6 +500,7 @@ function sharingClearInvitation(){const s=SHARING_MANAGEMENT;if(s){if(s.invitati
 async function sharingWork(work,action=""){
   sharingQRStop();
   const s=SHARING_MANAGEMENT;if(!s||s.busy||!sharingCurrent(s.capture))return;
+  sharingInvalidateObservations(s);
   const e=s.editor,revision=e?e.revision:s.revision;s.requestCapture={...s.capture,work:true,state:s,stateRevision:s.revision,editor:e,editRevision:e?.revision};s.busy=true;if(e){e.busy=true;e.sent=false;e.action=action;if(action==="save")e.error="";}sharingPaint();
   const accepts=()=>SHARING_MANAGEMENT===s&&s.alive&&sharingCurrent(s.capture)&&(e?s.editor===e&&e.revision===revision:s.revision===revision);
   try{const result=await work(s,e);if(accepts())return result;}
@@ -232,13 +518,13 @@ async function sharingWork(work,action=""){
   }
 }
 async function sharingOpen(mode,index=0,draft=null){
-  sharingQRStop();
+  sharingQRStop();sharingStopConnection();
   const s=SHARING_MANAGEMENT;if(!s||s.busy||!sharingCurrent(s.capture))return;
   const row=["scope","approve","revoke"].includes(mode)?s.exports[index]:s.imports[index];
   if(!["invite","import","manifest","network"].includes(mode)&&!row)return;
-  s.revision++;s.editor={mode,row,revision:0,ready:false,busy:false,error:"",text:"",selected:[],libraries:[],matrix:null,endpoints:[],manifestRevision:0n,needsEndpoints:false,returnInvite:mode==="manifest"?draft:null};
+  s.revision++;s.editor={mode,row,revision:0,ready:false,busy:false,error:"",text:"",name:"",selected:[],libraries:[],matrix:null,endpoints:[],manifestRevision:0n,needsEndpoints:false,returnInvite:mode==="manifest"?draft:null};
   if(mode==="invite"&&draft)s.editor.selected=[...draft.selected];
-  if(mode==="network"){await sharingWork(async(s,e)=>{e.networkStatus=await sharingRequest("/sharing/network-authorization",{capture:s.requestCapture});e.ready=true;});return;}
+  if(mode==="network"){await sharingWork(async(s,e)=>{e.networkStatus=await sharingReadNetworkAuthorizationBounded(s.requestCapture,s.status?.node_id);e.networkNodeId=e.networkStatus.node_id;s.status={...s.status,network_authorization:e.networkStatus,network_authorization_error:null};e.ready=true;});return;}
   if(["import","repair","approve","rotate","disconnect","revoke","code"].includes(mode)){s.editor.ready=true;sharingPaint();return;}
   await sharingEditorReload();
 }
@@ -334,23 +620,34 @@ function sharingEditorHTML(e){
   const titles={invite:"Create invitation",import:"Import invitation",repair:"Re-pair Source",approve:"Approve pairing",scope:"Export library scope",matrix:"Viewer assignments",manifest:"This Cinema's addresses",endpoints:"Source endpoints",rotate:"Rotate Source credential",disconnect:"Disconnect Source",revoke:"Revoke export",code:"Pairing code"};
   let content="";
   if(e.mode==="code")content=`<p>Enter this code on the Source Cinema to approve this recipient:</p><code>${esc(e.row.pairing_code)}</code>`;
-  else if(e.mode==="network")content=`<p>Authorize this Cinema server to create private device invitations. Tailscale requires a user-owned API key; OAuth client keys cannot create these invitations. The key is encrypted on this server and never included in an invitation.</p>${e.networkStatus?`<p>Account authorization: ${e.networkStatus.configured?"stored":"not connected"}. Pending cleanup: ${esc(String(e.networkStatus.pending_cleanup??0))}. Unconfirmed provider creations: ${esc(String(e.networkStatus.unknown_outcomes??0))}.${e.networkStatus.last_error?" Latest cleanup: "+esc(e.networkStatus.last_error.replaceAll("_"," ")):""}</p>`:""}<p><a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener noreferrer">Create a Tailscale user API key</a></p>`+sharingInput("Tailscale API key","text",e.text,"password");
-  else if(["import","repair"].includes(e.mode))content=sharingQRImportHTML(e)+(e.connection?.length?`<p>Authorize the private connection using the Tailscale account of the Cinema server importing these libraries. Cinema will continue automatically when that server can connect.</p>`+e.connection.map((row,i)=>`<p><a href="${esc(row.invite_url)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Authorize connection to ${esc(row.ts_fqdn)}</a></p>`).join(""):"");
+  else if(e.mode==="network")content=`<p>Authorize this Cinema server to create private device invitations. Tailscale requires a user-owned API key; OAuth client keys cannot create these invitations. The key is encrypted on this server and never included in an invitation. A saved key does not confirm current account authorization or this host’s Tailscale connection.</p><p><a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener noreferrer">Create a Tailscale user API key</a></p>`+sharingInput("Tailscale API key","text",e.text,"password");
+  else if(["import","repair"].includes(e.mode)){
+    if(e.saved&&e.result){
+      const pending=e.result.import.state==="pending",active=e.result.import.state==="active";
+      content=`<p><strong>Invitation imported.</strong> ${active?"Next, assign the libraries to your local users, including yourself.":pending?"Next, send this pairing code to the other owner. They approve it on their Sharing page.":"Cinema saved the connection and is requesting pairing. Return to connections to check its progress."}</p>${pending?`<code class="sharing-pairing-code">${esc(e.result.pairing_code)}</code>`:""}`;
+    }else{
+      const form=sharingQRImportHTML(e)+(e.mode==="import"?sharingInput("Share name (optional)","name",e.name)+`<p class="hint">Use a name your household recognizes, such as Alex’s Cinema. Leave blank to use the Source Cinema’s name. You can rename it later; this name stays local to your Cinema.</p>`:"");
+      const id=sharingIdentity(s.status),account=id?.login||id?.tailnet;
+      const guidance=e.connection?.length?`<p>Open the link below and accept the Tailscale share <strong>while signed in to ${account?"the Tailscale account "+esc(account):"the Tailscale account this Cinema server's host uses"}</strong> — that is the account this Cinema connects with. If your browser is signed in to Tailscale as someone else, for example the person who sent the invitation, sign out of Tailscale first or open the link in a private window. Then return here and keep this page open until the invitation is imported.</p>`:"";
+      content=e.connection?`<section class="sharing-progress"><h4>Connect to ${esc(e.sourceName||"the other Cinema")}</h4>${guidance}`+e.connection.map(row=>`<p><a href="${esc(row.invite_url)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Authorize connection to ${esc(row.ts_fqdn)}</a></p>`).join("")+`<p role="status" aria-live="polite">${e.waitingConnection?"Checking the private connection automatically… ":""}${e.diagnosis?"":esc(e.connectionError||"")}</p>${e.diagnosis?sharingDiagnosisHTML(e.diagnosis):""}<p>No Cinema import is saved until this connection succeeds. Leaving this form cancels the attempt.</p></section><details><summary>Use a different invitation</summary>${form}</details>`:form;
+    }
+  }
   else if(e.mode==="approve")content=`<p>Compare the importing Cinema's pairing code and type it here. Approval is never automatic.</p>`+sharingInput("Pairing code","text",e.text);
   else if(["invite","scope"].includes(e.mode))content=(e.mode==="invite"?`<p>${e.needsEndpoints?(s.status?.host_setup?"Cinema is discovering this server’s Tailscale addresses and TLS certificate. This updates automatically; your selected libraries are kept.":"Set up this Cinema’s private addresses before creating an invitation. Your library selection is kept while you configure them."):"One Cinema invitation includes private network access for an external recipient. Tailscale device access follows your tailnet policy; Cinema library access still requires pairing approval."}</p>${sharingButton(s.status?.host_setup?"Advanced addresses":"Configure this Cinema’s addresses","sharingConfigureAddresses()",e.busy)}`:"")+e.libraries.map((l,i)=>`<label><input type="checkbox" onchange="sharingSelect(${i},this.checked)"${e.selected.includes(l.library_id)?" checked":""}${e.busy?" disabled":""}> ${esc(l.name)} · ${esc(l.library_id)}</label>`).join("");
   else if(e.mode==="matrix"&&e.matrix){
     const m=e.matrix,users=m.viewers.filter(v=>v.username.toLowerCase().includes((e.search||"").toLowerCase())||v.id.toString().includes(e.search||""));
     const group=m.groups.find(g=>g.library_id===e.library);
-    content=`<p>The complete matrix is retained. Unavailable viewers and libraries outside current Source scope remain until you explicitly remove them.</p><label>Source library<select onchange="sharingEdit('library',this.value);sharingPaint()"${e.busy?" disabled":""}>${m.libraries.map(l=>`<option value="${esc(l.library_id)}"${l.library_id===e.library?" selected":""}>${esc(l.name)}</option>`).join("")}</select></label>`+sharingInput("Find viewers","search",e.search)+sharingButton("Find","sharingPaint()",e.busy)+users.slice(0,100).map(v=>`<label><input type="checkbox" onchange="sharingMatrixEdit('${v.id}',this.checked)"${group?.user_ids.includes(v.id)?" checked":""}${e.busy?" disabled":""}>${esc(v.username)} · ${v.id}</label>`).join("")+(users.length>100?`<p>Showing 100 of ${users.length} matching viewers. Refine the search; the complete matrix is retained.</p>`:"")+(m.libraries.some(l=>l.library_id===e.library&&l.outside)?sharingButton("Remove this outside-scope group","sharingRemoveOutside()",e.busy):"");
+    content=`<p>Choose a library, then check the users on this Cinema who should see it. Include your own user if you want to browse it. Save when finished.</p><label>Shared library<select onchange="sharingEdit('library',this.value);sharingPaint()"${e.busy?" disabled":""}>${m.libraries.map(l=>`<option value="${esc(l.library_id)}"${l.library_id===e.library?" selected":""}>${esc(l.name)}</option>`).join("")}</select></label>`+sharingInput("Find viewers","search",e.search)+sharingButton("Find","sharingPaint()",e.busy)+users.slice(0,100).map(v=>`<label><input type="checkbox" onchange="sharingMatrixEdit('${v.id}',this.checked)"${group?.user_ids.includes(v.id)?" checked":""}${e.busy?" disabled":""}>${esc(v.username)} · ${v.id}</label>`).join("")+(users.length>100?`<p>Showing 100 of ${users.length} matching viewers. Refine the search; the complete matrix is retained.</p>`:"")+`<details><summary>Unavailable users and libraries</summary><p>Existing assignments are retained until you explicitly remove them.</p></details>`+(m.libraries.some(l=>l.library_id===e.library&&l.outside)?sharingButton("Remove this outside-scope group","sharingRemoveOutside()",e.busy):"");
   }else if(["manifest","endpoints"].includes(e.mode)){
-    content=`<p>${e.mode==="manifest"?"Configure the machine serving this Cinema’s libraries.":"Use the details of the other Cinema providing the libraries."} The addresses come from Tailscale. ${e.mode==="manifest"?"Cinema fills in this serving node’s certificate pin for its first endpoint when available.":"Use the certificate pin from the Cinema providing the libraries."} Saving addresses does not check connectivity or configure Tailscale.</p>`+e.endpoints.map((row,i)=>sharingEndpointFieldsHTML(row,i,e.busy||e.saved)).join("")+sharingButton("Add endpoint","sharingEndpointCount(true)",e.busy||e.saved||e.endpoints.length>=4)+`<p>Saving trusts the Cinema certificate pins entered above. Check that they match the serving Cinema’s Sharing page.</p>`;
+    content=`<p>${e.mode==="manifest"?"Configure the ingress gateways for this Cinema’s libraries. Cluster members share this address list; each gateway keeps its own certificate and Tailscale connection.":"Use the details of the other Cinema providing the libraries."} The addresses come from Tailscale. ${e.mode==="manifest"?"Cinema fills in this serving node’s certificate pin for its first endpoint when available.":"Use the certificate pin from the Cinema providing the libraries."} Saving addresses does not check connectivity or configure Tailscale.</p>`+e.endpoints.map((row,i)=>sharingEndpointFieldsHTML(row,i,e.busy||e.saved)).join("")+sharingButton("Add endpoint","sharingEndpointCount(true)",e.busy||e.saved||e.endpoints.length>=4)+`<p>Saving trusts the Cinema certificate pins entered above. Check that they match the serving Cinema’s Sharing page.</p>`;
   }else if(["rotate","disconnect","revoke"].includes(e.mode))content=`<p>${e.mode==="rotate"?"Replace this Source credential?":e.mode==="disconnect"?"Disconnect this Source and stop using its shared libraries?":"Revoke this recipient's library access?"}</p>`;
   const addresses=["manifest","endpoints"].includes(e.mode),inviting=e.mode==="invite",feedbackAtEnd=addresses||inviting,saving=e.busy&&e.action==="save";
   const error=e.error?`<p role="alert">${addresses&&!e.saved?(e.sent?"Save not confirmed. ":"Addresses not saved. "):inviting?(e.sent?"Invitation creation not confirmed. ":"Invitation not created. "):""}${esc(e.error)}</p>`:"";
-  const status=e.saved?(addresses?"Addresses saved. Connectivity has not been tested.":"Saved. Reload before making another change."):saving?(inviting?"Creating invitation…":"Saving…"):"";
+  const status=e.saved?(addresses?"Addresses saved. Connectivity has not been tested.":["import","repair"].includes(e.mode)?"Import saved.":e.mode==="approve"?"Pairing approved. The recipient must now assign viewers on their Cinema.":e.mode==="matrix"?"Viewer assignments saved. Open Shared libraries to browse.":"Saved. Reload before making another change."):saving?(inviting?"Creating invitation…":["import","repair"].includes(e.mode)?"Checking connection and importing invitation…":"Saving…"):e.waitingConnection?"Waiting for the private connection. The invitation has not been imported yet.":"";
   const feedback=`<div id="sharing-editor-feedback" tabindex="-1">${error}<p role="status" aria-live="polite">${esc(status)}</p></div>`;
-  const saveLabel=addresses?(e.saved?"Saved":saving?"Saving…":"Save"):inviting?(saving?"Creating…":"Create"):e.mode==="approve"?"Approve":"Save";
-  return `<h3>${esc(titles[e.mode]||"Sharing")}</h3>${feedbackAtEnd?"":feedback}${content}${feedbackAtEnd?feedback:""}<p>${sharingButton(e.returnInvite?"Return to invitation":"Back","sharingCloseEditor()",e.busy)} ${e.mode!=="code"?sharingButton(saveLabel,"sharingSave()",e.busy||!e.ready||e.saved||(e.mode==="invite"&&e.needsEndpoints)):""} ${["invite","scope","matrix","manifest","endpoints"].includes(e.mode)?sharingButton(addresses&&e.saved?"Edit addresses":"Reload current data","sharingEditorReload()",e.busy):""}</p>`;
+  const importing=["import","repair"].includes(e.mode);
+  const saveLabel=addresses?(e.saved?"Saved":saving?"Saving…":"Save"):inviting?(saving?"Creating…":"Create invitation"):e.mode==="approve"?"Approve pairing":importing?(e.waitingConnection?"Waiting for connection…":e.connection?"Try connection again":"Import invitation"):"Save";
+  return `<h3>${esc(titles[e.mode]||"Sharing")}</h3>${feedbackAtEnd?"":feedback}${content}${feedbackAtEnd?feedback:""}<p>${sharingButton(e.returnInvite?"Return to invitation":e.saved?"View connections":importing?"Cancel import":"Back","sharingCloseEditor()",e.busy)} ${e.mode!=="code"&&!(importing&&e.saved)?sharingButton(saveLabel,"sharingSave()",e.busy||!e.ready||e.saved||e.waitingConnection||(e.mode==="invite"&&e.needsEndpoints)):""} ${["invite","scope","matrix","manifest","endpoints"].includes(e.mode)?sharingButton(addresses&&e.saved?"Edit addresses":"Reload current data","sharingEditorReload()",e.busy):""}</p>`;
 }
 async function sharingMutation(path,method,body,capture,key="updated"){const reply=await sharingRequest(path,{method,body,capture});if(reply?.[key]!==true)throw new Error("Sharing update did not return a confirmed result");return reply;}
 async function sharingSave(){
@@ -365,24 +662,44 @@ async function sharingSave(){
       catch(error){if(error.code==="sharing_network_authorization_required"){throw new Error("Connect your Tailscale account in Private network, then create the invitation.");}if(error.status===409&&error.code==="sharing_endpoints_unavailable"){e.needsEndpoints=true;throw new Error("This Cinema’s addresses are no longer configured. Configure them, then return to this invitation. Your selected libraries are kept.");}throw error;}
       sharingUUID(r.id);sharingInvitation(r.invitation);s.invitation=r;s.invitationCopyNotice="";s.invitationTextOpen=false;
     }else if(mode==="network"){
+      if(!e.networkNodeId||s.status?.node_id!==e.networkNodeId)throw new Error("The serving node changed. Refresh connections and reopen Tailscale account setup before saving.");
       const token=e.text;e.text="";
       const r=await sharingRequest("/sharing/network-authorization",{method:"PUT",body:{token},capture:c});
       if(r.configured!==true)throw new Error("Tailscale authorization was not confirmed");
+      e.saved=true;
+      e.networkStatus=null;
+      s.status={...s.status,network_authorization:null,network_authorization_error:null};
+      sharingPaint();
+      try{
+        e.networkStatus=await sharingReadNetworkAuthorizationBounded(c,e.networkNodeId);
+        s.status={...s.status,network_authorization:e.networkStatus,network_authorization_error:null};
+      }catch(error){
+        if(!sharingCurrent(c))throw error;
+        s.status={...s.status,network_authorization:null,network_authorization_error:error.message};
+        throw new Error("The API key was saved, but its saved status could not be refreshed. Refresh connections to check it; the save was not repeated.");
+      }
+      if(!e.networkStatus.configured)throw new Error("The save was confirmed, but no API key is available on this node. Refresh connections to check which node is serving this page.");
     }else if(mode==="import"||mode==="repair"){
-      if(e.text.startsWith("cinema-connect-v1:")&&!e.connectionChecked){
-        const r=await sharingRequest("/sharing/connection",{method:"POST",body:{invitation:sharingInvitation(e.text)},capture:c});
-        e.connection=sharingNetworkRows(r.network);e.connectionChecked=true;
-        if(e.connection.length&&r.connected!==true){e.waitingConnection=true;return;}
+      if(e.text.startsWith("cinema-connect-v1:")&&!e.connectionVerified){
+        const r=await sharingRequest("/sharing/connection",{method:"POST",body:{invitation:sharingInvitation(e.text),probe:true},capture:c});
+        e.connection=sharingNetworkRows(r.network);e.sourceName=typeof r.name==="string"?r.name:"";
+        e.connectionError=sharingConnectionMessage(r.connection_error);e.diagnosis=sharingDiagnosis(r.diagnosis);e.connectionAttempts=0;
+        if(r.connected!==true){e.waitingConnection=true;return;}
+        e.connectionVerified=true;
       }
       e.waitingConnection=false;
       const path=mode==="import"?"/sharing/imports":"/sharing/imports/"+sharingUUID(e.row.import.id)+"/re-pair";
-      const body={invitation:sharingInvitation(e.text)};if(mode==="repair")body.expected_lifecycle_generation=sharingInteger(e.row.import.lifecycle_generation);
+      const body={invitation:sharingInvitation(e.text)};if(mode==="import"){const name=sharingFriendlyName(e.name||"",true);if(name)body.name=name;}if(mode==="repair")body.expected_lifecycle_generation=sharingInteger(e.row.import.lifecycle_generation);
       const r=sharingImport(await sharingRequest(path,{method:"POST",body,capture:c}));
       if(mode==="repair"&&(r.import.id!==e.row.import.id||r.import.source_server_id!==e.row.import.source_server_id||r.import.catalogue_epoch!==e.row.import.catalogue_epoch))throw new Error("Source identity changed");
-      s.imports=[...s.imports.filter(v=>v.import.id!==r.import.id),r];e.text="";
+      s.imports=[...s.imports.filter(v=>v.import.id!==r.import.id),r];e.result=r;e.text="";
     }else if(mode==="approve"){
       const r=e.row;sharingExport(r);if(sharingCode(e.text)!==r.pairing_code)throw new Error("Pairing code does not match");
       await sharingMutation("/sharing/exports/"+r.grant.id+"/approve","POST",{expected_mutation_generation:r.grant.mutation_generation,pairing_code:e.text},c);e.text="";
+      e.saved=true;
+      // Do not reuse the pre-mutation generation; refresh supplies confirmed state.
+      try{s.exports=(await sharingManagementRead("/sharing/exports",c)).exports;}
+      catch(_){throw new Error("Pairing was approved, but the connection list could not be refreshed. Refresh connections to check it; approval was not retried.");}
     }else if(mode==="scope"){
       sharingIds(e.selected);await sharingMutation("/sharing/exports/"+sharingUUID(e.row.grant.id)+"/libraries","PUT",{expected_mutation_generation:sharingInteger(e.row.grant.mutation_generation),library_ids:e.selected},c);
     }else if(mode==="matrix"){
@@ -437,6 +754,16 @@ function sharingNetworkRows(rows){
   }
   return rows;
 }
+function sharingConnectionMessage(code){
+  const messages={
+    sharing_peer_unavailable:"The other Cinema’s sharing listener is not reachable. Tailscale authorization alone does not verify it. Check Connection setup on both Cinema servers; the private listener and forwarding must be configured.",
+    sharing_identity_mismatch:"The address reached a different Cinema identity. Ask the owner to check its sharing addresses and send a fresh invitation.",
+    sharing_protocol_unsupported:"These Cinema versions cannot pair. Update both servers before trying again.",
+    sharing_peer_auth_failed:"The other Cinema refused verification. Ask its owner to check the sharing setup and send a fresh invitation.",
+    sharing_invalid_peer_response:"The address did not return a valid Cinema sharing response. Ask the owner to check its private sharing listener."
+  };
+  return messages[code]||"Waiting to verify the other Cinema. Authorize its Tailscale connection if requested.";
+}
 function sharingScheduleConnection(){
   const s=SHARING_MANAGEMENT,e=s?.editor;
   if(!s||!e?.waitingConnection||s.busy||s.connectionTimer!=null||!sharingCurrent(s.capture)||typeof setTimeout!=="function")return;
@@ -448,7 +775,12 @@ function sharingScheduleConnection(){
       try{
         const capture={...s.capture,work:true,state:s,stateRevision:s.revision,editor:e,editRevision:revision};
         const r=await sharingRequest("/sharing/connection",{method:"POST",body:{invitation:sharingInvitation(e.text),probe:true},capture});
-        if(sharingCurrent(capture)&&r.connected===true){e.waitingConnection=false;await sharingSave();return;}
+        if(sharingCurrent(capture)&&r.connected===true){e.waitingConnection=false;e.connectionVerified=true;e.connectionError="";await sharingSave();return;}
+        if(sharingCurrent(capture)){
+          e.connectionError=sharingConnectionMessage(r.connection_error);e.diagnosis=sharingDiagnosis(r.diagnosis);e.connectionAttempts=(e.connectionAttempts||0)+1;
+          if(e.connectionAttempts>=10){e.waitingConnection=false;e.error="Connection not established; the invitation has not been imported. Automatic checks paused. Resolve the setup message below, then choose Try connection again.";}
+          sharingPaint();
+        }
       }catch(error){if(sharingCurrent(s.capture)&&s.editor===e&&e.revision===revision){e.error=error.message;e.waitingConnection=false;sharingPaint();return;}}
     }
     sharingScheduleConnection();

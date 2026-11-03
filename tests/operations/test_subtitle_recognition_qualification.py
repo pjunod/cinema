@@ -101,11 +101,46 @@ class RecognitionQualificationCase(unittest.TestCase):
         self.assertTrue(TOOL.captions(output, 734.0930625)["structural_valid"])
 
     def test_timeout_reaps_child_and_clean_environment_is_explicit(self):
+        import select
+        from types import SimpleNamespace
+        from unittest import mock
+
         program = self.root / "child.py"
         marker = self.root / "pid"
-        program.write_text("import os,time\nfrom pathlib import Path\nPath('" + str(marker) + "').write_text(str(os.getpid()))\ntime.sleep(20)\n")
-        with self.assertRaisesRegex(ValueError, "probe_timeout"):
-            TOOL.run_child([sys.executable, str(program)], self.root, "probe", 0.15)
+        ready_read, ready_write = os.pipe()
+        writer_open = True
+        started = False
+        program.write_text(
+            "import os,time\nfrom pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+            f"os.write({ready_write}, b'R')\n"
+            "time.sleep(20)\n"
+        )
+
+        def deadline_clock():
+            nonlocal started, writer_open
+            if not started:
+                started = True
+                return 0.0
+            # Drive expiry only after an acknowledged real child exists.
+            # Startup has its own bounded handshake; the production helper's
+            # wall-clock deadline and kill/reap path are unchanged.
+            os.close(ready_write)
+            writer_open = False
+            readable, _, _ = select.select([ready_read], [], [], 5)
+            self.assertTrue(readable, "timeout fixture did not acknowledge startup")
+            self.assertEqual(os.read(ready_read, 1), b"R")
+            return 1.0
+
+        try:
+            with mock.patch.object(TOOL, "time", SimpleNamespace(monotonic=deadline_clock)):
+                with self.assertRaisesRegex(ValueError, "probe_timeout"):
+                    TOOL.run_child([sys.executable, str(program)], self.root, "probe", 0.15,
+                                   pass_fds=(ready_write,))
+        finally:
+            os.close(ready_read)
+            if writer_open:
+                os.close(ready_write)
         pid = int(marker.read_text())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)

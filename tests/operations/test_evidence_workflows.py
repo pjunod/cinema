@@ -311,11 +311,13 @@ class EvidenceWorkflowCase(unittest.TestCase):
 
     def test_nightly_mutation_scope_is_bounded_and_artifacted(self) -> None:
         workflow = self.read(".github/workflows/validation-nightly.yml")
-        self.assertIn("git log --since=7.days --name-only", workflow)
-        self.assertIn("cargo mutants --timeout 300", workflow)
-        self.assertIn("--file", workflow)
-        self.assertIn("timeout-minutes: 60", workflow)
-        self.assertIn("continue-on-error: true", workflow)
+        mutation = self.read("scripts/nightly-mutation")
+        self.assertIn("git log --since=7.days --name-only", mutation)
+        self.assertIn("60m cargo mutants", mutation)
+        self.assertIn("--timeout 300", mutation)
+        self.assertIn("--file", mutation)
+        self.assertIn("timeout-minutes: 120", workflow)
+        self.assertNotIn("continue-on-error: true", workflow.split("\n  mutation:\n", 1)[1])
         self.assertIn("target/mutants", workflow)
         self.assertIn("GITHUB_STEP_SUMMARY", workflow)
         self.assertIn("name: report-only weekly mutation spot-check", workflow)
@@ -441,14 +443,14 @@ class EvidenceWorkflowCase(unittest.TestCase):
         parser = workflow.split("\n  parser-fuzz:\n", 1)[1].split("\n  mutation:\n", 1)[0]
         mutation = workflow.split("\n  mutation:\n", 1)[1]
 
-        self.assertIn("run: make validate-nightly", deep)
+        self.assertIn("--host-network make validate-nightly", deep)
         self.assertNotIn("cargo-fuzz", deep)
         self.assertNotIn("cargo-mutants", deep)
         self.assertIn("cargo-fuzz", fuzz)
         self.assertNotIn("needs:", fuzz)
         self.assertIn("cargo-fuzz", parser)
         self.assertNotIn("needs:", parser)
-        self.assertIn("cargo-mutants", mutation)
+        self.assertIn("bash scripts/nightly-mutation", mutation)
         self.assertNotIn("needs:", mutation)
 
     def test_nightly_runs_and_retains_the_auto_cliff_acceptance(self) -> None:

@@ -465,3 +465,35 @@ fn an_invalid_snapshot_threshold_is_rejected_without_changing_production() {
         );
     }
 }
+
+#[test]
+fn future_learner_ports_remain_reserved_until_their_own_start() {
+    let allocation = super::allocate_learner_membership_ports().expect("owned membership ports");
+    let super::LearnerMembershipPorts {
+        voters,
+        learner,
+        promoted,
+        specs,
+    } = allocation;
+    drop(voters);
+    for node in &specs[3..] {
+        for address in [&node.raft, &node.api] {
+            assert_eq!(
+                std::net::TcpListener::bind(address)
+                    .expect_err("future learner still owns its socket")
+                    .kind(),
+                std::io::ErrorKind::AddrInUse
+            );
+        }
+    }
+    drop(learner);
+    for address in [&specs[4].raft, &specs[4].api] {
+        assert_eq!(
+            std::net::TcpListener::bind(address)
+                .expect_err("starting learner4 must not release learner5")
+                .kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+    }
+    drop(promoted);
+}

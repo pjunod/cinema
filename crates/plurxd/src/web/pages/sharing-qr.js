@@ -23,7 +23,7 @@ function sharingQRFinish(job,text,error=""){
   if(!sharingQRCurrent(job))return;
   const e=job.editor;
   if(text!==null){
-    try{e.text=sharingInvitation(text);e.revision++;e.qrNotice="Invitation read. Choose Save to import it, then compare the pairing code with the other Cinema.";e.error="";}
+    try{sharingEdit("text",sharingInvitation(text));e.qrNotice="Invitation read. Choose Import invitation, then follow the connection and pairing steps.";e.error="";}
     catch{e.error="This QR code is not a Cinema sharing invitation.";}
   }else if(error)e.error=error;
   sharingQRStop();sharingPaint();

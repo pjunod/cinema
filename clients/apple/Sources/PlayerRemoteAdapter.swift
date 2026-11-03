@@ -16,14 +16,23 @@ struct PlayerRemoteAdapter: ViewModifier {
     let scope: Scope
     let state: () -> PlayerInputState
     let apply: (PlayerInputOutcome, PlayerContractInput) -> Bool
+    var timelineHold: PlayerTimelineHoldRepeater? = nil
+    @Environment(\.scenePhase) private var scenePhase
 
     @ViewBuilder
     func body(content: Content) -> some View {
         switch scope {
         case .root:
             content
-                .onExitCommand { dispatch(.back) }
-                .onPlayPauseCommand { dispatch(.playPause) }
+                .onExitCommand { timelineHold?.cancel(); dispatch(.back) }
+                .onPlayPauseCommand { timelineHold?.cancel(); dispatch(.playPause) }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase != .active { timelineHold?.cancel() }
+                }
+                .onChange(of: state()) { _, state in
+                    if state != .timeline && state != .scrub { timelineHold?.cancel() }
+                }
+                .onDisappear { timelineHold?.cancel() }
         case .surface:
             content
                 .onTapGesture { dispatch(.select) }
@@ -35,11 +44,29 @@ struct PlayerRemoteAdapter: ViewModifier {
             // A focusable drawing with a tap gesture can receive directions
             // while dropping Siri Remote Select. Use native button activation
             // and keep the label-only style so the thin bar gains no bezel.
-            Button { dispatch(.select) } label: { content }
+            Button { timelineHold?.cancel(); dispatch(.select) } label: { content }
                 .buttonStyle(PlaybackRevealButtonStyle())
                 .focusEffectDisabled()
+                .background {
+                    if let timelineHold {
+                        PlayerTimelineHoldCapture(
+                            hold: timelineHold,
+                            canBegin: { scenePhase == .active && (state() == .timeline || state() == .scrub) },
+                            preview: { input in
+                                guard scenePhase == .active,
+                                      PlayerInputRouting.route(surface: .tenFoot, state: state(), input: input) == .preview
+                                else { return false }
+                                dispatch(input)
+                                return true
+                            }
+                        )
+                    }
+                }
                 .onMoveCommand { direction in
                     guard let input = Self.input(for: direction) else { return }
+                    // Native repeat commands must not double-count the timer.
+                    if timelineHold?.input == input { return }
+                    timelineHold?.cancel()
                     dispatch(input)
                 }
         }
@@ -62,6 +89,132 @@ struct PlayerRemoteAdapter: ViewModifier {
             PlayerInputRouting.route(surface: .tenFoot, state: state(), input: input),
             input
         )
+    }
+}
+
+/// One repeat owner for a held timeline direction. The press recognizer owns
+/// the initial hold delay; repeats only preview and stop as soon as that owner
+/// releases, cancels, loses focus or can no longer preview.
+@MainActor
+final class PlayerTimelineHoldRepeater: ObservableObject {
+    private(set) var input: PlayerContractInput?
+    private var generation = 0
+    private var task: Task<Void, Never>?
+    private let wait: @MainActor () async throws -> Void
+
+    init(wait: @escaping @MainActor () async throws -> Void = {
+        try await Task.sleep(for: .milliseconds(150))
+    }) { self.wait = wait }
+
+    func begin(_ input: PlayerContractInput, preview: @escaping @MainActor (PlayerContractInput) -> Bool) {
+        cancel()
+        guard input == .left || input == .right else { return }
+        self.input = input
+        guard preview(input) else { cancel(); return }
+        let owner = generation
+        task = Task { @MainActor [weak self, wait] in
+            while !Task.isCancelled {
+                do { try await wait() } catch { return }
+                guard let self, self.generation == owner, !Task.isCancelled else { return }
+                guard preview(input) else { self.cancel(); return }
+            }
+        }
+    }
+
+    func cancel() {
+        generation &+= 1
+        task?.cancel()
+        task = nil
+        input = nil
+    }
+}
+
+/// SwiftUI move commands have no release event. Observe a directional click
+/// hold alongside the focused timeline's normal commands; a short click keeps
+/// the ordinary single preview. The window recognizers are admitted only while
+/// this timeline owns focus, and leave native focus and Select gestures alone.
+private struct PlayerTimelineHoldCapture: UIViewRepresentable {
+    let hold: PlayerTimelineHoldRepeater
+    let canBegin: () -> Bool
+    let preview: @MainActor (PlayerContractInput) -> Bool
+
+    final class CaptureView: UIView {
+        var windowChanged: ((UIWindow?) -> Void)?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            windowChanged?(window)
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var owner: PlayerTimelineHoldCapture
+        private weak var window: UIWindow?
+        private var recognizers: [UILongPressGestureRecognizer] = []
+        init(_ owner: PlayerTimelineHoldCapture) { self.owner = owner }
+
+        func install(on window: UIWindow?) {
+            guard self.window !== window else { return }
+            stop()
+            self.window = window
+            for type in [UIPress.PressType.leftArrow, .rightArrow] {
+                let recognizer = UILongPressGestureRecognizer(target: self, action: #selector(changed(_:)))
+                recognizer.allowedPressTypes = [NSNumber(value: type.rawValue)]
+                recognizer.allowedTouchTypes = []
+                recognizer.minimumPressDuration = 0.35
+                recognizer.cancelsTouchesInView = false
+                recognizer.delaysTouchesBegan = false
+                recognizer.delaysTouchesEnded = false
+                recognizer.delegate = self
+                window?.addGestureRecognizer(recognizer)
+                recognizers.append(recognizer)
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive press: UIPress) -> Bool {
+            owner.canBegin()
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
+
+        @objc private func changed(_ recognizer: UILongPressGestureRecognizer) {
+            let input: PlayerContractInput = recognizer.allowedPressTypes.first?.intValue == UIPress.PressType.leftArrow.rawValue ? .left : .right
+            switch recognizer.state {
+            case .began:
+                guard owner.canBegin() else { return }
+                owner.hold.begin(input) { [weak self] input in
+                    guard let self, self.owner.canBegin() else { return false }
+                    return self.owner.preview(input)
+                }
+            case .ended, .cancelled, .failed:
+                if owner.hold.input == input { owner.hold.cancel() }
+            default: break
+            }
+        }
+
+        func stop() {
+            owner.hold.cancel()
+            for recognizer in recognizers { window?.removeGestureRecognizer(recognizer) }
+            recognizers.removeAll()
+            window = nil
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIView(context: Context) -> CaptureView {
+        let view = CaptureView()
+        view.isUserInteractionEnabled = false
+        view.windowChanged = { [weak coordinator = context.coordinator] in coordinator?.install(on: $0) }
+        return view
+    }
+    func updateUIView(_ view: CaptureView, context: Context) {
+        context.coordinator.owner = self
+        context.coordinator.install(on: view.window)
+    }
+    static func dismantleUIView(_ view: CaptureView, coordinator: Coordinator) {
+        view.windowChanged = nil
+        coordinator.stop()
     }
 }
 
@@ -153,9 +306,10 @@ extension View {
     func playerRemoteAdapter(
         _ scope: PlayerRemoteAdapter.Scope,
         state: @escaping () -> PlayerInputState,
-        apply: @escaping (PlayerInputOutcome, PlayerContractInput) -> Bool
+        apply: @escaping (PlayerInputOutcome, PlayerContractInput) -> Bool,
+        timelineHold: PlayerTimelineHoldRepeater? = nil
     ) -> some View {
-        modifier(PlayerRemoteAdapter(scope: scope, state: state, apply: apply))
+        modifier(PlayerRemoteAdapter(scope: scope, state: state, apply: apply, timelineHold: timelineHold))
     }
 }
 #endif
@@ -257,6 +411,22 @@ final class RemotePhysicalInputObserver: ObservableObject {
 #endif
 
 #if os(tvOS)
+/// Decode the category rail's Right at the adapter boundary, keeping the
+/// selected category and entry request in the settings view.
+private struct TVSettingsCategoryEntryAdapter: ViewModifier {
+    let enterContent: () -> Void
+    func body(content: Content) -> some View {
+        content.onMoveCommand { direction in
+            if direction == .right { enterContent() }
+        }
+    }
+}
+extension View {
+    func tvSettingsCategoryEntry(_ enterContent: @escaping () -> Void) -> some View {
+        modifier(TVSettingsCategoryEntryAdapter(enterContent: enterContent))
+    }
+}
+
 /// Only the settings content pane owns this Back. The category rail remains
 /// outside the adapter, retaining native root behavior and spatial movement.
 private struct TVSettingsContentExitAdapter: ViewModifier {
