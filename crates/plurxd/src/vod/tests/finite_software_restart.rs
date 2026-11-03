@@ -120,6 +120,7 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
             .await
     );
     let final_key = rendition.key.clone();
+    drop(output); // Eviction must wait for actual selector aliases to leave.
     drop(rendition);
     expire_finite_session_tombstone(&serve, "finite-software-restart").await;
     serve
@@ -129,7 +130,6 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
     let final_snapshot = runtime.accounting().expect("final accounting");
     assert_eq!(final_snapshot.held, 0);
     assert_eq!(final_snapshot.used, Default::default());
-    drop(output);
     drop(serve);
     drop(playback_cache);
     let runtime =

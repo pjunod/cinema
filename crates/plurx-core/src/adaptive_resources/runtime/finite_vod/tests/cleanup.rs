@@ -131,12 +131,27 @@ pub(in crate::adaptive_resources::runtime) fn original_software_fixture_with_pro
     OwnedPreparation,
     Uuid,
 ) {
+    // Match the ordinary finite child's explicit loader planning. The selected
+    // child clears its environment; the probe's inherited loader path alone
+    // cannot make this fixed executable runnable.
+    let loader_env = std::env::var_os("LD_LIBRARY_PATH")
+        .map(|value| {
+            let text = value.to_str().expect("fixture loader path is valid UTF-8");
+            assert!(
+                text.len() <= 4096 && !text.contains('\0'),
+                "fixture loader path exceeds the production planning bound"
+            );
+            (std::ffi::OsString::from("LD_LIBRARY_PATH"), value)
+        })
+        .into_iter()
+        .collect();
     let (runtime, owner) = original_owner_with_producer(
         root,
         false,
         SoftwareVodRequest::INITIAL_GENERATION_EPOCH,
         None,
         producer,
+        loader_env,
     );
     let owner = owner.expect("same original accepted command with explicit producer bounds");
     let preparation = owner.preparation.clone();
@@ -159,6 +174,7 @@ fn original_owner_with_cutoff(
         generation_epoch,
         continuous_entry_deadline,
         super::tests::pump_plan(),
+        Vec::new(),
     )
 }
 
@@ -168,6 +184,7 @@ fn original_owner_with_producer(
     generation_epoch: u64,
     continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     producer: SoftwareAvcPumpPlan,
+    loader_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> (
     Arc<NodeResourceRuntime>,
     Result<SoftwareVodOwner, FiniteVodError>,
@@ -313,7 +330,7 @@ fn original_owner_with_producer(
             None,
         )
         .expect("actual engine metadata fence"),
-        Vec::new(),
+        loader_env,
         root.to_owned(),
     )
     .expect("fixed software command");

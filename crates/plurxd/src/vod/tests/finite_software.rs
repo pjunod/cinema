@@ -246,6 +246,7 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     assert_eq!(init_body.len() as u64, init_len);
     assert!(init_body.windows(4).any(|box_type| box_type == b"moov"));
     drop(init_body);
+    drop(init); // Release the counted output alias before final eviction.
 
     wait_until(
         "normal R-to-S retirement",
@@ -497,6 +498,7 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         ),
         "retained reads cannot refresh the producer event or advance useful work"
     );
+    drop(output); // The first rendition still owns S; this test alias is done.
     // A second ordinary selected finite builder really admits another R
     // while the first S still owns every retained file and reader budget.
     let second_key = "b".repeat(64);
