@@ -72,7 +72,7 @@ async fn manual_copy_queued_metadata_and_unsupported_versions_refuse_before_publ
     let active = crate::background_jobs::ActiveBackgroundJob::start(
         Arc::clone(&store), Arc::new(CopyPreparationAuthority), claimed.token.clone().expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
-    ).expect("owner");
+    ).await.expect("owner");
     let admission = manager.admit_fragment().await.expect("background admission");
     let error = manager.produce_copy_output_job(&current, &claimed, active.fence(),
         &admission, Instant::now() + Duration::from_secs(20)).await.expect_err("metadata refusal");
@@ -153,7 +153,7 @@ async fn manual_copy_manager_queue_worker_and_matching_new_attachment_use_only_l
         Arc::clone(&store), Arc::new(CopyPreparationAuthority),
         claimed.token.clone().expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
-    ).expect("owner");
+    ).await.expect("owner");
     let admission = manager.admit_fragment().await.expect("existing background admission");
     assert!(manager.produce_copy_output_job(&file, &claimed, active.fence(),
         &admission, Instant::now() + Duration::from_secs(20)).await.expect("real copy worker"));
@@ -366,7 +366,7 @@ async fn prepared_copy_consumer(control: u8) {
     let active = crate::background_jobs::ActiveBackgroundJob::start(
         Arc::clone(&store), Arc::new(CopyPreparationAuthority), job.token.expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
-    ).expect("active owner");
+    ).await.expect("active owner");
     if (10..=15).contains(&control) {
         let hooks = serve.shared.test_hooks();
         let pause = match control {
@@ -695,7 +695,7 @@ async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
     let active = crate::background_jobs::ActiveBackgroundJob::start(
         Arc::clone(&store), Arc::new(CopyPreparationAuthority), claimed,
         tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
-    ).expect("owner");
+    ).await.expect("owner");
     active.fence().settle(JobSettlement::Cancel).await.expect("owner settles the cancel");
     active.finish().await;
     assert_eq!(d2_job_state(&store, &live).await, JobState::Cancelled);

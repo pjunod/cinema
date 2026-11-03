@@ -258,8 +258,18 @@ impl JobManager {
                 );
                 let cancellation = CancellationToken::new();
                 let loss = fence.loss_token();
-                let work =
-                    self.resolve_durable_subtitle(&request, runtime_cache, &fence, &cancellation);
+                let work = crate::background_jobs::budgeted(
+                    fence.source_budget(),
+                    plurx_core::process::bounded::cancellable(
+                        cancellation.clone(),
+                        self.resolve_durable_subtitle(
+                            &request,
+                            runtime_cache,
+                            &fence,
+                            &cancellation,
+                        ),
+                    ),
+                );
                 tokio::pin!(work);
                 let mut pressure = tokio::time::interval(Duration::from_millis(250));
                 loop {
@@ -267,9 +277,16 @@ impl JobManager {
                         biased;
                         () = loss.cancelled() => { cancellation.cancel(); break work.await; }
                         _ = pressure.tick() => {
-                            if background.is_some_and(|(manager, permit)| !manager.fragment_worker_idle(permit)) {
+                            if background.is_some_and(|(manager, permit)| !manager.fragment_worker_idle(permit))
+                                || !fence.source_may_continue().await.unwrap_or(false) {
                                 cancellation.cancel(); let _ = work.await;
                                 break Err(AnalysisResolutionError::Retry { code: "foreground_preempted", charge_attempt: false });
+                            }
+                        }
+                        () = crate::source_custody::source_pressure_changed().notified() => {
+                            if !fence.source_may_continue().await.unwrap_or(false) {
+                                cancellation.cancel(); let _=work.await;
+                                break Err(AnalysisResolutionError::Retry {code:"foreground_preempted",charge_attempt:false});
                             }
                         }
                         result = &mut work => break result,

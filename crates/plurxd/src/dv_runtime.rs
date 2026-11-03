@@ -103,7 +103,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 15] = [
+    let inputs: [(&str, &[u8]); 16] = [
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -135,6 +135,10 @@ fn renderer_source_identity() -> String {
         (
             "hevc-rasl-frame-thread.patch",
             include_bytes!("../../../tools/dv_processing/hevc-rasl-frame-thread.patch"),
+        ),
+        (
+            "movie_source_io.h",
+            include_bytes!("../../../tools/dv_processing/movie_source_io.h"),
         ),
         (
             "nlq_clipping.h",
@@ -524,7 +528,7 @@ impl PrivateWindow {
         let reporter =
             crate::ffmpeg::EncodedExecutable::capture_program(&crate::ffmpeg::ffprobe_bin())
                 .await?;
-        let document = crate::ffmpeg::held_source_probe_json_bound(
+        let document = crate::ffmpeg::held_artifact_probe_json_bound(
             held.as_file(),
             crate::process_control::ChildWork::realtime("DV completed output header probe"),
             &reporter,
@@ -895,7 +899,7 @@ impl RuntimeRecipe {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn execute(
+    pub(crate) async fn execute_with_source_input(
         &self,
         file: &plurx_core::domain::MediaFile,
         plan: &plurx_core::transcode::ResolvedTranscode,
@@ -907,42 +911,7 @@ impl RuntimeRecipe {
         producer: Arc<crate::prodrun::ProducerSlot>,
         cancel: tokio_util::sync::CancellationToken,
         registration_hook: Option<RegistrationHook>,
-    ) -> Result<
-        WindowOutcome<(
-            VerifiedWindow,
-            plurx_core::transcode::dv_processing::DvProcessingPlan,
-        )>,
-        String,
-    > {
-        self.execute_until(
-            file,
-            plan,
-            options,
-            grid,
-            entry,
-            encoder,
-            admission,
-            producer,
-            cancel,
-            registration_hook,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn execute_until(
-        &self,
-        file: &plurx_core::domain::MediaFile,
-        plan: &plurx_core::transcode::ResolvedTranscode,
-        options: &plurx_core::transcode::TranscodeOptions,
-        grid: plurx_core::transcode::VodFrameGrid,
-        entry: &plurx_core::segplan::PlanEntry,
-        encoder: &Path,
-        admission: crate::dv_segment::SegmentAdmission,
-        producer: Arc<crate::prodrun::ProducerSlot>,
-        cancel: tokio_util::sync::CancellationToken,
-        registration_hook: Option<RegistrationHook>,
+        source_input: crate::source_input::SourceInput,
         absolute_deadline: Option<tokio::time::Instant>,
     ) -> Result<
         WindowOutcome<(
@@ -951,26 +920,41 @@ impl RuntimeRecipe {
         )>,
         String,
     > {
-        self.execute_policy_until(
-            file,
-            plan,
-            options,
-            grid,
-            entry,
-            encoder,
-            admission,
-            producer,
-            cancel,
-            registration_hook,
-            absolute_deadline,
-            self.display_target,
-        )
-        .await
+        let source_input =
+            crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
+        let result = self
+            .execute_policy_until_with_source(
+                file,
+                plan,
+                options,
+                grid,
+                entry,
+                encoder,
+                admission,
+                producer,
+                cancel,
+                registration_hook,
+                absolute_deadline,
+                self.display_target,
+                Arc::clone(&source_input),
+            )
+            .await;
+        // Early validation/spawn failures and every terminal graph result use
+        // this same join. Physical Resources retain their input use through
+        // helper and encoder reap; no caller can release it by returning early.
+        source_input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV original source cleanup: {error}"))?;
+        result
     }
 
     /// Explicit immutable policy; live preparation freezes the title-qualified
     /// target, ordinary VOD/pre-encode recipes retain None. No per-window
     /// environment/caps/settings selection occurs here.
+    // Explicit fixture/custom qualification control. Ordinary original-media
+    // production can enter only execute_with_source_input with owned service.
+    #[cfg(any(test, plurx_dv_segment_probe))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_policy_until(
         &self,
@@ -986,6 +970,56 @@ impl RuntimeRecipe {
         registration_hook: Option<RegistrationHook>,
         absolute_deadline: Option<tokio::time::Instant>,
         display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+        source_input: crate::source_input::SourceInput,
+    ) -> Result<
+        WindowOutcome<(
+            VerifiedWindow,
+            plurx_core::transcode::dv_processing::DvProcessingPlan,
+        )>,
+        String,
+    > {
+        let source_input =
+            crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
+        let result = self
+            .execute_policy_until_with_source(
+                file,
+                plan,
+                options,
+                grid,
+                entry,
+                encoder,
+                admission,
+                producer,
+                cancel,
+                registration_hook,
+                absolute_deadline,
+                display_target,
+                Arc::clone(&source_input),
+            )
+            .await;
+        source_input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV qualification source cleanup: {error}"))?;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_policy_until_with_source(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        options: &plurx_core::transcode::TranscodeOptions,
+        grid: plurx_core::transcode::VodFrameGrid,
+        entry: &plurx_core::segplan::PlanEntry,
+        encoder: &Path,
+        admission: crate::dv_segment::SegmentAdmission,
+        producer: Arc<crate::prodrun::ProducerSlot>,
+        cancel: tokio_util::sync::CancellationToken,
+        registration_hook: Option<RegistrationHook>,
+        absolute_deadline: Option<tokio::time::Instant>,
+        display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+        source_input: Arc<crate::dv_segment::SourceInputLease>,
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -1102,6 +1136,7 @@ impl RuntimeRecipe {
                 export_raster: Some(export_raster),
                 display_target: export_policy.display_target(),
                 request: crate::dv_segment::SegmentRequest {
+                    source_input: Some(source_input),
                     renderer: self.tools.renderer.clone(),
                     renderer_env,
                     muxer: self.tools.renderer.clone(),
@@ -1322,7 +1357,7 @@ impl RuntimeRecipe {
 /// owned-job retirement have all been observed. Cancellation drops the pipe
 /// owner and retires the same registered process, never a replacement PID.
 #[cfg(target_os = "linux")]
-pub(crate) async fn run_private_window(
+async fn run_private_window(
     mut request: crate::dv_segment::StreamingSegmentRequest,
     registration_hook: Option<RegistrationHook>,
 ) -> Result<WindowOutcome<PrivateWindow>, String> {
@@ -1333,36 +1368,44 @@ pub(crate) async fn run_private_window(
     let deadline = request.renderer_deadline;
     let display_target = request.display_target;
     let mut producer = crate::dv_segment::spawn_streaming(request).await?;
-    let evidence = producer
-        .take_evidence()
-        .ok_or("missing owned renderer evidence")?;
-    let helper = producer
-        .take_helper_completion()
-        .ok_or("missing helper completion")?;
-    let (registration, writers, stdout, stderr) = producer.into_parts();
-    if let Some(registered) = registration_hook {
-        registered(&registration);
+    let source_settlement = producer.take_source_settlement();
+    let result = async {
+        let evidence = producer
+            .take_evidence()
+            .ok_or("missing owned renderer evidence")?;
+        let helper = producer
+            .take_helper_completion()
+            .ok_or("missing helper completion")?;
+        let (registration, writers, stdout, stderr) = producer.into_parts();
+        if let Some(registered) = registration_hook {
+            registered(&registration);
+        }
+        match capture_private_output(
+            &slot,
+            &registration,
+            writers,
+            stdout,
+            stderr,
+            helper,
+            &cancel,
+            deadline,
+        )
+        .await?
+        {
+            WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
+                encoded,
+                evidence,
+                registration,
+                display_target,
+            })),
+            WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
+        }
     }
-    match capture_private_output(
-        &slot,
-        &registration,
-        writers,
-        stdout,
-        stderr,
-        helper,
-        &cancel,
-        deadline,
-    )
-    .await?
-    {
-        WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
-            encoded,
-            evidence,
-            registration,
-            display_target,
-        })),
-        WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
+    .await;
+    if let Some(source) = source_settlement {
+        source.settle().await?;
     }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1490,7 +1533,7 @@ fn private_window_outcome(
 /// for a log/plan note.
 #[cfg(any(target_os = "linux", test))]
 fn encoder_diagnostic_tail(diagnostic: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(diagnostic);
+    let text = crate::scratch_put::redact(&String::from_utf8_lossy(diagnostic));
     let line = text.lines().rev().map(str::trim).find(|line| {
         !line.is_empty()
             && !line.split_once('=').is_some_and(|(key, _)| {

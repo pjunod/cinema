@@ -1808,6 +1808,14 @@ rest, in the groups that matter:
   claim about the grade cannot authorize anything),
   `audio_offset_ms` (±15 000, never written back to the file).
 - **Position** — `start` in seconds, negatives clamped to 0.
+- **Source service** — optional `source_telemetry: "film-v1"` declares film-demand
+  reporting separately from `transport`. A capable client receives startup/refill
+  priority before its first control exchange. Omission uses finite transfer
+  service until actual accepted film telemetry permanently establishes rolling
+  service. When ordinary control is off, the server clears the declaration; quality-ledger
+  receipts alone do not supply source-demand freshness. This field
+  does not change media identity or enable a feature; unknown labels retain
+  legacy transfer service.
 - **Evidence** — `caps` (the same v2 document), `overrides`, `presentation`
   (only `"vod"`), `block_budget_secs`, `intent` (the viewer's ask as an
   *orderable* value, recorded durably before anything is built).
@@ -2040,6 +2048,18 @@ whose playlist is the family's multivariant master, and `quality` is
 `quality-schedule` and `quality-family` paths. Reading the new owner back can
 answer 503 `continuous_family_owner_timeout`, or 409
 `continuous_family_owner_missing` / `continuous_family_owner_changed`.
+
+Version 2 creation requires `controlled: true`. It keeps the same candidate pair
+and response envelope, but prepares only primary video and shared audio for
+startup. The companion begins after the owned primary reports a durable
+`presented` transition. A version 2 family has `family_revision: 1` and one
+video row initially; once the companion init is verified it adds the second
+row at revision 2. Family identity, primary and audio rows remain stable.
+Clients refresh `quality-family` on owned media requests or quality intents,
+accept only additive revisions, and update the existing player levels without
+reloading the source. Version 1 retains its full-pair startup contract.
+A 503 `segment_pending` retains the same family, URL and original preparation
+deadline; it is not permission to delete and recreate the producer.
 
 **`GET /hls/{session}/quality-family`** — `application/json`, `Cache-Control:
 no-store`, at most 32 KiB, relayed to the owner like a playlist: `{version: 1,

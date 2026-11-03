@@ -909,6 +909,14 @@ async fn own_rolling_retirement(
         };
         match cleanup {
             Ok(()) => {
+                if let Err(error) = session
+                    .restore_fallback_analysis_interest(store.as_ref())
+                    .await
+                {
+                    tracing::warn!(%error,session=%session_log_id(&session_id),"exact fallback interest restore will retry after physical retirement");
+                    tokio::time::sleep(PREPUBLICATION_REAP_RETRY).await;
+                    continue;
+                }
                 // The child is reaped, but a copy reader may still be
                 // draining its pipe. Fence new writers, wait for the ones
                 // already registered, then measure once and convert the

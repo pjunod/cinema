@@ -965,7 +965,8 @@ pub(crate) async fn worker_pass(
                 .ok_or_else(|| StoreError::Task("translation claim token missing".into()))?,
             deadline,
             kind,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
         let operation = plurx_core::process::bounded::cancellable(
@@ -979,6 +980,13 @@ pub(crate) async fn worker_pass(
                 expected_model_identity.as_deref(),
             ),
         );
+        let operation = async {
+            if !model {
+                crate::background_jobs::budgeted(fence.source_budget(), operation).await
+            } else {
+                operation.await
+            }
+        };
         tokio::pin!(operation);
         let result = loop {
             tokio::select! {

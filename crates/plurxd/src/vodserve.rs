@@ -771,6 +771,7 @@ pub struct VodStart {
 
 /// Actual init-verified media and exact catalog provenance for one parent.
 pub(crate) struct VerifiedContinuousFamily {
+    pub versioned: bool,
     pub controlled: bool,
     pub family: plurx_core::transcode::VodPresentationFamily,
     pub video_budgets: Vec<plurx_core::transcode::VodRenditionBandwidth>,
@@ -779,9 +780,9 @@ pub(crate) struct VerifiedContinuousFamily {
 }
 
 impl VerifiedContinuousFamily {
-    /// The durable descriptor bound to the session. Its bytes are compared
-    /// exactly on every re-bind and parsed by older nodes during a rolling
-    /// deploy, so it never carries the link rates.
+    /// The durable descriptor bound to the session. V1 is immutable; negotiated
+    /// V2 may add the original companion under the same primary/audio anchor.
+    /// Link rates remain recomputed client metadata, outside durable identity.
     pub(crate) fn description(&self) -> Result<Vec<u8>, VodError> {
         self.description_with(false)
     }
@@ -839,11 +840,15 @@ impl VerifiedContinuousFamily {
             );
             row
         });
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "version": 1, "family_id": self.family.id(),
+        let mut description = serde_json::json!({
+            "version": if self.versioned { 2 } else { 1 }, "family_id": self.family.id(),
             "mode": if self.controlled { "controlled" } else { "autonomous_reserved" }, "master": "master.m3u8", "video": video, "audio": audio,
-        }))
-        .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
+        });
+        if self.versioned {
+            description["family_revision"] = self.family.video().rungs().len().into();
+        }
+        let bytes = serde_json::to_vec(&description)
+            .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
         if bytes.len() > 32 * 1024 {
             return Err(VodError::ProducerFailed(
                 "family description exceeds its bound".into(),
@@ -1189,6 +1194,7 @@ pub(crate) use session::*;
 /// Everything the tasks share. `VodServe` is a thin handle over this so the
 /// per-rendition driver and generation tasks can be `'static`.
 struct Shared {
+    source_identity: StdMutex<Option<crate::source_custody::SourceIdentity>>,
     base: PathBuf,
     runtime_cache: PathBuf,
     store: Arc<dyn Store>,

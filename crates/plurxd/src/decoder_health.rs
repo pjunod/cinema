@@ -1811,7 +1811,7 @@ fn observe_line(
     // Without a grammar the line is still read, still bounded and still
     // logged; it is simply not evidence. `mark_grammar_unavailable` said so
     // once, before the first read.
-    log(line);
+    log(&crate::scratch_put::redact(line));
 }
 
 #[cfg(test)]

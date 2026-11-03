@@ -36,7 +36,7 @@ function streamHasVideo(p, v){
 // before, and a browser that does not implement getVideoPlaybackQuality is
 // judged by whether a picture exists at all. Neither guesses a failure.
 function playbackIsReal(){
-  const p=PLAYER; if(!p || !p.started) return false;
+  const p=PLAYER; if(!p || !p.started || p.mediaAttachment?.nativePositionPending) return false;
   const v=document.getElementById("video");
   if(!streamHasVideo(p, v)) return true;     // audio-only: `playing` IS the answer
   if(!v) return true;
@@ -72,8 +72,11 @@ function hasPendingPlaybackOpen(p){
 // can still belong to its predecessor. Only the attached owner may interpret
 // media events/clock samples as playback evidence or trigger automatic work.
 // Transport/selection commands deliberately use desired PLAYER independently.
-function playbackOwnsAttachedMedia(p){
-  return !!p&&PLAYER===p&&!p.playPermissionDenied&&!p.pendingMediaChange&&!hasPendingPlaybackOpen(p);
+function playbackOwnsAttachedMedia(p,sourceAuthority=false){
+  // Native readiness owns its session before its bytes own the element. Only
+  // that loader may bypass the pending-source fence; observations may not.
+  return !!p&&PLAYER===p&&!p.playPermissionDenied&&!p.pendingMediaChange&&!hasPendingPlaybackOpen(p)
+    &&(sourceAuthority||!p.mediaAttachment?.nativePositionPending);
 }
 // Always released, including on failure: a 5xx on the replacement session must
 // leave Auto able to try again rather than wedging every later rescue.
@@ -927,6 +930,17 @@ function retryPlayback(){
 async function stallDiagnose(){
   const v=document.getElementById("video");
   const p=PLAYER;
+  // The native timer and this existing timer can mature in either order.
+  // A fresh independent-progress diagnosis concludes only the sensor, never
+  // the attached transport. Do this before generic stall reporting/effects.
+  const native=p&&p.hlsStartup;
+  if(native?.transport==='native'&&native.state==='active'
+    &&performance.now()>=native.deadlineMs&&concludeNativeHlsObservation(p,native)) return;
+  if(native?.state==='observation_unavailable'){
+    const media=/** @type {HTMLVideoElement|null} */(v);
+    if(!media?.error&&!currentStreamFailureOverlay()) return;
+    native.state='exhausted';
+  }
   // `armStall` and the VOD local fallback share the 20 s seek clock. If
   // both timers mature together, only the seek fallback may reopen; this
   // watchdog must not stop the attachment first.

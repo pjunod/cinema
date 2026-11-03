@@ -729,6 +729,8 @@ fn test_session_with_optional_child(
         recovery: None,
         response_incarnation: uuid::Uuid::new_v4(),
         frozen_presentation: None,
+        fallback_analysis_interest: std::sync::Mutex::new(None),
+        source_request: None,
         rolling_provenance: None,
         rolling_collection: None,
         rolling_artifact: None,
@@ -762,7 +764,9 @@ fn test_session_with_optional_child(
         cache_manifest: None,
         cache_location: None,
         control,
-        publication: Mutex::new(RollingPublicationClock::default()),
+        // Historical flow/retention controls explicitly retain the old cushion.
+        // Production and new startup regressions bind the short phase below.
+        publication: Mutex::new(RollingPublicationClock::historical_control_for_test()),
         publication_worker_started: AtomicBool::new(false),
         flow_worker_started: AtomicBool::new(false),
         file_id: 1,

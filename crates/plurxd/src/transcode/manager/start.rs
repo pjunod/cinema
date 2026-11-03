@@ -192,6 +192,7 @@ impl TranscodeManager {
             None,
             None,
             None,
+            false,
         )
         .await
     }
@@ -228,6 +229,7 @@ impl TranscodeManager {
             Some(claim),
             None,
             None,
+            false,
         )
         .await
     }
@@ -644,6 +646,7 @@ impl TranscodeManager {
         audio_claim: Option<&plurx_core::playback::audio::AudioClaim>,
         retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
         sdr_master_codecs: Option<bool>,
+        source_telemetry: bool,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
         // Cluster replacements are provisional until their durable pointer CAS
@@ -1489,6 +1492,13 @@ impl TranscodeManager {
             dir: dir.clone(),
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
+            fallback_analysis_interest: std::sync::Mutex::new(None),
+            source_request: self.foreground_source_request(
+                &file,
+                &session_id,
+                uuid::Uuid::new_v4(),
+                if source_telemetry {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling} else {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::RollingOrTransfer},
+            ),
             rolling_provenance,
             rolling_collection,
             rolling_artifact: None,
@@ -1639,7 +1649,7 @@ impl TranscodeManager {
             }
         }
         if let Err(reason) = session
-            .spawn_and_install_prepublication_child(generation, || {
+            .spawn_and_install_prepublication_child(generation, |source_input| {
                 spawn_ffmpeg_at_with_env(
                     macos_executable
                         .as_ref()
@@ -1651,7 +1661,7 @@ impl TranscodeManager {
                                 .map(|proof| proof.executable_path())
                         })
                         .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
-                    &args,
+                    &crate::source_input::source_args(&args, &file.path, &[3], source_input),
                     crate::process_control::ChildWork::realtime("playback transcode"),
                     encoder.label(),
                     &session_id,
@@ -1788,6 +1798,7 @@ impl TranscodeManager {
             false,
             None,
             None,
+            false,
         )
         .await
     }
@@ -1809,6 +1820,7 @@ impl TranscodeManager {
         automatic: bool,
         audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
         sdr_master_codecs: Option<bool>,
+        source_telemetry: bool,
     ) -> Result<StartInfo, String> {
         // One Store read for the file, its probe and its settings (D4).
         let RollingStartInputs {
@@ -2239,6 +2251,13 @@ impl TranscodeManager {
             dir: dir.clone(),
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
+            fallback_analysis_interest: std::sync::Mutex::new(None),
+            source_request: self.foreground_source_request(
+                &file,
+                &session_id,
+                uuid::Uuid::new_v4(),
+                if source_telemetry {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling} else {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::RollingOrTransfer},
+            ),
             rolling_provenance,
             rolling_collection,
             rolling_artifact: None,
@@ -2370,14 +2389,19 @@ impl TranscodeManager {
         session.bind_retry_compatibility_attempt(generation).await;
         let pipe_stdout = if segmenting {
             match session
-                .spawn_and_install_prepublication_pipe_child(generation, || {
+                .spawn_and_install_prepublication_pipe_child(generation, |source_input| {
                     spawn_ffmpeg_pipe_at(
                         session
                             .rolling_provenance
                             .as_ref()
                             .map(|proof| proof.executable_path())
                             .unwrap_or(std::path::Path::new(&ffmpeg_bin())),
-                        &initial_args,
+                        &crate::source_input::source_args(
+                            &initial_args,
+                            &file.path,
+                            &[3],
+                            source_input,
+                        ),
                         crate::process_control::ChildWork::realtime("playback transcode"),
                         &session_id,
                         FfmpegProgressObserver::rolling(
@@ -2419,14 +2443,19 @@ impl TranscodeManager {
             }
         } else {
             if let Err(reason) = session
-                .spawn_and_install_prepublication_child(generation, || {
+                .spawn_and_install_prepublication_child(generation, |source_input| {
                     spawn_ffmpeg_at(
                         session
                             .rolling_provenance
                             .as_ref()
                             .map(|proof| proof.executable_path())
                             .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
-                        &initial_args,
+                        &crate::source_input::source_args(
+                            &initial_args,
+                            &file.path,
+                            &[3],
+                            source_input,
+                        ),
                         crate::process_control::ChildWork::realtime("playback copy HLS"),
                         "copy",
                         &session_id,

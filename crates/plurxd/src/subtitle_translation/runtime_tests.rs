@@ -103,6 +103,7 @@ async fn begin(state: &AppState, job_id: &str, kind: JobKind) -> ActiveBackgroun
         deadline,
         kind,
     )
+    .await
     .expect("active claim")
 }
 async fn fixture(media: bool) -> Fixture {

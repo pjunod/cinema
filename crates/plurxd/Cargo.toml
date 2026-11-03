@@ -74,7 +74,7 @@ mdns-sd = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
 qrcode = { workspace = true }
-sha2 = { workspace = true }
+sha2 = { workspace = true, features = ["compress"] }
 hmac = { workspace = true }
 base64 = "0.22"
 hex = { workspace = true }

@@ -599,6 +599,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
         deadline,
         JobKind::DvTitleScan,
     )
+    .await
     .expect("active job");
     let admission = state
         .transcode

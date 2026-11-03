@@ -2775,3 +2775,28 @@ fn a_failed_main10_decode_probe_is_retried_after_a_bounded_backoff() {
     assert!(super::HEVC_MAIN10_PROBE_CLIP.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
     assert!(super::HEVC_MAIN10_PROBE_CLIP.len() < 16 * 1024);
 }
+
+#[tokio::test]
+async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_arguments() {
+    let nonce = "0123456789abcdef0123456789ABCDEF";
+    let url = format!("http://127.0.0.1:43210/{nonce}");
+    let diagnostic = format!("Error opening input '{url}': invalid data; retry {url}\n");
+    let redacted = drain_diagnostics(diagnostic.as_bytes()).await;
+    assert!(!redacted.contains(nonce));
+    assert_eq!(redacted,"Error opening input 'http://127.0.0.1:43210/REDACTED': invalid data; retry http://127.0.0.1:43210/REDACTED\n");
+    assert_eq!(url, format!("http://127.0.0.1:43210/{nonce}"));
+    let truncated = format!("{url}{}", "x".repeat(8150));
+    let tail = drain_diagnostics(truncated.as_bytes()).await;
+    assert!(tail.len() <= 8 * 1024);
+    assert!(
+        !tail.contains(nonce),
+        "tail truncation cannot expose a nonce after cutting its URL prefix"
+    );
+    let other =
+        "file /media/movie.mkv; http://127.0.0.1:43210/status; https://example.invalid/video";
+    assert_eq!(crate::scratch_put::redact(other), other);
+    assert_eq!(
+        crate::scratch_put::redact(&format!("({url}), ü {url}/part.m4s")),
+        "(http://127.0.0.1:43210/REDACTED), ü http://127.0.0.1:43210/REDACTED/part.m4s"
+    );
+}

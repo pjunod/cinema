@@ -2015,6 +2015,19 @@
           next.presentingSince = null;
         }
       }
+    } else if (event && Object.prototype.hasOwnProperty.call(event, "observation_unavailable")) {
+      // The owner withdraws only its observational claim. This is neither
+      // presentation proof nor success, and cannot retire server/permission
+      // authority or another owner, generation, or viewer intent.
+      const owner = event.observation_unavailable;
+      const sources = ["client_preparing", "media_waiting", "owner_recovery_step", "readiness_deadline_rungs_left"];
+      if (typeof owner === "string" && owner.length > 0 && event.attached != null && event.attached === next.attached) {
+        surfaceDropFaults(next, log, (fault) =>
+          fault.attached === event.attached && fault.intent === (event.intent ?? null) &&
+          fault.observationOwner === owner && !fault.playerStopped &&
+          ["preparing", "buffering", "recovering"].includes(fault.class) && sources.includes(fault.source),
+        "observation_unavailable");
+      }
     } else if (event && Object.prototype.hasOwnProperty.call(event, "system_paused")) {
       if (event.system_paused) {
         surfaceDropFaults(next, log, (fault) => fault.source === "system_interruption", "system_resumed");
@@ -2110,6 +2123,7 @@
               detail: event.detail ?? null,
               actions: rowActions,
               playerStopped,
+              observationOwner: typeof event.observation_owner === "string" ? event.observation_owner : null,
               thenWhenStopped: found.row.then_when_stopped || null,
               demoted: false,
               seq: next.seq,

@@ -1,11 +1,13 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-02 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
 ## HDR enhancement quality repair — 2026-11-03
 
 Open: make RPU/DYN/FEL preserve their benefit after delivery. A measured RGB conversion bias has a source correction prepared; full-window encoder comparison and production improvement remain. [Canonical ledger](docs/streaming/DV_HDR_QUALITY_REPAIR.md).
+
+- **2026-11-02 · Playback startup, Resume and native callbacks:** Owner Codex/root; [delivery ledger](docs/streaming/PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md). Astra closed all seven source findings; narrow test-phase corrections are recorded in the delivery ledger. All 86 focused Rust cases pass with successful cases retained and failures retried only. C controls, Apple (1) and Android (10) tests pass on matching inputs. Pinned compiler checks pass. [PR #1366](http://forge.lan:3000/noirr/plurx/pulls/1366) records the live main-lane checks and landing. The maintainer owns deployment; runtime cold-start acceptance remains open.
 
 - **2026-11-02 · Library worker driver; async Store refinement proof parked:** [parked proof ledger](docs/cluster/ASYNC-STORE-REFINEMENT-STATUS.md). Owner Claude (claude-opus-5-5, session 01BCWL9x). Library workers now run through one shared driver, so ready work beats pressure ticks while queue and domain loss keep priority; carved from PR #1263 without its proof machinery. The exhaustive refinement proof is parked: its state space did not close in an offline census (about 5M products per context and still growing), far beyond what paged sessions can qualify. The proof work is preserved under tag `archive/async-store-refinement-2026-11-02` and a bundle on #1263; restarting needs a reduced model first.
 - **2026-11-01 · CI fleet visibility (ci-fleet):** [repository, plan and usage](http://forge.lan:3000/noirr/ci-fleet) (moved out of plurx into its own repository after merging here). Owner Claude (claude-opus-5-5, session 01BCWL9y); [PR #1344](http://forge.lan:3000/noirr/plurx/pulls/1344). The forge records no placement and shows a job whose labels no runner carries as waiting forever: four Apple jobs asked for `xcode-27.1` after macb re-registered as `xcode-27.2`, and `general · ffmpeg-6` had 0 of 3 runners online. ci-fleet classifies every waiting job, shows pools, drift, placement (from line 1 of each job log) and per-host usage, and routes Drain/Start VM through the runner watchdog and Apple standby. Not deployed: Paul installs the collector on lab3 and the agents.

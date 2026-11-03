@@ -142,7 +142,7 @@ class TLCOutputClassificationTests(unittest.TestCase):
 
 class RegistryProfileTests(unittest.TestCase):
     def test_registry_profiles_are_explicit_and_bounded(self) -> None:
-        self.assertEqual(len(formal.CONFIG_ORDER), 16)
+        self.assertEqual(len(formal.CONFIG_ORDER), 18)
         self.assertEqual(len(formal.SMOKE_CONFIGS), 9)
         self.assertEqual(formal.select_configs("smoke", None), list(formal.SMOKE_CONFIGS))
         self.assertEqual(formal.select_configs("full", None), list(formal.CONFIG_ORDER))

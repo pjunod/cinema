@@ -1,8 +1,9 @@
 # Durable-job contract — connect finite authority transitions to source
 
-**Status:** reviewed source contract; bounded qualification complete ·
+**Status:** original package qualified; all 18 updated configurations checked
+locally; CI and promotion qualification separate ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`5ac9d8f25` combined with repair `59c648db` (scoped audits below) · **Scope:** bound `library_scan` and
+`594210a783986d4da5ec7184f0895433ffe98b90` (2026-11-03 pause extension below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -12,6 +13,91 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+
+## Source pause — finite correspondence on 2026-11-03
+
+The source audit compares each drifted file with the Git version whose bytes
+match its previously admitted whole-file fingerprint. Current runtime source
+is `594210a783986d4da5ec7184f0895433ffe98b90`. This is an author source review;
+previous independent reviews and execution receipts retain their historical
+source/model identities. New static and bounded executions are separate
+receipts, not renewal of the earlier full qualification.
+
+The queue changes are substantive: `RENEW_SQL` and `CLAIM_RESOURCE_SNAPSHOT`
+accept an exact paused source owner when its physical source reservation is
+absent. Claim admission additionally consults source occupancy and foreground
+permission. A hash-only refresh would miss this difference. The model now
+records a stable job/node/boot/claim/fence pause identity and one selected
+source key. `PauseSource` removes that key's reservation; `RenewCover` permits
+its exact paused substitute only for renewal/replay/resolution; `ResumeSource`
+reinstalls it under the current live owner and slot guard. Revisions may
+advance while stable ownership remains. A stale fence/boot/claim cannot
+substitute for the current paused owner. The record may retain obsolete
+identity diagnostics; exact matching makes them inert after takeover or
+settlement, rather than modeling the source cleanup trigger itself.
+
+The binding implementation, publication facade, both backend publication
+implementations and existing queue schema triggers remain byte-identical to
+the admitted pins. Their actual-reservation `Cover` guards stay unchanged in
+the model. S8 asserts no current paused source reservation. The bounded
+witness composes pause, successful heartbeat delivery and replay, exact
+reacquisition, then an actual insertion commit; its state invariants also
+check publication authority. It uses a declared action subset of shared
+`Next`, while the added positive safety configuration uses shared
+`SafetyNext` without a schedule filter. Existing controls, horizons and
+properties remain; positive safety configurations additionally check S8.
+
+There is at most one pause/reacquisition pair per execution. The extra
+source-pressure claim/resume veto is external; omitting that veto permits
+more safety schedules, never proves admission availability. Physical
+stop/join verification, custody settlement, source-byte service, indefinite
+or repeated pressure and paused-worker liveness are not established. This
+model supplies no permission to perform a physical read while paused.
+
+| Reviewed changed dependency | Correspondence and limit |
+|---|---|
+| `background_jobs.rs`, `background_jobs_resources.rs` and [foreground SQL](../../crates/plurx-core/src/store/background_jobs_foreground.sql) | Exact paused-owner branch and source reservation removal/reacquisition mapped above; source checkpoint data and physical custody remain outside model state |
+| `hiqlite.rs`, `sqlite/mod.rs`, `subtitle_managed_schema.rs` and [managed-v4 resource view](../../crates/plurx-core/src/store/subtitle_managed_resources_v4.sql) | Install the source schema and managed-v4 classification. `library_scan`/`metadata_refresh` still require source and provider rows; prepared-artifact exclusions do not reclassify them. Online migration correctness remains ordinary runtime evidence |
+| `plurxd/background_jobs.rs`, `library_work.rs`, `library_work/env.rs`, `state.rs` | Source registration, budgets, owned probe input and settlement replay surround the existing library route. Bind-before-work and selected publication call sites remain; local source-driver progress/cleanup is outside this finite authority model |
+| `transcode/manager/produce.rs` | Source budgeting and offline child ownership change the previously classified domain-only/out-of-scope route; no new bound library publication caller is admitted |
+| `store_contract/formal_publication.rs` | Only the `Arc` import gains its Hiqlite-test condition; the eight selected conformance test bodies are unchanged |
+
+The mapping refreshes 43 whole-file rows across 11 inspected files and adds
+foreground-schema and managed-v4-view dependency pins. The historical review
+§2 renewal citation is retained but its exact anchor now includes both the
+real reservation predicate and exact paused alternative. This is not anchor
+removal or a claim that the new physical source subsystem was proved.
+
+**Observed checks (2026-11-03):** pinned Temurin 21.0.12+8 and TLC 1.7.4,
+model SHA-256
+`9ffa3459040c8b076af85370712a11f1c932ed204be3c6e57142142578fda2fe`,
+mapping SHA-256
+`d7680ca828c88fce963ee13c0c57f345a51b81bd9c2fea140607c03db07c31ed`.
+The static `check-mapping --package durable-jobs --affected-base bd213c819`
+reported no source drift. Single-configuration runs completed for
+`source-pause.cfg` (8.069 s, exhaustive finite safety),
+`witness-source-pause.cfg` (1.302 s, the named witness with 11 trace states),
+and the existing `smoke.cfg` (7.719 s, exhaustive finite safety). The
+`baseline.cfg` run completed in 688.180 s with 257,837,060 generated states,
+31,710,453 distinct states and zero queued; `lifecycle.cfg` completed in
+310.809 s with 84,457,632 generated states, 11,222,402 distinct states and
+zero queued. The other 13 controls, recovery and witness configurations
+returned their expected outcomes in 27.824 s combined. Each registered
+configuration ran once, with no failures or retries. The existing
+registry-profile unit assertion also passed.
+
+All 18 per-configuration receipts bind identical model, mapping, runner and
+input hashes, as checked by the task's `configuration-receipts.json` index.
+The five positive/new-case receipt IDs are `20261103T191359.798063Z`,
+`20261103T191401.511107Z`, `20261103T191425.267863Z`,
+`20261103T191553.163147Z` and `20261103T191552.079302Z`; the index identifies
+all remaining individual receipts. Each receipt retains its actual
+single-configuration qualification label. This is local coverage of all
+18 registered configurations on the exact recorded dirty source/model
+snapshot; it does not establish authenticated CI custody or replace the
+promotion gate. All 18 task-owned checker metadirs were removed after their
+runs; receipts, raw logs, traces and hash/config evidence remain (about
+0.76 MiB total), with the pinned toolchain cache retained separately.
 
 ## Local main integration — source correspondence on 2026-10-29
 
@@ -395,8 +481,8 @@ A newly acquired higher domain fence may temporarily have no matching binding.
 | Enqueue / demand | `store/background_jobs.rs::enqueue_job`, `ENQUEUE_SQL`, `background_jobs_retention.sql::background_job_enqueue_command` | Accepted demand creates or joins a queued job; request identity differs from job identity | Library id, kind and payload-v1 validation are fixed valid; waiter priorities and payload data are abstracted |
 | Claim read, then CAS | `background_jobs.rs::claim_job`, `CLAIM_SQL` | First read can return the same live claim; otherwise exact observed revision CAS claims eligible queued/expired work, increments fence/revision, installs attempt and both required reservations atomically | Read and CAS are separate transitions; capability/kind predicates fixed to selected kinds; no Raft implementation |
 | Claim eligibility | `CLAIM_SQL` and resource triggers in `background_jobs_resources.sql` | Valid demand, not-before reached, retry budget, owner not removed, dispatch window, fresh identity, reservation slots available; live reservations of other jobs compete | Finite identities never recycle; counter exhaustion is an exploration boundary, not a production terminal state |
-| Replay / resolution | `background_jobs.rs::claim_job` and `resolve_claim` | Same identity returns existing current token only with matching node/boot, running state, live expiry and resource coverage; absent history gives expired/pruned, never a new attempt | Resolve without fence additionally checks dispatch window; per-operation caller `now_ms` is retained |
-| Queue renewal | `RENEW_SQL`, `background_jobs_schema.sql::background_job_renew_command` | Exact predecessor, running state, live lease, no removed owner, complete reservations; increments revision and updates reservation expiry | Cancellation changes revision as well as state; replay is not a new renewal |
+| Replay / resolution | `background_jobs.rs::claim_job` and `resolve_claim` | Same identity returns existing current token only with matching node/boot, running state, live expiry and actual resource coverage or the exact paused source substitute; absent history gives expired/pruned, never a new attempt | Resolve without fence additionally checks dispatch window; per-operation caller `now_ms` is retained |
+| Queue renewal | `RENEW_SQL`, `background_jobs_schema.sql::background_job_renew_command` | Exact predecessor, running state, live lease, no removed owner, covering reservations or exact paused source substitute; increments revision and updates reservation expiry | Cancellation changes revision as well as state; replay is not a new renewal |
 | Cancellation / settlement | `cancel_job`, `SETTLE_SQL`, cancellation/settlement triggers | Queued→cancelled, running→cancelling; exact live settlement clears owner and reservations; yield preserves demand and installs not-before; failure consumes retry budget | S5 checks no revival of cancelling by modeled actions; cancelling is absorbing here, with no modeled completion/settlement from that state. New requests and general cancellation/completion precedence are outside this fragment |
 | Domain acquire / renew / release | `store/sqlite/coordination.rs`; `store/hiqlite_coordination.rs`; `cluster/coordination.rs::Lease` | Acquire expired row with higher fence/revision; exact renew; release clamps expiry and advances revision without deleting row | SQLite acquire/renew do not have Hiqlite's explicit removed-owner filter; publication still checks its bound job |
 | Bind | `background_jobs_domain.rs::BIND_SQL` | Selected kind and scan resource; exact live queue/domain tuples; reservations; owner not removed; stable tuple installed | Same domain fence accepts only identical stable tuple; different attempt needs a higher domain fence |
@@ -535,6 +621,7 @@ in README and the model; finite safety exhaustion is never liveness evidence.
 |---|---|
 | `InitFresh`, `InitRecovery`, `Next`, `ModelView`, `Symm` | Constructed reachable-shape seeds and explicit finite exploration machinery; not production operations |
 | `Cancel`, `Remove`, `LoseResource`, `Takeover`, `Outage`, `Restart` | Queue cancellation; membership removal; reservation loss; environment takeover abstraction of expired `CLAIM_SQL` plus triggers; unreachable authority; crash/reboot transport abstraction |
+| `PauseSource`, `ResumeSource` | `background_jobs_resources.rs::pause_background` / `resume_background` plus foreground SQL triggers; exact stable owner and one source reservation; physical stop/join and extra admission veto external |
 | `SendRenew`, `ApplyRenew`, `DeliverRenew` | Caller queue heartbeat; atomic `RENEW_SQL`/renew trigger; worker adoption of returned exact token |
 | `DomainChange`, `AcquireDomain` | Exact domain renewal/release and expired-lease acquisition in both coordination backends |
 | `BindAttempt`, `RefusalRelease`, `RefusalSettle` | Binding transaction followed by distinct domain release and exact queue yield; caller not-before is now+5000 (model2) |

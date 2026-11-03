@@ -51,6 +51,7 @@
     "detail/edit.js",
     "player/player.js",
     "player/continuous-media.js",
+    "player/video-frames.js",
     "player/continuous-quality.js",
     "player/session.js",
     "player/prepared-replacement.js",

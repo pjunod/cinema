@@ -3476,6 +3476,9 @@ pub(crate) fn rolling_estimated_position_ms(
     demand: &PlaybackDemandSnapshot,
     observation_age: Duration,
 ) -> i64 {
+    if demand.render_state == RenderState::Seeking {
+        return demand.seek_target_ms.unwrap_or(demand.position_ms);
+    }
     if demand.demand != PlaybackDemand::Active || demand.render_state != RenderState::Rendering {
         return demand.position_ms;
     }

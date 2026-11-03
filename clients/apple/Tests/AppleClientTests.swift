@@ -286,6 +286,8 @@ private struct PlaybackSurfaceContractFixture: Decodable {
         let intentSettled: String?
         let intentSuperseded: String?
         let ownerSuccess: String?
+        let observationUnavailable: String?
+        let observationOwner: String?
         let userAction: String?
         let playbackRequested: Bool?
         let systemPaused: Bool?
@@ -300,6 +302,8 @@ private struct PlaybackSurfaceContractFixture: Decodable {
             case intentSettled = "intent_settled"
             case intentSuperseded = "intent_superseded"
             case ownerSuccess = "owner_success"
+            case observationUnavailable = "observation_unavailable"
+            case observationOwner = "observation_owner"
             case userAction = "user_action"
             case playbackRequested = "playback_requested"
             case systemPaused = "system_paused"
@@ -3076,6 +3080,10 @@ final class AppleClientTests: XCTestCase {
         if let presenting = raw.presenting {
             return .presenting(presenting, attached: ids.id(raw.attached))
         }
+        if let owner = raw.observationUnavailable {
+            return .observationUnavailable(owner: owner, attached: ids.id(raw.attached),
+                                           intent: raw.intent == nil ? nil : ids.id(raw.intent))
+        }
         if let source = raw.raise {
             return PlaybackSurfaceModel.raise(
                 source: source,
@@ -3086,7 +3094,8 @@ final class AppleClientTests: XCTestCase {
                 actions: (raw.actions ?? []).compactMap { PlaybackFault.Action(rawValue: $0) },
                 positionMs: raw.positionMs,
                 title: raw.title,
-                detail: raw.detail
+                detail: raw.detail,
+                observationOwner: raw.observationOwner
             )
         }
         if let settled = raw.intentSettled { return .intentSettled(ids.id(settled)) }

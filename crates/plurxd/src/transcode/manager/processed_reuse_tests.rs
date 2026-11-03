@@ -1006,7 +1006,8 @@ async fn fixture_with_audio(
             root.path().join("cache"),
             crate::ffmpeg::ffmpeg_build().await,
             "node".into(),
-        ),
+        )
+        .with_source_identity("node".into(), uuid::Uuid::new_v4()),
     );
     manager.test_hooks();
     let backend = DvBackendIdentity::new(
@@ -1129,8 +1130,25 @@ async fn fixture_with_audio(
                 r#"#!/bin/sh
 set -eu
 test "$2" = 0
-test "$(wc -c < "$1")" -eq {}
-test "$(sha256sum "$1" | cut -d ' ' -f 1)" = '{}'
+case "$1" in http://127.0.0.1:*) ;; *) exit 1 ;; esac
+observed="$(python3 - "$1" <<'PYTHON'
+import hashlib, sys, urllib.request
+try:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
+    digest, count = hashlib.sha256(), 0
+    with opener.open(sys.argv[1]) as source:
+        while True:
+            chunk = source.read(65536)
+            if not chunk:
+                break
+            count += len(chunk)
+            digest.update(chunk)
+    print(count, digest.hexdigest())
+except Exception:
+    raise SystemExit("owned source capability read failed")
+PYTHON
+)"
+test "$observed" = '{} {}'
 printf '%s\n' '{}'
 "#,
                 source_file.size,
@@ -1558,6 +1576,7 @@ printf '%s\n' '{}'
     let incarnation = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let request = SessionRequest {
+        source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: Some(Box::new(context)),
