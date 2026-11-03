@@ -1,6 +1,6 @@
 # Adaptive playback — production policy wiring
 
-**Status:** open · implementation local, qualification pending · updated
+**Status:** open · scoped implementation qualified · updated
 2026-11-03. Continuation of draft effort #1248 after the selected
 [finite lifecycle and restart qualification](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification).
 The [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) remains normative.
@@ -44,7 +44,10 @@ Observation allocates no new map, and exhaustion loses expansion availability
 instead of evicting a cooldown.
 
 The original ledger family, generation and effective limit epoch must still
-match. Duplicate, stale, mismatched or paced observations supply no positive
+match. A producer-backed finite rendition takes its original typed scratch/task
+epoch before execution; the finite driver bypasses the legacy scheduler's first
+generation increment. Accepted samples retain their original identity and time.
+Duplicate, stale, mismatched or paced observations supply no positive
 stability. Producer replacement resets stability while preserving class
 cooldown. Joined/failed production clears positive evidence; generic failures,
 intentional pacing and missing evidence do not manufacture capacity failures.
@@ -52,9 +55,21 @@ Retained reads cannot advance useful work or refresh sample timestamps.
 
 ## Qualification and remaining work
 
-Compilation, focused execution and independent final review are pending for
-this local slice. The preceding finite receipts remain source-bound evidence;
-they do not qualify these new policy changes.
+Four core policy cases pass at `c3b6e38bf`; the real clock/node-runtime case
+passes at `bae03fe9d` after moving its fixture under protected ancestry. At
+`96f37627a`, eight daemon cases pass with zero ignored, including typed refusal,
+original task join/close, unchanged deadlines, contiguous runway and actual
+materialization/cache observations. The native lifecycle passes in 78.81 s.
+Graceful process restart also passes at that source in 85.39 s, including its
+successful 14.74 s child, same S/no encoder, native eviction and final zero.
+These are fourteen unique selected cases; earlier unchanged passes retain
+their actual source identities.
+
+Pinned Rust 1.97.1 workspace/all-target strict Clippy, formatting, catalog and
+JavaScript syntax pass. Independent core/integration and transport reviews
+approve the source. Native execution uses the isolated nonvoter Linux lab,
+18 GiB/no swap/four CPUs and the repository's 8 MiB test stack. The task still
+requires its exact-candidate development gate before effort merge.
 
 This implements refusal of speculation and service observation, not production
 trial execution or safe expansion. Verified containment/startup/cleanup bounds,

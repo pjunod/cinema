@@ -6,7 +6,7 @@ qualification or deployment is claimed.
 
 [Plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) ·
 [finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) ·
-[production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) (local wiring).
+[production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) (qualified scope).
 
 ## Current continuation — two-node publication and test isolation
 

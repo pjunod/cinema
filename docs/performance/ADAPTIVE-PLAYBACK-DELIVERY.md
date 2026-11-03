@@ -89,9 +89,9 @@ The two-node and exact-head gate results are recorded in the task PR.
 The finite qualification above separates implemented fixtures from executed
 results. Their presence does not close the historical all-path checklist.
 
-The local [production policy slice](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
+The [production policy slice](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
 connects typed speculative refusals and bounded growth observations to actual
-finite admission/materialization. Qualification is pending. Unknown native
+finite admission/materialization. Fourteen scoped cases pass. Unknown native
 peaks, startup/cleanup bounds, full inventory and pre-Winner ownership still
 block trial execution. `TrialMonitor` has no production trial owner; priors
 and growth stability never authorize expansion. M2 and hard-memory acceptance
