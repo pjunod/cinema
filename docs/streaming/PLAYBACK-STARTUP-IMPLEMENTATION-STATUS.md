@@ -1,8 +1,9 @@
 # Playback startup, Resume and native callback implementation status
 
-**Status:** Source review closed; execution qualification in progress · **Owner:**
-Codex/root · **Branch:** `codex/playback-startup-fixes` · **Base:** `bd213c819` ·
-**Updated:** 2026-11-03
+**Status:** Implemented; focused Rust, C and mobile qualification passed. Main
+CI and landing are recorded in [PR #1366](http://forge.lan:3000/noirr/plurx/pulls/1366).
+Runtime cold-start acceptance remains open. **Owner:** Codex/root · **Branch:**
+`codex/playback-startup-fixes` · **Base:** `bd213c819` · **Updated:** 2026-11-03
 
 Companion to the [canonical startup proposal](COLD-PLAYBACK-STARTUP-RCA-AND-PROPOSAL.md),
 [AC3 retest RCA](COLD-PLAYBACK-AC3-RETEST-RCA.md), [native callback RCA](NATIVE-CALLBACK-DELIVERY-RCA.md)
@@ -23,24 +24,32 @@ companion selection acquires source admission before init discovery;
 The [Astra dispositions](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) record the
 source changes and qualification boundaries.
 
-Qualification snapshot for implementation candidate `ad2180342`:
+Qualification record through implementation candidate `9205cb735`:
 
+- All 86 focused Rust cases have passing results: 34 core, 2 decoder selection
+  and 50 daemon cases. This includes the explicitly executed packaged-parser
+  qualification. Passing cases were retained; only failed, incomplete or new
+  cases ran again. Receipts preserve each test's source and binary identity.
+- All four parser regressions pass after the future-storage correction on
+  `ad2180342`. The final SDR fixture and same-directory journal replay cases
+  pass on `9205cb735`; earlier passing cases were preserved.
 - Renderer and complete-title C controls pass on matching source hashes.
-- The focused Apple model test passes (1/1); the Android model class passes
-  (10/10), with matching source hashes and no skipped cases.
-- Rust qualification retains 68 passes. Eighteen failed, incomplete or new
-  cases remain in the deduplicated 86-case selection; passing cases are not
-  rerun. The new candidate is compiling on the confirmed learner with pinned
-  Rust 1.97.1, four CPUs, an 18 GiB memory cap and no swap.
-- Normal Mac commit hooks and the unchanged web TypeScript baseline pass.
-  Current-candidate Linux checks, remaining Rust cases, main fast lane and
-  merge qualification are still required.
+  The focused Apple model test passes (1/1) and Android model class passes
+  (10/10), with matching input hashes and no skipped cases.
+- Pinned Linux all-target Clippy passes on `ad2180342`; the affected daemon
+  check passes again on `9205cb735`. Focused binaries compile. Normal Mac
+  commit hooks and the unchanged web TypeScript baseline pass.
+- The main fast lane owns browser regression execution and the affected CI
+  surfaces. The PR records its live result, exact candidate and landing;
+  focused test passes alone do not authorize merge.
 
 Narrow test-phase corrections follow the reviewed source: `91745417d` fixes
 Linux fixture imports; `580ae8f3f` canonicalizes typed receipt identities,
 parameterizes bounded replay queries and corrects fixture policy/schema;
 `ad2180342` heap-pins the collector and platform futures before nested owner
-scopes and asserts the VOD protocol's idempotent Replay behavior. Parser
+scopes and asserts the VOD protocol's idempotent Replay behavior. `9205cb735` supplies
+explicit SDR transfer metadata and clears replay receipts from the same
+journal directory that was enumerated. Parser
 tracing identified a 5,915,304-byte collection future and an 11,830,744-byte
 spawn frame. Heap placement removes that stack expansion while preserving
 existing ownership, cancellation and reap. The test stack stays at the
@@ -50,14 +59,14 @@ repository's documented 8 MiB convention.
 
 | Order | Lane | State | Owner |
 |---:|---|---|---|
-| 1 | Per-element callback multiplexer and native discontinuity renewal; preserve Resume/seek proof and scope renewal evidence to native-src. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Codex/root |
-| 2 | Typed pending-family retry under the original deadline. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Sol |
-| 3 | One shared heavy-source predicate for decode and filter planning, including cropped UHD. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Codex/root |
-| 4 | Resume through the retained-incumbent owner. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Codex/root |
-| 5 | Native clock and buffer ownership across attachment/source execution. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Codex/root |
-| 6 | Continuous companion deferral plus client binding and versioned-family-update consumption. | Astra source review closed, including accepted parent selection before discovery and independent `control_required` / `quality_required` ownership; focused regressions remain pending. | Sol |
-| 7 | M3 short-window first publication while retaining steady continuity reserve. | Astra source review closed; focused regressions and fast-lane qualification remain pending. | Codex/root |
-| 8 | M1 shared source ledger and sparse subtitle-read cancellation with bounded fairness. | Astra source review closed across custody, finite service, sparse cancellation, durable hashes and verified quota holds, including isolated probes; focused regressions remain pending. | Sol / Codex/root |
+| 1 | Per-element callback multiplexer and native discontinuity renewal; preserve Resume/seek proof and scope renewal evidence to native-src. | Source review closed; browser regressions and main gate are recorded in PR #1366. | Codex/root |
+| 2 | Typed pending-family retry under the original deadline. | Source review closed; browser regressions and main gate are recorded in PR #1366. | Sol |
+| 3 | One shared heavy-source predicate for decode and filter planning, including cropped UHD. | Source review closed; focused Rust passes. Main-gate result is recorded in PR #1366. | Codex/root |
+| 4 | Resume through the retained-incumbent owner. | Source review closed; browser regressions and main gate are recorded in PR #1366. | Codex/root |
+| 5 | Native clock and buffer ownership across attachment/source execution. | Source review closed; browser regressions and main gate are recorded in PR #1366. | Codex/root |
+| 6 | Continuous companion deferral plus client binding and versioned-family-update consumption. | Source review closed; focused Rust passes. Accepted parent selection and independent ownership are covered; browser and main-gate results are recorded in PR #1366. | Sol |
+| 7 | M3 short-window first publication while retaining steady continuity reserve. | Source review closed; focused Rust passes. Cold-start timing requires deployment and measurement. | Codex/root |
+| 8 | M1 shared source ledger and sparse subtitle-read cancellation with bounded fairness. | Source review closed; focused Rust and C controls pass across custody, finite service, sparse cancellation, durable hashes and verified quota holds. Runtime cold acceptance remains open. | Sol / Codex/root |
 
 The user's one-batched-main-PR instruction supersedes Fable's separate-PR
 sequence. Keep the order above in reviewable commits within the batch. The
@@ -153,14 +162,14 @@ boundaries require Linux and packaged-parser qualification after review.
 
 | Check | Current result |
 |---|---|
-| Pinned Mac workspace Clippy, all targets, formatting, catalog and served JS syntax | Normal commit hooks pass through implementation candidate `ad2180342`. |
+| Pinned Mac workspace Clippy, all targets, formatting, catalog and served JS syntax | Normal commit hooks pass through implementation candidate `9205cb735`. |
 | Web TypeScript baseline | Pass; no increase to the existing baseline. |
-| Linux all-target Clippy and focused test binaries | Earlier candidate compiled; affected checks and binaries are being rebuilt for `ad2180342` on the confirmed learner. |
+| Linux all-target Clippy and focused test binaries | Pass on `ad2180342`; affected daemon lint and decoder/daemon binaries pass on `9205cb735`. |
 | Renderer and complete-title C controls | Pass; renderer, scanner and input-header hashes match current source. |
 | Focused Apple / Android model tests | Pass: 1 Apple and 10 Android; input hashes match current source. |
-| Focused Rust regressions | 68 passes retained; 18 failed, incomplete or new cases pending out of 86. |
+| Focused Rust regressions | 86/86 pass, retaining successful cases and retrying failures only; per-test source and binary receipts retained. |
 | Astra source review | Seven findings source-closed on `bd3bfffba`; narrow test-phase corrections are identified above. |
-| Main fast lane and merge qualification | Pending; no main PR has been opened yet. |
+| Browser regressions, main fast lane and landing | Live candidate, checks, owner and merge state: [PR #1366](http://forge.lan:3000/noirr/plurx/pulls/1366). |
 
 Private compiler logs, archive checksums, test receipts and ownership handoffs
 live in the workflow's durable evidence directory, outside its disposable build
