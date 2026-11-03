@@ -451,6 +451,10 @@ pub(super) struct AttemptEntry {
     /// the `size_of::<AttemptEntry>()` term of every precharged application
     /// total already covers it; the clock guard it shares is node-owned.
     local_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
+    /// The SAME local create's full-allowance cutoff, fixed with
+    /// `local_cutoff`. It bounds only Adopt, the activation step the create
+    /// keeps its last allowance for; P and R entry stay on `local_cutoff`.
+    local_activation_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
 }
 
 enum PlanningState {
@@ -569,6 +573,7 @@ impl AdaptiveAttemptRegistry {
         worker_instance_id: Uuid,
         serving_generation: u64,
         local_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
+        local_activation_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     ) -> Result<Arc<AttemptEntry>, &'static str> {
         if attempt_id.is_nil() || request_incarnation_id.is_nil() || worker_instance_id.is_nil() {
             return Err("adaptive attempt has a nil identity");
@@ -611,6 +616,7 @@ impl AdaptiveAttemptRegistry {
             finishing_lease: Mutex::new(None),
             charged_control_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
             local_cutoff,
+            local_activation_cutoff,
         });
         *vacant = Some(Arc::clone(&entry));
         Ok(entry)
@@ -638,6 +644,7 @@ impl AdaptiveAttemptRegistry {
             claim.worker_instance_id,
             claim.serving_generation,
             crate::media_pool::create_continuous_entry_deadline(),
+            crate::media_pool::create_continuous_activation_deadline(),
         )?;
         Ok((entry, deadline))
     }
@@ -744,6 +751,18 @@ impl AttemptEntry {
         Ok(self
             .remote_deadline()?
             .or_else(|| self.local_cutoff.clone()))
+    }
+    /// The original continuous bound on this attempt's Adopt: the accepted
+    /// remote grant, else the local create's full-allowance cutoff (its
+    /// prepare cutoff only if that pairing is somehow absent).
+    fn continuous_activation_deadline(
+        &self,
+    ) -> Result<Option<plurx_core::cluster::clock::ContinuousDeadline>, String> {
+        Ok(self.remote_deadline()?.or_else(|| {
+            self.local_activation_cutoff
+                .clone()
+                .or_else(|| self.local_cutoff.clone())
+        }))
     }
     fn remote_failure_fence(
         &self,
@@ -1360,6 +1379,7 @@ impl super::TranscodeManager {
                 request.claim.worker_instance_id,
                 request.claim.serving_generation,
                 None,
+                None,
             )
             .map_err(str::to_owned)?;
         let (grant_tx, grant_rx) = tokio::sync::oneshot::channel();
@@ -1840,18 +1860,9 @@ impl super::TranscodeManager {
         adoption: plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
         preview_json: String,
         authority: crate::serving_fence::ServingAuthority,
-        mut deadline: std::time::Instant,
+        deadline: std::time::Instant,
     ) -> Result<crate::vodserve::VodStart, String> {
-        if let Some(original) = entry.continuous_entry_deadline()? {
-            original
-                .entry_remaining()
-                .map_err(|error| format!("original create activation deadline: {error}"))?;
-            deadline = deadline.min(
-                original
-                    .monotonic_cutoff()
-                    .map_err(|error| error.to_string())?,
-            );
-        }
+        let deadline = original_adopt_deadline(entry, deadline)?;
         if !authority.is_current(entry.serving_generation())
             || std::time::Instant::now() >= deadline
         {
@@ -2995,6 +3006,7 @@ impl super::TranscodeManager {
                 claim.worker_instance_id,
                 claim.serving_generation,
                 None,
+                None,
             )
             .expect("original bounded worker slot");
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
@@ -3404,6 +3416,26 @@ impl super::TranscodeManager {
     }
 }
 
+/// Adopt is activation, not preparation: it is bounded by the create's full
+/// original allowance (or the accepted remote grant), never by the earlier
+/// cutoff P and R entry use.
+fn original_adopt_deadline(
+    entry: &AttemptEntry,
+    deadline: std::time::Instant,
+) -> Result<std::time::Instant, String> {
+    let Some(original) = entry.continuous_activation_deadline()? else {
+        return Ok(deadline);
+    };
+    original
+        .entry_remaining()
+        .map_err(|error| format!("original create activation deadline: {error}"))?;
+    Ok(deadline.min(
+        original
+            .monotonic_cutoff()
+            .map_err(|error| error.to_string())?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3567,6 +3599,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_adopt_inside_the_activation_allowance_survives_the_prepare_cutoff() {
+        let (fixture, _receiver) = remote_control_fixture();
+        let claim = fixture.claim;
+        let registry = AdaptiveAttemptRegistry::default();
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let clock = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(true));
+        // 600 ms create: P/R entry closes at 350 ms, activation at 600 ms.
+        let budget = crate::media_pool::CreateStartupBudget::new_with_clock(600, &clock);
+        let (entry, _) = budget
+            .scope(async { registry.reserve_local(&claim, later) })
+            .await
+            .expect("fresh local reservation inside its create");
+        let early = original_adopt_deadline(&entry, later).expect("adopt before both cutoffs");
+        assert!(early < later && early > std::time::Instant::now());
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(
+            entry
+                .continuous_entry_deadline()
+                .expect("readable")
+                .expect("local P/R cutoff")
+                .entry_remaining()
+                .is_err(),
+            "P and R entry stay closed after the prepare cutoff"
+        );
+        let adopted = original_adopt_deadline(&entry, later)
+            .expect("an Adopt inside the activation allowance is not refused");
+        assert_eq!(adopted, early, "the SAME full-allowance cutoff, never renewed");
+        tokio::time::sleep(
+            early.saturating_duration_since(std::time::Instant::now())
+                + std::time::Duration::from_millis(20),
+        )
+        .await;
+        assert!(
+            original_adopt_deadline(&entry, later).is_err(),
+            "real expiry of the full allowance still closes Adopt"
+        );
+    }
+
+    #[tokio::test]
     async fn cluster_clock_grant_refusal_stays_ungranted_so_the_original_fence_reaches_its_cleanup()
     {
         let (mut original, receiver) = remote_control_fixture();
@@ -3601,6 +3672,7 @@ mod tests {
                 claim.key.request.request_incarnation_id,
                 claim.worker_instance_id,
                 claim.serving_generation,
+                None,
                 None,
             )
             .expect("original registration slot");
@@ -3709,14 +3781,14 @@ mod tests {
         let request = Uuid::new_v4();
         let worker = Uuid::new_v4();
         let entry = registry
-            .reserve(attempt, request, worker, 7, None)
+            .reserve(attempt, request, worker, 7, None, None)
             .expect("reserve");
         let replay = registry
-            .reserve(attempt, request, worker, 7, None)
+            .reserve(attempt, request, worker, 7, None, None)
             .expect("replay");
         assert!(Arc::ptr_eq(&entry, &replay));
         assert!(registry
-            .reserve(attempt, request, Uuid::new_v4(), 7, None)
+            .reserve(attempt, request, Uuid::new_v4(), 7, None, None)
             .is_err());
         let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();

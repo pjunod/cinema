@@ -431,6 +431,10 @@ pub(crate) struct CreateStartupBudget {
     /// policy. Absence refuses new remote grants; it does not mint fallback
     /// time.
     continuous_prepare_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
+    /// The SAME capture's full-allowance cutoff, paired with `deadline`. It
+    /// bounds a local attempt's Adopt: activation is what the
+    /// [`CREATE_ACTIVATION_ALLOWANCE`] between the two cutoffs is kept for.
+    continuous_activation_cutoff: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     pub deadline: tokio::time::Instant,
     calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     binding: std::sync::Arc<std::sync::Mutex<Option<PlanningBinding>>>,
@@ -488,6 +492,7 @@ impl CreateStartupBudget {
         Self {
             deadline: tokio::time::Instant::now() + Duration::from_millis(remaining_ms.min(10_000)),
             continuous_prepare_cutoff: None,
+            continuous_activation_cutoff: None,
             calls: Default::default(),
             binding: Default::default(),
             advisory: Default::default(),
@@ -512,12 +517,11 @@ impl CreateStartupBudget {
         let mut budget = Self::new(remaining_ms);
         budget.deadline = started + allowance;
         if let Some(original) = original {
-            if let Some(paired) = original
-                .deadline_after(allowance)
-                .ok()
-                .and_then(|total| total.monotonic_cutoff().ok())
-            {
-                budget.deadline = budget.deadline.min(paired.into());
+            if let Some(total) = original.deadline_after(allowance).ok() {
+                if let Ok(paired) = total.monotonic_cutoff() {
+                    budget.deadline = budget.deadline.min(paired.into());
+                    budget.continuous_activation_cutoff = Some(total);
+                }
             }
             budget.continuous_prepare_cutoff = allowance
                 .checked_sub(CREATE_ACTIVATION_ALLOWANCE)
@@ -613,6 +617,18 @@ pub(crate) fn create_continuous_entry_deadline(
 ) -> Option<plurx_core::cluster::clock::ContinuousDeadline> {
     CREATE_STARTUP_BUDGET
         .try_with(|budget| budget.continuous_prepare_cutoff.clone())
+        .ok()
+        .flatten()
+}
+
+/// The same original full-allowance continuous cutoff that pairs with the
+/// create's own `deadline`, for a local attempt's Adopt. Absent outside a
+/// create scope or without a healthy local BOOTTIME.
+#[cfg(target_os = "linux")]
+pub(crate) fn create_continuous_activation_deadline(
+) -> Option<plurx_core::cluster::clock::ContinuousDeadline> {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| budget.continuous_activation_cutoff.clone())
         .ok()
         .flatten()
 }
