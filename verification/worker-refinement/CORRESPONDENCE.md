@@ -29,6 +29,33 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Original queue heartbeat delegation — scoped source review on 2026-11-04
+
+Source `d39b42631656b1962f183f2561f2422ffb635d9d` changes the shared
+heartbeat carrier from a raw handle to core `OriginalUnitTask`. `FinishJoin`
+now names the actual retained-handle poll in
+[core application custody](../../crates/plurx-core/src/adaptive_resources/runtime/application.rs).
+The separate `heartbeat.queue.stop_join` boundary continues to name
+[`JobFence::finish_original_controller`](../../crates/plurxd/src/background_jobs.rs):
+its original heartbeat owner mutex now serializes the `OriginalUnitTask`
+selector across waiting, not the actual `JoinHandle`. It requests stop of the
+same original heartbeat and releases that selector mutex before token-state
+retirement.
+Core's synchronous group mutex spans only a poll, never an await. Cancelled
+waiters preserve the same handle; failed join stays sticky and skips retirement.
+
+The durable-jobs and operation-progress source tables also pin this shared
+core dependency. Their other refreshed whole-file pins cover controller
+ownership and encoded-static-only coordination in `state.rs`; selected library
+claim, bind, renewal, completion, settlement and scheduler bodies are unchanged.
+Static M binding is not used by the selected library workers and is not added
+to any model. `FinishJoin` stays descriptive, `abstraction` and `unchecked`;
+the existing selected-driver schedules do not directly observe positive join.
+Models, configurations, action/boundary inventories, properties, fairness,
+validators and historical qualification scopes are unchanged. Offline mapping
+checks are separate from model execution and supply no new refinement,
+progress, native-close, last-alias or M0 acceptance.
+
 ## Effort/main integration — source correspondence on 2026-11-02
 
 Claude (claude-opus-5-5) merged main `7ea74370b` into effort `ca95fde57` on
