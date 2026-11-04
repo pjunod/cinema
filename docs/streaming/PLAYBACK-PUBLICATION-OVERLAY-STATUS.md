@@ -6,7 +6,7 @@ Companion to [the startup implementation ledger](PLAYBACK-STARTUP-IMPLEMENTATION
 
 **Progress:** Adversarial review finished; its regression-fixture finding is addressed. This branch’s pull request description is the live record for compiler results, retained per-test evidence, the main fast lane and landing.
 
-**Owner:** Codex/root; Sol owns the web lifecycle patch. **Branch:** `codex/playback-publication-overlay`. **PR:** See the pull request for this branch; its description records the current state. **Integration base:** `3812516dc` (the reviewed patch has no overlapping upstream changes). **Updated:** 2026-11-03.
+**Owner:** Codex/root; Sol owns the web lifecycle patch. **Branch:** `codex/playback-publication-overlay`. **PR:** [#1376](http://forge.lan:3000/noirr/plurx/pulls/1376), owned by Codex/root; its description records the live check and merge state. **Integration base:** `3812516dc` (the reviewed patch has no overlapping upstream changes). **Updated:** 2026-11-03.
 
 ## Acceptance found two distinct ownership defects
 
