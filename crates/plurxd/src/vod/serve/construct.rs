@@ -1,6 +1,10 @@
 use super::*;
 
 impl VodServe {
+    pub(crate) fn set_source_identity(&self, identity: crate::source_custody::SourceIdentity) {
+        *self.shared.source_identity.lock().expect("source identity") = Some(identity);
+    }
+
     /// Record the durable incarnation a speculative (prepared) session was
     /// primed as, and wake its rendition so an earlier refusal can now look
     /// for the predecessor that staged it.
@@ -219,6 +223,7 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
+                source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
                 file: file.clone(),
@@ -438,6 +443,7 @@ impl VodServe {
         );
         Arc::new(VodServe {
             shared: Arc::new(Shared {
+                source_identity: StdMutex::new(None),
                 base,
                 runtime_cache,
                 store,

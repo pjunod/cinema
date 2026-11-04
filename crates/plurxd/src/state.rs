@@ -1127,6 +1127,7 @@ impl AppState {
             credential_key_path,
             backup_client,
         } = config;
+        crate::source_custody::configure_settlement_journal(&data_dir);
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
             artwork: artwork_dir,
@@ -1159,6 +1160,10 @@ impl AppState {
                 scan_prune_percent,
                 node_id.clone(),
                 Arc::new(membership.clone()),
+            )
+            .with_source_checkpoint_dir(
+                (!data_dir.as_os_str().is_empty())
+                    .then(|| data_dir.join("source-attestation-checkpoints")),
             )
             .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_membership(membership.clone()),
@@ -1211,6 +1216,7 @@ impl AppState {
                 encoder_caps,
                 system.tone_map.selected(),
             )
+            .with_source_identity(node_id.clone(), sharing.accepted_drivers.boot_id())
             .with_encoder_override(crate::transcoder_optimization::effective_override(&system))
             .with_decoders(system.decoders.clone())
             // Cloned from the policy this process installed, which happens in
@@ -1684,6 +1690,9 @@ pub(crate) const TITLE_SCAN_INDEX_WAIT: std::time::Duration =
 
 pub struct JobManager {
     store: Arc<dyn Store>,
+    /// Durable source continuation root. Standalone test managers omit it.
+    source_checkpoint_dir: Option<PathBuf>,
+    source_identity: std::sync::RwLock<Option<crate::source_custody::SourceIdentity>>,
     /// Bounded, node-local repair previews. A plan ID is a lookup handle, not
     /// authority; every status/apply request authenticates its original admin.
     pub(crate) identity_repairs: crate::http::scan_identity::IdentityRepairCache,
@@ -3320,10 +3329,81 @@ fn subtitle_source_covered(
 /// The subtitle worker has no index pipe: the tee's null slave is its sole
 /// stdout destination. A job-owned child and a separate stderr reader ensure
 /// even a noisy decoder cannot deadlock a lease holder.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing extraction inputs and cancellation/progress lifetimes while explicitly plumbing original-source ownership"
+)]
 async fn run_subtitle_source_pass(
     plan: crate::subtitle_ride_along::RideAlongPlan,
     source: &std::fs::File,
     input_args: &[String],
+    original_source: bool,
+    runtime_cache: &Path,
+    lost: &CancellationToken,
+    preempt_when_busy: Option<&TranscodeManager>,
+    progress: &(dyn Fn() + Sync),
+) -> Result<crate::subtitle_ride_along::PendingRideAlong, AnalysisResolutionError> {
+    let input = if original_source {
+        crate::source_input::SourceInput::open_current_held(source, "subtitle-source-pass")
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_unavailable",
+                charge_attempt: false,
+            })?
+    } else {
+        None
+    };
+    let result = run_subtitle_source_pass_owned(
+        plan,
+        source,
+        input_args,
+        input.as_ref().map(|input| input.url()),
+        runtime_cache,
+        lost,
+        preempt_when_busy,
+        progress,
+    )
+    .await;
+    if let Some(input) = input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_read_cleanup_pending",
+                charge_attempt: false,
+            })?;
+    }
+    result
+}
+
+async fn join_subtitle_source_child(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let _ = crate::source_custody::signal_group(
+            pid,
+            crate::process_control::ProcessSignal::Terminate,
+        );
+    }
+    let _ = child.start_kill();
+    loop {
+        match child.wait().await {
+            Ok(_) => break,
+            Err(error) => {
+                tracing::warn!(%error,"subtitle source child wait failed; retaining owned cleanup");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing extraction inputs and cancellation/progress lifetimes while explicitly plumbing original-source ownership"
+)]
+async fn run_subtitle_source_pass_owned(
+    plan: crate::subtitle_ride_along::RideAlongPlan,
+    source: &std::fs::File,
+    input_args: &[String],
+    input_url: Option<&str>,
     runtime_cache: &Path,
     lost: &CancellationToken,
     preempt_when_busy: Option<&TranscodeManager>,
@@ -3346,6 +3426,7 @@ async fn run_subtitle_source_pass(
         .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?
         .to_string_lossy()
         .into_owned();
+    let input = input_url.map_or(input, ToOwned::to_owned);
     let args = subtitle_source_argv(&input, input_args, &plan);
     let mut command = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
@@ -3373,14 +3454,18 @@ async fn run_subtitle_source_pass(
         }
     }
     #[cfg(windows)]
-    crate::ffmpeg::verify_windows_source_path(source, Path::new(&input))
-        .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?;
+    if input_url.is_none() {
+        crate::ffmpeg::verify_windows_source_path(source, Path::new(&input))
+            .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?;
+    }
     command
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     let (mut child, _child_job) = crate::process_control::spawn_job_owned(
         &mut command,
         crate::process_control::ChildWork::background("subtitle source extraction"),
@@ -3411,29 +3496,26 @@ async fn run_subtitle_source_pass(
     let status = loop {
         tokio::select! {
             () = lost.cancelled() => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                join_subtitle_source_child(&mut child).await;
                 stderr_task.abort();
                 return Err(AnalysisResolutionError::ClaimLost);
             }
             () = &mut deadline => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                join_subtitle_source_child(&mut child).await;
                 stderr_task.abort();
                 return Err(AnalysisResolutionError::Retry {
                     code: "source_pass_timeout",
                     charge_attempt: true,
                 });
             }
-            status = child.wait() => break status.map_err(|_| AnalysisResolutionError::Retry {
-                code: "source_process_failed",
-                charge_attempt: true,
-            })?,
+            status = child.wait() => match status {
+                Ok(status)=>break status,
+                Err(error)=>{tracing::warn!(%error,"subtitle source wait failed; retaining claim and retrying");tokio::time::sleep(Duration::from_millis(100)).await;},
+            },
             () = tokio::time::sleep(Duration::from_millis(500)) => {
                 progress();
                 if preempt_when_busy.is_some_and(|manager| !manager.pretranscode_worker_idle()) {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
+                    join_subtitle_source_child(&mut child).await;
                     stderr_task.abort();
                     return Err(AnalysisResolutionError::Retry {
                         code: "foreground_preempted",
@@ -3558,6 +3640,30 @@ async fn fragment_index_requested_video_options(
 }
 
 impl JobManager {
+    pub(crate) fn configure_source_identity(
+        &self,
+        identity: crate::source_custody::SourceIdentity,
+    ) {
+        if let Ok(mut current) = self.source_identity.write() {
+            *current = Some(identity);
+        }
+    }
+
+    pub(crate) fn foreground_source_request(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        lifetime: &str,
+    ) -> Option<crate::source_custody::SourceRequest> {
+        let identity = self.source_identity.read().ok()?.clone()?;
+        Some(identity.request(
+            Arc::clone(&self.store),
+            file,
+            lifetime,
+            uuid::Uuid::new_v4(),
+            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+        ))
+    }
+
     /// Revalidate one bounded node-local page every interval. This deliberately
     /// does not take cluster job authority: both SQLite and hiqlite route the
     /// index rows through this process's local database, never through Raft.
@@ -3629,6 +3735,11 @@ impl JobManager {
         ))
     }
 
+    fn with_source_checkpoint_dir(mut self, directory: Option<PathBuf>) -> Self {
+        self.source_checkpoint_dir = directory;
+        self
+    }
+
     fn new_with_scan_prune_percent(
         store: Arc<dyn Store>,
         artwork_dir: PathBuf,
@@ -3640,6 +3751,8 @@ impl JobManager {
             .expect("configured node id is a valid lease owner");
         JobManager {
             store,
+            source_checkpoint_dir: None,
+            source_identity: std::sync::RwLock::new(None),
             identity_repairs: Default::default(),
             coordinator,
             job_authority,
@@ -6170,6 +6283,9 @@ impl JobManager {
     /// between a learner that quietly does nothing and one that schedules the
     /// cluster's jobs a second time.
     async fn schedule_tick(self: &Arc<Self>, transcode: &Arc<TranscodeManager>) -> bool {
+        // Local fsynced join evidence must be replayed even if this daemon
+        // restarted as a learner. Replicated no-reader proof is node-agnostic.
+        self.replay_settled_source_custody().await;
         if !self.may_run_cluster_jobs().await {
             tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
             return false;
@@ -6322,6 +6438,41 @@ impl JobManager {
             }
         };
         tokio::join!(preparation, fragments, libraries, subtitles);
+    }
+
+    async fn replay_settled_source_custody(&self) {
+        if let Err(error) = crate::source_custody::replay_local_settlements(&self.store).await {
+            tracing::warn!(%error,"replaying local source settlement journal");
+        }
+        match self.store.settled_background_source_custody().await {
+            Ok(receipts) => {
+                for receipt in receipts {
+                    if let Err(error) = self
+                        .store
+                        .release_background_source_custody(receipt, clock_ms())
+                        .await
+                    {
+                        tracing::warn!(%error,"replaying settled background source custody");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error,"reading settled background source custody"),
+        }
+        match self.store.settled_foreground_source_custody().await {
+            Ok(receipts) => {
+                for receipt in receipts {
+                    if let Err(error) = self
+                        .store
+                        .release_foreground_source(receipt, clock_ms())
+                        .await
+                    {
+                        tracing::warn!(%error,"replaying settled foreground source custody");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error,"reading settled foreground source custody"),
+        }
+        crate::source_custody::source_pressure_changed().notify_waiters();
     }
 
     async fn maintain_background_queue(self: Arc<Self>) {
@@ -9519,21 +9670,21 @@ impl JobManager {
                 0,
             );
         };
+        let hash_cancel = lost.child_token();
+        let hash_pacing = crate::background_jobs::SourcePacingClock::default();
+        let hashing = hash_pacing.scope(plurx_core::process::bounded::cancellable(
+            hash_cancel.clone(),
+            crate::fragment_index_cluster::attest_source(node_id, file, memo.as_ref(), &progress),
+        ));
+        tokio::pin!(hashing);
         let attested = tokio::select! {
-            () = lost.cancelled() => return Err(AnalysisResolutionError::ClaimLost),
-            result = tokio::time::timeout(
-                Duration::from_secs(10 * 60),
-                crate::fragment_index_cluster::attest_source(node_id, file, memo.as_ref(), &progress)
-            ) => match result {
-                Ok(Ok(attested)) => attested,
-                Ok(Err(_)) => return Err(AnalysisResolutionError::Retry {
-                    code: "source_attestation_failed",
-                    charge_attempt: true,
-                }),
-                Err(_) => return Err(AnalysisResolutionError::Retry {
-                    code: "source_attestation_timeout",
-                    charge_attempt: true,
-                }),
+            () = lost.cancelled() => { hash_cancel.cancel(); let _=hashing.await; return Err(AnalysisResolutionError::ClaimLost); },
+            result = &mut hashing => result.map_err(|_| AnalysisResolutionError::Retry {
+                code:"source_attestation_failed", charge_attempt:true,
+            })?,
+            () = hash_pacing.deadline(Duration::from_secs(10*60)) => {
+                hash_cancel.cancel(); let _=hashing.await;
+                return Err(AnalysisResolutionError::Retry {code:"source_attestation_timeout",charge_attempt:true});
             },
         };
         if !crate::fragment_index_cluster::source_still_matches(
@@ -9705,6 +9856,16 @@ impl JobManager {
             crate::process_control::ChildWork::background("subtitle source extraction"),
         )
         .await
+        .map_err(|error| match error {
+            crate::mkv_sparse::SparseError::Cancelled => AnalysisResolutionError::Retry {
+                code: "foreground_preempted",
+                charge_attempt: false,
+            },
+            _ => AnalysisResolutionError::Retry {
+                code: "source_read_failed",
+                charge_attempt: true,
+            },
+        })?
         .filter(|sparse| sparse.blocks > 0);
         tracing::info!(
             file_id = file.id,
@@ -9722,6 +9883,7 @@ impl JobManager {
             sparse
                 .as_ref()
                 .map_or(&[][..], |sparse| sparse.input_args.as_slice()),
+            sparse.is_none(),
             runtime_cache,
             lost,
             if request.priority == "foreground" {
@@ -9905,6 +10067,96 @@ impl JobManager {
 
     #[allow(clippy::too_many_arguments)]
     async fn resolve_analysis_request(
+        &self,
+        request: &AnalysisRequest,
+        node_id: &str,
+        engine_sha256: &str,
+        have_dovi: bool,
+        transcode: &TranscodeManager,
+        stop: &tokio_util::sync::CancellationToken,
+        lost: &tokio_util::sync::CancellationToken,
+        attest_timeout: Duration,
+    ) -> Result<(), AnalysisResolutionError> {
+        let owner = plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Analysis {
+            request_id: request.request_id.clone(),
+            node_id: request.owner_node_id.clone(),
+            fence: request.fence,
+        };
+        let registration = self
+            .store
+            .register_background_source_custody(owner.clone(), clock_ms())
+            .await;
+        let custody = match registration {
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)) => receipt,
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired
+                | plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership) =>
+                return Err(AnalysisResolutionError::ClaimLost),
+            Err(error) => {
+                tracing::warn!(request_id=%request.request_id,%error,
+                    "resolving ambiguous analysis source registration");
+                self.settle_unstarted_analysis_source(owner).await;
+                return Err(AnalysisResolutionError::Retry {
+                    code: "source_custody_unavailable", charge_attempt: false,
+                });
+            }
+        };
+        if crate::source_custody::activate_background_with_journal(&self.store, custody.clone())
+            .await
+            .is_err()
+        {
+            return Err(AnalysisResolutionError::Retry {
+                code: "source_custody_unavailable",
+                charge_attempt: false,
+            });
+        }
+        let budget = crate::background_jobs::SourceReadBudget::new(
+            Arc::clone(&self.store),
+            owner,
+            lost.clone(),
+        );
+        let result = crate::background_jobs::budgeted(
+            budget,
+            self.resolve_analysis_request_owned(
+                request,
+                node_id,
+                engine_sha256,
+                have_dovi,
+                transcode,
+                stop,
+                lost,
+                attest_timeout,
+            ),
+        )
+        .await;
+        // Every source read/child above is joined even after pressure/loss.
+        // Release the original receipt; successor fences own distinct rows.
+        crate::background_jobs::settle_joined_source_custody(&self.store, custody).await;
+        result
+    }
+
+    /// This attempt never exposed input. A lost insert acknowledgement can
+    /// still have committed an exact no-reader row; resolve and settle it in
+    /// the existing analysis owner before reporting the retry.
+    async fn settle_unstarted_analysis_source(
+        &self,
+        owner: plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    ) {
+        loop {
+            match self.store.register_background_source_custody(owner.clone(), clock_ms()).await {
+                Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)) => {
+                    crate::background_jobs::settle_no_reader_source_custody(&self.store, receipt).await;
+                    return;
+                }
+                Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired
+                    | plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership) => return,
+                Err(error) => tracing::warn!(%error,"analysis no-reader source resolution will retry"),
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_analysis_request_owned(
         &self,
         request: &AnalysisRequest,
         node_id: &str,
@@ -10146,19 +10398,31 @@ impl JobManager {
         };
         let attestation_budget = AnalysisAttestationBudget::default();
         attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
-        let attested = tokio::select! {
-            result = crate::fragment_index_cluster::attest_copy_source(
+        let hash_cancel = lost.child_token();
+        let hash_pacing = crate::background_jobs::SourcePacingClock::default();
+        let hashing = hash_pacing.scope(plurx_core::process::bounded::cancellable(
+            hash_cancel.clone(),
+            crate::fragment_index_cluster::attest_analysis_copy_source_persistent(
                 node_id,
                 &file,
                 memo.as_ref(),
                 &report_progress,
-            ) => {
+                self.source_checkpoint_dir.as_deref(),
+                self.store.as_ref(),
+                request,
+            ),
+        ));
+        tokio::pin!(hashing);
+        let attested = tokio::select! {
+            result = &mut hashing => {
                 result.map_err(|_| AnalysisResolutionError::Retry {
                     code: "source_attestation_failed",
                     charge_attempt: true,
                 })?
             }
             () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost, &attestation_budget) => {
+                hash_cancel.cancel();
+                let _ = hashing.await;
                 if lost.is_cancelled() {
                     return Err(AnalysisResolutionError::ClaimLost);
                 }
@@ -10167,7 +10431,9 @@ impl JobManager {
                     charge_attempt: false,
                 });
             }
-            () = wait_analysis_deadline(attest_timeout) => {
+            () = hash_pacing.deadline(attest_timeout) => {
+                hash_cancel.cancel();
+                let _ = hashing.await;
                 // Playback contention must not turn a formerly deferred request
                 // into terminal attempt_limit. Idle-only reads retain the cap.
                 return Err(attestation_budget.deadline_failure(!transcode.pretranscode_worker_idle()));
@@ -10547,15 +10813,30 @@ impl JobManager {
         transcode: &TranscodeManager,
         request: Option<&AnalysisRequest>,
     ) -> bool {
-        if transcode.pretranscode_worker_idle() {
-            return true;
-        }
         let Some(request) = request else {
             return false;
         };
+        let source_allowed = self
+            .store
+            .background_source_may_continue(
+                plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Analysis {
+                    request_id: request.request_id.clone(),
+                    node_id: request.owner_node_id.clone(),
+                    fence: request.fence,
+                },
+                clock_ms(),
+            )
+            .await
+            .unwrap_or(false);
+        if !source_allowed {
+            return false;
+        }
+        if transcode.pretranscode_worker_idle() {
+            return true;
+        }
         // Source attestation holds the Store's bounded source-I/O reservation,
-        // not an encoder slot. Any live playback waiter on this request permits
-        // the read while this node is busy. Expired/departed viewers and failed
+        // not an encoder slot. After the domain-wide source decision, a live
+        // playback waiter permits the read while this node's encoder is busy. Expired/departed viewers and failed
         // reads fail closed.
         self.store
             .analysis_preparation_observation(&request.request_id, clock_ms())
@@ -10587,6 +10868,23 @@ impl JobManager {
             tokio::select! {
                 () = permit_lost.cancelled() => return,
                 () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            }
+        }
+    }
+
+    async fn wait_for_background_source_stop(
+        &self,
+        fence: &crate::background_jobs::JobFence,
+        lost: &CancellationToken,
+    ) {
+        loop {
+            if lost.is_cancelled() || !fence.source_may_continue().await.unwrap_or(false) {
+                return;
+            }
+            tokio::select! {
+                ()=lost.cancelled()=>return,
+                ()=crate::source_custody::source_pressure_changed().notified()=>{},
+                ()=tokio::time::sleep(Duration::from_millis(250))=>{},
             }
         }
     }
@@ -10964,18 +11262,31 @@ impl JobManager {
                 0,
             );
         };
-        let attestation = tokio::select! {
-            result = crate::fragment_index_cluster::attest_copy_source(
+        let hash_cancel = lost.child_token();
+        let hash_pacing = crate::background_jobs::SourcePacingClock::default();
+        let hashing = hash_pacing.scope(plurx_core::process::bounded::cancellable(
+            hash_cancel.clone(),
+            crate::fragment_index_cluster::attest_copy_source_persistent(
                 &node_id,
                 &file,
                 memo.as_ref(),
                 &report_progress,
-            ) => Some(result.map_err(AttestationFailure::Refused)),
+                self.source_checkpoint_dir.as_deref(),
+                &fence,
+            ),
+        ));
+        tokio::pin!(hashing);
+        let attestation = tokio::select! {
+            result = &mut hashing => Some(result.map_err(AttestationFailure::Refused)),
             () = self.wait_for_fragment_worker_stop(
                 transcode.as_ref(), admission,
                 &lost,
-            ) => None,
-            () = tokio::time::sleep(ATTEST_TIMEOUT) => {
+            ) => { hash_cancel.cancel(); let _=hashing.await; None },
+            () = self.wait_for_background_source_stop(&fence, &lost) => {
+                hash_cancel.cancel(); let _=hashing.await; None
+            },
+            () = hash_pacing.deadline(ATTEST_TIMEOUT) => {
+                hash_cancel.cancel(); let _=hashing.await;
                 Some(Err(AttestationFailure::TimedOut))
             }
         };
@@ -11124,20 +11435,41 @@ impl JobManager {
                 None
             }
         };
-        let build = crate::fragindex::build_shared_from_attested_file_with_progress(
-            &file,
-            &attested.handle,
-            &attested.observation.object_version,
-            &pass_videos,
-            transcode.runtime_cache_dir(),
-            index_file_budget(file.duration_ms, file.size, previous.as_ref()),
-            report_progress,
-            ride_along.as_ref(),
+        let build = crate::source_probe::run_source_admitted_probe(
+            transcode.as_ref(),
+            admission,
             &cancel,
+            &lost,
+            None,
+            &fence,
+            || async {
+                crate::fragment_index_cluster::source_still_matches(
+                    &attested.handle,
+                    &attested.observation,
+                )
+                .unwrap_or(false)
+                    && crate::ffmpeg::fragment_index_engine_digest().await == worker.engine_sha256
+            },
+            async {
+                Ok::<_, String>(
+                    crate::fragindex::build_shared_from_attested_file_with_progress(
+                        &file,
+                        &attested.handle,
+                        &attested.observation.object_version,
+                        &pass_videos,
+                        transcode.runtime_cache_dir(),
+                        index_file_budget(file.duration_ms, file.size, previous.as_ref()),
+                        report_progress,
+                        ride_along.as_ref(),
+                        &cancel,
+                    )
+                    .await,
+                )
+            },
         );
         tokio::pin!(build);
         let (builds, preempted) = tokio::select! {
-            built = &mut build => (Some(built), false),
+            built = &mut build => (built.ok(), cancel.is_cancelled() && !lost.is_cancelled()),
             () = self.wait_for_fragment_worker_stop(transcode.as_ref(), admission, &lost) => {
                 cancel.cancel();
                 let _ = build.await;

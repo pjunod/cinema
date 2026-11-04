@@ -12,7 +12,7 @@
 #include <libavformat/avio.h>
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
-#include "source_reader.h"
+#include "test_source_reader_io.h"
 static struct source_reader reader = SOURCE_READER_INITIALIZER;
 static int callback_read(void *opaque, uint8_t *buffer, int size) {
   struct budget_io *io = opaque;
@@ -35,7 +35,7 @@ static int64_t callback_seek(void *opaque, int64_t offset, int whence) {
     struct stat s;
     return fstat(io->fd, &s) ? AVERROR(errno) : s.st_size;
   }
-  return source_reader_seek(&reader, io, offset, whence & ~AVSEEK_FORCE);
+  return test_reader_seek(&reader, io, offset, whence & ~AVSEEK_FORCE);
 }
 static void pattern(const uint8_t *buffer, int length, int64_t at) {
   for (int i = 0; i < length; i++) assert(buffer[i] == (uint8_t)((at + i) % 251));
@@ -60,7 +60,7 @@ int main(void) {
   pattern(block, 7, 0);
   assert(avio_tell(avio) == 7 && lseek(fd, 0, SEEK_CUR) > 7);
   // Activate with AVIO still holding unread bytes from its earlier fill.
-  assert(source_reader_start(&reader, &io) == 0);
+  assert(test_reader_start(&reader, &io) == 0);
   assert(reader.delivered != avio_tell(avio));
   assert(avio_size(avio) == 8 * 1024 * 1024);
   assert(avio_read(avio, block, 100) == 100);

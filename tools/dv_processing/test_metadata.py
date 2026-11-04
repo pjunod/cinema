@@ -8,6 +8,16 @@ import unittest
 
 
 class MetadataAdmission(unittest.TestCase):
+    def test_source_reader_remote_capability_budget_and_interrupt(self):
+        from tools.dv_processing.controls.test_movie_source_io import (
+            test_private_movie_source_url_budget_and_nested_io,
+        )
+        source = Path(__file__).with_name("segment_decode_render.c")
+        with tempfile.TemporaryDirectory() as directory:
+            test_private_movie_source_url_budget_and_nested_io(
+                source, Path(directory) / "source-controls", static_ffmpeg=True,
+            )
+
     def test_bounded_source_reader(self):
         source = Path(__file__).with_name("test_source_reader.c")
         with tempfile.TemporaryDirectory() as directory:

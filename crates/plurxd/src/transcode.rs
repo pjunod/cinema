@@ -616,6 +616,7 @@ pub(crate) struct LiveReconstructionFacts {
 }
 
 pub struct TranscodeManager {
+    source_identity: Option<crate::source_custody::SourceIdentity>,
     #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
     source_workers: source_actor::SourceWorkerRegistry,
     pub(crate) source_http_starts: crate::http::shared_source_playback::SourceStartRegistry,

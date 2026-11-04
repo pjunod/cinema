@@ -1907,7 +1907,7 @@ function queuePlaybackFrame(v,p,callback,renewingSeek=false){
   let id=null, generation=0, retired=false;
   const cancel=()=>{
     generation++;
-    if(id!=null&&typeof v.cancelVideoFrameCallback==="function") v.cancelVideoFrameCallback(id);
+    if(id!=null) cancelPlaybackVideoFrame(v,id);
     id=null;
   };
   const clear=()=>{
@@ -1923,18 +1923,17 @@ function queuePlaybackFrame(v,p,callback,renewingSeek=false){
   const ready=()=>{
     if(retired) return;
     if(PLAYER!==p){clear();return;}
-    // Safari native HLS can strand a request registered before the initial
-    // load/seek. Subscribe against current data after the seek completes,
-    // and renew it when a source load replaces it. A request already armed
-    // with current data survives ordinary seeks so it can observe the landing
-    // frame, including when playback stays paused.
+    // The multiplexer owns native discontinuity renewal. This subscriber
+    // only owns its presentation identity, including a paused landing frame.
     // Readiness only permits registration; actual callbacks remain the proof
     // of presentation used by the existing progress detector.
-    if(id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;
+    if(p.mediaAttachment?.nativePositionPending||id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;
     const registration=++generation;
-    id=v.requestVideoFrameCallback((now,meta)=>{
+    id=requestPlaybackVideoFrame(v,(now,meta)=>{
       if(registration!==generation) return;
-      id=null;clear();
+      id=null;
+      if(p.mediaAttachment?.nativePositionPending)return;
+      clear();
       if(PLAYER===p&&p.mediaAttachment===attachment){
         if(typeof playbackCaptionAttachmentPositionReady==="function")playbackCaptionAttachmentPositionReady(v,p,attachment,true);
         callback(now,meta,epoch,{attachment,intent,epoch});

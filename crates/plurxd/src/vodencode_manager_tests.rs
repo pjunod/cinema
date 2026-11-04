@@ -137,6 +137,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         },
         Pipeline::Cpu,
     )
+    .with_source_identity("node".into(), uuid::Uuid::new_v4())
     .with_decode_probe(Some(
         crate::decode_facts::DecodeProbeIdentity::discover(&crate::ffmpeg::bound_ffprobe_bin())
             .await
@@ -570,6 +571,25 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         )
         .await
         .expect("actual graph resources");
+        let input_request = manager
+            .foreground_source_request(
+                &file,
+                "processed-window-qualification",
+                uuid::Uuid::new_v4(),
+                plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+            )
+            .expect("actual original-media fixture has source identity");
+        let input = crate::source_input::SourceInput::open_foreground_held(
+            input_request,
+            crate::fragment_index_cluster::SourceFence::clone_held(
+                &runtime.source.handle,
+                runtime.source.object_version(),
+            )
+            .expect("same held original source"),
+            format!("qualified-window-{at}"),
+        )
+        .await
+        .expect("owned source input");
         // Balanced ABBA control: holding the operation makes optional warming
         // skip immediately. Release it before the mandatory reservation; all
         // rendering, validation and publication-capacity checks still run.
@@ -600,6 +620,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 None,
                 None,
                 display_target,
+                input,
             )
             .await
             .expect("actual verified window")
@@ -2173,6 +2194,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
         EncoderCaps::default(),
         Pipeline::Cpu,
     )
+    .with_source_identity("node".into(), uuid::Uuid::new_v4())
     .with_dovi_reshape(true);
     let req = SessionRequest {
         dv_processing_destination: None,
@@ -2206,17 +2228,92 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     assert_eq!(realtime.class, ChildClass::Realtime);
 
     let offline = TranscodeManager::new(
-        store,
+        Arc::clone(&store),
         base.path().join("offline"),
         EncoderCaps::default(),
         Pipeline::Cpu,
     )
+    .with_cache(
+        base.path().join("offline-cache"),
+        crate::ffmpeg::ffmpeg_build().await,
+        "node".into(),
+    )
+    .with_source_identity("node".into(), uuid::Uuid::new_v4())
     .with_dovi_reshape(true);
     let before = spawns_of(background);
-    assert!(offline
+    let captured = offline
         .effective_rate_control_for_new_offline_package(&file, 1080, false)
         .await
-        .is_err());
+        .expect("queue configuration is an advisory, source-free capture");
+    assert_eq!(
+        spawns_of(background),
+        before,
+        "enqueue must not start a source proof"
+    );
+    use plurx_core::domain::{NewOfflinePackage, OfflineCreateOutcome};
+    let user = store
+        .create_user("offline-proof-owner", "hash", true)
+        .await
+        .expect("offline user");
+    let package = NewOfflinePackage {
+        audio_recipe: None,
+        id: "owned-background-pixel-proof".into(),
+        request_id: "owned-background-pixel-proof-request".into(),
+        user_id: user.id,
+        file_id,
+        node_id: "node".into(),
+        source_path: file.path.to_string_lossy().into_owned(),
+        source_size: file.size,
+        source_mtime: file.mtime,
+        effective_rate_control: captured.snapshot_value(),
+        target_height: 1080,
+        output_width: Some(1920),
+        output_height: Some(1080),
+        audio_index: None,
+        audio_offset_ms: 0,
+        subtitle_index: None,
+        subtitle_language: None,
+        subtitle_mode: "none".into(),
+        estimated_bytes: 1_000_000,
+        reserved_bytes: 1_100_000,
+        expires_at: i64::MAX,
+    };
+    assert!(matches!(
+        store
+            .create_offline_package(&package, 10, 10_000_000, 20_000_000)
+            .await
+            .expect("queue package"),
+        OfflineCreateOutcome::Created(_)
+    ));
+    let claimed = store
+        .claim_next_offline_package("node")
+        .await
+        .expect("claim package")
+        .expect("queued package");
+    let spec = OfflineSpec {
+        audio_delivery: None,
+        target_height: 1080,
+        audio_index: None,
+        subtitle: OfflineSubtitle::None,
+        effective_rate_control: captured,
+    };
+    let refused = offline
+        .ensure_offline(
+            &claimed,
+            &file,
+            &spec,
+            Instant::now() + Duration::from_secs(60),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        refused.is_err()
+            || matches!(
+                refused,
+                Ok(OfflineProduceOutcome::Yielded("source_proof_pending"))
+            ),
+        "the non-Dolby fixture cannot produce a proved Dolby package"
+    );
     assert!(
         spawns_of(background) >= before + 2,
         "the offline package's pixel proof did not run at the background class"

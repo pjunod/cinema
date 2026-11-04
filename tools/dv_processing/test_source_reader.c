@@ -38,7 +38,7 @@ static ssize_t controlled_read(int fd, void *buffer, size_t size) {
 }
 #define SOURCE_READER_SYSCALL controlled_read
 #define SOURCE_READER_CREATE controlled_create
-#include "source_reader.h"
+#include "test_source_reader_io.h"
 
 static void reset_hook(void) {
   gate = entered = release_read = interrupt_first = false;
@@ -69,18 +69,18 @@ static void cursor_and_seek(int fd) {
   struct source_reader r = SOURCE_READER_INITIALIZER;
   uint8_t *buffer = malloc(2 * SOURCE_READER_CHUNK);
   assert(buffer && lseek(fd, 4096, SEEK_SET) == 4096);
-  assert(source_reader_start(&r, &io) == 0);
-  assert(source_reader_start(&r, &io) == -EBUSY);
+  assert(test_reader_start(&r, &io) == 0);
+  assert(test_reader_start(&r, &io) == -EBUSY);
   exact(&r, buffer, 31, 4096);
   assert(r.delivered == 4127);
   // Callback-delivered cursor, regardless of how much AVIO has consumed.
-  assert(source_reader_seek(&r, &io, -20, SEEK_CUR) == 4107);
+  assert(test_reader_seek(&r, &io, -20, SEEK_CUR) == 4107);
   exact(&r, buffer, SOURCE_READER_CHUNK + 73, 4107);
-  assert(source_reader_seek(&r, &io, 0, 99999) == -EINVAL);
+  assert(test_reader_seek(&r, &io, 0, 99999) == -EINVAL);
   exact(&r, buffer, 31, 4107 + SOURCE_READER_CHUNK + 73);
-  assert(source_reader_seek(&r, &io, 7, SEEK_SET) == 7);
+  assert(test_reader_seek(&r, &io, 7, SEEK_SET) == 7);
   exact(&r, buffer, 99, 7);
-  assert(source_reader_seek(&r, &io, -13, SEEK_END) > 0);
+  assert(test_reader_seek(&r, &io, -13, SEEK_END) > 0);
   off_t at = r.delivered;
   exact(&r, buffer, 13, at);
   assert(source_reader_read(&r, buffer, 1) == 0);
@@ -96,7 +96,7 @@ static void short_reads_and_interrupt(int fd) {
   struct budget_io io = { .fd = fd };
   struct source_reader r = SOURCE_READER_INITIALIZER;
   uint8_t buffer[997];
-  assert(source_reader_start(&r, &io) == 0);
+  assert(test_reader_start(&r, &io) == 0);
   exact(&r, buffer, sizeof(buffer), 0);
   assert(source_reader_stop(&r) == 0);
   assert(io.bytes >= sizeof(buffer) && !io.exhausted);
@@ -109,7 +109,7 @@ static void queued_error(int fd) {
   struct budget_io io = { .fd = fd };
   struct source_reader r = SOURCE_READER_INITIALIZER;
   uint8_t buffer[34];
-  assert(source_reader_start(&r, &io) == 0);
+  assert(test_reader_start(&r, &io) == 0);
   await_done(&r);
   exact(&r, buffer, sizeof(buffer), 0);
   assert(source_reader_read(&r, buffer, 1) == -EIO);
@@ -124,13 +124,13 @@ static void budget_and_discard(int fd) {
   struct budget_io io = { .fd = fd, .bytes = WINDOW_READ_LIMIT - 47 };
   struct source_reader r = SOURCE_READER_INITIALIZER;
   uint8_t buffer[47];
-  assert(source_reader_start(&r, &io) == 0);
+  assert(test_reader_start(&r, &io) == 0);
   await_done(&r);
   assert(io.bytes == WINDOW_READ_LIMIT && !io.exhausted);
   exact(&r, buffer, sizeof(buffer), 0);
   assert(!io.exhausted);
   assert(source_reader_read(&r, buffer, 1) == -ENOSPC && io.exhausted);
-  assert(source_reader_seek(&r, &io, 0, SEEK_SET) == 0);
+  assert(test_reader_seek(&r, &io, 0, SEEK_SET) == 0);
   assert(source_reader_read(&r, buffer, 1) == -ENOSPC);
   assert(io.bytes == WINDOW_READ_LIMIT);
   assert(source_reader_stop(&r) == 0);
@@ -139,10 +139,10 @@ static void budget_and_discard(int fd) {
   reset_hook();
   io = (struct budget_io){ .fd = fd, .bytes = WINDOW_READ_LIMIT - 47 };
   struct source_reader discarded = SOURCE_READER_INITIALIZER;
-  assert(source_reader_start(&discarded, &io) == 0);
+  assert(test_reader_start(&discarded, &io) == 0);
   await_done(&discarded);
   exact(&discarded, buffer, 3, 0);
-  assert(source_reader_seek(&discarded, &io, 100, SEEK_SET) == 100);
+  assert(test_reader_seek(&discarded, &io, 100, SEEK_SET) == 100);
   assert(source_reader_read(&discarded, buffer, 1) == -ENOSPC);
   assert(io.bytes == WINDOW_READ_LIMIT); // Discarded bytes never create credit.
   assert(source_reader_stop(&discarded) == 0);
@@ -154,7 +154,7 @@ static void stop_full(int fd) {
   assert(lseek(fd, 0, SEEK_SET) == 0);
   struct budget_io io = { .fd = fd };
   struct source_reader r = SOURCE_READER_INITIALIZER;
-  assert(source_reader_start(&r, &io) == 0);
+  assert(test_reader_start(&r, &io) == 0);
   pthread_mutex_lock(&r.mutex);
   while (r.count < SOURCE_READER_SLOTS) pthread_cond_wait(&r.readable, &r.mutex);
   pthread_mutex_unlock(&r.mutex);
@@ -169,7 +169,7 @@ static void stop_inflight(int fd) {
   assert(lseek(fd, 0, SEEK_SET) == 0);
   struct budget_io io = { .fd = fd };
   struct source_reader r = SOURCE_READER_INITIALIZER;
-  assert(source_reader_start(&r, &io) == 0);
+  assert(test_reader_start(&r, &io) == 0);
   pthread_mutex_lock(&hook_mutex);
   while (!entered) pthread_cond_wait(&hook_changed, &hook_mutex);
   pthread_mutex_unlock(&hook_mutex);
@@ -190,10 +190,10 @@ static void start_failure(int fd) {
   struct budget_io io = { .fd = fd };
   struct source_reader r = SOURCE_READER_INITIALIZER;
   fail_start = true;
-  assert(source_reader_start(&r, &io) == -EAGAIN);
+  assert(test_reader_start(&r, &io) == -EAGAIN);
   assert(!r.active && io.bytes == 0 && lseek(fd, 0, SEEK_CUR) == 11);
   fail_start = false;
-  assert(source_reader_start(&r, &io) == 0);
+  assert(test_reader_start(&r, &io) == 0);
   uint8_t byte;
   exact(&r, &byte, 1, 11);
   assert(source_reader_stop(&r) == 0);

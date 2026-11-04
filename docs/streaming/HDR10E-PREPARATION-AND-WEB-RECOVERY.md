@@ -9,6 +9,81 @@ Companion to [playback](../PLAYBACK.md) (delivery and progress),
 This ledger distinguishes three faults reported during one 4K P7 playback
 investigation. It does not declare physical acceptance from unit tests.
 
+## Current-main source custody changes require new qualification
+
+Main `71a776b3a` landed the separate startup/source-custody repair in #1366.
+Production DV windows now read through the held-source service, with exact
+capability and Range validation and settlement after actual child reap. The
+32-window measurements below qualify the earlier direct-descriptor graph;
+they do not qualify this integration.
+
+The synchronous source-service baseline retained every check and original
+surround audio. Its 32 windows contained 1,536 frames over 64 seconds, but
+subsequent waits averaged 2,204.6 ms (median 1,795 ms; maximum 3,485 ms).
+Thirteen consecutive slow windows accumulated 9,330 ms of readiness debt;
+final debt was 6,342 ms. Local bodies took at most 6 ms. This graph still falls
+behind the two-second media cadence; passing media checks is not throughput
+acceptance.
+
+The reader adaptation calls the authoritative adapter for read, seek and
+charging. Local reads spend returned bytes; remote reads spend the entire
+requested Range before transfer, including partial, failed and discarded
+lookahead. The worker never charges twice or refunds a seek. Its own four-slot
+queue adds 4 MiB and one explicit 256 KiB stack to existing service/socket
+buffers; the extra CPU worker remains admitted. A latched nonblocking cancel
+pipe wakes a policy-paused socket request without cross-thread socket closure
+or a wall timer. Only the I/O owner closes its socket. Reset and destruction
+follow worker join; source-service settlement still follows actual child reap.
+Seven pinned native metadata/reader controls pass, including real HTTP
+partial-body cancellation, positive-budget seek/restart without refund,
+queued invalid-header errors, exact cap exhaustion, and cancellation priority
+after interruption. Address/undefined-behavior controls pass ten local reader
+runs plus the remote controls; no ThreadSanitizer execution is claimed.
+
+The complete same-window comparison ran synchronous → reader → reader →
+synchronous, each with 32 original-audio publication windows and all checks:
+
+| Source adapter | Create (ms) | Mean subsequent wait (ms) | Maximum wait (ms) |
+|---|---:|---:|---:|
+| Synchronous, first | 2,264 | 2,204.6 | 3,485 |
+| Reader, first | 2,886 | 1,612.6 | 1,756 |
+| Reader, repeat | 2,017 | 1,580.3 | 1,668 |
+| Synchronous, repeat | 3,664 | 1,912.3 | 2,550 |
+
+Both reader runs prepared every subsequent segment ahead of its two-second
+media duration: 62 waits averaged 1,596.5 ms, with a 1,756 ms maximum. Across
+both synchronous runs the mean was 2,058.4 ms, a measured 22.4% reduction in
+this balanced control. The warmer final synchronous run still had a 2,550 ms
+window and a 407 ms cumulative readiness deficit. Reader runs accumulated no
+positive subsequent readiness deficit. Initial create time is reported
+separately and is not uniformly faster.
+
+Each run independently decoded 1,536 frames spanning 63.9999996667 seconds,
+with joined AAC/video timing, Main10/PQ/BT.2020/TV signalling and every
+source, custody, RPU, FEL, header, receipt and publication check retained.
+Segment byte lengths matched across all four runs; this is not a claim of
+content-hash or calibrated display equivalence. Local body reads took at most
+7 ms. These are private SQLite/manual VOD controls through the real source
+service and local published-file reads; viewer-facing HTTP, replicated-store
+and live browser acceptance remain separate.
+
+The new base also upgrades managed schema v3 to v4 and appends SQLite
+migrations 122–123. An old-image rollback is not valid after activation:
+the old binary cannot reopen that schema. During qualification a concurrent
+rollout upgraded the baseline on a voter and a learner. Read-only, WAL-visible
+schema queries then confirmed managed v4 on all four replicas. This task has
+not restarted a service or activated a schema. Recovery must use a v4-aware
+image; remaining old voters must not be restarted with an old binary on the
+assumption that image tags alone provide rollback. Candidate deployment still
+requires coordination with that rollout and a qualified compatible recovery
+image.
+
+The separate November 2 callback RCA does not establish the missing JavaScript
+ownership state in this November 3 Safari incident. Its incoming subscription
+renewal follows source/seek lifecycle events; ordinary active playback has no
+age-triggered renewal. Independent progress may defer destructive recovery,
+but it does not manufacture presentation receipts.
+
 ## Evidence identifies three different failures
 
 The deployed source inspected was `7ea74370b`; the repair starts from
@@ -226,10 +301,10 @@ test for inventory ownership.
 
 Focused resume regressions have passed, including Shared launches (22 tests).
 The cache suite passed 27 tests; its read-only physical timing control is
-explicitly ignored by ordinary runs. The candidate physical ABBA harness
+explicitly ignored by ordinary runs. Both source-service reader controls and the balanced synchronous comparison
 passed with all validation intact. Native reader controls cover cursors, unread
 AVIO data, seeks, short reads, EOF/errors, exact budget exhaustion, discarded
-reads, start refusal and owned shutdown. Six native metadata/reader tests and
+reads, start refusal and owned shutdown. Seven native metadata/reader tests and
 12 focused Rust resource/lifecycle tests and 29 runtime metadata/receipt tests
 passed. Address/undefined-behavior
 sanitizer controls passed ten runs with a fixed executable mapping; ThreadSanitizer

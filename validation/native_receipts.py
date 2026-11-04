@@ -73,12 +73,13 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed change adds only the Node resume-position suite to web-unit-check;
-    # native targets, build scripts and bundled-resource boundaries are unchanged.
+    # Reviewed Makefile change adds only the Node resume-position suite; native
+    # targets, build scripts and bundled-resource boundaries are unchanged.
     'Makefile': 'd74b5626264702988ac3d7bc9f64aac246a1656e8408d539c0241659375971d8',
-    # Reviewed 0.8.0 build 287: only CURRENT_PROJECT_VERSION differs from the
-    # reviewed build 286 bytes; bundled resources and build scripts are unchanged.
-    'clients/apple/project.yml': 'b6d8faedc0d81afefc100afa976398498a3b23627811c8ce76103228d46f2ea0',
+    # Reviewed 0.8.0 build 288: only CURRENT_PROJECT_VERSION differs from the
+    # reviewed build 287 bytes. Pin this exact spec; build-287 case receipts do
+    # not transfer, and added resources or scripts still change its digest.
+    'clients/apple/project.yml': '701f0d2c478267a2e1a716ecb2a2e4ca34a0f71949bbca186d1c73d38fef7f6e',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',

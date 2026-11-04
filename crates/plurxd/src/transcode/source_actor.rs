@@ -314,6 +314,7 @@ impl SourceOpenedResource {
 pub(crate) struct SourceResponseGuard {
     owner: Arc<SourceViewerInner>,
     source: Option<crate::fragment_index_cluster::SourceFence>,
+    pub(crate) source_request: Option<crate::source_custody::SourceRequest>,
 }
 impl Drop for SourceResponseGuard {
     fn drop(&mut self) {
@@ -472,6 +473,7 @@ impl SourceViewerActor {
         let mut guard = SourceResponseGuard {
             owner: Arc::clone(&self.0),
             source: None,
+            source_request: None,
         };
         let facts = manager
             .vod
@@ -593,6 +595,7 @@ impl SourceViewerActor {
         let mut guard = SourceResponseGuard {
             owner: Arc::clone(&self.0),
             source: None,
+            source_request: None,
         };
         let initial = self.0.gate.current_owned(&self.0.assignment).await?;
         initial
@@ -1332,6 +1335,27 @@ impl TranscodeManager {
         deadline: Instant,
     ) {
         let actor = SourceViewerActor(Arc::clone(&owner));
+        let source_request = self.foreground_source_request(
+            prepared.file(),
+            &owner.assignment.binding().incarnation_id().to_string(),
+            owner.assignment.binding().incarnation_id(),
+            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling,
+        );
+        let mut preparation_custody = match source_request {
+            Some(request) => match request.register("source-preparation").await {
+                Ok(custody) => Some(custody),
+                Err(_) => {
+                    let mut current = owner.state.lock().expect("Source worker state");
+                    current.start = Some(Err(SourceWorkerError::Unavailable));
+                    current.settled = Some(Err(SourceWorkerError::Unavailable));
+                    current.finished = true;
+                    drop(current);
+                    owner.changed.notify_waiters();
+                    return;
+                }
+            },
+            None => None,
+        };
         let mut reserved: Option<crate::vodserve::ReservedSourceVodRendition> = None;
         let mut index_work = None;
         let mut probe_work = None;
@@ -1588,6 +1612,21 @@ impl TranscodeManager {
         if let Err(error) = &start {
             tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, "Source producer startup failed");
         }
+        if start.is_ok() {
+            // Readiness helpers have returned; join their independent owners
+            // before dropping this preparation-only source charge. Materializer
+            // generations have separate exact reaper-owned ledger tokens.
+            if let Some(work) = index_work.as_ref() {
+                let _ = work.settle().await;
+            }
+            if let Some(work) = probe_work.as_ref() {
+                let _ = work.settle().await;
+            }
+            if let Some(work) = native_work.as_ref() {
+                let _ = work.settle().await;
+            }
+            drop(preparation_custody.take());
+        }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();
         // A graceful drain ends this owner the way retirement does: stop
@@ -1647,6 +1686,9 @@ impl TranscodeManager {
             work.cancel();
             preparations.native = Some(work.settle().await);
         }
+        // These operations' settle methods join the detached reader/child,
+        // including work which outlived the startup deadline.
+        drop(preparation_custody);
         self.finish_source_owner(
             &owner,
             &state,

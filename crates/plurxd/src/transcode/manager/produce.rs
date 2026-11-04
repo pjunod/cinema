@@ -363,6 +363,7 @@ impl TranscodeManager {
         };
         let file = &resolved_file;
         let mut request = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -826,6 +827,7 @@ impl TranscodeManager {
             (intent.width, intent.height),
         );
         let mut request = SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -1014,15 +1016,18 @@ impl TranscodeManager {
         fence: PretranscodeFence,
     ) -> Result<PretranscodeProduceOutcome, String> {
         let snapshot = source.snapshot;
-        self.produce_attempt(
-            file,
-            target_height,
-            deadline,
-            cancelled,
-            Some(snapshot),
-            Some(Arc::new(source)),
-            None,
-            Some(fence),
+        crate::background_jobs::budgeted(
+            fence.durable.source_budget(),
+            self.produce_attempt(
+                file,
+                target_height,
+                deadline,
+                cancelled,
+                Some(snapshot),
+                Some(Arc::new(source)),
+                None,
+                Some(fence),
+            ),
         )
         .await
     }
@@ -1382,9 +1387,16 @@ impl TranscodeManager {
         if cancelled.is_cancelled() {
             return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
         }
-        let encoder = self
-            .encoder_for_file(file, crate::process_control::ChildClass::Background)
-            .await?;
+        let encoder = match self
+            .encoder_for_offline_package(file, package, cancelled)
+            .await
+        {
+            Ok(encoder) => encoder,
+            Err(error) if is_source_proof_pending_error(&error) => {
+                return Ok(OfflineProduceOutcome::Yielded("source_proof_pending"));
+            }
+            Err(error) => return Err(error),
+        };
         let subtitle_burn = match spec.subtitle {
             OfflineSubtitle::Burn(index) => {
                 let stream = file
@@ -2891,44 +2903,67 @@ impl TranscodeManager {
                     return Err("macos_processing_implementation_changed: captured offline encoder changed before launch".to_owned());
                 }
             }
-            let (mut child, _child_job, diagnostics) = spawn_ffmpeg_at_with_env(
-                macos_executable
-                    .as_ref()
-                    .map(|executable| executable.path.as_path())
-                    .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
-                &args,
-                crate::process_control::ChildWork::background("pre-transcode cache producer"),
-                encoder.label(),
-                hash,
-                FfmpegProgressObserver::offline(Arc::clone(&progress), generation),
-                &self.runtime_cache,
-                {
-                    #[cfg(unix)]
-                    let descriptors = FfmpegDescriptors::from_raw_fds(
-                        bound_source_fd,
-                        Some(temp.raw_fd()),
-                        subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
-                        true,
-                    );
-                    #[cfg(windows)]
-                    let descriptors = windows_offline_descriptors(
-                        bound_source.as_deref(),
-                        &part_dir,
-                        subtitle_handle,
-                    )?;
-                    descriptors
-                },
-                observation.clone(),
-                &macos_executable
-                    .as_ref()
-                    .map(|executable| executable.processing_child_env())
-                    .unwrap_or_default(),
-            )?
-            .into_parts();
+            let source_part = self
+                .run_source_part(
+                    file,
+                    bound_source.as_ref().map(|source| source.handle.as_ref()),
+                    offline_package_id,
+                    offline_claim_generation,
+                    deadline,
+                    yield_to_offline,
+                    cancelled,
+                    |input_url| {
+                        spawn_ffmpeg_at_with_env(
+                            macos_executable
+                                .as_ref()
+                                .map(|executable| executable.path.as_path())
+                                .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
+                            &crate::source_input::source_args(
+                                &args,
+                                &ffmpeg_file.path,
+                                &[3],
+                                input_url,
+                            ),
+                            crate::process_control::ChildWork::background(
+                                "pre-transcode cache producer",
+                            ),
+                            encoder.label(),
+                            hash,
+                            FfmpegProgressObserver::offline(Arc::clone(&progress), generation),
+                            &self.runtime_cache,
+                            {
+                                #[cfg(unix)]
+                                let descriptors = FfmpegDescriptors::from_raw_fds(
+                                    bound_source_fd,
+                                    Some(temp.raw_fd()),
+                                    subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
+                                    true,
+                                );
+                                #[cfg(windows)]
+                                let descriptors = windows_offline_descriptors(
+                                    bound_source.as_deref(),
+                                    &part_dir,
+                                    subtitle_handle,
+                                )?;
+                                descriptors
+                            },
+                            observation.clone(),
+                            &macos_executable
+                                .as_ref()
+                                .map(|executable| executable.processing_child_env())
+                                .unwrap_or_default(),
+                        )
+                    },
+                )
+                .await?;
+            let Some((mut ended, diagnostics)) = source_part else {
+                // Admission did not start a producer. Preserve completed parts
+                // and let this exact offline owner resume on its next pass.
+                drop(upload);
+                let _ = remove_staged_child(temp, &part_name).await;
+                return Ok(ProductionProgress::Yielded("source_admission_deferred"));
+            };
 
-            let mut ended = self
-                .run_part(&mut child, deadline, yield_to_offline, cancelled)
-                .await;
             if let Some(upload) = upload.as_ref() {
                 if tokio::time::timeout(Duration::from_secs(15), upload.drain())
                     .await
@@ -3119,6 +3154,100 @@ impl TranscodeManager {
     }
 
     /// Run one part to completion, or until a viewer wants the hardware.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_source_part<F>(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        held: Option<&std::fs::File>,
+        offline_package_id: Option<&str>,
+        offline_generation: Option<i64>,
+        deadline: Instant,
+        yield_to_offline: bool,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+        spawn: F,
+    ) -> Result<Option<(PartEnd, crate::decoder_health::ObservedDiagnostics)>, String>
+    where
+        F: FnOnce(Option<&str>) -> Result<ObservedFfmpeg, String>,
+    {
+        use plurx_core::store::background_jobs_resources::{
+            BackgroundSourceOwner, BackgroundSourceRegistration,
+        };
+        let mut custody = None;
+        let budget = if let Some(budget) = crate::background_jobs::source_budget() {
+            Some(budget)
+        } else if let Some(package_id) = offline_package_id {
+            let owner = BackgroundSourceOwner::Offline {
+                package_id: package_id.into(),
+                node_id: self.offline_owner().into(),
+                claim_generation: offline_generation
+                    .ok_or("offline source owner missing generation")?,
+            };
+            let registered = self
+                .store
+                .register_background_source_custody(owner, crate::state::clock_ms())
+                .await
+                .map_err(|error| error.to_string())?;
+            match registered {
+                BackgroundSourceRegistration::Registered(token) => {
+                    if crate::source_custody::activate_background_with_journal(
+                        &self.store,
+                        token.clone(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return Err("offline source custody activation was not acknowledged".into());
+                    }
+                    let budget = crate::background_jobs::SourceReadBudget::from_existing_custody(
+                        Arc::clone(&self.store),
+                        &token,
+                        cancelled.cloned().unwrap_or_default(),
+                    );
+                    custody = Some(token);
+                    Some(budget)
+                }
+                BackgroundSourceRegistration::NotRequired => None,
+                BackgroundSourceRegistration::LostOwnership => return Ok(None),
+            }
+        } else {
+            None
+        };
+        let mut input = None;
+        let result=async {
+            if let Some(budget)=budget {
+                let source=match held {Some(handle)=>crate::fragment_index_cluster::SourceFence::clone_current_held(handle)?,None=>crate::fragment_index_cluster::open_source_fence(file,None).await?};
+                input=Some(crate::source_input::SourceInput::open_background_held(source,
+                    crate::http::stream::file_content_type(&file.path),budget).await?);
+            } else if self.source_identity.is_some() {
+                return Err("original cache producer has no durable source owner".into());
+            }
+            let (mut child,child_job,diagnostics)=spawn(input.as_ref().map(|input|input.url()))?.into_parts();
+            let ended=self.run_part(&mut child,deadline,yield_to_offline,cancelled).await;
+            if !matches!(ended,PartEnd::Finished) {
+                if let Some(pid)=child.id() {let _=crate::source_custody::signal_group(pid,crate::process_control::ProcessSignal::Terminate);}
+                let _=child.start_kill();
+            }
+            loop {match child.wait().await {Ok(_)=>break,Err(error)=>{
+                tracing::warn!(%error,"source-owned cache part wait failed; retaining capacity");
+                let _=child.start_kill();tokio::time::sleep(Duration::from_millis(100)).await;
+            }}}
+            drop(child_job);
+            Ok(Some((ended,diagnostics)))
+        }.await;
+        // These are explicit joins in the existing operation supervisor; no
+        // Drop-spawned cleanup or synthetic background job is introduced.
+        if let Some(input) = input {
+            input
+                .close_and_wait()
+                .await
+                .map_err(|error| format!("cache original source read join: {error}"))?;
+        }
+        if let Some(custody) = custody {
+            crate::background_jobs::settle_joined_source_custody(&self.store, custody).await;
+        }
+        result
+    }
+
     pub(super) async fn run_part(
         &self,
         child: &mut Child,

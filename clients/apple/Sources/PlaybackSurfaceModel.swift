@@ -59,6 +59,7 @@ struct PlaybackFault: Equatable, Sendable {
     var detail: String?
     var actions: [Action]
     var playerStopped: Bool
+    let observationOwner: String?
 
     /// The class this fault becomes when its own owner stops the player.
     /// Set from the source row (`media_owner_lost_410` → `stopped`).
@@ -80,7 +81,8 @@ struct PlaybackFault: Equatable, Sendable {
         title: String? = nil,
         detail: String? = nil,
         actions: [Action] = [],
-        playerStopped: Bool = false
+        playerStopped: Bool = false,
+        observationOwner: String? = nil
     ) {
         self.cls = cls
         self.source = source
@@ -92,6 +94,7 @@ struct PlaybackFault: Equatable, Sendable {
         self.detail = detail
         self.actions = actions
         self.playerStopped = playerStopped
+        self.observationOwner = observationOwner
         self.thenWhenStopped = nil
         self.demoted = false
         self.seq = 0
@@ -153,6 +156,7 @@ struct PlaybackSurfaceLog: Equatable, Sendable {
         case intentSettled = "intent_settled"
         case intentSuperseded = "intent_superseded"
         case attachedRetired = "attached_retired"
+        case observationUnavailable = "observation_unavailable"
         case ownerSuccess = "owner_success"
         case ownerStopped = "owner_stopped"
         case playbackNotRequested = "playback_not_requested"
@@ -568,6 +572,9 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
         case intentSettled(Int)
         case intentSuperseded(Int)
         case ownerSuccess(Int)
+        /// Withdraw only this owner's observational claim on this exact
+        /// generation and intent. This never supplies presentation evidence.
+        case observationUnavailable(owner: String, attached: Int, intent: Int?)
         /// The viewer's transport intent. `false` retires every fault whose
         /// class names `playback_not_requested`; `true` does nothing, because
         /// the raise sites decide what comes back — if the player is still
@@ -615,7 +622,8 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
         actions: [PlaybackFault.Action] = [],
         positionMs: Int? = nil,
         title: String? = nil,
-        detail: String? = nil
+        detail: String? = nil,
+        observationOwner: String? = nil
     ) -> Event {
         // A proposed class is only a placeholder: `apply` resolves the row and
         // overwrites it, so the table and the call site cannot disagree.
@@ -631,7 +639,8 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
             title: title,
             detail: detail,
             actions: actions,
-            playerStopped: playerStopped
+            playerStopped: playerStopped,
+            observationOwner: observationOwner
         )
         return .raise(fault, context: context)
     }
@@ -711,6 +720,17 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
 
         case .intentSuperseded(let intent):
             drop(&log, by: .intentSuperseded) { $0.intent == intent && Self.retires($0, by: .intentSuperseded) }
+
+        case .observationUnavailable(let owner, let generation, let intent):
+            guard !owner.isEmpty, attached == generation else { break }
+            let observationalSources: Set<String> = [
+                "client_preparing", "media_waiting", "owner_recovery_step", "readiness_deadline_rungs_left",
+            ]
+            drop(&log, by: .observationUnavailable) {
+                $0.attached == generation && $0.intent == intent && $0.observationOwner == owner
+                    && !$0.playerStopped && [.preparing, .buffering, .recovering].contains($0.cls)
+                    && observationalSources.contains($0.source)
+            }
 
         case .ownerSuccess:
             // One recovery owner per player: its success retires every
@@ -861,7 +881,8 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
                 title: proposed.title ?? rule.title,
                 detail: proposed.detail,
                 actions: resolvedActions,
-                playerStopped: playerStopped
+                playerStopped: playerStopped,
+                observationOwner: proposed.observationOwner
             )
             fault.thenWhenStopped = row.thenWhenStopped
             fault.seq = seq

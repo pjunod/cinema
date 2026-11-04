@@ -125,6 +125,7 @@ impl SegmentAdmission {
 /// argv already selects encoder/output and keeps source time with -copyts. Its
 /// NUT video is fd3; original source audio remains fd4 (independent demux input).
 pub(crate) struct SegmentRequest {
+    pub(crate) source_input: Option<Arc<SourceInputLease>>,
     pub(crate) renderer: PathBuf,
     /// Trusted worker runtime configuration, scoped to the renderer child only.
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
@@ -301,6 +302,8 @@ pub(crate) fn supervise_streaming_helper(
 /// Same registered pipes/writer barrier the existing producer consumes. On
 /// unsuccessful handoff the detached owner retires this exact generation.
 pub(crate) struct SegmentProducer {
+    #[cfg(target_os = "linux")]
+    source_settlement: Option<SourceInputSettlement>,
     registration: ProducerRegistration,
     writers: Option<ProducerWriters>,
     stdout: Option<tokio::process::ChildStdout>,
@@ -312,6 +315,11 @@ pub(crate) struct SegmentProducer {
     evidence: Option<SegmentEvidence>,
 }
 impl SegmentProducer {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_source_settlement(&mut self) -> Option<SourceInputSettlement> {
+        self.source_settlement.take()
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn take_evidence(&mut self) -> Option<SegmentEvidence> {
         self.evidence.take()
@@ -352,7 +360,84 @@ impl Drop for SegmentProducer {
     }
 }
 
+/// One existing input owner shared by the renderer/encoder resource graph.
+/// Closing the input waits for those actual physical owners to drop, as well
+/// as the input server's blocking reads; an error waiter is not reap proof.
+pub(crate) struct SourceInputLease {
+    input: std::sync::Mutex<Option<crate::source_input::SourceInput>>,
+    #[cfg(target_os = "linux")]
+    url: String,
+    users: std::sync::atomic::AtomicUsize,
+    settled: tokio::sync::Notify,
+}
+impl SourceInputLease {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn new(input: crate::source_input::SourceInput) -> Arc<Self> {
+        Arc::new(Self {
+            url: input.url().into(),
+            input: std::sync::Mutex::new(Some(input)),
+            users: std::sync::atomic::AtomicUsize::new(0),
+            settled: tokio::sync::Notify::new(),
+        })
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn physical_owner(self: &Arc<Self>) -> SourceInputUse {
+        self.users.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        SourceInputUse(Arc::clone(self))
+    }
+    pub(crate) async fn close_and_wait(&self) -> std::io::Result<()> {
+        loop {
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if self.users.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                break;
+            }
+            settled.await;
+        }
+        let input = { self.input.lock().expect("DV source input").take() };
+        if let Some(input) = input {
+            input.close_and_wait().await?;
+        }
+        Ok(())
+    }
+}
+#[cfg(target_os = "linux")]
+pub(crate) struct SourceInputUse(Arc<SourceInputLease>);
+#[cfg(target_os = "linux")]
+impl Drop for SourceInputUse {
+    fn drop(&mut self) {
+        let prior = self
+            .0
+            .users
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(prior > 0);
+        self.0.settled.notify_waiters();
+    }
+}
+/// Minted only after the actual helper and encoder are registered. It is
+/// move-only: a cached receipt can never pretend another read owner settled.
+#[cfg(target_os = "linux")]
+pub(crate) struct SourceInputSettlement {
+    input: Arc<SourceInputLease>,
+    encoder: ProducerRegistration,
+    helper: HelperCompletion,
+}
+#[cfg(target_os = "linux")]
+impl SourceInputSettlement {
+    pub(crate) async fn settle(self) -> Result<(), String> {
+        self.encoder.wait_confirmed_reap().await;
+        let _ = self.helper.wait().await;
+        self.input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV source read join: {error}"))
+    }
+}
+
 struct Resources {
+    #[cfg(target_os = "linux")]
+    _source_input: Option<SourceInputUse>,
     source: Arc<SourceFence>,
     original_offset: u64,
     _offset_lane: Option<OwnedSemaphorePermit>,
@@ -678,6 +763,13 @@ async fn run(
     request: SegmentRequest,
     cancel: CancellationToken,
 ) -> Result<SegmentProducer, String> {
+    if let Some(input) = request.source_input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|error| error.to_string())?;
+        return Err("source input service requires an original movie window".into());
+    }
     let raw_limit = request.shape.validate()?;
     let admission = request.admission;
     let held = admission.resources();
@@ -723,6 +815,8 @@ async fn run(
         .tempdir_in(&request.runtime_cache)
         .map_err(|e| e.to_string())?;
     let resources = Arc::new(Resources {
+        #[cfg(target_os = "linux")]
+        _source_input: None,
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),
@@ -858,6 +952,8 @@ async fn run(
         }, _ = watched.wait_confirmed_reap() => {} }
     });
     Ok(SegmentProducer {
+        #[cfg(target_os = "linux")]
+        source_settlement: None,
         registration,
         writers: Some(writers),
         stdout: Some(encoded.stdout),
@@ -1085,7 +1181,9 @@ async fn run_streaming(
         .prefix("dv-stream-")
         .tempdir_in(&request.runtime_cache)
         .map_err(|e| e.to_string())?;
+    let source_input = request.source_input;
     let resources = Arc::new(Resources {
+        _source_input: source_input.as_ref().map(|input| input.physical_owner()),
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),
@@ -1108,6 +1206,12 @@ async fn run_streaming(
     let read: std::fs::File = std::os::fd::OwnedFd::from(read).into();
     let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
     let mut args = request.shape.renderer_args();
+    if let Some(input) = &source_input {
+        if !windowed {
+            return Err("original source service requires windowed renderer input".into());
+        }
+        args[0] = input.url.clone();
+    }
     args.push(fd(5));
     if let Some(window_args) = window_args {
         args.extend(window_args);
@@ -1186,7 +1290,12 @@ async fn run_streaming(
         }
         producer_spawn::spawn(
             &request.encoder,
-            &request.encoder_args,
+            &crate::source_input::source_args(
+                &request.encoder_args,
+                std::path::Path::new(""),
+                &[4],
+                source_input.as_ref().map(|input| input.url.as_str()),
+            ),
             SpawnOptions {
                 runtime_cache: &request.runtime_cache,
                 progress: Progress::Stderr,
@@ -1241,7 +1350,13 @@ async fn run_streaming(
         Arc::downgrade(&request.producer),
         registration.clone(),
     );
+    let source_settlement = source_input.map(|input| SourceInputSettlement {
+        input,
+        encoder: registration.clone(),
+        helper: completion.clone(),
+    });
     Ok(SegmentProducer {
+        source_settlement,
         registration,
         writers: Some(writers),
         stdout: Some(encoded.stdout),
@@ -1312,7 +1427,7 @@ async fn stage<R: Send + Sync + 'static>(
         tokio::select! {
             result = completed => result.and_then(|(status,(stdout,stderr))| {
                 if status.success() { Ok(stdout) } else {
-                    Err(format!("{name} {}: {}",if status.code()==Some(1) {"refused segment"} else {"failed"},String::from_utf8_lossy(&stderr)))
+                    Err(format!("{name} {}: {}",if status.code()==Some(1) {"refused segment"} else {"failed"},crate::scratch_put::redact(&String::from_utf8_lossy(&stderr))))
                 }
             }),
             _ = cancel.cancelled() => Err(format!("{name} cancelled")),
@@ -1570,6 +1685,7 @@ pub(crate) async fn physical_probe() {
         Duration::from_millis(500),
         probe_spawn(
             SegmentRequest {
+                source_input: None,
                 renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                     .expect("renderer")
                     .into(),
@@ -1627,6 +1743,7 @@ pub(crate) async fn physical_probe() {
     .expect("predecessor slot fully settled");
     let producer = probe_spawn(
         SegmentRequest {
+            source_input: None,
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
                 .into(),
@@ -1689,7 +1806,7 @@ pub(crate) async fn physical_probe() {
     assert!(
         status.success(),
         "encoder: {}",
-        String::from_utf8_lossy(&diagnostic)
+        crate::scratch_put::redact(&String::from_utf8_lossy(&diagnostic))
     );
     #[cfg(target_os = "linux")]
     if let Some(completion) = completion {
@@ -1757,6 +1874,7 @@ pub(crate) async fn physical_probe() {
     let slot = Arc::new(ProducerSlot::new());
     let unaccepted = probe_spawn(
         SegmentRequest {
+            source_input: None,
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
                 .into(),
@@ -1818,6 +1936,7 @@ pub(crate) async fn physical_probe() {
         let slot = Arc::new(ProducerSlot::new());
         let mut refused = probe_spawn(
             SegmentRequest {
+                source_input: None,
                 renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                     .expect("renderer")
                     .into(),

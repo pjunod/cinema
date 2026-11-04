@@ -3034,8 +3034,7 @@ pub async fn download(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let file = load_file(&state, id).await?;
-    let mut response =
-        serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await?;
+    let mut response = serve_original_file_range(&state, &file, &headers, &method).await?;
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_static("attachment"),
@@ -3072,8 +3071,7 @@ pub async fn direct(
             return Err(error);
         }
     };
-    let served =
-        serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await;
+    let served = serve_original_file_range(&state, &file, &headers, &method).await;
     match &served {
         // Bytes are going out: this is the moment playback is real. Every
         // request in the storm reports, and the registry collapses them — the
@@ -3153,8 +3151,7 @@ pub(super) async fn serve_book_content(
     if item.kind != ItemKind::Book {
         return Err(ApiError::NotFound("book content"));
     }
-    let mut response =
-        serve_file_range(&file.path, headers, method, Some(file.size.max(0) as u64)).await?;
+    let mut response = serve_original_file_range(state, &file, headers, method).await?;
     if response.status().is_success() {
         let name = file
             .path
@@ -3427,6 +3424,12 @@ async fn serve_stream_mp4(
     #[cfg(not(windows))]
     let remux_path = file.path.clone();
     remux(RemuxSpec {
+        source_request: state.transcode.foreground_source_request(
+            &file,
+            &format!("progressive-{}", file.id),
+            uuid::Uuid::new_v4(),
+            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+        ),
         audio_delivery: (caps.achannels.is_some()
             || caps
                 .caps_v2
@@ -3669,6 +3672,46 @@ pub(crate) fn file_content_type(path: &Path) -> &'static str {
 
 /// HTTP range serving of a file (direct play). Shared by the native part
 /// endpoint and the Plex-compat `/library/parts/...` endpoint.
+pub(crate) async fn serve_original_file_range(
+    state: &AppState,
+    file: &MediaFile,
+    headers: &HeaderMap,
+    method: &Method,
+) -> Result<Response, ApiError> {
+    let len = file.size.max(0) as u64;
+    let plan = plan_file_range(headers, method, len);
+    let (start, length) = match plan {
+        FileRangePlan::Partial { start, end } if method != Method::HEAD => (start, end - start + 1),
+        FileRangePlan::Full if method != Method::HEAD => (0, len),
+        _ => return serve_file_range(&file.path, headers, method, Some(len)).await,
+    };
+    let Some(request) = state.transcode.foreground_source_request(
+        file,
+        &format!("original-range-{}", file.id),
+        uuid::Uuid::new_v4(),
+        plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+    ) else {
+        return serve_file_range(&file.path, headers, method, Some(len)).await;
+    };
+    // Opening/stat'ing a capability performs no original byte read. The
+    // replicated owner is bound to this exact object before its first read.
+    let source = crate::fragment_index_cluster::open_source_playback_fence(file, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    let body = crate::source_custody::file_body(source, start, length, request)
+        .await
+        .map_err(ApiError::Internal)?;
+    let (status, fields) = file_range_head(plan, len, content_type(&file.path));
+    let mut response = (status, body).into_response();
+    for (name, value) in fields {
+        response.headers_mut().insert(
+            name,
+            HeaderValue::from_str(&value).map_err(|error| ApiError::Internal(error.to_string()))?,
+        );
+    }
+    Ok(response)
+}
+
 pub(crate) async fn serve_file_range(
     path: &Path,
     headers: &HeaderMap,
@@ -3724,6 +3767,7 @@ pub(crate) async fn serve_file_range(
 /// transposition away from remuxing at the wrong pace with the wrong track.
 struct RemuxSpec<'a> {
     audio_delivery: Option<&'a plurx_core::playback::audio::AudioDelivery>,
+    source_request: Option<crate::source_custody::SourceRequest>,
     path: &'a Path,
     #[cfg(windows)]
     source: &'a std::fs::File,
@@ -3796,12 +3840,35 @@ impl Drop for RemuxProcessGuard {
 /// buffered output still drains. The owner keeps that decision after a
 /// natural exit, until the body is dropped, so a body waiting on authority
 /// always has someone to end its wait.
+#[cfg(test)]
 fn spawn_remux_process_owner(
+    child: tokio::process::Child,
+    child_job: crate::process_control::ChildJob,
+    serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    admitted_generation: u64,
+    registry_guard: Option<crate::progressive::StreamGuard>,
+) -> (
+    RemuxProcessGuard,
+    tokio_util::sync::CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_remux_process_owner_with_source(
+        child,
+        child_job,
+        serving,
+        admitted_generation,
+        registry_guard,
+        None,
+    )
+}
+
+fn spawn_remux_process_owner_with_source(
     mut child: tokio::process::Child,
     child_job: crate::process_control::ChildJob,
     mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
     admitted_generation: u64,
     registry_guard: Option<crate::progressive::StreamGuard>,
+    source_custody: Option<crate::source_input::SourceInput>,
 ) -> (
     RemuxProcessGuard,
     tokio_util::sync::CancellationToken,
@@ -3813,6 +3880,7 @@ fn spawn_remux_process_owner(
     let owner_fenced = fenced.clone();
     let task = tokio::spawn(async move {
         let _child_job = child_job;
+        let mut source_custody = source_custody;
         // Registration belongs to the process lifetime. It disappears on
         // natural exit, body drop, or serving loss—not merely when Hyper next
         // decides to poll a response body.
@@ -3863,8 +3931,12 @@ fn spawn_remux_process_owner(
                 status = child.wait(), if !exited => {
                     if let Err(error) = status {
                         tracing::warn!(%error, "waiting for remux ffmpeg failed");
+                        if let Some(custody)=source_custody.take() { custody.cleanup_pending(); }
                     }
                     exited = true;
+                    if let Some(input)=source_custody.take() {
+                        if let Err(error)=input.close_and_wait().await {tracing::warn!(%error,"progressive original input settlement failed");}
+                    }
                     drop(registry_guard.take());
                 }
                 () = owner_cancel.cancelled() => break None,
@@ -3888,7 +3960,20 @@ fn spawn_remux_process_owner(
             if child.try_wait().ok().flatten().is_none() {
                 let _ = child.kill().await;
             }
-            let _ = child.wait().await;
+            match child.wait().await {
+                Ok(_) => {
+                    if let Some(input) = source_custody.take() {
+                        if let Err(error) = input.close_and_wait().await {
+                            tracing::warn!(%error,"progressive original input settlement failed");
+                        }
+                    }
+                }
+                Err(_) => {
+                    if let Some(custody) = source_custody.take() {
+                        custody.cleanup_pending();
+                    }
+                }
+            }
         }
     });
     (RemuxProcessGuard { cancel }, fenced, task)
@@ -4075,6 +4160,7 @@ async fn consume_remux_stderr<R>(
                 continue;
             }
         }
+        let line = crate::scratch_put::redact(&line);
         tracing::warn!("remux ffmpeg: {line}");
     }
 }
@@ -4082,6 +4168,7 @@ async fn consume_remux_stderr<R>(
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     let RemuxSpec {
         audio_delivery,
+        source_request,
         path,
         #[cfg(windows)]
         source,
@@ -4228,6 +4315,20 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         .map_err(ApiError::Internal)?;
     #[cfg(not(windows))]
     let descriptors = crate::producer_spawn::Descriptors::default();
+    let source_custody = match source_request {
+        Some(request) => Some(
+            crate::source_input::SourceInput::open(request, "progressive-remux")
+                .await
+                .map_err(ApiError::Internal)?,
+        ),
+        None => None,
+    };
+    let args = crate::source_input::source_args(
+        &args,
+        path,
+        &[],
+        source_custody.as_ref().map(|input| input.url()),
+    );
     let program = ffmpeg_bin();
     let crate::producer_spawn::Spawned {
         child,
@@ -4274,12 +4375,13 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // serving authority during the origin probe is resolved by the same grace
     // as one during playback rather than refusing the start outright.
     let owner_guard = guard.clone();
-    let (process_guard, fenced, _process_owner) = spawn_remux_process_owner(
+    let (process_guard, fenced, _process_owner) = spawn_remux_process_owner_with_source(
         child,
         child_job,
         serving.clone(),
         admitted_generation,
         owner_guard,
+        source_custody,
     );
 
     // Probe after the remux starts opening the source, matching the HLS copy

@@ -552,83 +552,109 @@
     }
 
     #[test]
-    fn rolling_transport_does_not_admit_unqualified_short_bootstrap() {
+    fn rolling_short_bootstrap_is_transport_independent_and_keeps_steady_reserve() {
         for transport in [None, Some("native"), Some("hlsjs"), Some("unknown")] {
             let mut clock = RollingPublicationClock::default();
             clock.bind_startup_transport(transport);
-            assert_eq!(clock.startup_policy, RollingStartupPolicy::Conservative);
-            assert!(!clock.startup_policy.uses_small_bootstrap());
-            for rate in [0.25, 1.0, 4.0] {
-                assert_eq!(
-                    clock.startup_policy.bootstrap_ms(rate),
-                    rolling_initial_runway_ms(rate)
-                );
+            assert_eq!(clock.startup_policy, RollingStartupPolicy::FirstReloadWindow);
+            assert!(clock.startup_policy.uses_small_bootstrap());
+            for (rate, expected) in [(0.25, 16_000), (1.0, 16_000), (4.0, 64_000)] {
+                assert_eq!(clock.startup_policy.bootstrap_ms(rate), expected);
+                assert!(rolling_initial_runway_ms(rate) >= 48_000);
             }
-            // Production admission is frozen across replacement/clear, and
-            // even the test-lab setter cannot opt an admitted attempt in.
             clock.reset_for_attempt(1);
             clock.reset_for_attempt(2);
             clock.clear_attempt();
-            clock.bind_startup_candidate_for_test(RollingStartupPolicy::WebFixedHlsV1);
-            assert_eq!(clock.startup_policy, RollingStartupPolicy::Conservative);
+            clock.bind_startup_candidate_for_test(RollingStartupPolicy::Conservative);
+            assert_eq!(clock.startup_policy, RollingStartupPolicy::FirstReloadWindow);
         }
     }
 
     #[tokio::test]
-    async fn rolling_unqualified_web_waits_for_conservative_first_snapshot() {
+    async fn rolling_first_complete_cut_is_published_and_replenished_before_steady_cadence() {
         for transport in ["native", "hlsjs"] {
-            let directory = crate::test_tempdir().expect("unqualified web bootstrap");
+            let directory = crate::test_tempdir().expect("short bootstrap");
             let session = test_session(directory.path().to_path_buf());
-            session
+            session.publication.lock().await.bind_startup_candidate_for_test(RollingStartupPolicy::FirstCompleteSegment);
+            let _ = transport; // Same controlled short-arm proof for each transport label.
+            accept_rolling_publication_demand(
+                &session, 1, 0, 1.0,
+                crate::playback_control::PlaybackDemand::Active,
+                crate::playback_control::RenderState::Starting,
+            ).await;
+            tokio::fs::write(directory.path().join("index.m3u8"), rolling_playlist(&[2.002], false)).await.expect("first cut");
+            session.publication_cycle("short-bootstrap").await.expect("first publication");
+            {
+                let clock = session.publication.lock().await;
+                assert_eq!(clock.served.as_ref().expect("first snapshot").end_ms, 2_002);
+                assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
+            }
+            tokio::fs::write(directory.path().join("index.m3u8"), rolling_playlist(&[2.002; 3], false)).await.expect("next cuts");
+            // Use the policy clock to exercise a replenishment before the 16s
+            // steady cycle. No sleep and no altered producer/capacity budget.
+            let due = session
                 .publication
                 .lock()
                 .await
-                .bind_startup_transport(Some(transport));
-            accept_rolling_publication_demand(
-                &session,
-                1,
-                0,
-                1.0,
-                crate::playback_control::PlaybackDemand::Active,
-                crate::playback_control::RenderState::Starting,
-            )
-            .await;
-            tokio::fs::write(
-                directory.path().join("index.m3u8"),
-                rolling_playlist(&[8.0; 4], false),
-            )
-            .await
-            .expect("short writer inventory");
-            session
-                .publication_cycle("unqualified-web")
-                .await
-                .expect("wait for runway");
+                .served
+                .as_ref()
+                .expect("first short cut is served before refill")
+                .available_at
+                + Duration::from_secs(2);
+            session.publication_cycle_at("short-bootstrap-refill", due).await.expect("replenishment");
+            let clock = session.publication.lock().await;
+            assert_eq!(clock.served.as_ref().expect("replenished").end_ms, 6_006);
             assert!(
-                session.publication.lock().await.served.is_none(),
-                "transport alone must not release the 32-second candidate"
-            );
-            tokio::fs::write(
-                directory.path().join("index.m3u8"),
-                rolling_playlist(&[8.0; 6], false),
-            )
-            .await
-            .expect("conservative writer inventory");
-            session
-                .publication_cycle("unqualified-web")
-                .await
-                .expect("qualified runway");
-            assert_eq!(
-                session
-                    .publication
-                    .lock()
-                    .await
+                clock
                     .served
                     .as_ref()
-                    .expect("snapshot")
-                    .end_ms,
-                48_000
+                    .expect("replenished short cut remains served")
+                    .end_ms
+                    < 48_000
             );
         }
+    }
+
+    #[tokio::test]
+    async fn rolling_production_bootstrap_covers_the_advertised_native_reload_interval() {
+        let directory = crate::test_tempdir().expect("native reload bootstrap");
+        let session = test_session(directory.path().to_path_buf());
+        session.publication.lock().await.bind_startup_transport(Some("native"));
+        accept_rolling_publication_demand(&session, 1, 0, 1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Starting).await;
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[2.002], false),
+        )
+        .await
+        .expect("write first native reload playlist");
+        session
+            .publication_cycle("native-reload-bootstrap")
+            .await
+            .expect("publish native reload attempt with the first short object");
+        assert!(session.publication.lock().await.served.is_none(), "one short object cannot pay a sixteen-second reload gap");
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[2.002; 8], false),
+        )
+        .await
+        .expect("write complete native reload playlist");
+        session
+            .publication_cycle("native-reload-bootstrap")
+            .await
+            .expect("publish complete native reload bootstrap");
+        let clock = session.publication.lock().await;
+        assert_eq!(
+            clock
+                .served
+                .as_ref()
+                .expect("complete native reload bootstrap is served")
+                .end_ms,
+            16_016
+        );
+        assert_eq!(rolling_initial_runway_ms(1.0), 48_000);
+        assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
     }
 
     #[test]
@@ -648,7 +674,7 @@
         assert_eq!(clock.startup_policy, RollingStartupPolicy::WebFixedHlsV1);
         let mut unknown = RollingPublicationClock::default();
         unknown.bind_startup_transport(Some("other"));
-        assert_eq!(unknown.startup_policy.bootstrap_ms(1.0), 48_000);
+        assert_eq!(unknown.startup_policy.bootstrap_ms(1.0), 16_000);
     }
 
     #[tokio::test]

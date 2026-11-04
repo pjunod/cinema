@@ -9,6 +9,8 @@ pub(crate) const CLAIM: u8 = 1;
 pub(crate) const RENEW: u8 = 2;
 pub(crate) const PUBLISH: u8 = 4;
 pub(crate) const COMPLETE: u8 = 8;
+pub(crate) const SOURCE_REGISTER: u8 = 16;
+pub(crate) const SOURCE_RELEASE: u8 = 32;
 struct Replies {
     pending: AtomicU8,
     dropped: AtomicU8,

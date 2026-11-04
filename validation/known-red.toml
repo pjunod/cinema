@@ -155,3 +155,11 @@ owner = "subtitles"
 reason = "Real 1x playback qualification requires useful current-position captions across core boundaries and complete source coverage under the supplied hardware budget; its recorded invocation passed both Small tasks."
 requires = "Owned speech qualification root/cache/TMPDIR, pinned CPU engine and FFmpeg/FFprobe, hardware meeting the declared 1x throughput assertions"
 command = "PLURX_SPEECH_QUALIFICATION_ROOT=/path/to/owned/speech TMPDIR=/path/to/owned/speech/tmp PLURX_SUBTITLE_ENGINE=/path/to/package/subtitle-engine/whisper-cli PLURX_FFMPEG=/path/to/package/ffmpeg PLURX_FFPROBE=/path/to/package/ffprobe cargo test --locked -p plurxd --bin plurxd subtitle_translation::installer::qualification::pinned_progressive_worker_covers_advancing_playback_for_both_tasks -- --ignored --exact --nocapture"
+
+# Exact packaged-parser qualification is an explicit fixture, not known-red debt.
+[[fixtures]]
+test = "crates/plurxd/src/decode_facts/tests.rs::decode_facts::tests::packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls"
+owner = "playback"
+reason = "The production static parser must be supplied explicitly and exercised against generated qualification media; this exact case passed in the playback startup qualification."
+requires = "Linux; exact packaged static parser PLURX_TEST_STRICT_FFPROBE; generated PLURX_TEST_STRICT_MEDIA; owned scratch directory"
+command = "PLURX_TEST_STRICT_FFPROBE=/path/to/package/ffprobe PLURX_TEST_STRICT_MEDIA=/path/to/owned/generated.mkv TMPDIR=/path/to/owned/scratch RUST_MIN_STACK=8388608 cargo test --locked -p plurxd --bin plurxd decode_facts::tests::packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls -- --ignored --exact --nocapture"

@@ -32,6 +32,12 @@ function playbackSurfaceGeneration(p){ return (p&&p.attemptId)||null; }
 // destination outlives the media element that was carrying it, which is exactly
 // what `controlSeek` already is.
 function playbackSurfaceIntent(p){ const seek=p&&p.controlSeek; return seek?seek.sequence:null; }
+// An observation owner is distinct from a server/control authority. Its
+// faults retain the exact viewer intent as well as the attached generation.
+function playbackSurfaceObservationOwner(p){
+  const generation=playbackSurfaceGeneration(p);
+  return generation==null?null:`playback-observation:${generation}`;
+}
 // `start` before this playback has presented anything, `change` while a
 // viewer-requested replacement is pending over a predecessor, `attached`
 // otherwise — the three the fixture declares.
@@ -102,11 +108,14 @@ function raisePlaybackSurface(source,fault,options){
   // A fact the owner is restating rather than a new one: a `waiting` that fires
   // at every fragment boundary must not push a fault per boundary at the ring.
   if(options&&options.once&&playbackSurfaceHasLiveFault(source,attached)) return null;
+  const observationOwner=given.observation_owner!==undefined?given.observation_owner:
+    ["client_preparing","media_waiting"].includes(source)?playbackSurfaceObservationOwner(p):null;
   return playbackSurfaceStep({
     raise:source,
     context:given.context||playbackSurfaceContext(p),
     attached,
-    intent:given.intent!==undefined?given.intent:null,
+    intent:given.intent!==undefined?given.intent:observationOwner?playbackSurfaceIntent(p):null,
+    observation_owner:observationOwner,
     player_stopped:!!given.player_stopped,
     title:given.title!==undefined?given.title:null,
     detail:given.detail!==undefined?given.detail:null,

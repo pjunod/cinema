@@ -152,17 +152,29 @@ pub(crate) fn inherit_raw_file_descriptors_with_cwd(
 /// last 8 KiB, where encoder/filter failures normally explain their exit.
 pub(crate) async fn drain_diagnostics(mut input: impl AsyncRead + Unpin) -> String {
     const LIMIT: usize = 8 * 1024;
-    let mut tail = Vec::with_capacity(LIMIT);
+    // Retain one complete generated URL before truncating the public tail.
+    // Otherwise the byte boundary could discard its scheme/host while
+    // leaving the entire bearer nonce intact and invisible to the redactor.
+    const PRIVATE_URL_CONTEXT: usize = 128;
+    let mut tail = Vec::with_capacity(LIMIT + PRIVATE_URL_CONTEXT);
     let mut chunk = [0u8; 2048];
     while let Ok(read) = input.read(&mut chunk).await {
         if read == 0 {
             break;
         }
-        let discard = (tail.len() + read).saturating_sub(LIMIT);
+        let discard = (tail.len() + read).saturating_sub(LIMIT + PRIVATE_URL_CONTEXT);
         tail.drain(..discard);
         tail.extend_from_slice(&chunk[..read]);
     }
-    String::from_utf8_lossy(&tail).into_owned()
+    let mut text = crate::scratch_put::redact(&String::from_utf8_lossy(&tail));
+    if text.len() > LIMIT {
+        let mut start = text.len() - LIMIT;
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        text.drain(..start);
+    }
+    text
 }
 
 /// A producer's drained stderr tail, split into the lines an operator should
@@ -224,6 +236,7 @@ pub(crate) fn classify_diagnostic(tail: &str) -> ProducerDiagnostic {
 /// reader. Cancellation transfers the exact child to a reap owner, never a
 /// detached diagnostic reader. Used by whole-track burn extraction.
 pub(crate) struct BoundedDiagnosticChild {
+    source_input: Option<crate::source_input::SourceInput>,
     child: Option<tokio::process::Child>,
     child_job: Option<crate::process_control::ChildJob>,
     stdout: Option<tokio::process::ChildStdout>,
@@ -244,6 +257,7 @@ impl BoundedDiagnosticChild {
         let (mut child, child_job) = crate::process_control::spawn_job_owned(command, work)?;
         let stderr = child.stderr.take();
         Ok(Self {
+            source_input: None,
             child: Some(child),
             child_job: Some(child_job),
             stdout: None,
@@ -268,6 +282,7 @@ impl BoundedDiagnosticChild {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         Ok(Self {
+            source_input: None,
             child: Some(child),
             child_job: Some(child_job),
             stdout,
@@ -277,8 +292,58 @@ impl BoundedDiagnosticChild {
         })
     }
 
+    pub(crate) fn with_source_input(
+        mut self,
+        input: Option<crate::source_input::SourceInput>,
+    ) -> Self {
+        self.source_input = input;
+        self
+    }
+    pub(crate) async fn output_bytes_cancellable(
+        mut self,
+        max: usize,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<(std::process::ExitStatus, Vec<u8>, String)> {
+        use tokio::io::AsyncReadExt;
+        let mut stdout = self
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("extractor stdout missing"))?;
+        let stderr = self
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("extractor stderr missing"))?;
+        let child = self.child.as_mut().expect("owned extraction child");
+        let read = async {
+            let mut kept = Vec::new();
+            let mut buffer = vec![0; 8192];
+            loop {
+                let count = stdout.read(&mut buffer).await?;
+                if count == 0 {
+                    break;
+                }
+                let keep = count.min(max.saturating_sub(kept.len()));
+                kept.extend_from_slice(&buffer[..keep]);
+            }
+            Ok::<_, std::io::Error>(kept)
+        };
+        let wait = async {
+            tokio::select! {biased;
+                ()=cancelled.cancelled()=>{let _=child.start_kill();child.wait().await},
+                status=child.wait()=>status,
+            }
+        };
+        let (status, bytes, diagnostics) = tokio::join!(wait, read, drain_diagnostics(stderr));
+        let status = status?;
+        self.child.take();
+        if let Some(input) = self.source_input.take() {
+            input.close_and_wait().await?;
+        }
+        self.child_job.take();
+        Ok((status, bytes?, diagnostics))
+    }
     pub async fn output(self) -> std::io::Result<(std::process::ExitStatus, String)> {
-        self.output_cancellable(&tokio_util::sync::CancellationToken::new())
+        self.output_cancellable(&plurx_core::process::bounded::cancellation().unwrap_or_default())
             .await
     }
 
@@ -306,6 +371,9 @@ impl BoundedDiagnosticChild {
         let (status, diagnostics) = tokio::join!(wait, drain_diagnostics(stderr));
         let status = status?;
         self.child.take(); // Successful wait, including nonzero exit, proves reap.
+        if let Some(input) = self.source_input.take() {
+            input.close_and_wait().await?;
+        }
         self.child_job.take();
         #[cfg(test)]
         if let Some(reaped) = self.reaped.take() {
@@ -326,7 +394,7 @@ impl BoundedDiagnosticChild {
         self.output_to_bounded_file_cancellable(
             path,
             max_bytes,
-            &tokio_util::sync::CancellationToken::new(),
+            &plurx_core::process::bounded::cancellation().unwrap_or_default(),
         )
         .await
     }
@@ -399,6 +467,9 @@ impl BoundedDiagnosticChild {
             .wait()
             .await?;
         self.child.take();
+        if let Some(input) = self.source_input.take() {
+            input.close_and_wait().await?;
+        }
         self.child_job.take();
         #[cfg(test)]
         if let Some(reaped) = self.reaped.take() {
@@ -420,12 +491,20 @@ impl Drop for BoundedDiagnosticChild {
             return;
         };
         let child_job = self.child_job.take();
+        let source_input = self.source_input.take();
         let _ = child.start_kill();
         #[cfg(test)]
         let reaped = self.reaped.take();
         tokio::spawn(async move {
             let _child_job = child_job;
             let result = child.wait().await;
+            if let Some(input) = source_input {
+                if result.is_ok() {
+                    let _ = input.close_and_wait().await;
+                } else {
+                    input.cleanup_pending();
+                }
+            }
             if let Err(ref error) = result {
                 tracing::warn!(%error, "reaping cancelled burn-track extraction failed");
             }
@@ -697,10 +776,52 @@ pub(crate) async fn held_source_probe_json_bound(
     work: crate::process_control::ChildWork,
     reporter: &EncodedExecutable,
 ) -> Result<String, String> {
+    held_probe_json_bound(source, work, reporter, true).await
+}
+
+/// The descriptor is already materialized output, never original media.
+/// Ambient original-read scopes must not charge a second source owner for it.
+#[cfg(target_os = "linux")]
+pub(crate) async fn held_artifact_probe_json_bound(
+    source: &std::fs::File,
+    work: crate::process_control::ChildWork,
+    reporter: &EncodedExecutable,
+) -> Result<String, String> {
+    held_probe_json_bound(source, work, reporter, false).await
+}
+
+async fn held_probe_json_bound(
+    source: &std::fs::File,
+    work: crate::process_control::ChildWork,
+    reporter: &EncodedExecutable,
+    original: bool,
+) -> Result<String, String> {
     if !reporter.is_current().await {
         return Err("held clock reporter changed before query".into());
     }
-    let command = source_held_probe_command(source, &reporter.path)?;
+    let input = if original {
+        crate::source_input::SourceInput::open_current_held(source, "held-bound-metadata").await?
+    } else {
+        None
+    };
+    let command = if let Some(input) = input.as_ref() {
+        let mut command = tokio::process::Command::new(&reporter.path);
+        command.args([
+            "-v",
+            "error",
+            "-threads",
+            "1",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            input.url(),
+        ]);
+        command
+    } else {
+        source_held_probe_command(source, &reporter.path)?
+    };
     let output = bounded_command_output_cancellable(
         command,
         ENGINE_PROBE_TIMEOUT,
@@ -709,7 +830,14 @@ pub(crate) async fn held_source_probe_json_bound(
         None,
         work,
     )
-    .await?;
+    .await;
+    if let Some(input) = input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("joining held bound probe source: {error}"))?;
+    }
+    let output = output?;
     if !reporter.is_current().await {
         return Err("held clock reporter changed during query".into());
     }
@@ -724,13 +852,23 @@ pub(crate) async fn held_source_probe_json_bound(
 /// parsed is handed back untouched: the comparison reports the parse failure,
 /// which is the honest answer, rather than a stamp over unreadable output.
 async fn stamped_with_this_reporter(document: String) -> String {
-    let Some(reporter) = plurx_core::scan::probe::reporter_identity_of(&ffprobe_bin()).await else {
-        return document;
-    };
     let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&document) else {
         return document;
     };
-    plurx_core::scan::probe::stamp_reporter(&mut parsed, reporter);
+    if let Some(filename) = parsed
+        .get_mut("format")
+        .and_then(|format| format.get_mut("filename"))
+    {
+        if let Some(value) = filename.as_str() {
+            let sanitized = crate::scratch_put::redact(value);
+            if sanitized != value {
+                *filename = serde_json::Value::String(sanitized);
+            }
+        }
+    }
+    if let Some(reporter) = plurx_core::scan::probe::reporter_identity_of(&ffprobe_bin()).await {
+        plurx_core::scan::probe::stamp_reporter(&mut parsed, reporter);
+    }
     serde_json::to_string(&parsed).unwrap_or(document)
 }
 
@@ -829,6 +967,19 @@ pub(crate) async fn held_source_packet_probe_json(
         (source_path, held_identity)
     };
 
+    let input = match crate::background_jobs::source_budget() {
+        Some(budget) => Some(
+            crate::source_input::SourceInput::open_background_held(
+                crate::fragment_index_cluster::SourceFence::clone_current_held(source)
+                    .map_err(HeldPacketProbeError::Source)?,
+                "application/octet-stream",
+                budget,
+            )
+            .await
+            .map_err(HeldPacketProbeError::Source)?,
+        ),
+        None => None,
+    };
     let mut command = tokio::process::Command::new(ffprobe_bin());
     #[cfg(unix)]
     inherit_file_descriptors(&mut command, &[(source, 3)]);
@@ -856,16 +1007,52 @@ pub(crate) async fn held_source_packet_probe_json(
     if let Some(interval) = interval {
         command.args(["-read_intervals", &interval]);
     }
-    #[cfg(unix)]
-    command.arg("/dev/fd/3");
-    #[cfg(windows)]
-    command.arg(&source_path);
+    if let Some(input) = input.as_ref() {
+        command.arg(input.url());
+    } else {
+        #[cfg(unix)]
+        command.arg("/dev/fd/3");
+        #[cfg(windows)]
+        command.arg(&source_path);
+    }
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
+    if let Some(input) = input {
+        let cap = usize::try_from(max_stdout_bytes.saturating_add(1))
+            .map_err(|error| HeldPacketProbeError::Process(error.to_string()))?;
+        let output = plurx_core::process::bounded::output_command(
+            &mut command,
+            timeout,
+            cap,
+            crate::process_control::ChildWork::background("fragment index packet probe"),
+        )
+        .await;
+        input.close_and_wait().await.map_err(|error| {
+            HeldPacketProbeError::Source(format!("joining packet source input: {error}"))
+        })?;
+        let output = output.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                HeldPacketProbeError::Timeout
+            } else {
+                HeldPacketProbeError::Process(error.to_string())
+            }
+        })?;
+        if output.stdout.len() as u64 > max_stdout_bytes {
+            return Err(HeldPacketProbeError::OutputLimit);
+        }
+        if !output.status.success() {
+            return Err(HeldPacketProbeError::Process(format!(
+                "packet probe exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        return Ok(output.stdout);
+    }
     let (mut child, _child_job) = crate::process_control::spawn_job_owned(
         &mut command,
         crate::process_control::ChildWork::background("fragment index packet probe"),
@@ -1071,6 +1258,35 @@ async fn held_source_probe_json_with_limits(
     work: crate::process_control::ChildWork,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<String, String> {
+    if let Some(budget) = crate::background_jobs::source_budget() {
+        let input = crate::source_input::SourceInput::open_background_held(
+            crate::fragment_index_cluster::SourceFence::clone_current_held(source)?,
+            "application/octet-stream",
+            budget,
+        )
+        .await?;
+        let mut command = tokio::process::Command::new(ffprobe_bin());
+        command.args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            input.url(),
+        ]);
+        let output =
+            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
+                .await;
+        input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("joining held probe source input: {error}"))?;
+        return String::from_utf8(output?.stdout)
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"));
+    }
+
     #[cfg(windows)]
     {
         let held_identity = plurx_core::fs_secure::std_file_identity(source)
@@ -3444,8 +3660,13 @@ pub(crate) async fn bounded_command_capture_cancellable(
             let status = status.map_err(|e| e.to_string())?;
             Ok(BoundedCommandOutcome {
                 status,
-                output: stdout
-                    .and_then(|stdout| stderr.map(|stderr| BoundedOutput { stdout, stderr })),
+                output: stdout.and_then(|stdout| {
+                    stderr.map(|stderr| BoundedOutput {
+                        stdout,
+                        stderr: crate::scratch_put::redact(&String::from_utf8_lossy(&stderr))
+                            .into_bytes(),
+                    })
+                }),
             })
         };
         tokio::pin!(collect);
@@ -4441,6 +4662,7 @@ async fn dovi_probe_output(
     file: &MediaFile,
     apply: bool,
     class: crate::process_control::ChildClass,
+    source: &std::fs::File,
 ) -> Result<Vec<String>, String> {
     let seek = file
         .duration_ms
@@ -4453,33 +4675,45 @@ async fn dovi_probe_output(
         .filters(Some(width), height, Some("dolby_vision"))
         .ok_or_else(|| "Dolby Vision renderer produced no filter graph".to_owned())?
         .replace("apply_dovi=1", &format!("apply_dovi={}", u8::from(apply)));
+    let input = crate::source_input::SourceInput::open_current_held(source, "dovi-pixel-probe")
+        .await?
+        .ok_or("Dolby Vision pixel probe has no original source read owner")?;
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     command
-        .kill_on_drop(true)
         .args(["-hide_banner", "-loglevel", "error"])
-        .args(["-ss", &format!("{seek:.3}"), "-i"])
-        .arg(&file.path)
+        .args(["-ss", &format!("{seek:.3}"), "-i", input.url()])
         .args(["-map", "0:v:0", "-frames:v", "3", "-an", "-vf"])
         .arg(filter)
         .args(["-f", "framemd5", "-"]);
-    let output = tokio::time::timeout(
-        Duration::from_secs(30),
-        crate::process_control::output_job_owned(
-            &mut command,
-            crate::process_control::ChildWork::new(class, "Dolby Vision pixel probe"),
-        ),
+    let child = BoundedDiagnosticChild::spawn_piped_output(
+        &mut command,
+        crate::process_control::ChildWork::new(class, "Dolby Vision pixel probe"),
     )
-    .await
-    .map_err(|_| "Dolby Vision pixel probe timed out".to_owned())?
-    .map_err(|error| format!("starting Dolby Vision pixel probe: {error}"))?;
-    if !output.status.success() {
+    .map_err(|error| format!("starting Dolby Vision pixel probe: {error}"))?
+    .with_source_input(Some(input));
+    let cancelled = plurx_core::process::bounded::cancellation()
+        .unwrap_or_default()
+        .child_token();
+    let output = child.output_bytes_cancellable(1024 * 1024, &cancelled);
+    tokio::pin!(output);
+    let (status, stdout, stderr) = tokio::select! {
+        result = &mut output => result.map_err(|error| error.to_string())?,
+        () = tokio::time::sleep(Duration::from_secs(30)) => {
+            cancelled.cancel();
+            // Expiry is not physical settlement: join the exact child and
+            // every mediated read before returning the probe outcome.
+            let _ = output.await;
+            return Err("Dolby Vision pixel probe timed out".into());
+        }
+    };
+    if !status.success() {
         return Err(format!(
             "Dolby Vision pixel probe exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            status,
+            stderr.trim()
         ));
     }
-    let frames: Vec<String> = String::from_utf8_lossy(&output.stdout)
+    let frames: Vec<String> = String::from_utf8_lossy(&stdout)
         .lines()
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .map(str::to_owned)
@@ -4500,8 +4734,12 @@ pub async fn dovi_reshape_changes_pixels(
     file: &MediaFile,
     class: crate::process_control::ChildClass,
 ) -> DoviPixelProof {
-    let enabled = dovi_probe_output(file, true, class).await;
-    let disabled = dovi_probe_output(file, false, class).await;
+    let source = match crate::fragment_index_cluster::open_source_fence(file, None).await {
+        Ok(source) => source,
+        Err(reason) => return DoviPixelProof::Inconclusive(reason),
+    };
+    let enabled = dovi_probe_output(file, true, class, &source.handle).await;
+    let disabled = dovi_probe_output(file, false, class, &source.handle).await;
     let proof = dovi_pixel_verdict(enabled, disabled);
     match &proof {
         DoviPixelProof::Proved => {}

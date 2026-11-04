@@ -97,16 +97,19 @@ pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
     format!(
         r#"NOT EXISTS (SELECT 1 FROM analysis_required_resources required
       WHERE required.request_id = analysis_requests.request_id AND (
-        (SELECT COUNT(*) FROM background_job_reservations held
-          WHERE held.resource_key = required.resource_key AND held.expires_at_ms > {now})
-        + (SELECT COUNT(*) FROM analysis_source_reservations held
-          WHERE held.resource_key = required.resource_key AND held.expires_at_ms > {now}) >= 2
+        EXISTS(SELECT 1 FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
+          AND held.custody_id IS NOT NULL AND held.active_occupancy=1 AND held.expires_at_ms<={now})
+        OR EXISTS(SELECT 1 FROM foreground_source_permissions fg WHERE (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
+          AND (fg.lease_expires_at_ms>{now} OR fg.custody_held=1)
+          AND (fg.lease_expires_at_ms<={now} OR COALESCE(fg.permits_through_ms,0)<={now}))
+        OR (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
+          AND held.active_occupancy=1 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL))>=2
         OR (NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
               WHERE viewer.request_scope = 'playback-analysis'
                 AND viewer.job_id = analysis_requests.request_id
                 AND viewer.state = 'pending' AND viewer.deadline_ms > {now})
           AND (SELECT COUNT(*) FROM background_job_reservations held
-              WHERE held.resource_key = required.resource_key AND held.expires_at_ms > {now}
+              WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.expires_at_ms > {now}
                 AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
                     WHERE viewer.job_id = held.job_id
                       AND viewer.state IN ('pending','awaiting_hydration')
@@ -126,11 +129,15 @@ pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
                               AND source.trigger = 'playback'
                               AND source.state IN ('queued','running'))))))
             + (SELECT COUNT(*) FROM analysis_source_reservations held
-                WHERE held.resource_key = required.resource_key AND held.expires_at_ms > {now}
+                WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.expires_at_ms > {now}
                   AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
                       WHERE viewer.request_scope = 'playback-analysis'
                         AND viewer.job_id = held.request_id
-                        AND viewer.state = 'pending' AND viewer.deadline_ms > {now})) >= 1)))"#
+                        AND viewer.state = 'pending' AND viewer.deadline_ms > {now}))
+            + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
+              WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
+                AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
+                AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)) >= 1)))"#
     )
 }
 

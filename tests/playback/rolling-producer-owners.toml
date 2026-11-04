@@ -1,3 +1,140 @@
+# Playback-startup source ownership audit (2026-11-03): reviewed base
+# bd213c81942175f591912e4bb0a2cc10f2a7a195 against source candidate
+# e3490c587d5c12fc00eadac6fda9c191d445c0fb. This is authored source review,
+# not fresh runtime or physical qualification. Historical audits below retain
+# their original candidate identities. Exact equality, roots, alias guards,
+# forbidden zeroes and all structural categories stay in force.
+#
+# The two rolling/session.rs production registrations now call
+# AttemptChild::new_with_source_job rather than new_with_job. Both still enter
+# attempt_child.rs::new_with_hooks before publication and share its sole child,
+# ChildJob, command receiver and terminal receipt. Its supervisor owns SourceInput
+# until successful child wait followed by close_and_wait; wait failure instead
+# marks cleanup_pending. Drop sends termination to that retained supervisor.
+# Extend both registration patterns to cover the new constructor spelling;
+# retain 23 registrations, rather than allowing those two owners to disappear.
+#
+# The module task-shaped increase is +25, composed of 11 actual production
+# tasks, 13 fixture tasks and one static child-builder spelling:
+# - source_custody.rs::SourceRequest::register has two run_owner launches:
+#   ordinary registration, and ambiguous-registration cleanup before input was
+#   exposed. Each owns the exact token/Store/receiver independently of its
+#   caller, renews its visible charge and resolves journal/proof/deletion.
+#   These are deliberately detached durable settlement owners, not joined
+#   daemon-shutdown receipts. Channel closure requests settlement; uncertain
+#   physical cleanup retains a charge instead of inventing successful reap.
+# - source_custody.rs::file_body adds one directly awaited blocking read. Its
+#   closure retains the DirectReader Arc (held file and custody) plus actual
+#   read activity, so dropping an HTTP waiter cannot release a live read.
+# - source_input.rs::launch adds the authority-loss watcher and private server.
+#   The watcher owns only observer/close-token state and ends on authority loss
+#   or close; its JoinHandle is not retained. The server handle is retained for
+#   graceful close_and_wait. Drop requests close, without claiming a join.
+# - source_input.rs adds three blocking helpers: close_and_wait closes the
+#   descriptor/custody only while owning the read semaphore; read_source's
+#   cached-identity check and physical positioned-read closure own that same
+#   semaphore and Arc state until they return. Cancellation can drop a waiter,
+#   but cannot release the actual read slot. close_and_wait awaits that slot.
+# - process/bounded/pause.rs::verified_group directly awaits one blocking
+#   /proc census; it observes the caller's retained group, owns no child and
+#   never treats a task timeout as proof of stopped/reaped source readers.
+# - transcode/manager/create.rs::FallbackAnalysisInterestOwner::drop transfers
+#   one exact viewer/source/generation restoration receipt to a detached Store
+#   call. Failure leaves durable suspension state; this task does not retry or
+#   restart a producer. After transfer to Session, rolling/retirement.rs retries
+#   the same receipt after confirmed child retirement, retaining the session.
+# - vod/generation.rs::spawn_generation retains prepared-source custody in one
+#   detached waiter on the exact ProducerRegistration::wait_confirmed_reap.
+#   That wait returns only a confirmed generation receipt, not a deadline or
+#   a current-slot guess; the source guard drops only after that receipt.
+# - The remaining task-shaped addition is subtitles.rs's static
+#   BoundedDiagnosticChild::spawn call. It constructs the existing child owner,
+#   not a new Tokio task. Its source input is joined by output or retained by
+#   the existing Drop reaper on cancellation.
+#
+# The 13 added fixture tasks are: bounded.rs's one pause/cancel child driver;
+# pause.rs's one coalesced-revision group driver; scan/probe/input.rs's three
+# provider/cancellation/active-budget probes; decode_facts/tests.rs's one
+# stopped-thread probe; source_input/tests.rs's six range-read, cancelled
+# waiter/close, blocking range/error, and processed-input close workers; and
+# source_probe.rs's one finite-hold RPC revalidation worker. Their successful
+# paths join them; the cancellation fixture explicitly aborts/awaits its waiter
+# while the actual read retains the permit until the gate releases. Fixture
+# timeouts diagnose failure, not physical settlement or runtime guarantees.
+# Existing decode_facts::spawn_configured_probe, subtitle hash workers and
+# fragindex's companion scanner changed source plumbing without net new tasks.
+# The scanner now receives the caller's cancellation/budget/pause scopes, and
+# refused/expired companion collection cancels then awaits it and its bridge.
+#
+# Other shape deltas, including non-process lexical matches:
+# - +3 method spawns are pause.rs's owned fixture child, fragindex/tests.rs's
+#   owned companion call, and mkv_sparse.rs's scoped/joined fixture thread.
+#   The latter's four added .wait calls are paired barriers, not child waits.
+# - +1 bare spawn is run_source_part's passed child factory, not a task. Its
+#   operation owner retains child/ChildJob, kills on non-finished outcomes,
+#   retries failed wait with capacity retained, then joins input and custody.
+#   This adds one raw child.wait().await and one operation-owned 100ms sleep.
+# - +4 Command constructors: pause.rs and source_input/tests.rs each add an
+#   explicitly killed/waited fixture child; ffmpeg.rs adds held-source metadata
+#   builders collected through the existing bounded child owner. The moved
+#   fragindex companion constructor is still owned by its joined scanner.
+# - +11 launch-shaped methods comprise those three method spawns, five new
+#   SourceInput HTTP status observations (one production, four tests), two
+#   subtitle HTTP status observations, and BoundedDiagnosticChild::output.
+#   Status observations launch nothing; output awaits the existing child owner.
+# - +10 lifecycle methods: bounded collector +1, pause fixture +2, DV helper
+#   settlement +1, ffmpeg byte-output collection +3, scoped fixture barriers +4,
+#   cache run_source_part +3, and subtitle-source refactoring -4. The DV
+#   SourceInputSettlement waits for the encoder registration and helper before
+#   input close. BoundedDiagnosticChild drains output concurrently with wait,
+#   cancels then awaits on expiry, and transfers a dropped unreaped child plus
+#   input to its existing reaper. Subtitle passes now share one group-kill and
+#   retrying wait owner instead of repeated best-effort kill/wait branches.
+# - +4 free/UFCS lifecycle sites: bounded and companion fixture signal-0 probes
+#   +2, verified pause group signal +1, fragindex exact-group cleanup sends +2,
+#   source_custody's Linux group/platform dispatch +2, minus the three old
+#   prodrun/AttemptChild platform-dispatch calls now routed through that helper.
+#   Only the unreaped child's owner may signal its fresh group; signal-0 tests
+#   are existence observations. Quiescence polling retains the group owner.
+# - kill_on_drop changes by +1: two fixture constructors added, while the DOVI
+#   pixel probe's inline constructor flag moves to BoundedDiagnosticChild's
+#   existing shared builder. Explicit child/read settlement remains required.
+#
+# Timer changes are awaited by their named owners, not detached watchdogs.
+# Net +93 namespaced constructors are exactly:
+#   bounded.rs +11; bounded/pause.rs +18; scan/probe/input.rs +9;
+#   background_jobs.rs +6; background_jobs/source.rs +8; decode_facts.rs -1;
+#   decode_facts/source_session.rs +5; decode_facts/tests.rs +6;
+#   fragindex.rs +1; fragindex/tests.rs +2; http/shared_source_playback.rs +1;
+#   source_custody.rs +9; source_input.rs +2; source_input/tests.rs +3;
+#   source_probe.rs +5; state.rs +2; subtitle_translation/read_attestation.rs +3;
+#   transcode/manager/produce.rs +1; transcode/rolling/retirement.rs +1;
+#   vod/tests/chunk_03.rs +1.
+# Source controller timers bound active time and finite wall age; only verified
+# group/read quiescence plus acknowledged source-slot state can grant finite
+# quota credit. Slot/authority RPC waits consume active time. Collection expiry
+# in decode_facts, ffmpeg and subtitles cancels then awaits the same owner;
+# expiry itself never proves reap. The one tokio::time import is pause.rs's
+# Instant. Background/source/read-attestation timers pace byte grants, renew
+# exact receipts or retry journal/proof/deletion with their owner retained.
+# The library/source driver awaits its 250ms pause/reacquisition checks while
+# retaining physical admission; state subtitle/group cleanup waits preserve
+# the claim until join. Fixture timers only observe those orders and budgets.
+# The extra PREPUBLICATION_REAP_RETRY use belongs to the existing retirement
+# owner's exact fallback-interest restore after reap, not producer recovery.
+#
+# Reviewed census: tasks 1052->1077; method spawns 82->85; bare spawns 17->18;
+# timers 1954->2047; tokio-time imports 6->7; Commands 315->319;
+# launch shapes 862->873; lifecycle methods 360->370; UFCS lifecycle 74->78;
+# kill-on-drop 119->120; supervisor registrations stay 23 with expanded coverage.
+# Transcode-local tasks 120->121, sleeps 86->88, raw waits 1->2, and physical
+# cleanup retry references 5->6 follow the exact owners described above.
+# Cleanup/join can remain pending on stuck filesystem/group/Store/journal
+# dependencies; these source counts establish no global liveness or shutdown
+# join. No new playback verdict timer, symptom watchdog or recovery owner is
+# admitted by this audit. Runtime tests/proofs remain attributable to their
+# actual recorded source candidates, separate from this static source audit.
+
 # Latest main5ac integration source audit (2026-10-29; 460 Rust files):
 # exact counts are 1029 namespaced tasks, 81 method spawns, 1917 timers,
 # 312 Commands, 838 launch-shaped methods, 360 lifecycle methods, 74 UFCS
@@ -614,7 +751,7 @@ replacement = "typed producer facts entering the actor; only prepublication and 
 
 [[symbols]]
 id = "supervisor-registration"
-pattern = "AttemptChild::new(?:_with_job)?\\("
+pattern = "AttemptChild::new(?:_with_(?:source_)?job)?\\("
 also_in = ["crates/plurxd/src/transcode"]
 # 20 -> 22 with M5c3: two test-only predecessor children. The retry executor
 # terminates the exact failed attempt before it clears scratch, so both
@@ -698,9 +835,9 @@ replacement = "prepublication and published cleanup owners wait on the superviso
 [[symbols]]
 id = "raw-child-wait"
 pattern = "child\\.wait\\(\\)\\.await"
-expected_occurrences = 1
+expected_occurrences = 2
 kind = "process_action"
-replacement = "the sole supervisor reap path; rejected candidates use the same cleanup registry"
+replacement = "named supervisor reap paths retain exact child, admission and source input until confirmed wait; rejected candidates use the same cleanup registry"
 
 [[symbols]]
 id = "response-publication-observation"
@@ -852,7 +989,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # awaits its JoinHandle before asserting.
 # PR1341: +1 test-only spawn in chunk_06.rs (M5 init-wait driver); the
 # test joins it under its deadline.
-expected_occurrences = 120
+expected_occurrences = 121
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -1003,7 +1140,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # fixtures under a paused clock; one in publication.rs is a source-pin
 # string (`match_indices`) proving the 100 ms init poll is the only sleep in
 # both pre-object wait branches. No shipped sleep is added.
-expected_occurrences = 86
+expected_occurrences = 88
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1101,7 +1238,7 @@ replacement = "bounds each individual prepublication or published physical reap 
 [[symbols]]
 id = "prepublication-reap-retry-cadence"
 pattern = "PREPUBLICATION_REAP_RETRY"
-expected_occurrences = 5
+expected_occurrences = 6
 kind = "lifecycle_timer"
 replacement = "bounded prepublication or published physical-cleanup repair only; cannot retry, replace, or make a playback verdict"
 
@@ -3496,7 +3633,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # joined after an unwind-safe Release guard releases the blocked scan. The
 # actual blocking scan keeps its io_slot credit until it returns. Production
 # warm_inventory awaits the existing refresh owner and spawns no extra task.
-expected_occurrences = 1054
+expected_occurrences = 1079
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3739,7 +3876,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # the listener owner. Both parent additions are present in the source union.
 # Subtitle cue index (#1340): +1 scope.spawn in mkv_sparse::parallel; the
 # reader threads are scoped and joined by std::thread::scope before it returns.
-expected_occurrences = 82
+expected_occurrences = 85
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3760,7 +3897,7 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # both use the same retained cancellation/reap owner, not separate launchers.
 # PR1225: +1 is vod/driver.rs:1245's cfg(test) controlled_driver::spawn
 # declaration, not a second task. Its actual task/cancellation is noted above.
-expected_occurrences = 17
+expected_occurrences = 18
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5241,7 +5378,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # create 30s, GET 20s, body 10s, stop 5s, offline decode/probe 20s each, and
 # settlement 10s with 500-ms stop attempts and a 10-ms condition poll. Its
 # caught errors/panics still settle all isolated sessions before offline checks.
-expected_occurrences = 1969
+expected_occurrences = 2062
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5285,7 +5422,7 @@ pattern = "use\\s+tokio::time"
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
 # PR1341: +1 test-only `use tokio::time` in authority_recovery.rs.
-expected_occurrences = 6
+expected_occurrences = 7
 
 [[module_structures]]
 id = "process-command-construction"
@@ -5732,7 +5869,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # normal exit under a 20-second timeout with kill_on_drop as cancellation's
 # backstop. They run only after the session and reconstruction slot settle;
 # neither launches a production producer or turns timeout into valid evidence.
-expected_occurrences = 317
+expected_occurrences = 321
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6403,7 +6540,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # are unchanged; the two joined fixture tasks are classified above separately.
 # PR1369: +2 output() calls for the same bounded offline FFmpeg/FFprobe
 # controls inventoried above, not additional children or detached owners.
-expected_occurrences = 864
+expected_occurrences = 875
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6699,7 +6836,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 360
+expected_occurrences = 370
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6778,7 +6915,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 74
+expected_occurrences = 78
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6928,12 +7065,12 @@ pattern = "kill_on_drop\\s*\\("
 # PR1369: +2 cancellation backstops on those same physical-control diagnostics.
 # Successful evidence requires collected exit status and decoded/probed media;
 # a timeout drops the guarded child and fails the control.
-expected_occurrences = 121
+expected_occurrences = 122
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
-pattern = "AttemptChild::new(?:_with_job)?\\s*\\("
+pattern = "AttemptChild::new(?:_with_(?:source_)?job)?\\s*\\("
 # 20 -> 22 with M5c3; the module-wide twin of `supervisor-registration`, and
 # the same two test-only predecessor children.
 # The Windows constructor variant is included because it is the same exact

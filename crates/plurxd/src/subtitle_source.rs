@@ -556,6 +556,16 @@ impl StoreAccess {
         self.membership.as_ref()
     }
 
+    pub(crate) fn foreground_source_request(
+        &self,
+        file: &MediaFile,
+        lifetime: &str,
+    ) -> Option<crate::source_custody::SourceRequest> {
+        self.jobs
+            .as_ref()
+            .and_then(|jobs| jobs.foreground_source_request(file, lifetime))
+    }
+
     pub(crate) fn jobs(&self) -> Option<&std::sync::Arc<crate::state::JobManager>> {
         self.jobs.as_ref()
     }
