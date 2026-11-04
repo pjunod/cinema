@@ -26,10 +26,12 @@ does not establish a separate compilation boundary. A changed shared API may
 still invalidate dependents, and the final executable still links. Release
 Thin LTO is retained; no universal rebuild-speed promise is made.
 
-The runtime prerequisite is commit `f30dfbbc9`: native SQLite selection,
+The runtime prerequisite began at `f30dfbbc9`: native SQLite selection,
 verified singleton conversion, native backup/restore and explicit promotion.
-It has focused source evidence but is not yet merged or release qualified.
-Land it through its own reviewed task PR and gate before dependent task merges.
+Reviewed corrections at `5484d7986` passed effort gate 6468 and merged through
+PR #1379 into `effort/standalone-sqlite` as `fa5ed825a`. Dependent task branches
+include that actual effort base before their own gates. Release qualification
+and the final Hiqlite-free build remain open.
 
 ## 2. Contracts — package boundaries cannot change data or authority
 
@@ -440,7 +442,7 @@ each supported distribution, including new migration tooling.
 |---|---|---|
 | P0 | Plan draft based on `f30dfbbc9`; source/dependency and historical timing audit | Astra confirmed all four findings and two clarifications addressed; P1/P2 allowed in order; no build improvement implemented |
 | P1 | Fixed `cf095b203` / `e1ce9af4ce` source; three samples per case, preserved raw reports, actual source restoration and Cargo artifact events | Baseline collected; guarded runner belongs to its own task PR |
-| P2b measurement | Equal-capability system/LLD Cargo commands; all 450 observed units have identical features/profiles | Median edit reductions: CSS 58%, daemon 56%, small API 35%; full ranges retained, including a 55-second LLD daemon outlier. Named developer recipe and PR validation still pending; no cold/release/Mac claim |
+| P2b diagnostic measurement | Equal-capability system/LLD Cargo commands; all 450 observed units have identical features/profiles | Initial median edit reductions: CSS 58%, daemon 56%, small API 35%; all ranges/outliers retained. The initial VM-only isolation check missed its host daemon. Repeat both variants through voter-build caps before recipe acceptance; no cold/release/Mac claim |
 | P3–P6 | Primitive-only entry admitted; authority obligations remain explicit and unresolved | Open; standalone dependency omission is not yet achieved |
 
 Record Astra's findings and individual dispositions with the review, then
