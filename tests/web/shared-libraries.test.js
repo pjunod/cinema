@@ -2,6 +2,9 @@
 const fs=require("node:fs"),vm=require("node:vm"),assert=require("node:assert/strict"),{test}=require("node:test");
 const artworkSource=fs.readFileSync("crates/plurxd/src/web/pages/shared-artwork.js","utf8");
 const source=fs.readFileSync("crates/plurxd/src/web/pages/shared-libraries.js","utf8");
+const preplaySource=fs.readFileSync("crates/plurxd/src/web/detail/preplay-selection.js","utf8");
+const resumeStart=preplaySource.indexOf("function playbackResumeMs(");
+const resumeSource=preplaySource.slice(resumeStart,preplaySource.indexOf("\n}",resumeStart)+2);
 const detailSources=["detail/helpers.js","detail/dynamic-range.js","detail/track-facts.js","detail/edit.js"].map(path=>fs.readFileSync("crates/plurxd/src/web/"+path,"utf8"));
 const hdrLabelSource=fs.readFileSync("crates/plurxd/src/web/player/stats.js","utf8").match(/^function hdrLabel\(.*$/m)[0];
 const ref={import_id:"11111111-1111-4111-8111-111111111111",server_id:"22222222-2222-4222-8222-222222222222",catalogue_epoch:"33333333-3333-4333-8333-333333333333",library_id:"9007199254740993",item_id:"9223372036854775807"};
@@ -16,6 +19,7 @@ function harness(read){
  vm.runInContext(artworkSource,context);
  for(const detailSource of detailSources)vm.runInContext(detailSource,context);
  vm.runInContext(hdrLabelSource,context);
+ vm.runInContext(resumeSource,context);
  vm.runInContext(source+"\nthis.shared={id:sharedCatalogueId,key:sharedCatalogueGroupKey,href:sharedCatalogueHref,route:sharedCatalogueRoute,item:sharedCatalogueItemHtml,detail:sharedCatalogueDetailHtml,read:sharedCatalogueRead,view:viewSharedCatalogue,page:sharedCatalogueLoadPage};",context);
  return {context,h:context.shared,elements,requests,capture(){return {generation:1,auth:1,token:"login-a",origin:"/api/v1",route:"#/shared"};}};
 }
@@ -130,6 +134,21 @@ test("Shared launch refetches current delivery and retains string file identity 
  fixture.context.SHARED_DECISION.details=async()=>({detail:{delivery_status:"unavailable"},files:[]});
  await assert.rejects(fixture.context.launch(ref,"9007199254740993",fixture.capture()));assert.equal(launches.length,1);
  fixture.context.AUTH_GENERATION++;await assert.rejects(fixture.context.launch(ref,"9007199254740993",fixture.capture()));assert.equal(launches.length,1);
+});
+test("Shared launch resumes a partial rewatch without clearing watched history",async()=>{
+ const fixture=harness(),launches=[],fileContext={source_file_id:"77"};
+ const watch={position_ms:45000,duration_ms:90000,watched:true};
+ fixture.context.SHARED_DECISION={details:async()=>({detail:{delivery_status:"available",item:{title:"Rewatch",reference:ref},watch},files:[{context:fileContext,file:{duration_ms:90000}}]})};
+ fixture.context.play=(...args)=>{launches.push(args);};
+ vm.runInContext("this.launch=sharedCataloguePlay",fixture.context);
+ await fixture.context.launch(ref,"77",fixture.capture());
+ assert.equal(launches[0][2],45000);assert.equal(watch.watched,true);
+ watch.position_ms=85500;
+ await fixture.context.launch(ref,"77",fixture.capture());
+ assert.equal(launches[1][2],0,"the 95% completion boundary still starts over");
+ watch.position_ms=-1;
+ await assert.rejects(fixture.context.launch(ref,"77",fixture.capture()),/Shared timeline unavailable/);
+ assert.equal(launches.length,2);
 });
 
 test("an expired or substituted Source cursor reopens the list once instead of retrying a dead cursor",async()=>{

@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +20,50 @@
 #ifndef WINDOW_READ_LIMIT
 #define WINDOW_READ_LIMIT (128ULL * 1024 * 1024)
 #endif
+// The controller latches stop without touching the I/O owner's socket.
+// Reset and destruction require the reader to have joined.
+struct movie_source_interrupt { int read_fd, write_fd; };
+
+static inline int movie_source_interrupt_init(struct movie_source_interrupt *interrupt) {
+  interrupt->read_fd = interrupt->write_fd = -1;
+  int descriptors[2];
+  if (pipe(descriptors)) return AVERROR(errno);
+  for (int i = 0; i < 2; i++) {
+    int flags = fcntl(descriptors[i], F_GETFL);
+    if (flags < 0 || fcntl(descriptors[i], F_SETFL, flags | O_NONBLOCK) < 0 ||
+        fcntl(descriptors[i], F_SETFD, FD_CLOEXEC) < 0) {
+      int error = errno;
+      close(descriptors[0]); close(descriptors[1]);
+      return AVERROR(error);
+    }
+  }
+  interrupt->read_fd = descriptors[0];
+  interrupt->write_fd = descriptors[1];
+  return 0;
+}
+static inline int movie_source_interrupt_reset(struct movie_source_interrupt *interrupt) {
+  if (interrupt->read_fd < 0) return AVERROR(EINVAL);
+  char bytes[64];
+  for (;;) {
+    ssize_t n = read(interrupt->read_fd, bytes, sizeof(bytes));
+    if (n > 0 || (n < 0 && errno == EINTR)) continue;
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+    return n < 0 ? AVERROR(errno) : AVERROR(EPIPE);
+  }
+}
+static inline void movie_source_interrupt_stop(struct movie_source_interrupt *interrupt) {
+  if (interrupt->write_fd < 0) return;
+  const char stopped = 1;
+  ssize_t n;
+  do { n = write(interrupt->write_fd, &stopped, 1); } while (n < 0 && errno == EINTR);
+  // EAGAIN means unread stop bytes already keep the interrupt latched.
+}
+static inline void movie_source_interrupt_destroy(struct movie_source_interrupt *interrupt) {
+  if (interrupt->read_fd >= 0) close(interrupt->read_fd);
+  if (interrupt->write_fd >= 0) close(interrupt->write_fd);
+  interrupt->read_fd = interrupt->write_fd = -1;
+}
+
 struct budget_io {
   int fd;
   uint64_t bytes, requested_bytes;
@@ -28,7 +73,55 @@ struct budget_io {
   char path[34];
   int64_t position, length;
   int upstream;
+  struct movie_source_interrupt *interrupt;
 };
+
+static int movie_source_interrupt_status(const struct budget_io *io) {
+  if (!io->interrupt) return 0;
+  if (io->interrupt->read_fd < 0) return AVERROR(EINVAL);
+  struct pollfd descriptor = {.fd = io->interrupt->read_fd, .events = POLLIN};
+  int ready;
+  do { ready = poll(&descriptor, 1, 0); } while (ready < 0 && errno == EINTR);
+  if (ready < 0) return AVERROR(errno);
+  return descriptor.revents ? AVERROR(ECANCELED) : 0;
+}
+static int movie_socket_wait(struct budget_io *io, short events) {
+  struct pollfd descriptors[2] = {
+    {.fd = io->upstream, .events = events},
+    {.fd = io->interrupt ? io->interrupt->read_fd : -1, .events = POLLIN}
+  };
+  for (;;) {
+    int ready = poll(descriptors, 2, -1);
+    if (ready < 0 && errno == EINTR) continue;
+    if (ready < 0) return AVERROR(errno);
+    // Cancellation wins even when the socket became ready in the same poll.
+    if (descriptors[1].revents) return AVERROR(ECANCELED);
+    if (descriptors[0].revents & POLLNVAL) return AVERROR(EBADF);
+    if (descriptors[0].revents & (events | POLLERR | POLLHUP)) return 0;
+  }
+}
+static int movie_socket_transfer(struct budget_io *io, void *buffer, int size, bool sending) {
+  for (;;) {
+    int stopped = movie_source_interrupt_status(io);
+    if (stopped < 0) return stopped;
+#ifdef MSG_NOSIGNAL
+    const int flags = sending ? MSG_NOSIGNAL : 0;
+#else
+    const int flags = 0;
+#endif
+    ssize_t n = sending ? send(io->upstream, buffer, (size_t)size, flags)
+                        : recv(io->upstream, buffer, (size_t)size, 0);
+    if (n >= 0) return (int)n;
+    int error = errno;
+    if (error == EINTR) continue;
+    if (io->interrupt && (error == EAGAIN || error == EWOULDBLOCK)) {
+      int result = movie_socket_wait(io, sending ? POLLOUT : POLLIN);
+      if (result < 0) return result;
+      continue;
+    }
+    return AVERROR(error);
+  }
+}
 
 // The capability is minted by the held-source owner, never by media metadata.
 // No DNS, escaping, alternate IP spelling, credentials or trailing components.
@@ -77,13 +170,21 @@ static bool movie_decimal(const char **text, int64_t *value) {
 // explicitly requested Range, itself clipped to the original-byte budget.
 static int movie_http_head(struct budget_io *io, bool head, int size) {
   char request[256];
-  int result = AVERROR(EIO);
+  int result = movie_source_interrupt_status(io);
+  if (result < 0) return result;
+  result = AVERROR(EIO);
   unsigned port;
   if (sscanf(io->authority, "127.0.0.1:%u", &port) != 1)
     return AVERROR(EINVAL);
   io->upstream = socket(AF_INET, SOCK_STREAM, 0);
   if (io->upstream < 0) return AVERROR(errno);
   if (fcntl(io->upstream, F_SETFD, FD_CLOEXEC) < 0) goto failed;
+  if (io->interrupt) {
+    int flags = fcntl(io->upstream, F_GETFL);
+    if (flags < 0 || fcntl(io->upstream, F_SETFL, flags | O_NONBLOCK) < 0) {
+      result = AVERROR(errno); goto failed;
+    }
+  }
   // The existing child owner bounds work and owns cancellation. A socket wall
   // timer would continue running during a verified source-service pause.
 #ifdef SO_NOSIGPIPE
@@ -95,8 +196,24 @@ static int movie_http_head(struct budget_io *io, bool head, int size) {
   endpoint.sin_family = AF_INET;
   endpoint.sin_port = htons((uint16_t)port);
   endpoint.sin_addr.s_addr = htonl(UINT32_C(0x7f000001));
-  if (connect(io->upstream, (const struct sockaddr *)&endpoint, sizeof(endpoint)))
-    goto failed;
+  for (;;) {
+    if (!connect(io->upstream, (const struct sockaddr *)&endpoint, sizeof(endpoint))) break;
+    int error = errno;
+    if (error == EINTR && !io->interrupt) continue;
+    if (!io->interrupt ||
+        (error != EINPROGRESS && error != EALREADY && error != EINTR)) {
+      result = AVERROR(error); goto failed;
+    }
+    result = movie_socket_wait(io, POLLOUT);
+    if (result < 0) goto failed;
+    socklen_t length = sizeof(error);
+    int status;
+    do { status = getsockopt(io->upstream, SOL_SOCKET, SO_ERROR, &error, &length); }
+    while (status < 0 && errno == EINTR);
+    if (status < 0) { result = AVERROR(errno); goto failed; }
+    if (error) { result = AVERROR(error); goto failed; }
+    break;
+  }
   int count;
   if (head) {
     count = snprintf(request, sizeof(request),
@@ -110,22 +227,21 @@ static int movie_http_head(struct budget_io *io, bool head, int size) {
   }
   int sent = 0;
   while (sent < count) {
-#ifdef MSG_NOSIGNAL
-    const int flags = MSG_NOSIGNAL;
-#else
-    const int flags = 0;
-#endif
-    ssize_t n = send(io->upstream, request + sent, (size_t)(count - sent), flags);
-    if (n < 0 && errno == EINTR) continue;
-    if (n <= 0) goto failed;
-    sent += (int)n;
+    result = movie_socket_transfer(io, request + sent, count - sent, true);
+    if (result <= 0) {
+      if (!result) result = AVERROR(EIO);
+      goto failed;
+    }
+    sent += result;
   }
   char headers[8192];
   size_t used = 0;
   while (used < sizeof(headers) - 1) {
-    do { result = (int)recv(io->upstream, &headers[used], 1, 0); }
-    while (result < 0 && errno == EINTR);
-    if (result != 1) { result = AVERROR_INVALIDDATA; goto failed; }
+    result = movie_socket_transfer(io, &headers[used], 1, false);
+    if (result != 1) {
+      if (result >= 0) result = AVERROR_INVALIDDATA;
+      goto failed;
+    }
     used++;
     if (used >= 4 && !memcmp(headers + used - 4, "\r\n\r\n", 4)) break;
   }
@@ -238,9 +354,7 @@ static int movie_read(void *opaque, uint8_t *buffer, int size) {
   if (result < 0) return result;
   int used = 0;
   while (used < size) {
-    do { result = (int)recv(io->upstream, buffer + used, (size_t)(size - used), 0); }
-    while (result < 0 && errno == EINTR);
-    if (result < 0) result = AVERROR(errno);
+    result = movie_socket_transfer(io, buffer + used, size - used, false);
     if (result <= 0) break;
     used += result;
     io->bytes += (uint64_t)result;
@@ -248,6 +362,7 @@ static int movie_read(void *opaque, uint8_t *buffer, int size) {
   }
   if (io->upstream >= 0) close(io->upstream);
   io->upstream = -1;
+  if (result == AVERROR(ECANCELED)) return result;
   return used ? used : (result < 0 ? result : AVERROR_EOF);
 }
 static int64_t movie_seek(void *opaque, int64_t offset, int whence) {
