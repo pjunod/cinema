@@ -78,8 +78,10 @@ The Cinema Play upload key remains in its existing private signing file.
 The service-account JSON is stored at `~/.config/noirr/google-play.json`
 with mode `0600`. Its Play grant covers Cinema only: view app information
 and release apps to testing tracks, with no account-wide or production
-permissions. API activation and a successful authenticated validation are
-separate acceptance steps; a local key file alone does not prove access.
+permissions. On 2026-11-03 the Android Developer API was enabled and fastlane
+authenticated, read Cinema's internal track, and validated an empty edit.
+The edit was discarded without uploading an artifact or committing a release.
+This proves store access separately from the presence of a local key file.
 Missing credentials and rejected uploads fail the job.
 
 **Queued runs and recovery.** Workflow concurrency queues this repository's
