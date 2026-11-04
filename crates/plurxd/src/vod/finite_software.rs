@@ -51,6 +51,10 @@ pub(crate) struct FiniteSoftwareProducer {
     suspended: AtomicBool,
     driver_state: AtomicU8,
     driver_change: Notify,
+    // Registration precedes Store Prepared. Publication authorizes ordinary
+    // entry separately and transfers the exact original task handle here.
+    driver_activated: AtomicBool,
+    installed_driver: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Registered before spawn. A dropped task ends daemon observations but is
@@ -101,6 +105,8 @@ impl FiniteSoftwareProducer {
             suspended: AtomicBool::new(false),
             driver_state: AtomicU8::new(DRIVER_UNREGISTERED),
             driver_change: Notify::new(),
+            driver_activated: AtomicBool::new(false),
+            installed_driver: Mutex::new(None),
         }
     }
     pub(crate) fn generation_epoch(&self) -> u64 {
@@ -188,6 +194,63 @@ impl FiniteSoftwareProducer {
         self.driver_state.load(Acquire) == DRIVER_UNREGISTERED
     }
 
+    pub(super) fn activate_driver(&self) {
+        self.driver_activated.store(true, Release);
+    }
+
+    pub(super) fn install_original_driver(&self, driver: tokio::task::JoinHandle<()>) {
+        let mut installed = self
+            .installed_driver
+            .try_lock()
+            .expect("original driver installation has no concurrent join");
+        assert!(
+            installed.is_none(),
+            "original finite driver is published once"
+        );
+        *installed = Some(driver);
+        self.activate_driver();
+    }
+
+    /// Keep the exact handle in its owner while awaiting it. Cancelling a
+    /// cleanup waiter releases only this lock, never the registered task.
+    pub(super) async fn join_installed_driver(&self) -> io::Result<()> {
+        let mut installed = self.installed_driver.lock().await;
+        if let Some(driver) = installed.as_mut() {
+            let joined = driver.await;
+            installed.take();
+            joined.map_err(io::Error::other)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) async fn installed_driver_id_for_test(&self) -> Option<tokio::task::Id> {
+        self.installed_driver
+            .lock()
+            .await
+            .as_ref()
+            .map(tokio::task::JoinHandle::id)
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) async fn hold_original_owner_for_test(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, SoftwareVodOwner> {
+        self.owner.lock().await
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn driver_dormant_for_test(&self) -> bool {
+        self.driver_state.load(Acquire) == DRIVER_REGISTERED
+            && !self.driver_activated.load(Acquire)
+            && self.stage.load(Acquire) == PREPARED
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn driver_waiting_for_demand_for_test(&self) -> bool {
+        self.driver_state.load(Acquire) == DRIVER_REGISTERED && self.stage.load(Acquire) == PREPARED
+    }
+
     /// Wait only for daemon event production to end. Native root/task closure
     /// is established separately by the original core owner operation.
     pub(super) async fn wait_driver_quiescent(&self, deadline: Instant) -> io::Result<bool> {
@@ -202,7 +265,7 @@ impl FiniteSoftwareProducer {
                 _ => {
                     return Err(io::Error::other(
                         "finite producer driver was never registered",
-                    ))
+                    ));
                 }
             }
             tokio::time::timeout_at(deadline.into(), changed)
@@ -380,8 +443,9 @@ fn attach_metadata_partitions(
     }
 }
 
-/// The selected path starts exactly one `run` task. Ask the compiler for its
-/// concrete future layout without constructing a dummy owner or entering it.
+/// The selected path owns one `run` task and the existing closing driver.
+/// Measure those concrete layouts, including the installed-task join, without
+/// constructing a dummy owner or entering it.
 /// Tokio's private task allocation/header and allocator rounding are separate
 /// from this application-owned future frame.
 pub(super) fn projected_driver_future_bytes() -> usize {
@@ -422,6 +486,7 @@ pub(super) fn projected_driver_future_bytes() -> usize {
     // fields add no heap; private executor/timer/allocator peaks remain Unknown.
     frame_bytes(run)
         .checked_add(build_frame_bytes(build_inner))
+        .and_then(|bytes| bytes.checked_add(super::shared::finite_closing_frame_bytes()))
         .expect("compiler-projected finite frames fit usize")
 }
 
@@ -1043,8 +1108,19 @@ async fn run_body(
 ) {
     // The same registered per-rendition driver waits for demand; it does not
     // create a detached retry loop or one native producer per response.
-    if !rendition.closed.load(Acquire) {
-        rendition.wake.notified().await;
+    loop {
+        // Register before the closed check: abandonment may happen before
+        // this newly registered task receives its first poll.
+        let changed = rendition.wake.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if rendition.closed.load(Acquire) {
+            break;
+        }
+        changed.await;
+        if rendition.closed.load(Acquire) || producer.driver_activated.load(Acquire) {
+            break;
+        }
     }
     let mut owner = producer.owner.lock().await;
     if rendition.closed.load(Acquire) {

@@ -103,6 +103,10 @@ pub struct NodeResourceRuntime {
     owner: OwnerIdentity,
     recovered: RecoverySnapshot,
     ledger: ResourceLedger,
+    // One node-local serialization boundary for affected owners, including
+    // unpublished and closing work. Unbridged families start explicitly
+    // unknown on every boot; recovery/serving-map absence cannot clear them.
+    affected_owners: super::owner_inventory::OwnerInventory,
     /// Advisory cost summaries only. The journal and ledger never consult
     /// these records for admission, physical closure or refund.
     #[cfg(target_os = "linux")]
@@ -170,6 +174,7 @@ impl NodeResourceRuntime {
             owner,
             recovered,
             ledger,
+            affected_owners: super::owner_inventory::OwnerInventory::new(),
             #[cfg(target_os = "linux")]
             history,
             #[cfg(target_os = "linux")]
@@ -198,6 +203,12 @@ impl NodeResourceRuntime {
             operations: Mutex::new(operations::Operations::default()),
             rendition_root: None,
         })
+    }
+
+    /// Original census shared by entry and physical/application close adapters.
+    /// No adapter coverage is inferred from an empty book or restored ledger.
+    pub fn affected_owner_inventory(&self) -> &super::owner_inventory::OwnerInventory {
+        &self.affected_owners
     }
 
     /// Bind the real configured output root before this runtime is shared.

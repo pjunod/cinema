@@ -68,11 +68,14 @@ their actual source identities.
 Pinned Rust 1.97.1 workspace/all-target strict Clippy, formatting, catalog and
 JavaScript syntax pass. Independent core/integration and transport reviews
 approve the source. Native execution uses the isolated nonvoter Linux lab,
-18 GiB/no swap/four CPUs and the repository's 8 MiB test stack. The task still
-requires its exact-candidate development gate before effort merge.
+18 GiB/no swap/four CPUs and the repository's 8 MiB test stack. PR #1371 merged
+at `122d0ba086f9310e653bf19b0fe326baa94d352c` after all eight jobs in
+development gate 6422 passed.
 
 This implements refusal of speculation and service observation, not production
 trial execution or safe expansion. Verified containment/startup/cleanup bounds,
 the complete affected-work inventory and an attempt-owned pre-Winner driver
 remain prerequisites. No `TrialMonitor` is instantiated without that owner.
+The [owned-containment continuation](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md)
+records kernel ownership, inventory coverage and pre-Winner driver work.
 M2, V1–V5 and Main promotion remain open; no deployment is claimed.
