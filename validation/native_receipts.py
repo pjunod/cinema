@@ -73,7 +73,9 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    'Makefile': 'a8dfee1e29ba93b43cf58ee5233a5aef1aeddd381765a759d47b05c8126b23c2',
+    # Reviewed Makefile change adds only the Node resume-position suite; native
+    # targets, build scripts and bundled-resource boundaries are unchanged.
+    'Makefile': 'd74b5626264702988ac3d7bc9f64aac246a1656e8408d539c0241659375971d8',
     # Reviewed 0.8.0 build 288: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 287 bytes. Pin this exact spec; build-287 case receipts do
     # not transfer, and added resources or scripts still change its digest.

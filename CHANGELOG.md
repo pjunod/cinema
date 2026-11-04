@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Web Local and Shared playback resume partial rewatches even when watched
+  history is already recorded.
+- Enhanced DV preparation overlaps bounded source reads and optional cache
+  inventory with full validation.
 - Playback source readers share fenced storage budgets, yield background scans
   during startup, and retain physical custody through cancellation and cleanup.
   Continuous quality starts primary video and audio before its companion;
