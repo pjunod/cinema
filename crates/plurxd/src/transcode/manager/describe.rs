@@ -610,9 +610,22 @@ impl TranscodeManager {
         target_height: i64,
         subtitle_burn: bool,
     ) -> Result<EffectiveRateControl, String> {
-        let encoder = self
-            .encoder_for_file(file, crate::process_control::ChildClass::Background)
-            .await?;
+        // This captures queued package configuration; it is not an actual
+        // source-reading operation. The durable package owner proves pixels
+        // when its cache-miss worker starts.
+        let preference = self
+            .store
+            .get_setting(keys::HWACCEL)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let encoder = if Self::needs_dovi_reshape(file)? {
+            self.dovi_reshape_encoder_advisory_with_preference(file, &preference)
+                .await
+        } else {
+            self.encoder_for_preference(&preference)
+        };
         let baseline = self.effective_rate_control(encoder);
         if subtitle_burn {
             return Ok(baseline);

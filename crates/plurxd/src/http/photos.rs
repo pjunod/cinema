@@ -57,6 +57,5 @@ pub async fn serve(
         .into_iter()
         .next()
         .ok_or(ApiError::NotFound("photo file"))?;
-    super::stream::serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64))
-        .await
+    super::stream::serve_original_file_range(&state, &file, &headers, &method).await
 }

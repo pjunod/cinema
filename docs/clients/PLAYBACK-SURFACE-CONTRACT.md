@@ -465,6 +465,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 - A retirement reason normally comes from the CLASS, but a source may declare an explicit `retired_by` override when its lifecycle is narrower. `system_interruption` uses that override because `system_resumed` retires that hold without retiring unrelated holds. `attached_retired` is an identity rule rather than either kind of retirement declaration, and the note above says why.
 - `owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced.
 - `playback_not_requested` is the viewer no longer wanting media. A `buffering` fault is about a player that WANTS it — the wait is only a wait while something is trying to play — so a pause makes the fault about nothing and it is retired. It is on `buffering` and on no other class: a `preparing` start has not been paused by a viewer who has not seen it yet, and a blocking prompt is answered by the viewer rather than by a transport change. Resuming raises nothing back; the raise sites decide what comes back, which is the same rule every other retirement follows.
+- observation_unavailable carries an observation owner plus exact attached generation and viewer intent (including null). It withdraws only explicitly tagged client_preparing, media_waiting, owner_recovery_step or readiness_deadline_rungs_left faults in preparing/buffering/recovering; never authority, player_stopped faults, presentation proof, or owner success.
 
 <!-- contract:surface-sources:end -->
 
@@ -537,6 +538,18 @@ PiP report presenting through the platform's own flags
 `webkitCurrentPlaybackTargetIsWireless`) and a hidden page samples nothing —
 a fault raised before the page was hidden is neither cleared nor promoted
 until it is visible again.
+
+An observation owner may conclude `observation_unavailable` without claiming
+presentation or recovery success. The event carries its exact `attached`
+generation, `intent` (including null), and owner; only that currently attached
+scope's explicitly tagged `observation_owner` progress faults can be withdrawn.
+Eligible sources are `client_preparing`, `media_waiting`, `owner_recovery_step`
+and `readiness_deadline_rungs_left`, in `preparing`/`buffering`/`recovering`, with
+`player_stopped=false`. Permission/server authority, stopped faults and other
+owners or intents remain. The native owner offers a nonblocking notice with
+explicit Try again / Close actions; the reducer supplies no transport effects
+or presentation/seek proof. The shared fixture exercises this event on all
+three clients.
 
 ### 3.5 The fixture
 

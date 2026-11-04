@@ -103,7 +103,11 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 15] = [
+    let inputs: [(&str, &[u8]); 17] = [
+        (
+            "author_p81.c",
+            include_bytes!("../../../tools/dv_processing/author_p81.c"),
+        ),
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -135,6 +139,10 @@ fn renderer_source_identity() -> String {
         (
             "hevc-rasl-frame-thread.patch",
             include_bytes!("../../../tools/dv_processing/hevc-rasl-frame-thread.patch"),
+        ),
+        (
+            "movie_source_io.h",
+            include_bytes!("../../../tools/dv_processing/movie_source_io.h"),
         ),
         (
             "nlq_clipping.h",
@@ -286,6 +294,12 @@ impl ToolSet {
         let root = std::env::var_os("PLURX_DV_PROCESSING_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/usr/lib/plurx/dv-processing".into());
+        Self::capture_at(root).await
+    }
+
+    // Keep the manifest-validation boundary identical for production discovery
+    // and fixture bundles without mutating process-global configuration.
+    async fn capture_at(root: PathBuf) -> Result<Option<Arc<Self>>, String> {
         tokio::task::spawn_blocking(move || {
             let manifest_path = root.join("build-identity.json");
             let bytes = match std::fs::read(&manifest_path) {
@@ -532,7 +546,7 @@ impl PrivateWindow {
         let reporter =
             crate::ffmpeg::EncodedExecutable::capture_program(&crate::ffmpeg::ffprobe_bin())
                 .await?;
-        let document = crate::ffmpeg::held_source_probe_json_bound(
+        let document = crate::ffmpeg::held_artifact_probe_json_bound(
             held.as_file(),
             crate::process_control::ChildWork::realtime("DV completed output header probe"),
             &reporter,
@@ -903,7 +917,7 @@ impl RuntimeRecipe {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn execute(
+    pub(crate) async fn execute_with_source_input(
         &self,
         file: &plurx_core::domain::MediaFile,
         plan: &plurx_core::transcode::ResolvedTranscode,
@@ -915,42 +929,7 @@ impl RuntimeRecipe {
         producer: Arc<crate::prodrun::ProducerSlot>,
         cancel: tokio_util::sync::CancellationToken,
         registration_hook: Option<RegistrationHook>,
-    ) -> Result<
-        WindowOutcome<(
-            VerifiedWindow,
-            plurx_core::transcode::dv_processing::DvProcessingPlan,
-        )>,
-        String,
-    > {
-        self.execute_until(
-            file,
-            plan,
-            options,
-            grid,
-            entry,
-            encoder,
-            admission,
-            producer,
-            cancel,
-            registration_hook,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn execute_until(
-        &self,
-        file: &plurx_core::domain::MediaFile,
-        plan: &plurx_core::transcode::ResolvedTranscode,
-        options: &plurx_core::transcode::TranscodeOptions,
-        grid: plurx_core::transcode::VodFrameGrid,
-        entry: &plurx_core::segplan::PlanEntry,
-        encoder: &Path,
-        admission: crate::dv_segment::SegmentAdmission,
-        producer: Arc<crate::prodrun::ProducerSlot>,
-        cancel: tokio_util::sync::CancellationToken,
-        registration_hook: Option<RegistrationHook>,
+        source_input: crate::source_input::SourceInput,
         absolute_deadline: Option<tokio::time::Instant>,
     ) -> Result<
         WindowOutcome<(
@@ -959,26 +938,41 @@ impl RuntimeRecipe {
         )>,
         String,
     > {
-        self.execute_policy_until(
-            file,
-            plan,
-            options,
-            grid,
-            entry,
-            encoder,
-            admission,
-            producer,
-            cancel,
-            registration_hook,
-            absolute_deadline,
-            self.display_target,
-        )
-        .await
+        let source_input =
+            crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
+        let result = self
+            .execute_policy_until_with_source(
+                file,
+                plan,
+                options,
+                grid,
+                entry,
+                encoder,
+                admission,
+                producer,
+                cancel,
+                registration_hook,
+                absolute_deadline,
+                self.display_target,
+                Arc::clone(&source_input),
+            )
+            .await;
+        // Early validation/spawn failures and every terminal graph result use
+        // this same join. Physical Resources retain their input use through
+        // helper and encoder reap; no caller can release it by returning early.
+        source_input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV original source cleanup: {error}"))?;
+        result
     }
 
     /// Explicit immutable policy; live preparation freezes the title-qualified
     /// target, ordinary VOD/pre-encode recipes retain None. No per-window
     /// environment/caps/settings selection occurs here.
+    // Explicit fixture/custom qualification control. Ordinary original-media
+    // production can enter only execute_with_source_input with owned service.
+    #[cfg(any(test, plurx_dv_segment_probe))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_policy_until(
         &self,
@@ -994,6 +988,56 @@ impl RuntimeRecipe {
         registration_hook: Option<RegistrationHook>,
         absolute_deadline: Option<tokio::time::Instant>,
         display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+        source_input: crate::source_input::SourceInput,
+    ) -> Result<
+        WindowOutcome<(
+            VerifiedWindow,
+            plurx_core::transcode::dv_processing::DvProcessingPlan,
+        )>,
+        String,
+    > {
+        let source_input =
+            crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
+        let result = self
+            .execute_policy_until_with_source(
+                file,
+                plan,
+                options,
+                grid,
+                entry,
+                encoder,
+                admission,
+                producer,
+                cancel,
+                registration_hook,
+                absolute_deadline,
+                display_target,
+                Arc::clone(&source_input),
+            )
+            .await;
+        source_input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("DV qualification source cleanup: {error}"))?;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_policy_until_with_source(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        options: &plurx_core::transcode::TranscodeOptions,
+        grid: plurx_core::transcode::VodFrameGrid,
+        entry: &plurx_core::segplan::PlanEntry,
+        encoder: &Path,
+        admission: crate::dv_segment::SegmentAdmission,
+        producer: Arc<crate::prodrun::ProducerSlot>,
+        cancel: tokio_util::sync::CancellationToken,
+        registration_hook: Option<RegistrationHook>,
+        absolute_deadline: Option<tokio::time::Instant>,
+        display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+        source_input: Arc<crate::dv_segment::SourceInputLease>,
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -1110,6 +1154,7 @@ impl RuntimeRecipe {
                 export_raster: Some(export_raster),
                 display_target: export_policy.display_target(),
                 request: crate::dv_segment::SegmentRequest {
+                    source_input: Some(source_input),
                     renderer: self.tools.renderer.clone(),
                     renderer_env,
                     muxer: self.tools.renderer.clone(),
@@ -1328,7 +1373,7 @@ impl RuntimeRecipe {
 /// owned-job retirement have all been observed. Cancellation drops the pipe
 /// owner and retires the same registered process, never a replacement PID.
 #[cfg(target_os = "linux")]
-pub(crate) async fn run_private_window(
+async fn run_private_window(
     mut request: crate::dv_segment::StreamingSegmentRequest,
     registration_hook: Option<RegistrationHook>,
 ) -> Result<WindowOutcome<PrivateWindow>, String> {
@@ -1339,36 +1384,44 @@ pub(crate) async fn run_private_window(
     let deadline = request.renderer_deadline;
     let display_target = request.display_target;
     let mut producer = crate::dv_segment::spawn_streaming(request).await?;
-    let evidence = producer
-        .take_evidence()
-        .ok_or("missing owned renderer evidence")?;
-    let helper = producer
-        .take_helper_completion()
-        .ok_or("missing helper completion")?;
-    let (registration, writers, stdout, stderr) = producer.into_parts();
-    if let Some(registered) = registration_hook {
-        registered(&registration);
+    let source_settlement = producer.take_source_settlement();
+    let result = async {
+        let evidence = producer
+            .take_evidence()
+            .ok_or("missing owned renderer evidence")?;
+        let helper = producer
+            .take_helper_completion()
+            .ok_or("missing helper completion")?;
+        let (registration, writers, stdout, stderr) = producer.into_parts();
+        if let Some(registered) = registration_hook {
+            registered(&registration);
+        }
+        match capture_private_output(
+            &slot,
+            &registration,
+            writers,
+            stdout,
+            stderr,
+            helper,
+            &cancel,
+            deadline,
+        )
+        .await?
+        {
+            WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
+                encoded,
+                evidence,
+                registration,
+                display_target,
+            })),
+            WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
+        }
     }
-    match capture_private_output(
-        &slot,
-        &registration,
-        writers,
-        stdout,
-        stderr,
-        helper,
-        &cancel,
-        deadline,
-    )
-    .await?
-    {
-        WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
-            encoded,
-            evidence,
-            registration,
-            display_target,
-        })),
-        WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
+    .await;
+    if let Some(source) = source_settlement {
+        source.settle().await?;
     }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1496,7 +1549,7 @@ fn private_window_outcome(
 /// for a log/plan note.
 #[cfg(any(target_os = "linux", test))]
 fn encoder_diagnostic_tail(diagnostic: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(diagnostic);
+    let text = crate::scratch_put::redact(&String::from_utf8_lossy(diagnostic));
     let line = text.lines().rev().map(str::trim).find(|line| {
         !line.is_empty()
             && !line.split_once('=').is_some_and(|(key, _)| {
@@ -3104,5 +3157,94 @@ mod title_scanner_identity_tests {
         assert!(create.contains(
             "planning.probe_json.as_deref(),\n            &tools.title_scanner_digest(),"
         ));
+    }
+}
+
+#[cfg(test)]
+mod bundle_capture_tests {
+    use super::*;
+
+    /// Generate the actual installer's manifest and enter the same capture
+    /// boundary as production. Stub artifacts are never executed.
+    #[tokio::test]
+    async fn revised_bundle_capture_accepts_current_sources_and_rejects_stale_or_incomplete_identity(
+    ) {
+        let fixture = tempfile::tempdir().expect("bundle fixture");
+        let root = fixture.path().join("bundle");
+        for directory in ["bin", "lib", "sources"] {
+            std::fs::create_dir_all(root.join(directory)).expect("fixture directory");
+        }
+        for name in [
+            "segment_decode_render",
+            "mux_rgb",
+            "author_p81",
+            "scan_title",
+        ] {
+            std::fs::write(root.join("bin").join(name), name).expect("stub helper");
+        }
+        std::fs::write(root.join("lib/libplacebo.so.374"), b"fixture placebo")
+            .expect("write stub placebo library");
+        std::fs::write(root.join("sources/libdovi.a"), b"fixture parser")
+            .expect("write stub parser library");
+        std::fs::write(
+            root.join("sources/abi.json"),
+            br#"{"libplacebo":374,"avcodec":62,"avformat":62,"avutil":60}"#,
+        )
+        .expect("write fixture ABI");
+        let source = fixture.path().join("source");
+        std::fs::create_dir(&source).expect("create copied-source directory");
+        let actual_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/dv_processing");
+        for entry in std::fs::read_dir(&actual_source).expect("enumerate actual helper sources") {
+            let entry = entry.expect("read source entry");
+            if entry
+                .file_type()
+                .expect("inspect source entry type")
+                .is_file()
+            {
+                std::fs::copy(entry.path(), source.join(entry.file_name()))
+                    .expect("copy manifest source input");
+            }
+        }
+        let installer = include_str!("../../../tools/dv_processing/bundle-manifest.py");
+        let generate = |script: &str| {
+            let result = std::process::Command::new("python3")
+                .args(["-c", script])
+                .arg(&source)
+                .arg(&root)
+                .output()
+                .expect("run installed manifest generator");
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        generate(installer);
+        let tools = ToolSet::capture_at(root.clone())
+            .await
+            .expect("validate current installer bundle")
+            .expect("current bundle accepted");
+        assert!(tools.is_current().await);
+        assert_eq!(
+            tools.renderer,
+            root.join("bin/segment_decode_render")
+                .canonicalize()
+                .expect("canonical fixture renderer")
+        );
+        for missing in ["author_p81.c", "movie_source_io.h"] {
+            let incomplete = installer.replace(&format!("\"{missing}\","), "");
+            assert_ne!(incomplete, installer, "fixture removes a real source input");
+            generate(&incomplete);
+            assert!(
+                matches!(ToolSet::capture_at(root.clone()).await, Err(error) if error == "unsupported DV build identity")
+            );
+        }
+        // A self-consistent old source bundle still cannot authorize this daemon.
+        std::fs::write(source.join("author_p81.c"), b"stale author source")
+            .expect("write deliberately stale author source");
+        generate(installer);
+        assert!(
+            matches!(ToolSet::capture_at(root).await, Err(error) if error == "unsupported DV build identity")
+        );
     }
 }

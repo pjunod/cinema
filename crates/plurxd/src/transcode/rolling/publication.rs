@@ -134,12 +134,16 @@ pub(super) struct ServedPlaylistSnapshot {
     pub(super) available_at: Instant,
 }
 
-/// Frozen at create. No production source/transport class is qualified for
-/// shorter readiness yet; candidate selection belongs only to the test lab.
+/// First publication is separate from steady reserve. Historical policies
+/// remain test controls; production replenishes complete cuts while banking lead.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum RollingStartupPolicy {
-    #[default]
+    #[cfg(test)]
     Conservative,
+    #[default]
+    FirstReloadWindow,
+    #[cfg(test)]
+    FirstCompleteSegment,
     #[cfg(test)]
     WebFixedHlsV1,
 }
@@ -147,7 +151,11 @@ pub(super) enum RollingStartupPolicy {
 impl RollingStartupPolicy {
     pub(super) fn uses_small_bootstrap(self) -> bool {
         match self {
+            #[cfg(test)]
             Self::Conservative => false,
+            Self::FirstReloadWindow => true,
+            #[cfg(test)]
+            Self::FirstCompleteSegment => true,
             #[cfg(test)]
             Self::WebFixedHlsV1 => true,
         }
@@ -155,7 +163,19 @@ impl RollingStartupPolicy {
 
     pub(super) fn bootstrap_ms(self, rate: f64) -> i64 {
         match self {
+            #[cfg(test)]
             Self::Conservative => rolling_initial_runway_ms(rate),
+            Self::FirstReloadWindow => {
+                ((ROLLING_PUBLICATION_TARGET.as_millis() as f64 * rate).ceil() as i64).clamp(
+                    ROLLING_PUBLICATION_TARGET.as_millis() as i64,
+                    ROLLING_RESERVE_MAX_MS,
+                )
+            }
+            #[cfg(test)]
+            Self::FirstCompleteSegment => {
+                ((f64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000.0 * rate).ceil() as i64)
+                    .clamp(2_000, ROLLING_RESERVE_MAX_MS)
+            }
             #[cfg(test)]
             Self::WebFixedHlsV1 => {
                 ((32_000.0 * rate).ceil() as i64).clamp(32_000, ROLLING_RESERVE_MAX_MS)
@@ -203,12 +223,20 @@ pub(super) struct RollingPublicationClock {
 }
 
 impl RollingPublicationClock {
+    #[cfg(test)]
+    pub(super) fn historical_control_for_test() -> Self {
+        Self {
+            startup_policy: RollingStartupPolicy::Conservative,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn bind_startup_transport(&mut self, _transport: Option<&str>) {
-        // A web transport label proves neither source cadence nor native
-        // discovery, rate/resume behavior, or the daemon resource path.
-        // Retain conservative readiness before the first production response.
+        // Bootstrap is a publication phase, not a transport capability or
+        // a change to the producer's paid steady reserve. Complete objects
+        // retain the existing init, attempt and random-access validation.
         if !self.startup_policy_bound && self.served.is_none() {
-            self.startup_policy = RollingStartupPolicy::Conservative;
+            self.startup_policy = RollingStartupPolicy::FirstReloadWindow;
             self.startup_policy_bound = true;
         }
     }
@@ -255,9 +283,6 @@ impl RollingPublicationClock {
         budget: &RollingPublicationBudget,
         lease: Option<&crate::playback_control::RollingLeaseSnapshot>,
     ) -> i64 {
-        if budget.demand_sequence.is_none() {
-            return budget.desired_end_ms;
-        }
         let rate = rolling_playback_rate(lease.and_then(|lease| lease.demand.as_ref()));
         budget
             .consumed_end_ms

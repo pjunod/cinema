@@ -11,6 +11,8 @@
 //! decoded back. Every child is a background job-owned process (listed in
 //! Activity Processes, stopped with the job).
 
+mod child_group;
+
 use crate::dv_segment::RendererDecode;
 use plurx_core::process::ChildWork;
 use plurx_core::transcode::dv_fel_qualification::{self as q, Lattice, WindowScore};
@@ -238,6 +240,9 @@ pub(crate) fn encode_args(
 /// Everything one title's measurement needs; nothing here is request data.
 pub(crate) struct Sample<'a> {
     pub(crate) source: &'a std::fs::File,
+    /// Production background reads use the held, budgeted broker. No-budget
+    /// direct-descriptor use is retained only for explicitly unscoped fixtures.
+    pub(crate) source_url: Option<&'a str>,
     pub(crate) clock: Clock,
     pub(crate) duration_ms: i64,
     pub(crate) envelope: plurx_core::transcode::EnhancementRateEnvelope,
@@ -370,13 +375,19 @@ async fn render(
         .map_err(|e| e.to_string())?;
     let (read, write) = std::io::pipe().map_err(|e| e.to_string())?;
     let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
-    let mut source = sample.source;
-    source.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    if sample.source_url.is_none() {
+        let mut source = sample.source;
+        source.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    }
+    let mut args = helper_args(&sample.clock, window, mode, export);
+    if let Some(url) = sample.source_url {
+        args[0] = url.to_owned();
+    }
     let diagnostics = std::fs::File::create(scratch.join(format!("{mode}-{export}.log")))
         .map_err(|e| e.to_string())?;
     let mut helper = tokio::process::Command::new(sample.renderer);
     helper
-        .args(helper_args(&sample.clock, window, mode, export))
+        .args(args)
         .envs(
             sample
                 .renderer_env
@@ -389,21 +400,11 @@ async fn render(
         .stdout(Stdio::piped())
         .stderr(Stdio::from(diagnostics))
         .kill_on_drop(true);
-    crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-        &mut helper,
-        &[
-            (sample.source.as_raw_fd(), 3),
-            (directory.as_raw_fd(), 4),
-            (write.as_raw_fd(), 5),
-        ],
-        None,
-    );
-    let (mut helper, _helper_job) = plurx_core::process::spawn_job_owned(
-        &mut helper,
-        ChildWork::background("Dolby Vision FEL qualification render"),
-    )
-    .map_err(|e| e.to_string())?;
-    drop(write);
+    let mut descriptors = vec![(directory.as_raw_fd(), 4), (write.as_raw_fd(), 5)];
+    if sample.source_url.is_none() {
+        descriptors.push((sample.source.as_raw_fd(), 3));
+    }
+    crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(&mut helper, &descriptors, None);
     let mut consumer = tokio::process::Command::new(&sample.ffmpeg);
     match encode_to {
         Some(output) => {
@@ -428,35 +429,35 @@ async fn render(
     } else {
         "Dolby Vision FEL qualification sample"
     };
-    let (mut consumer, _consumer_job) =
-        plurx_core::process::spawn_job_owned(&mut consumer, ChildWork::background(work))
-            .map_err(|e| e.to_string())?;
-    let trace = helper.stdout.take().ok_or("the renderer has no trace")?;
-    let outcome = supervised(&sample.cancel, async {
+    let mut group = child_group::Group::start(
+        &mut helper,
+        &sample.cancel,
+        ChildWork::background("Dolby Vision FEL qualification render"),
+    )
+    .await?;
+    drop(write);
+    if let Err(error) = group.add(&mut consumer, ChildWork::background(work)) {
+        group.close().await;
+        return Err(error);
+    }
+    let (guard, id, children) = group.parts();
+    let (helper, consumer) = children.split_at_mut(1);
+    let (helper, consumer) = (&mut helper[0], &mut consumer[0]);
+    let outcome = child_group::supervise(guard, id, &sample.cancel, async {
+        let trace = helper.stdout.take().ok_or("the renderer has no trace")?;
+        let stdout = consumer.stdout.take();
+        let stderr = consumer.stderr.take();
         let consume = async {
-            match consumer.stdout.take() {
+            match stdout {
                 Some(stdout) => lattices(stdout, sample.clock.raster).await,
                 None => Ok(Vec::new()),
             }
         };
-        let (lattices, trace) = tokio::join!(consume, read_trace(trace));
+        let (lattices, trace, diagnostic) =
+            tokio::join!(consume, read_trace(trace), read_diagnostic(stderr));
         let lattices = lattices?;
-        let consumed = finish(&mut consumer, "the window's consumer").await;
-        let rendered = helper.wait().await.map_err(|e| e.to_string())?;
-        if !rendered.success() {
-            let log = std::fs::read_to_string(scratch.join(format!("{mode}-{export}.log")))
-                .unwrap_or_default();
-            let tail = log
-                .char_indices()
-                .rev()
-                .nth(400)
-                .map_or(log.as_str(), |(at, _)| &log[at..]);
-            return Err(format!(
-                "the renderer refused the window ({mode}): {}",
-                tail.trim()
-            ));
-        }
-        consumed?;
+        let diagnostic = diagnostic?;
+        child_group::wait_dead(id).await;
         if let Some(output) = encode_to {
             let bytes = std::fs::read(output).map_err(|e| e.to_string())?;
             plurx_core::transcode::validate_encoded_enhancement_envelope(&bytes, sample.envelope)
@@ -469,14 +470,46 @@ async fn render(
                     .into(),
             );
         }
-        Ok(lattices)
+        Ok((lattices, diagnostic))
     })
     .await;
-    if outcome.is_err() {
-        reap(&mut helper).await;
-        reap(&mut consumer).await;
+    let statuses = group.close().await;
+    let (lattices, diagnostic) = outcome?;
+    if statuses
+        .iter()
+        .any(|status| !status.as_ref().is_ok_and(|status| status.success()))
+    {
+        let helper_log = std::fs::read_to_string(scratch.join(format!("{mode}-{export}.log")))
+            .unwrap_or_default();
+        let tail = helper_log
+            .char_indices()
+            .rev()
+            .nth(400)
+            .map_or(helper_log.as_str(), |(at, _)| &helper_log[at..]);
+        return Err(format!(
+            "FEL qualification render or consumer failed: {}; {}",
+            tail.trim(),
+            diagnostic
+        ));
     }
-    outcome
+    Ok(lattices)
+}
+
+async fn read_diagnostic(stderr: Option<tokio::process::ChildStderr>) -> Result<String, String> {
+    let Some(mut stderr) = stderr else {
+        return Ok(String::new());
+    };
+    let mut diagnostic = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = stderr.read(&mut buffer).await.map_err(|e| e.to_string())?;
+        if read == 0 {
+            break;
+        }
+        let retained = read.min(4096usize.saturating_sub(diagnostic.len()));
+        diagnostic.extend_from_slice(&buffer[..retained]);
+    }
+    Ok(String::from_utf8_lossy(&diagnostic).trim().to_owned())
 }
 
 async fn read_trace(stdout: tokio::process::ChildStdout) -> Result<String, String> {
@@ -513,12 +546,6 @@ async fn supervised<T>(
     }
 }
 
-/// Kill and reap a stage child that did not finish on its own.
-async fn reap(child: &mut tokio::process::Child) {
-    let _ = child.start_kill();
-    let _ = child.wait().await;
-}
-
 async fn decode(sample: &Sample<'_>, encoded: &Path) -> Result<Vec<Lattice>, String> {
     let mut command = tokio::process::Command::new(&sample.ffmpeg);
     command
@@ -527,22 +554,35 @@ async fn decode(sample: &Sample<'_>, encoded: &Path) -> Result<Vec<Lattice>, Str
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _job) = plurx_core::process::spawn_job_owned(
+    let mut group = child_group::Group::start(
         &mut command,
+        &sample.cancel,
         ChildWork::background("Dolby Vision FEL qualification sample"),
     )
-    .map_err(|e| e.to_string())?;
-    let outcome = supervised(&sample.cancel, async {
+    .await?;
+    let (guard, id, children) = group.parts();
+    let child = &mut children[0];
+    let outcome = child_group::supervise(guard, id, &sample.cancel, async {
         let stdout = child.stdout.take().ok_or("decoder has no output")?;
-        let lattices = lattices(stdout, sample.clock.raster).await?;
-        finish(&mut child, "the served window's decoder").await?;
+        let (lattices, diagnostic) = tokio::join!(
+            lattices(stdout, sample.clock.raster),
+            read_diagnostic(child.stderr.take())
+        );
+        diagnostic?;
+        let lattices = lattices?;
+        child_group::wait_dead(id).await;
         Ok(lattices)
     })
     .await;
-    if outcome.is_err() {
-        reap(&mut child).await;
+    let statuses = group.close().await;
+    let lattices = outcome?;
+    if statuses
+        .iter()
+        .any(|status| !status.as_ref().is_ok_and(|status| status.success()))
+    {
+        return Err("the served window decoder failed".into());
     }
-    outcome
+    Ok(lattices)
 }
 
 /// Raw 16-bit R'G'B' pictures of the input. The helper's own R'G'B' export is
@@ -599,21 +639,6 @@ async fn lattices(
         out.push(Lattice::from_rgb48(&frame, width, height).ok_or("invalid window picture")?);
     }
     Ok(out)
-}
-
-async fn finish(child: &mut tokio::process::Child, what: &str) -> Result<(), String> {
-    let mut diagnostic = String::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let mut bytes = Vec::new();
-        let _ = (&mut stderr).take(4096).read_to_end(&mut bytes).await;
-        diagnostic = String::from_utf8_lossy(&bytes).trim().to_owned();
-    }
-    let status = child.wait().await.map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{what} failed: {diagnostic}"))
-    }
 }
 
 /// What the title job did about the FEL qualification.
@@ -840,8 +865,30 @@ pub(crate) async fn qualify_with(
             &crate::ffmpeg::ffmpeg_bin(),
         );
     }
+    let input = match crate::background_jobs::source_budget() {
+        Some(budget) => Some(
+            crate::source_input::SourceInput::open_background_held(
+                crate::fragment_index_cluster::SourceFence::clone_held(
+                    &source.handle,
+                    source.object_version(),
+                )?,
+                crate::http::stream::file_content_type(&file.path),
+                budget,
+            )
+            .await?
+            .without_prefetch(),
+        ),
+        None => {
+            #[cfg(not(test))]
+            return Err("FEL qualification requires its owned background source budget".into());
+            #[cfg(test)]
+            None
+        }
+    };
+    let source_url = input.as_ref().map(|input| input.url().to_owned());
     let sample = Sample {
         source: &source.handle,
+        source_url: source_url.as_deref(),
         clock,
         duration_ms: file.duration_ms.ok_or("title duration is unknown")?,
         envelope: request.envelope,
@@ -853,7 +900,7 @@ pub(crate) async fn qualify_with(
         cancel: cancel.clone(),
     };
     let started = std::time::Instant::now();
-    let mut measured = measurer(&sample).await?;
+    let mut measured = measure_with_input(&sample, input, measurer).await?;
     let renderer_current = match renderer.tools {
         Some(tools) => tools.is_current().await,
         None => true,
@@ -906,6 +953,22 @@ pub(crate) async fn qualify_with(
         "FEL qualification measured"
     );
     Ok(Qualification::Stored(verdict))
+}
+
+async fn measure_with_input(
+    sample: &Sample<'_>,
+    input: Option<crate::source_input::SourceInput>,
+    measurer: Measurer,
+) -> Result<Measurement, String> {
+    let measured = measurer(sample).await;
+    // The stage group is reaped before measurement returns on every outcome.
+    if let Some(input) = input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|e| format!("joining FEL qualification source input: {e}"))?;
+    }
+    measured
 }
 
 #[cfg(test)]
@@ -1647,5 +1710,295 @@ mod tests {
             q::verdict_state(Some(&stored), file.size, file.mtime, &request.identity),
             q::VerdictState::Missing
         ));
+    }
+
+    fn broker_measurement<'a>(
+        sample: &'a Sample<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Measurement, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let pictures = render(
+                sample,
+                sample.clock.window_at(0)?,
+                "fel",
+                RGB48_EXPORT,
+                sample.runtime_cache,
+                None,
+            )
+            .await?;
+            if pictures.len() != q::WINDOW_FRAMES as usize {
+                return Err("fixture output picture lost".into());
+            }
+            Ok(Measurement {
+                windows: Vec::new(),
+                served: Vec::new(),
+                dropped: Vec::new(),
+            })
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn qualification_broker_pauses_pipe_partners_and_reaps_before_close() {
+        use plurx_core::process::bounded::{
+            pausable, source_group_quiescent as verified_group, SourcePauseController,
+            SourcePausePhase,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        for cancelled in [false, true] {
+            let dir = tempfile::tempdir().expect("create source-broker fixture");
+            let helper = dir.path().join("helper.py");
+            let consumer = dir.path().join("consumer.py");
+            std::fs::write(
+                &helper,
+                r#"#!/usr/bin/python3
+import os, sys, time, urllib.request, subprocess
+from pathlib import Path
+root=Path(os.environ['FIXTURE_ROOT'])
+try:
+    os.fstat(3)
+except OSError:
+    pass
+else:
+    raise RuntimeError('original source FD3 was inherited')
+assert sys.argv[1].startswith('http://127.0.0.1:')
+(root/'helper.pid').write_text(str(os.getpid()))
+if os.environ['FIXTURE_CANCELLED']=='true':
+    descendant=subprocess.Popen(['/bin/sleep', '30'])
+    (root/'descendant.pid').write_text(str(descendant.pid))
+while not (root/'finish').exists():
+    request=urllib.request.Request(sys.argv[1], headers={'Range':'bytes=0-13'})
+    assert urllib.request.urlopen(request).read()==b'fixture source'
+    with (root/'reads').open('ab') as log: log.write(b'x')
+    time.sleep(.02)
+for _ in range(int(sys.argv[4])):
+    remaining=memoryview(bytes(64*64*6))
+    while remaining:
+        written=os.write(5, remaining)
+        assert written>0
+        remaining=remaining[written:]
+"#,
+            )
+            .expect("write synthetic source helper");
+            std::fs::write(
+                &consumer,
+                r#"#!/usr/bin/python3
+import os, sys
+from pathlib import Path
+(Path(os.environ['FIXTURE_ROOT'])/'consumer.pid').write_text(str(os.getpid()))
+while True:
+    data=os.read(0, 4096)
+    if not data: break
+    os.write(1, data)
+"#,
+            )
+            .expect("write synthetic pipe consumer");
+            for path in [&helper, &consumer] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+                    .expect("make synthetic child executable");
+            }
+            // Consumer inherits the fixture variable through its script literal,
+            // rather than process-global environment mutation.
+            let script = std::fs::read_to_string(&consumer)
+                .expect("read consumer template")
+                .replace(
+                    "os.environ['FIXTURE_ROOT']",
+                    &format!("{:?}", dir.path().to_string_lossy()),
+                );
+            std::fs::write(&consumer, script).expect("bind consumer fixture path");
+            let controller = SourcePauseController::new_slot_gated(Duration::from_secs(10));
+            let worker_controller = controller.clone();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let worker_cancel = cancel.clone();
+            let root = dir.path().to_path_buf();
+            let (send, recv) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                pausable(worker_controller, async move {
+                    let (input, source) =
+                        crate::source_input::SourceInput::qualification_fixture(b"fixture source")
+                            .await;
+                    let url = input.url().to_owned();
+                    send.send(url.clone()).expect("send fixture broker URL");
+                    let sample = Sample {
+                        source: &source,
+                        source_url: Some(&url),
+                        clock: Clock {
+                            video_index: 0,
+                            raster: (64, 64),
+                            native_raster: (64, 64),
+                            rate: (24, 1),
+                            origin: (0, 1),
+                        },
+                        duration_ms: 2000,
+                        envelope: plurx_core::transcode::EnhancementRateEnvelope::resolve(
+                            20_000,
+                            plurx_core::transcode::EnhancementRateProvenance::ExplicitEncode,
+                            64,
+                            64,
+                            (24, 1),
+                            true,
+                            Default::default(),
+                        )
+                        .expect("resolve fixture video envelope"),
+                        renderer: &helper,
+                        renderer_env: vec![
+                            ("FIXTURE_ROOT".into(), root.clone().into_os_string()),
+                            ("FIXTURE_CANCELLED".into(), cancelled.to_string().into()),
+                        ],
+                        ffmpeg: consumer.to_string_lossy().into_owned(),
+                        runtime_cache: &root,
+                        decode: RendererDecode::Software,
+                        cancel: worker_cancel,
+                    };
+                    measure_with_input(&sample, Some(input), broker_measurement).await
+                })
+                .await
+            });
+            let url = recv.await.expect("receive fixture broker URL");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !dir.path().join("reads").exists()
+                    || !dir.path().join("consumer.pid").exists()
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("wait for both children to start");
+            let pid: i32 = std::fs::read_to_string(dir.path().join("helper.pid"))
+                .expect("read helper PID")
+                .parse()
+                .expect("parse helper PID");
+            let consumer_pid: i32 = std::fs::read_to_string(dir.path().join("consumer.pid"))
+                .expect("read consumer PID")
+                .parse()
+                .expect("parse consumer PID");
+            assert_eq!(unsafe { libc::getpgid(consumer_pid) }, pid);
+            let revision = controller.request_pause();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while controller.observation().phase != SourcePausePhase::Paused {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("await verified whole-group pause");
+            // This is the exact phase the store owner requires before releasing
+            // its source reservation. Both physical pipe partners are stopped.
+            assert!(verified_group(pid, true)
+                .await
+                .expect("verify every pipe-partner thread stopped"));
+            let reads = std::fs::metadata(dir.path().join("reads"))
+                .expect("stat progress before pause hold")
+                .len();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(
+                std::fs::metadata(dir.path().join("reads"))
+                    .expect("stat progress during pause hold")
+                    .len(),
+                reads
+            );
+            if cancelled {
+                cancel.cancel();
+            } else {
+                std::fs::write(dir.path().join("finish"), b"finish")
+                    .expect("release synthetic renderer");
+                assert!(controller.resume(revision));
+            }
+            let result = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("bound cooperative cleanup")
+                .expect("join synthetic measurement task");
+            assert_eq!(
+                result.is_err(),
+                cancelled,
+                "unexpected measurement error: {:?}",
+                result.as_ref().err()
+            );
+            assert!(
+                !Path::new(&format!("/proc/{pid}")).exists(),
+                "leader reaped before completion"
+            );
+            assert!(
+                !Path::new(&format!("/proc/{consumer_pid}")).exists(),
+                "consumer reaped before completion"
+            );
+            assert!(
+                verified_group(pid, false)
+                    .await
+                    .expect("verify no surviving descendant reader"),
+                "descendants dead before bridge close"
+            );
+            assert!(
+                reqwest::Client::new().head(url).send().await.is_err(),
+                "bridge joined and closed before result"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn qualification_partial_partner_spawn_retains_group_until_reap() {
+        use plurx_core::process::bounded::{
+            pausable, source_group_quiescent as verified_group, SourcePauseController,
+            SourcePausePhase,
+        };
+        for early_exit in [false, true] {
+            let controller = SourcePauseController::new(Duration::from_secs(5));
+            pausable(controller.clone(), async {
+                let (input, _source) =
+                    crate::source_input::SourceInput::qualification_fixture(b"fixture source")
+                        .await;
+                let url = input.url().to_owned();
+                let mut command = tokio::process::Command::new("/bin/sh");
+                command
+                    .args(["-c", if early_exit { "exit 0" } else { "sleep 30" }])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true);
+                let mut group = child_group::Group::start(
+                    &mut command,
+                    &tokio_util::sync::CancellationToken::new(),
+                    ChildWork::background("qualification partial spawn fixture"),
+                )
+                .await
+                .expect("create partial-spawn group");
+                let (_, id, _) = group.parts();
+                if early_exit {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                let mut missing = tokio::process::Command::new("/missing-qualification-consumer");
+                assert!(group
+                    .add(
+                        &mut missing,
+                        ChildWork::background("qualification missing pipe partner")
+                    )
+                    .is_err());
+                assert!(
+                    reqwest::Client::new()
+                        .head(&url)
+                        .send()
+                        .await
+                        .expect("bridge remains served until group teardown")
+                        .status()
+                        .is_success(),
+                    "bridge retained during partial-spawn cleanup"
+                );
+                group.close().await;
+                assert!(verified_group(id, false)
+                    .await
+                    .expect("verify partial-spawn group physically dead"));
+                assert!(!Path::new(&format!("/proc/{id}")).exists());
+                controller.request_pause();
+                assert_eq!(
+                    controller.observation().phase,
+                    SourcePausePhase::Paused,
+                    "guard released only after reap"
+                );
+                input
+                    .close_and_wait()
+                    .await
+                    .expect("join and close partial-spawn bridge");
+                assert!(reqwest::Client::new().head(url).send().await.is_err());
+            })
+            .await;
+        }
     }
 }

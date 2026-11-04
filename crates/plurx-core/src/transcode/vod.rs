@@ -424,13 +424,20 @@ pub struct VodVideoFamily {
 }
 
 impl VodVideoFamily {
-    pub fn new(mut rungs: Vec<VodVideoRung>) -> Result<Self, crate::fmp4::Fmp4Error> {
+    pub fn new(rungs: Vec<VodVideoRung>) -> Result<Self, crate::fmp4::Fmp4Error> {
+        Self::build(rungs, 2)
+    }
+    /// A controlled attachment can publish its primary before its optional rung.
+    pub fn continuous(rungs: Vec<VodVideoRung>) -> Result<Self, crate::fmp4::Fmp4Error> {
+        Self::build(rungs, 1)
+    }
+    fn build(mut rungs: Vec<VodVideoRung>, minimum: usize) -> Result<Self, crate::fmp4::Fmp4Error> {
         let refuse = || {
             crate::fmp4::Fmp4Error::Unsupported(
                 "continuous rungs do not form one verified family".into(),
             )
         };
-        if !(2..=8).contains(&rungs.len()) {
+        if !(minimum..=8).contains(&rungs.len()) {
             return Err(refuse());
         }
         let id = rungs[0].compatibility_id.clone();
@@ -679,6 +686,26 @@ impl VodPresentationFamily {
             video,
             audio,
         })
+    }
+    /// Stable controlled attachment authority is anchored to its verified primary
+    /// and soundtrack. Optional membership is an additive durable descriptor.
+    pub fn continuous(
+        video: VodVideoFamily,
+        audio: Option<VodSharedAudioRendition>,
+        primary: &str,
+    ) -> Result<Self, crate::fmp4::Fmp4Error> {
+        let anchor = video
+            .rungs()
+            .iter()
+            .find(|rung| rung.rendition_id() == primary)
+            .ok_or_else(|| {
+                crate::fmp4::Fmp4Error::Unsupported("continuous primary missing".into())
+            })?
+            .clone();
+        let identity = Self::new(VodVideoFamily::continuous(vec![anchor])?, audio.clone())?;
+        let mut family = Self::new(video, audio)?;
+        family.id = identity.id;
+        Ok(family)
     }
     pub fn id(&self) -> &str {
         &self.id

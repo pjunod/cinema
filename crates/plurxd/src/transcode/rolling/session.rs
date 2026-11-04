@@ -1,6 +1,10 @@
 use super::*;
 
 pub(super) struct Session {
+    pub(super) fallback_analysis_interest: std::sync::Mutex<
+        Option<plurx_core::store::background_jobs_resources::PlaybackAnalysisSuspension>,
+    >,
+    pub(super) source_request: Option<crate::source_custody::SourceRequest>,
     pub(super) dir: PathBuf,
     /// Process-local response incarnation. The bearer session id can be reused
     /// by a durable reattachment, while segment names and lengths can repeat
@@ -975,7 +979,15 @@ impl Session {
                     true
                 }
                 Some(served) => {
-                    clock.next_publish_at.is_some_and(|target| now >= target)
+                    (clock.startup_policy.uses_small_bootstrap()
+                        && clock.reserve_phase != RollingReservePhase::Steady
+                        && last_segment > served.last_segment
+                        && now
+                            >= served.available_at
+                                + Duration::from_secs(u64::from(
+                                    plurx_core::transcode::SEGMENT_SECONDS,
+                                )))
+                        || clock.next_publish_at.is_some_and(|target| now >= target)
                         || (wants_early_publication
                             && now >= served.available_at + ROLLING_PUBLICATION_EARLIEST)
                 }
@@ -994,10 +1006,7 @@ impl Session {
                     // Capacity becomes measurable at the fixed initial runway,
                     // independently of the publication frontier advancing with
                     // elapsed time. Clearing a hold must not defer rejection.
-                    None => {
-                        !held_for_scratch
-                            && end_ms >= clock.startup_policy.bootstrap_ms(playback_rate)
-                    }
+                    None => !held_for_scratch && end_ms >= rolling_initial_runway_ms(playback_rate),
                     Some(served) => {
                         clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                             && end_ms <= served.end_ms
@@ -1077,6 +1086,16 @@ impl Session {
                     && clock.reserve_phase != RollingReservePhase::Steady
             };
             let floor = earned.or_else(|| {
+                // Bootstrap replenishment serves every completed bounded cut,
+                // including legacy fetch-driven owners without film telemetry.
+                if low_reserve && previous_served.is_some() {
+                    return index.segs.iter().rev().find(|segment| {
+                        segment.index >= first_new_segment
+                            && segment.end_ms <= budget.allowed_end_ms
+                            && segment.end_ms.saturating_sub(budget.consumed_end_ms)
+                                <= ROLLING_RESERVE_MAX_MS
+                    });
+                }
                 budget.demand_sequence.and_then(|_| {
                     if first_web_snapshot {
                         // At the 124s bootstrap ceiling the next complete cut
@@ -1087,17 +1106,6 @@ impl Session {
                             segment.end_ms <= selection_allowed_end_ms
                                 && segment.end_ms
                                     >= budget.desired_end_ms.saturating_sub(ROLLING_SEGMENT_MAX_MS)
-                        });
-                    }
-                    // While reserve grows, include every completed eligible
-                    // object. One segment per 16 s cycle can lose to 1x even
-                    // when sustained production is 1.05x.
-                    if low_reserve && previous_served.is_some() {
-                        return index.segs.iter().rev().find(|segment| {
-                            segment.index >= first_new_segment
-                                && segment.end_ms <= budget.allowed_end_ms
-                                && segment.end_ms.saturating_sub(budget.consumed_end_ms)
-                                    <= ROLLING_RESERVE_MAX_MS
                         });
                     }
                     index.segs.iter().find(|segment| {
@@ -2069,7 +2077,7 @@ impl Session {
         spawn: F,
     ) -> Result<(), String>
     where
-        F: FnOnce() -> Result<ObservedFfmpeg, String>,
+        F: FnOnce(Option<&str>) -> Result<ObservedFfmpeg, String>,
     {
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_ref() {
@@ -2078,13 +2086,21 @@ impl Session {
                 child.producer_attempt
             ));
         }
-        let (candidate, child_job, diagnostics) = spawn()?.into_parts();
-        *slot = Some(AttemptChild::new_with_job(
+        let custody = match &self.source_request {
+            Some(request) => Some(
+                crate::source_input::SourceInput::open(request.clone(), producer_attempt).await?,
+            ),
+            None => None,
+        };
+        let (candidate, child_job, diagnostics) =
+            spawn(custody.as_ref().map(|input| input.url()))?.into_parts();
+        *slot = Some(AttemptChild::new_with_source_job(
             producer_attempt,
             candidate,
             Some(child_job),
             self.control.clone(),
             Some(diagnostics),
+            custody,
         ));
         drop(slot);
 
@@ -2139,7 +2155,7 @@ impl Session {
         spawn: F,
     ) -> Result<tokio::process::ChildStdout, String>
     where
-        F: FnOnce() -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String>,
+        F: FnOnce(Option<&str>) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String>,
     {
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_ref() {
@@ -2148,14 +2164,21 @@ impl Session {
                 child.producer_attempt
             ));
         }
-        let (observed, stdout) = spawn()?;
+        let custody = match &self.source_request {
+            Some(request) => Some(
+                crate::source_input::SourceInput::open(request.clone(), producer_attempt).await?,
+            ),
+            None => None,
+        };
+        let (observed, stdout) = spawn(custody.as_ref().map(|input| input.url()))?;
         let (candidate, child_job, diagnostics) = observed.into_parts();
-        *slot = Some(AttemptChild::new_with_job(
+        *slot = Some(AttemptChild::new_with_source_job(
             producer_attempt,
             candidate,
             Some(child_job),
             self.control.clone(),
             Some(diagnostics),
+            custody,
         ));
         drop(slot);
 

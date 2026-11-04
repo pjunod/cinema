@@ -42,6 +42,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         MediaSessionRequestClaim::Acquired { .. }
     ));
     let request = crate::transcode::SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -207,6 +208,7 @@ async fn started_session_cleanup_shipped_shape() {
     let dir = crate::test_tempdir().expect("state dir");
     let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
     let request = crate::transcode::SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -2681,6 +2683,7 @@ fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
 /// A create body with nothing set, to be spread over.
 fn bare_create() -> CreateSession {
     CreateSession {
+        source_telemetry: None,
         intent: None,
         control_sequence: None,
         playback_id: String::new(),
@@ -3589,4 +3592,37 @@ fn the_enhancement_follows_the_selected_plan_before_any_report() {
     let kept = session_enhancement(Some(&file), &native, OutputGrade::Sdr, None, None, None, None, None)
         .expect("a Dolby Vision source");
     assert_eq!(kept.active, [EnhancementBadge::Dyn]);
+}
+
+#[test]
+fn source_telemetry_is_explicit_retained_and_independent_of_transport() {
+    use crate::transcode::{SessionRequest, SourceTelemetry};
+    let legacy: CreateSession = serde_json::from_value(serde_json::json!({
+        "playback_id": "legacy",
+        "transport": "hlsjs",
+    }))
+    .expect("deserialize legacy request without source telemetry");
+    let legacy = legacy.into_request(17, 720);
+    assert_eq!(legacy.source_telemetry, None, "transport is not a film-observation claim");
+    let modern: CreateSession = serde_json::from_value(serde_json::json!({
+        "playback_id": "legacy",
+        "source_telemetry": "film-v1",
+    }))
+    .expect("deserialize explicit source telemetry request");
+    let modern = modern.into_request(17, 720);
+    assert_eq!(modern.source_telemetry, Some(SourceTelemetry::FilmV1));
+    assert_eq!(modern.transport, None);
+    let encoded = serde_json::to_value(&modern).expect("serialize source telemetry request");
+    assert_eq!(encoded["source_telemetry"], "film-v1");
+    let replay: SessionRequest = serde_json::from_value(encoded)
+        .expect("deserialize encoded source telemetry request");
+    assert_eq!(replay.source_telemetry, modern.source_telemetry);
+    let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+    assert_eq!(legacy.durable_intent_fingerprint(&principal), modern.durable_intent_fingerprint(&principal), "source service metadata is not media identity");
+    let unknown: CreateSession = serde_json::from_value(serde_json::json!({
+        "playback_id": "future",
+        "source_telemetry": "future-v2",
+    }))
+    .expect("deserialize unknown optional source telemetry request");
+    assert_eq!(unknown.into_request(17, 720).source_telemetry, None, "an unknown optional service declaration retains legacy playback");
 }

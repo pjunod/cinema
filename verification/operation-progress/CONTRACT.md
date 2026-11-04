@@ -34,6 +34,10 @@ source correspondence; they supply no new TLC execution or qualification.
 Fresh affected smoke receipts remain a separate CI obligation outside effort
 compile-only mode.
 
+The current integration preserves main's separately reviewed source-pause
+correspondences and live mapping rows. The historical HDR-only comparison
+above does not revert or requalify that shared source-ownership extension.
+
 ## Artifact-only text translation — scoped source review on 2026-10-28
 
 Managed v3 / SQLite v121 exempts only the new closed

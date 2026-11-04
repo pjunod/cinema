@@ -10011,6 +10011,7 @@ fn every_axis_is_prepared_and_names_itself() {
 
 fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -10629,6 +10630,7 @@ fn a_grade_intent_comes_off_the_request() {
 
     fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
         SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
@@ -17631,5 +17633,28 @@ fn a_published_attempt_is_not_failed_by_the_prepublication_check() {
     assert_eq!(
         classify_prepublication_attempt(&snapshot, 1, 1),
         PrepublicationAttemptOutcome::Waiting
+    );
+}
+
+#[test]
+fn rolling_seek_projection_uses_the_explicit_target_instead_of_the_predecessor_clock() {
+    let mut demand = PlaybackDemandSnapshot::test_default(ClientPlatform::Web);
+    demand.position_ms = 1_417_211;
+    demand.seek_target_ms = Some(1_234_749);
+    demand.render_state = RenderState::Seeking;
+    demand.demand = PlaybackDemand::Active;
+    assert_eq!(
+        rolling_estimated_position_ms(&demand, Duration::from_secs(30)),
+        1_234_749
+    );
+    demand.demand = PlaybackDemand::Hold;
+    assert_eq!(
+        rolling_estimated_position_ms(&demand, Duration::from_secs(30)),
+        1_234_749
+    );
+    demand.seek_target_ms = None;
+    assert_eq!(
+        rolling_estimated_position_ms(&demand, Duration::ZERO),
+        1_417_211
     );
 }

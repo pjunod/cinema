@@ -1,15 +1,18 @@
 "use strict";
 const test=require("node:test"),assert=require("node:assert/strict");
 const fs=require("node:fs"),path=require("node:path"),vm=require("node:vm");
-const source=fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/player/prepared-replacement.js"),"utf8");
+const webPlayer=path.join(__dirname,"../../crates/plurxd/src/web/player");
+const frameSource=fs.readFileSync(path.join(webPlayer,"video-frames.js"),"utf8");
+const source=fs.readFileSync(path.join(webPlayer,"prepared-replacement.js"),"utf8");
 function harness({origin=600000,rate=1,voluntary=true}={}){
   let now=0,next=0,attached=true;
   const timers=new Map(),exposed=[],failed=[],pairs=[],logs=[];
-  const element=()=>({currentTime:17,playbackRate:rate,paused:false,seeking:false,readyState:4,
-    buffered:{length:1,start:()=>0,end:()=>60},callbacks:new Map(),listeners:new Map(),muted:true,
+  const element=()=>Object.assign(new EventTarget(),{
+    currentTime:17,playbackRate:rate,paused:false,seeking:false,readyState:4,
+    buffered:{length:1,start:()=>0,end:()=>60},callbacks:new Map(),muted:true,
     requestVideoFrameCallback(fn){const id=++next;this.callbacks.set(id,fn);return id;},
     cancelVideoFrameCallback(id){this.callbacks.delete(id);},
-    addEventListener(name,fn){this.listeners.set(name,fn);},removeEventListener(name){this.listeners.delete(name);}});
+    emit(name){this.dispatchEvent(new Event(name));}});
   const incumbent=element(),target=element();incumbent.muted=false;
   const state={sessionId:"target",mediaOriginMs:origin,bufferReadyAtMs:0};
   const player={prepared:state,offset:origin/1000,vod:false,wantsPlayback:true,
@@ -18,6 +21,7 @@ function harness({origin=600000,rate=1,voluntary=true}={}){
     performance:{now:()=>now},setTimeout(fn,ms){const id=++next;timers.set(id,{fn,at:now+ms});return id;},
     clearTimeout(id){timers.delete(id);},playbackOwnsAttachedMedia:()=>attached,
     streamHasVideo:()=>true,bufferRunway:()=>20,playbackContext:()=>({}),clientLog:row=>logs.push(row)});
+  vm.runInContext(frameSource,ctx);
   vm.runInContext(source,ctx);
   ctx.failPreparedReplacement=(p,s,reason)=>{failed.push(reason);p.prepared=null;};
   ctx.exposePreparedReplacement=(p,s,v,spare,filmMs)=>{exposed.push({p,s,v,spare,filmMs});};
@@ -63,7 +67,7 @@ test("prepared handoff never settles a superseded frame rendezvous",()=>{
 });
 test("prepared handoff retires on pause rather than waiting for alignment",()=>{
   const h=harness();h.start();h.warm();h.incumbentFrame(18.2,86525,100);
-  h.incumbent.paused=true;h.incumbent.listeners.get("pause")();h.deadline();
+  h.incumbent.paused=true;h.incumbent.emit("pause");h.deadline();
   assert.equal(h.exposed.length,0);assert.equal(h.failed.length,1);assert.match(h.failed[0],/pressure before voluntary commit/);
 });
 

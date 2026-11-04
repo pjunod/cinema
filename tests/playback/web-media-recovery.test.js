@@ -97,23 +97,25 @@ test("a paused rolling session's failure parks and Play reopens it", () => {
     "a paused rolling fatal parks before any recovery or surface");
 });
 
-// Play after a pause of a minute or more is a natural quality boundary. It
-// used to run through seekTo() at the position Play was pressed at; the Auto
-// ask took about a second, so a retained route still seeked the attached VOD
-// media back by that second (Safari, 2026-10-04: every `hls_loader_resumed`
-// followed 1.2 s later by a `seek_local` with no viewer seek).
+// Play after a pause of a minute or more is a natural quality boundary. An
+// optional Auto upgrade delegates to the retained-incumbent owner; it must
+// leave attached playback alone and stand down when a newer intent wins.
 test("Play after a long pause never seeks when Auto keeps the route", async () => {
   const toggle = declaration("togglePlay");
   assert.doesNotMatch(toggle, /if\(qualityBoundary\) seekTo\(/,
     "the resume boundary does not seek before it knows the route changes");
   assert.match(toggle, /if\(qualityBoundary\) resumeQualityBoundary\(PLAYER\)/);
 
-  const run = async ({picked, during = () => {}, force = "auto", pendingOpen = false}) => {
-    const seeks = [];
+  const run = async ({picked, during = () => {}, force = "auto", pendingOpen = false,
+    switchResult = true}) => {
+    const video = {};
+    const incumbent = {id: "1", route: "encode", target_height: 1080};
+    const switches = [], seeks = [];
     const player = {controlSeek: undefined, mediaAttachment: 7, wantsPlayback: true,
-      abr: {switching: false}};
+      qualityCandidateId: incumbent.id, qualityCandidates: [incumbent], abr: {switching: false}};
     const scope = {
       PLAYER: player, position: 100,
+      document: {getElementById: id => id === "video" ? video : null},
       qualityForce: () => force,
       hasPendingPlaybackOpen: () => pendingOpen,
       pbPosSec: () => scope.position,
@@ -122,26 +124,31 @@ test("Play after a long pause never seeks when Auto keeps the route", async () =
         during(scope, player);
         return picked;
       },
+      switchAutoCandidate: (...args) => { switches.push(args); return Promise.resolve(switchResult); },
       seekTo: async (...args) => { seeks.push(args); },
     };
     const body = `${declaration("resumeQualityBoundary")}
       return (p) => resumeQualityBoundary(p);`;
     const moved = await new Function("scope", `with(scope){${body}}`)(scope)(player);
-    return {moved, seeks};
+    return {moved, seeks, switches, player, video, incumbent};
   };
 
   const kept = await run({picked: null});
   assert.equal(kept.moved, false);
+  assert.deepEqual(kept.switches, [], "no optional change leaves the incumbent attached");
   assert.deepEqual(kept.seeks, [], "a retained route leaves the playing media alone");
 
   const candidate = {id: "2", route: "encode", target_height: 720};
   const changed = await run({picked: candidate});
   assert.equal(changed.moved, true);
-  assert.equal(changed.seeks.length, 1);
-  assert.equal(changed.seeks[0][0], 101.2, "a picked route aims where playback has reached");
-  assert.equal(changed.seeks[0][1], false);
-  assert.equal(changed.seeks[0][3], false, "it is not a viewer seek");
-  assert.equal(changed.seeks[0][6], candidate, "the picked route is handed over, not asked again");
+  assert.deepEqual(changed.switches, [[changed.player, changed.video, changed.incumbent,
+    {candidate, reason: "resume_quality_boundary", transition: "upgrade"}]],
+    "the optional candidate is delegated to the retained-incumbent owner");
+  assert.deepEqual(changed.seeks, [], "an Auto boundary does not synthesize a viewer seek");
+  const refused = await run({picked: candidate, switchResult: false});
+  assert.equal(refused.moved, false, "a refused optional change retains the incumbent");
+  assert.equal(refused.switches.length, 1, "the incumbent owner makes the refusal");
+  assert.deepEqual(refused.seeks, []);
 
   for (const during of [
     (scope, player) => { player.wantsPlayback = false; },
@@ -155,15 +162,20 @@ test("Play after a long pause never seeks when Auto keeps the route", async () =
   ]) {
     const superseded = await run({picked: candidate, during});
     assert.equal(superseded.moved, false);
-    assert.deepEqual(superseded.seeks, [],
+    assert.deepEqual(superseded.switches, [],
       "a pause, seek, reattach, new player or an Auto change in flight supersedes it");
+    assert.deepEqual(superseded.seeks, []);
   }
   const settled = await run({picked: candidate,
     during: (scope, player) => { player.directedChange = {settled: true}; }});
-  assert.equal(settled.seeks.length, 1, "a settled directed change does not hold the boundary");
-  assert.deepEqual((await run({picked: candidate, pendingOpen: true})).seeks, []);
-  assert.deepEqual((await run({picked: candidate, force: "1080"})).seeks, [],
-    "a pinned quality has no Auto boundary");
+  assert.equal(settled.switches.length, 1, "a settled directed change does not hold the boundary");
+  assert.deepEqual(settled.seeks, []);
+  const pending = await run({picked: candidate, pendingOpen: true});
+  assert.deepEqual(pending.switches, []);
+  assert.deepEqual(pending.seeks, []);
+  const pinned = await run({picked: candidate, force: "1080"});
+  assert.deepEqual(pinned.switches, [], "a pinned quality has no Auto boundary");
+  assert.deepEqual(pinned.seeks, []);
 
   // seekTo with a handed-in candidate: no second ask, and a change that fails
   // before attachment retires the intent without seeking the retained media.

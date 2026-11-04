@@ -36,6 +36,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include "title_constants.h"
+// This is a whole-title scan, not a bounded renderer window. Its existing
+// frame/packet limits and daemon total/active owner deadlines remain in force;
+// source-service admission budgets every finite Range. Do not impose the
+// renderer's 128 MiB cumulative window on a complete source scan.
+#define WINDOW_READ_LIMIT UINT64_MAX
+#include "movie_source_io.h"
+
+static struct budget_io title_io = {.fd = -1, .upstream = -1};
+static AVIOContext *title_avio;
+static void close_title_io(void) {
+  if (title_avio) {
+    av_freep(&title_avio->buffer);
+    avio_context_free(&title_avio);
+  }
+  movie_source_close(&title_io);
+}
+
 
 #define MAX_TITLE_FRAMES 100000000ULL
 #define MAX_UNIT_NALS 4096
@@ -69,8 +86,22 @@ static bool known_pps[64];
 static void need(bool ok, const char *why) {
   if (!ok) {
     fprintf(stderr, "DV title scan refused: %s\n", why);
+    close_title_io();
     exit(1);
   }
+}
+static void open_title_io(AVFormatContext *input, const char *source) {
+  need(movie_source_open(&title_io, source) >= 0,
+       "held regular title source or private source capability");
+  uint8_t *buffer = av_malloc(65536);
+  need(buffer != NULL, "bounded title IO buffer");
+  title_avio = avio_alloc_context(buffer, 65536, 0, &title_io,
+                                  movie_read, NULL, movie_seek);
+  if (!title_avio) av_free(buffer);
+  need(title_avio != NULL, "title IO context");
+  input->pb = title_avio;
+  input->flags |= AVFMT_FLAG_CUSTOM_IO;
+  need(movie_source_bind_demuxer(input) >= 0, "closed title demux protocol authority");
 }
 static void unknown_constants(void) {
   dv_title_constants_unknown(&stats.mastering);
@@ -375,6 +406,7 @@ int main(int argc, char **argv) {
   input->max_streams = 256;
   input->probesize = 1024 * 1024;
   input->max_analyze_duration = AV_TIME_BASE;
+  open_title_io(input, argv[1]);
   need(avformat_open_input(&input, argv[1], NULL, NULL) >= 0, "source open");
   // Supported catalogue containers expose codec parameters on opening. Avoid
   // a second analysis pass and never seek past the start of the title.
@@ -468,5 +500,6 @@ int main(int argc, char **argv) {
   free(times);
   av_packet_free(&packet);
   avformat_close_input(&input);
+  close_title_io();
   return 0;
 }

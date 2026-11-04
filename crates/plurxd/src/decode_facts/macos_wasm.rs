@@ -40,6 +40,10 @@ pub struct Output {
 struct State {
     source: Option<Arc<File>>,
     source_size: u64,
+    range_reader: Option<(
+        crate::source_input::SourceInputRangeReader,
+        tokio_util::sync::CancellationToken,
+    )>,
     cursors: BTreeMap<i32, u64>,
     args: Vec<Vec<u8>>,
     stdout: Vec<u8>,
@@ -94,6 +98,7 @@ impl Parser {
         Ok(Self { engine, module })
     }
 
+    #[cfg(test)]
     pub fn run(
         &self,
         source: Option<Arc<File>>,
@@ -101,6 +106,21 @@ impl Parser {
         output_limits: (usize, usize),
         deadline: Instant,
         stop: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<Output, String> {
+        self.run_with_reader(source, args, output_limits, deadline, stop, None)
+    }
+
+    pub fn run_with_reader(
+        &self,
+        source: Option<Arc<File>>,
+        args: Vec<String>,
+        output_limits: (usize, usize),
+        deadline: Instant,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        range_reader: Option<(
+            crate::source_input::SourceInputRangeReader,
+            tokio_util::sync::CancellationToken,
+        )>,
     ) -> Result<Output, String> {
         let source_size = source
             .as_ref()
@@ -111,6 +131,7 @@ impl Parser {
         let state = State {
             source,
             source_size,
+            range_reader,
             cursors: BTreeMap::new(),
             args: std::iter::once("ffprobe".to_owned())
                 .chain(args)
@@ -566,9 +587,14 @@ fn dispatch(name: &str, c: &mut Caller<'_, State>, a: &[Val]) -> Result<i32, Err
                         .as_ref()
                         .ok_or_else(|| Error::msg("parser has no source"))?;
                     let mut bytes = vec![0; len];
-                    let got = source
-                        .read_at(&mut bytes, offset)
-                        .map_err(|e| Error::msg(e.to_string()))?;
+                    let got = match &c.data().range_reader {
+                        Some((reader, cancel)) => reader
+                            .read_at(&mut bytes, offset, cancel)
+                            .map_err(|error| Error::msg(format!("source service: {error}")))?,
+                        None => source
+                            .read_at(&mut bytes, offset)
+                            .map_err(|error| Error::msg(error.to_string()))?,
+                    };
                     write(c, dest, &bytes[..got])?;
                     total += got;
                     offset = offset

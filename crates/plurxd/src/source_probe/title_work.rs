@@ -202,7 +202,8 @@ impl TitleTask {
                 token,
                 deadline,
                 JobKind::DvTitleScan,
-            )?;
+            )
+            .await?;
             let cancel = CancellationToken::new();
             let work = execute(
                 state.clone(),
@@ -370,15 +371,27 @@ async fn execute(
             })
             .map(|out| out.stats)
     });
+    let source_version = crate::fragment_index_cluster::inspect_source(&file)
+        .await
+        .ok();
     let result = match reused {
         Some(stats) => Ok(stats),
         None => {
-            super::run_admitted_probe(
+            super::run_source_admitted_probe(
                 &state.transcode,
                 &admission,
                 &cancel,
                 &shutdown,
                 None,
+                &fence,
+                || async {
+                    source_version.is_some()
+                        && tools.is_current().await
+                        && crate::fragment_index_cluster::inspect_source(&file)
+                            .await
+                            .ok()
+                            == source_version
+                },
                 super::dv_title::scan(&file, &demand.probe_json, &tools),
             )
             .await
@@ -407,12 +420,21 @@ async fn execute(
                 // published, and the verdict stays missing until a later play
                 // asks again.
                 let qualification = cancel.child_token();
-                match super::run_admitted_probe(
+                match super::run_source_admitted_probe(
                     &state.transcode,
                     &admission,
                     &qualification,
                     &shutdown,
                     None,
+                    &fence,
+                    || async {
+                        source_version.is_some()
+                            && tools.is_current().await
+                            && crate::fragment_index_cluster::inspect_source(&file)
+                                .await
+                                .ok()
+                                == source_version
+                    },
                     super::fel_qualification::qualify_if_due(
                         &state,
                         &file,

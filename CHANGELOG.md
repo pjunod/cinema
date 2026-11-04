@@ -17,6 +17,13 @@ bump may break compatibility and a **patch** bump never does.
 
 - Dolby Vision enhancement quality checks use an accurate BT.2020/PQ colour
   conversion and remeasure verdicts made with the old conversion.
+- Playback source readers share fenced storage budgets, yield background scans
+  during startup, and retain physical custody through cancellation and cleanup.
+  Continuous quality starts primary video and audio before its companion;
+  rolling HLS publishes its first reload window before banking the steady reserve.
+- Web Resume retains the current playback owner, native source changes fence
+  predecessor clocks and buffers, and all frame consumers share one callback
+  subscription per video element with discontinuity renewal.
 
 - Nightly deep validation and mutation tests use the app's shipped FFmpeg
   package; obsolete FFmpeg 6 runner capacity and recovery entries are retired.

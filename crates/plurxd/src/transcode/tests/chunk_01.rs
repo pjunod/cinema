@@ -2254,6 +2254,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
         Pipeline::Cpu,
     ));
     let req = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -2323,6 +2324,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
 
 fn snapshot_probe_request() -> SessionRequest {
     SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
@@ -3946,6 +3948,7 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
 #[test]
 fn the_grade_is_part_of_a_request_identity() {
     let request = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,

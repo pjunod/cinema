@@ -195,6 +195,69 @@ fn recovered_retained_output_matches(
     }
 }
 
+// The durable receipt owns only the exact viewer's suspended preparation
+// interest. Cancellation transfers restoration to a named cleanup task; its SQL
+// still requires that original viewer/source/generation to be current.
+struct FallbackAnalysisInterestOwner {
+    store: Arc<dyn Store>,
+    receipt: Option<plurx_core::store::background_jobs_resources::PlaybackAnalysisSuspension>,
+}
+impl FallbackAnalysisInterestOwner {
+    fn transfer(mut self, session: &Arc<Session>) {
+        if let Some(receipt) = self.receipt.take() {
+            let mut target = session
+                .fallback_analysis_interest
+                .lock()
+                .expect("fallback interest");
+            if target.is_none() {
+                *target = Some(receipt);
+            } else {
+                self.receipt = Some(receipt);
+            }
+        }
+    }
+}
+impl Drop for FallbackAnalysisInterestOwner {
+    fn drop(&mut self) {
+        if let Some(receipt) = self.receipt.take() {
+            let store = Arc::clone(&self.store);
+            tokio::spawn(async move {
+                if let Err(error) = store
+                    .restore_playback_analysis_interest(receipt, crate::state::clock_ms())
+                    .await
+                {
+                    tracing::warn!(%error,"exact fallback preparation interest cleanup remains durable");
+                }
+            });
+        }
+    }
+}
+impl Session {
+    pub(super) async fn restore_fallback_analysis_interest(
+        &self,
+        store: &dyn Store,
+    ) -> Result<(), String> {
+        let receipt = self
+            .fallback_analysis_interest
+            .lock()
+            .expect("fallback interest")
+            .take();
+        if let Some(receipt) = receipt {
+            if let Err(error) = store
+                .restore_playback_analysis_interest(receipt.clone(), crate::state::clock_ms())
+                .await
+            {
+                *self
+                    .fallback_analysis_interest
+                    .lock()
+                    .expect("fallback interest") = Some(receipt);
+                return Err(error.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
 impl TranscodeManager {
     /// Retained output is authoritative; an initial claim is negotiated only
     /// after this producer has selected the encoded route and its AAC lattice.
@@ -904,6 +967,34 @@ impl TranscodeManager {
                             // reads the source itself.
                             self.validate_candidate_planning_binding(req, replacement_deadline)
                                 .await?;
+                            let mut fallback_interest = FallbackAnalysisInterestOwner {
+                                store: Arc::clone(&self.store),
+                                receipt: None,
+                            };
+                            if let Some(identity) = recovery
+                                .filter(|identity| identity.principal.local_user_id().is_some())
+                            {
+                                if let Ok(Some(file)) = self.store.get_file(req.file_id).await {
+                                    let receipt=plurx_core::store::background_jobs_resources::PlaybackAnalysisSuspension {
+                                        receipt_id:uuid::Uuid::new_v4().to_string(),principal:identity.principal.clone(),
+                                        playback_id:req.playback_id.clone(),incarnation_id:identity.incarnation_id.clone(),
+                                        file_id:file.id,source_size:file.size,source_mtime:file.mtime,
+                                    };
+                                    match self
+                                        .store
+                                        .suspend_playback_analysis_interest(
+                                            receipt,
+                                            crate::state::clock_ms(),
+                                        )
+                                        .await
+                                    {
+                                        Ok(receipt) => fallback_interest.receipt = receipt,
+                                        Err(error) => {
+                                            tracing::warn!(%error,"could not demote exact fallback preparation interest; source custody arbitration remains authoritative")
+                                        }
+                                    }
+                                }
+                            }
                             let started = self
                                 .start_live_recovery_session(
                                     req,
@@ -919,6 +1010,11 @@ impl TranscodeManager {
                             // a refusal — capacity, spawn, deadline — and a
                             // metric whose HELP says "sessions served" must
                             // not include streams nobody ever received.
+                            let session =
+                                self.sessions.lock().await.get(&started.session_id).cloned();
+                            if let Some(session) = session {
+                                fallback_interest.transfer(&session);
+                            }
                             record_live_recovery(reason);
                             crate::media_pool::mark_create_phase("rolling");
                             started
@@ -1056,6 +1152,7 @@ impl TranscodeManager {
                     req.audio_claim.as_ref(),
                     req.audio_delivery.as_ref(),
                     req.sdr_master_codecs,
+                    req.source_telemetry == Some(crate::transcode::SourceTelemetry::FilmV1),
                 )
                 .await
             }
@@ -1085,6 +1182,7 @@ impl TranscodeManager {
                     req.automatic,
                     req.audio_delivery.as_ref(),
                     req.sdr_master_codecs,
+                    req.source_telemetry == Some(crate::transcode::SourceTelemetry::FilmV1),
                 )
                 .await
             }
@@ -2048,12 +2146,13 @@ impl TranscodeManager {
                 );
             let (display_target, display_target_note) = tokio::time::timeout_at(
                 deadline,
-                self.display_target_policy_for_source(
-                    target_enabled,
-                    caps.display.as_ref(),
-                    &file,
-                    planning.probe_json.as_deref(),
-                ),
+                crate::source_custody::with_request(
+                    self.foreground_source_request(&file,"processed-source-planning",uuid::Uuid::new_v4(),
+                        if request.source_telemetry==Some(SourceTelemetry::FilmV1) {
+                            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling
+                        } else {plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer}),
+                    self.display_target_policy_for_source(
+                        target_enabled,caps.display.as_ref(),&file,planning.probe_json.as_deref())),
             )
             .await
             .map_err(|_| {
@@ -2371,6 +2470,47 @@ impl TranscodeManager {
     }
 
     async fn prepare_vod_encoding_with_source(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        source_evidence: Option<(
+            &crate::transcode::source_preparation::SourceHeldProbeEvidence,
+            &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+        )>,
+        hwaccel: Option<&str>,
+        prepared_admission: Option<(
+            &mut Option<crate::vodencode::EncodePermit>,
+            tokio::time::Instant,
+        )>,
+        _decline: Option<&mut Option<String>>,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        let request = crate::source_custody::current_request().or_else(|| {
+            self.foreground_source_request(
+                file,
+                "vod-planning",
+                uuid::Uuid::new_v4(),
+                if req.source_telemetry == Some(SourceTelemetry::FilmV1) {
+                    plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling
+                } else {
+                    plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer
+                },
+            )
+        });
+        crate::source_custody::with_request(
+            request,
+            self.prepare_vod_encoding_with_source_scoped(
+                req,
+                file,
+                source_evidence,
+                hwaccel,
+                prepared_admission,
+                _decline,
+            ),
+        )
+        .await
+    }
+
+    async fn prepare_vod_encoding_with_source_scoped(
         &self,
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
@@ -3277,9 +3417,16 @@ impl TranscodeManager {
                         let worker = credit.clone().try_claim_worker().ok_or("DV preparation credit already claimed")?;
                         (Some(credit), crate::dv_segment::SegmentAdmission::Retained(worker))
                     } else { (None, crate::dv_segment::SegmentAdmission::Owned(bundle)) };
-                    let (verified, selected) = match runtime.execute_until(file, &processed_plan, &processed_options, grid,
+                    // The same explicitly scoped FG/BG owner that prepared
+                    // this recipe must own its first actual original reads.
+                    // Clone the held descriptor; never reacquire path authority.
+                    let input=crate::source_input::SourceInput::open_current_held(
+                        &runtime.source.handle,"processed-first-window").await?
+                        .ok_or("processed first window has no original source read owner")?;
+                    let (verified, selected) = match runtime.execute_with_source_input(file, &processed_plan, &processed_options, grid,
                         entry, &executable.path, admission,
-                        Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None, processing_deadline).await {
+                        Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None,
+                        input, processing_deadline).await {
                             // This awaited owner still holds the frozen graph's
                             // admission. Dropping it never reaches this branch;
                             // normal cancellation makes no backend claim.
