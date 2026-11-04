@@ -391,6 +391,8 @@ repository metadata were sent to the compiler host.
 | `5931aeeac88112dc7b82bb4837fc8895f1c0dc7e` | Both shipping-daemon singleton conversion journeys passed. | Actual pre-Source and Sharing-enabled replicated stores become native SQLite with current data, identities, master and sealed Source keys preserved; daemon readiness/auth, no cluster listeners, native backup API, restore CLI and native restarts. |
 | `5931aeeac88112dc7b82bb4837fc8895f1c0dc7e` | Backup suite passed 11/11; three real Source producer/HTTP regressions passed. | Native archive creation without a cluster client, retained cluster cut/deadline semantics, actual producer admission, expired original cluster observation refusal, and H1/H2 playlist/init/segment lineage. |
 | `d75e8230b4c181192b8520b05d33917be42b9a94` | Native Source provider passed 2/2. | Real native boot/driver registry, capability revocation and missing-provider refusal without membership fallback. |
+| `e1ce9af4ce7247c6e9743f9952692758259282bc` | All 155 focused storage regressions and four affected web files passed after integrating current main. | Includes actual AUTH81/AUTH82 shipping-daemon conversion, native restarts, backup/restore and managed promotion; precedes the additional blocking-worker cancellation correction below. |
+| `c65eca14b5c57a2167d2b9aaa565c0c91129d816` | Promotion suite passed 6/6; real daemon managed create/restart passed. | All three blocking promotion workers retain the actual root lease through cancellation. The new regression cancels an awaiting task during a paused SQLite transaction, proves exclusion until completion and verifies its committed write; the daemon retains Source keys, local data and accepted restart writes. |
 
 Web settings, cluster-membership, asset-order and asset-load contracts passed,
 including all 80 settings cases. The validation catalog passed with 38 points
@@ -406,9 +408,25 @@ construction and the replicated Source provider remain in the cluster adapter.
 Native job execution, offline packages, Trakt and watched drains receive an
 explicit local job authority rather than an inactive membership manager.
 
-These are focused source checks, not full release qualification. The final
-bookkeeping/commit changes only documentation and the test target; its normal
-hook recompiles/lints the exact staged tree. The effort/main promotion gates,
+PR review also corrected the lifetime of independent blocking promotion work:
+archive preparation and both telemetry workers now retain their own directory
+lease. Cancelling the parent future cannot admit another writer while those
+workers still mutate SQLite. The strengthened regression reacquires a fresh
+root lease before starting the worker, preventing startup handles from masking
+premature release.
+
+Astra separately reviewed the exact previously admitted job/lease/SQLite
+source deltas. All three formal correspondence checks passed without drift;
+bounded smoke completed nine durable-job configurations, two operation-progress
+configurations and one worker-refinement configuration. Thirty-eight focused
+formal-runner tests passed. Models, configurations, properties and fairness
+inputs are unchanged. Native selection, directory ownership, migration and
+shutdown remain external runtime obligations; these results do not transfer
+the finite worker models' claims to those mechanisms.
+
+These are focused source checks, not full release qualification. The recorded
+snapshots distinguish runtime changes from later documentation; the normal
+commit hook recompiles/lints the exact staged tree. The effort/main promotion gates,
 broader feature and multi-node acceptance, old-binary execution drills, affected
 Mac playback/suspend, and durable SQLite performance acceptance remain pending.
 FFmpeg on this compiler VM is 8.0.1; a passing
