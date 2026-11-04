@@ -10,6 +10,17 @@ use plurx_core::cluster::coordination::{ClusterJobAuthority, Lease, LeaseClaim, 
 use plurx_core::error::StoreError;
 use plurx_core::store::{PublicationFence, PublicationStore, Store};
 
+/// An exclusively owned native database has one local job executor. This
+/// authority performs no membership or quorum observation.
+pub(crate) struct LocalJobAuthority;
+
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+impl ClusterJobAuthority for LocalJobAuthority {
+    async fn may_run_cluster_jobs(&self) -> bool {
+        true
+    }
+}
+
 /// The job authority for a process that has no Raft membership handle.
 ///
 /// The maintenance commands attach to a running voter as a remote client, so

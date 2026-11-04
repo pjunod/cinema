@@ -113,12 +113,9 @@ impl RosterProof {
     }
 
     fn for_membership(membership: &MembershipManager) -> Self {
-        Self::new(match membership.local_db_raft_metrics() {
-            Some(applied) => SettingsChangeSource::Applied(applied),
-            // Without a replicated store the roster is empty and read from
-            // nothing; no other process can change it.
-            None => SettingsChangeSource::LocalOnly,
-        })
+        Self::new(crate::cluster_runtime::settings_changes_for_membership(
+            membership,
+        ))
     }
 
     /// The held roster while it stands, otherwise one consistent read, held

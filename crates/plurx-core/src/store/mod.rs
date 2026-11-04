@@ -43,7 +43,6 @@ pub mod sharing_receiver_retirement;
 pub use sharing_receiver_retirement::SharingReceiverRetirementStore;
 pub mod sharing_receiver_sessions;
 pub use sharing_receiver_progress::SharingReceiverProgressStore;
-#[cfg(feature = "hiqlite-store")]
 pub(crate) mod sharing_source_schema;
 pub use sharing_receiver_sessions::SharingReceiverSessionStore;
 pub mod sharing_source_ingress_custody;
@@ -145,7 +144,7 @@ pub use jellyfin_identity::{JellyfinEntityId, JellyfinEntityKind, JellyfinIdenti
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_jellyfin_identity;
 mod sqlite;
-mod telemetry;
+pub(crate) mod telemetry;
 mod timeline_annotations;
 
 mod publication;

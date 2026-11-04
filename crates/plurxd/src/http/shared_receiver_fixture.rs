@@ -105,6 +105,7 @@ async fn build_receiver_fixture(
     state.store = Arc::clone(&selected.store);
     state.node_id = selected.identity.node_id.clone();
     state.membership = selected.membership_manager();
+    state.storage_mode = plurx_core::storage::mode::StorageMode::Cluster;
     state.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
         state.membership.clone(),
         Arc::clone(&state.store),

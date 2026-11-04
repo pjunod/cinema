@@ -256,6 +256,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     eprintln!("Source fixture: state constructed without Router");
     state_mut.store = Arc::clone(&selected.store);
     state_mut.membership = membership.clone();
+    state_mut.storage_mode = plurx_core::storage::mode::StorageMode::Cluster;
     state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
         membership.clone(),
         Arc::clone(&state_mut.store),
@@ -943,7 +944,9 @@ async fn source_actual_copy_attachment(
     .await;
     let gate = Arc::new(SourceProducerAuthority {
         store: Arc::clone(store),
-        membership: membership.clone(),
+        source_authority: crate::cluster_runtime::source_admission::from_membership(
+            membership.clone(),
+        ),
         master: Arc::clone(master),
         registry_boot_id: state.sharing.accepted_drivers.boot_id(),
         ingress: ingress_fixture.permission().await,
@@ -1175,7 +1178,7 @@ async fn source_actual_actor(
     if mode == 52 {
         let gate = SourceProducerAuthority {
             store: Arc::clone(&state.store),
-            membership: state.membership.clone(),
+            source_authority: state.source_authority_provider(),
             master: Arc::clone(&state.sharing.key),
             registry_boot_id: state.sharing.accepted_drivers.boot_id(),
             ingress: ingress_permission.clone(),

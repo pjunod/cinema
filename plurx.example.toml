@@ -33,6 +33,11 @@ key_file = ""
 sans = ["localhost", "127.0.0.1", "::1"]
 
 [storage]
+# Omission selects native SQLite on fresh installs. The durable storage-mode
+# manifest controls existing installs. Explicit cluster creation uses
+# `plurxd --config plurx.toml cluster create`; changing this value cannot
+# silently convert an existing authority.
+# mode = "sqlite"
 # Authoritative database, node identity, and compatibility root. Created if
 # missing. Empty cache/transcode overrides preserve the legacy child layout.
 data_dir = "./data"
@@ -54,12 +59,10 @@ transcode_dir = ""
 scan_prune_percent = 10
 
 # [cluster]
-# M2 uses both ports for the one-voter store but pins their listener hosts to
-# loopback, regardless of the addresses below. M3 membership will make the
-# hosts reachable and use the remaining peer/join settings.
+# Cluster-only listeners; standalone opens neither port. Explicit cluster
+# creation or join enables replication, never a local playback request.
 # raft_bind = "0.0.0.0:32401"
 # api_bind = "0.0.0.0:32402"
-# Reserved for M3 membership:
 # advertise_host = ""
 # join_token_file = ""
 # trusted_network = ""

@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Standalone servers use native SQLite without Raft or quorum serving checks.
+  Verified private singleton upgrades preserve current data, identities, sealed
+  keys and local observations; clusters require explicit creation or joining.
+  Native backup, restore and maintenance have independent storage adapters.
 - Playback source readers share fenced storage budgets, yield background scans
   during startup, and retain physical custody through cancellation and cleanup.
   Continuous quality starts primary video and audio before its companion;

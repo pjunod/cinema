@@ -1,28 +1,181 @@
 //! Server-only Source identity and capacity handles. None is wire authority.
-// Source admission always requires the actual replicated member observation.
-// Bare Core preserves its SQLite/type surface, but cannot construct a proof.
-#[cfg(feature = "hiqlite-store")]
-pub use crate::cluster::membership::{
-    MembershipError as SourceAdmissionError, SourceAdmissionMembers,
-};
-#[cfg(not(feature = "hiqlite-store"))]
+// Local boot ownership and replicated membership are adapters to one Source
+// transaction contract. Neither wire data nor a bare node string is authority.
 pub type SourceAdmissionError = crate::error::StoreError;
-#[cfg(not(feature = "hiqlite-store"))]
+
 #[derive(Clone)]
-pub enum SourceAdmissionMembers {}
-#[cfg(not(feature = "hiqlite-store"))]
+pub enum SourceOwnerIdentity {
+    Local(String),
+    Replicated(u64),
+}
+
+mod admission_sealed {
+    pub trait Sealed {}
+}
+
+pub trait SourceAdmissionAuthority: admission_sealed::Sealed + Send + Sync {
+    fn write_guard(
+        &self,
+        now_ms: i64,
+        members_parameter: usize,
+        cutoff_parameter: usize,
+        observed_at_parameter: usize,
+    ) -> Result<(String, String, i64, i64), SourceAdmissionError>;
+    fn owner_identity(&self) -> SourceOwnerIdentity;
+    fn clone_authority(&self) -> SourceAdmissionMembers;
+    fn local_registry_boot_id(&self) -> Option<uuid::Uuid> {
+        None
+    }
+    fn is_replicated(&self) -> bool {
+        matches!(self.owner_identity(), SourceOwnerIdentity::Replicated(_))
+    }
+}
+
+#[derive(Clone)]
+pub struct SourceAdmissionMembers {
+    authority: std::sync::Arc<dyn SourceAdmissionAuthority>,
+}
+impl admission_sealed::Sealed for SourceAdmissionMembers {}
+impl SourceAdmissionAuthority for SourceAdmissionMembers {
+    fn write_guard(
+        &self,
+        now: i64,
+        members: usize,
+        cutoff: usize,
+        observed: usize,
+    ) -> Result<(String, String, i64, i64), SourceAdmissionError> {
+        self.authority.write_guard(now, members, cutoff, observed)
+    }
+    fn owner_identity(&self) -> SourceOwnerIdentity {
+        self.authority.owner_identity()
+    }
+    fn clone_authority(&self) -> Self {
+        self.clone()
+    }
+    fn local_registry_boot_id(&self) -> Option<uuid::Uuid> {
+        self.authority.local_registry_boot_id()
+    }
+}
 impl SourceAdmissionMembers {
     pub fn write_guard(
         &self,
-        _now_ms: i64,
-        _members_parameter: usize,
-        _cutoff_parameter: usize,
-        _observed_at_parameter: usize,
+        now: i64,
+        members: usize,
+        cutoff: usize,
+        observed: usize,
     ) -> Result<(String, String, i64, i64), SourceAdmissionError> {
-        match *self {}
+        self.authority.write_guard(now, members, cutoff, observed)
     }
-    pub(crate) fn actual_local_raft_id(&self) -> u64 {
-        match *self {}
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl admission_sealed::Sealed for crate::cluster::membership::SourceAdmissionMembers {}
+#[cfg(feature = "hiqlite-store")]
+impl SourceAdmissionAuthority for crate::cluster::membership::SourceAdmissionMembers {
+    fn write_guard(
+        &self,
+        now: i64,
+        members: usize,
+        cutoff: usize,
+        observed: usize,
+    ) -> Result<(String, String, i64, i64), SourceAdmissionError> {
+        self.write_guard(now, members, cutoff, observed)
+            .map_err(|error| crate::error::StoreError::Task(error.to_string()))
+    }
+    fn owner_identity(&self) -> SourceOwnerIdentity {
+        SourceOwnerIdentity::Replicated(self.actual_local_raft_id())
+    }
+    fn clone_authority(&self) -> SourceAdmissionMembers {
+        SourceAdmissionMembers {
+            authority: std::sync::Arc::new(self.clone()),
+        }
+    }
+}
+#[cfg(feature = "hiqlite-store")]
+impl From<crate::cluster::membership::SourceAdmissionMembers> for SourceAdmissionMembers {
+    fn from(value: crate::cluster::membership::SourceAdmissionMembers) -> Self {
+        Self {
+            authority: std::sync::Arc::new(value),
+        }
+    }
+}
+
+/// Actual native startup capability. Its generation is installed under the
+/// directory lock, and every Source mutation rechecks it in SQLite. There is
+/// no clock-expiring consensus lease and no member roster.
+#[derive(Clone)]
+pub struct LocalSourceAuthority {
+    pub(crate) node_id: String,
+    pub(crate) storage_generation: String,
+    pub(crate) boot_id: uuid::Uuid,
+    pub(crate) generation: i64,
+    pub(crate) master_fingerprint: String,
+    pub(crate) active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl LocalSourceAuthority {
+    pub fn admission(
+        &self,
+        registry_boot_id: uuid::Uuid,
+    ) -> Result<SourceAdmissionMembers, SourceAdmissionError> {
+        if registry_boot_id.is_nil()
+            || registry_boot_id.get_version_num() != 4
+            || !self.active.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(crate::sharing::invalid());
+        }
+        Ok(SourceAdmissionMembers {
+            authority: std::sync::Arc::new(LocalSourceAdmission {
+                boot: self.clone(),
+                registry_boot_id,
+            }),
+        })
+    }
+    pub fn revoke(&self) {
+        self.active
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+#[derive(Clone)]
+struct LocalSourceAdmission {
+    boot: LocalSourceAuthority,
+    registry_boot_id: uuid::Uuid,
+}
+impl admission_sealed::Sealed for LocalSourceAdmission {}
+impl SourceAdmissionAuthority for LocalSourceAdmission {
+    fn write_guard(
+        &self,
+        now: i64,
+        members: usize,
+        cutoff: usize,
+        observed: usize,
+    ) -> Result<(String, String, i64, i64), SourceAdmissionError> {
+        if now <= 0
+            || [members, cutoff, observed]
+                .into_iter()
+                .any(|n| !(1..=256).contains(&n))
+            || !self.boot.active.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(crate::sharing::invalid());
+        }
+        let captured=serde_json::json!({"node":self.boot.node_id,"storage":self.boot.storage_generation,
+            "boot":self.boot.boot_id,"generation":self.boot.generation,"master":self.boot.master_fingerprint}).to_string();
+        let guard=format!("json_type(${members})='object' AND ${cutoff}=${observed} AND ${observed}>0 AND EXISTS(SELECT 1 FROM sharing_native_source_boot b JOIN storage_identity s ON s.singleton=1 AND s.node_id=b.node_id AND s.generation=b.storage_generation WHERE b.singleton=1 AND b.node_id=json_extract(${members},'$.node') AND b.storage_generation=json_extract(${members},'$.storage') AND b.boot_id=json_extract(${members},'$.boot') AND b.generation=json_extract(${members},'$.generation') AND b.master_fingerprint=json_extract(${members},'$.master'))");
+        let guard = format!(
+            "({guard}) AND ({})",
+            crate::store::sharing_source_schema::native_installed_guard()
+        );
+        Ok((guard, captured, now, now))
+    }
+    fn owner_identity(&self) -> SourceOwnerIdentity {
+        SourceOwnerIdentity::Local(self.boot.node_id.clone())
+    }
+    fn clone_authority(&self) -> SourceAdmissionMembers {
+        SourceAdmissionMembers {
+            authority: std::sync::Arc::new(self.clone()),
+        }
+    }
+    fn local_registry_boot_id(&self) -> Option<uuid::Uuid> {
+        Some(self.registry_boot_id)
     }
 }
 
@@ -447,7 +600,7 @@ mod association_tests {
             binding,
             owner_node_id: "node".into(),
             dispatch_generation: 1,
-            members,
+            members: members.into(),
         };
         let mut other = assignment.clone();
         other.owner_node_id.push('2');

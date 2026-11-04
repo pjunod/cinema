@@ -525,8 +525,7 @@ pub(super) async fn apply_forward_custody(
             );
             current_reference(state, &headers, &wire.reference).await?;
             let members = state
-                .membership
-                .observe_source_admission_members()
+                .source_admission_members()
                 .await
                 .map_err(|_| unavailable())?
                 .ok_or_else(unavailable)?;
@@ -644,8 +643,7 @@ async fn register_local_locked(
         return Err(unavailable());
     }
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .source_admission_members()
         .await
         .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.members_store", error_class = "store", "Source admission refused"); unavailable() })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.snapshot_1", error_class = "absent", "Source admission refused"); unavailable() })?;
@@ -959,8 +957,7 @@ pub(super) async fn publication_allowed(
     value: &SourceDispatchAssignment,
 ) -> Result<(), ApiError> {
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .source_admission_members()
         .await
         .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.members_store", error_class = "store", "Source admission refused"); unavailable() })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.snapshot_0", error_class = "absent", "Source admission refused"); unavailable() })?;
@@ -1004,8 +1001,7 @@ pub(super) async fn source_forward_locality(
     #[cfg(test)]
     eprintln!("Source locate actual owner current reference accepted");
     state
-        .membership
-        .observe_source_admission_members()
+        .source_admission_members()
         .await
         .map_err(|_error| {
             #[cfg(test)]

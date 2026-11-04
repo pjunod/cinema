@@ -24,6 +24,7 @@ mod backup;
 mod cachekeep;
 mod channel_subjects;
 mod clock_offset;
+mod cluster_runtime;
 mod copyseg;
 mod decode_facts;
 mod decoder_health;
@@ -91,10 +92,12 @@ mod sharing_host;
 mod sharing_network;
 #[cfg(test)]
 mod sharing_protocol_fixture;
+mod source_authority;
 mod source_custody;
 mod source_input;
 mod source_probe;
 mod state;
+mod storage_runtime;
 mod store_result;
 mod storeprobe;
 mod subtitle_models;
@@ -135,9 +138,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
 use hyper_util::service::TowerToHyperService;
 use plurx_core::cluster::coordination::StoreCoordinator;
-use plurx_core::cluster::migration::{
-    connect_activated_store, select_daemon_store_observing, SelectedBackend, StartupClockObserver,
-};
+use plurx_core::cluster::migration::{connect_activated_store, StartupClockObserver};
 use plurx_core::config::{Config, StorageConfig};
 use plurx_core::domain::LibraryKind;
 use plurx_core::metadata::{self, AniListClient, TmdbClient};
@@ -463,12 +464,12 @@ enum Command {
         #[arg(long)]
         library: Option<i64>,
     },
-    /// Inspect or prepare a running replicated cluster through its admin API.
+    /// Create a cluster offline, or manage one through its running admin API.
     Cluster {
         #[command(subcommand)]
         command: ClusterCommand,
     },
-    /// Verify or restore a portable cluster archive while the daemon is stopped.
+    /// Verify or restore a native or cluster backup while the daemon is stopped.
     Restore {
         /// Existing portable backup directory.
         #[arg(long)]
@@ -531,6 +532,8 @@ enum WindowsServiceCommand {
 
 #[derive(Subcommand)]
 enum ClusterCommand {
+    /// Promote stopped native SQLite storage into a verified explicit cluster.
+    Create,
     /// Build one portable, checksummed cluster backup on the running voter.
     Backup {
         #[arg(long, default_value = "http://127.0.0.1:32400")]
@@ -681,6 +684,11 @@ async fn dispatch(
         Command::ResetPassword { .. } => {
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
+        Command::Cluster {
+            command: ClusterCommand::Create,
+        } => {
+            canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
+        }
         Command::RefreshMetadata { .. } => {}
         Command::Healthcheck
         | Command::MediaRuntimeIdentity
@@ -742,7 +750,7 @@ async fn dispatch(
             reset_password(&config, &username, password).await
         }
         Command::RefreshMetadata { library } => refresh_metadata(&mut config, library).await,
-        Command::Cluster { command } => cluster_command(command).await,
+        Command::Cluster { command } => cluster_command(command, &config).await,
         Command::Restore {
             archive,
             data_dir,
@@ -751,7 +759,47 @@ async fn dispatch(
             credential_key,
             advertise_host,
         } => {
-            if verify {
+            let manifest: serde_json::Value =
+                plurx_core::storage::mode::read_record(&archive.join("manifest.json"))?
+                    .ok_or_else(|| anyhow::anyhow!("backup manifest is missing"))?;
+            let native = match manifest.get("storage_backend") {
+                Some(serde_json::Value::String(backend)) if backend == "sqlite" => true,
+                Some(_) => anyhow::bail!("backup declares an unsupported storage backend"),
+                None => false,
+            };
+            if native {
+                if !remap.is_empty() || advertise_host.is_some() {
+                    anyhow::bail!("native restore preserves media paths and does not accept cluster advertisement or remapping options");
+                }
+                if verify {
+                    if data_dir.is_some() {
+                        anyhow::bail!("--verify cannot be combined with --data-dir");
+                    }
+                    let report =
+                        plurx_core::storage::backup::verify_native_backup_artifact(&archive)?;
+                    if let Some(path) = credential_key {
+                        let key = plurx_core::secrets::CredentialKey::load(&path)?;
+                        if key.id() != report.credential_key_id {
+                            anyhow::bail!(
+                                "native archive credential key does not match the override"
+                            );
+                        }
+                    }
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    let data_dir = data_dir.ok_or_else(|| {
+                        anyhow::anyhow!("--data-dir is required unless --verify is used")
+                    })?;
+                    let report = plurx_core::storage::backup::restore_native_backup_artifact(
+                        &archive,
+                        &data_dir,
+                        credential_key.as_deref(),
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                Ok(())
+            } else if verify {
                 if data_dir.is_some() || !remap.is_empty() || advertise_host.is_some() {
                     anyhow::bail!(
                         "--verify cannot be combined with --data-dir, --remap, or --advertise-host"
@@ -839,8 +887,13 @@ fn parse_restore_remaps(values: &[String]) -> anyhow::Result<Vec<(PathBuf, PathB
         .collect()
 }
 
-async fn cluster_command(command: ClusterCommand) -> anyhow::Result<()> {
+async fn cluster_command(command: ClusterCommand, config: &Config) -> anyhow::Result<()> {
     match command {
+        ClusterCommand::Create => {
+            let receipt = crate::cluster_runtime::create::create(config).await?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+            Ok(())
+        }
         ClusterCommand::Backup {
             server,
             token_file,
@@ -1693,7 +1746,7 @@ fn canonicalize_and_validate_credential_key(
         })?;
         config.cluster.credential_key_file = parent.join(name);
     }
-    let key = config.cluster.credential_key_path(&config.storage.data_dir);
+    let key = config.credential_key_path();
     let mut forbidden = vec![
         ("transcode scratch", dirs.transcode.as_path()),
         ("artwork cache", dirs.artwork.as_path()),
@@ -1731,6 +1784,24 @@ async fn refresh_metadata(config: &mut Config, library_id: Option<i64>) -> anyho
     // as daemon startup. This remains non-destructive: scratch cleanup is
     // reserved for the lock-owning `run` path.
     let dirs = canonicalize_storage_roots(config)?;
+    if plurx_core::storage::mode::StorageManifest::read(&config.storage.data_dir)?
+        .is_some_and(|manifest| manifest.mode == plurx_core::storage::mode::StorageMode::Sqlite)
+    {
+        // The native opener validates the manifest before opening a writer,
+        // and retains exclusive directory ownership for this entire command.
+        let native = plurx_core::storage::open_native_store(config)
+            .await
+            .context("opening standalone storage for maintenance; stop the daemon first")?;
+        std::fs::create_dir_all(&dirs.artwork)?;
+        return refresh_metadata_with_store(
+            Arc::clone(&native.store),
+            &dirs.artwork,
+            library_id,
+            &native.identity.node_id,
+            &crate::job_lease::LocalJobAuthority,
+        )
+        .await;
+    }
     let store = connect_activated_store(config).await.context(
         "connecting to the activated store: an unmigrated data directory needs \
              `plurxd run` to import it once, and an activated one needs that daemon \
@@ -1882,29 +1953,22 @@ async fn run(config: Config) -> anyhow::Result<()> {
     let desktop = desktop_control::DesktopControl::from_environment()?;
 
     let observation = Arc::new(StartupObservationHttp::new(config.server.bind));
-    let mut selected =
-        match select_daemon_store_observing(&config, Some(observation.as_ref())).await {
-            Ok(selected) => selected,
-            Err(error) => {
-                observation.stop_and_drain().await;
-                return Err(error).with_context(|| {
-                    format!("selecting store in {}", config.storage.data_dir.display())
-                });
-            }
-        };
-    // Which backend is serving is not otherwise observable. A recovery boot
-    // binds and serves normally on unreplicated SQLite, so a persistently
-    // failing activation otherwise looks only like a flapping container, with
-    // nothing saying which boots were replicated and which were not.
-    match selected.backend {
-        SelectedBackend::Replicated => {
-            tracing::info!(target: "plurx::cluster", "durable state: replicated store");
+    let mut selected = match storage_runtime::select(&config, Some(observation.as_ref())).await {
+        Ok(selected) => selected,
+        Err(error) => {
+            observation.stop_and_drain().await;
+            return Err(error).with_context(|| {
+                format!("selecting store in {}", config.storage.data_dir.display())
+            });
         }
-        SelectedBackend::SqliteRecovery => tracing::warn!(target: "plurx::cluster",
-            "durable state: unreplicated SQLite, recovering from an interrupted activation; \
-             this boot is not replicated and the next restart retries the import"
-        ),
+    };
+    if selected.mode() == plurx_core::storage::mode::StorageMode::Sqlite {
+        // A legacy conversion may have temporarily owned the authenticated
+        // clock-only listener. Drain it with the old cluster before native
+        // service claims the public listener and its own local authority.
+        observation.stop_and_drain().await;
     }
+    tracing::info!(storage_mode=?selected.mode(), "durable storage selected");
     trigger_shutdown_registration_failpoint("after-store-activation");
 
     let serving = async {
@@ -1917,16 +1981,20 @@ async fn run(config: Config) -> anyhow::Result<()> {
             tracing::info!("shutdown signal received during store activation; not serving");
             return Ok(());
         }
-        let source_layout_ready = Box::pin(selected.prepare_source_schema_before_serving())
+        let source_layout_ready = Box::pin(selected.prepare_source_before_serving())
             .await
             .context("qualifying Source schema before serving")?;
         if !source_layout_ready {
             tracing::info!(target:"plurx::sharing","Source schema readiness pending; Local serving continues");
         }
-        let store = Arc::clone(&selected.store);
-        let replication = selected.replication_monitor();
-        let membership = selected.membership_manager();
-        let catalogue = selected.catalogue_reader();
+        let store = selected.store();
+        let services = selected.services(&config)?;
+        let identity = selected.identity();
+        let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&store));
+        let catalogue = match &selected {
+            storage_runtime::RuntimeStore::Cluster(cluster) => cluster.catalogue_reader(),
+            storage_runtime::RuntimeStore::Native { .. } => catalogue,
+        };
         let dirs = create_dirs_for_config(&config)?;
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
@@ -1935,7 +2003,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let probed = tokio::select! {
             biased;
             () = shutdown.clone().signalled() => None,
-            probed = probe_system(&config, &store, &selected.identity.node_id, &dirs.transcode, &dirs.runtime_cache) => Some(probed?),
+            probed = probe_system(&config, &store, &identity.node_id, &dirs.transcode, &dirs.runtime_cache) => Some(probed?),
         };
         let Some((encoder_caps, system)) = probed else {
             tracing::info!("shutdown signal received during system probing; not serving");
@@ -1944,12 +2012,15 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let parts = Boot {
             source_activation_at_boot: Some(source_layout_ready),
             store,
-            replication,
-            membership,
+            replication: services.replication,
+            membership: services.membership,
             catalogue,
-            identity: selected.identity.clone(),
-            credential_key: Arc::clone(&selected.credential_key),
-            backup_client: selected.local_client(),
+            identity,
+            credential_key: selected.credential_key(),
+            storage_mode: selected.mode(),
+            local_source: selected.local_source(),
+            settings_changes: services.settings_changes,
+            backup_provider: services.backup,
             dirs,
             encoder_caps,
             system,
@@ -2003,11 +2074,14 @@ struct Boot {
     catalogue: plurx_core::store::CatalogueReader,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
-    identity: plurx_core::cluster::ClusterIdentity,
+    identity: plurx_core::storage::LocalIdentity,
     /// Resolved before the store is handed on, so a node that cannot open its
     /// existing Trakt rows fails here rather than at the first sync.
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
-    backup_client: Option<hiqlite::Client>,
+    storage_mode: plurx_core::storage::mode::StorageMode,
+    local_source: Option<plurx_core::sharing_source_sessions::LocalSourceAuthority>,
+    settings_changes: crate::settings_changes::SettingsChangeSource,
+    backup_provider: Arc<dyn crate::backup::BackupProvider>,
     dirs: crate::state::Dirs,
     encoder_caps: plurx_core::transcode::EncoderCaps,
     system: SystemInfo,
@@ -2357,7 +2431,10 @@ async fn boot_observing(
         catalogue,
         identity,
         credential_key,
-        backup_client,
+        storage_mode,
+        local_source,
+        settings_changes,
+        backup_provider,
         dirs,
         encoder_caps,
         system,
@@ -2381,14 +2458,17 @@ async fn boot_observing(
     log_startup(&config, &identity);
 
     let purpose_master = Arc::clone(&credential_key);
-    let instance_id = identity.cluster_id;
+    let instance_id = identity.instance_id;
     let node_id = identity.node_id;
     let mut state = build_state(
         &config,
         node_id.clone(),
         instance_id.clone(),
         credential_key,
-        backup_client,
+        storage_mode,
+        local_source,
+        settings_changes,
+        backup_provider,
         replication,
         membership,
         catalogue,
@@ -2418,29 +2498,7 @@ async fn boot_observing(
         );
         state.clock_observer = observer;
     }
-    state
-        .membership
-        .set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
-    state
-        .membership
-        .publish_ingress_custody_boot()
-        .await
-        .context("publishing actual accepted-driver custody boot")?;
-    state
-        .membership
-        .prepare_purpose_master(purpose_master)
-        .await
-        .context("qualifying coordinated sharing purpose master")?;
-    match tokio::time::timeout(
-        Duration::from_secs(5),
-        state.membership.coordinate_purpose_keys(),
-    )
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::warn!(code = error.code(), "sharing purpose factory is pending"),
-        Err(_) => tracing::warn!(code = "deadline", "sharing purpose factory is pending"),
-    }
+    crate::cluster_runtime::prepare_source_authority(&state, purpose_master).await?;
 
     // The stored request is not an ffmpeg contract. Exercise the exact
     // production rate-control arguments against this boot's real drivers and
@@ -2810,12 +2868,12 @@ fn console_target(metadata: &tracing::Metadata<'_>) -> bool {
 /// Both identities are named because they are different things that a cluster
 /// makes it possible to confuse: `instance_id` is the logical server clients
 /// bind to, `node_id` is the process that owns the local bytes.
-fn log_startup(config: &Config, identity: &plurx_core::cluster::ClusterIdentity) {
+fn log_startup(config: &Config, identity: &plurx_core::storage::LocalIdentity) {
     tracing::info!(
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         server_name = %config.server.name,
-        instance_id = %identity.cluster_id,
+        instance_id = %identity.instance_id,
         node_id = %identity.node_id,
         data_dir = %config.storage.data_dir.display(),
         "plurxd starting"
@@ -3038,7 +3096,7 @@ fn create_dirs_for_storage(storage: &StorageConfig) -> anyhow::Result<crate::sta
 }
 
 fn create_dirs_for_config(config: &Config) -> anyhow::Result<crate::state::Dirs> {
-    let key_path = config.cluster.credential_key_path(&config.storage.data_dir);
+    let key_path = config.credential_key_path();
     let key_identity = plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&key_path)
         .with_context(|| {
             format!(
@@ -3442,7 +3500,10 @@ fn build_state(
     node_id: String,
     cluster_id: String,
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
-    backup_client: Option<hiqlite::Client>,
+    storage_mode: plurx_core::storage::mode::StorageMode,
+    local_source: Option<plurx_core::sharing_source_sessions::LocalSourceAuthority>,
+    settings_changes: crate::settings_changes::SettingsChangeSource,
+    backup_provider: Arc<dyn crate::backup::BackupProvider>,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     catalogue: plurx_core::store::CatalogueReader,
@@ -3473,8 +3534,10 @@ fn build_state(
                 install_secs: config.cluster.install_snapshot_timeout_secs,
             },
             data_dir: config.storage.data_dir.clone(),
-            credential_key_path: config.cluster.credential_key_path(&config.storage.data_dir),
-            backup_client,
+            storage_mode,
+            local_source,
+            settings_changes,
+            backup_provider,
         },
         store,
         dirs,
@@ -3551,6 +3614,7 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    crate::cluster_runtime::spawn_background_loops(state, &background_shutdown);
     tokio::spawn(http::remote::invitations::worker::run(
         state.clone(),
         background_shutdown.clone(),
@@ -3564,10 +3628,7 @@ fn spawn_background_loops(
             background_shutdown.clone(),
         ),
     );
-    tokio::spawn(crate::clock_offset::run(
-        state.clone(),
-        background_shutdown.clone(),
-    ));
+
     tokio::spawn(http::file_grants::prune_loop(
         state.clone(),
         background_shutdown.clone(),
@@ -3590,35 +3651,10 @@ fn spawn_background_loops(
         background_shutdown.clone(),
     ));
     tokio::spawn(Arc::clone(&state.backup).schedule_loop(background_shutdown.clone()));
-    tokio::spawn(
-        crate::http::cluster_operations::membership_status_cache_loop(
-            state.clone(),
-            background_shutdown.clone(),
-        ),
-    );
-    tokio::spawn(
-        crate::http::internal_auth_revocation::cache_admin_revocation_activation_loop(
-            state.clone(),
-            background_shutdown.clone(),
-        ),
-    );
-    tokio::spawn(crate::http::cluster_operations::peer_status_cache_loop(
-        state.clone(),
-        background_shutdown.clone(),
-    ));
-    let replication = state.replication.clone();
-    tokio::spawn(replication.passive_metrics_loop(background_shutdown.clone().cancelled_owned()));
-    tokio::spawn(
-        state
-            .serving
-            .clone()
-            .monitor_loop(background_shutdown.clone()),
-    );
+
     tokio::spawn(
         std::sync::Arc::clone(&state.transcode).serving_fence_loop(state.serving.subscribe()),
     );
-    state.membership.register_media_relay_acquisition();
-    tokio::spawn(state.membership.clone().heartbeat_loop());
     tokio::spawn(std::sync::Arc::clone(&state.media_pool).poll_loop());
     tokio::spawn(
         std::sync::Arc::clone(&state.media_pool)
@@ -3642,7 +3678,7 @@ fn spawn_background_loops(
         background_shutdown.clone(),
     ));
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
-    tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
+
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
     tokio::spawn(crate::artifact_integrity::run(
         state.clone(),
@@ -3671,7 +3707,7 @@ fn spawn_background_loops(
     // Answers "can you read this package's source?" while a peer is being
     // removed. Every node has to be listening for its own removal to be
     // possible, so this runs whether or not a removal is in progress.
-    tokio::spawn(state.membership.clone().offline_source_probe_loop());
+
     // Artwork filenames are replicated facts, but their bytes are node-local.
     // Reconcile them independently of traffic so every voter is ready to
     // become the public leader before a failover actually happens.
@@ -3744,9 +3780,7 @@ fn spawn_background_loops(
     // The expiry sweep in here is a cluster-wide idempotent sweep and stays
     // ungated; claiming the next queued package is not, and takes the same
     // live membership check the other cluster-wide loops do.
-    tokio::spawn(
-        std::sync::Arc::clone(&state.offline).run(std::sync::Arc::new(state.membership.clone())),
-    );
+    tokio::spawn(std::sync::Arc::clone(&state.offline).run(state.jobs.execution_authority()));
 
     // What the libraries' storage reads at. Deliberately after the listener
     // would come up rather than inline with the encoder and tone-map probes:
@@ -3772,10 +3806,7 @@ fn spawn_background_loops(
     tokio::spawn(crate::http::transcode_copies::run(state.clone()));
 
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
-    tokio::spawn(
-        std::sync::Arc::clone(&state.trakt)
-            .sync_loop(std::sync::Arc::new(state.membership.clone())),
-    );
+    tokio::spawn(std::sync::Arc::clone(&state.trakt).sync_loop(state.jobs.execution_authority()));
     tokio::spawn(std::sync::Arc::clone(&state.trakt).sweep_loop());
     // The watched outbox. Its own loop because a retry scheduled two minutes
     // out has no request to wake it, and a Curator that is down must not stall
@@ -3788,7 +3819,7 @@ fn spawn_background_loops(
             tokio::spawn(std::sync::Arc::clone(&state.watched).run(
                 crate::watched::DrainAuthority {
                     coordinator,
-                    authority: std::sync::Arc::new(state.membership.clone()),
+                    authority: state.jobs.execution_authority(),
                     policy: crate::watched::WatchedLeasePolicy::PRODUCTION,
                 },
             ));

@@ -1884,8 +1884,7 @@ async fn own_start(
         _intent: (*intent).clone(),
     });
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .source_admission_members()
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unavailable)?;
@@ -1925,8 +1924,7 @@ async fn own_start(
         return Err(SourceStartFailure::Unresolved);
     }
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .source_admission_members()
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unresolved)?;
@@ -1964,8 +1962,7 @@ async fn own_start(
     }
 
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .source_admission_members()
         .await
         .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.members", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_members_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
@@ -2494,6 +2491,7 @@ async fn build_real_source_start_fixture(
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
     state_mut.store = Arc::clone(&selected.store);
     state_mut.membership = selected.membership_manager();
+    state_mut.storage_mode = plurx_core::storage::mode::StorageMode::Cluster;
     state_mut.clock_observer = if let Some(clock) = &startup_clock {
         clock
             .observer()

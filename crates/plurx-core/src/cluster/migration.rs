@@ -5,6 +5,13 @@
 //! the target atomically, fsyncs the data directory, and reopens the active
 //! target before the daemon may start producers or bind HTTP.
 
+#[cfg(feature = "hiqlite-store")]
+pub mod native_import;
+#[cfg(feature = "hiqlite-store")]
+pub mod native_promotion;
+#[cfg(feature = "hiqlite-store")]
+pub mod standalone_export;
+
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -288,6 +295,90 @@ pub struct SelectedStore {
     _daemon_lock: File,
 }
 
+/// Own a live selection until it is returned or terminally drained.
+/// Cancellation or a failed drain retains its actual writer and directory
+/// lease rather than admitting a second owner while cleanup is uncertain.
+#[cfg(feature = "hiqlite-store")]
+pub struct PendingSelectedStore {
+    selected: Option<SelectedStore>,
+    drained: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl PendingSelectedStore {
+    pub fn new(selected: SelectedStore) -> Self {
+        Self {
+            selected: Some(selected),
+            drained: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub fn into_selected(mut self) -> SelectedStore {
+        self.selected
+            .take()
+            .expect("owned pending cluster selection")
+    }
+
+    /// A borrowed shutdown keeps ownership protected throughout cancellation.
+    /// Only successful terminal drainage permits ordinary resource release.
+    pub async fn shutdown(&self) -> Result<(), StoreError> {
+        self.selected
+            .as_ref()
+            .expect("owned pending cluster selection")
+            .shutdown()
+            .await?;
+        self.drained
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    pub async fn refuse(self, error: StoreError) -> StoreError {
+        match self.shutdown().await {
+            Ok(()) => {
+                drop(self.into_selected());
+                error
+            }
+            Err(drain_error) => StoreError::Migration(format!(
+                "{error}; cluster startup writer drain failed and its directory lease remains retained: {drain_error}"
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl std::ops::Deref for PendingSelectedStore {
+    type Target = SelectedStore;
+    fn deref(&self) -> &Self::Target {
+        self.selected
+            .as_ref()
+            .expect("owned pending cluster selection")
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl std::ops::DerefMut for PendingSelectedStore {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.selected
+            .as_mut()
+            .expect("owned pending cluster selection")
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl Drop for PendingSelectedStore {
+    fn drop(&mut self) {
+        if let Some(selected) = self.selected.take() {
+            // Runtime cancellation is not terminal-drain proof. Process
+            // teardown remains the final owner of these exact resources.
+            if self.drained.load(std::sync::atomic::Ordering::Acquire) {
+                drop(selected);
+            } else {
+                std::mem::forget(selected);
+            }
+        }
+    }
+}
+
 #[cfg(feature = "hiqlite-store")]
 impl SelectedStore {
     /// Read-only watch-state replication projection for the server API.
@@ -374,6 +465,15 @@ impl SelectedStore {
             shutdown_voter(client, true).await?;
         }
         Ok(())
+    }
+
+    /// After durable shutdown, transfer the directory lease to the native
+    /// lifecycle without an unlock/relock race during an authority handoff.
+    pub fn into_native_directory_lock(
+        self,
+        data_dir: PathBuf,
+    ) -> Result<crate::storage::NativeDirectoryLock, StoreError> {
+        crate::storage::NativeDirectoryLock::from_locked_file(self._daemon_lock, data_dir)
     }
 }
 
@@ -553,10 +653,33 @@ pub async fn select_daemon_store_observing(
     config: &Config,
     observer: Option<&dyn StartupClockObserver>,
 ) -> Result<SelectedStore, StoreError> {
+    config.validate_cluster_runtime().map_err(|error| {
+        StoreError::Migration(format!("invalid cluster runtime configuration: {error}"))
+    })?;
     install_default_crypto_provider();
     std::fs::create_dir_all(&config.storage.data_dir)
         .map_err(|error| migration_io("creating", &config.storage.data_dir, error))?;
     let daemon_lock = acquire_daemon_lock(&config.storage.data_dir).await?;
+    Box::pin(select_daemon_store_observing_locked(
+        config,
+        observer,
+        daemon_lock,
+    ))
+    .await
+}
+
+/// Replication adapter entry point for a caller that has already selected
+/// cluster storage while continuously owning the data-directory lock.
+#[cfg(feature = "hiqlite-store")]
+pub async fn select_daemon_store_observing_locked(
+    config: &Config,
+    observer: Option<&dyn StartupClockObserver>,
+    daemon_lock: File,
+) -> Result<SelectedStore, StoreError> {
+    config.validate_cluster_runtime().map_err(|error| {
+        StoreError::Migration(format!("invalid cluster runtime configuration: {error}"))
+    })?;
+    install_default_crypto_provider();
     recover_interrupted_readdress(&config.storage.data_dir)?;
 
     let active = config.storage.data_dir.join(HIQLITE_ACTIVE_DIRNAME);
@@ -1339,6 +1462,9 @@ struct JoinApiError {
 /// replicated state.
 #[cfg(feature = "hiqlite-store")]
 pub async fn connect_activated_store(config: &Config) -> Result<Arc<dyn Store>, StoreError> {
+    config.validate_cluster_runtime().map_err(|error| {
+        StoreError::Migration(format!("invalid cluster runtime configuration: {error}"))
+    })?;
     install_default_crypto_provider();
     let active = config.storage.data_dir.join(HIQLITE_ACTIVE_DIRNAME);
     if !path_exists(&active)? {
@@ -2120,6 +2246,9 @@ pub async fn restore_cluster_backup_archive(
     remaps: &[(PathBuf, PathBuf)],
     credential_key_override: Option<&Path>,
 ) -> Result<ClusterRestoreReport, StoreError> {
+    config.validate_cluster_runtime().map_err(|error| {
+        StoreError::Migration(format!("invalid cluster runtime configuration: {error}"))
+    })?;
     let manifest = verified_backup_manifest(archive)?;
     if manifest.replicated_schema_version > AUTH_SCHEMA_VERSION {
         return Err(StoreError::Migration(format!(
@@ -3718,6 +3847,9 @@ async fn start_voter(
     force_loopback: bool,
     observation_only: bool,
 ) -> Result<(Client, ClusterPeer, Option<PendingStartupClient>), StoreError> {
+    config.validate_cluster_runtime().map_err(|error| {
+        StoreError::Migration(format!("invalid cluster runtime configuration: {error}"))
+    })?;
     let raft_bind = if force_loopback {
         local_client_address(config.cluster.raft_bind)
     } else {

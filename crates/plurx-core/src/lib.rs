@@ -1,11 +1,11 @@
 //! plurx core: the storage boundary, configuration, and shared domain types.
 //!
 //! The single most load-bearing decision in this crate is the [`store::Store`]
-//! trait: *all* replicated durable state (users, settings, library metadata,
-//! watch state) is accessed through it. Phase 0–2 run a single-node SQLite
-//! backend; Phase 3–4 swap in a raft-replicated backend (hiqlite, or
-//! openraft + SQLite) behind the same trait. Nothing outside this crate may
-//! assume which backend is in play. See `docs/ARCHITECTURE.md` §2.
+//! trait: durable application state (users, settings, library metadata and
+//! watch state) crosses that interface. Standalone composes native SQLite;
+//! explicit clusters compose the Raft backend behind the same contract.
+//! Native storage has its own lifecycle and local authority without a
+//! replication dependency. See `docs/ARCHITECTURE.md` §2.
 
 // Production children go through `process::spawn_job_owned`; see clippy.toml.
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
@@ -59,6 +59,7 @@ pub mod sharing_receiver_sessions;
 pub mod sharing_resources;
 pub mod sharing_source_sessions;
 pub mod sharing_tls;
+pub mod storage;
 pub mod store;
 /// Media fixtures for the test suites, shared so `plurx-core` and `plurxd`
 /// cannot drift onto different GOP structures and disagree about what the
