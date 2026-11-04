@@ -8313,9 +8313,19 @@ fn rolling_first_media_clock_requires_an_exact_attempt_body_commit() {
         Some(first),
         "downloads cannot continually restart the consumption clock"
     );
+}
+
+#[test]
+fn rolling_first_media_clock_resets_with_a_prepublication_attempt() {
+    let started = Instant::now();
+    let mut actor =
+        RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+    let attempt = actor
+        .begin_producer_attempt_at(started)
+        .expect("unpublished first attempt");
     let replacement = actor
         .begin_producer_attempt_at(started + Duration::from_secs(4))
-        .expect("replacement attempt");
+        .expect("unpublished replacement attempt");
     assert_eq!(actor.delivery.first_media_committed_at, None);
     assert!(!actor.commit_media_at(
         started + Duration::from_secs(5),
@@ -8327,6 +8337,14 @@ fn rolling_first_media_clock_requires_an_exact_attempt_body_commit() {
     assert_eq!(
         actor.delivery.first_media_committed_at, None,
         "predecessor delivery cannot start the replacement clock"
+    );
+    assert!(actor.observe_publication_at(
+        started + Duration::from_secs(5),
+        publication(replacement, true, 0, 16_000, None)
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at, None,
+        "replacement publication cannot start consumption"
     );
     let next = started + Duration::from_secs(6);
     assert!(actor.commit_media_at(next, "segment", replacement, Some(0), Some(16_000)));

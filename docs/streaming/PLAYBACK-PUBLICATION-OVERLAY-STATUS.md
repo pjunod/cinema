@@ -2,7 +2,7 @@
 
 Companion to [the startup implementation ledger](PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md) and [the playback surface contract](../clients/PLAYBACK-SURFACE-CONTRACT.md) — this records the deployed acceptance failures, their corrections, and the PR's progress toward merge.
 
-**Status:** Implementation complete; compiler checks and adversarial review pending. **Owner:** Codex/root; Sol owns the web lifecycle patch. **Branch:** `codex/playback-publication-overlay`. **PR:** Not opened yet. **Base:** `d367abf3d`. **Updated:** 2026-11-03.
+**Status:** Adversarial review complete; its regression-fixture finding is addressed. Final compilation, focused Rust regression execution and one main fast lane are next. **Owner:** Codex/root; Sol owns the web lifecycle patch. **Branch:** `codex/playback-publication-overlay`. **PR:** Not opened yet. **Base:** `d367abf3d`. **Updated:** 2026-11-03.
 
 ## Acceptance found two distinct ownership defects
 
@@ -16,7 +16,7 @@ Expired-session web Resume also retained a `media_waiting` fault over advancing 
 |---|---|---|---|
 | Initial publication frontier and clock | Codex/root | Implemented | Requested position, not pre-attachment elapsed time, owns initial coverage. Keep complete cuts, immutable reload duration, exact-attempt admission and steady reserve. |
 | Media-wait and destination-fault lifetime | Sol | Implemented | Attached presentation retires only attached waits; destination faults retire on actual destination proof or supersession. Predecessor movement cannot forgive an unresolved destination. |
-| Regression evidence and main fast lane | Codex/root | Pending review | One completed adversarial review, fixes, then focused regressions and one fast-lane run. Retry only failed or invalidated checks. |
+| Regression evidence and main fast lane | Codex/root | Review complete; validation next | One completed adversarial review, fixes, then focused regressions and one fast-lane run. Retry only failed or invalidated checks. |
 | Main merge and post-merge jobs | Codex/root | Pending | Carry regression fields into landing commit; record observed post-merge checks. Maintainer owns deployment. |
 
 ## Decisions and limits
@@ -34,3 +34,7 @@ The actor now retains the first accepted media-body commit time for each produce
 Web media waits now explicitly distinguish the attached element from an executed, unresolved seek on that same element and attachment. The actual settlement owner emits `intent_settled` after target proof (or established paused positioning), and the `media_waiting` source specifically retires on that event or supersession. Other buffering sources retain their existing contracts. Deduplication includes intent; paused and retired-element events cannot raise waits.
 
 The regressions replay late waiting after the old early settlement event, predecessor movement, actual target proof, supersession and the expired-session Play/reopen seam. Publication regressions retain the 16-second target, reject insufficient post-position coverage despite seek lead, simulate seven seconds of unpublished time, distinguish observed position from presentation extrapolation, and test delivery timestamp ownership across replacement.
+
+## Adversarial review — one fixture correction
+
+Astra reviewed the full candidate `e66d81b2f` against `d367abf3d` before test execution. One P1 finding identified a new test fixture attempting producer replacement after publication through a constructor that correctly refuses `PlaylistPublished`. The correction splits published body-commit timing from an unpublished replacement fixture, then publishes the successor before accepting its media. The existing admission fence remains intact. No additional actionable product defect was found. The private review receipt records the exact reviewed source and this disposition; it is not runtime acceptance.
