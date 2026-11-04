@@ -657,6 +657,127 @@
         assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
     }
 
+    #[tokio::test]
+    async fn rolling_production_bootstrap_does_not_charge_unpublished_time_or_seek_lead() {
+        for explicit in [false, true] {
+            let directory = crate::test_tempdir().expect("fixed first publication");
+            let mut session = test_session(directory.path().to_path_buf());
+            session.start_seconds = 2_000.0;
+            session.media_origin_seconds = 1_999.258;
+            session
+                .publication
+                .lock()
+                .await
+                .bind_startup_transport(Some("native"));
+            if explicit {
+                accept_rolling_publication_demand(
+                    &session,
+                    1,
+                    2_000_000,
+                    1.0,
+                    crate::playback_control::PlaybackDemand::Active,
+                    crate::playback_control::RenderState::Rendering,
+                )
+                .await;
+            }
+            let started = Instant::now();
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&[2.002; 8], false),
+            )
+            .await
+            .expect("sixteen seconds before requested position");
+            session
+                .publication_cycle_at("fixed-first-frontier", started)
+                .await
+                .expect("stage short prefix");
+            assert!(
+                session.publication.lock().await.served.is_none(),
+                "seek pullback cannot pay the requested position's reload window"
+            );
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&[2.002; 9], false),
+            )
+            .await
+            .expect("complete post-position reload coverage");
+            session
+                .publication_cycle_at("fixed-first-frontier", started + Duration::from_secs(7))
+                .await
+                .expect("publish without fictitious consumption");
+            let clock = session.publication.lock().await;
+            let served = clock
+                .served
+                .as_ref()
+                .expect("unpublished elapsed time cannot move the first frontier");
+            assert_eq!(served.end_ms, 18_018);
+            assert!(served.end_ms - 742 >= 16_000);
+            assert!(String::from_utf8_lossy(&served.raw).contains("#EXT-X-TARGETDURATION:16"));
+            assert_eq!(
+                clock.reserve_phase,
+                RollingReservePhase::AwaitingPresentation
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_explicit_publication_ages_only_after_actual_presentation() {
+        let directory = crate::test_tempdir().expect("presentation clock");
+        let mut session = test_session(directory.path().to_path_buf());
+        session.start_seconds = 2_000.0;
+        session.media_origin_seconds = 1_999.258;
+        session
+            .publication
+            .lock()
+            .await
+            .bind_startup_transport(Some("native"));
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            2_000_000,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Rendering,
+        )
+        .await;
+        let mut lease = session.control.snapshot().await.expect("explicit lease");
+        lease.demand_observation_age = Some(Duration::from_secs(7));
+        let attempt = session.control.current_producer_attempt();
+        let now = Instant::now();
+        {
+            let mut clock = session.publication.lock().await;
+            clock.reset_for_attempt(attempt);
+            let budget = clock.publication_budget_at(now, attempt, Some(&lease), 1_999_258, 2_000_000);
+            assert_eq!(
+                budget.consumed_end_ms, 742,
+                "pre-attach Rendering cannot spend unpublished time"
+            );
+        }
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[2.002; 9], false),
+        )
+        .await
+        .expect("first prefix");
+        session
+            .publication_cycle("presentation-clock")
+            .await
+            .expect("publish first prefix");
+        let mut clock = session.publication.lock().await;
+        assert!(clock.served.is_some());
+        let budget = clock.publication_budget_at(now, attempt, Some(&lease), 1_999_258, 2_000_000);
+        assert_eq!(
+            budget.consumed_end_ms, 742,
+            "availability alone is not presentation"
+        );
+        lease.startup.phase = crate::playback_control::RollingStartupPhase::Presented;
+        let budget = clock.publication_budget_at(now, attempt, Some(&lease), 1_999_258, 2_000_000);
+        assert_eq!(
+            budget.consumed_end_ms, 7_742,
+            "accepted presentation owns its subsequent observation age"
+        );
+    }
+
     #[test]
     fn rolling_web_bootstrap_policy_is_frozen_and_rate_bounded() {
         let mut clock = RollingPublicationClock::default();
@@ -1332,7 +1453,7 @@
         session
             .publication_cycle_at(
                 "rolling_publication_budget_legacy",
-                started + ROLLING_PUBLICATION_TARGET,
+                session.control.snapshot().await.expect("delivered lease").delivery.first_media_committed_at.expect("first body commit") + ROLLING_PUBLICATION_TARGET,
             )
             .await
             .expect("bounded legacy publication");
@@ -1392,7 +1513,7 @@
         session
             .publication_cycle_at(
                 "rolling_publication_budget_legacy_variable",
-                started + ROLLING_PUBLICATION_TARGET,
+                session.control.snapshot().await.expect("delivered lease").delivery.first_media_committed_at.expect("first body commit") + ROLLING_PUBLICATION_TARGET,
             )
             .await
             .expect("paced legacy publication");

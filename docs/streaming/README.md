@@ -6,6 +6,7 @@ Add each document's row here in the same commit.
 
 | File | Answers | |
 |---|---|---|
+| [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold first-playlist consumption and web Resume fault ownership: implementation, review, validation and merge ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs; review and acceptance. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Which playback files share `cache.max_gb`, how concurrent writes reserve capacity, and how global eviction protects readers and free disk space. | built |

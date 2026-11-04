@@ -8280,6 +8280,63 @@ fn exit_seals_preceding_progress_and_later_progress_stays_terminal() {
 }
 
 #[test]
+fn rolling_first_media_clock_requires_an_exact_attempt_body_commit() {
+    let started = Instant::now();
+    let mut actor =
+        RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+    let attempt = actor
+        .begin_producer_attempt_at(started)
+        .expect("first attempt");
+    assert!(actor.observe_publication_at(started, publication(attempt, true, 2, 48_000, None)));
+    assert!(actor.commit_media_at(
+        started + Duration::from_secs(1),
+        "init",
+        attempt,
+        None,
+        None
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at, None,
+        "metadata and publication are not media consumption"
+    );
+    let first = started + Duration::from_secs(2);
+    assert!(actor.commit_media_at(first, "segment", attempt, Some(0), Some(16_000)));
+    assert!(actor.commit_media_at(
+        started + Duration::from_secs(3),
+        "segment",
+        attempt,
+        Some(1),
+        Some(32_000)
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at,
+        Some(first),
+        "downloads cannot continually restart the consumption clock"
+    );
+    let replacement = actor
+        .begin_producer_attempt_at(started + Duration::from_secs(4))
+        .expect("replacement attempt");
+    assert_eq!(actor.delivery.first_media_committed_at, None);
+    assert!(!actor.commit_media_at(
+        started + Duration::from_secs(5),
+        "segment",
+        attempt,
+        Some(2),
+        Some(48_000)
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at, None,
+        "predecessor delivery cannot start the replacement clock"
+    );
+    let next = started + Duration::from_secs(6);
+    assert!(actor.commit_media_at(next, "segment", replacement, Some(0), Some(16_000)));
+    assert_eq!(
+        actor.snapshot_at(next).delivery.first_media_committed_at,
+        Some(next)
+    );
+}
+
+#[test]
 fn rolling_equal_fetch_resolves_its_pending_end() {
     let started = Instant::now();
     let mut actor =
