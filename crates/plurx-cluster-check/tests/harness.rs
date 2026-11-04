@@ -70,7 +70,14 @@ async fn a_one_voter_bootstrap_and_reopen_retain_local_membership_admission() {
     let (mut cluster, _) = start_cluster_with_port_retry(&harness_binary(), root.path(), 1)
         .await
         .expect("start real admitted voter");
-    for request in [Request::Bootstrap, Request::Open] {
+    // Current canonical managed schema must survive repeated bootstrap, and
+    // must still reject a different persisted identity before reopening.
+    for request in [
+        Request::Bootstrap,
+        Request::Bootstrap,
+        Request::RejectIdentityDrift,
+        Request::Open,
+    ] {
         require_ok(
             cluster
                 .request(1, request)

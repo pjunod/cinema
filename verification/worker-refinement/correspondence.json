@@ -148,7 +148,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "            Request::AcquireDomain => {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -165,7 +165,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "            Request::Bind => {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -233,7 +233,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "            Request::Settle(settlement) => {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -353,7 +353,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "    async fn perform(&mut self, request: Request) -> Reply {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -369,7 +369,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "    async fn perform(&mut self, request: Request) -> Reply {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -385,7 +385,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "    async fn perform(&mut self, request: Request) -> Reply {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -401,7 +401,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "    async fn perform(&mut self, request: Request) -> Reply {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -417,7 +417,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "    async fn perform(&mut self, request: Request) -> Reply {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -501,7 +501,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "            Request::CancelWork => {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -518,7 +518,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::poll_work",
         "anchor": "                Selected::Work(result) => {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -534,7 +534,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::poll_work",
         "anchor": "                Selected::QueueLoss => {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -961,7 +961,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "                Reply::Released {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1258,7 +1258,7 @@
         "file": "crates/plurxd/src/library_work/env.rs",
         "symbol": "TokioEnvironment::perform",
         "anchor": "            Request::DropAdmission => {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       "held_across_await": [],
       "completed_by": "worker task",

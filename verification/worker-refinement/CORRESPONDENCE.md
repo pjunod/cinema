@@ -29,6 +29,34 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` reviewed the frozen
+[library environment](../../crates/plurxd/src/library_work/env.rs) correction
+against `460d8e6d3ec494f2335ed4bbdfa6601f54bfa380`. All 13 prior environment
+fingerprints match the base, and retained anchors remain unique. Refresh those
+13 existing action/boundary source pins and the containing correspondence
+hash; retain all 57 actions, 18 boundaries, trust classifications and seven
+selected schedules. This is an authored audit, not independent review or an
+execution receipt.
+
+The extracted `probe_work` factory heap-pins `process_library_requests` before
+the generic scopes receive it. Direct await preserves task-local probe input,
+budget, cancellation and pause bindings. The existing outer work future still
+owns its publisher and domain reference; admission stays retained until joined
+work releases it. `CancelWork`, `JoinWork`, publisher drop, domain release,
+queue retirement, environment field order and shared driver bodies are
+unchanged. Heap allocation supplies no new authority transition or fairness.
+
+The related [canonical version-4 bootstrap correction](../durable-jobs/CONTRACT.md#scan-stack-and-canonical-bootstrap--scoped-source-audit-on-2026-11-04)
+preserves the existing exact DDL/marker validation and resource view. Startup
+and schema installation remain outside this closed worker correspondence.
+Neither native stack exhaustion nor heap allocation is modeled. The PR's
+future-size check and ordinary-stack empty scan are separate runtime evidence;
+they do not prove a full UI/media scan, whole-daemon progress, or source reboot
+recovery. Model, configuration, bounds, properties, fairness and historical
+receipts are unchanged; fresh static/TLC results remain separate evidence.
+
 ## Verified host-reboot recovery — scoped source audit on 2026-11-04
 
 Codex agent `/root/recovery_design_audit` compared source `88fa37663` in

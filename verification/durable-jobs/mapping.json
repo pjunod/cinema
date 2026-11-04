@@ -253,7 +253,7 @@
       },
       {
         "anchor": "impl QueueSql for HiqliteAuthStore {",
-        "sha256": "62b0f57dc2affe100f5b552a0975951b457b330149d820676aa14a73dbcc29fa",
+        "sha256": "f2a83bbd4fe6a4fe0ef935dfba6b0bf28ebf9ae2f261dfa39863875ef1fce21f",
         "source": "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
         "table": "proposal \u00a74.1 Hiqlite queue adapter"
       },
@@ -523,13 +523,13 @@
       },
       {
         "anchor": "            Request::Bind => {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944",
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063",
         "source": "crates/plurxd/src/library_work/env.rs",
         "table": "review \u00a73 citation (was crates/plurxd/src/library_work.rs:257) now library_work/env.rs Request::Bind"
       },
       {
         "anchor": "\"library publication binding refused\"",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944",
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063",
         "source": "crates/plurxd/src/library_work/env.rs",
         "table": "review \u00a73 citation (was crates/plurxd/src/library_work.rs:260) now library_work/env.rs bind refusal warning"
       },

@@ -10,6 +10,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Library scans avoid async stack exhaustion on ordinary worker threads, and
+  repeated startup recognizes the current canonical managed subtitle schema.
+
+- Apple and Android media waits retire when their destination intent settles
+  or is superseded, matching the shared playback-surface contract.
+
 - Source-reader recovery preserves exact ownership evidence across crashes and
   can settle abandoned custody after a verified reboot of the same Linux host.
   Activity explains expired reader reservations that block queued library scans.

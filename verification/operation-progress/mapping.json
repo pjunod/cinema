@@ -57,7 +57,7 @@
         "table": "09 domain lease acquisition",
         "source": "crates/plurxd/src/library_work/env.rs",
         "anchor": "            Request::AcquireDomain => {",
-        "sha256": "b50452f2527937d348d14ff0642021bba436429ed72299872de81202aa2d1944"
+        "sha256": "ca24dda50aea28979913f52ea02c66cb4c004c4e2a81adf2d83bfbb3a00e9063"
       },
       {
         "table": "10 work iteration bound",

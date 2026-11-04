@@ -5,6 +5,39 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared the frozen corrections with
+`460d8e6d3ec494f2335ed4bbdfa6601f54bfa380`. The previous whole-file pin for the
+[library environment](../../crates/plurxd/src/library_work/env.rs) matches
+that base, and its selected acquisition anchor remains unique. Refresh only
+that one existing row; the authored review is not independent review or an
+execution receipt.
+
+The non-async `probe_work` factory heap-pins the producer before the generic
+probe-input/admission wrappers receive it. Work still runs by direct await,
+under the same task-local budget, cancellation and pause scopes. The same
+outer future owns publisher/domain references through `JoinWork`; selection
+priority, cancellation, admission retention, release, retirement and field drop
+order are unchanged. This removes native stack amplification without adding a
+worker action, detached task, deadline, retry or new completion premise.
+
+The related [Hiqlite bootstrap](../../crates/plurx-core/src/store/hiqlite_background_jobs.rs)
+correction recognizes an already exact canonical version-4 layout and marker
+in both success branches. It does not weaken shape validation, replace the
+managed view or change SQL authority guards. That startup dependency is pinned
+and audited by the [durable contract](../durable-jobs/CONTRACT.md#scan-stack-and-canonical-bootstrap--scoped-source-audit-on-2026-11-04),
+not modeled here. The model still assumes a running backend rather than
+proving startup, schema installation or host recovery terminates.
+
+The PR's future-size regression, ordinary-stack empty-library scan and real
+one-voter bootstrap/identity regression are runtime evidence with their own
+scope. An empty scan proves neither media parsing nor the full UI; a future
+size proves neither total native poll-stack use nor whole-daemon liveness.
+No model/configuration, bound, property, fairness premise, selected schedule
+or historical receipt identity changes. New source pins do not renew the
+earlier formal qualification or cover these external failure mechanisms.
+
 ## Verified host-reboot recovery — scoped source audit on 2026-11-04
 
 Codex agent `/root/recovery_design_audit` compared `88fa37663` in

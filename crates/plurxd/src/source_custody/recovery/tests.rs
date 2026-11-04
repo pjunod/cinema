@@ -863,13 +863,19 @@ fn recovery_process_fixture() {
         // Deliberately bypass the production parent-death launcher in this
         // hostile test fixture, proving that an escaped descendant prevents
         // recovery from using mere daemon death as a physical-stop proof.
-        let reader = std::process::Command::new(std::env::current_exe().expect("test executable"))
-            .args(["--exact", PROCESS_FIXTURE, "--nocapture"])
-            .env("PLURX_RECOVERY_PROCESS_ROLE", "reader")
-            .env("PLURX_RECOVERY_PROCESS_ROOT", &root)
-            .spawn()
-            .expect("held descendant");
-        std::fs::write(root.join("reader.pid.tmp"), reader.id().to_string()).expect("reader PID");
+        let reader = OwnedProcess {
+            child: std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", PROCESS_FIXTURE, "--nocapture"])
+                .env("PLURX_RECOVERY_PROCESS_ROLE", "reader")
+                .env("PLURX_RECOVERY_PROCESS_ROOT", &root)
+                .spawn()
+                .expect("held descendant"),
+            joined: false,
+        };
+        // Unwind retains kill/wait ownership. The test deliberately SIGKILLs
+        // this daemon, transferring the surviving reader to its subreaper.
+        std::fs::write(root.join("reader.pid.tmp"), reader.child.id().to_string())
+            .expect("reader PID");
         std::fs::rename(root.join("reader.pid.tmp"), root.join("reader.pid"))
             .expect("publish complete reader identity");
         loop {

@@ -3,7 +3,7 @@
 **Status:** original package qualified; all 18 updated configurations checked
 locally; CI and promotion qualification separate ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`88fa37663` (2026-11-04 recovery audit below) · **Scope:** bound `library_scan` and
+`460d8e6d3` plus the pinned scan/bootstrap corrections (2026-11-04 audits below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -13,6 +13,45 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+
+## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` reviewed the frozen working-tree
+corrections against `460d8e6d3ec494f2335ed4bbdfa6601f54bfa380`. The two previous
+source fingerprints match that commit; all retained anchors remain unique.
+This is an authored correspondence audit, not independent Astra review or an
+execution receipt. Three existing rows change: two for the library environment
+and one for the Hiqlite queue adapter. No dependency or modeled action is added.
+
+The [library environment](../../crates/plurxd/src/library_work/env.rs) extracts
+the concrete `probe_work` factory and heap-pins `process_library_requests`
+before passing it through the probe-input and admission scopes. It remains
+directly awaited in the same task, so task-local budget/cancellation/pause
+bindings still cover the producer. The outer owned work future retains the
+publisher and domain reference. Physical admission, `JoinWork`, completed-work
+drop, domain release, queue retirement and environment field drop order retain
+their prior implementations. Heap allocation changes native stack demand,
+not the selected worker authority or cleanup transitions.
+
+The [Hiqlite adapter](../../crates/plurx-core/src/store/hiqlite_background_jobs.rs)
+recognizes version 4 in both managed-bootstrap success branches. Its existing
+`managed_bootstrap_layout` first checks the canonical DDL shape through
+`subtitle_managed_schema::bootstrap_version` and the matching singleton marker.
+The repair therefore preserves an already canonical version-4 resource view;
+it does not accept an arbitrary version marker, replace that view, alter SQL
+guards, or change claim/renewal/bind/publication protocol. Membership and node
+identity checks remain outside and unchanged. Startup/schema convergence is
+not a transition of this worker model.
+
+The PR records separate runtime evidence: the actual scoped future shrinks
+from 16104 to 64 bytes, the driver future is 656 bytes, and an empty-library
+scan completes on the ordinary daemon worker stack with zero scan errors.
+That limited scan does not qualify media parsing or the full UI. The real
+one-voter bootstrap/reopen and identity-drift rejection regression is separate
+from TLC. Future-state size does not prove the whole native poll-stack bound,
+and no old-base comparison establishes when the stack problem was introduced.
+Model/configuration bytes, bounds, properties, fairness, source-custody proof
+obligations and historical qualification identities remain unchanged.
 
 ## Verified host-reboot recovery — scoped source audit on 2026-11-04
 
