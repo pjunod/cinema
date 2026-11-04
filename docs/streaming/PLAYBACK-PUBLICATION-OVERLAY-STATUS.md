@@ -2,7 +2,7 @@
 
 Companion to [the startup implementation ledger](PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md) and [the playback surface contract](../clients/PLAYBACK-SURFACE-CONTRACT.md) — this records the deployed acceptance failures, their corrections, and the PR's progress toward merge.
 
-**Status:** Implementation in progress. **Owner:** Codex/root; Sol owns the web lifecycle patch. **Branch:** `codex/playback-publication-overlay`. **PR:** Not opened yet. **Base:** `d367abf3d`. **Updated:** 2026-11-03.
+**Status:** Implementation complete; compiler checks and adversarial review pending. **Owner:** Codex/root; Sol owns the web lifecycle patch. **Branch:** `codex/playback-publication-overlay`. **PR:** Not opened yet. **Base:** `d367abf3d`. **Updated:** 2026-11-03.
 
 ## Acceptance found two distinct ownership defects
 
@@ -14,8 +14,8 @@ Expired-session web Resume also retained a `media_waiting` fault over advancing 
 
 | Work | Owner | State | Required invariant |
 |---|---|---|---|
-| Initial publication frontier and clock | Codex/root | In progress | Requested position, not pre-attachment elapsed time, owns initial coverage. Keep complete cuts, immutable reload duration, exact-attempt admission and steady reserve. |
-| Media-wait and destination-fault lifetime | Sol | In progress | Attached presentation retires only attached waits; destination faults retire on actual destination proof or supersession. Predecessor movement cannot forgive an unresolved destination. |
+| Initial publication frontier and clock | Codex/root | Implemented | Requested position, not pre-attachment elapsed time, owns initial coverage. Keep complete cuts, immutable reload duration, exact-attempt admission and steady reserve. |
+| Media-wait and destination-fault lifetime | Sol | Implemented | Attached presentation retires only attached waits; destination faults retire on actual destination proof or supersession. Predecessor movement cannot forgive an unresolved destination. |
 | Regression evidence and main fast lane | Codex/root | Pending review | One completed adversarial review, fixes, then focused regressions and one fast-lane run. Retry only failed or invalidated checks. |
 | Main merge and post-merge jobs | Codex/root | Pending | Carry regression fields into landing commit; record observed post-merge checks. Maintainer owns deployment. |
 
@@ -26,3 +26,11 @@ There are no new watchdogs, startup timeout increases, feature gates, or browser
 ## Validation and review receipts
 
 Not run yet. Tests are deferred until the complete candidate has had its adversarial review. Static syntax and pinned compiler checks may run during implementation. Private runtime receipts retain the measured sequence and cleanup; committed documentation uses neutral infrastructure names.
+
+## Implementation — the clock starts at its owner
+
+The actor now retains the first accepted media-body commit time for each producer attempt. Init/metadata, publication and rejected predecessor commits cannot set it. Replacement resets it. Legacy publication adds elapsed time from this event to the requested position relative to media origin. An unpublished prefix has no elapsed consumption, including copy lead before a Resume destination. Explicit publication uses observed position without extrapolation until the actor has accepted post-publication presentation progress; after that the latest accepted observation owns extrapolation. The first snapshot continues to cover its immutable native reload window and every response retains normal init, complete-object and attempt admission. First-snapshot logs now name lease mode, demand sequence, presentation phase and media-commit state.
+
+Web media waits now explicitly distinguish the attached element from an executed, unresolved seek on that same element and attachment. The actual settlement owner emits `intent_settled` after target proof (or established paused positioning), and the `media_waiting` source specifically retires on that event or supersession. Other buffering sources retain their existing contracts. Deduplication includes intent; paused and retired-element events cannot raise waits.
+
+The regressions replay late waiting after the old early settlement event, predecessor movement, actual target proof, supersession and the expired-session Play/reopen seam. Publication regressions retain the 16-second target, reject insufficient post-position coverage despite seek lead, simulate seven seconds of unpublished time, distinguish observed position from presentation extrapolation, and test delivery timestamp ownership across replacement.
