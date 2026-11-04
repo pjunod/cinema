@@ -551,8 +551,8 @@ async fn sharing_source_direct_symlink_or_resized_file_refuses() {
 }
 
 /// Native/SQL End precedes original typed ticket settlement. Cached reply
-/// actors retain their immutable kind, while only their redundant application
-/// alias retires at the actual joined-worker handoff. No fixture clears a lease.
+/// cache compacts to a genuine terminal observation, while an escaped actual
+/// actor retains its full application charge until final payload destruction.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_original_restart_admission_moves_to_retained_ticket() {
@@ -565,6 +565,9 @@ async fn sharing_source_direct_original_restart_admission_moves_to_retained_tick
         .resource_runtime
         .as_ref()
         .expect("actual Direct runtime");
+    let escaped_actor = manager
+        .fixture_source_direct_actor()
+        .expect("actual independently retained actor alias");
     let charged = runtime.accounting().expect("original Direct R").used;
     assert!(charged.handles > 0);
     let gate = Arc::new(SourceReadJobGate::default());
@@ -651,6 +654,85 @@ async fn sharing_source_direct_original_restart_admission_moves_to_retained_tick
         "native/SQL End alone cannot discharge original ticket custody"
     );
     assert_eq!(fixture.active_source_sessions().await, 0);
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("same original resource accounting")
+            .used,
+        charged
+    );
+    assert!(runtime
+        .affected_owner_inventory()
+        .snapshot()
+        .expect("original owner census snapshot")
+        .records()
+        .any(|row| matches!(
+            row.kind,
+            plurx_core::adaptive_resources::owner_inventory::OwnerKind::Reference { .. }
+        )));
+    assert_eq!(escaped_actor.settlement_status(), Some(Ok(())));
+    // Terminal HTTP cache compaction drops only its own alias. This separately
+    // retained actual actor still owns charged rich allocations and the census.
+    let duplicate = reqwest::Client::new()
+        .post(direct_url(peer.address, &fixture, &session, "end"))
+        .headers(fixture.headers.clone())
+        .json(&session.known)
+        .send()
+        .await
+        .expect("actual terminal HTTP response");
+    assert_eq!(duplicate.status(), reqwest::StatusCode::OK);
+    let duplicate: Value = duplicate.json().await.expect("duplicate exact End receipt");
+    assert_eq!(duplicate["confirmation_id"], receipt["confirmation_id"]);
+    let status = reqwest::Client::new()
+        .post(direct_url(peer.address, &fixture, &session, "status"))
+        .headers(fixture.headers.clone())
+        .json(&session.known)
+        .send()
+        .await
+        .expect("actual terminal HTTP response");
+    assert_eq!(status.status(), reqwest::StatusCode::OK);
+    let terminal: Value = status
+        .json()
+        .await
+        .expect("actual terminal status projection");
+    assert_eq!(terminal["state"], "settled");
+    assert_eq!(terminal["session_id"], session.known["session_id"]);
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("same original resource accounting")
+            .used,
+        charged
+    );
+    let late_bytes = actual_resource_request(
+        peer.address,
+        false,
+        &direct_url(peer.address, &fixture, &session, "direct"),
+        fixture.headers.clone(),
+        direct_body(&session, &get_all()),
+    )
+    .await;
+    assert!(
+        !late_bytes.status().is_success(),
+        "terminal cache cannot reopen a direct body"
+    );
+    drop(late_bytes);
+    let recipe: Value =
+        serde_json::from_slice(&fixture.request).expect("original complete direct recipe");
+    if let Ok(replayed) = direct_start(&fixture, &recipe).await {
+        assert!(
+            !replayed.status().is_success(),
+            "terminal Start retry cannot admit a new original owner"
+        );
+    }
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("same original resource accounting")
+            .used,
+        charged
+    );
+    drop(escaped_actor);
     // This exclusive fixture runs original maintenance explicitly. Even if
     // the actual finalizer returned, no completion counter can disarm before
     // maintenance positively joins that SAME handle's successful result.

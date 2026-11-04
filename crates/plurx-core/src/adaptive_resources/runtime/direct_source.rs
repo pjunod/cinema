@@ -187,6 +187,7 @@ impl DirectSourceRequest {
             .checked_add(std::mem::size_of::<DirectState>())?
             .checked_add(std::mem::size_of::<ApplicationLeaseState>())?
             .checked_add(std::mem::size_of::<DirectSourceApplicationLease>())?
+            .checked_add(application::worker_frame_bytes())?
             .checked_add(std::mem::size_of::<DirectSourceRetirementTicket>())?
             .checked_add(std::mem::size_of::<SourceOpenSpec>())?
             .checked_add(std::mem::size_of::<DirectSourcePlan>())?
@@ -328,25 +329,11 @@ struct DirectInner {
     #[cfg(any(test, feature = "fixtures"))]
     read_gate: Mutex<Option<Arc<DirectSourceReadGate>>>,
 }
-struct ApplicationLeaseState {
-    state: Mutex<ApplicationLeaseStatus>,
-    changed: Notify,
-}
-struct ApplicationLeaseStatus {
-    held: bool,
-}
-pub struct DirectSourceApplicationLease {
-    state: Arc<ApplicationLeaseState>,
-}
-impl Drop for DirectSourceApplicationLease {
-    fn drop(&mut self) {
-        if let Ok(mut state) = self.state.state.lock() {
-            state.held = false;
-            drop(state);
-            self.state.changed.notify_waiters();
-        }
-    }
-}
+pub(in crate::adaptive_resources) mod application;
+use application::ApplicationLeaseState;
+pub use application::{
+    DirectSourceApplication, DirectSourceApplicationLease, DirectSourceApplicationWorker,
+};
 pub struct DirectSourceRetirementTicket {
     runtime: Arc<NodeResourceRuntime>,
     preparation: Option<OwnedPreparation>,
@@ -789,10 +776,12 @@ impl NodeResourceRuntime {
         *slot = Some(member.uuid());
         drop(domain_state);
         self.install_finite_response_budget(&preparation, role_index, Arc::clone(&budget))?;
-        let application = Arc::new(ApplicationLeaseState {
-            state: Mutex::new(ApplicationLeaseStatus { held: true }),
-            changed: Notify::new(),
-        });
+        let reference = if application_owner_bytes != 0 {
+            Some(self.register_direct_application_reference(&preparation, role_index)?)
+        } else {
+            None
+        };
+        let application = ApplicationLeaseState::new(reference);
         let owner = DirectSourceOwner {
             runtime: Arc::clone(self),
             preparation,
@@ -829,7 +818,7 @@ impl NodeResourceRuntime {
                 read_gate: Mutex::new(None),
             }),
         };
-        Ok((owner, DirectSourceApplicationLease { state: application }))
+        Ok((owner, DirectSourceApplicationLease::new(application)))
     }
 }
 
@@ -859,6 +848,7 @@ impl DirectSourceOwner {
     }
 
     pub async fn open(&self, deadline: Instant) -> Result<(), DirectSourceError> {
+        self.inner.application.validate_entry()?;
         let _gate = self.inner.open_gate.lock().await;
         if self.inner.state.lock().map_err(|_| invalid())?.closing {
             return Err(invalid());
@@ -1118,6 +1108,7 @@ impl DirectSourceOwner {
                 .spec
                 .is_some()
             {
+                self.inner.application.validate_entry()?;
                 self.runtime
                     .resolve_preparation(&self.preparation, deadline)
                     .await?;
@@ -1228,24 +1219,8 @@ impl DirectSourceRetirementTicket {
         {
             return Err(invalid());
         }
-        loop {
-            let notified = self.inner.application.changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if !self
-                .inner
-                .application
-                .state
-                .lock()
-                .map_err(|_| invalid())?
-                .held
-            {
-                break;
-            }
-            tokio::time::timeout_at(deadline.into(), notified)
-                .await
-                .map_err(|_| DirectSourceError(OperationError::Deadline))?;
-        }
+        self.inner.application.wait_closed(deadline).await?;
+        self.inner.application.close_reference(&self.runtime)?;
         if !self
             .inner
             .state

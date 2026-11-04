@@ -5,8 +5,8 @@
 use super::TranscodeManager;
 use futures_util::FutureExt;
 use plurx_core::adaptive_resources::runtime::direct_source::{
-    DirectSourceApplicationLease, DirectSourceBinding, DirectSourceBody, DirectSourceError,
-    DirectSourceOwner, DirectSourceRequest, DirectSourceRetirementTicket,
+    DirectSourceApplication, DirectSourceApplicationWorker, DirectSourceBinding, DirectSourceBody,
+    DirectSourceError, DirectSourceOwner, DirectSourceRequest, DirectSourceRetirementTicket,
 };
 use plurx_core::adaptive_resources::{ResourceVector, WorkloadDemand};
 use plurx_core::domain::MediaFile;
@@ -37,8 +37,8 @@ impl Default for LocalDirectOwners {
 
 enum LocalDirectRecord {
     Active {
-        entry: Arc<LocalDirectEntry>,
-        worker: JoinHandle<Result<DirectSourceRetirementTicket, DirectSourceError>>,
+        _entry: Arc<LocalDirectEntry>,
+        worker: DirectSourceApplicationWorker,
     },
     Settling {
         ticket: SharedTicket,
@@ -46,14 +46,11 @@ enum LocalDirectRecord {
     },
 }
 
-struct LocalDirectEntry {
+type LocalDirectEntry = DirectSourceApplication<LocalDirectPayload>;
+struct LocalDirectPayload {
     owner: Arc<DirectSourceOwner>,
     body_done: AtomicBool,
     changed: Notify,
-    // Last field: destroying this entry releases the application charge only
-    // after its other owned payloads. The original worker retains an extra
-    // Arc until the actual future allocation has been destroyed.
-    _application_lease: DirectSourceApplicationLease,
 }
 
 struct BudgetedWorker<F> {
@@ -127,14 +124,15 @@ impl TranscodeManager {
         u64::try_from(bytes).ok()
     }
 
-    fn spawn_original(
-        entry: Arc<LocalDirectEntry>,
-    ) -> JoinHandle<Result<DirectSourceRetirementTicket, DirectSourceError>> {
+    fn spawn_original(entry: Arc<LocalDirectEntry>) -> DirectSourceApplicationWorker {
         let future = Self::prepare_local_retirement(Some(Arc::clone(&entry)));
-        tokio::spawn(BudgetedWorker {
-            future: Box::pin(future),
-            _entry: entry,
-        })
+        let owner = Arc::clone(&entry.owner);
+        owner
+            .spawn_application_worker(BudgetedWorker {
+                future: Box::pin(future),
+                _entry: entry,
+            })
+            .expect("one original sealed local direct worker")
     }
 
     /// Register original worker and memory lease before native entry. Failure
@@ -205,15 +203,19 @@ impl TranscodeManager {
                 )
                 .map_err(|_| ())?;
             let owner = Arc::new(owner);
-            let entry = Arc::new(LocalDirectEntry {
-                owner: Arc::clone(&owner),
-                body_done: AtomicBool::new(false),
-                changed: Notify::new(),
-                _application_lease: lease,
-            });
+            let entry = Arc::new(
+                lease
+                    .wrap(LocalDirectPayload {
+                        owner: Arc::clone(&owner),
+                        body_done: AtomicBool::new(false),
+                        changed: Notify::new(),
+                    })
+                    .expect("one original local direct payload"),
+            );
+            drop(lease);
             let worker = Self::spawn_original(Arc::clone(&entry));
             *slot = Some(LocalDirectRecord::Active {
-                entry: Arc::clone(&entry),
+                _entry: Arc::clone(&entry),
                 worker,
             });
             (owner, entry)
@@ -253,10 +255,21 @@ impl TranscodeManager {
             }
             notification.await;
         }
-        entry
-            .owner
-            .prepare_retirement(Instant::now() + Duration::from_secs(305))
-            .await
+        loop {
+            match entry
+                .owner
+                .prepare_retirement(Instant::now() + Duration::from_secs(305))
+                .await
+            {
+                Ok(ticket) => return Ok(ticket),
+                Err(_) => {
+                    // A bounded waiter timing out does not replace the actual
+                    // original worker. It keeps its payload and native owner
+                    // while the same cleanup operation becomes joinable.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
     }
 
     async fn finish_local_retirement(
@@ -269,12 +282,37 @@ impl TranscodeManager {
             .await
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture_local_direct_custody(&self) -> (usize, usize) {
+        // Diagnostics never mint completion. Tests drive the same maintenance
+        // separately through its actual Arc manager below.
+        let entries = self
+            .local_direct_owners
+            .entries
+            .lock()
+            .expect("local direct owners");
+        (
+            entries
+                .iter()
+                .filter(|slot| matches!(slot, Some(LocalDirectRecord::Active { .. })))
+                .count(),
+            entries
+                .iter()
+                .filter(|slot| matches!(slot, Some(LocalDirectRecord::Settling { .. })))
+                .count(),
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_drive_local_direct(self: &Arc<Self>) {
+        self.reconcile_local_direct_owners();
+    }
+
     /// Existing manager maintenance joins only completed original workers.
     /// Unknown results keep the same owner or ticket for another pass.
     pub(super) fn reconcile_local_direct_owners(self: &Arc<Self>) {
         enum Transition {
             None,
-            RetryActive,
+            HoldUnknown,
             ToSettling(DirectSourceRetirementTicket),
             RetrySettle,
             Remove,
@@ -288,8 +326,8 @@ impl TranscodeManager {
             let transition = match slot.as_mut() {
                 Some(LocalDirectRecord::Active { worker, .. }) if worker.is_finished() => {
                     match worker.now_or_never() {
-                        Some(Ok(Ok(ticket))) => Transition::ToSettling(ticket),
-                        Some(_) => Transition::RetryActive,
+                        Some(Ok(ticket)) => Transition::ToSettling(ticket),
+                        Some(_) => Transition::HoldUnknown,
                         None => Transition::None,
                     }
                 }
@@ -304,10 +342,9 @@ impl TranscodeManager {
             };
             match transition {
                 Transition::None => {}
-                Transition::RetryActive => {
-                    if let Some(LocalDirectRecord::Active { entry, worker }) = slot {
-                        *worker = Self::spawn_original(Arc::clone(entry));
-                    }
+                Transition::HoldUnknown => {
+                    // Retain the original failed handle and payload. A new
+                    // worker cannot certify the unknown original's closure.
                 }
                 Transition::ToSettling(ticket) => {
                     // Drop the joined task, rich entry and application lease

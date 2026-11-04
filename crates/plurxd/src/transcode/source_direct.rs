@@ -7,8 +7,8 @@ use crate::http::sharing_direct_wire::SourceDirectStart;
 use futures_util::FutureExt;
 #[cfg(target_os = "linux")]
 use plurx_core::adaptive_resources::runtime::direct_source::{
-    DirectSourceApplicationLease, DirectSourceBinding, DirectSourceBody, DirectSourceOwner,
-    DirectSourceRequest, DirectSourceRetirementTicket,
+    DirectSourceApplication, DirectSourceApplicationWorker, DirectSourceBinding, DirectSourceBody,
+    DirectSourceOwner, DirectSourceRequest, DirectSourceRetirementTicket,
 };
 #[cfg(target_os = "linux")]
 use plurx_core::adaptive_resources::{ResourceVector, WorkloadDemand};
@@ -24,7 +24,10 @@ use std::task::{Context, Poll};
 #[cfg(target_os = "linux")]
 type SharedTicket = Arc<tokio::sync::Mutex<DirectSourceRetirementTicket>>;
 #[cfg(target_os = "linux")]
-type DirectWorkerResult = DirectSourceRetirementTicket;
+type DirectWorkerResult = Result<
+    DirectSourceRetirementTicket,
+    plurx_core::adaptive_resources::runtime::direct_source::DirectSourceError,
+>;
 #[cfg(not(target_os = "linux"))]
 type DirectWorkerResult = ();
 
@@ -32,7 +35,7 @@ type DirectWorkerResult = ();
 pub(super) enum SourceDirectRecord {
     Active {
         owner_address: usize,
-        worker: tokio::task::JoinHandle<DirectSourceRetirementTicket>,
+        worker: DirectSourceApplicationWorker,
     },
     Settling {
         restart_admission: Option<SourceRestartAdmission>,
@@ -74,9 +77,12 @@ pub(crate) struct SourceDirectFile {
     recipe_json: String,
     #[cfg(target_os = "linux")]
     admitted: std::sync::OnceLock<Arc<DirectSourceOwner>>,
-    #[cfg(target_os = "linux")]
-    _application_lease: Option<DirectSourceApplicationLease>,
 }
+#[cfg(target_os = "linux")]
+pub(super) type SourceDirectApplication = DirectSourceApplication<SourceDirectFile>;
+#[cfg(not(target_os = "linux"))]
+pub(super) type SourceDirectApplication = SourceDirectFile;
+
 impl SourceDirectFile {
     pub(crate) fn new(
         file: plurx_core::domain::MediaFile,
@@ -96,8 +102,6 @@ impl SourceDirectFile {
             recipe_json,
             #[cfg(target_os = "linux")]
             admitted: std::sync::OnceLock::new(),
-            #[cfg(target_os = "linux")]
-            _application_lease: None,
         }
     }
     #[cfg(target_os = "linux")]
@@ -108,12 +112,11 @@ impl SourceDirectFile {
             .ok_or(SourceWorkerError::Unavailable)
     }
     #[cfg(target_os = "linux")]
-    fn install_admitted(&mut self, owner: DirectSourceOwner, lease: DirectSourceApplicationLease) {
+    fn install_admitted(&mut self, owner: DirectSourceOwner) {
         assert!(
             self.admitted.set(Arc::new(owner)).is_ok(),
             "fresh direct file owner"
         );
-        self._application_lease = Some(lease);
     }
     #[cfg(target_os = "linux")]
     pub(super) fn admitted_unchanged(&self) -> bool {
@@ -421,6 +424,7 @@ impl TranscodeManager {
     /// compact private core ticket perform typed resource settlement/refund.
     #[cfg(target_os = "linux")]
     pub(crate) fn reconcile_source_direct_tasks(self: &Arc<Self>) {
+        self.source_http_starts.reconcile_direct_applications();
         enum Transition {
             None,
             ToSettling {
@@ -533,6 +537,17 @@ impl TranscodeManager {
         }
     }
 
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn fixture_source_direct_actor(&self) -> Option<SourceViewerActor> {
+        self.source_workers
+            .entries
+            .lock()
+            .expect("Source workers")
+            .iter()
+            .find(|owner| owner.direct)
+            .map(|owner| SourceViewerActor(Arc::clone(owner)))
+    }
+
     /// Read-only custody diagnostics for the exclusive actual Direct fixture.
     /// Counts and is_finished never grant native/typed closure or a refund.
     #[cfg(all(test, target_os = "linux"))]
@@ -607,7 +622,7 @@ impl TranscodeManager {
         // original worker frame is measured from its actual async function.
         let start_strings = 36usize.checked_add(maximum_mime)?.checked_mul(4)?;
         let bytes = arc_layout::<SourceViewerInner>()?
-            .checked_add(arc_layout::<SourceDirectFile>()?)?
+            .checked_add(arc_layout::<SourceDirectApplication>()?)?
             .checked_add(arc_layout::<SourceProducerAuthority>()?)?
             .checked_add(arc_layout::<resource::SourceResourceHookOwner>()?)?
             .checked_add(arc_layout::<SourceResponseGuard>()?)?
@@ -824,8 +839,12 @@ impl TranscodeManager {
         #[cfg(target_os = "linux")]
         let mut direct_file = direct_file;
         #[cfg(target_os = "linux")]
-        direct_file.install_admitted(admitted, application_lease);
-        let owner = Arc::new(SourceViewerInner {
+        direct_file.install_admitted(admitted);
+        #[cfg(target_os = "linux")]
+        let direct_file = application_lease
+            .wrap(direct_file)
+            .expect("original Source direct file payload");
+        let owner = SourceViewerPayload {
             control_target_duration_ms: 0,
             control_hooks: Default::default(),
             status_hooks: Default::default(),
@@ -856,7 +875,14 @@ impl TranscodeManager {
                 direct_activity: None,
             }),
             changed: tokio::sync::Notify::new(),
-        });
+        };
+        #[cfg(target_os = "linux")]
+        let owner = application_lease
+            .wrap(owner)
+            .expect("original Source direct actor payload");
+        #[cfg(target_os = "linux")]
+        drop(application_lease);
+        let owner = Arc::new(owner);
         let actor = SourceViewerActor(Arc::clone(&owner));
         #[cfg(target_os = "linux")]
         {
@@ -866,10 +892,17 @@ impl TranscodeManager {
                 Some(state),
                 deadline,
             );
-            let worker = tokio::spawn(BudgetedSourceWorker {
-                future: Box::pin(future),
-                _owner: Arc::clone(&owner),
-            });
+            let admitted = owner
+                .direct_file()
+                .expect("registered direct file")
+                .admitted()
+                .expect("registered direct owner");
+            let worker = admitted
+                .spawn_application_worker(BudgetedSourceWorker {
+                    future: Box::pin(future),
+                    _owner: Arc::clone(&owner),
+                })
+                .expect("one original Source direct worker");
             *direct_slot = Some(SourceDirectRecord::Active {
                 owner_address,
                 worker,
@@ -1173,7 +1206,7 @@ impl TranscodeManager {
                 current.finished = true;
             }
             owner.changed.notify_waiters();
-            ticket
+            Ok(ticket)
         }
         #[cfg(not(target_os = "linux"))]
         {

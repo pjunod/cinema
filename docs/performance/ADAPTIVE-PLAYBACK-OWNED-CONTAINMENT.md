@@ -1,7 +1,7 @@
 # Adaptive owned containment — what still stands before real trials
 
 **Status:** open · scoped implementation qualified; production coverage open ·
-2026-11-03. Companion to the [production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
+2026-11-04. Companion to the [production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
 and [canonical resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md).
 The [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) remains normative.
 The handoff's “M0 owned containment” includes native containment work; the
@@ -88,8 +88,8 @@ close boundary before obtaining coverage.
 | Rolling and continuous output | [Transcode manager](../../crates/plurxd/src/transcode.rs): original session/producer attempt before publication | [Rolling retirement](../../crates/plurxd/src/transcode/rolling/retirement.rs): retired presentation retains its original session; [compact copy-ticket maintenance](../../crates/plurxd/src/transcode/manager/maintenance.rs) joins original actor and settles same native ticket | Open |
 | Live transport | [DVR transport](../../crates/plurxd/src/live_tv/dvr.rs): one original tuner worker; separate viewer feed queues | `close_transport_arc` and actual tuner/body join, plus each viewer pump/feed destruction; its `closed` signal alone is insufficient | Open |
 | DVR recording sinks | [DVR sink](../../crates/plurxd/src/live_tv/dvr.rs): original sink before `start_sink_writer` | `sink_writer_loop` file write/flush/fsync and `settle_sink` joining the original handle; activity-row removal supplies no proof | Open |
-| Source actors and escaped response bodies | [Source factory](../../crates/plurxd/src/transcode/source_actor.rs): original registry owner before spawn; original response reference before body publication | Original physical/preparation settlement and every `SourceResponseGuard`; [Source direct task registry](../../crates/plurxd/src/transcode/source_direct.rs) retains Active/Settling/Failed custody | Open |
-| Local direct reads | [Local direct open](../../crates/plurxd/src/transcode/local_direct.rs): fixed 64-slot claim, core preparation and original worker before native entry | `reconcile_local_direct_owners`: join Active worker, destroy rich entry/application lease, retain Settling ticket until final retirement; [core direct domain](../../crates/plurx-core/src/adaptive_resources/runtime/direct_source.rs) owns the actual reads | Open |
+| Source actors and escaped response bodies | [Source factory](../../crates/plurxd/src/transcode/source_actor.rs): original registry owner before spawn; original response reference before body publication | Original physical/preparation settlement and every `SourceResponseGuard`; [Source direct task registry](../../crates/plurxd/src/transcode/source_direct.rs) retains Active/Settling/Failed custody | Direct applications built; other Source paths open |
+| Local direct reads | [Local direct open](../../crates/plurxd/src/transcode/local_direct.rs): fixed 64-slot claim, core preparation and original worker before native entry | `reconcile_local_direct_owners`: join Active worker, destroy rich entry/application lease, retain Settling ticket until final retirement; [core direct domain](../../crates/plurx-core/src/adaptive_resources/runtime/direct_source.rs) owns the actual reads | Native/application adapters built; scoped qualification passes |
 | Background static generation | [Static run reservation](../../crates/plurxd/src/transcode/background_static.rs): original controller slot before P native awaits | `reconcile_static_artifact_run`: retain AdmissionUnknown/Closing, original controller receipt and actual rich payload destruction before application lease release | Open |
 | Preparation and retained output | [Retained artifact registry](../../crates/plurxd/src/vod/retained.rs): same retained S and original preparation origin | Original finite closing ticket plus each artifact/read alias; [cache reader guards](../../crates/plurxd/src/cachekeep.rs) last through actual consumer destruction | Open |
 | Relay, network/source domains and legacy helper graphs | [Relay response pump](../../crates/plurxd/src/media_sessions.rs) before spawn; original [probe](../../crates/plurxd/src/transcode/source_preparation.rs), [index](../../crates/plurxd/src/fragindex.rs) and [subtitle](../../crates/plurxd/src/transcode/source_subtitles.rs) operations | Actual pump/upstream/queued-body destruction and original helper settlement; other legacy audio/processed graphs still need their own adapters | Open |
@@ -115,18 +115,69 @@ the original task until its actual join and owned tuner body destruction are
 confirmed, with uncertainty remaining held. DVR writer completion also remains
 separate from successful fsync and from destruction of queued body allocations.
 
-### Application references need their own sealed final-close mechanism
+### Direct applications retain original workers and whole payloads
 
-The next implementation slice is local direct and Source direct application
-ownership, then static background controllers. The selected core bridge already
-registers native roles created by these typed preparations. Daemon application
-hooks must reference those original identities, rather than count a second
-producer. `OwnerInventory::register_reference` currently creates a reference,
-but its physical-receipt close method cannot retire it: a reference deliberately
-has no producer physical binding. Add a sealed application-close mechanism
-backed by the original owner, actual rich payload destruction and original
-worker join. A copied UUID, registry removal, dropped waiter or producer receipt
-cannot mint this authority.
+Local direct and Source direct now register one separate application reference
+against the original native source residency before entry. They do not count a
+second producer. The [application owner](../../crates/plurx-core/src/adaptive_resources/runtime/direct_source/application.rs)
+wraps the actual rich payload inside its Arc; only a normally completed payload
+destructor decrements its bounded count. Source direct wraps both the file and
+the whole actor, so escaped cached actors retain their own charged allocations.
+The nonclone lease seals registration; its Drop never closes the census row.
+
+The same core owner retains the original worker's actual JoinHandle. A cancelled
+waiter can rejoin that handle; it cannot spawn a replacement. Positive join must
+return a retirement ticket for the same original application Arc. Panic, wrong
+ticket, poisoned state and destructor panic keep the reference UnknownHeld.
+Local native-retirement timeouts retry within the same original worker.
+Spawn runs outside the application mutex because a shut-down executor can
+synchronously destroy its future. A core gate waits for publication of that
+same handle before polling the original future; its measured frame is charged.
+Reference removal requires sealed registration, all original payloads destroyed
+and positive original join, under the census boundary before native settlement.
+A producer physical receipt cannot retire this separate application reference.
+
+The [HTTP cache](../../crates/plurxd/src/http/shared_source_playback.rs) previously
+kept the whole Source actor through 64 later cache entries. It now compacts only
+a direct actor with its actual successful terminal outcome, outside map/result
+locks. Authentication, original typed assignment, published lineage and the same
+End receipt remain. Cached terminal status grants no new live operation or close
+authority. Any independent actor alias still blocks actual application closure.
+This compaction does not prove that the bounded HTTP cache's own authentication,
+assignment and lineage metadata has been destroyed; that wider inventory remains
+open.
+
+Focused qualification passes **17 distinct cases**: 12 core direct-source
+cases and five actual daemon cases, all with zero ignored. Six cases are new.
+Source tree `082c1445` supplies 14 unchanged-path passes; the three daemon cases
+with diagnostic-only assertion edits pass again on `4f886314`. The runtime
+implementation is unchanged between those trees. The core batch includes real executor shutdown, driver panic,
+destructor panic, cancelled original waiter, escaped application aliases,
+original read jobs and real restart history:
+
+```bash
+cargo test -p plurx-core --lib --locked \
+  --features fixtures,hiqlite-contract-tests,scratch-fault-injection \
+  adaptive_resources::runtime::direct_source::tests -- --nocapture --test-threads=1
+```
+
+The five daemon cases use `cargo test -p plurxd --bin plurxd --locked --features
+cluster-integration-tests <exact-case> -- --exact --nocapture`:
+
+| Exact case | Actual boundary |
+|---|---|
+| `http::shared_source_playback::direct::start_failure_tests::local_direct_original_worker_and_payload_reference_close_after_response_guard` | Original local worker, response guard and payload/reference destruction |
+| `http::shared_source_playback::direct::tests::sharing_source_direct_original_restart_admission_moves_to_retained_ticket` | Escaped actor holds charge after terminal cache compaction; status/duplicate End remain valid; Start/body replay cannot reopen |
+| `http::shared_source_playback::direct::start_failure_tests::direct_unpublished_open_failure_returns_original_ticket_and_releases_own_r` | Actual missing-file failure retains original R until the rich actor drops |
+| `http::shared_source_playback::direct::tests::sharing_source_direct_read_join_before_end_receipt` | Original read job joins before native/SQL End |
+| `http::shared_source_playback::tests::sharing_source_http_native_copy_h1_h2_vtt_and_held_body_end` | Shared non-direct actor retains its existing native VOD/body/End lifecycle |
+
+These are scoped native results, not full-suite, M0 or real-trial acceptance.
+Exact-candidate formatting/Clippy and the manual Effort gate belong to the task
+PR. Earlier superseded-source passes are not added to this count. Existing
+zero-application-byte core fixtures retain their native-only boundary; neither
+those fixtures nor the explicit untracked VOD wrapper certify application
+coverage. Background static and finite application leases still need adapters.
 
 Keep admission/settlement mutation under a single documented lock order.
 Local direct holds its slot mutex while preparing the core role; Source direct

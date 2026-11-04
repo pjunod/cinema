@@ -255,7 +255,15 @@ impl Drop for SourceRestartAdmission {
     }
 }
 
-struct SourceViewerInner {
+#[cfg(target_os = "linux")]
+type SourceViewerInner =
+    plurx_core::adaptive_resources::runtime::direct_source::DirectSourceApplication<
+        SourceViewerPayload,
+    >;
+#[cfg(not(target_os = "linux"))]
+type SourceViewerInner = SourceViewerPayload;
+
+struct SourceViewerPayload {
     control_target_duration_ms: i64,
     control_hooks: control::SourceControlHookOwner,
     status_hooks: status::SourceStatusHookOwner,
@@ -313,7 +321,7 @@ impl SourcePhysicalSettlement {
 struct SourceViewerState {
     // Only this redundant actor alias retires at the original joined worker's
     // ticket handoff. Actual body/open/read aliases still own their application.
-    direct: Option<Arc<direct::SourceDirectFile>>,
+    direct: Option<Arc<direct::SourceDirectApplication>>,
     restart_admission: Option<SourceRestartAdmission>,
     native: Option<Arc<super::source_subtitles::SourceNativeTracks>>,
     start: Option<Result<crate::http::hls::StartResponse, SourceWorkerError>>,
@@ -340,8 +348,8 @@ pub(super) fn source_actor_requested_bytes() -> usize {
     std::mem::size_of::<SourceViewerInner>() + 2 * std::mem::size_of::<usize>()
 }
 
-impl SourceViewerInner {
-    fn direct_file(&self) -> Option<Arc<direct::SourceDirectFile>> {
+impl SourceViewerPayload {
+    fn direct_file(&self) -> Option<Arc<direct::SourceDirectApplication>> {
         self.state
             .lock()
             .expect("Source worker state")
@@ -1100,7 +1108,7 @@ impl TranscodeManager {
                 SourceWorkerError::Capacity,
             ));
         }
-        let owner = Arc::new(SourceViewerInner {
+        let owner = SourceViewerPayload {
             control_target_duration_ms: i64::from(match prepared.request().kind {
                 SessionKind::Copy { .. } => plurx_core::transcode::COPY_SEGMENT_MAX_SECS,
                 SessionKind::Transcode { .. } => plurx_core::transcode::SEGMENT_SECONDS,
@@ -1134,7 +1142,10 @@ impl TranscodeManager {
                 direct_activity: None,
             }),
             changed: tokio::sync::Notify::new(),
-        });
+        };
+        #[cfg(target_os = "linux")]
+        let owner = plurx_core::adaptive_resources::runtime::direct_source::DirectSourceApplication::untracked(owner);
+        let owner = Arc::new(owner);
         registry.push(Arc::clone(&owner));
         drop(registry);
         let actor = SourceViewerActor(Arc::clone(&owner));
