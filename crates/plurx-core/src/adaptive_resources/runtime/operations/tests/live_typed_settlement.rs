@@ -105,7 +105,7 @@ async fn live_multi_member_settlement_closes_armed_roots_and_refunds_once() {
     let settled_sequence = role.sequence;
     let operation_id = Uuid::new_v4();
     let proof = accounting_proof(&runtime, role, &roots, operation_id);
-    start_named_transition(
+    let rejected = start_named_transition(
         &runtime.journal,
         role,
         operation_id,
@@ -113,8 +113,12 @@ async fn live_multi_member_settlement_closes_armed_roots_and_refunds_once() {
         Effect::Settle,
         deadline(),
     )
-    .unwrap();
-    assert!(runtime.finish_transition(id, role).await.is_err());
+    .expect_err("a refunded original owner cannot issue another settlement");
+    assert!(matches!(rejected, OperationError::State));
+    assert!(
+        role.transition.is_none(),
+        "duplicate settlement never reaches the journal"
+    );
     assert_eq!(role.sequence, settled_sequence);
     assert_eq!(
         runtime.accounting().unwrap().used,

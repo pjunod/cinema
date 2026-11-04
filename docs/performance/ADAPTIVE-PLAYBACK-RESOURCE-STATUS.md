@@ -10,37 +10,33 @@ qualification or deployment is claimed.
 
 ## Current continuation — source-bound task qualification
 
-Task PRs #1293, #1338, #1360–#1365, #1368 and #1371 are merged into
-draft effort #1248. #1368 landed at `8aa9cae1b28dd6d6dc9fdb5db3265ef549e8d2f7`
-after gate 6411; #1371 at `122d0ba086f9310e653bf19b0fe326baa94d352c` after gate
-6422. The [finite qualification](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
-records six reader cases plus lifecycle and graceful restart. The
-[policy continuation](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) records fourteen
-scoped refusal/service cases. [Owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md)
-now tracks kernel entry, complete affected-owner inventory and pre-Winner
-custody. Its 44 passing cases retain actual source identities; PR #1375 tracks gate/landing.
+Draft effort #1248 includes merged task PRs #1293, #1338, #1360–#1365, #1368,
+#1371 and #1375. The latter landed at `edb5b79f` after eight green jobs in gate
+6437; #1368/#1371 passed gates 6411/6422. [Owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md)
+keeps the earlier 44 cases separate from 51 selected-bridge core passes on
+production-identical `6ee93330`/`ca85f07f` and three daemon passes on `ca85f07f`.
+Seven unchanged overlap failures remain reproduced baseline exceptions.
 
-#1365 landed at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e` after nine green
-jobs. Its two-node fixture uses three distinct ladder rungs and controls only
-the peer proxy's advisory I/O/speed ranking; clock, eligibility, capacity,
-identity and control exchanges remain real. This proves controlled placement
-and serving, not naturally selected performance.
+[PR #1377](http://forge.lan:3000/noirr/plurx/pulls/1377) records the exact-candidate
+gate and landing for the built direct-retirement amendment. Exact `7658db4c` execution
+reproduced three core and two daemon ticket-retention failures. The
+[original-selector follow-up](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#direct-retirement-follow-up--original-selectors-replace-permanent-aliases)
+records the bounded repair and two new actual-read cases at source tree
+`4cb874ba`: 21 focused core and three affected daemon cases pass. Distinct source-scoped total: 66.
+Exact-candidate checks are recorded in that task PR.
+The earlier 51-case qualification retains its original source boundary.
 
-The exact attached owner may renew its lease between Adopt and publication.
-Publication compares current matching route/job-lease copies while retaining
-original custody, owner, epoch, pointer and live-lease guards. Five affected
-cases passed with SQLite and the real three-voter backend at `4a6461e6214c`;
-the two new cases fail on `099eafdcee4c`. Pinned Rust 1.97.1 strict all-target
-Clippy, fixture/cluster features and paperwork 15/15 passed. The guard batch
-at `5d65151d3` passed 5/5, zero ignored. The [delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md)
-also records the committed-Adopt-to-attachment settlement race and its bounded
-original-owner guard. These task results do not imply M0–M7 acceptance.
+The [finite ledger](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
+and [policy ledger](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) retain their earlier
+reader/lifecycle/restart and fourteen refusal/service results. #1365's
+controlled two-node and exact-owner publication evidence remains in the
+[delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md). None establishes naturally
+selected performance or M0–M7 acceptance.
 
-Still open: M0 coverage/contracts, M3a/C2 native and allocator containment,
-V1–V5, broader adapters/platforms, current-main integration and Main promotion.
-The handoff's “M0 owned containment” differs from the plan's M0 inventory.
-The pre-existing actor-application lease regression and selected-static FFmpeg
-`-display_rotation` capability decision remain open; neither is silently accepted.
+Still open: full inventory/M0, M3a/C2 native and allocator bounds, production
+trials, V1–V5, broader adapters/platforms, current-main integration and Main
+promotion. The actor-application lease regression and selected-static FFmpeg
+`-display_rotation` decision remain separate open items. No deployment.
 
 ## 2026-10-29 checkpoint — historical source-bound evidence
 

@@ -222,7 +222,6 @@ struct DirectState {
 /// One node-local, journal-charged CPU execution lane. Every source joins an
 /// exact obligation in this domain; no request can mint its own CPU allowance.
 pub(super) struct DirectReadDomain {
-    preparation: OwnedPreparation,
     obligation_id: Uuid,
     member: Uuid,
     domain_id: Uuid,
@@ -254,6 +253,9 @@ impl DirectReadDomainReady {
     }
 }
 struct DomainState {
+    // The original shared-bundle selector moves out only for synchronous final
+    // consumption. None before forgotten means another finalizer is busy.
+    preparation: Option<OwnedPreparation>,
     members: [Option<Uuid>; 64],
     closing: bool,
     settled: bool,
@@ -347,7 +349,8 @@ impl Drop for DirectSourceApplicationLease {
 }
 pub struct DirectSourceRetirementTicket {
     runtime: Arc<NodeResourceRuntime>,
-    preparation: OwnedPreparation,
+    preparation: Option<OwnedPreparation>,
+    domain_finalizer: Option<OwnedPreparation>,
     member: Uuid,
     role_index: usize,
     domain: Arc<DirectReadDomain>,
@@ -754,12 +757,12 @@ impl NodeResourceRuntime {
             };
             let obligation_id = self.prepared_typed_obligation_id(&preparation, 0)?;
             let domain = Arc::new(DirectReadDomain {
-                preparation: preparation.clone(),
                 obligation_id,
                 member: domain_member.uuid(),
                 domain_id: domain_id.uuid(),
                 semaphore: Arc::new(Semaphore::new(1)),
                 state: Mutex::new(DomainState {
+                    preparation: Some(preparation.clone()),
                     members: [None; 64],
                     closing: false,
                     settled: false,
@@ -1196,7 +1199,8 @@ impl DirectSourceOwner {
         }
         Ok(DirectSourceRetirementTicket {
             runtime: Arc::clone(&self.runtime),
-            preparation: self.preparation.clone(),
+            preparation: Some(self.preparation.clone()),
+            domain_finalizer: None,
             member: self.member,
             role_index: self.role_index,
             domain: Arc::clone(&self.domain),
@@ -1212,6 +1216,7 @@ impl DirectSourceRetirementTicket {
     pub async fn finish_retirement(&mut self, deadline: Instant) -> Result<(), DirectSourceError> {
         let _finish = self.inner.finish_gate.lock().await;
         if self.inner.state.lock().map_err(|_| invalid())?.settled {
+            self.preparation = None;
             return Ok(());
         }
         if !self
@@ -1249,7 +1254,12 @@ impl DirectSourceRetirementTicket {
             .source_settled
         {
             self.runtime
-                .settle_direct_source(&self.preparation, self.role_index, self.member, deadline)
+                .settle_direct_source(
+                    self.preparation.as_ref().ok_or_else(invalid)?,
+                    self.role_index,
+                    self.member,
+                    deadline,
+                )
                 .await?;
             self.inner
                 .state
@@ -1263,32 +1273,49 @@ impl DirectSourceRetirementTicket {
                 .direct_read_domain
                 .lock()
                 .map_err(|_| invalid())?;
-            let current = registry.as_ref().ok_or_else(invalid)?;
-            if !Arc::ptr_eq(current, &self.domain) {
-                return Err(invalid());
-            }
             let mut state = self.domain.state.lock().map_err(|_| invalid())?;
-            if let Some(slot) = state
-                .members
-                .iter_mut()
-                .find(|entry| **entry == Some(self.member))
-            {
-                *slot = None;
-            } else if !state.closing {
-                return Err(invalid());
-            }
-            if state.members.iter().all(Option::is_none) {
-                state.closing = true;
-                self.domain.semaphore.close();
-                true
-            } else {
+            if state.forgotten {
+                // Another retired member can finish the domain while this
+                // source still retains a busy original bundle selector.
                 false
+            } else {
+                let current = registry.as_ref().ok_or_else(invalid)?;
+                if !Arc::ptr_eq(current, &self.domain) {
+                    return Err(invalid());
+                }
+                if let Some(slot) = state
+                    .members
+                    .iter_mut()
+                    .find(|entry| **entry == Some(self.member))
+                {
+                    *slot = None;
+                } else if !state.closing {
+                    return Err(invalid());
+                }
+                if state.members.iter().all(Option::is_none) {
+                    state.closing = true;
+                    self.domain.semaphore.close();
+                    true
+                } else {
+                    false
+                }
             }
         };
         if last && !self.domain.state.lock().map_err(|_| invalid())?.settled {
+            // Only a temporary borrow clone crosses the journal await. The
+            // original remains in DomainState on every cancelled waiter.
+            let preparation = self
+                .domain
+                .state
+                .lock()
+                .map_err(|_| invalid())?
+                .preparation
+                .as_ref()
+                .ok_or_else(invalid)?
+                .clone();
             self.runtime
                 .settle_direct_read_domain(
-                    &self.domain.preparation,
+                    &preparation,
                     self.domain.member,
                     self.domain.domain_id,
                     DirectReadDomainReady {
@@ -1297,6 +1324,7 @@ impl DirectSourceRetirementTicket {
                     deadline,
                 )
                 .await?;
+            drop(preparation);
             self.domain.state.lock().map_err(|_| invalid())?.settled = true;
         }
         if self.role_index == 0
@@ -1308,18 +1336,35 @@ impl DirectSourceRetirementTicket {
                 .source_forgotten
         {
             self.runtime
-                .forget_preparation(self.preparation.clone())
-                .await?;
+                .try_forget_preparation_owned(&mut self.preparation)?;
             self.inner
                 .state
                 .lock()
                 .map_err(|_| invalid())?
                 .source_forgotten = true;
+        } else if self.role_index != 0 {
+            // The first source shares the domain's complete bundle. Keep its
+            // original in DomainState, not a permanent second ticket alias.
+            self.preparation = None;
         }
         if last && !self.domain.state.lock().map_err(|_| invalid())?.forgotten {
-            self.runtime
-                .forget_preparation(self.domain.preparation.clone())
-                .await?;
+            {
+                let mut state = self.domain.state.lock().map_err(|_| invalid())?;
+                // None is busy, never absence. No mutex or await crosses the
+                // census mutation after taking this exact original selector.
+                self.domain_finalizer = Some(state.preparation.take().ok_or_else(invalid)?);
+            }
+            if let Err(error) = self
+                .runtime
+                .try_forget_preparation_owned(&mut self.domain_finalizer)
+            {
+                let mut state = self.domain.state.lock().map_err(|_| invalid())?;
+                if state.preparation.is_some() || state.forgotten {
+                    return Err(invalid());
+                }
+                state.preparation = self.domain_finalizer.take();
+                return Err(error.into());
+            }
             self.domain.state.lock().map_err(|_| invalid())?.forgotten = true;
             let mut registry = self
                 .runtime

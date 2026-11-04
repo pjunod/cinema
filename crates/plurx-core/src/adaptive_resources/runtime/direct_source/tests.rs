@@ -92,6 +92,15 @@ async fn actual_direct_owners_share_one_cpu_domain_until_last_known_close_and_ap
         1_000_000_000
     );
     assert_eq!(runtime.accounting().expect("held").used.handles, 2);
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        3
+    );
     first_owner
         .open(deadline())
         .await
@@ -150,6 +159,17 @@ async fn actual_direct_owners_share_one_cpu_domain_until_last_known_close_and_ap
         runtime.accounting().expect("app still held").used.handles,
         2
     );
+
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        3,
+        "the application lease blocks final census removal"
+    );
     drop(first_app);
     first_ticket
         .finish_retirement(deadline())
@@ -164,6 +184,16 @@ async fn actual_direct_owners_share_one_cpu_domain_until_last_known_close_and_ap
         1_000_000_000
     );
     assert_eq!(runtime.accounting().expect("second source").used.handles, 1);
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        3,
+        "the first source's shared bundle remains under the original domain selector"
+    );
     let mut second_ticket = second_owner
         .prepare_retirement(deadline())
         .await
@@ -181,6 +211,16 @@ async fn actual_direct_owners_share_one_cpu_domain_until_last_known_close_and_ap
     assert_eq!(
         runtime.accounting().expect("all refunded").used,
         ResourceVector::default()
+    );
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        0,
+        "only actual final rich-bundle closure retires the census owners"
     );
 }
 
@@ -227,6 +267,16 @@ async fn cancelled_waiter_keeps_original_read_job_and_full_chunk_credit_until_jo
         .await
         .is_err());
     assert_eq!(runtime.accounting().expect("no refund").used.handles, 1);
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        2,
+        "the cancelled original read still retains source and domain owners"
+    );
     gate.release();
     let mut ticket = owner
         .prepare_retirement(deadline())
@@ -243,6 +293,16 @@ async fn cancelled_waiter_keeps_original_read_job_and_full_chunk_credit_until_jo
     assert_eq!(
         runtime.accounting().expect("all refunded").used,
         ResourceVector::default()
+    );
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        0,
+        "only actual final rich-bundle closure retires the census owners"
     );
 }
 
@@ -296,6 +356,16 @@ async fn one_byte_chunks_consume_full_configured_slot_cardinality() {
     assert_eq!(
         runtime.accounting().expect("all refunded").used,
         ResourceVector::default()
+    );
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        0,
+        "only actual final rich-bundle closure retires the census owners"
     );
 }
 
@@ -466,5 +536,150 @@ async fn expired_invalid_and_overflow_direct_requests_are_before_reservation() {
     assert!(
         !DirectSourceError(OperationError::State).definitely_before_reservation(),
         "generic post-reservation state remains uncertain"
+    );
+}
+
+#[tokio::test]
+async fn last_shared_domain_restores_original_selector_after_busy_finalization() {
+    let root = tempfile::tempdir().expect("actual isolated journal");
+    let path = root.path().join("busy-domain.bin");
+    std::fs::write(&path, b"original").unwrap();
+    let runtime = actual_runtime(root.path());
+    let (owner, app) = runtime
+        .prepare_direct_source(local_request(path, 21, 1), deadline())
+        .unwrap();
+    owner.open(deadline()).await.unwrap();
+    let original = owner.preparation.clone();
+    let identities: Vec<_> = runtime
+        .affected_owner_inventory()
+        .snapshot()
+        .unwrap()
+        .records()
+        .map(|record| record.identity)
+        .collect();
+    assert_eq!(identities.len(), 2);
+    let mut ticket = owner.prepare_retirement(deadline()).await.unwrap();
+    drop(owner);
+    drop(app);
+    assert!(
+        ticket.finish_retirement(deadline()).await.is_err(),
+        "the actual rich shared bundle still has its original selector alias"
+    );
+    assert!(
+        ticket.domain.state.lock().unwrap().preparation.is_some(),
+        "busy finalization restores the same domain selector before returning"
+    );
+    assert!(ticket.domain_finalizer.is_none());
+    assert_eq!(
+        runtime.accounting().unwrap().used,
+        ResourceVector::default()
+    );
+    let held = runtime.affected_owner_inventory().snapshot().unwrap();
+    assert_eq!(
+        held.records()
+            .map(|record| record.identity)
+            .collect::<Vec<_>>(),
+        identities
+    );
+    assert!(held.records().all(|record| record.phase
+        == crate::adaptive_resources::owner_inventory::OwnerPhase::UnknownHeld));
+    drop(original);
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("retry consumes the original unaliased bundle");
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        0
+    );
+    assert!(runtime.direct_read_domain.lock().unwrap().is_none());
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("known retirement remains idempotent");
+}
+
+#[tokio::test]
+async fn source_retry_finishes_after_other_member_finalizes_shared_domain() {
+    let root = tempfile::tempdir().expect("actual isolated journal");
+    let first = root.path().join("first-last.bin");
+    let second = root.path().join("second-busy.bin");
+    std::fs::write(&first, b"first").unwrap();
+    std::fs::write(&second, b"second").unwrap();
+    let runtime = actual_runtime(root.path());
+    let (first_owner, first_app) = runtime
+        .prepare_direct_source(local_request(first, 22, 1), deadline())
+        .unwrap();
+    let (second_owner, second_app) = runtime
+        .prepare_direct_source(local_request(second, 23, 1), deadline())
+        .unwrap();
+    first_owner.open(deadline()).await.unwrap();
+    second_owner.open(deadline()).await.unwrap();
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        3
+    );
+    let second_alias = second_owner.preparation.clone();
+    let mut second_ticket = second_owner.prepare_retirement(deadline()).await.unwrap();
+    drop(second_owner);
+    drop(second_app);
+    assert!(
+        second_ticket.finish_retirement(deadline()).await.is_err(),
+        "independent source remains retained after its member leaves the domain"
+    );
+    assert!(
+        second_ticket.preparation.is_some(),
+        "same source selector survives busy retirement"
+    );
+    let mut first_ticket = first_owner.prepare_retirement(deadline()).await.unwrap();
+    drop(first_owner);
+    drop(first_app);
+    first_ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("first source is last domain member in reverse closing order");
+    assert!(runtime.direct_read_domain.lock().unwrap().is_none());
+    assert!(second_ticket.domain.state.lock().unwrap().forgotten);
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        1,
+        "the other member's live rich bundle alias is still in the census"
+    );
+    assert!(
+        second_ticket.finish_retirement(deadline()).await.is_err(),
+        "known domain closure cannot close the independent remaining bundle"
+    );
+    drop(second_alias);
+    second_ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("original source retries after explicit domain completion");
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .unwrap()
+            .records()
+            .count(),
+        0
+    );
+    assert_eq!(
+        runtime.accounting().unwrap().used,
+        ResourceVector::default()
     );
 }

@@ -89,6 +89,9 @@ impl NodeResourceRuntime {
             // No original create cutoff survives a restart; local deadlines still apply.
             continuous_entry_deadline: None,
             binding,
+            inventory: None,
+            pending_inventory_close: None,
+            native_never_acquired: None,
             durable_tag: id,
             members: Vec::new(),
             typed_members: Some(manifest.members),
@@ -144,35 +147,49 @@ impl NodeResourceRuntime {
             installed: false,
             roles: vec![role],
         };
-        let state = {
-            let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
-            if let Some(existing) = book.bundles.get(&id) {
-                let bound = book.bindings.get(&binding).ok_or(OperationError::State)?;
-                if bound.obligation_id() != id
-                    || bound.graph_id() != handle.graph_id()
-                    || bound.recovery_authority().is_none_or(|saved| {
-                        saved.binding() != binding
-                            || saved.adoption_operation_id() != authority.adoption_operation_id()
-                            || saved.current_owner_id() != authority.current_owner_id()
-                    })
-                {
-                    return Err(OperationError::State);
+        let state = self
+            .affected_owners
+            .with_runtime_mutation(|_inventory| {
+                let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
+                if let Some(existing) = book.bundles.get(&id) {
+                    let bound = book.bindings.get(&binding).ok_or(OperationError::State)?;
+                    if bound.obligation_id() != id
+                        || bound.graph_id() != handle.graph_id()
+                        || bound.recovery_authority().is_none_or(|saved| {
+                            saved.binding() != binding
+                                || saved.adoption_operation_id()
+                                    != authority.adoption_operation_id()
+                                || saved.current_owner_id() != authority.current_owner_id()
+                        })
+                    {
+                        return Err(OperationError::State);
+                    }
+                    Ok(existing.clone())
+                } else {
+                    if book.draining
+                        || book.bindings.contains_key(&binding)
+                        || ledger_state != ReservationState::UnknownHeld
+                        || resources.peak_memory_bytes == 0
+                    {
+                        return Err(OperationError::State);
+                    }
+                    let mut bundle = bundle;
+                    // Take only for a new placeholder. A retry selects the owner
+                    // already in the book and never drops a replacement token.
+                    let inventory = self
+                        .recovered_inventory
+                        .lock()
+                        .map_err(|_| OperationError::State)?
+                        .remove(&id)
+                        .ok_or(OperationError::State)?;
+                    bundle.roles[0].inventory = Some(inventory);
+                    let state = Arc::new(AsyncMutex::new(bundle));
+                    book.bindings.insert(binding, handle.clone());
+                    book.bundles.insert(id, state.clone());
+                    Ok(state)
                 }
-                existing.clone()
-            } else {
-                if book.draining
-                    || book.bindings.contains_key(&binding)
-                    || ledger_state != ReservationState::UnknownHeld
-                    || resources.peak_memory_bytes == 0
-                {
-                    return Err(OperationError::State);
-                }
-                let state = Arc::new(AsyncMutex::new(bundle));
-                book.bindings.insert(binding, handle.clone());
-                book.bundles.insert(id, state.clone());
-                state
-            }
-        };
+            })
+            .map_err(|_| OperationError::State)??;
         let owner = OwnedPreparation {
             ledger: self.ledger.id,
             id,
@@ -185,6 +202,7 @@ impl NodeResourceRuntime {
         let installed = bundle.installed;
         let role = bundle.roles.get_mut(0).ok_or(OperationError::State)?;
         if role.binding != binding
+            || role.inventory.is_none()
             || role.durable_tag != id
             || role.handle.as_ref().is_none_or(|held| {
                 held.obligation_id() != id

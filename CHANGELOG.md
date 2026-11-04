@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Adaptive playback keeps selected work in its owner inventory through cleanup,
+  recovery and producer-to-retained-output transfer.
+
 - Adaptive VOD preparation retains its original driver through adoption and
   cancellation, and keeps resource charges when that task cannot be joined.
 
