@@ -26,10 +26,12 @@ does not establish a separate compilation boundary. A changed shared API may
 still invalidate dependents, and the final executable still links. Release
 Thin LTO is retained; no universal rebuild-speed promise is made.
 
-The runtime prerequisite is commit `f30dfbbc9`: native SQLite selection,
+The runtime prerequisite began at `f30dfbbc9`: native SQLite selection,
 verified singleton conversion, native backup/restore and explicit promotion.
-It has focused source evidence but is not yet merged or release qualified.
-Land it through its own reviewed task PR and gate before dependent task merges.
+Reviewed corrections at `5484d7986` passed effort gate 6468 and merged through
+PR #1379 into `effort/standalone-sqlite` as `fa5ed825a`. Dependent task branches
+include that actual effort base before their own gates. Release qualification
+and the final Hiqlite-free build remain open.
 
 ## 2. Contracts — package boundaries cannot change data or authority
 
