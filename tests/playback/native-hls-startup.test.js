@@ -842,6 +842,10 @@ function nativeObservationSurface(h,{pendingSeek=false}={}){
 test('native observation deadline leaves advancing transport running with a nonblocking explicit notice',async()=>{
  const h=await readyNativeHarness(),o=nativeObservationSurface(h,{pendingSeek:true});
  const originalSeek=h.player.controlSeek,deadline=h.player.hlsStartup.deadlineMs,requests=h.requests.length;
+ const surfaceEvents=[];h.ctx.recordPlaybackSurfaceLog=entry=>surfaceEvents.push(entry);
+ assert.deepEqual(Array.from(o.state.faults,fault=>[fault.source,fault.intent]),
+  [['client_preparing',originalSeek.sequence],['media_waiting',null]],
+  'preparation belongs to the destination while the wait belongs to attached media');
  while(h.ctx.performance.now()<deadline)o.progress();
  await flush();
  assert.equal(h.player.hlsStartup.state,'observation_unavailable');
@@ -853,6 +857,13 @@ test('native observation deadline leaves advancing transport running with a nonb
  assert.deepEqual(Array.from(o.surface.actions),['retry','close']);
  assert.equal(o.surface.input_failed,false);
  assert.equal(o.state.faults.length,1,'the exact owned observational progress faults were withdrawn');
+ assert.deepEqual(surfaceEvents.filter(entry=>entry.event==='surface_cleared')
+  .map(entry=>[entry.source,entry.intent,entry.by]).sort((a,b)=>a[0].localeCompare(b[0])),
+  [['client_preparing',originalSeek.sequence,'observation_unavailable'],
+   ['media_waiting',null,'observation_unavailable']],
+  'the observation owner explicitly withdraws both exact scopes without settling the seek');
+ assert.equal(originalSeek.targetFrame,undefined,'independent decode and clock progress supplies no target-frame proof');
+ assert.equal(h.video.paused,false);assert.ok(h.video.currentTime>0,'transport keeps advancing');
  assert.equal(o.pauses,0);assert.equal(o.settlements,0);assert.equal(o.recoveries,0);
  assert.equal(h.stops.length,0);assert.equal(h.diagnoses.length,0);assert.equal(h.sources.length,1);assert.equal(h.requests.length,requests);
  const logCount=h.logs.filter(row=>row.detail==='observation_unavailable_deadline').length;

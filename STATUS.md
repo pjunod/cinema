@@ -2,6 +2,10 @@
 
 **Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
+
+## 2026-11-03 · Playback publication and Resume overlay
+
+Codex/root is repairing initial playlist consumption accounting and destination-owned web wait retirement. [Live implementation, review and merge status](docs/streaming/PLAYBACK-PUBLICATION-OVERLAY-STATUS.md).
 - **2026-11-03 · Enhanced playback preparation and web recovery:** [incident and acceptance ledger](docs/streaming/HDR10E-PREPARATION-AND-WEB-RECOVERY.md). Owner Codex; branch `codex/m6-hdr10e-preparation`. Bounded owned-source read-ahead and cache inventory overlap retain all checks. Balanced 32-window controls pass: reader waits average 1.60 s, maximum 1.76 s for two-second media. Partial rewatch resume passes. Current-main integration, compiler/CLI gates and live acceptance remain open; its schema upgrade prevents old-image rollback after activation. No deployment.
 - **2026-11-02 · Playback startup, Resume and native callbacks:** Owner Codex/root; [delivery ledger](docs/streaming/PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md). Astra closed all seven source findings; narrow test-phase corrections are recorded in the delivery ledger. All 86 focused Rust cases pass with successful cases retained and failures retried only. C controls, Apple (1) and Android (10) tests pass on matching inputs. Pinned compiler checks pass. [PR #1366](http://forge.lan:3000/noirr/plurx/pulls/1366) records the live main-lane checks and landing. The maintainer owns deployment; runtime cold-start acceptance remains open.
 

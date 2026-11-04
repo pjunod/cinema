@@ -657,6 +657,127 @@
         assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
     }
 
+    #[tokio::test]
+    async fn rolling_production_bootstrap_does_not_charge_unpublished_time_or_seek_lead() {
+        for explicit in [false, true] {
+            let directory = crate::test_tempdir().expect("fixed first publication");
+            let mut session = test_session(directory.path().to_path_buf());
+            session.start_seconds = 2_000.0;
+            session.media_origin_seconds = 1_999.258;
+            session
+                .publication
+                .lock()
+                .await
+                .bind_startup_transport(Some("native"));
+            if explicit {
+                accept_rolling_publication_demand(
+                    &session,
+                    1,
+                    2_000_000,
+                    1.0,
+                    crate::playback_control::PlaybackDemand::Active,
+                    crate::playback_control::RenderState::Rendering,
+                )
+                .await;
+            }
+            let started = Instant::now();
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&[2.002; 8], false),
+            )
+            .await
+            .expect("sixteen seconds before requested position");
+            session
+                .publication_cycle_at("fixed-first-frontier", started)
+                .await
+                .expect("stage short prefix");
+            assert!(
+                session.publication.lock().await.served.is_none(),
+                "seek pullback cannot pay the requested position's reload window"
+            );
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&[2.002; 9], false),
+            )
+            .await
+            .expect("complete post-position reload coverage");
+            session
+                .publication_cycle_at("fixed-first-frontier", started + Duration::from_secs(7))
+                .await
+                .expect("publish without fictitious consumption");
+            let clock = session.publication.lock().await;
+            let served = clock
+                .served
+                .as_ref()
+                .expect("unpublished elapsed time cannot move the first frontier");
+            assert_eq!(served.end_ms, 18_018);
+            assert!(served.end_ms - 742 >= 16_000);
+            assert!(String::from_utf8_lossy(&served.raw).contains("#EXT-X-TARGETDURATION:16"));
+            assert_eq!(
+                clock.reserve_phase,
+                RollingReservePhase::AwaitingPresentation
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_explicit_publication_ages_only_after_actual_presentation() {
+        let directory = crate::test_tempdir().expect("presentation clock");
+        let mut session = test_session(directory.path().to_path_buf());
+        session.start_seconds = 2_000.0;
+        session.media_origin_seconds = 1_999.258;
+        session
+            .publication
+            .lock()
+            .await
+            .bind_startup_transport(Some("native"));
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            2_000_000,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Rendering,
+        )
+        .await;
+        let mut lease = session.control.snapshot().await.expect("explicit lease");
+        lease.demand_observation_age = Some(Duration::from_secs(7));
+        let attempt = session.control.current_producer_attempt();
+        let now = Instant::now();
+        {
+            let mut clock = session.publication.lock().await;
+            clock.reset_for_attempt(attempt);
+            let budget = clock.publication_budget_at(now, attempt, Some(&lease), 1_999_258, 2_000_000);
+            assert_eq!(
+                budget.consumed_end_ms, 742,
+                "pre-attach Rendering cannot spend unpublished time"
+            );
+        }
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[2.002; 9], false),
+        )
+        .await
+        .expect("first prefix");
+        session
+            .publication_cycle("presentation-clock")
+            .await
+            .expect("publish first prefix");
+        let mut clock = session.publication.lock().await;
+        assert!(clock.served.is_some());
+        let budget = clock.publication_budget_at(now, attempt, Some(&lease), 1_999_258, 2_000_000);
+        assert_eq!(
+            budget.consumed_end_ms, 742,
+            "availability alone is not presentation"
+        );
+        lease.startup.phase = crate::playback_control::RollingStartupPhase::Presented;
+        let budget = clock.publication_budget_at(now, attempt, Some(&lease), 1_999_258, 2_000_000);
+        assert_eq!(
+            budget.consumed_end_ms, 7_742,
+            "accepted presentation owns its subsequent observation age"
+        );
+    }
+
     #[test]
     fn rolling_web_bootstrap_policy_is_frozen_and_rate_bounded() {
         let mut clock = RollingPublicationClock::default();
@@ -1332,7 +1453,7 @@
         session
             .publication_cycle_at(
                 "rolling_publication_budget_legacy",
-                started + ROLLING_PUBLICATION_TARGET,
+                session.control.snapshot().await.expect("delivered lease").delivery.first_media_committed_at.expect("first body commit") + ROLLING_PUBLICATION_TARGET,
             )
             .await
             .expect("bounded legacy publication");
@@ -1392,7 +1513,7 @@
         session
             .publication_cycle_at(
                 "rolling_publication_budget_legacy_variable",
-                started + ROLLING_PUBLICATION_TARGET,
+                session.control.snapshot().await.expect("delivered lease").delivery.first_media_committed_at.expect("first body commit") + ROLLING_PUBLICATION_TARGET,
             )
             .await
             .expect("paced legacy publication");
@@ -1478,7 +1599,10 @@
     #[tokio::test]
     async fn rolling_publication_budget_eof_keeps_the_slow_viewers_protected_tail() {
         let directory = crate::test_tempdir().expect("EOF publication budget");
-        let session = test_session(directory.path().to_path_buf());
+        let mut session = test_session(directory.path().to_path_buf());
+        // The first snapshot is for this requested Resume. Prepublication
+        // Rendering telemetry alone cannot establish a different playhead.
+        session.start_seconds = 360.0;
         accept_rolling_publication_demand(
             &session,
             1,
@@ -1527,11 +1651,11 @@
         min_late_runway_ms: i64,
         /// Largest produced lead over the viewer once playback began.
         max_produced_lead_ms: i64,
-        /// Largest `produced end - allowed_end_ms` seen on any poll.
-        max_produced_over_allowed_ms: i64,
-        /// Polls on which a producer with a whole staged batch was released
-        /// at or beyond the clock's `allowed_end_ms`.
-        releases_beyond_allowance: Vec<(i64, i64, i64)>,
+        /// Advertised media may never spend the private source-read bank.
+        max_published_over_allowed_ms: i64,
+        /// Polls releasing a fully staged producer past its private bank,
+        /// including the one complete-cut envelope.
+        releases_beyond_private_bank: Vec<(i64, i64, i64)>,
         /// Polls on which the flow controller held the producer.
         held_polls: usize,
     }
@@ -1543,6 +1667,23 @@
                 .filter(|(at, media)| *at > wall_ms && *media <= 2_000)
                 .count()
         }
+    }
+
+    fn rolling_test_private_bank_ceiling_ms(rate: f64) -> i64 {
+        let high = rolling_source_watermarks(rate).1 as i64;
+        let guard = ((ROLLING_PUBLICATION_GUARD_MS as f64) * rate).ceil() as i64;
+        // At 1x: 80s private bank + 10s exchange guard + one 2s cut.
+        // At 2x: the reserve ceiling caps it at 124s + one 2s cut.
+        high.saturating_add(guard).min(ROLLING_RESERVE_MAX_MS).saturating_add(2_000)
+    }
+
+    fn assert_rolling_test_frontiers(run: &HeldRollingProducerRun, rate: f64) {
+        assert!(run.max_published_over_allowed_ms <= 0,
+            "private media escaped the advertised allowance: {run:?}");
+        assert!(run.max_produced_lead_ms <= rolling_test_private_bank_ceiling_ms(rate),
+            "physical production escaped its bounded private bank: {run:?}");
+        assert!(run.releases_beyond_private_bank.is_empty(),
+            "producer released beyond its private bank: {run:?}");
     }
 
     /// Drive the rolling publication clock and the flow controller together,
@@ -1571,6 +1712,9 @@
         const SEGMENT_MS: i64 = 2_000;
         let directory = crate::test_tempdir().expect("held rolling producer");
         let session = test_session(directory.path().to_path_buf());
+        session.control.bind_response_publication_contract(
+            "held-rolling-presentation".to_owned(), Arc::clone(&session.failed),
+        ).await.expect("bind simulated presentation");
         let poll_ms = i64::try_from(poll.as_millis()).expect("poll");
         let consumed_per_poll_ms = ((poll_ms as f64) * playback_rate).round() as i64;
         let exchange_ms = i64::from(crate::playback_control::NEXT_EXCHANGE_MS);
@@ -1579,7 +1723,7 @@
         let mut run = HeldRollingProducerRun {
             min_runway_ms: i64::MAX,
             min_late_runway_ms: i64::MAX,
-            max_produced_over_allowed_ms: i64::MIN,
+            max_published_over_allowed_ms: i64::MIN,
             ..HeldRollingProducerRun::default()
         };
         let mut segments = 0_usize;
@@ -1689,6 +1833,15 @@
                 }
             }
             if published.is_some() && !playing {
+                // The simulated viewer actually receives the video playlist.
+                // Subsequent advancing reports must pass the same actor
+                // admission as production before either clock extrapolates.
+                session.control.authorize_response_publication(
+                    crate::playback_control::RollingResponsePublication::attempt_media(
+                        crate::playback_control::RollingResponseObject::VideoMediaPlaylist,
+                        session.control.current_producer_attempt(), None,
+                    ), None, now + Duration::from_secs(1),
+                ).await.expect("simulated video playlist response");
                 playing = true;
             }
             served_end_ms = published;
@@ -1703,10 +1856,9 @@
                     .max_produced_lead_ms
                     .max(produced_end_ms.saturating_sub(position_ms));
             }
-            if let Some(allowed_end_ms) = allowed_end_ms {
-                run.max_produced_over_allowed_ms = run
-                    .max_produced_over_allowed_ms
-                    .max(produced_end_ms.saturating_sub(allowed_end_ms));
+            if let (Some(published), Some(allowed_end_ms)) = (published, allowed_end_ms) {
+                run.max_published_over_allowed_ms = run.max_published_over_allowed_ms
+                    .max(published.saturating_sub(allowed_end_ms));
             }
 
             // The flow controller, fed exactly as `apply_ahead_window` feeds
@@ -1723,7 +1875,7 @@
                 physical_ahead: None,
                 produced_end_ms: (segments > 0).then_some(produced_end_ms),
                 staged_publication_seconds,
-                startup_protected: false,
+                startup_protected: lease.startup.protects_from_time_hold(),
                 media_origin_ms: 0,
                 lease_mode: lease.mode,
                 demand: lease.demand.as_ref(),
@@ -1741,15 +1893,14 @@
             held = evaluation.hold.is_some();
             if held {
                 run.held_polls += 1;
-            } else if let (Some(staged), Some(allowed_end_ms)) =
-                (staged_publication_seconds, allowed_end_ms)
-            {
-                // A whole batch is staged, so only the next-publication rule
-                // can have released this producer; it must stop inside the
-                // clock's own allowance.
-                if staged.saturating_mul(1_000) >= batch_ms && produced_end_ms >= allowed_end_ms {
-                    run.releases_beyond_allowance
-                        .push((elapsed_ms, produced_end_ms, allowed_end_ms));
+            } else if let Some(staged) = staged_publication_seconds {
+                // The private source bank amortizes physical reads; it is
+                // intentionally distinct from the advertised allowance.
+                let private_end_ms = position_ms.saturating_add(
+                    rolling_test_private_bank_ceiling_ms(playback_rate));
+                if !lease.startup.protects_from_time_hold()
+                    && staged.saturating_mul(1_000) >= batch_ms && produced_end_ms > private_end_ms {
+                    run.releases_beyond_private_bank.push((elapsed_ms, produced_end_ms, private_end_ms));
                 }
             }
 
@@ -1798,11 +1949,7 @@
             "the published runway must not drain: {run:?}"
         );
         assert!(run.held_polls > 0, "the producer is still paced: {run:?}");
-        assert!(run.releases_beyond_allowance.is_empty(), "{run:?}");
-        assert!(
-            run.max_produced_over_allowed_ms <= 2_000,
-            "produced media stays within one segment of allowed_end_ms: {run:?}"
-        );
+        assert_rolling_test_frontiers(&run, 1.0);
     }
 
     /// A realistic producer only 10% faster than playback. It reaches the
@@ -1812,8 +1959,8 @@
     /// must not happen is the permanent trap. The thresholds are therefore:
     /// no stall, at most that one short cycle and none after the first
     /// minute, a runway never below one batch, recovered in the final third
-    /// to within one batch and one guard of the initial runway, and produced
-    /// media within one segment of `allowed_end_ms`.
+    /// to within one batch and one guard of the initial runway, with separate
+    /// bounds for advertised media and the private physical-read bank.
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_barely_faster_producer_recovers_from_late_cycles() {
         let wall = Duration::from_secs(600);
@@ -1838,20 +1985,11 @@
                 >= ROLLING_INITIAL_RUNWAY_MS - ROLLING_SEGMENT_MAX_MS - ROLLING_PUBLICATION_GUARD_MS,
             "runway recovers: {run:?}"
         );
-        assert!(run.releases_beyond_allowance.is_empty(), "{run:?}");
-        assert!(run.max_produced_over_allowed_ms <= 2_000, "{run:?}");
+        assert_rolling_test_frontiers(&run, 1.0);
     }
 
-    /// At 2x playback the next-publication release is capped at the clock's
-    /// `allowed_end_ms`: its guard scales with rate, the allowance's rounding
-    /// segment does not. The producer must never be released with a whole
-    /// batch staged at or beyond that allowance.
-    ///
-    /// Produced media can still pass `allowed_end_ms` here, through the
-    /// pre-existing one-batch staging rule rather than this release: at 2x a
-    /// batch is 32 s past the published end while the allowance rounds by an
-    /// unscaled 16 s. That excess is bounded by the difference plus one
-    /// segment (measured 6 s) and is asserted as such.
+    /// At 2x, the private bank is capped by the physical reserve ceiling.
+    /// Advertisement remains limited by the separate publication allowance.
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_double_rate_release_stays_inside_the_allowance() {
         let run = simulate_held_rolling_producer(
@@ -1864,15 +2002,7 @@
         .await;
         assert_eq!(run.stalled_ms, 0, "{run:?}");
         assert_eq!(run.single_segment_batches_after(0), 0, "{run:?}");
-        assert!(
-            run.releases_beyond_allowance.is_empty(),
-            "released beyond allowed_end_ms: {run:?}"
-        );
-        assert!(
-            run.max_produced_over_allowed_ms
-                <= rolling_publication_batch_ms(2.0) - ROLLING_SEGMENT_MAX_MS + 2_000,
-            "{run:?}"
-        );
+        assert_rolling_test_frontiers(&run, 2.0);
         assert!(
             run.min_runway_ms >= rolling_initial_runway_ms(2.0) - rolling_publication_batch_ms(2.0),
             "{run:?}"
@@ -1906,11 +2036,7 @@
             run.held_polls * 3 >= run.batches.len() * 16,
             "the producer spends a real part of each cycle time-held: {run:?}"
         );
-        assert!(
-            run.max_produced_lead_ms <= ROLLING_INITIAL_RUNWAY_MS + 2 * ROLLING_SEGMENT_MAX_MS,
-            "produced inventory stays inside the publication allowance plus one batch: {run:?}"
-        );
-        assert!(run.max_produced_over_allowed_ms <= 2_000, "{run:?}");
+        assert_rolling_test_frontiers(&run, 1.0);
     }
 
     /// The next-publication release target is the clock's own desired end

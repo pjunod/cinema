@@ -254,10 +254,8 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
   const pending=p&&p.controlSeek;
   const targetMs=Math.max(0,Math.round(Number(targetSec||0)*1000));
   if(!pending||pending.targetMs!==targetMs) return false;
-  // The destination landed. A fault that was about it is retired by this and
-  // by nothing else — evidence about the picture never speaks for a pending
-  // request (contract §3.4).
-  playbackSurfaceStep({intent_settled:pending.sequence});
+  // Assignment starts destination observation. It is not settlement: waiting
+  // can arrive after this edge, before the destination has presented a frame.
   pending.executed=true;
   if(pending.captionViewerSeek&&typeof translationPlaybackSeek==="function")translationPlaybackSeek(p,pending);
   pending.executedAt=performance.now();
@@ -536,6 +534,9 @@ function settlePlaybackControlSeek(v,p,presentedMediaTime,presentedFrameSequence
   pending.localVodSeekCleanup?.();
   finishPlaybackSeekTelemetry(p,pending,provenance==="positioned"?"seek_positioned":"seek_resumed");
   p.controlSeek=null;
+  // Only the proven destination (or explicit paused positioning above) ends
+  // this intent. Predecessor movement and currentTime assignment cannot.
+  playbackSurfaceStep({intent_settled:pending.sequence});
   pending.pausedStartupCleanup?.(provenance!=="positioned",false,provenance==="positioned");
   notifyPlaybackControl();
   return true;
@@ -915,17 +916,25 @@ function wirePlayerMedia(v){
   // decided when playback resumes, because that is the first moment its
   // duration is known. See beginWait/endWait.
   v.addEventListener("waiting",()=>{
-    if(!playbackOwnsAttachedMedia(PLAYER)) return;
+    const p=PLAYER;
+    if(!playbackOwnsAttachedMedia(p)||document.getElementById("video")!==v
+      ||v.paused||p.wantsPlayback===false) return;
     const action=PlaybackPolicy.waitingOverlayAction({
-      started:PLAYER.started, promptUp:playbackSurfacePromptUp()
+      started:p.started, promptUp:playbackSurfacePromptUp()
     });
     if(action!=='buffer') return;
     beginWait(v);
-    const copy=playbackWaitCopy(bufferRunway(v),PLAYER.health&&PLAYER.health.http_wait_count);
+    const copy=playbackWaitCopy(bufferRunway(v),p.health&&p.health.http_wait_count);
+    // A wait for an executed, still-unproven target belongs to that exact
+    // destination. Otherwise this is attached media, regardless of whether
+    // another viewer intent exists. Observation ownership does not imply it.
+    const pending=p.controlSeek;
+    const intent=pending?.executed&&pending.element===v&&pending.attachment===p.mediaAttachment
+      ?pending.sequence:null;
     // Raised the moment the wait begins and DRAWN only once it has lasted
     // `buffering_min_ms`: Safari fires `waiting` at every fMP4 boundary on
     // healthy 4K, and the undebounced repaint was §2.1's fifth defect.
-    raisePlaybackSurface("media_waiting",{context:"attached",
+    raisePlaybackSurface("media_waiting",{context:"attached",intent,
       title:copy.title,detail:copy.detail},{once:true});
     notifyPlaybackControl();
   });

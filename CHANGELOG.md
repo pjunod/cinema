@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Rolling HLS startup measures coverage from the requested position and starts
+  legacy consumption on actual media delivery. Web Resume retires destination
+  waits at proven seek completion and preserves attached-media fault ownership.
+
 - Web Local and Shared playback resume partial rewatches even when watched
   history is already recorded.
 - Enhanced DV preparation overlaps bounded source reads and optional cache
