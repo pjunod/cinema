@@ -247,6 +247,16 @@ os = "macOS"
 arch = "ARM64"
 labels = ["lab", "apple", "xcode-27", "backup", "xcode-27.2"]
 
+# Repository-scoped Forgejo signing registration, provisioned 2026-11-03.
+# The signing user's separate LaunchAgent and private config are documented
+# in docs/PUBLISHING.md. Capacity one; no general Apple CI eligibility.
+[[runners]]
+name = "gha-macb-mobile-signing-01"
+host = "macb"
+os = "macOS"
+arch = "ARM64"
+labels = ["mobile-release"]
+
 # The existing Forgejo registration is release-only: the release image's
 # arm64 leg builds natively instead of under QEMU on X64. Do not add ci-arm64
 # or backup eligibility without separately qualifying that workload here.

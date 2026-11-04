@@ -4052,9 +4052,10 @@ test("the waiting listener raises one fault per wait, not one per boundary", () 
   const handler = new PlaybackContextFunction(
     "PLAYER", "PlaybackPolicy", "playbackOwnsAttachedMedia", "playbackSurfacePromptUp",
     "beginWait", "bufferRunway", "playbackWaitCopy", "raisePlaybackSurface",
-    "notifyPlaybackControl", "v",
+    "notifyPlaybackControl", "v", "document",
     match[1],
   );
+  const video = {};
   const call = () => handler(
     { started: true, health: null }, policy, () => true, () => false, () => {}, () => 3,
     () => ({ title: "Buffering…", detail: "3.0 s client loaded" }),
@@ -4064,7 +4065,7 @@ test("the waiting listener raises one fault per wait, not one per boundary", () 
       raised.push({ source, options });
       return null;
     },
-    () => {}, {},
+    () => {}, video, {getElementById:()=>video},
   );
   call();
   call();

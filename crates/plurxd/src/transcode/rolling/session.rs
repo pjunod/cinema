@@ -962,8 +962,13 @@ impl Session {
                 clock.staged_end_ms =
                     Some(clock.staged_end_ms.map_or(end_ms, |old| old.max(end_ms)));
             }
-            let mut budget =
-                clock.publication_budget_at(now, producer_attempt, lease.as_ref(), media_origin_ms);
+            let mut budget = clock.publication_budget_at(
+                now,
+                producer_attempt,
+                lease.as_ref(),
+                media_origin_ms,
+                (self.start_seconds * 1_000.0).round() as i64,
+            );
             clock.update_reserve_phase(lease.as_ref(), &budget);
             if clock.served.is_none() {
                 // Keep steady production/allowance intact. Only first snapshot
@@ -1362,6 +1367,10 @@ impl Session {
                 startup_policy = ?clock.startup_policy,
                 bootstrap_ms = clock.startup_policy.bootstrap_ms(playback_rate),
                 consumed_end_ms = budget.consumed_end_ms,
+                demand_sequence = ?budget.demand_sequence,
+                lease_mode = ?lease.as_ref().map(|lease| lease.mode),
+                presentation_phase = ?lease.as_ref().map(|lease| lease.startup.phase),
+                media_committed = lease.as_ref().is_some_and(|lease| lease.delivery.first_media_committed_at.is_some()),
                 served_end_ms,
                 requested_position_ms = (self.start_seconds * 1_000.0).round() as i64,
                 media_origin_ms,

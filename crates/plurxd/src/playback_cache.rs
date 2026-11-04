@@ -211,6 +211,9 @@ struct Sample {
     root_devices: Vec<u64>,
     committed: u128,
     device_committed: HashMap<u64, u128>,
+    // An early inventory may include a validation temporary that is removed
+    // before publication. Reconcile such a sample before acting on pressure.
+    warmed: bool,
 }
 
 #[derive(Debug)]
@@ -387,6 +390,31 @@ pub(crate) async fn reserve(path: &Path, bytes: u64) -> io::Result<Option<CacheR
     budget.reserve_owned(path, bytes).await.map(Some)
 }
 
+/// Best-effort metadata work while a private window is being verified. This
+/// grants no capacity: publication must still take its ordinary reservation.
+/// Never queue behind another operation or an unknown ceiling, and bound the
+/// optional wait to a quarter of the unchanged inventory freshness interval.
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) async fn warm_inventory(path: &Path) {
+    let Some(budget) = lookup(path) else { return };
+    let Ok(_operation) = budget.operations.try_lock() else {
+        return;
+    };
+    if !matches!(*budget.ceiling_setting.borrow(), CeilingSetting::Known(_))
+        || budget.io_slot.available_permits() == 0
+    {
+        return;
+    }
+    if matches!(
+        tokio::time::timeout(SAMPLE_AGE / 4, budget.refresh(false)).await,
+        Ok(Ok(()))
+    ) {
+        if let Some(sample) = budget.lock().sample.as_mut() {
+            sample.warmed = true;
+        }
+    }
+}
+
 pub(crate) fn pin(path: &Path) -> io::Result<Option<CachePin>> {
     let Some(budget) = lookup(path) else {
         return Ok(None);
@@ -473,6 +501,16 @@ pub(crate) struct PlaybackCacheBudget {
     test_ceiling: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     test_space: Mutex<Option<DiskSpace>>,
+    #[cfg(test)]
+    test_inventory_gate: Mutex<Option<Arc<InventoryGate>>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct InventoryGate {
+    entered: tokio::sync::Notify,
+    released: Mutex<bool>,
+    changed: std::sync::Condvar,
 }
 
 impl std::fmt::Debug for PlaybackCacheBudget {
@@ -518,6 +556,8 @@ impl PlaybackCacheBudget {
             test_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
             #[cfg(test)]
             test_space: Mutex::new(None),
+            #[cfg(test)]
+            test_inventory_gate: Mutex::new(None),
         });
         registry()
             .lock()
@@ -530,6 +570,17 @@ impl PlaybackCacheBudget {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn inventory_operation_for_control(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.operations.lock().await
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn inventory_warmed_since_for_control(&self, since: Instant) -> bool {
+        self.lock()
+            .sample
+            .as_ref()
+            .is_some_and(|sample| sample.warmed && sample.at >= since)
     }
     fn root_index(&self, path: &Path) -> Option<usize> {
         self.roots.iter().position(|root| path.starts_with(root))
@@ -641,8 +692,25 @@ impl PlaybackCacheBudget {
         let roots = self.roots.clone();
         #[cfg(test)]
         let override_space = *self.test_space.lock().expect("test space");
+        #[cfg(test)]
+        let gate = self
+            .test_inventory_gate
+            .lock()
+            .expect("test inventory gate")
+            .take();
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                gate.entered.notify_one();
+                drop(
+                    gate.changed
+                        .wait_while(gate.released.lock().expect("inventory gate"), |released| {
+                            !*released
+                        })
+                        .expect("inventory gate"),
+                );
+            }
             let mut sample = inventory(&roots)?;
             sample.committed = committed;
             sample.device_committed = device_committed;
@@ -723,6 +791,19 @@ impl PlaybackCacheBudget {
             (device, sample.disks[&device].allocation_unit)
         };
         let bytes = allocation_charge(bytes, allocation_unit);
+        let warmed_pressure = {
+            let state = self.lock();
+            state.sample.as_ref().is_some_and(|sample| sample.warmed)
+                && state.pressure(Some((device, bytes)))
+        };
+        if warmed_pressure {
+            // Verification can remove a staged probe after the early scan.
+            // Do not evict or refuse based on that transient charge. The
+            // operation lock remains held; retry with current allocation,
+            // pending grants and the ordinary dirty-revision checks.
+            self.refresh(true).await?;
+            return Ok(None);
+        }
         if bytes > self.lock().ceiling {
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
@@ -1102,6 +1183,7 @@ fn inventory(roots: &[PathBuf]) -> io::Result<Sample> {
         root_devices: Vec::new(),
         committed: 0,
         device_committed: HashMap::new(),
+        warmed: false,
     };
     let mut seen = HashSet::new();
     for root in roots {
@@ -1499,6 +1581,213 @@ mod tests {
             .await
             .expect("the settings task publishes the new ceiling")
             .expect("settings channel");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "read-only timing control requiring an explicitly selected playback-cache root"]
+    async fn actual_playback_cache_inventory_cost() {
+        let root = PathBuf::from(
+            std::env::var("PLURX_DV_WINDOW_CACHE_ROOT").expect("explicit cache root"),
+        );
+        assert!(root.is_dir(), "physical inventory root must exist");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("isolated store"));
+        let budget = PlaybackCacheBudget::new(store, vec![root]);
+        budget
+            .used_bytes()
+            .await
+            .expect("initial settings and inventory");
+        for _ in 0..3 {
+            let _operation = budget.operation().await.expect("inventory operation");
+            let started = Instant::now();
+            budget.refresh(true).await.expect("read-only inventory");
+            let state = budget.lock();
+            println!(
+                "{}",
+                serde_json::json!({"inventory_us":started.elapsed().as_micros(),"allocated_bytes":state.sample.as_ref().expect("sample").bytes})
+            );
+            assert!(state.pending.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_inventory_never_waits_for_settings_locks_or_an_existing_scan() {
+        let fixture = Fixture::new();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            warm_inventory(&fixture.roots[0]),
+        )
+        .await
+        .expect("an unread ceiling is not an optional wait");
+        assert!(fixture.budget.lock().sample.is_none());
+        fixture.used().await;
+        let operation = fixture.budget.operations.lock().await;
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            warm_inventory(&fixture.roots[0]),
+        )
+        .await
+        .expect("an occupied operation is skipped");
+        drop(operation);
+        let scan = Arc::clone(&fixture.budget.io_slot)
+            .acquire_owned()
+            .await
+            .expect("scan");
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            warm_inventory(&fixture.roots[0]),
+        )
+        .await
+        .expect("an existing scan is skipped");
+        assert!(
+            !fixture
+                .budget
+                .lock()
+                .sample
+                .as_ref()
+                .expect("sample")
+                .warmed
+        );
+        drop(scan);
+    }
+
+    #[tokio::test]
+    async fn optional_inventory_timeout_and_cancellation_retain_scan_credit_until_reconciled() {
+        struct Release(Arc<InventoryGate>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                *self.0.released.lock().expect("gate") = true;
+                self.0.changed.notify_all();
+            }
+        }
+        for cancelled in [false, true] {
+            let fixture = Fixture::new();
+            let baseline = fixture.used().await;
+            fixture.limit(baseline + 32 * 1024);
+            fixture.file(1, "unsettled-private-output", 8192);
+            {
+                let mut state = fixture.budget.lock();
+                state.dirty = true;
+                state.dirty_revision += 1;
+            }
+            let gate = Arc::new(InventoryGate::default());
+            let release = Release(Arc::clone(&gate));
+            *fixture.budget.test_inventory_gate.lock().expect("gate") = Some(Arc::clone(&gate));
+            let root = fixture.roots[0].clone();
+            let warm = tokio::spawn(async move { warm_inventory(&root).await });
+            tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+                .await
+                .expect("inventory started");
+            if cancelled {
+                warm.abort();
+                assert!(warm.await.expect_err("cancelled warm owner").is_cancelled());
+            } else {
+                tokio::time::pause();
+                tokio::time::advance(SAMPLE_AGE / 4 + Duration::from_millis(1)).await;
+                warm.await.expect("optional inventory deadline");
+                tokio::time::resume();
+            }
+            assert_eq!(
+                fixture.budget.io_slot.available_permits(),
+                0,
+                "the actual blocking scan still owns its lease"
+            );
+            assert!(fixture.budget.lock().dirty);
+            assert!(fixture.budget.lock().pending.is_empty());
+            warm_inventory(&fixture.roots[0]).await;
+            let path = fixture.roots[0].join("next.m4s");
+            let admission = tokio::spawn(async move { reserve(&path, 4096).await });
+            let started = Instant::now();
+            while fixture.budget.operations.try_lock().is_ok() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(2),
+                    "mandatory reconciliation started"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                !admission.is_finished(),
+                "a timed-out sample cannot admit a writer"
+            );
+            drop(release);
+            let reservation = tokio::time::timeout(Duration::from_secs(2), admission)
+                .await
+                .expect("scan released")
+                .expect("admission task")
+                .expect("reconciled inventory")
+                .expect("managed");
+            {
+                let state = fixture.budget.lock();
+                assert!(!state.dirty);
+                assert!(!state.sample.as_ref().expect("authoritative sample").warmed);
+                assert!(state.used() >= baseline + 8192 + 4096);
+            }
+            reservation.commit(0);
+        }
+    }
+
+    #[tokio::test]
+    async fn publication_reconciles_removed_probe_files_before_eviction_or_refusal() {
+        for disk_pressure in [false, true] {
+            let fixture = Fixture::new();
+            let retained = fixture.file(0, "keep.m4s", 4096);
+            let baseline = fixture.used().await;
+            let probe = fixture.file(1, "private-probe.mp4", 16 * 1024);
+            fixture.limit(if disk_pressure {
+                100 * GIB
+            } else {
+                baseline + 4096
+            });
+            if disk_pressure {
+                *fixture.budget.test_space.lock().expect("space") = Some(DiskSpace {
+                    free: GIB + 4095,
+                    total: 10 * GIB,
+                    allocation_unit: 1,
+                });
+            }
+            {
+                let mut state = fixture.budget.lock();
+                state.dirty = true;
+                state.dirty_revision += 1;
+            }
+            warm_inventory(&fixture.roots[0]).await;
+            {
+                let state = fixture.budget.lock();
+                assert!(state.sample.as_ref().expect("early sample").warmed);
+                assert!(state.used() >= baseline + 16 * 1024);
+                assert!(state.pending.is_empty(), "warming grants no writer credit");
+            }
+            std::fs::remove_file(probe).expect("verification removes its private probe");
+            if disk_pressure {
+                fixture
+                    .budget
+                    .test_space
+                    .lock()
+                    .expect("space")
+                    .as_mut()
+                    .expect("space")
+                    .free = GIB + 4096;
+            }
+            let output = fixture.roots[0].join("next.m4s");
+            let reservation = reserve(&output, 4096)
+                .await
+                .expect("current capacity")
+                .expect("managed");
+            assert!(
+                retained.exists(),
+                "transient probe pressure must not evict retained media"
+            );
+            assert!(
+                !fixture
+                    .budget
+                    .lock()
+                    .sample
+                    .as_ref()
+                    .expect("current sample")
+                    .warmed
+            );
+            std::fs::write(output, vec![0; 4096]).expect("bounded output");
+            reservation.commit(4096);
         }
     }
 
