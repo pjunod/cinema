@@ -59,7 +59,7 @@ files and passwords on the controller, outside the repository.
 | `PLURX_MOBILE_STATE_DIR` | Persistent receipts and controller lock; defaults to `~/.local/state/noirr/mobile-channels`. Preserve it when clearing build caches. |
 
 **Signing controller, 2026-11-03.** The repository-scoped
-`plurx-mobile-signing` runner uses a separate user LaunchAgent,
+`gha-macb-mobile-signing-01` runner uses a separate user LaunchAgent,
 `tv.plurx.mobile-signing`, with capacity one. Its private configuration is in
 `~/.config/plurx/mobile-runner/`; work and logs are in
 `~/.local/share/plurx-mobile-runner/`. The existing Apple CI standby is a
