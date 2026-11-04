@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <float.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <libavutil/mem.h>
 #include "dv_metadata.h"
@@ -15,13 +16,24 @@ static void close_enough(double actual, double expected) {
 // Independent scalar evaluation of the public polynomial/MMR basis. Compare
 // fixed-point source coefficients to the binary32 API projection over a grid,
 // including every pivot edge, not just a duplicate mapper invocation.
-static double evaluate(const AVDOVIReshapingCurve *curve,
+static double evaluate(const AVDOVIDataMapping *mapping,
                        const struct pl_dovi_metadata *mapped, int comp,
                        const double in[3], bool projected) {
+  const AVDOVIReshapingCurve *curve = &mapping->curves[comp];
+  double sig[3];
+  // MMR consumes all three inputs after each component's own input clamp.
+  for (int c = 0; c < 3; c++) {
+    const AVDOVIReshapingCurve *v = &mapping->curves[c];
+    double low = projected ? mapped->comp[c].pivots[0] : v->pivots[0] / 1024.0;
+    double high = projected ? mapped->comp[c].pivots[v->num_pivots - 1] :
+                             v->pivots[v->num_pivots - 1] / 1024.0;
+    sig[c] = fmin(high, fmax(low, in[c]));
+  }
   int piece = 0;
-  double x = in[comp];
+  double x = sig[comp];
   while (piece < curve->num_pivots - 2 &&
-         x >= curve->pivots[piece + 1] / 1023.0)
+         x >= (projected ? mapped->comp[comp].pivots[piece + 1] :
+                          curve->pivots[piece + 1] / 1024.0))
     piece++;
   const double denom = 8388608.0;
   double value;
@@ -34,17 +46,16 @@ static double evaluate(const AVDOVIReshapingCurve *curve,
     value = projected ? mapped->comp[comp].mmr_constant[piece] :
                         curve->mmr_constant[piece] / denom;
     for (int order = 0; order < curve->mmr_order[piece]; order++) {
-      double a = pow(in[0], order + 1), b = pow(in[1], order + 1),
-             c = pow(in[2], order + 1);
+      double a = pow(sig[0], order + 1), b = pow(sig[1], order + 1),
+             c = pow(sig[2], order + 1);
       const double basis[] = {a, b, c, a*b, a*c, b*c, a*b*c};
       for (int k = 0; k < 7; k++)
         value += basis[k] * (projected ? mapped->comp[comp].mmr_coeffs[piece][order][k] :
                                            curve->mmr_coef[piece][order][k] / denom);
     }
   }
-  double low = curve->pivots[0] / 1023.0;
-  double high = curve->pivots[curve->num_pivots - 1] / 1023.0;
-  return fmin(high, fmax(low, value));
+  // API387 clamps the result to signal range, not back to input pivots.
+  return fmin(1, fmax(0, value));
 }
 
 static void public_piecewise_fel_mapping(void) {
@@ -71,7 +82,7 @@ static void public_piecewise_fel_mapping(void) {
     const AVDOVIReshapingCurve *curve = &m->curves[comp];
     assert(out.dovi.comp[comp].num_pivots == curve->num_pivots);
     for (int i = 0; i < curve->num_pivots; i++)
-      close_enough(out.dovi.comp[comp].pivots[i], curve->pivots[i] / 1023.0);
+      close_enough(out.dovi.comp[comp].pivots[i], curve->pivots[i] / 1024.0);
     for (int i = 0; i < curve->num_pivots - 1; i++) {
       assert((int)out.dovi.comp[comp].method[i] == (int)curve->mapping_idc[i]);
       if (curve->mapping_idc[i] == AV_DOVI_MAPPING_POLYNOMIAL) {
@@ -87,18 +98,30 @@ static void public_piecewise_fel_mapping(void) {
                          curve->mmr_coef[i][order][k] / 8388608.0);
       }
     }
-    close_enough(out.dovi.nlq[comp].offset, 512.0 / 1023);
-    close_enough(out.dovi.nlq[comp].deadzone_slope, 1023.0 * 2048 / 8388608);
-    close_enough(out.dovi.nlq[comp].deadzone_threshold, -1024.0 / 8388608);
-    // Exact neutral code contributes zero; endpoints obey the original bound.
+    close_enough(out.dovi.nlq[comp].offset, 512);
+    close_enough(out.dovi.nlq[comp].deadzone_slope, 2048.0 / 8388608);
+    close_enough(out.dovi.nlq[comp].deadzone_threshold, 0);
+    close_enough(out.dovi.nlq[comp].hdr_in_max, .125);
+    // Manual libdovi projection must match the independently mapped AV fields.
+    struct pl_dovi_nlq_data manual = dv_fel_nlq_projection(512, 2048, 0, 0, 1048576);
+    close_enough(manual.offset, out.dovi.nlq[comp].offset);
+    close_enough(manual.deadzone_slope, out.dovi.nlq[comp].deadzone_slope);
+    close_enough(manual.deadzone_threshold, out.dovi.nlq[comp].deadzone_threshold);
+    close_enough(manual.hdr_in_max, out.dovi.nlq[comp].hdr_in_max);
+    // Sample in integer EL-code space before rounding/NLQ. Non-tie quarter
+    // offsets exercise order without asserting a GPU's exact half-tie rule.
     for (int code = 0; code <= 1023; code++) {
-      double delta = code - 512;
-      double expected = delta == 0 ? 0 : copysign((fabs(delta) - .5) * 2048 / 8388608, delta);
-      double normalized = code / 1023.0 - out.dovi.nlq[comp].offset;
-      double actual = code == 512 ? 0 : copysign(fabs(normalized) *
-          out.dovi.nlq[comp].deadzone_slope + out.dovi.nlq[comp].deadzone_threshold, delta);
-      close_enough(actual, expected);
-      assert(fabs(actual) < .125);
+      int delta = code - 512;
+      double expected = delta == 0 ? 0 :
+          copysign((2 * abs(delta) - 1) * 1024.0 / 8388608, delta);
+      for (int quarter = -1; quarter <= 1; quarter++) {
+        double rr = round(code + quarter * .25 - manual.offset);
+        double actual = rr == 0 ? 0 : copysign(
+            (fabs(rr) - .5) * manual.deadzone_slope + manual.deadzone_threshold, rr);
+        actual = fmin(manual.hdr_in_max, fmax(-manual.hdr_in_max, actual));
+        close_enough(actual, expected);
+        assert(fabs(actual) < .125);
+      }
     }
   }
   unsigned samples = 0;
@@ -107,26 +130,142 @@ static void public_piecewise_fel_mapping(void) {
       for (int c = 0; c <= 16; c++) {
         const double in[] = {a/16.0, b/16.0, c/16.0};
         for (int comp = 0; comp < 3; comp++) {
-          close_enough(evaluate(&m->curves[comp], &out.dovi, comp, in, false),
-                       evaluate(&m->curves[comp], &out.dovi, comp, in, true));
+          close_enough(evaluate(m, &out.dovi, comp, in, false),
+                       evaluate(m, &out.dovi, comp, in, true));
           samples++;
         }
       }
   for (int edge = 0; edge < 9; edge++) {
-    const double in[] = {m->curves[0].pivots[edge]/1023.0, .25, .75};
-    close_enough(evaluate(&m->curves[0], &out.dovi, 0, in, false),
-                 evaluate(&m->curves[0], &out.dovi, 0, in, true));
+    const double in[] = {m->curves[0].pivots[edge]/1024.0, .25, .75};
+    close_enough(evaluate(m, &out.dovi, 0, in, false),
+                 evaluate(m, &out.dovi, 0, in, true));
+  }
+  // A nonzero threshold is not folded into a normalized-domain intercept.
+  AVDOVIDataMapping *nlq_change = av_dovi_get_mapping(data);
+  nlq_change->nlq[0].nlq_offset = 17;
+  nlq_change->nlq[0].linear_deadzone_slope = 1024;
+  nlq_change->nlq[0].linear_deadzone_threshold = 2048;
+  assert(dv_map_metadata(data, size, 7, true, &out));
+  struct pl_dovi_nlq_data manual = dv_fel_nlq_projection(17, 1024, 2048, 0, 1048576);
+  close_enough(manual.offset, out.dovi.nlq[0].offset);
+  close_enough(manual.deadzone_slope, out.dovi.nlq[0].deadzone_slope);
+  close_enough(manual.deadzone_threshold, out.dovi.nlq[0].deadzone_threshold);
+  close_enough(manual.hdr_in_max, out.dovi.nlq[0].hdr_in_max);
+  for (int rr = -1; rr <= 1; rr++) {
+    double actual = rr == 0 ? 0 : copysign(
+        (abs(rr) - .5) * manual.deadzone_slope + manual.deadzone_threshold, rr);
+    close_enough(actual, rr * 2560.0 / 8388608);
   }
   // The same shared mapper deliberately omits EL for the base-only lane.
   assert(dv_map_metadata(data, size, 7, false, &out) && !out.dovi.nlq_active);
-  // Preserve narrowed signalled clamp endpoints rather than widening to 0/1.
+  // Preserve narrowed signalled INPUT clamp endpoints.
   AVDOVIDataMapping *change = av_dovi_get_mapping(data);
   change->curves[1].pivots[0] = 16;change->curves[1].pivots[1] = 1000;
   assert(dv_map_metadata(data, size, 7, true, &out));
-  close_enough(out.dovi.comp[1].pivots[0], 16.0/1023);
-  close_enough(out.dovi.comp[1].pivots[1], 1000.0/1023);
+  close_enough(out.dovi.comp[1].pivots[0], 16.0/1024);
+  close_enough(out.dovi.comp[1].pivots[1], 1000.0/1024);
   av_free(data);
   printf("public piecewise FEL mapping: %u scalar samples; no GPU qualification\n", samples);
+}
+
+
+static void narrowed_input_and_signal_output_clamps(void) {
+  size_t size;
+  AVDOVIMetadata *data = av_dovi_metadata_alloc(&size);
+  assert(data);
+  p7_mapping_fixture(data);
+  AVDOVIDataMapping *m = av_dovi_get_mapping(data);
+  const uint16_t lo[] = {64, 32, 96}, hi[] = {960, 992, 928};
+  for (int c = 0; c < 3; c++) {
+    memset(&m->curves[c], 0, sizeof(m->curves[c]));
+    m->curves[c].num_pivots = 2;
+    m->curves[c].pivots[0] = lo[c];
+    m->curves[c].pivots[1] = hi[c];
+    m->curves[c].poly_order[0] = 1;
+    m->curves[c].poly_coef[0][1] = 8388608;
+  }
+  m->curves[0].poly_coef[0][0] = 262144; // x + 1/32
+  m->curves[1].mapping_idc[0] = AV_DOVI_MAPPING_MMR;
+  m->curves[1].mmr_order[0] = 1;
+  m->curves[1].mmr_coef[0][0][0] = 2097152; // Y/4 + U/2 + V/4
+  m->curves[1].mmr_coef[0][0][1] = 4194304;
+  m->curves[1].mmr_coef[0][0][2] = 2097152;
+  struct dv_decoded_mapping out;
+  assert(dv_map_metadata(data, size, 7, true, &out));
+  const double mixed[] = {1, -1, 1};
+  for (int projected = 0; projected < 2; projected++) {
+    close_enough(evaluate(m, &out.dovi, 0, mixed, projected), 31.0/32);
+    close_enough(evaluate(m, &out.dovi, 1, mixed, projected), 61.0/128);
+    assert(evaluate(m, &out.dovi, 0, mixed, projected) > 960.0/1024);
+  }
+  // Outputs above/below the signal range still clamp, independently of pivots.
+  m->curves[0].poly_coef[0][0] = 8388608;
+  m->curves[2].poly_coef[0][0] = -8388608;
+  assert(dv_map_metadata(data, size, 7, true, &out));
+  close_enough(evaluate(m, &out.dovi, 0, mixed, true), 1);
+  close_enough(evaluate(m, &out.dovi, 2, mixed, true), 0);
+  av_free(data);
+}
+
+static void base_profiles_and_storage_normalization(void) {
+  size_t size;
+  AVDOVIMetadata *data = av_dovi_metadata_alloc(&size);
+  assert(data);
+  const int profiles[] = {5, 7, 8};
+  for (unsigned p = 0; p < sizeof(profiles)/sizeof(profiles[0]); p++) {
+    p7_mapping_fixture(data);
+    int profile = profiles[p];
+    AVDOVIRpuDataHeader *h = av_dovi_get_header(data);
+    AVDOVIColorMetadata *color = av_dovi_get_color(data);
+    h->vdr_rpu_profile = profile == 5 ? 0 : 1;
+    h->bl_video_full_range_flag = profile == 5;
+    h->disable_residual_flag = profile != 7;
+    color->signal_color_space = profile == 5 ? 2 : 0;
+    struct dv_decoded_mapping out;
+    assert(dv_map_metadata(data, size, profile, false, &out));
+    assert(!out.dovi.nlq_active);
+    for (int c = 0; c < 3; c++) {
+      close_enough(out.dovi.nonlinear_offset[c], av_q2d(color->ycc_to_rgb_offset[c]));
+      for (int k = 0; k < 3; k++) {
+        close_enough(out.dovi.nonlinear.m[c][k], av_q2d(color->ycc_to_rgb_matrix[c*3+k]));
+        close_enough(out.dovi.linear.m[c][k], av_q2d(color->rgb_to_lms_matrix[c*3+k]));
+      }
+    }
+    // After the shader's DV code-scale/reshape/NLQ stages, the affine
+    // offsets are in composed-signal units, with no 1024/1023 multiplier.
+    struct pl_color_repr composed = {.sys = PL_COLOR_SYSTEM_DOLBYVISION,
+        .levels = PL_COLOR_LEVELS_FULL, .bits = {.sample_depth = 10, .color_depth = 10},
+        .dovi = &out.dovi};
+    pl_transform3x3 affine = pl_color_repr_decode(&composed, NULL);
+    for (int c = 0; c < 3; c++) {
+      double black = 0;
+      for (int k = 0; k < 3; k++) {
+        close_enough(affine.mat.m[c][k], av_q2d(color->ycc_to_rgb_matrix[c*3+k]));
+        black -= av_q2d(color->ycc_to_rgb_matrix[c*3+k]) *
+                 av_q2d(color->ycc_to_rgb_offset[k]);
+      }
+      close_enough(affine.c[c], black);
+    }
+    // R32F code/1023, low10 R16, and high10 P010 have the same nominal BL
+    // texture-normalized signal. The shader then separately uses code_scale
+    // and divides by 2^BL depth; public normalize alone is NOT that DV step.
+    // This proves CPU representation arithmetic, not GPU filtering.
+    const struct pl_bit_encoding storage[] = {{10,10,0}, {16,10,0}, {16,10,6}};
+    for (unsigned f = 0; f < sizeof(storage)/sizeof(storage[0]); f++) {
+      struct pl_color_repr repr = {.sys = PL_COLOR_SYSTEM_DOLBYVISION,
+          .levels = PL_COLOR_LEVELS_FULL, .bits = storage[f], .dovi = &out.dovi};
+      double scale = pl_color_repr_normalize(&repr);
+      for (int code = 0; code <= 1023; code++) {
+        double texture = (double)(code << storage[f].bit_shift) /
+                         ((1U << storage[f].sample_depth) - 1);
+        assert(fabs(texture * scale - code/1023.0) < 2e-7);
+        double dv_scale = ((1U << storage[f].sample_depth) - 1.0) /
+                          (1U << storage[f].bit_shift) / 1024.0;
+        assert(fabs(texture * dv_scale - code/1024.0) < 2e-7);
+      }
+    }
+  }
+  av_free(data);
 }
 
 static void malformed_metadata_refuses(void) {
@@ -174,6 +313,8 @@ static void malformed_metadata_refuses(void) {
 }
 int main(void) {
   public_piecewise_fel_mapping();
+  narrowed_input_and_signal_output_clamps();
+  base_profiles_and_storage_normalization();
   malformed_metadata_refuses();
   return 0;
 }

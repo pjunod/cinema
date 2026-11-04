@@ -73,8 +73,8 @@ class MetadataAdmission(unittest.TestCase):
         """Pinned public headers/libraries; CPU-only mapping and refusal grid."""
         source = Path(__file__).with_name("test_decoded_metadata.c")
         flags = shlex.split(subprocess.check_output(
-            ["pkg-config", "--static", "--cflags", "--libs", "libavformat",
-             "libavcodec", "libavutil", "libplacebo"], text=True, timeout=15))
+            ["pkg-config", "--static", "--cflags", "--libs",
+             "libavutil", "libplacebo"], text=True, timeout=15))
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "decoded-metadata"
             subprocess.run([os.environ.get("CC", "cc"), "-O2", "-std=c11",

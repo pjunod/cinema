@@ -1,7 +1,7 @@
 # HDR enhancement quality — preserve the benefit in the delivered picture
 
-**Status:** open; measurement repair integrated into the effort, production quality work in
-progress · **Written:** 2026-11-03 · **Owner:** Codex, with Astra consultation
+**Status:** open; native rendering causes isolated in fixed-frame controls;
+production integration, compression tails and decoded-delivery acceptance remain · **Updated:** 2026-11-04 · **Owner:** Codex, with Astra consultation
 
 Companion to [the processing ledger](DV_HDR_PROCESSING_STATUS.md),
 [display management](DISPLAY-TARGETED-DV-BUILD.md), and
@@ -23,8 +23,8 @@ establish final-delivery quality. Preserve native delivery where the client
 can compose the original layers without re-encoding.
 
 The owner further clarified that enhancements must not impose a lower
-bitrate than the source. The existing 20 Mb/s Original replacement and the
-initial 60 Mb/s repair ceiling both violate that intent for higher-rate
+bitrate than the source. The former 20 Mb/s Original replacement and the
+initial 60 Mb/s repair ceiling both violated that intent for higher-rate
 sources. The 60 Mb/s implementation was not published and is superseded.
 An equal bitrate budget is necessary here; it does not make a lossy
 re-encode equivalent to preserving the original compressed video.
@@ -98,6 +98,185 @@ The legacy and supported executables are not interchangeable evidence.
 
 ## 4. Production repair — choose from measured final-delivery results
 
+### Current native and delivery isolation
+
+Two additional losses are now reproduced separately. Software planar 10-bit
+DV samples uploaded in the low bits of UNORM16 lose interpolation precision.
+Owned left-aligned staging with a matching 16/10/6 representation removes the
+phase-dependent difference. Hardware/P010 import is a separate path.
+
+The native reconstruction also retains mastering and scene HDR fields while
+requesting an identity colour conversion. Those fields prevent libplacebo's
+colour-space equality shortcut. With source metadata mode `NONE`, source nominal
+black ignores the explicit .005-nit minimum, while the target uses it; an extra
+black adaptation lifts weak dark colour components before DV display management.
+A same-library synthetic RGB32F control preserves known dark input with fresh
+metadata, reproduces the lift with retained metadata, and preserves input when
+source nominal luminance uses HDR10. Its identity tolerance was fixed before
+execution. The correction normalizes only the copied reconstruction colour;
+raw RPU, creative display metadata and the target are preserved.
+
+The combined private native diagnostic passes exact paired BL/EL/raw-RPU,
+PTS, target and actual texture/colour checks for indices 0/16/32/47 on two
+sources. Default-off and observation controls reproduce the original PNGs.
+The original reference files remain intact. Separately built production patches
+now reproduce those corrected images exactly on all eight pictures. A rebuilt
+original baseline reproduces all eight original images; production with the
+pair observer absent, disabled and enabled has identical full PNG and decoded
+RGB48 hashes. Enabled observation also binds the actual presented and captured
+BL, EL, raw RPU and PTS to the frozen input records. These 32 controls use the
+same private headless renderer and target; they do not qualify a physical display,
+other profiles, hardware import, performance or a packaged release.
+
+A separate HDR10 control now isolates the same software-upload precision loss.
+The same decoder produces identical visible YUV and timing for all 48 pictures
+through software and CUDA decoding. Broadening only precise software staging
+to limited-range BT.2020-NCL/PQ/BT.2020 input makes HDR10 software captures at
+indices 0 and 47 match the existing hardware PNG and RGB48 hashes exactly.
+An unchanged hardware capture and two corrected DV captures also match their
+frozen predictions. This supports the staging correction; it does not establish
+independent colour accuracy or remove compression loss. The generalized
+production build compiles. The later 62-case consumer matrix and separate
+24 performance runs are complete, with a material software QP14 CPU regression
+of approximately 17–19%.
+That regression, current-package parity and broader acceptance remain open.
+
+Pixel controls also retain actual error logs. The old and corrected players
+share an initial predecoder swapchain-size error; some two-thread DV seeks emit
+PPS-change errors before the selected picture. One-thread P8 diagnostics are
+clean apart from that original startup event and preserve the selected pixels.
+They do not fix the production decoder. A separate Jellyfin-decoder CPU seek
+control does not reproduce the PPS error, so applying its proposed RASL patch
+without reproducing the native path would not establish a repair.
+
+At a 1,000-nit P3-D65 target, .005-nit black and 203-nit reference white, the
+unencoded API387 helper versus the corrected native diagnostic measures:
+
+| Source | Fixed samples | Mean / p99 / maximum Delta E ITP |
+|---|---|---|
+| Stronger FEL contribution | 122,880 | 0.00819 / 0.02453 / 0.04065 |
+| Weaker FEL contribution | 96,000 | 0.00672 / 0.02542 / 0.05236 |
+
+Both paths share libplacebo. This establishes measured consumer agreement and
+the controlled causes, not independent FEL conformance or calibrated display
+accuracy. Held-out scenes, other profiles/targets and full-window consumer
+qualification remain required.
+
+A lossless FFV1 positive control reproduces the entire RGB48 output of an
+already decoded HEVC frame exactly. Only after that gate passes does the same
+transport carry all uncompressed shipping 4:2:0 pixels, with all 48 source YUV
+hashes unchanged. Four actual native captures then separate the export floor
+from compression. The original uncompressed control used the earlier `d266`
+consumer and measured 0.670 / 1.799 / 5.712. The current `59bb` consumer was
+recaptured on four pure floor pictures. At frame 16 only, an additional trace
+verified all three decoded 10-bit YUV planes and exact pure/observed pixel
+equality. Its current matched floor and fallback, alongside retained encoded
+controls on 122,880 coordinates, are:
+
+| Stronger-source output | Mean / p99 / maximum Delta E ITP |
+|---|---|
+| Uncompressed shipping 4:2:0 through current native playback | 0.549279 / 1.546207 / 5.492584 |
+| Preferred VAAPI encode at the source-derived rate | 2.833 / 9.007 / 22.112 |
+| Same encode with a measured picture-QP ceiling of 20 | 2.518 / 7.349 / 15.831 |
+| Same encode with a measured picture-QP ceiling of 14 | 2.120 / 6.168 / 15.989 |
+| Actual base-copy P8.1 fallback through corrected native playback | 3.201 / 5.979 / 9.559 |
+
+The fallback row is freshly measured on all four corrected native pictures,
+with inactive residual/NLQ metadata, exact base-layer/timing joins and identical
+pure/observed pixels. Its earlier 3.234 / 6.012 / 9.600 result used the old
+renderer and remains historical context. The three encoded rows retain their
+original software-upload path. On the two-picture HDR10 staging control,
+hardware-aligned output changes QP14 mean/p99/maximum from
+2.000 / 5.729 / 15.989 to 1.970 / 5.665 / 15.495. Even that observed maximum
+exceeds the corrected fallback's maximum across all four pictures; alignment
+alone cannot close the compression tail. A full aligned four-picture score is
+still owed.
+
+The original multiplexed P7 video packets for these same 48 pictures total
+21,719,629 bytes over the verified 2.002-second boundary: 86.792 Mb/s, counting
+BL, encapsulated EL and RPU once. Preroll/postroll and container overhead are
+excluded. QP20 delivers 85.397 Mb/s, while QP14 delivers 96.370 Mb/s, about
+11% above this source window. Original and output GOPs differ, so AU sizes and
+average rates cannot replace decoded-picture measurements. The remaining
+QP14 outliers therefore cannot be attributed to a lower average output rate.
+
+The current matched export floor improves mean, p99 and maximum against
+fallback overall, in all four luminance bands and at all four chroma phases.
+Black has only four points; this is bounded cohort evidence, not universal
+pointwise improvement or final acceptance. Current compression does not beat
+fallback tails. Both original and corrected-reference luminance bands
+are retained without dropping sample positions. A single QP-ceiling-14 control
+uses unchanged requests of 90.893 Mb/s target, 136.339 Mb/s peak and a
+181.786 Mbit buffer, with finer measured slice/base QPs. Its average is 96.370 Mb/s, above the target; HRD is
+absent, so peak/CPB compliance is unproved. Its four native captures improve
+mean and p99 versus QP20, but the maximum is slightly worse and tail error
+still exceeds fallback. It does not pass acceptance.
+
+A subsequent exact-source software decoder observer records final luma QP at
+every minimum coding block, plus resolved SAO parameters before filtering
+replaces them. Both encoded clips pass all 48 decoded-frame hashes and timelines
+against the shipping decoder, the minimal baseline, and the observer disabled
+and enabled. Final luma QPs remain 7–14 for QP14 and 9–20 for QP20 across all
+6,220,800 block entries per clip: no observed luma-QP limit escape. At the
+worst QP14 point, its QP is 13 versus QP20's 15; current-picture SAO offsets
+are bounded by one code. These observations do not trace actual chroma QP,
+per-pixel SAO classification, deblocking or inherited reference-picture error.
+The remaining tail cause is unproven. These controls are not a shipping encoder
+policy; lower QP does not promise monotonic improvement at every pixel.
+
+A single forced-IDR-at-32 control improves its new IDR but barely improves
+following-picture aggregate error, worsens bright-band error, and leaves the
+all-window maximum unchanged when compared to the frozen encoder-input YUV.
+Its original driver-observation check stopped: the expected system VA driver
+was not observed, and the bundled driver is a different file. Separate CPU
+postflight retains that unknown identity rather than qualifying the old run.
+This does not justify a GOP policy. It motivated a bounded quantization control
+requiring exact reproduction of every original QP14 coded packet, decoded picture
+and timeline before one QP8 comparison, with the actual mapped driver and unchanged
+runtime observed in both. Encoding-preservation scores remain separate from native
+Dolby Vision and final-delivery acceptance.
+
+A subsequent bounded QP14/QP8 diagnostic first reproduced all 48 QP14 coded
+packets, decoded pictures and timestamps, with the actual driver and 74 runtime
+file identities matched. Against the frozen encoder-input YUV, 1,474,560 fixed
+sample points give mean/p99/max Delta E ITP of 2.188019/6.068646/15.980965 at
+QP14 and 1.602958/4.298506/10.261381 at QP8. Every frame's three aggregate
+metrics improve, but 29.773% of individual points worsen; the 33 black points'
+p99 rises from 5.7157 to 6.5278 and cannot qualify black preservation. The QP8
+output averages 148.310 Mb/s and reaches 156.855 Mb/s over a full one-second
+window, exceeding its requested 136.339 Mb/s peak. HRD is absent and CPB remains
+unverified. This is provisional encode-preservation evidence, not a production
+recipe or native Dolby reference. The subsequent four native QP8 captures
+improve mean and p99 against the corrected P8.1 fallback, but retain mixed tails:
+the aggregate maximum is 11.0197 versus 9.5589 for fallback. QP8 also has a
+worse maximum than fallback in each of the four pictures. They do not pass
+acceptance.
+
+At the retained worst QP8 coordinate (2312, 872), even the current uncompressed
+floor has error 5.154776 versus 3.33444 for fallback at that same point. The
+QP8-minus-floor difference has Delta E ITP of 5.904895, and the signed
+chromatic vectors reinforce; those scalar error magnitudes are not additive.
+An independent source-backed bilinear reconstruction at four retained points
+predicts all twelve native RGB channel changes within 0.711 RGB16 code from
+the actual native-joined YUV deltas. This explains those local differences
+through the known encoded-YUV/consumer path; it establishes neither a QP/SAO
+cause nor independent colour conformance.
+
+Uncapped source-rate handling is integrated into the effort by #1370. The
+current server API387 port now passes the actual Linux bundle build and all
+four helper links, manifest/ABI checks, six CPU bodies (including nine raw-RPU
+subcases), three Rust controls and nine Python bundle/source controls, with no
+ignored bodies. The eighteen producer inputs and runtime closure are retained
+for subsequent rendered-producer parity; the new bundle has not yet rendered
+a GPU picture. Native precision/metadata package integration remains open.
+No arbitrary source cap, changed admission threshold or enhancement-disable
+rule is accepted as closure.
+
+### Earlier encoder and reference-tool screens
+
+The following results retain their original tools, reconstruction and reference
+identities. They must not be substituted for the newer native comparison above.
+
 The supported-encoder screen now covers 48 consecutive sample-B pictures.
 An initial software screen omitted input colour tags and is invalidated;
 its retained output is not evidence for a preset decision. The corrected
@@ -109,8 +288,8 @@ it does not establish live feasibility or held-out acceptance.
 
 A separate HDR10-E window uses the same exact source identities, a
 1,000-nit target, actual RPU L5 active area and four chroma phases.
-Its current Original path inherits the ordinary 20 Mb/s 4K rung after
-processing turns source copy into an encode. Raising only the bitrate
+At the time of this screen, Original inherited the ordinary 20 Mb/s 4K rung
+after processing turned source copy into an encode. Raising only the bitrate
 to 60 Mb/s, while retaining VAAPI policy 19, improves all measured bands:
 
 | Reference band | 20 Mb/s mean / p99 | 60 Mb/s mean / p99 |
@@ -187,12 +366,16 @@ It verifies exact timing/RPU association, unchanged encoded base and decoded
 YUV, authored DV level and refusal cases. The shipping FFmpeg 8 fixture uses
 passthrough timestamps without the contradictory output `-r` accepted by older
 FFmpeg; the short NUT's estimated cadence is not source-clock authority.
-The exact staged native source passes all-target compilation and Clippy; all
-ten requested Linux daemon regressions execute successfully with zero ignored,
-covering Original rate/cost replay, reduced-raster execution, Busy/preemption,
-foreign-backend pending work and actual encoder binding. Integration remains
-pending.
-None of these controls establishes final movie-picture acceptance.
+The current-main M1 port landed into the effort by #1370 after exact-head
+gate6451: daemon all-target compilation, workspace/all-target Clippy, ten core,
+fourteen daemon and one replicated-store regression pass with zero ignored.
+The current four-helper build and three actual source-reader CPU controls pass;
+the authoring body retains its identical consumed sources, binary and original
+runtime/fixture context. The daemon controls include held-source broker custody,
+paired-child pause/cancel/reap ordering, complete eighteen-file bundle identity
+and the real nine-thread admission graph, alongside Original rate/cost replay,
+reduced-raster execution and actual backend binding. Main promotion, deployment
+and final movie-picture acceptance remain open.
 
 The weaker-FEL sample A now has a matched 48-picture HDR10-E window at
 1,000 nits, using its actual title minimum 0.0001 nits and peak 1,000 nits.
@@ -296,9 +479,9 @@ source fences, cancellation/reap, storage accounting and resumable ownership.
 
 | Milestone | Required evidence | State |
 |---|---|---|
-| M0 trustworthy conversion | Independent H.273 10/16-bit and 4:4:4/4:2:0 controls; unchanged RGB branch; old verdict invalidation; independent diff review and focused checks | Integrated into the effort by #1367; exact-head effort gate 6403 passed, identical landing tree and five regression fields verified |
-| M1 loss isolation | Exact frame bindings, representation/codec split, true fallback, full 48-frame weak/strong FEL comparisons on supported tools | Both source windows measured; native DV basis, additional targets and held-out coverage open |
-| M2 production improvement | A measured recipe/export change delivered through supported ownership, admission and metadata paths | Source-aware HDR10-E Original implemented and focused checks/review passed; representation and codec repairs open |
+| M0 trustworthy conversion | Independent H.273 10/16-bit and 4:4:4/4:2:0 controls; unchanged RGB branch; old verdict invalidation; independent diff review and focused checks | Integrated by #1367; current-main refresh and source-mapping checks pass, with accepted exact-source evidence retained |
+| M1 loss isolation | Exact frame bindings, representation/codec split, true fallback, full 48-frame weak/strong FEL comparisons on supported tools | Full strong-source window and eight paired native controls measured; held-out/full weaker-source window remains open |
+| M2 production improvement | A measured recipe/export change delivered through supported ownership, admission and metadata paths | Uncapped source-budget preservation integrated by #1370 after exact-head effort gate 6451; API387 server bundle and native rendering fixes prepared, with exact integrated build and delivery qualification pending |
 | M3 enhancement acceptance | Held-out scenes and final decoded outputs: dark detail, neutral/saturated colour, highlights, grain and temporal stability; CM4/CM29, P7/P8 and both destinations; then physical client checks | Open |
 
 Use mean and tail error, per-frame and luminance-band results together.

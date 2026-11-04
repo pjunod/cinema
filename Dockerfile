@@ -69,7 +69,7 @@ WORKDIR /build-inputs
 COPY rust-toolchain.toml .
 COPY tools/dv_quality/backends/parsed-rpu/fetch_parser.py tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock parsed-rpu/
 COPY tools/dv_quality/backends/libplacebo/fetch_sources.py libplacebo/
-COPY tools/dv_processing/build-dependencies.sh .
+COPY tools/dv_processing/build-dependencies.sh tools/dv_processing/fetch_sources.py ./
 COPY tools/dv_processing/*.patch .
 RUN --mount=type=cache,id=plurx-dv-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     sh /build-inputs/build-dependencies.sh /opt/dv-dependencies
