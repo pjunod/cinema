@@ -3,7 +3,7 @@
 **Status:** original package qualified; all 18 updated configurations checked
 locally; CI and promotion qualification separate ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`594210a783986d4da5ec7184f0895433ffe98b90` (2026-11-03 pause extension below) · **Scope:** bound `library_scan` and
+`88fa37663` (2026-11-04 recovery audit below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -13,6 +13,50 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+
+## Verified host-reboot recovery — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared source candidate
+`88fa37663` in [PR #1378](http://forge.lan:3000/noirr/plurx/pulls/1378) with
+`edf6d08faf549554b9892dee582406ff79af1c97`. All five affected previous
+whole-file fingerprints match that base. This is an authored correspondence
+audit: the agent contributed implementation and tests, so it is not an
+independent review. The PR owns subsequent Astra review and execution.
+
+The [queue Store](../../crates/plurx-core/src/store/background_jobs.rs)
+adds an exact physical-custody lookup and delegation. Its claim, renewal,
+binding, cancellation, settlement and publication SQL is unchanged.
+[Resource helpers](../../crates/plurx-core/src/store/background_jobs_resources.rs)
+expose the existing canonical owner key without changing its body and add
+a consistent exact-owner read. Neither equality nor absence is a new proof
+of physical termination or authority to publish. The existing ledger's
+claim veto and actual-reservation publication guards remain in force.
+
+[Daemon cleanup](../../crates/plurxd/src/background_jobs.rs) passes its exact
+Store to journal cleanup. [State](../../crates/plurxd/src/state.rs) retries
+verified recovery before ordinary settled-custody replay;
+[startup](../../crates/plurxd/src/main.rs) configures the exact Store/backend
+and attempts recovery before producers. Selected worker acquisition, binding,
+publication, heartbeat retirement and drop order retain their prior bodies.
+These new filesystem/Store calls are additional external waits, not modeled
+transitions or an eventual-recovery guarantee.
+
+The mapping refreshes 17 existing rows and adds four explicit dependency pins
+for startup, [custody integration](../../crates/plurxd/src/source_custody.rs),
+[recovery](../../crates/plurxd/src/source_custody/recovery.rs), and the
+[host helper](../../scripts/source-custody-recovery). Those pins expose future
+drift; they do not map physical reboot proof into `DurableJobs`. Same-machine
+boot identity, descendant termination, fsync durability, aborted-activation
+reconciliation, exact-Store isolation and safe legacy challenge preparation
+remain runtime obligations in the
+[recovery plan](../../docs/server/JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). Same-boot
+or unproved ownership may still block indefinitely. No model result proves
+that source custody becomes available or that a real scan completes.
+
+All previous exact anchors remain unique. Model, configuration, bounds,
+properties, fairness, toolchain and historical qualification identities are
+unchanged. Fresh static/smoke receipts remain separate from this audit and
+from runtime crash/replay evidence; no new refinement theorem is claimed.
 
 ## Source pause — finite correspondence on 2026-11-03
 

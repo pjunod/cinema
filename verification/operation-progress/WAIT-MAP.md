@@ -5,6 +5,49 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Verified host-reboot recovery — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared `88fa37663` in
+[PR #1378](http://forge.lan:3000/noirr/plurx/pulls/1378) with
+`edf6d08faf549554b9892dee582406ff79af1c97`; all five affected previous
+whole-file pins match that base. The agent participated in implementation,
+so this authored audit is not independent Astra review or execution evidence.
+
+[Core claiming](../../crates/plurx-core/src/store/background_jobs.rs) only
+adds an exact-owner custody lookup to the trait/adapter; selected claim,
+renewal, binding and publication guards do not change.
+[Resource helpers](../../crates/plurx-core/src/store/background_jobs_resources.rs)
+retain the existing immutable key algorithm and add the consistent read.
+[Queue cleanup](../../crates/plurxd/src/background_jobs.rs) now passes its
+Store into custody journal cleanup without changing the selected token,
+heartbeat, publication or domain-release lock order.
+
+[Startup](../../crates/plurxd/src/main.rs) registers the exact Store/backend
+and awaits [verified recovery](../../crates/plurxd/src/source_custody/recovery.rs)
+before producers. [The scheduler](../../crates/plurxd/src/state.rs) retries it
+before ordinary settled-source replay. The new path clones its Store context
+before filesystem/Store work; its registry mutex is not held across an await.
+It may still await filesystem durability and authoritative Store replies.
+The existing finite worker model does not include these startup/scheduler
+steps, active-reader journals, abort cleanup, or physical custody states.
+
+The mapping refreshes 11 existing rows and adds four external dependency pins:
+the exact resource lookup, [custody integration](../../crates/plurxd/src/source_custody.rs),
+the recovery module, and [challenge preparation](../../scripts/source-custody-recovery).
+This expands drift detection, not modeled coverage. Trusted host identity,
+changed-kernel-boot proof, terminated descendants, fsync publication,
+exact-Store/fallback isolation and lost-ack abort reconciliation remain
+separate runtime obligations in the
+[recovery plan](../../docs/server/JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). Same-boot
+or missing proof remains a legitimate indefinite obstruction; the filesystem,
+backend and runtime return premises do not imply a reboot or discharge it.
+
+Retain the historical `source-anchors.json`, all selected action/wait anchors,
+model/configuration bytes, bounds, properties, fairness and receipt identities.
+No historical schedule or temporal result gains a host-recovery, whole-daemon
+liveness or scan-completion guarantee. Static validation, fresh TLC smoke and
+runtime tests are distinct evidence.
+
 ## Playback startup custody — scoped source review on 2026-11-03
 
 Codex agent `/root/other_formal_correspondence` compared base

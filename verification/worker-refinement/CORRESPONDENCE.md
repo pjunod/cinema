@@ -29,6 +29,48 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Verified host-reboot recovery — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared source `88fa37663` in
+[PR #1378](http://forge.lan:3000/noirr/plurx/pulls/1378) with
+`edf6d08faf549554b9892dee582406ff79af1c97`. The agent contributed recovery
+implementation/tests; this is an authored source audit, not independent
+review or execution. All 18 affected action/boundary source fingerprints
+match that base before refresh, and every retained anchor remains unique.
+
+The only selected-worker file delta is
+[queue ownership](../../crates/plurxd/src/background_jobs.rs) passing its
+exact Store to source-journal cleanup. Acquisition, claim/renewal, binding,
+token/publication locks, queue heartbeat join and retirement retain their
+implementations. The 57 actions, 18 boundaries, trust classifications and
+seven selected schedule definitions remain. `FinishRetire`'s gap now explicitly
+retains post-retirement physical settlement and journal cleanup outside the
+modeled transition and its liveness result.
+
+[Custody integration](../../crates/plurxd/src/source_custody.rs) and
+[recovery](../../crates/plurxd/src/source_custody/recovery.rs) additionally
+persist active-reader evidence, reconcile aborts against the exact Store,
+and settle only after independently verified host reboot. They are external
+source dependencies, not extra actions in this closed correspondence inventory.
+The [durable contract](../durable-jobs/CONTRACT.md#verified-host-reboot-recovery--scoped-source-audit-on-2026-11-04)
+and [operation wait map](../operation-progress/WAIT-MAP.md#verified-host-reboot-recovery--scoped-source-audit-on-2026-11-04)
+record the broader source audit and explicit dependency pins. Changed-boot
+proof, descendant termination, durable directory publication, fallback-Store
+isolation, legacy preparation and successful physical recovery are not proved
+by this model or its existing paired-worker schedule.
+
+Startup/scheduler recovery can wait on filesystem and Store work before a
+library worker is dispatched. An unchanged boot or missing evidence can keep
+source custody unavailable indefinitely. The model's external-return and
+fairness premises neither force a reboot nor prove those new paths terminate.
+The new crash/replay tests are runtime regressions, not additions to the seven
+mapped worker schedules or a refinement argument.
+
+Refresh only the 18 whole-file source pins and containing correspondence hash,
+plus the explicit `FinishRetire` gap. Model, configuration, bounds, properties,
+fairness, checker and historical receipt identities remain unchanged. Fresh
+static/TLC smoke and independent Astra review are separate evidence.
+
 ## Playback startup custody — scoped source review on 2026-11-03
 
 Codex agent `/root/other_formal_correspondence` compared base
