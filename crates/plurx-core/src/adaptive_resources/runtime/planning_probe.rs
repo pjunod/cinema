@@ -564,6 +564,17 @@ impl FixedPlanningProbeOwner {
             .take_application_lease(bytes)
             .ok_or_else(|| OperationError::State.into())
     }
+    /// Seal the same bounded startup group against this original M before
+    /// prepare_inputs. Earlier unbound startup remains explicitly unbridged.
+    pub fn take_registered_application(
+        &self,
+        bytes: usize,
+        group: &super::application::PendingApplicationGroup,
+    ) -> Result<super::application::RegisteredApplication, FixedPlanningProbeError> {
+        self.runtime
+            .bind_planning_application(self.selection()?, &self.release.application, bytes, group)
+            .map_err(Into::into)
+    }
     /// Add an immutable continuous negative-entry condition to this SAME
     /// already charged owner before source/collector entry. Cleanup stays
     /// available after expiry and no clock datum authorizes native closure.

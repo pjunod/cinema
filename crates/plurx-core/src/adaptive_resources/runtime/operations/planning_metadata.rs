@@ -4,6 +4,44 @@ use super::*;
 use crate::resource_custody::PhysicalTypedSettlement;
 
 impl NodeResourceRuntime {
+    pub(in crate::adaptive_resources::runtime) fn bind_planning_application(
+        self: &Arc<Self>,
+        owner: &OwnedPreparation,
+        application: &Arc<super::super::finite_lifetime::FiniteAppState>,
+        bytes: usize,
+        group: &super::super::application::PendingApplicationGroup,
+    ) -> Result<super::super::application::RegisteredApplication, OperationError> {
+        self.validate_preparation(owner)?;
+        self.affected_owners
+            .with_runtime_mutation(|inventory| {
+                let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+                let role = bundle.roles.get(1).ok_or(OperationError::State)?;
+                if !role
+                    .finite_app
+                    .as_ref()
+                    .is_some_and(|original| Arc::ptr_eq(original, application))
+                    || role.planning_metadata.is_none()
+                {
+                    return Err(OperationError::State);
+                }
+                // Census -> original book -> group -> finite. Deterministic
+                // refusals cannot insert an orphan application reference.
+                group
+                    .bind(Arc::clone(self), application, bytes, || {
+                        inventory
+                            .register_application_reference(
+                                role.inventory
+                                    .as_ref()
+                                    .ok_or(super::super::application::ApplicationError)?,
+                                group.identity(),
+                            )
+                            .map_err(|_| super::super::application::ApplicationError)
+                    })
+                    .map_err(|_| OperationError::State)
+            })
+            .map_err(|_| OperationError::State)?
+    }
+
     /// Called only by the fixed initializer while the original bundle is
     /// private and the operations book excludes every observer. Never call
     /// validate_preparation or another book-locking registration from here.

@@ -2,6 +2,36 @@
 use super::*;
 use crate::adaptive_resources::runtime::direct_source::application::DirectApplicationClosed;
 
+pub(in crate::adaptive_resources) enum ApplicationClosed {
+    Direct(DirectApplicationClosed),
+    #[cfg(target_os = "linux")]
+    Registered(crate::adaptive_resources::runtime::application::RegisteredApplicationClosed),
+}
+impl From<DirectApplicationClosed> for ApplicationClosed {
+    fn from(value: DirectApplicationClosed) -> Self {
+        Self::Direct(value)
+    }
+}
+#[cfg(target_os = "linux")]
+impl From<crate::adaptive_resources::runtime::application::RegisteredApplicationClosed>
+    for ApplicationClosed
+{
+    fn from(
+        value: crate::adaptive_resources::runtime::application::RegisteredApplicationClosed,
+    ) -> Self {
+        Self::Registered(value)
+    }
+}
+impl ApplicationClosed {
+    fn reference(&self) -> Uuid {
+        match self {
+            Self::Direct(value) => value.reference(),
+            #[cfg(target_os = "linux")]
+            Self::Registered(value) => value.reference(),
+        }
+    }
+}
+
 pub(in crate::adaptive_resources) enum ApplicationReference {
     Tracked(InventoryOwner),
     Overflow { reference: Uuid },
@@ -59,7 +89,7 @@ impl InventoryAdmission<'_> {
     pub(in crate::adaptive_resources) fn finish_application_close(
         &mut self,
         owner: &mut ApplicationReference,
-        closed: DirectApplicationClosed,
+        closed: ApplicationClosed,
     ) -> Result<(), InventoryError> {
         if owner.identity() != closed.reference() {
             return Err(InventoryError::ReceiptMismatch);

@@ -28,6 +28,12 @@ The earlier 51-case qualification retains its original source boundary.
 The [direct application continuation](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#direct-applications-retain-original-workers-and-whole-payloads)
 records 17 scoped passes for original-worker and rich-payload reference custody; full M0 stays open.
 
+The [static P/M continuation](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#static-pm-counts-actual-controllers-entries-and-inline-futures)
+now counts the actual original controller, inline encoded pass and escaped
+entry aliases, with core custody of the same heartbeat and compact independent
+cleanup. Its 63 distinct source-scoped passes are recorded there. The pre-M
+census span and all family coverage remain unbridged; finite R/S and pre-Winner ownership remain separate.
+
 The [finite ledger](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
 and [policy ledger](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) retain their earlier
 reader/lifecycle/restart and fourteen refusal/service results. #1365's
@@ -76,16 +82,10 @@ executor peaks, P/legacy CPU coexistence, shared storage/provisional recovery,
 broader adapters and selective recovery remain open. Earlier compiler results
 and authored regressions do not close these acceptance gaps.
 
-Earlier published compiler receipts are preserved in
-[the copy review record](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md#15-earlier-published-compiler-receipts).
-Effort source `cc3da4a9003c5fbebefe05cbcbfa92abe3b50bdc` passed native
-Linux core+daemon all-target+cluster strict Clippy in 516.256s with stable
-source (log SHA-256 `0a2167e78a277cc7ac02541bfb827124be842d56213345f40672dba0552bb92c`).
-Joined task source `02bf1fd46e58ae3e1f9e99279f7728a408837fa5` passed all
-three host phases: workspace/format/locked spikes 359.972s, strict core+daemon
-Clippy 380.831s, and vendored Hiqlite Clippy 0.888s, with stable source. The
-vendor check retains its existing configuration warnings. These receipts do
-not cover the pending cgroup fix or replace current-task native execution.
+Earlier compiler receipts remain in the
+[copy review record](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md#15-earlier-published-compiler-receipts).
+They cover their original source and environment; they do not qualify this
+continuation, the pending cgroup fix or current-task native execution.
 
 Bounded direct recovery retains its held-lock and positive
 same-boot/PID-namespace old-daemon-exit requirements. Separate obsolete

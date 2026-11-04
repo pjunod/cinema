@@ -268,7 +268,7 @@ async fn static_original_registry_allows_claim_renewal_but_refuses_a_changed_sav
     };
     let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().unwrap());
     let active = crate::background_jobs::ActiveBackgroundJob::start(
-        store,
+        Arc::clone(&store),
         Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
         token.clone(),
         tokio::time::Instant::now() + Duration::from_secs(30),
@@ -335,7 +335,33 @@ async fn static_original_registry_allows_claim_renewal_but_refuses_a_changed_sav
         )
         .is_err());
     assert!(Arc::ptr_eq(&original, &registry.current().unwrap()));
+    // Unknown admission retains the same actual entry across maintenance;
+    // neither a joined original heartbeat nor absent producer handles prove
+    // that the consumed R request had no original admission.
+    *original.finite.lock().await = StaticFinite::AdmissionUnknown {
+        _cache_grant: None,
+        _compatibility: None,
+    };
+    let root = crate::test_tempdir().expect("original static registry namespace");
+    let mut manager = TranscodeManager::new(
+        store,
+        root.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    manager.static_artifact_runs = registry;
     active.finish().await;
+    manager.reconcile_static_artifact_run().await;
+    manager.reconcile_static_artifact_run().await;
+    let retained = manager
+        .static_artifact_runs
+        .current()
+        .expect("same unknown original entry");
+    assert!(Arc::ptr_eq(&original, &retained));
+    assert!(matches!(
+        &*retained.finite.lock().await,
+        StaticFinite::AdmissionUnknown { .. }
+    ));
 }
 
 #[test]

@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Selected static background planning keeps its original application charge
+  through actual controller, inline future, and escaped entry destruction.
+
 - Adaptive playback keeps selected work in its owner inventory through cleanup,
   recovery and producer-to-retained-output transfer.
 

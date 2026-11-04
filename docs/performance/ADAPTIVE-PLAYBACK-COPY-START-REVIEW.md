@@ -473,3 +473,14 @@ The original source-alias fixture repair clones the existing retained file Arc
 without consuming the production collector's one-shot lease. Native/application
 cleanup ordering and all production admission checks remain intact. No supplied
 Opus review is extended to later source by this execution record.
+
+**Additional historical compiler receipts, moved from the resource ledger:**
+
+Effort source `cc3da4a9003c5fbebefe05cbcbfa92abe3b50bdc` passed native
+Linux core+daemon all-target+cluster strict Clippy in 516.256s with stable
+source (log SHA-256 `0a2167e78a277cc7ac02541bfb827124be842d56213345f40672dba0552bb92c`).
+Joined task source `02bf1fd46e58ae3e1f9e99279f7728a408837fa5` passed all
+three host phases: workspace/format/locked spikes 359.972s, strict core+daemon
+Clippy 380.831s, and vendored Hiqlite Clippy 0.888s, with stable source. The
+vendor check retains its existing configuration warnings. These receipts do
+not cover the pending cgroup fix or replace current-task native execution.

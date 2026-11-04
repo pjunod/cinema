@@ -251,7 +251,7 @@ struct ClaimState {
 }
 
 struct OriginalHeartbeat {
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<plurx_core::adaptive_resources::runtime::application::OriginalUnitTask>,
     registered: bool,
     failed: bool,
     frame_bytes: usize,
@@ -317,6 +317,7 @@ struct Inner {
     // Actual outer payload destruction, distinct from either joined task or
     // logical claim closure. Only the owning carrier's Drop sets this flag.
     payloads_dropped: AtomicBool,
+    application: plurx_core::adaptive_resources::runtime::application::PendingApplicationGroup,
     deadline: watch::Sender<Instant>,
     lost: CancellationToken,
     /// Historical acknowledged completion only; never artifact authority.
@@ -324,7 +325,9 @@ struct Inner {
 }
 
 #[derive(Clone)]
-pub(crate) struct JobFence(Arc<Inner>);
+pub(crate) struct JobFence(
+    Arc<plurx_core::adaptive_resources::runtime::application::ApplicationPayload<Inner>>,
+);
 
 pub(crate) struct ActiveBackgroundJob {
     fence: JobFence,
@@ -334,6 +337,12 @@ pub(crate) struct ActiveBackgroundJob {
 /// cancelled pass drops these values before publishing only that payload
 /// destruction; the SAME original heartbeat handle remains in JobFence.
 pub(crate) struct BackgroundJobController {
+    payload: plurx_core::adaptive_resources::runtime::application::ApplicationPayload<
+        BackgroundControllerPayload,
+    >,
+    fence: JobFence,
+}
+struct BackgroundControllerPayload {
     job: Option<BackgroundJob>,
     active: Option<ActiveBackgroundJob>,
     fence: JobFence,
@@ -341,14 +350,19 @@ pub(crate) struct BackgroundJobController {
 impl BackgroundJobController {
     pub(crate) fn new(job: BackgroundJob, active: ActiveBackgroundJob) -> Self {
         let fence = active.fence();
-        Self {
-            job: Some(job),
-            active: Some(active),
-            fence,
-        }
+        let payload = fence
+            .0
+            .application
+            .wrap(BackgroundControllerPayload {
+                job: Some(job),
+                active: Some(active),
+                fence: fence.clone(),
+            })
+            .expect("private original controller registration precedes M sealing");
+        Self { payload, fence }
     }
     pub(crate) fn job(&self) -> &BackgroundJob {
-        self.job.as_ref().expect("owned original job")
+        self.payload.job.as_ref().expect("owned original job")
     }
     pub(crate) fn fence(&self) -> JobFence {
         self.fence.clone()
@@ -375,7 +389,7 @@ impl BackgroundJobController {
         receipt
     }
 }
-impl Drop for BackgroundJobController {
+impl Drop for BackgroundControllerPayload {
     fn drop(&mut self) {
         let Self { job, active, fence } = self;
         drop(job.take());
@@ -515,29 +529,38 @@ impl ActiveBackgroundJob {
             ));
         }
         let (deadline, _) = watch::channel(deadline);
-        let fence = JobFence(Arc::new(Inner {
-            kind,
-            started: Instant::now(),
-            store,
-            authority,
-            claim_binding: original_claim_binding(&token),
-            state: Mutex::new(ClaimState {
-                token: Some(token),
-                cancelling: false,
-                logical_closed: false,
-            }),
-            stop: CancellationToken::new(),
-            heartbeat: Mutex::new(OriginalHeartbeat {
-                task: None,
-                registered: false,
-                failed: false,
-                frame_bytes: 0,
-            }),
-            payloads_dropped: AtomicBool::new(false),
-            deadline,
-            lost: CancellationToken::new(),
-            copy_output_completed: AtomicBool::new(false),
-        }));
+        let application =
+            plurx_core::adaptive_resources::runtime::application::PendingApplicationGroup::new();
+        let fence = JobFence(Arc::new(
+            application
+                .wrap(Inner {
+                    kind,
+                    started: Instant::now(),
+                    store,
+                    authority,
+                    claim_binding: original_claim_binding(&token),
+                    state: Mutex::new(ClaimState {
+                        token: Some(token),
+                        cancelling: false,
+                        logical_closed: false,
+                    }),
+                    stop: CancellationToken::new(),
+                    heartbeat: Mutex::new(OriginalHeartbeat {
+                        task: None,
+                        registered: false,
+                        failed: false,
+                        frame_bytes: 0,
+                    }),
+                    payloads_dropped: AtomicBool::new(false),
+                    application: application.clone(),
+                    deadline,
+                    lost: CancellationToken::new(),
+                    copy_output_completed: AtomicBool::new(false),
+                })
+                .map_err(|_| {
+                    StoreError::Task("original controller state registration failed".to_owned())
+                })?,
+        ));
         let heartbeat_stop = fence.0.stop.clone();
         let heartbeat_fence = fence.clone();
         let (start, registered) = tokio::sync::oneshot::channel();
@@ -587,7 +610,11 @@ impl ActiveBackgroundJob {
             }
         };
         let frame_bytes = std::mem::size_of_val(&heartbeat_future);
-        let heartbeat = tokio::spawn(heartbeat_future);
+        let heartbeat = fence
+            .0
+            .application
+            .spawn_original(heartbeat_future)
+            .map_err(|_| StoreError::Task("original heartbeat registration failed".to_owned()))?;
         {
             let mut original = fence
                 .0
@@ -642,6 +669,7 @@ impl JobFence {
             reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
         )
     )]
+    #[cfg(test)]
     pub(crate) fn outer_payloads_dropped(&self) -> bool {
         self.0.payloads_dropped.load(Ordering::Acquire)
     }
@@ -666,10 +694,11 @@ impl JobFence {
             stop: _,
             heartbeat,
             payloads_dropped: _,
+            application: _,
             deadline: _,
             lost: _,
             copy_output_completed: _,
-        } = &*self.0;
+        } = &**self.0;
         let frame_bytes = {
             let original = heartbeat.lock().await;
             let OriginalHeartbeat {
@@ -689,10 +718,12 @@ impl JobFence {
             cancelling: _,
             logical_closed: _,
         } = &*state;
-        let mut bytes = std::mem::size_of::<Inner>()
-            .checked_add(2 * std::mem::size_of::<usize>())?
-            .checked_add(frame_bytes)?
-            .checked_add(std::mem::size_of_val(&self.finish_original_controller()))?;
+        let mut bytes = std::mem::size_of::<
+            plurx_core::adaptive_resources::runtime::application::ApplicationPayload<Inner>,
+        >()
+        .checked_add(2 * std::mem::size_of::<usize>())?
+        .checked_add(frame_bytes)?
+        .checked_add(std::mem::size_of_val(&self.finish_original_controller()))?;
         if let Some(token) = token {
             let JobToken {
                 job_id,
@@ -725,12 +756,15 @@ impl JobFence {
                 false
             } else {
                 if let Some(task) = original.task.as_mut() {
-                    match task.await {
+                    match task.wait().await {
                         Ok(()) => {
                             original.task.take();
                         }
                         Err(error) => {
-                            tracing::warn!(%error, "joining original background heartbeat remains uncertain");
+                            tracing::warn!(
+                                ?error,
+                                "joining original background heartbeat remains uncertain"
+                            );
                             original.failed = true;
                             original.task.take();
                         }
@@ -749,6 +783,12 @@ impl JobFence {
             joined,
             logical_closed: self.0.state.lock().await.logical_closed,
         }
+    }
+
+    pub(crate) fn application_group(
+        &self,
+    ) -> &plurx_core::adaptive_resources::runtime::application::PendingApplicationGroup {
+        &self.0.application
     }
 
     pub(crate) fn copy_output_completed(&self) -> bool {

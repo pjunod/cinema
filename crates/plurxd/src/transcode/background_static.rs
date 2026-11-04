@@ -3,21 +3,29 @@
 //! dropped waiter releases its task guard, never its P/R/S or Store mutation.
 
 use super::*;
-use plurx_core::adaptive_resources::runtime::finite_vod::{
-    FiniteApplicationLease, FiniteCloseTicket,
+use plurx_core::adaptive_resources::runtime::application::{
+    ApplicationPayload, RegisteredApplication,
 };
+use plurx_core::adaptive_resources::runtime::finite_vod::FiniteCloseTicket;
 use plurx_core::adaptive_resources::runtime::planning_probe::{
     FixedPlanningProbeCleanup, FixedPlanningProbeOwner, FixedProbeMetadataLease,
 };
 use plurx_core::store::background_jobs::{EncodedOutputIntent, JobToken};
 use std::sync::atomic::AtomicBool;
+type StaticArtifactOwner = ApplicationPayload<StaticArtifactEntry>;
 
 #[derive(Default)]
 pub(super) struct StaticArtifactRuns {
     // The existing BACKGROUND_HEAVY_LIMIT is one selected producer. The slot
     // itself has no growing heap; its Arc entry is included in the original
     // P application projection before allocation/native entry.
-    slot: std::sync::Mutex<Option<Arc<StaticArtifactEntry>>>,
+    slot: std::sync::Mutex<StaticArtifactSlots>,
+}
+#[derive(Default)]
+struct StaticArtifactSlots {
+    entry: Option<Arc<StaticArtifactOwner>>,
+    // No rich entry Arc here: finalization must not wait for its own payload.
+    closing: Option<Arc<RegisteredApplication>>,
 }
 
 pub(super) struct StaticArtifactEntry {
@@ -25,7 +33,9 @@ pub(super) struct StaticArtifactEntry {
     // Pins the original saved catalog, source version and complete carrier.
     // A renewal may update its token, never replace these admission inputs.
     pub(super) payload_digest: [u8; 32],
-    pub(super) controller: crate::background_jobs::JobFence,
+    // Extract at terminal cleanup so an escaped entry can retain its own
+    // allocations independently of the original controller-state aliases.
+    controller: std::sync::Mutex<Option<crate::background_jobs::JobFence>>,
     pub(super) intent: EncodedOutputIntent,
     pub(super) policy_generation: String,
     pub(super) file_id: i64,
@@ -36,7 +46,7 @@ pub(super) struct StaticArtifactEntry {
     pub(super) active: AtomicBool,
     // Last: the original P/M application payload stays charged through all
     // fields above and any aliases held by the original coordinator.
-    pub(super) planning_lease: std::sync::Mutex<Option<FiniteApplicationLease>>,
+    pub(super) planning_lease: std::sync::Mutex<Option<RegisteredApplication>>,
 }
 
 pub(super) enum StaticPlanning {
@@ -70,7 +80,7 @@ pub(super) enum StaticFinite {
     Closed,
 }
 
-pub(super) struct StaticRunGuard(Arc<StaticArtifactEntry>);
+pub(super) struct StaticRunGuard(Arc<StaticArtifactOwner>);
 
 impl Drop for StaticRunGuard {
     fn drop(&mut self) {
@@ -78,14 +88,19 @@ impl Drop for StaticRunGuard {
     }
 }
 
-impl StaticArtifactEntry {
-    pub(super) fn begin(self: &Arc<Self>) -> Option<StaticRunGuard> {
-        self.active
+impl StaticRunGuard {
+    fn begin(entry: &Arc<StaticArtifactOwner>) -> Option<Self> {
+        entry
+            .active
             .compare_exchange(false, true, AcqRel, Acquire)
             .ok()
-            .map(|_| StaticRunGuard(Arc::clone(self)))
+            .map(|_| Self(Arc::clone(entry)))
     }
-
+}
+impl StaticArtifactEntry {
+    fn controller(&self) -> Option<crate::background_jobs::JobFence> {
+        self.controller.lock().ok()?.clone()
+    }
     pub(super) fn matches(
         &self,
         token: &JobToken,
@@ -115,13 +130,19 @@ impl StaticArtifactRuns {
         policy_generation: String,
         file_id: i64,
         budget: u64,
-    ) -> Result<Arc<StaticArtifactEntry>, &'static str> {
-        let mut slot = self
+    ) -> Result<Arc<StaticArtifactOwner>, &'static str> {
+        let slot = self
             .slot
             .lock()
             .map_err(|_| "static owner registry is uncertain")?;
-        if let Some(existing) = slot.as_ref() {
-            if !existing.controller.same_controller_as(&controller) {
+        if slot.closing.is_some() {
+            return Err("original static application cleanup retains the slot");
+        }
+        if let Some(existing) = slot.entry.as_ref() {
+            if !existing
+                .controller()
+                .is_some_and(|original| original.same_controller_as(&controller))
+            {
                 return Err("another original static controller retains the slot");
             }
             return existing
@@ -136,37 +157,83 @@ impl StaticArtifactRuns {
                 .then(|| Arc::clone(existing))
                 .ok_or("another static claim retains the slot");
         }
-        let entry = Arc::new(StaticArtifactEntry {
-            original: token,
-            payload_digest,
-            controller,
-            intent,
-            policy_generation,
-            file_id,
-            budget,
-            planning: Mutex::new(StaticPlanning::Empty),
-            report: Mutex::new(None),
-            finite: Mutex::new(StaticFinite::Empty),
-            active: AtomicBool::new(false),
-            planning_lease: std::sync::Mutex::new(None),
-        });
-        *slot = Some(Arc::clone(&entry));
+        drop(slot);
+        let application = controller.application_group().clone();
+        let entry = Arc::new(
+            application
+                .wrap(StaticArtifactEntry {
+                    original: token,
+                    payload_digest,
+                    controller: std::sync::Mutex::new(Some(controller)),
+                    intent,
+                    policy_generation,
+                    file_id,
+                    budget,
+                    planning: Mutex::new(StaticPlanning::Empty),
+                    report: Mutex::new(None),
+                    finite: Mutex::new(StaticFinite::Empty),
+                    active: AtomicBool::new(false),
+                    planning_lease: std::sync::Mutex::new(None),
+                })
+                .map_err(|_| "original static entry registration is uncertain")?,
+        );
+        let mut slot = self
+            .slot
+            .lock()
+            .map_err(|_| "static owner registry is uncertain")?;
+        if slot.entry.is_some() || slot.closing.is_some() {
+            drop(slot);
+            return Err("another original static owner acquired the slot");
+        }
+        slot.entry = Some(Arc::clone(&entry));
+        drop(slot);
         Ok(entry)
     }
 
-    pub(super) fn current(&self) -> Option<Arc<StaticArtifactEntry>> {
-        self.slot.lock().ok()?.as_ref().map(Arc::clone)
+    pub(super) fn current(&self) -> Option<Arc<StaticArtifactOwner>> {
+        self.slot.lock().ok()?.entry.as_ref().map(Arc::clone)
     }
 
-    pub(super) fn remove(&self, entry: &Arc<StaticArtifactEntry>) {
-        if let Ok(mut slot) = self.slot.lock() {
-            if slot
+    fn remove(&self, entry: &Arc<StaticArtifactOwner>, registered: Option<RegisteredApplication>) {
+        let removed = {
+            let Ok(mut slot) = self.slot.lock() else {
+                return;
+            };
+            if !slot
+                .entry
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, entry))
             {
-                *slot = None;
+                return;
             }
+            slot.closing = registered.map(Arc::new);
+            slot.entry.take()
+        };
+        // Destructors and application finalization never run under this map lock.
+        drop(removed);
+    }
+
+    fn reconcile_closing(&self) {
+        let closing = self.slot.lock().ok().and_then(|slot| slot.closing.clone());
+        let Some(closing) = closing else { return };
+        if closing.finish().is_err() {
+            return;
         }
+        let removed = {
+            let Ok(mut slot) = self.slot.lock() else {
+                return;
+            };
+            if slot
+                .closing
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &closing))
+            {
+                slot.closing.take()
+            } else {
+                None
+            }
+        };
+        drop(removed);
     }
 }
 
@@ -304,8 +371,17 @@ fn planning_application_bytes(
     } = job;
     let token = &entry.original;
     let intent = &entry.intent;
-    let mut bytes = std::mem::size_of::<StaticArtifactEntry>()
+    let mut bytes = std::mem::size_of::<StaticArtifactOwner>()
         .checked_add(2 * std::mem::size_of::<usize>())? // Arc entry header
+        .checked_add(std::mem::size_of::<RegisteredApplication>())?
+        .checked_add(2 * std::mem::size_of::<usize>())? // compact custody Arc header
+        .checked_add(std::mem::size_of::<StaticArtifactSlots>())?
+        .checked_add(
+            entry
+                .controller()?
+                .application_group()
+                .requested_heap_bytes()?,
+        )?
         .checked_add(frame_bytes)?
         .checked_add(std::mem::size_of::<SessionRequest>())?
         .checked_add(request.selected_finite_requested_heap_bytes()?)?
@@ -450,11 +526,23 @@ impl TranscodeManager {
     /// Existing manager reap cadence, never a new timer. The core book keeps
     /// every original P/R job and durable mutation when this bounded pass
     /// times out; the fixed entry remains until its R selector closes.
+    #[cfg(test)]
+    pub(crate) fn fixture_static_application_alias(&self) -> Option<impl Send> {
+        self.static_artifact_runs.current()
+    }
+    #[cfg(test)]
+    pub(crate) async fn fixture_reconcile_static_application(&self) {
+        self.reconcile_static_artifact_run().await;
+    }
+
     pub(super) async fn reconcile_static_artifact_run(&self) {
+        self.static_artifact_runs.reconcile_closing();
         let Some(entry) = self.static_artifact_runs.current() else {
             return;
         };
-        let Some(_active) = entry.begin() else { return };
+        let Some(_active) = StaticRunGuard::begin(&entry) else {
+            return;
+        };
         let deadline = Instant::now() + Duration::from_millis(500);
         let mut finite = entry.finite.lock().await;
         match &mut *finite {
@@ -570,24 +658,34 @@ impl TranscodeManager {
         // original heartbeat join and logical Store Close. A cancelled waiter
         // leaves its original handle in this retained controller; no missing
         // fence, timeout or pruned row can authorize M's final drop.
-        if !entry.controller.outer_payloads_dropped() {
+        let Some(controller) = entry.controller() else {
             return;
-        }
-        let receipt = match tokio::time::timeout_at(
-            deadline.into(),
-            entry.controller.finish_original_controller(),
-        )
-        .await
-        {
-            Ok(receipt) => receipt,
-            Err(_) => return,
         };
+        let receipt =
+            match tokio::time::timeout_at(deadline.into(), controller.finish_original_controller())
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(_) => return,
+            };
         if !receipt.closes_original(&entry.original) {
             return;
         }
+        // Actual rich entry aliases and shared controller-state aliases have
+        // independent destruction fences. Extract the original controller
+        // selector outside the map before waiting for either payload.
+        let original_controller = match entry.controller.lock() {
+            Ok(mut original) => original.take(),
+            Err(_) => return,
+        };
+        drop(original_controller);
+        drop(controller);
         // The original core book still requires positive native P closure.
-        // The entry's own fields/controller disappear before its M lease.
-        self.static_artifact_runs.remove(&entry);
+        let registered = match entry.planning_lease.lock() {
+            Ok(mut lease) => lease.take(),
+            Err(_) => return,
+        };
+        self.static_artifact_runs.remove(&entry, registered);
     }
 
     /// Selected complete software output. The fixed registry entry is visible
@@ -630,9 +728,8 @@ impl TranscodeManager {
                 budget,
             )
             .map_err(PreparationError::Yield)?;
-        let _active = entry
-            .begin()
-            .ok_or(PreparationError::Yield("static_owner_busy"))?;
+        let _active =
+            StaticRunGuard::begin(&entry).ok_or(PreparationError::Yield("static_owner_busy"))?;
         let runtime = self
             .resource_runtime
             .as_ref()
@@ -679,13 +776,13 @@ impl TranscodeManager {
             } else if candidate_catalog.is_some() {
                 return Err(PreparationError::Stop("static_candidate_unexpected"));
             }
-            let controller_bytes = entry
-                .controller
-                .controller_requested_heap_bytes()
-                .await
-                .ok_or(PreparationError::Fail(
-                    "static_controller_capacity_unavailable",
-                ))?;
+            let controller_bytes =
+                fence
+                    .controller_requested_heap_bytes()
+                    .await
+                    .ok_or(PreparationError::Fail(
+                        "static_controller_capacity_unavailable",
+                    ))?;
             let app_bytes = planning_application_bytes(
                 request,
                 &snapshot,
@@ -730,7 +827,7 @@ impl TranscodeManager {
                 if lease.is_none() {
                     *lease = Some(
                         owner
-                            .take_application_lease(app_bytes)
+                            .take_registered_application(app_bytes, fence.application_group())
                             .map_err(|error| PreparationError::Retry(error.to_string()))?,
                     );
                 }

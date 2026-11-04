@@ -90,7 +90,7 @@ close boundary before obtaining coverage.
 | DVR recording sinks | [DVR sink](../../crates/plurxd/src/live_tv/dvr.rs): original sink before `start_sink_writer` | `sink_writer_loop` file write/flush/fsync and `settle_sink` joining the original handle; activity-row removal supplies no proof | Open |
 | Source actors and escaped response bodies | [Source factory](../../crates/plurxd/src/transcode/source_actor.rs): original registry owner before spawn; original response reference before body publication | Original physical/preparation settlement and every `SourceResponseGuard`; [Source direct task registry](../../crates/plurxd/src/transcode/source_direct.rs) retains Active/Settling/Failed custody | Direct applications built; other Source paths open |
 | Local direct reads | [Local direct open](../../crates/plurxd/src/transcode/local_direct.rs): fixed 64-slot claim, core preparation and original worker before native entry | `reconcile_local_direct_owners`: join Active worker, destroy rich entry/application lease, retain Settling ticket until final retirement; [core direct domain](../../crates/plurx-core/src/adaptive_resources/runtime/direct_source.rs) owns the actual reads | Native/application adapters built; scoped qualification passes |
-| Background static generation | [Static run reservation](../../crates/plurxd/src/transcode/background_static.rs): original controller slot before P native awaits | `reconcile_static_artifact_run`: retain AdmissionUnknown/Closing, original controller receipt and actual rich payload destruction before application lease release | Open |
+| Background static generation | [Static run reservation](../../crates/plurxd/src/transcode/background_static.rs): bounded original group before heartbeat spawn; same group binds to M before P native awaits | `reconcile_static_artifact_run`: retain AdmissionUnknown/Closing; compact cleanup waits for actual controller/entry/inline-F destruction, original heartbeat join and original Store Close | Scoped P/M adapter qualified; pre-M census and broader family coverage open |
 | Preparation and retained output | [Retained artifact registry](../../crates/plurxd/src/vod/retained.rs): same retained S and original preparation origin | Original finite closing ticket plus each artifact/read alias; [cache reader guards](../../crates/plurxd/src/cachekeep.rs) last through actual consumer destruction | Open |
 | Relay, network/source domains and legacy helper graphs | [Relay response pump](../../crates/plurxd/src/media_sessions.rs) before spawn; original [probe](../../crates/plurxd/src/transcode/source_preparation.rs), [index](../../crates/plurxd/src/fragindex.rs) and [subtitle](../../crates/plurxd/src/transcode/source_subtitles.rs) operations | Actual pump/upstream/queued-body destruction and original helper settlement; other legacy audio/processed graphs still need their own adapters | Open |
 
@@ -177,7 +177,8 @@ Exact-candidate formatting/Clippy and the manual Effort gate belong to the task
 PR. Earlier superseded-source passes are not added to this count. Existing
 zero-application-byte core fixtures retain their native-only boundary; neither
 those fixtures nor the explicit untracked VOD wrapper certify application
-coverage. Background static and finite application leases still need adapters.
+coverage. Background static now has the scoped adapter below; finite R/S application
+leases and broader static entry paths still need adapters.
 
 Keep admission/settlement mutation under a single documented lock order.
 Local direct holds its slot mutex while preparing the core role; Source direct
@@ -190,6 +191,99 @@ legacy path, recovery import and application reference in that family has a
 concrete adapter. Completing local direct alone cannot certify all SourceReader
 work. Lost selectors and census overflow retain uncertainty and never evict an
 older owner to claim completeness.
+
+## Static P/M counts actual controllers, entries and inline futures
+
+The bounded [application group](../../crates/plurx-core/src/adaptive_resources/runtime/application.rs)
+is created before the original heartbeat spawn. It has four payload/frame
+slots and one original task. The group wraps the actual shared controller
+state inside JobFence's original Arc, the encoded controller payload, the
+whole pinned inline encoded pass in
+[state.rs](../../crates/plurxd/src/state.rs), and the actual static entry
+inside its escaped Arc aliases. `Ready` does not release the inline F count;
+only successful destruction of the original pinned F does. Destructor panic,
+poll panic, poisoned custody and failed original join retain uncertainty.
+There is no observer task or daemon-supplied positive-close Boolean.
+
+Core retains and polls the same original heartbeat JoinHandle. Cancelling its
+waiter leaves that handle in original custody; retry joins it without spawning
+replacement work. Spawn occurs outside the group mutex, and the original F
+cannot run before handle publication. A shut-down executor may synchronously
+destroy its submitted F, so this ordering is required even before first poll.
+
+Before `prepare_inputs`, one-shot binding seals registration and registers the
+same original group identity as a separate reference to the actual M role.
+Census → original book → group → finite is the binding lock order; every
+deterministic group/capacity refusal precedes census insertion, and no fallible
+step separates insertion from retaining the same reference and application
+fence. Failed byte checks, a taken M slot or a sealed cross-runtime group
+cannot leave an orphan reference.
+Its measured inline/heartbeat frames and structural bookkeeping join the
+existing requested application projection. These are requested capacities,
+not a complete allocator/executor peak or startup bound. The original finite
+owner retains the group if a daemon selector disappears. Existing finite
+callers without this adapter keep their own alias fence; registration is not
+globally imposed on unaudited R/S lifetimes.
+
+The daemon preserves native P, report, original R/S, cache/compatibility,
+AdmissionUnknown and original logical Store fences. Once original Store Close
+and heartbeat join are positive, reconciliation extracts the entry's original
+controller selector, transfers the registered group into compact cleanup
+custody, and extracts the rich entry under the map lock.
+Actual destruction and reference finalization run after that lock is released.
+Compact cleanup holds no rich-entry Arc. An escaped entry, JobFence, controller or
+completed inline F therefore keeps the original M reference and application
+charge while permitting later reconciliation. Successful reference closure
+then releases the application fence; native and journal settlement remain
+separate. Retained S and its aliases keep their existing independent lifetime.
+
+**Startup boundary:** claim candidate parsing, Store claim dispatch and the
+whole span before M binding remain explicitly unbridged in the census. The
+bounded pending group preserves original objects in that span, but later M
+registration cannot certify absence of earlier work. Full static-family
+coverage, finite R application closure, conserving R-to-S application custody,
+pre-Winner ownership, complete startup/cleanup bounds, the production sandbox
+and the production launcher remain open. All family coverage stays unbridged;
+full M0 and real trials remain ineligible.
+
+Focused task qualification passes **63 distinct cases**: 39 core and 24
+daemon, all with zero ignored. Twelve cases are new. Tree `0972b7d2` supplies
+60 unchanged cases; tree `82cb40b1` supplies the three strengthened native
+survivors. The earlier three survivor passes are excluded from this count.
+All production Rust is identical between those trees; the colocated retained-S
+case and all other test bodies are unchanged. Historical totals above remain
+separate.
+
+| Executed scope | Distinct passes | Actual boundary |
+|---|---:|---|
+| Core application group | 6 | Original task cancellation/failure, real executor shutdown, actual inline F destruction, poll/destructor panic |
+| Core planning bind | 6 | Three isolated M survivors, deterministic bad-bind/no-orphan/refund, existing constructor and continuous-cutoff cases |
+| Core finite alias, direct and census | 27 | Existing finite fence (1), direct ownership (12), owner inventory (14) |
+| Daemon original controller and static registry | 13 | Original heartbeat/Store (5), carrier/configuration/AdmissionUnknown (8) |
+| Daemon native static survivors | 3 | Entry-only, completed-F-only and JobFence-only each retain M under driven cleanup; original M retires after the sole survivor drops |
+| Daemon retained S, pre-Winner and direct | 8 | Retained output (1), original dormant drivers (2), existing direct/HTTP ownership (5) |
+
+The core group and planning cases use these focused filters:
+
+```bash
+cargo test -p plurx-core --lib --locked \
+  --features fixtures,hiqlite-contract-tests,scratch-fault-injection \
+  adaptive_resources::runtime::application::tests -- --nocapture --test-threads=1
+cargo test -p plurx-core --lib --locked \
+  --features fixtures,hiqlite-contract-tests,scratch-fault-injection \
+  adaptive_resources::runtime::planning_probe::plan::tests -- --nocapture --test-threads=1
+```
+
+The three native variants in
+[automatic_static.rs](../../crates/plurxd/src/vod/tests/automatic_static.rs)
+use a fixture inline coordinator with the actual selected Store, P/R,
+FFmpeg, static entry and retained-S machinery. They verify original Store
+closure and rich-entry extraction before isolating a survivor, actively drive
+M cleanup while it is held, and require positive original M retirement after
+it drops. They do not execute the production `state.rs` background loop end
+to end; that concrete F is source-reviewed and compiled. Exact-candidate
+format, strict Clippy and workspace-check receipts belong to the task PR.
+These scoped results grant no full-suite, M0 or real-trial acceptance.
 
 ## Selected runtime keeps its original census row
 
