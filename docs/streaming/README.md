@@ -1,15 +1,13 @@
 # streaming/ — delivery: VOD, Dolby Vision, capabilities, reliability
 
-The index of `docs/streaming/`: every document in this folder, the question it
-answers, and its status. Routed from [the docs index](../README.md), which
-defines status words. Add each new document’s row in the same commit.
-
-Everything about what gets sent to a player and why: the VOD presentation
-programme, the capability negotiation that picks a grade, Dolby Vision
-conversion, decoder selection, and the stall/stutter investigations.
+Delivery, Dolby Vision, capabilities and playback reliability. The
+[docs index](../README.md) defines status words and documentation rules.
+Add each document's row here in the same commit.
 
 | File | Answers | |
 |---|---|---|
+| [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold first-playlist consumption and web Resume fault ownership: implementation, review, validation and merge ledger. | open |
+| [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs; review and acceptance. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Which playback files share `cache.max_gb`, how concurrent writes reserve capacity, and how global eviction protects readers and free disk space. | built |
 | [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG backward-seek failure: subtitle reattachment cancelled the Auto request before commit; underlying repair, recovery ownership, quality indicators and remaining live qualification. | open |

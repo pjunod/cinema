@@ -212,7 +212,6 @@ pub(super) struct RollingPublicationClock {
     pub(super) retention_first_segment: Option<i64>,
     pub(super) budget_attempt: Option<u64>,
     pub(super) budget_anchor_sequence: Option<u64>,
-    legacy_bootstrap_at: Option<Instant>,
     pub(super) allowed_end_ms: Option<i64>,
     pub(super) carried_surplus_ms: i64,
     pub(super) demand_observation_age_ms: Option<i64>,
@@ -313,7 +312,6 @@ impl RollingPublicationClock {
             self.retention_first_segment = None;
             self.budget_attempt = None;
             self.budget_anchor_sequence = None;
-            self.legacy_bootstrap_at = None;
             self.allowed_end_ms = None;
             self.carried_surplus_ms = 0;
             self.demand_observation_age_ms = None;
@@ -328,18 +326,42 @@ impl RollingPublicationClock {
         producer_attempt: u64,
         lease: Option<&crate::playback_control::RollingLeaseSnapshot>,
         media_origin_ms: i64,
+        requested_position_ms: i64,
     ) -> RollingPublicationBudget {
         self.budget_attempt = Some(producer_attempt);
+        let initial_consumed_ms = requested_position_ms.saturating_sub(media_origin_ms).max(0);
+        let published = self
+            .served
+            .as_ref()
+            .is_some_and(|served| served.producer_attempt == producer_attempt);
         let explicit = lease.filter(|lease| {
             lease.mode == crate::playback_control::RollingLeaseMode::Explicit
                 && lease.demand.is_some()
                 && lease.accepted_demand_sequence.is_some()
         });
         let budget = if let Some(lease) = explicit {
-            self.legacy_bootstrap_at = None;
             let demand = lease.demand.as_ref().expect("explicit demand checked");
-            let observation_age = lease.demand_observation_age.unwrap_or_default();
-            let ends = rolling_explicit_publication_ends(demand, observation_age, media_origin_ms);
+            // Rendering telemetry is not permission to extrapolate a playhead
+            // before this attachment has actually presented. The actor's
+            // admission requires advancing, exact-attempt post-publication
+            // observations; its latest observation then owns elapsed time.
+            let observation_age = if published
+                && lease.startup.phase == crate::playback_control::RollingStartupPhase::Presented
+            {
+                lease.demand_observation_age.unwrap_or_default()
+            } else {
+                Duration::ZERO
+            };
+            let mut ends =
+                rolling_explicit_publication_ends(demand, observation_age, media_origin_ms);
+            if !published {
+                ends.consumed_end_ms = initial_consumed_ms;
+                ends.consumed_absolute_ms = media_origin_ms.saturating_add(initial_consumed_ms);
+                ends.desired_end_ms = initial_consumed_ms.saturating_add(
+                    rolling_initial_runway_ms(rolling_playback_rate(Some(demand))),
+                );
+                ends.allowed_end_ms = ends.desired_end_ms.saturating_add(ROLLING_SEGMENT_MAX_MS);
+            }
             RollingPublicationBudget {
                 demand_sequence: lease.accepted_demand_sequence,
                 consumed_end_ms: ends.consumed_end_ms,
@@ -356,12 +378,21 @@ impl RollingPublicationClock {
                 ),
             }
         } else {
-            let bootstrap_at = *self.legacy_bootstrap_at.get_or_insert(now);
-            let consumed_end_ms =
-                i64::try_from(now.saturating_duration_since(bootstrap_at).as_millis())
-                    .unwrap_or(i64::MAX);
+            // A legacy client supplies no playhead. Its conservative clock
+            // starts with actual media delivery, never writer inventory or
+            // mere playlist availability. The actor resets this evidence on
+            // replacement and rejects predecessor commits.
+            let delivered_at = lease
+                .filter(|lease| published && lease.delivery.producer_attempt == producer_attempt)
+                .and_then(|lease| lease.delivery.first_media_committed_at);
+            let elapsed_ms = delivered_at.map_or(0, |at| {
+                i64::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(i64::MAX)
+            });
+            let consumed_end_ms = initial_consumed_ms.saturating_add(elapsed_ms);
             let desired_end_ms = consumed_end_ms.saturating_add(ROLLING_INITIAL_RUNWAY_MS);
-            let fetched_end_ms = lease.map_or(0, |lease| lease.delivery.fetched_end_ms.max(0));
+            let fetched_end_ms = lease
+                .map_or(0, |lease| lease.delivery.fetched_end_ms.max(0))
+                .max(initial_consumed_ms);
             RollingPublicationBudget {
                 demand_sequence: None,
                 consumed_end_ms,

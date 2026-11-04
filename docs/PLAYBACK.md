@@ -1526,6 +1526,9 @@ perf report are the same events server-side.
 
 ## Resume & progress
 
+- Watched history remains true during a rewatch. Web Local and Shared launches
+  resume a valid current position above three seconds and below 95% of known
+  duration independently of that historical flag. Completed positions start over.
 - **Resume** rides the same input-seek on every path: `?start=<seconds>` on
   `/direct`/`/stream.mp4`, or `hls/start?start=…`. For HLS sessions (transcode
   and copy), the response reports `media_origin_ms`; clients that understand

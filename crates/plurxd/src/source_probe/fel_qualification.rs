@@ -1236,16 +1236,30 @@ mod tests {
         plurx_core::domain::MediaFile,
         String,
     ) {
+        qualification_fixture_with_threads(dir, 9).await
+    }
+
+    async fn qualification_fixture_with_threads(
+        dir: &Path,
+        threads: usize,
+    ) -> (
+        crate::state::AppState,
+        plurx_core::domain::MediaFile,
+        String,
+    ) {
         use plurx_core::domain::{
             DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult,
         };
         use plurx_core::store::{SqliteStore, Store};
         use std::sync::Arc;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        // One title worker (1) plus its simulated GPU graph (4 + 3).
+        // One title worker (1), GPU helper with owned reader (5), consumer (3).
         // This fixture tests custody, not the host's physical CPU capacity.
         store
-            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "8")
+            .put_setting(
+                plurx_core::store::keys::SW_POOL_THREADS,
+                &threads.to_string(),
+            )
             .await
             .expect("synthetic title and GPU graph budget");
         let caps = plurx_core::transcode::EncoderCaps {
@@ -1279,7 +1293,7 @@ mod tests {
             )
             .with_hdr10_passthrough_vaapi(true),
         );
-        assert_eq!(state.transcode.software_budget().await, 8);
+        assert_eq!(state.transcode.software_budget().await, threads);
         std::fs::create_dir_all(dir.join("runtime")).expect("runtime");
         for key in [
             plurx_core::store::keys::DV_HDR_PROCESSING,
@@ -1335,6 +1349,94 @@ mod tests {
             .expect("file");
         let file = store.get_file(id).await.expect("file").expect("file");
         (state, file, document)
+    }
+
+    /// Admission includes the real owned source-reader worker. A tight pool
+    /// defers the exact request before measurement and releases its slot;
+    /// nine threads admit the unchanged graph without downshifting its work.
+    #[tokio::test]
+    async fn qualification_source_reader_graph_is_busy_at_eight_threads_and_admitted_at_nine() {
+        fn admitted_measurement<'a>(
+            sample: &'a Sample<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Measurement, String>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                assert_eq!(sample.decode, RendererDecode::Gpu);
+                std::fs::write(
+                    sample.runtime_cache.join("measurement-entered"),
+                    b"admitted",
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(Measurement {
+                    windows: Vec::new(),
+                    served: Vec::new(),
+                    dropped: Vec::new(),
+                })
+            })
+        }
+        for threads in [8, 9] {
+            let dir = crate::test_tempdir().expect("thread admission scratch");
+            let (state, file, document) =
+                qualification_fixture_with_threads(dir.path(), threads).await;
+            let admission = state
+                .transcode
+                .admit_dv_title()
+                .await
+                .expect("admit the one-thread title worker");
+            let renderer_path = dir.path().join("renderer");
+            let renderer = Renderer {
+                scanner: "a".repeat(64),
+                path: &renderer_path,
+                tools: None,
+                env: Vec::new(),
+                decode: RendererDecode::Gpu,
+            };
+            let result = qualify_with(
+                &state,
+                &file,
+                &document,
+                &renderer,
+                &admission,
+                &tokio_util::sync::CancellationToken::new(),
+                admitted_measurement,
+            )
+            .await
+            .expect("qualification admission outcome");
+            let stored = state
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .expect("read exact recipe state")
+                .expect("source probe document");
+            let entered = state.runtime_cache_dir.join("measurement-entered").exists();
+            let pending = q::pending_recipes(&stored, file.size, file.mtime);
+            if threads == 8 {
+                assert!(matches!(result, Qualification::Busy), "{result:?}");
+                assert!(
+                    !entered,
+                    "insufficient pool cannot start the renderer graph"
+                );
+                assert_eq!(pending.len(), 1);
+                assert!(matches!(
+                    q::verdict_state(Some(&stored), file.size, file.mtime, &pending[0].identity),
+                    q::VerdictState::Missing
+                ));
+            } else {
+                assert!(matches!(result, Qualification::Stored(_)), "{result:?}");
+                assert!(
+                    entered,
+                    "nine threads actually enter the admitted measurement"
+                );
+                assert!(pending.is_empty());
+            }
+            assert!(!admission.has_extension(), "the graph debit is released");
+            let slot = state
+                .transcode
+                .try_qualification_slot(tokio_util::sync::CancellationToken::new())
+                .expect("qualification released its reconstruction slot");
+            drop(slot);
+        }
     }
 
     /// B1: the qualification's own GPU graph is a claim on the title job's
