@@ -17,13 +17,13 @@ keeps the earlier 44 cases separate from 51 selected-bridge core passes on
 production-identical `6ee93330`/`ca85f07f` and three daemon passes on `ca85f07f`.
 Seven unchanged overlap failures remain reproduced baseline exceptions.
 
-[PR #1377](http://forge.lan:3000/noirr/plurx/pulls/1377) now has a built direct
-retirement amendment, not yet merged. Exact `7658db4c` execution
+[PR #1377](http://forge.lan:3000/noirr/plurx/pulls/1377) records the exact-candidate
+gate and landing for the built direct-retirement amendment. Exact `7658db4c` execution
 reproduced three core and two daemon ticket-retention failures. The
 [original-selector follow-up](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#direct-retirement-follow-up--original-selectors-replace-permanent-aliases)
 records the bounded repair and two new actual-read cases at source tree
-`4cb874ba`: 21 focused core and three affected daemon cases pass. The amended
-exact-candidate hook/gate remains owed. Distinct source-scoped total: 66.
+`4cb874ba`: 21 focused core and three affected daemon cases pass. Distinct source-scoped total: 66.
+Exact-candidate checks are recorded in that task PR.
 The earlier 51-case qualification retains its original source boundary.
 
 The [finite ledger](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)

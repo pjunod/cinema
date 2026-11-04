@@ -283,9 +283,9 @@ The effort remains draft; V1–V5 and Main promotion remain open.
 ## Direct retirement follow-up — original selectors replace permanent aliases
 
 **Status:** built amendment to [PR #1377](http://forge.lan:3000/noirr/plurx/pulls/1377);
-scoped core/daemon qualification passes; exact amended gate and merge pending. The earlier
-51-case heading and source
-boundaries above remain unchanged.
+scoped core/daemon qualification passes. The PR records exact-candidate checks,
+the required Effort development gate and landing. The earlier 51-case heading
+and source boundaries above remain unchanged.
 
 On exact committed source `7658db4c4fdb5027a6283bafa00018c121ed6ec5`, the
 [actual direct-source module](../../crates/plurx-core/src/adaptive_resources/runtime/direct_source/tests.rs)
@@ -334,5 +334,6 @@ source-scoped distinct core total is 60. The pinned test build passes in
 2 min 56 s. All three affected daemon Direct cases also pass on `4cb874ba`, including
 the two reproduced retained-ticket failures. Combined source-scoped evidence
 has 60 distinct core and six daemon passes: 24 amended-source cases and
-42 retained earlier cases. The exact amended commit hook/gate remains owed.
+42 retained earlier cases. Exact-candidate compiler checks and the required
+Effort development gate are recorded in the task PR.
 Full inventory/M0, producer bounds, trials and Main promotion remain open.
