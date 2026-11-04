@@ -6,6 +6,13 @@ version = 1
 # expose the same function name.
 entries = []
 
+[[fixtures]]
+test = "crates/plurxd/src/playback_cache.rs::playback_cache::tests::actual_playback_cache_inventory_cost"
+owner = "playback-cache"
+reason = "Read-only inventory timing requires an explicitly selected existing playback-cache root; ordinary unit runners do not provide operator-owned cache contents or physical timing evidence."
+requires = "PLURX_DV_WINDOW_CACHE_ROOT naming an existing explicitly selected playback-cache root"
+command = "PLURX_DV_WINDOW_CACHE_ROOT=/path/to/explicit-playback-cache cargo test --locked -p plurxd --bin plurxd playback_cache::tests::actual_playback_cache_inventory_cost -- --ignored --exact --nocapture"
+
 
 # Explicit opt-in fixtures are a separate inventory from temporarily broken
 # tests. Their exact commands supply a disposable namespace; they are never

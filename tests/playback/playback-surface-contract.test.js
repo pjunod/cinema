@@ -177,9 +177,18 @@ test("source retirement overrides are explicit and narrowly owned", () => {
     contract.sources
       .filter((row) => row.retired_by != null)
       .map((row) => ({ id: row.id, retired_by: row.retired_by })),
-    [{ id: "system_interruption", retired_by: ["system_resumed"] }],
+    [
+      { id: "system_interruption", retired_by: ["system_resumed"] },
+      { id: "media_waiting", retired_by: [
+        "presenting", "playback_not_requested", "intent_settled",
+        "intent_superseded", "attached_retired",
+      ] },
+    ],
     "a source-level retirement must be visible as an intentional exception",
   );
+  assert.deepEqual(contract.classes.buffering.retired_by,
+    ["presenting", "playback_not_requested", "attached_retired"],
+    "destination settlement is specific to media_waiting, not all buffering faults");
 });
 
 test("the shipped policy carries the fixture verbatim", () => {

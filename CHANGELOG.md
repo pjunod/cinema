@@ -14,6 +14,14 @@ bump may break compatibility and a **patch** bump never does.
   Verified private singleton upgrades preserve current data, identities, sealed
   keys and local observations; clusters require explicit creation or joining.
   Native backup, restore and maintenance have independent storage adapters.
+- Rolling HLS startup measures coverage from the requested position and starts
+  legacy consumption on actual media delivery. Web Resume retires destination
+  waits at proven seek completion and preserves attached-media fault ownership.
+
+- Web Local and Shared playback resume partial rewatches even when watched
+  history is already recorded.
+- Enhanced DV preparation overlaps bounded source reads and optional cache
+  inventory with full validation.
 - Playback source readers share fenced storage budgets, yield background scans
   during startup, and retain physical custody through cancellation and cleanup.
   Continuous quality starts primary video and audio before its companion;

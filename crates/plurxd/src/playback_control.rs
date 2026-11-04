@@ -6807,6 +6807,9 @@ pub(crate) struct RollingDeliverySnapshot {
     pub published_end_ms: Option<i64>,
     pub next_media_sequence: i64,
     pub fetched_segment: Option<i64>,
+    /// First accepted media-body commit for this producer attempt. Playlist
+    /// publication and init/metadata reads cannot start legacy consumption.
+    pub first_media_committed_at: Option<Instant>,
     pub fetched_end_ms: i64,
     pub pending_fetched_segment: Option<i64>,
 }
@@ -12426,6 +12429,7 @@ impl RollingControlActor {
         let Some(segment_index) = segment_index else {
             return true;
         };
+        self.delivery.first_media_committed_at.get_or_insert(now);
         if let Some(current) = self.delivery.fetched_segment {
             if segment_index < current {
                 return true;
