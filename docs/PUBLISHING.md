@@ -74,6 +74,10 @@ around by granting it more access. Export of the existing Cinema iOS and
 tvOS distribution archives succeeded with the Xcode account on 2026-11-03;
 these checks submitted no new builds to TestFlight.
 
+Cinema's internal TestFlight group `Developer Automatic` receives all current
+and future Apple builds. Its membership was verified on 2026-11-03 against
+the same one tester in `Internal Beta`; the original group was preserved.
+
 The Cinema Play upload key remains in its existing private signing file.
 The service-account JSON is stored at `~/.config/noirr/google-play.json`
 with mode `0600`. Its Play grant covers Cinema only: view app information
@@ -83,6 +87,11 @@ authenticated, read Cinema's internal track, and validated an empty edit.
 The edit was discarded without uploading an artifact or committing a release.
 This proves store access separately from the presence of a local key file.
 Missing credentials and rejected uploads fail the job.
+
+Credential checks do not prove an end-to-end store submission. Collect the
+first real mobile update's workflow result and store processing result as
+that acceptance evidence; do not bump versions or publish unchanged apps
+solely to exercise controller setup.
 
 **Queued runs and recovery.** Workflow concurrency queues this repository's
 releases without cancelling an upload. A controller file lock also refuses
