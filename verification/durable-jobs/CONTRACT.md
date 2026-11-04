@@ -53,6 +53,16 @@ remain runtime obligations in the
 or unproved ownership may still block indefinitely. No model result proves
 that source custody becomes available or that a real scan completes.
 
+**Identity-source corrections (2026-11-04):** subsequent recovery-module
+dependency refreshes require both actual-host inputs, read-only bound at
+`/run/plurx-host-machine-id` and `/run/plurx-host-boot-id`, for native services
+and containers alike. Missing container markers never establish native
+execution; neither image-local `/etc/machine-id` nor a namespace's `/proc`
+boot UUID is a fallback or physical-stop proof. Machine identity must be
+nonzero, and host boot identity a canonical nonnil UUID. Missing or invalid
+input retains custody without automatic recovery. These external proof
+prerequisites supply no additional modeled transition or guarantee.
+
 All previous exact anchors remain unique. Model, configuration, bounds,
 properties, fairness, toolchain and historical qualification identities are
 unchanged. Fresh static/smoke receipts remain separate from this audit and

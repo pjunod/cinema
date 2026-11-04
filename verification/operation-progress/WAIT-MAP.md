@@ -42,6 +42,15 @@ separate runtime obligations in the
 or missing proof remains a legitimate indefinite obstruction; the filesystem,
 backend and runtime return premises do not imply a reboot or discharge it.
 
+**Identity-source corrections (2026-11-04):** subsequent recovery-module
+dependency refreshes require both actual-host inputs, read-only bound at
+`/run/plurx-host-machine-id` and `/run/plurx-host-boot-id`, for native services
+and containers alike. Missing container markers do not justify image-local
+`/etc/machine-id`; a namespace's `/proc` boot UUID is not host-reboot proof
+either. Machine identity must be nonzero and host boot identity a canonical
+nonnil UUID. Missing or invalid input keeps recovery unproved and custody
+held. These remain external runtime obligations, not model progress evidence.
+
 Retain the historical `source-anchors.json`, all selected action/wait anchors,
 model/configuration bytes, bounds, properties, fairness and receipt identities.
 No historical schedule or temporal result gains a host-recovery, whole-daemon

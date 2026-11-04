@@ -105,33 +105,34 @@ impl Identity {
     fn current() -> Option<Self> {
         #[cfg(target_os = "linux")]
         {
-            // Containers receive a read-only host identity bind; an image's
-            // generated machine-id is not evidence of the host rebooting.
-            let machine_id = std::fs::read_to_string("/run/plurx-host-machine-id")
-                .or_else(|error| {
-                    if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
-                    {
-                        Err(error)
-                    } else {
-                        std::fs::read_to_string("/etc/machine-id")
-                    }
-                })
-                .ok()?;
-            let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
-            let identity = Self {
-                machine_id: machine_id.trim().to_owned(),
-                boot_id: boot_id.trim().to_owned(),
-            };
-            identity.valid().then_some(identity)
+            Self::linux_host(|path| std::fs::read_to_string(path))
         }
         #[cfg(not(target_os = "linux"))]
         None
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    fn linux_host(mut read: impl FnMut(&str) -> std::io::Result<String>) -> Option<Self> {
+        // Require an explicit read-only bind from the actual host for native
+        // services and containers alike. Missing container markers cannot
+        // establish native execution, and image machine IDs are not host proof.
+        let machine_id = read("/run/plurx-host-machine-id").ok()?;
+        // Some runtimes also virtualize /proc's boot UUID per container.
+        // Only the explicitly supplied actual-host boot identity is proof.
+        let boot_id = read("/run/plurx-host-boot-id").ok()?;
+        let identity = Self {
+            machine_id: machine_id.trim().to_owned(),
+            boot_id: boot_id.trim().to_owned(),
+        };
+        identity.valid().then_some(identity)
+    }
+
     fn valid(&self) -> bool {
         self.machine_id.len() == 32
+            && self.machine_id.bytes().any(|byte| byte != b'0')
             && self.machine_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-            && uuid::Uuid::parse_str(&self.boot_id).is_ok()
+            && uuid::Uuid::parse_str(&self.boot_id)
+                .is_ok_and(|boot| !boot.is_nil() && boot.to_string() == self.boot_id)
     }
 }
 

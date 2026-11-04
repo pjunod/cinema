@@ -22,6 +22,109 @@ fn identity(boot_id: &str) -> Identity {
     }
 }
 
+#[test]
+fn missing_explicit_host_identity_never_uses_image_identity_or_container_markers() {
+    for container_markers in [false, true] {
+        for explicit in [None, Some("".to_owned()), Some("0".repeat(32))] {
+            let mut reads = Vec::new();
+            let actual = Identity::linux_host(|path| {
+                reads.push(path.to_owned());
+                match path {
+                    "/run/plurx-host-machine-id" => explicit
+                        .clone()
+                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound)),
+                    "/run/plurx-host-boot-id" => Ok(NEW_BOOT.into()),
+                    "/etc/machine-id" => Ok("a".repeat(32)),
+                    "/.dockerenv" | "/run/.containerenv" if container_markers => Ok("".into()),
+                    _ => Err(std::io::ErrorKind::NotFound.into()),
+                }
+            });
+            assert!(actual.is_none());
+            assert!(reads.iter().all(|path| matches!(
+                path.as_str(),
+                "/run/plurx-host-machine-id" | "/run/plurx-host-boot-id"
+            )));
+        }
+    }
+}
+
+#[tokio::test]
+async fn namespace_boot_changes_never_replace_explicit_host_boot_proof() {
+    let fixture = Fixture::new();
+    let record = fixture.background("job");
+    let path = fixture.write(&fixture.envelope(vec![record]));
+    for host_boot in [
+        None,
+        Some(""),
+        Some("00000000-0000-0000-0000-000000000000"),
+        Some(OLD_BOOT),
+    ] {
+        let mut namespace_read = false;
+        let current = Identity::linux_host(|name| match name {
+            "/run/plurx-host-machine-id" => Ok("a".repeat(32)),
+            "/run/plurx-host-boot-id" => host_boot
+                .map(str::to_owned)
+                .ok_or_else(|| std::io::ErrorKind::NotFound.into()),
+            "/proc/sys/kernel/random/boot_id" => {
+                namespace_read = true;
+                Ok(NEW_BOOT.into())
+            }
+            _ => panic!("unexpected identity source {name}"),
+        });
+        assert!(
+            !namespace_read,
+            "container boot identity is never authority"
+        );
+        if host_boot == Some(OLD_BOOT) {
+            replay_at(
+                &fixture.store,
+                &fixture.dir,
+                &current.expect("explicit same host boot"),
+                NODE,
+            )
+            .await
+            .expect("same-boot refusal");
+        } else {
+            assert!(
+                current.is_none(),
+                "missing host boot cannot enable recovery"
+            );
+        }
+        assert!(path.exists());
+        assert_eq!(fixture.count("background_source_custody"), 1);
+    }
+}
+
+#[tokio::test]
+async fn explicit_host_identity_refuses_copied_evidence_and_recovers_the_same_host() {
+    let fixture = Fixture::new();
+    let records = vec![fixture.foreground(), fixture.background("job")];
+    let path = fixture.write(&fixture.envelope(records));
+    for host_machine in ["b".repeat(32), "a".repeat(32)] {
+        let current = Identity::linux_host(|name| match name {
+            "/run/plurx-host-machine-id" => Ok(format!("{host_machine}\n")),
+            "/run/plurx-host-boot-id" => Ok(format!("{NEW_BOOT}\n")),
+            _ => panic!("unexpected identity source {name}"),
+        })
+        .expect("explicit host identity");
+        replay_at(&fixture.store, &fixture.dir, &current, NODE)
+            .await
+            .expect("replay");
+        if host_machine == "b".repeat(32) {
+            assert!(path.exists(), "foreign host retains copied evidence");
+            assert_eq!(fixture.count("foreground_source_owners"), 1);
+            assert_eq!(fixture.count("background_source_custody"), 1);
+        } else {
+            assert!(
+                !path.exists(),
+                "same host's changed boot authorizes exact recovery"
+            );
+            assert_eq!(fixture.count("foreground_source_owners"), 0);
+            assert_eq!(fixture.count("background_source_custody"), 0);
+        }
+    }
+}
+
 pub(super) struct Fixture {
     pub(super) root: tempfile::TempDir,
     database: PathBuf,

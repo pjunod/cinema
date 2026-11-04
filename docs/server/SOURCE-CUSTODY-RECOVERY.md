@@ -114,21 +114,38 @@ the database. It never writes SQLite, stops services, or reboots anything.
 Use the active database and node identity from the installed server; the
 standalone historical database is not the replicated state machine.
 
-For a container, first make the real Linux host's machine identity readable
-to its service UID through this read-only bind in the local Compose override:
+For a container, first make the real Linux host's machine and boot identities
+readable to its service UID through these read-only binds in the local Compose override:
 
 ```yaml
 services:
   plurxd:
     volumes:
       - /etc/machine-id:/run/plurx-host-machine-id:ro
+      - /proc/sys/kernel/random/boot_id:/run/plurx-host-boot-id:ro
 ```
 
 The [override example](../../deploy/docker-compose.override.example.yml)
-shows its placement. The file must exist on the host and be readable. A known
-container without that bind does not substitute an image-specific identity.
-Native Linux uses `/etc/machine-id`; Linux kernel boot identity comes from
-`/proc/sys/kernel/random/boot_id`. There is no CLI identity override.
+shows their placement. Both files must exist on the actual host and be readable.
+Every Linux daemon requires both explicitly provisioned host identities;
+absence of container markers never permits an image-local machine identity or
+namespace-local boot identity fallback. Some runtimes replace the namespace's
+`/proc` boot UUID; [systemd-nspawn](https://github.com/systemd/systemd/blob/main/src/nspawn/nspawn.c)
+is one example. A container restart must never impersonate a host reboot.
+The [native systemd unit](../../deploy/plurxd.service) supplies the same
+read-only binds from `/etc/machine-id` and `/proc/sys/kernel/random/boot_id`
+to the two `/run/plurx-host-*` paths.
+Its optional source prefix preserves ordinary startup if identity is missing;
+automatic recovery remains unavailable. Systemd's bind is private to the
+service, as specified in [systemd.exec](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#BindPaths=).
+Custom service managers must explicitly provide both equivalent actual-host
+read-only files. The daemon never uses its namespace's `/etc` or `/proc` as a
+fallback. There is no CLI identity override.
+
+The helper reads `/etc/machine-id` and `/proc/sys/kernel/random/boot_id` in the actual owning host's context. Its
+challenge does not provision daemon identity: the daemon independently checks
+it against the explicit host bind. Running the helper in an arbitrary image or
+namespace is outside this operating contract and cannot supply recovery authority.
 
 ```bash
 # On the actual owning Linux host; substitute its node ID and active paths.
@@ -200,3 +217,4 @@ M1 work, with real descendant-stop evidence required before enabling them.
 | 2026-11-04 | Final local recovery cases: 17 passed on Rust 1.97.1. Operations: 1,623 passed (three environment skips). Validation: 659 passed (one environment skip). Activity regressions passed. | Linux-only process cases, root helper ownership and full unit CI remain required on the final PR revision. No live recovery or reboot qualification is claimed. |
 | 2026-11-04 | Final Rust 1.97.1 workspace/all-target Clippy passed with `-D warnings`; normal commit hooks passed. | PR #1378 owns the immutable CI and landing receipts. The full unit run and main gate must be green before landing; merge alone is not fleet recovery acceptance. |
 | 2026-11-04 | CI preflight caught formal correspondence drift before units started. The audited source-pin refresh passed Astra's independent review, all three mapping checks, 35 formal Python tests and the three pinned TLC smoke runs locally. | Models, properties, bounds, fairness and toolchain are unchanged. Physical reboot proof and filesystem/Store recovery waits remain explicit runtime obligations outside modeled guarantees. Full CI must rerun on the updated revision. |
+| 2026-11-04 | Astra closed both identity P1s after reviewing the correction and refreshed pins. All 20 local recovery tests, 100 operations contracts, three mapping checks, 35 formal Python tests, three pinned TLC smoke runs and workspace/all-target Clippy passed. | Removed image-local machine and namespace-local boot identity fallbacks universally; native service provisions both explicit host binds. Exact-candidate full CI and Linux-only cases remain required before merge. |
