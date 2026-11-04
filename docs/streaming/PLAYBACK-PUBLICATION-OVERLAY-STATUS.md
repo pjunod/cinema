@@ -2,11 +2,11 @@
 
 Companion to [the startup implementation ledger](PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md) and [the playback surface contract](../clients/PLAYBACK-SURFACE-CONTRACT.md) — this records the deployed acceptance failures, their corrections, and the PR's progress toward merge.
 
-**Status:** open — validation and merge pending.
+**Status:** open — source repair implemented; deployment acceptance pending.
 
-**Progress:** Adversarial review finished; its regression-fixture finding is addressed. Final compilation, focused Rust regressions and one main fast lane are next.
+**Progress:** Adversarial review finished; its regression-fixture finding is addressed. This branch’s pull request description is the live record for compiler results, retained per-test evidence, the main fast lane and landing.
 
-**Owner:** Codex/root; Sol owns the web lifecycle patch. **Branch:** `codex/playback-publication-overlay`. **PR:** Not opened yet. **Base:** `d367abf3d`. **Updated:** 2026-11-03.
+**Owner:** Codex/root; Sol owns the web lifecycle patch. **Branch:** `codex/playback-publication-overlay`. **PR:** See the pull request for this branch; its description records the current state. **Integration base:** `3812516dc` (the reviewed patch has no overlapping upstream changes). **Updated:** 2026-11-03.
 
 ## Acceptance found two distinct ownership defects
 
@@ -20,8 +20,8 @@ Expired-session web Resume also retained a `media_waiting` fault over advancing 
 |---|---|---|---|
 | Initial publication frontier and clock | Codex/root | Implemented | Requested position, not pre-attachment elapsed time, owns initial coverage. Keep complete cuts, immutable reload duration, exact-attempt admission and steady reserve. |
 | Media-wait and destination-fault lifetime | Sol | Implemented | Attached presentation retires only attached waits; destination faults retire on actual destination proof or supersession. Predecessor movement cannot forgive an unresolved destination. |
-| Regression evidence and main fast lane | Codex/root | Review complete; validation next | One completed adversarial review, fixes, then focused regressions and one fast-lane run. Retry only failed or invalidated checks. |
-| Main merge and post-merge jobs | Codex/root | Pending | Carry regression fields into landing commit; record observed post-merge checks. Maintainer owns deployment. |
+| Regression evidence and main fast lane | Codex/root | Tracked in the PR | One completed adversarial review, fixes, then focused regressions and one fast-lane run. Retry only failed or invalidated checks. |
+| Main merge and post-merge jobs | Codex/root | Tracked in the PR | Carry regression fields into landing commit; record observed post-merge checks. Maintainer owns deployment. |
 
 ## Decisions and limits
 
@@ -29,7 +29,7 @@ There are no new watchdogs, startup timeout increases, feature gates, or browser
 
 ## Validation and review receipts
 
-Not run yet. Tests are deferred until the complete candidate has had its adversarial review. Static syntax and pinned compiler checks may run during implementation. Private runtime receipts retain the measured sequence and cleanup; committed documentation uses neutral infrastructure names.
+Astra review preceded test execution. Pinned formatting passed. Initial bookkeeping passed 14 checks; its one lifecycle-header assertion passed on a focused retry after wording correction. The PR records final pinned compiler output and the 26-case Rust journal; its main fast lane owns the web regression IDs and retains successes across failed-only retries. Private runtime receipts retain measured startup/Resume and cleanup; committed documentation uses neutral infrastructure names.
 
 ## Implementation — the clock starts at its owner
 
