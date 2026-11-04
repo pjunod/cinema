@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Adaptive VOD preparation retains its original driver through adoption and
+  cancellation, and keeps resource charges when that task cannot be joined.
+
 - Nightly deep validation and mutation tests use the app's shipped FFmpeg
   package; obsolete FFmpeg 6 runner capacity and recovery entries are retired.
 

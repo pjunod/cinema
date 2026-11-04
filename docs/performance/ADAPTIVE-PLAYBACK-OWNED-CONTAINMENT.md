@@ -1,6 +1,6 @@
 # Adaptive owned containment — what still stands before real trials
 
-**Status:** open · implementation and native qualification in progress ·
+**Status:** open · scoped implementation qualified; task gate pending ·
 2026-11-03. Companion to the [production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
 and [canonical resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md).
 The [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) remains normative.
@@ -127,9 +127,28 @@ Nine daemon cases pass on staged source tree
 three new original-driver cases (same task through Adopt, cancelled preparation
 and cleanup waiter, aborted task retains full charge), four affected
 Adopt/fence cases, real finite lifecycle (80.90 s including invocation) and
-graceful restart (87.76 s including invocation). Native domain/census results
-remain pending; that earlier driver snapshot does not qualify their later
-local refinements.
+graceful restart (87.76 s including invocation). Those four daemon source files
+are unchanged on the committed native candidate.
+
+On `fd81da243a3d8d1012ca9a0bf0686ec884d54243`, all 35 focused core cases pass:
+
+| Scope | Passed | Evidence boundary |
+|---|---:|---|
+| Owner census | 14 | Includes callback Drop/unwind, finalization, references, overflow and atomic reservation |
+| Domain validation/custody | 8 | Synthetic refusals/ownership and bounded control parsing |
+| Sealed launcher validation | 3 | Argument capacity and original pidfd status handling |
+| Actual delegated kernel | 10 | Empty/removal/reuse; atomic birth; fork/thread refusal; private OOM; surviving `setsid` descendant; dropped owner, exec failure and pre-clone refusal |
+
+The ten kernel cases ran explicitly with `--ignored`, each reporting zero
+ignored tests under verified ancestor caps; ordinary fixture-file success is
+not substituted for enforcement. The private child entry runs only through
+the pinned executable owned by those parent cases. All 44 selected core/daemon
+cases pass, zero failed/ignored, at their stated sources.
+
+Pinned workspace/all-target strict Clippy, formatting, catalog and JavaScript
+syntax pass; task paperwork passes 14/14. Independent source reviews cover the
+domain/launcher, census and driver boundaries. The exact-candidate Effort
+development gate is still required before task merge.
 
 Kernel enforcement, ownership regressions and exact-source compiler results
 are recorded separately. Authored fixture cases do not establish

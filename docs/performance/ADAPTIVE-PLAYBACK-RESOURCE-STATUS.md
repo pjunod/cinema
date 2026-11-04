@@ -18,7 +18,7 @@ records six reader cases plus lifecycle and graceful restart. The
 [policy continuation](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) records fourteen
 scoped refusal/service cases. [Owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md)
 now tracks kernel entry, complete affected-owner inventory and pre-Winner
-custody. Its qualification is separate from those earlier passing sources.
+custody. Its 44 passing cases retain their actual source identities; task gate pending.
 
 #1365 landed at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e` after nine green
 jobs. Its two-node fixture uses three distinct ladder rungs and controls only
