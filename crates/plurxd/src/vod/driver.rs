@@ -7,7 +7,8 @@ pub(super) fn spawn_driver(
     #[cfg(target_os = "linux")]
     if let Some(producer) = rendition.dir.finite_producer() {
         let completion = producer.begin_driver();
-        producer.activate_driver();
+        // Publication retains this original handle before activation. A
+        // pre-publication wake must not authorize native producer entry.
         return tokio::spawn(finite_software::run(
             shared, rendition, producer, completion,
         ));

@@ -173,11 +173,15 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         rendition.dir.is_finite(),
         "ordinary route must select finite custody"
     );
-    let producer_generation = rendition
+    let original_producer = rendition
         .dir
         .finite_producer()
-        .expect("original finite producer")
-        .generation_epoch();
+        .expect("original finite producer");
+    let original_driver_id = original_producer
+        .installed_driver_id_for_test()
+        .await
+        .expect("ordinary publication retained its original task before native entry");
+    let producer_generation = original_producer.generation_epoch();
     assert_ne!(producer_generation, 0);
     assert_eq!(rendition.gen_epoch.load(Acquire), producer_generation);
     let output = rendition
@@ -266,6 +270,23 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         },
     )
     .await;
+    // R-to-S conserves residual application custody without waiting for
+    // this same driver to join itself. Its real original handle remains here
+    // after the callback and can be joined repeatedly by an external owner.
+    original_producer
+        .join_installed_driver()
+        .await
+        .expect("ordinary original task positively joined after R-to-S");
+    assert!(
+        original_producer
+            .original_driver_joined_for_test(original_driver_id)
+            .await
+    );
+    original_producer
+        .join_installed_driver()
+        .await
+        .expect("same original successful join is idempotent");
+    drop(original_producer);
     let retained = runtime.accounting().expect("known retained S accounting");
     assert!(
         !crate::playback_cache::is_pinned(output.path()),
@@ -301,8 +322,7 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     assert!(service.completed > 0 && service.completed <= final_ms);
     let manifest = rendition.manifest.lock().await;
     assert!(rendition.plan.entries.iter().any(|entry| {
-        u64::try_from(ticks_to_ms(entry.end_ticks(), rendition.timescale))
-            == Ok(service.completed)
+        u64::try_from(ticks_to_ms(entry.end_ticks(), rendition.timescale)) == Ok(service.completed)
             && manifest
                 .state(entry.index)
                 .is_some_and(|state| state.is_materialized() && state.bytes() > 0)
@@ -520,7 +540,10 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         "retained reads cannot refresh the producer event or advance useful work"
     );
     let policy_after = runtime.finite_policy_service_diagnostics(Instant::now());
-    assert_eq!(policy_after.accepted_samples, policy_before.accepted_samples);
+    assert_eq!(
+        policy_after.accepted_samples,
+        policy_before.accepted_samples
+    );
     assert_eq!(
         policy_after.last_sample.map(|sample| (
             sample.generation,
@@ -539,8 +562,8 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         "cached S does not supply a fresh policy service sample"
     );
     drop(output); // The first rendition still owns S; this test alias is done.
-    // A second ordinary selected finite builder really admits another R
-    // while the first S still owns every retained file and reader budget.
+                  // A second ordinary selected finite builder really admits another R
+                  // while the first S still owns every retained file and reader budget.
     let second_key = "b".repeat(64);
     assert_ne!(second_key, rendition.key);
     let second = finite_software::build(
@@ -569,18 +592,17 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     // cannot wait for a lease it owns; the existing cleanup owner settles it
     // only after those real metadata references have dropped.
     second.closed.store(true, Release);
-    let completion = second_producer.begin_driver();
+    second_producer.retain_original_driver(super::driver::spawn_prepared_finite_driver(
+        Arc::clone(&serve.shared),
+        Arc::clone(&second),
+    ));
     tokio::time::timeout(
         Duration::from_secs(2),
-        finite_software::run(
-            Arc::clone(&serve.shared),
-            Arc::clone(&second),
-            Arc::clone(&second_producer),
-            completion,
-        ),
+        second_producer.join_installed_driver(),
     )
     .await
-    .expect("closed-before-entry driver returns without waiting on its own metadata");
+    .expect("closed-before-entry driver returns without waiting on its own metadata")
+    .expect("same original closed-before-entry task positively joins");
     assert_eq!(
         runtime
             .accounting()
@@ -1252,6 +1274,14 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
     assert!(
         crate::playback_cache::is_pinned(&fixture.serve.shared.base.join(&key)),
         "unpublished original R is globally reserved before its first post-R await"
+    );
+    assert!(
+        rendition
+            .dir
+            .finite_producer()
+            .expect("unpublished original producer")
+            .driver_never_registered(),
+        "cancellation before exact publication remains genuinely never-spawned"
     );
     drop(rendition);
     drop(build_gate);
@@ -1940,6 +1970,141 @@ async fn aborted_original_prepared_driver_never_grants_known_close_or_refund() {
         .runtime
         .accounting()
         .expect("unknown original charge remains held");
+    assert_eq!(after.used, held.used);
+    assert_eq!(after.unknown_peak_producers, held.unknown_peak_producers);
+}
+
+#[tokio::test]
+async fn cancelled_installed_original_driver_join_retains_the_same_dormant_task() {
+    let fixture = finite_cancellation_fixture().await;
+    let baseline = fixture.runtime.accounting().expect("original baseline");
+    let (key, mut pending) = original_driver_pending(&fixture).await;
+    let producer = pending
+        .rendition()
+        .dir
+        .finite_producer()
+        .expect("original producer");
+    pending
+        .prepare_worker_binding(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("original dormant driver registration");
+    let original_id = pending
+        .original_driver_id_for_test()
+        .expect("same registered original task");
+    assert!(
+        producer.join_installed_driver().await.is_err(),
+        "a registered task still held by Prepared is not a never-spawned path"
+    );
+    pending
+        .install_after_adoption()
+        .await
+        .expect("publish the same original task");
+    {
+        let mut join = Box::pin(producer.join_installed_driver());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(join.as_mut(), &mut context).is_pending());
+    }
+    assert_eq!(
+        producer.installed_driver_id_for_test().await,
+        Some(original_id)
+    );
+    pending.rendition().closed.store(true, Release);
+    pending.rendition().kick();
+    producer
+        .join_installed_driver()
+        .await
+        .expect("cancelled waiter rejoins the same original task");
+    assert!(producer.original_driver_joined_for_test(original_id).await);
+    drop(pending);
+    drop(producer);
+    fixture
+        .serve
+        .shared
+        .purge_if_dormant(&key, Duration::ZERO)
+        .await;
+    wait_until(
+        "same original task and native owner positively retire",
+        Duration::from_secs(30),
+        || async {
+            fixture
+                .runtime
+                .accounting()
+                .expect("actual accounting")
+                .used
+                == baseline.used
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn returned_original_driver_destructor_panic_remains_failed_on_every_join() {
+    let fixture = finite_cancellation_fixture().await;
+    let (key, mut pending) = original_driver_pending(&fixture).await;
+    let producer = pending
+        .rendition()
+        .dir
+        .finite_producer()
+        .expect("original producer");
+    pending
+        .prepare_worker_binding(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("original dormant driver registration");
+    let original_id = pending
+        .original_driver_id_for_test()
+        .expect("same registered original task");
+    pending
+        .install_after_adoption()
+        .await
+        .expect("publish the same original driver");
+    let held = fixture.runtime.accounting().expect("original R charge");
+    producer.panic_original_driver_after_return_for_test();
+    pending.rendition().closed.store(true, Release);
+    pending.rendition().kick();
+    assert!(producer.join_installed_driver().await.is_err());
+    assert!(producer
+        .wait_driver_quiescent(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("successful callback precedes the actual destructor panic"));
+    assert_eq!(
+        producer.installed_driver_id_for_test().await,
+        Some(original_id)
+    );
+    for _ in 0..2 {
+        assert!(producer.join_installed_driver().await.is_err());
+        assert_eq!(
+            producer.installed_driver_id_for_test().await,
+            Some(original_id)
+        );
+    }
+    assert!(!producer.original_driver_joined_for_test(original_id).await);
+    drop(pending);
+    fixture
+        .serve
+        .shared
+        .purge_if_dormant(&key, Duration::ZERO)
+        .await;
+    let closing = fixture
+        .serve
+        .shared
+        .finite_closing
+        .lock()
+        .await
+        .get(&key)
+        .cloned()
+        .expect("same original failed join remains in closing custody");
+    let cleanup = shared::PreparedAttemptCleanup::from_closing(closing);
+    wait_until(
+        "original failed join closing pass returns without positive settlement",
+        Duration::from_secs(30),
+        || async { cleanup.close_driver_idle_for_test() },
+    )
+    .await;
+    assert!(!cleanup.known_closed());
+    let after = fixture
+        .runtime
+        .accounting()
+        .expect("failed original charge stays held");
     assert_eq!(after.used, held.used);
     assert_eq!(after.unknown_peak_producers, held.unknown_peak_producers);
 }

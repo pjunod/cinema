@@ -84,7 +84,7 @@ close boundary before obtaining coverage.
 | Affected work | Original entry hook | Final-close ownership hook | Current census bridge |
 |---|---|---|---|
 | Selected planning, R, retained S, cleanup and UnknownHeld | [Core operations](../../crates/plurx-core/src/adaptive_resources/runtime/operations.rs): original role before journal publication/native latch | Same `OwnedRole` through physical/application settlement and rich bundle destruction | Built; 51 distinct core cases pass; broader coverage open |
-| Buffered/shared finite VOD | [Shared finite build slot](../../crates/plurxd/src/vod/shared.rs): original unpublished producer/output before the first post-R await | `drive_finite_closing`: join original driver, drain allocations/application aliases, finish same close ticket | Open |
+| Buffered/shared finite VOD | [Shared finite build slot](../../crates/plurxd/src/vod/shared.rs): original unpublished producer/output before the first post-R await | `drive_finite_closing`: join original driver, drain allocations/application aliases, finish same close ticket | Original driver custody built; rich R/S application census open |
 | Rolling and continuous output | [Transcode manager](../../crates/plurxd/src/transcode.rs): original session/producer attempt before publication | [Rolling retirement](../../crates/plurxd/src/transcode/rolling/retirement.rs): retired presentation retains its original session; [compact copy-ticket maintenance](../../crates/plurxd/src/transcode/manager/maintenance.rs) joins original actor and settles same native ticket | Open |
 | Live transport | [DVR transport](../../crates/plurxd/src/live_tv/dvr.rs): one original tuner worker; separate viewer feed queues | `close_transport_arc` and actual tuner/body join, plus each viewer pump/feed destruction; its `closed` signal alone is insufficient | Open |
 | DVR recording sinks | [DVR sink](../../crates/plurxd/src/live_tv/dvr.rs): original sink before `start_sink_writer` | `sink_writer_loop` file write/flush/fsync and `settle_sink` joining the original handle; activity-row removal supplies no proof | Open |
@@ -284,6 +284,66 @@ it drops. They do not execute the production `state.rs` background loop end
 to end; that concrete F is source-reviewed and compiled. Exact-candidate
 format, strict Clippy and workspace-check receipts belong to the task PR.
 These scoped results grant no full-suite, M0 or real-trial acceptance.
+[Static task #1383](http://forge.lan:3000/noirr/plurx/pulls/1383) merged at
+`aa29e01e` after all eight jobs in Effort gate 6477 passed; its original
+source-scoped counts remain separate from the driver follow-up below.
+
+## Finite VOD keeps the original driver through every join
+
+Fresh finite-R publication validates the original cleanup arm before creating its
+single dormant driver. In one await-free publication step it retains that
+actual JoinHandle, activates it and exposes the rendition. Losing builders and
+requests cancelled before this step remain genuinely never-spawned. Spawn
+holds no installed-driver mutex; even executor shutdown drops only extra Arc
+clones of caller-held values, with no rich destructor under the map locks.
+
+The producer distinguishes never installed, pending original, successfully
+joined original and failed original. A cancelled join waiter leaves the same
+handle in custody. A successful callback is only a daemon observation: actual
+task/F destruction can still fail afterward. Such a failed join retains the
+same consumed handle and task identity, never polls it again, and refuses on
+every retry. Absence is accepted only for an original producer whose driver
+was never registered.
+
+Adopt preserves its existing original dormant task. Abandon transfers that
+same handle into producer custody without activation and uses the same join
+before registering existing finite closing. Native closure, retained S, rich
+application references and final refund remain distinct. R-to-S does not join
+its own driver. The producer projection uses its actual concrete size, and
+the existing driver/cleanup projections measure the changed concrete frames.
+Private executor and complete startup/application bounds remain unknown.
+
+**Qualification:** all 13 distinct daemon cases pass, zero ignored, on source
+tree `2300c5c3ba2a9bd7ec4048c3cacba0b715f40834`. The two new cases exercise
+cancellation of the installed original join and a real completion-destructor
+panic after the callback reported return. Repeated failed joins retain the
+same original task identity and full unresolved charge. Ordinary retained-S,
+original dormant Adopt/abandon, metadata cancellation and all four finite
+attempt/refusal cases also pass. Raw logs and all 13 exact commands remain in
+the task-owned receipts; counts overlap earlier tasks and are not added to them.
+
+The actual effort landing `aa29e01e` reproduces exactly the same combined tree
+as the qualified stacked source. Pinned Rust 1.97.1 formatting, workspace
+all-target compile, strict Clippy and three offline formal source-mapping
+preflights pass; the mapping checks are not TLC execution or an implementation
+refinement theorem. Final candidate checks and the manual Effort gate retain
+their own source boundary.
+
+The new regression commands are:
+
+```bash
+cargo test -p plurxd --bin plurxd --locked --features cluster-integration-tests \
+  vodserve::tests::cancelled_installed_original_driver_join_retains_the_same_dormant_task \
+  -- --exact --nocapture --test-threads=1
+cargo test -p plurxd --bin plurxd --locked --features cluster-integration-tests \
+  vodserve::tests::returned_original_driver_destructor_panic_remains_failed_on_every_join \
+  -- --exact --nocapture --test-threads=1
+```
+
+These are real selected-store and FFmpeg/FFprobe fixtures: missing tools or
+capacity fail explicitly. This task does not complete counted R/S rich payload
+destruction, pre-Winner coordinator/abandoned-cleanup whole-F custody, broader
+census coverage, full M0 or real-trial eligibility.
 
 ## Selected runtime keeps its original census row
 

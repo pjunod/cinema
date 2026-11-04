@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Ordinary finite VOD retains its original driver before entry and keeps failed
+  joins unresolved on every cleanup retry.
+
 - Selected static background planning keeps its original application charge
   through actual controller, inline future, and escaped entry destruction.
 
