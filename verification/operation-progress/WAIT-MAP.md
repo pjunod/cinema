@@ -5,6 +5,45 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Native runtime entry — scoped source review on 2026-11-04
+
+Astra independently inspected runtime candidate
+`cf095b203ec78d083385cbb6ecce13dc01378256`; these source bytes are also present
+in local integration `0cd29c10b`. Previous admitted fingerprints match
+`431581e2` for `job_lease.rs`, `d03c8abd` for membership, `bd3bfffb` for state,
+and `dac9e2c7` for main. Nine existing whole-file pins follow those reviewed
+deltas; two additional source rows identify the new local authority entry and
+mode-specific composition as external prerequisites, not modeled transitions.
+
+`LocalJobAuthority::may_run_cluster_jobs` returns true without membership or
+quorum I/O. `AppState` selects it only for the mode supplied by the selected
+`RuntimeStore`; cluster mode still supplies the actual `MembershipManager`.
+Both cluster `may_run_cluster_jobs` and `may_execute_job`, including committed
+voter/member and local-maintenance refusals, are byte-identical to their prior
+pins. The local authority removes an external admission wait; it does not
+bypass queue claim, domain acquisition or publication fencing. Maintenance CLI
+native admission holds an opened native Store and its directory lease.
+
+Domain lease timing, renewal drainage, release/retry/drop, selected library
+callers, schedule/worker-loop signatures and the main worker-spawn anchor are
+unchanged. Cluster background loops moved to
+[cluster composition](../../crates/plurxd/src/cluster_runtime/background.rs)
+and still start for cluster mode, including membership heartbeat, clock and
+serving-fence observation. Native mode deliberately starts none of those.
+The new membership import helpers require an actual committed singleton and
+install the existing fencing statements; they do not change the selected
+live cluster authority methods or grant jobs from a synthetic voter.
+
+The model starts after native selection. Exclusive directory ownership,
+storage conversion/recovery, new SQLite v124 identity tables, capability
+construction and shutdown remain outside its state/action/fairness mapping.
+The retained connection lifetime and startup test references are described in
+[the durable-job audit](../durable-jobs/CONTRACT.md#native-runtime-entry--scoped-source-review-on-2026-11-04).
+Neither unconditional local admission nor the existing backend-return premise
+proves OS/SQLite progress or physical worker drainage. Existing custody and
+pause/reacquisition gaps remain open. No model/configuration/fairness changes,
+new runtime execution, or renewal of historical qualification is claimed.
+
 ## Playback startup custody — scoped source review on 2026-11-03
 
 Codex agent `/root/other_formal_correspondence` compared base

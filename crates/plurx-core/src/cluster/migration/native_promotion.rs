@@ -93,6 +93,24 @@ fn io(action: &str, path: &Path, error: impl std::fmt::Display) -> StoreError {
     refused(format!("{action} {}: {error}", path.display()))
 }
 
+/// Blocking work continues after its awaiting future is cancelled. Its own
+/// lease must outlive every SQLite connection and file mutation in the worker.
+fn spawn_blocking_with_lock<T, F>(
+    lock: &NativeDirectoryLock,
+    worker: F,
+) -> tokio::task::JoinHandle<Result<T, StoreError>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, StoreError> + Send + 'static,
+{
+    let worker_lock = lock.clone();
+    tokio::task::spawn_blocking(move || {
+        let result = worker();
+        drop(worker_lock);
+        result
+    })
+}
+
 /// The caller already owns the root lease and has started no application
 /// workers. Listener observation is the ordinary real cluster startup path.
 pub async fn promote_native_storage(
@@ -199,7 +217,7 @@ pub async fn promote_native_storage(
     validate_active_marker(&root, &journal, &receipt)?;
     let telemetry_source = archive.join("plurx.db");
     let telemetry_target = root.join("hiqlite/telemetry.db");
-    let local_telemetry = tokio::task::spawn_blocking(move || {
+    let local_telemetry = spawn_blocking_with_lock(&lock, move || {
         transfer_local_telemetry(&telemetry_source, &telemetry_target)
     })
     .await
@@ -271,7 +289,7 @@ async fn prepare(
     let backup_key = key_path.clone();
     let destination = work.clone();
     let key_id = key.id().to_owned();
-    let (archive, backup) = tokio::task::spawn_blocking(move || {
+    let (archive, backup) = spawn_blocking_with_lock(&lock, move || {
         build_native_backup_artifact(
             &source_path,
             &destination,
@@ -502,7 +520,7 @@ async fn build_target(
         drop(store);
         let telemetry_source = archive.join("plurx.db");
         let telemetry_target = incoming.join("telemetry.db");
-        let local_telemetry = tokio::task::spawn_blocking(move || {
+        let local_telemetry = spawn_blocking_with_lock(lock, move || {
             transfer_local_telemetry(&telemetry_source, &telemetry_target)
         })
         .await
@@ -801,6 +819,84 @@ fn promotion_test_crash(phase: Phase) -> Result<(), StoreError> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn cancelled_promotion_waiter_retains_root_until_blocking_writer_exits() {
+        let directory = tempfile::tempdir().expect("native cancellation fixture");
+        let root = directory.path();
+        let native = crate::storage::open_native_store_at(root, &root.join("credentials.key"))
+            .await
+            .expect("actual native owner");
+        drop(native);
+        let lock = NativeDirectoryLock::acquire(root)
+            .await
+            .expect("original native startup writers have released their lease");
+        let database = root.join("plurx.db");
+        let (started, observed_start) = tokio::sync::oneshot::channel();
+        let (resume, paused) = std::sync::mpsc::channel();
+        let (finished, observed_finish) = tokio::sync::oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            spawn_blocking_with_lock(&lock, move || {
+                let mut connection = Connection::open(database)?;
+                connection.pragma_update(None, "synchronous", "FULL")?;
+                let transaction = connection.transaction()?;
+                transaction.execute(
+                    "INSERT INTO settings(key,value) VALUES('promotion.blocking-cancel','committed after waiter cancellation')",
+                    [],
+                )?;
+                let _ = started.send(());
+                paused
+                    .recv_timeout(Duration::from_secs(30))
+                    .map_err(|error| refused(format!("paused writer was not resumed: {error}")))?;
+                transaction.commit()?;
+                drop(connection);
+                let _ = finished.send(());
+                Ok(())
+            })
+            .await
+            .expect("blocking worker task")
+        });
+        tokio::time::timeout(Duration::from_secs(10), observed_start)
+            .await
+            .expect("blocking writer started")
+            .expect("actual SQLite transaction is paused");
+        waiter.abort();
+        assert!(waiter
+            .await
+            .expect_err("promotion waiter cancelled")
+            .is_cancelled());
+        let remained_busy = matches!(
+            NativeDirectoryLock::try_acquire(root),
+            Err(StoreError::Identity(message)) if message.contains("busy")
+        );
+        // Complete the actual writer before asserting the lease invariant so
+        // a failing regression still releases the test's owned resources.
+        resume.send(()).expect("resume actual blocking writer");
+        tokio::time::timeout(Duration::from_secs(10), observed_finish)
+            .await
+            .expect("blocking writer finished")
+            .expect("actual SQLite transaction committed");
+        let released = NativeDirectoryLock::acquire(root)
+            .await
+            .expect("worker completion releases the root lease");
+        let connection =
+            Connection::open_with_flags(root.join("plurx.db"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("read completed native write");
+        let value: String = connection
+            .query_row(
+                "SELECT value FROM settings WHERE key='promotion.blocking-cancel'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("actual post-cancellation commit");
+        drop(connection);
+        drop(released);
+        assert!(
+            remained_busy,
+            "cancelling the async waiter must not release the blocking writer's root lease"
+        );
+        assert_eq!(value, "committed after waiter cancellation");
+    }
 
     struct AppliedSingletonObserver;
 
