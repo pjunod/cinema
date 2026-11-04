@@ -1652,6 +1652,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/file-context.test.js
 	@node --test tests/web/shared-decision.test.js
 	@node --test tests/web/shared-libraries.test.js
+	@node --test tests/web/resume-position.test.js
 	@node --test tests/web/sharing-protocol-cases.test.js
 	@node --test tests/web/shared-artwork.test.js
 	@node --test tests/web/sharing-management.test.js

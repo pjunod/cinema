@@ -444,7 +444,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 | 16 | `media_owner_lost_410` | any | `recovering` | no | class default | – | re-classes to `stopped` when the owner stops; carries `position_ms` |
 | 17 | `control_hold` | attached | `hold` | no | class default | – |  |
 | 18 | `system_interruption` | attached | `hold` | no | class default | `system_resumed` |  |
-| 19 | `media_waiting` | attached | `buffering` | no | class default | – |  |
+| 19 | `media_waiting` | attached | `buffering` | no | class default | `presenting` · `playback_not_requested` · `intent_settled` · `intent_superseded` · `attached_retired` |  |
 | 20 | `owner_recovery_step` | any | `recovering` | no | class default | – |  |
 | 21 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default | – |  |
 | 22 | `decoder_failed` | any | `stopped` | yes | class default | – |  |
@@ -524,7 +524,7 @@ presenter adds no detector and never infers from an event:
   current `mediaMutationEpoch`, foreground, `playWhenReady` true.
 
 A fault with an `intent` is never retired by evidence alone: the destination
-must settle (`markPlaybackControlSeekExecuted` / seek generation settled /
+must settle (`settlePlaybackControlSeek` after destination proof / seek generation settled /
 `pendingSeek == null`) or be superseded. A fault about `attached` generation
 N is dropped the moment N is retired, which is the existing
 `playbackOwnsAttachedMedia` / `isSuperseded(generation)` / epoch test — that

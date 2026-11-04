@@ -304,7 +304,14 @@
     {
       "id": "media_waiting",
       "context": "attached",
-      "class": "buffering"
+      "class": "buffering",
+      "retired_by": [
+        "presenting",
+        "playback_not_requested",
+        "intent_settled",
+        "intent_superseded",
+        "attached_retired"
+      ]
     },
     {
       "id": "owner_recovery_step",

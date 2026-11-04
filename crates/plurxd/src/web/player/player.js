@@ -689,7 +689,12 @@ function concludeNativeHlsObservation(player,episode){
   clearTimeout(episode.native.deadlineTimer);episode.native.deadlineTimer=null;
   clearTimeout(player.stallTimer);player.stallTimer=null;
   const intent=playbackSurfaceIntent(player),owner=playbackSurfaceObservationOwner(player);
-  playbackSurfaceStep({observation_unavailable:owner,attached:playbackSurfaceGeneration(player),intent});
+  const attached=playbackSurfaceGeneration(player);
+  // This observer owns both attached-media waits and pending-destination
+  // preparation. Conclude each exact scope; neither withdrawal proves the
+  // destination or settles its seek, and other intents/owners remain fenced.
+  for(const scopeIntent of intent==null?[null]:[null,intent])
+    playbackSurfaceStep({observation_unavailable:owner,attached,intent:scopeIntent});
   const diagnosis=diagnoseHlsStartup(player);
   raisePlaybackSurface("degraded_notice",{title:diagnosis.title,detail:diagnosis.detail,
     actions:["retry","close"],intent});

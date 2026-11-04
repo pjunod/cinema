@@ -61,6 +61,7 @@ class KnownRedContractTest(unittest.TestCase):
         validate_opt_in_fixtures(fixtures, ignored, load_entries())
         fixture_ids = {fixture["test"] for fixture in fixtures}
         self.assertEqual(fixture_ids, {
+            "crates/plurxd/src/playback_cache.rs::playback_cache::tests::actual_playback_cache_inventory_cost",
             "crates/plurxd/src/decode_facts/tests.rs::decode_facts::tests::packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls",
             "crates/plurxd/src/transcoder_optimization/comparison.rs::transcoder_optimization::comparison::tests::real_media_production_tools_comparison",
             "crates/plurxd/src/pipeprobe.rs::pipeprobe::tests::real_neutral_peak_gate_rejects_old_metal_units",
