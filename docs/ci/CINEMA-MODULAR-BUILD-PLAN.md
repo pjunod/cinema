@@ -440,7 +440,7 @@ each supported distribution, including new migration tooling.
 |---|---|---|
 | P0 | Plan draft based on `f30dfbbc9`; source/dependency and historical timing audit | Astra confirmed all four findings and two clarifications addressed; P1/P2 allowed in order; no build improvement implemented |
 | P1 | Fixed `cf095b203` / `e1ce9af4ce` source; three samples per case, preserved raw reports, actual source restoration and Cargo artifact events | Baseline collected; guarded runner belongs to its own task PR |
-| P2b measurement | Equal-capability system/LLD Cargo commands; all 450 observed units have identical features/profiles | Median edit reductions: CSS 58%, daemon 56%, small API 35%; full ranges retained, including a 55-second LLD daemon outlier. Named developer recipe and PR validation still pending; no cold/release/Mac claim |
+| P2b diagnostic measurement | Equal-capability system/LLD Cargo commands; all 450 observed units have identical features/profiles | Initial median edit reductions: CSS 58%, daemon 56%, small API 35%; all ranges/outliers retained. The initial VM-only isolation check missed its host daemon. Repeat both variants through voter-build caps before recipe acceptance; no cold/release/Mac claim |
 | P3–P6 | Primitive-only entry admitted; authority obligations remain explicit and unresolved | Open; standalone dependency omission is not yet achieved |
 
 Record Astra's findings and individual dispositions with the review, then

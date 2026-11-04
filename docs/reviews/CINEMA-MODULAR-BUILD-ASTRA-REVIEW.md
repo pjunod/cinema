@@ -86,3 +86,23 @@ stay legal beside local row types. Private viewer-key construction, checked
 UUID parsing, wire values and old type paths survive through genuine reexports.
 Contracts-only consumer/graph checks cannot rely on workspace unification.
 This was source review, with no Rust edits, builds or authority acceptance.
+
+## 6. P1 runner review — source mutation and timing validity
+
+Astra requested three implementation corrections: protect child launch and
+journal registration before source restoration, refuse unexpected probe bytes
+instead of adopting them into an allowlist, and require the intended Cargo
+package/target to rebuild. All three were fixed, with actual cancellation and
+registration-failure injection, preservation of unrelated edits and rejection
+of unrelated/stale artifact events.
+
+A second source review identified restoration qualification and inherited
+compiler-selection gaps. Restoration now requires owner/dependent rebuilds;
+compiler metadata records the actual explicit compiler and target selection.
+Root review also requires disjoint source/target directories so a nested cache
+cannot hide source inputs. All 21 focused runner tests passed. The controlled
+real-Cargo pair separately validates source restoration and equal observed
+features/profiles; test fixtures alone do not establish real build behavior.
+The outer legacy compiler wrapper's cooperation limit remains explicit in the
+measurement ledger. This review provides no final package omission or release
+qualification credit.

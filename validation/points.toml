@@ -1557,6 +1557,7 @@ paths = [
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/k08-build-measure",
+  "scripts/build-measure",
   "scripts/ci-require-disk",
   "scripts/ci-runner-cache-audit",
   "scripts/release-package-candidate",

@@ -1,0 +1,541 @@
+#!/usr/bin/env python3
+"""Measure Cargo in an explicitly owned source extraction, never a checkout.
+
+Recipe JSON supplies command, environment and capabilities. Results retain all
+samples, actual source inventory, Cargo freshness events and raw logs. This is
+benchmark evidence, not a release qualification or authenticated source receipt.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import contextlib
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import signal
+import stat
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+MARKER = ".build-measure-owned.json"
+PENDING = ".build-measure-pending.json"
+EXCLUDED = {MARKER, PENDING, ".build-measure-source.lock", ".source-files.json", "target"}
+PROBES = {
+    "asset": "crates/plurxd/src/web/app.css",
+    "leaf": "crates/plurxd/src/http/web.rs",
+    "api": "crates/plurx-core/src/lib.rs",
+}
+CSS_RETURN = b'if path.ends_with(".css") {\n        "text/css; charset=utf-8"'
+
+
+class UndrainedCompiler(RuntimeError):
+    """No source restoration is allowed while descendants may still read it."""
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def version_output(command: list[str], source: Path, environment: dict[str, str]) -> str | None:
+    if not shutil.which(command[0], path=environment.get("PATH")):
+        return None
+    try:
+        result = subprocess.run(command, cwd=source, env=environment, capture_output=True,
+                                text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return (result.stdout + result.stderr).strip()[:4000] if result.returncode == 0 else None
+
+
+def allocated_target_bytes(source: Path, target: Path, environment: dict[str, str]) -> int | None:
+    value = version_output(["du", "-sk", str(target)], source, environment)
+    try:
+        return int(value.split(maxsplit=1)[0]) * 1024 if value else None
+    except ValueError:
+        return None
+
+
+def machine_context(command: list[str], source: Path, target: Path,
+                    environment: dict[str, str], recipe: dict) -> dict:
+    selector = [command[1]] if len(command) > 1 and command[1].startswith("+") else []
+    rustc_command = ([environment["RUSTC"], "-Vv"] if "RUSTC" in environment
+                     else ["rustc", *selector, "-Vv"])
+    rustc_environment = environment
+    if "RUSTC" in environment and selector:
+        # A Cargo rustup selector chooses its child environment. An explicit
+        # compiler executable need not understand rustup's +toolchain syntax.
+        rustc_environment = dict(environment, RUSTUP_TOOLCHAIN=selector[0][1:])
+    result = {"platform": sys.platform, "arch": platform.machine(),
+              "cpu_count": os.cpu_count(), "load_average": list(os.getloadavg()),
+              "disk_free_bytes": shutil.disk_usage(target.parent).free,
+              "command_version": version_output([command[0], *selector, "--version"], source, environment),
+              "rustc": version_output(rustc_command, source, rustc_environment),
+              "rustc_command": rustc_command,
+              "inherited_compiler_environment": {key: environment.get(key)
+                  for key in ("RUSTC", "CARGO_BUILD_TARGET")},
+              "cc": version_output(["cc", "--version"], source, environment),
+              "linker": version_output(recipe.get("linker_probe", ["ld", "--version"]), source, environment)}
+    result["allocated_target_bytes"] = allocated_target_bytes(source, target, environment)
+    for name, path in (("cpu_quota", "/sys/fs/cgroup/cpu.max"),
+                       ("memory_limit", "/sys/fs/cgroup/memory.max"),
+                       ("memory_info", "/proc/meminfo")):
+        result[name] = Path(path).read_text()[:4000] if Path(path).is_file() else None
+    return result
+
+
+def atomic_json(path: Path, value: object) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".measure-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write((json.dumps(value, sort_keys=True, indent=2) + "\n").encode())
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def inventory(source: Path, target: Path) -> str:
+    rows = []
+    for directory, children, files in os.walk(source, followlinks=False):
+        parent = Path(directory)
+        children[:] = sorted(
+            name for name in children
+            if not (parent == source and name in EXCLUDED) and parent / name != target
+        )
+        for name in [*children, *sorted(files)]:
+            path = parent / name
+            if path.parent == source and name in EXCLUDED:
+                continue
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not (
+                stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)
+            ):
+                raise ValueError(f"unsupported source entry: {path.relative_to(source)}")
+            if stat.S_ISREG(metadata.st_mode):
+                rows.append((path.relative_to(source).as_posix(),
+                             stat.S_IMODE(metadata.st_mode), digest(path.read_bytes())))
+    return digest(json.dumps(sorted(rows), separators=(",", ":")).encode())
+
+
+@contextlib.contextmanager
+def slot_lease(path: Path):
+    import fcntl
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("slot lease is not a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Cargo and compiler descendants retain ownership if this supervisor
+        # disappears. No second owner may rewrite a live compiler's source.
+        os.set_inheritable(fd, True)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def replace_probe(path: Path, data: bytes, newer_than: int, expected_sha256: str) -> None:
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ValueError("probe must be an owned, unlinked regular file")
+    fd, temporary = tempfile.mkstemp(prefix=".probe-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, stat.S_IMODE(metadata.st_mode))
+        deadline = time.monotonic() + 3
+        while True:
+            os.utime(temporary, None)
+            if Path(temporary).stat().st_mtime_ns > newer_than:
+                break
+            if time.monotonic() >= deadline:
+                raise ValueError("clock/mtime cannot prove probe newer than compiler inputs")
+            time.sleep(0.01)
+        if digest(path.read_bytes()) != expected_sha256:
+            raise ValueError("probe changed outside this run; refusing to overwrite it")
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def changed_bytes(case: str, original: bytes, sample: int) -> bytes:
+    token = f"build-measure-{sample}".encode()
+    if case == "asset":
+        return original + b"\n/* " + token + b" */\n"
+    if case == "api":
+        return original + b"\npub const BUILD_MEASURE_API_PROBE: u64 = " + str(sample).encode() + b";\n"
+    if case == "leaf":
+        if original.count(CSS_RETURN) != 1:
+            raise ValueError("used-function probe anchor changed; re-verify the recipe")
+        return original.replace(CSS_RETURN, CSS_RETURN[:-1] + b"; " + token + b'"')
+    raise ValueError("unknown probe")
+
+
+def stop_group(child: subprocess.Popen) -> None:
+    for signum, timeout in [(signal.SIGTERM, 5), (signal.SIGKILL, 5)]:
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.01)
+    raise UndrainedCompiler("compiler group did not terminate; source probe retained")
+
+
+@contextlib.contextmanager
+def defer_cancellation():
+    """Register a launched child before delivering cancellable signals."""
+    received = []
+    previous = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        for number in previous:
+            signal.signal(number, lambda signum, _frame: received.append(signum))
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+    if received:
+        raise KeyboardInterrupt("cancelled during compiler lifecycle transition")
+
+
+def run_command(command: list[str], environment: dict[str, str], source: Path,
+                log: Path, lease: tuple[int, ...], timeout: float) -> dict:
+    started = time.monotonic()
+    timed = command
+    memory_log = log.with_suffix(".time.log")
+    if sys.platform.startswith("linux") and Path("/usr/bin/time").is_file():
+        timed = ["/usr/bin/time", "-v", "-o", str(memory_log), *command]
+    with log.open("wb") as output:
+        pending = source / PENDING
+        child = None
+        state = None
+        launch_attempted = False
+        try:
+            with defer_cancellation():
+                if pending.exists():
+                    state = json.loads(pending.read_text())
+                    state.pop("compiler_group", None)
+                    state["compiler_state"] = "launching"
+                    atomic_json(pending, state)
+                launch_attempted = True
+                child = subprocess.Popen(timed, cwd=source, env=environment,
+                                         stdout=output, stderr=subprocess.STDOUT,
+                                         start_new_session=True, pass_fds=lease)
+                if state is not None:
+                    state.update(compiler_group=child.pid, compiler_state="running")
+                    atomic_json(pending, state)
+            code = child.wait(timeout=timeout)
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise UndrainedCompiler("command exited before its compiler descendants")
+        except BaseException:
+            if child is None and launch_attempted:
+                raise UndrainedCompiler("compiler launch ownership is uncertain; probe retained")
+            if child is not None:
+                try:
+                    with defer_cancellation():
+                        stop_group(child)
+                        if state is not None:
+                            state["compiler_state"] = "drained"
+                            atomic_json(pending, state)
+                except BaseException as error:
+                    raise UndrainedCompiler("compiler drainage was not recorded; probe retained") from error
+            raise
+    elapsed = time.monotonic() - started
+    events = []
+    finished = False
+    for line in log.read_text(errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("reason") == "compiler-artifact":
+            events.append({key: event.get(key) for key in
+                           ("package_id", "target", "fresh", "executable")})
+        elif event.get("reason") == "build-finished":
+            finished = event.get("success") is True
+    rss = None
+    if memory_log.exists():
+        match = re.search(r"Maximum resident set size \(kbytes\): (\d+)", memory_log.read_text())
+        if match:
+            rss = int(match[1]) * 1024
+    return {"seconds": elapsed, "exit_code": code, "cargo_finished": finished,
+            "gnu_time_max_child_rss_bytes": rss,
+            "artifacts": events,
+            "rebuilt": [event for event in events if event["fresh"] is False],
+            "log": log.name}
+
+
+def require_artifacts(row: dict, expected: list[dict], *, rebuilt: bool = False) -> None:
+    events = row["rebuilt" if rebuilt else "artifacts"]
+    for identity in expected:
+        if not any(event.get("package_id") == identity["package_id"]
+                   and event.get("target", {}).get("name") == identity["target_name"]
+                   and identity["target_kind"] in event.get("target", {}).get("kind", [])
+                   for event in events):
+            action = "did not compile" if rebuilt else "was not observed"
+            raise ValueError(f"expected artifact {identity} {action}; stale/unrelated output cannot earn timing credit")
+
+
+def recover(source: Path) -> None:
+    pending = source / PENDING
+    if not pending.exists():
+        return
+    state = json.loads(pending.read_text())
+    if state.get("compiler_state") == "launching":
+        raise UndrainedCompiler("compiler launch ownership is uncertain; probe retained")
+    if state.get("compiler_group"):
+        try:
+            os.killpg(state["compiler_group"], 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise UndrainedCompiler("probe compiler group is still present")
+    journal_path = Path(state["journal"])
+    journal = json.loads(journal_path.read_text())
+    owner = json.loads((source / MARKER).read_text())
+    if journal.get("owner") != owner.get("owner") or journal.get("source") != str(source):
+        raise ValueError("probe journal belongs to a different source owner")
+    relative = journal["path"]
+    if relative not in PROBES.values():
+        raise ValueError("unknown probe recovery path")
+    path = source / relative
+    if path.resolve() != path:
+        raise ValueError("unsafe probe recovery path")
+    data = path.read_bytes()
+    if digest(data) not in journal["allowed_sha256"]:
+        raise ValueError("probe changed outside this run; refusing to overwrite it")
+    original = base64.b64decode(journal["original_base64"], validate=True)
+    if digest(original) != journal["original_sha256"]:
+        raise ValueError("probe recovery material changed")
+    replace_probe(path, original, max(path.stat().st_mtime_ns, time.time_ns()), digest(data))
+    journal["phase"] = "source-restored-artifacts-unqualified"
+    atomic_json(journal_path, journal)
+    pending.unlink()
+
+
+def measure(args: argparse.Namespace) -> dict:
+    source, target, output = args.source.resolve(), args.target.resolve(), args.output.resolve()
+    if any((parent / ".git").exists() for parent in (source, *source.parents)):
+        raise ValueError("use an owned archive extraction, never a Git checkout")
+    if output == source or source in output.parents or output == target or target in output.parents:
+        raise ValueError("receipts must live outside source and compiler directories")
+    if target == source or target in source.parents or source in target.parents:
+        raise ValueError("source and compiler target must be disjoint directories")
+    recipe_bytes = args.recipe.read_bytes()
+    recipe = json.loads(recipe_bytes)
+    command = recipe["command"]
+    if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
+        raise ValueError("recipe command must be an argv array, never a shell string")
+    if not recipe.get("capabilities"):
+        raise ValueError("an explicit capability manifest is required")
+    expected_artifacts = recipe.get("expected_artifacts", {})
+    for case in {"warmup", *args.cases.split(",")}:
+        identities = expected_artifacts.get(case, expected_artifacts.get("warmup") if case == "noop" else None)
+        if not isinstance(identities, list) or not identities or any(
+            not isinstance(identity, dict)
+            or set(identity) != {"package_id", "target_name", "target_kind"}
+            or not all(isinstance(value, str) and value for value in identity.values())
+            for identity in identities
+        ):
+            raise ValueError(f"explicit expected Cargo package/target identities required for {case}")
+        if case == "api" and len({json.dumps(identity, sort_keys=True) for identity in identities}) < 2:
+            raise ValueError("API probe must identify its owner and dependent compilation unit")
+    if not isinstance(recipe.get("cache_state"), dict) or not all(
+        key in recipe["cache_state"] for key in ("target", "compiler_result_cache")
+    ):
+        raise ValueError("target and compiler-result-cache states must be declared separately")
+    overrides = recipe.get("environment", {})
+    allowed = {"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL",
+               "CARGO_BUILD_JOBS", "CARGO_HTTP_MULTIPLEXING", "RUSTC_WRAPPER",
+               "RUSTC_WORKSPACE_WRAPPER",
+               "PLURX_BUILD_REF", "PLURX_BUILD_SHA", "SOURCE_DATE_EPOCH"}
+    if not set(overrides) <= allowed or not all(isinstance(v, str) for v in overrides.values()):
+        raise ValueError("recipe contains unsupported build environment fields")
+    environment = dict(os.environ, **overrides, CARGO_TARGET_DIR=str(target))
+    target.mkdir(parents=True, exist_ok=True)
+    with (slot_lease(source / ".build-measure-source.lock") as source_lease,
+          slot_lease(target / ".build-measure-target.lock") as target_lease,
+          slot_lease(args.lease) as caller_lease):
+        lease = (source_lease, target_lease, caller_lease)
+        marker = source / MARKER
+        if args.initialize:
+            if marker.exists():
+                raise ValueError("source ownership already initialized")
+            atomic_json(marker, {"version": 1, "owner": str(uuid.uuid4()),
+                                "declared_commit": args.revision,
+                                "declared_tree": args.tree,
+                                "inventory_sha256": inventory(source, target)})
+            return {"initialized": True}
+        if args.recover:
+            recover(source)
+            return {"recovered_source": True, "artifacts_qualified": False}
+        if (source / PENDING).exists():
+            raise ValueError("an interrupted probe requires --recover under the slot lease")
+        owned = json.loads(marker.read_text())
+        if (owned.get("version") != 1 or not isinstance(owned.get("owner"), str)
+                or owned["declared_commit"] != args.revision or owned["declared_tree"] != args.tree
+                or owned["inventory_sha256"] != inventory(source, target)):
+            raise ValueError("source differs from its declared owned baseline")
+        output.mkdir(parents=True, exist_ok=False)
+        if environment.get("CARGO_ENCODED_RUSTFLAGS") and "RUSTFLAGS" in overrides:
+            raise ValueError("inherited encoded Rust flags override the requested comparison")
+        if recipe["cache_state"]["compiler_result_cache"] == "none" and any(
+            environment.get(key) for key in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER")
+        ):
+            raise ValueError("compiler wrapper conflicts with declared absent result cache")
+        report = {"version": 1, "label": args.label, "benchmark_only": True,
+                  "declared_commit": args.revision, "declared_tree": args.tree,
+                  "inventory_sha256": owned["inventory_sha256"],
+                  "recipe_sha256": digest(recipe_bytes), "recipe": recipe,
+                  "target": str(target), "samples": [], "complete": False,
+                  "host": machine_context(command, source, target, environment, recipe),
+                  "compiler_state": {key: environment.get(key) for key in
+                                     sorted({"RUSTC", "CARGO_BUILD_TARGET", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+                                             "CARGO_INCREMENTAL", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
+                                             *[key for key in environment if re.fullmatch(
+                                                 r"CARGO_TARGET_[A-Z0-9_]+_(LINKER|RUSTFLAGS)", key)]})}}
+        try:
+            for case in ["warmup", *args.cases.split(",")]:
+                if case not in {"warmup", "noop", *PROBES}:
+                    raise ValueError(f"unknown case: {case}")
+                original = path = None
+                safe_to_restore = True
+                if case in PROBES:
+                    path = source / PROBES[case]
+                    original = path.read_bytes()
+                    expected_probe_sha = digest(original)
+                try:
+                    for sample in range(1, 2 if case == "warmup" else args.samples + 1):
+                        probe_sha = None
+                        if path is not None:
+                            if digest(path.read_bytes()) != expected_probe_sha:
+                                raise ValueError("probe changed outside this run; refusing to overwrite it")
+                            probe = changed_bytes(case, original, sample)
+                            probe_sha = digest(probe)
+                            atomic_json(output / "probe-journal.json", {
+                                "owner": owned["owner"], "source": str(source),
+                                "path": PROBES[case], "phase": "prepared",
+                                "original_base64": base64.b64encode(original).decode(),
+                                "original_sha256": digest(original),
+                                "allowed_sha256": [digest(original), expected_probe_sha, probe_sha]})
+                            atomic_json(source / PENDING, {"journal": str(output / "probe-journal.json")})
+                            replace_probe(path, probe, max(path.stat().st_mtime_ns, time.time_ns()), expected_probe_sha)
+                            expected_probe_sha = probe_sha
+                        row = {"case": case, "sample": sample, "probe_sha256": probe_sha,
+                               **run_command(command, environment, source,
+                                             output / f"{case}-{sample}.log", lease, args.timeout)}
+                        report["samples"].append(row)
+                        atomic_json(output / "results.json", report)
+                        if row["exit_code"] or not row["cargo_finished"]:
+                            raise ValueError(f"{case} build failed; raw result retained")
+                        identities = expected_artifacts.get(case, expected_artifacts["warmup"])
+                        require_artifacts(row, identities)
+                        if case == "noop" and row["rebuilt"]:
+                            raise ValueError("no-op started compilation; not a valid no-op")
+                        expected = recipe.get("rust_activity", {}).get(case, "rebuild")
+                        if case in PROBES:
+                            if expected not in {"rebuild", "none"} or (expected == "none" and case != "asset"):
+                                raise ValueError("only a declared development-asset workflow may omit probe compilation")
+                            if expected == "rebuild":
+                                require_artifacts(row, identities, rebuilt=True)
+                            if expected == "none" and row["rebuilt"]:
+                                raise ValueError("development asset edit unexpectedly started compilation")
+                except UndrainedCompiler:
+                    safe_to_restore = False
+                    raise
+                finally:
+                    if path is not None and safe_to_restore:
+                        recover(source)
+                if path is not None:
+                    restored = {"case": "restore-" + case, "sample": 1,
+                                **run_command(command, environment, source,
+                                              output / f"restore-{case}.log", lease, args.timeout)}
+                    report["samples"].append(restored)
+                    if restored["exit_code"] or not restored["cargo_finished"]:
+                        raise ValueError("restoration build failed; artifacts remain unqualified")
+                    require_artifacts(restored, expected_artifacts[case])
+                    if recipe.get("rust_activity", {}).get(case, "rebuild") == "none":
+                        if restored["rebuilt"]:
+                            raise ValueError("development asset restoration unexpectedly started compilation")
+                    else:
+                        require_artifacts(restored, expected_artifacts[case], rebuilt=True)
+            report["restored_inventory_sha256"] = inventory(source, target)
+            if report["restored_inventory_sha256"] != owned["inventory_sha256"]:
+                raise ValueError("build or probe changed other source files")
+            report["allocated_target_bytes_after"] = allocated_target_bytes(source, target, environment)
+            report["complete"] = True
+            report["summary"] = {
+                case: {"median_seconds": statistics.median(row["seconds"] for row in rows),
+                       "min_seconds": min(row["seconds"] for row in rows),
+                       "max_seconds": max(row["seconds"] for row in rows)}
+                for case in args.cases.split(",")
+                if (rows := [row for row in report["samples"] if row["case"] == case])}
+            return report
+        except BaseException as error:
+            report["error"] = str(error)
+            raise
+        finally:
+            atomic_json(output / "results.json", report)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ("source", "target", "output", "recipe", "lease"):
+        parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--revision", required=True)
+    parser.add_argument("--tree", required=True)
+    parser.add_argument("--label", required=True)
+    parser.add_argument("--cases", default="noop,asset,leaf")
+    parser.add_argument("--samples", type=int, default=3)
+    parser.add_argument("--timeout", type=float, default=1800)
+    parser.add_argument("--initialize", action="store_true")
+    parser.add_argument("--recover", action="store_true")
+    args = parser.parse_args()
+    if not all(re.fullmatch(r"[0-9a-f]{40}", x) for x in (args.revision, args.tree)):
+        parser.error("revision/tree must be exact declared Git object IDs")
+    if args.samples < 3 or args.timeout <= 0 or not re.fullmatch(r"[A-Za-z0-9._-]+", args.label):
+        parser.error("require at least three samples, positive timeout and a safe label")
+    def interrupted(_signum, _frame):
+        raise KeyboardInterrupt()
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        result = measure(args)
+        if "samples" in result:
+            result = {key: result[key] for key in ("label", "complete", "summary")}
+            result["receipt"] = str(args.output.resolve() / "results.json")
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except (ValueError, OSError, KeyError, KeyboardInterrupt, UndrainedCompiler) as error:
+        print(f"build-measure: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
