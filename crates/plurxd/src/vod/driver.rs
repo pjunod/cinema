@@ -7,6 +7,7 @@ pub(super) fn spawn_driver(
     #[cfg(target_os = "linux")]
     if let Some(producer) = rendition.dir.finite_producer() {
         let completion = producer.begin_driver();
+        producer.activate_driver();
         return tokio::spawn(finite_software::run(
             shared, rendition, producer, completion,
         ));
@@ -72,6 +73,23 @@ pub(super) fn spawn_driver(
             driver_pass(&shared, &rendition).await;
         }
     })
+}
+
+/// Register the original task before Store Prepared, without authorizing
+/// native producer entry. Adopt later installs this same handle and wakes it.
+#[cfg(target_os = "linux")]
+pub(super) fn spawn_prepared_finite_driver(
+    shared: Arc<Shared>,
+    rendition: Arc<Rendition>,
+) -> tokio::task::JoinHandle<()> {
+    let producer = rendition
+        .dir
+        .finite_producer()
+        .expect("prepared finite rendition owns its original producer");
+    let completion = producer.begin_driver();
+    tokio::spawn(finite_software::run(
+        shared, rendition, producer, completion,
+    ))
 }
 
 /// Reclaim what a rendition that has already failed is still holding.

@@ -6,47 +6,41 @@ qualification or deployment is claimed.
 
 [Plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) ·
 [finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) ·
-[production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) (qualified scope).
+[policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) · [containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md).
 
-## Current continuation — two-node publication and test isolation
+## Current continuation — source-bound task qualification
 
-Task PRs #1293, #1338, #1360–#1365 and #1368 are merged into effort #1248.
-PR #1368 landed at `8aa9cae1b28dd6d6dc9fdb5db3265ef549e8d2f7`; gate 6411 passed.
-PR #1365 landed at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e` after its
-nine-job development gate passed. The current [finite lifecycle and restart
-qualification](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
-records six passing reader cases plus lifecycle and graceful restart passes.
-Earlier identities below remain historical evidence for their stated source.
+Task PRs #1293, #1338, #1360–#1365, #1368 and #1371 are merged into
+draft effort #1248. #1368 landed at `8aa9cae1b28dd6d6dc9fdb5db3265ef549e8d2f7`
+after gate 6411; #1371 at `122d0ba086f9310e653bf19b0fe326baa94d352c` after gate
+6422. The [finite qualification](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
+records six reader cases plus lifecycle and graceful restart. The
+[policy continuation](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) records fourteen
+scoped refusal/service cases. [Owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md)
+now tracks kernel entry, complete affected-owner inventory and pre-Winner
+custody. Its qualification is separate from those earlier passing sources.
 
-The retained two-node failures exposed two harness defects: arbitrary heights
-can snap to the same rendition key, and searching heights cannot override a
-consistent local storage-latency ranking advantage. The continuation uses
-three distinct ladder rungs and controls only the peer proxy's advisory I/O
-and speed measurements. Clock, eligibility, capacity, identity and every
-adaptive control exchange remain real. It proves those control/serving paths,
-not performance under naturally selected placement.
+#1365 landed at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e` after nine green
+jobs. Its two-node fixture uses three distinct ladder rungs and controls only
+the peer proxy's advisory I/O/speed ranking; clock, eligibility, capacity,
+identity and control exchanges remain real. This proves controlled placement
+and serving, not naturally selected performance.
 
-A separate publication race occurs when the exact attached owner renews its
-lease after Adopt but before publication. Publication must compare the current
-matching route/job-lease copies, while retaining the original custody, owner,
-epoch, pointer and live-lease guards. On source `4a6461e6214c`, five affected
-publication cases passed with SQLite and the real three-voter backend; neither
-new case passes the original behavior at `099eafdcee4c`. Pinned Rust 1.97.1
-workspace/all-target strict Clippy, including fixture/cluster features, and
-paperwork 15/15 passed. The guard batch at `5d65151d3` passed 5/5, zero ignored.
-Two-node serving and development-gate results belong to the task PR; they do not imply M0–M7 qualification.
-
-The continuation also protects the committed-Adopt-to-attachment gap from
-stale settlement; the [delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md) records that
-second race and the bounded guard's ownership.
+The exact attached owner may renew its lease between Adopt and publication.
+Publication compares current matching route/job-lease copies while retaining
+original custody, owner, epoch, pointer and live-lease guards. Five affected
+cases passed with SQLite and the real three-voter backend at `4a6461e6214c`;
+the two new cases fail on `099eafdcee4c`. Pinned Rust 1.97.1 strict all-target
+Clippy, fixture/cluster features and paperwork 15/15 passed. The guard batch
+at `5d65151d3` passed 5/5, zero ignored. The [delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md)
+also records the committed-Adopt-to-attachment settlement race and its bounded
+original-owner guard. These task results do not imply M0–M7 acceptance.
 
 Still open: M0 coverage/contracts, M3a/C2 native and allocator containment,
-V1–V5 acceptance, broader adapter/platform qualification, integrating the
-then-current main and the Main promotion gate. The handoff calls the containment
-gap “M0 owned containment”; it is distinct from the plan’s M0 inventory.
-The handoff also records a pre-existing actor-application lease regression and
-an unresolved selected-static FFmpeg `-display_rotation` capability decision.
-Neither is silently accepted or closed by this task.
+V1–V5, broader adapters/platforms, current-main integration and Main promotion.
+The handoff's “M0 owned containment” differs from the plan's M0 inventory.
+The pre-existing actor-application lease regression and selected-static FFmpeg
+`-display_rotation` capability decision remain open; neither is silently accepted.
 
 ## 2026-10-29 checkpoint — historical source-bound evidence
 

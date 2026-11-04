@@ -17,6 +17,15 @@ pub(super) struct FiniteClosingOwner {
     cleanup_ready: AtomicBool,
 }
 
+#[cfg(all(target_os = "linux", test, feature = "cluster-integration-tests"))]
+impl FiniteClosingOwner {
+    pub(super) async fn hold_registration_for_test(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, Option<Arc<Rendition>>> {
+        self.rich.lock().await
+    }
+}
+
 /// The map owns the original producer/output before the first post-R await.
 /// The directory owns this non-clone arm until exact Shared publication. The
 /// weak Shared link avoids a cycle through a published rendition; the map's
@@ -141,6 +150,7 @@ pub(crate) struct PreparedAttemptRendition {
     key: String,
     rendition: Option<Arc<Rendition>>,
     build_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    original_driver: Option<tokio::task::JoinHandle<()>>,
     // Last: the original core charge stays live until every rich field above
     // and the detached abandoned-owner transfer have been destroyed.
     application_lease:
@@ -187,6 +197,10 @@ pub(crate) struct PreparedAttemptCleanupTask {
 }
 
 #[cfg(target_os = "linux")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The original task, charged rendition, build gate and application lease stay in one measured cleanup frame."
+)]
 async fn run_prepared_attempt_cleanup(
     shared: Arc<Shared>,
     key: String,
@@ -194,8 +208,22 @@ async fn run_prepared_attempt_cleanup(
     rendition: Arc<Rendition>,
     output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
     producer: Arc<super::finite_software::FiniteSoftwareProducer>,
+    mut driver: Option<tokio::task::JoinHandle<()>>,
     lease: Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease>,
 ) -> Arc<FiniteClosingOwner> {
+    // Stop is synchronous and does not wait for the input-preparation owner
+    // lock. The original task must return before the closing selector can
+    // report successful cleanup; JoinError leaves its driver state aborted.
+    let _ = producer.request_stop();
+    rendition.closed.store(true, Release);
+    rendition.kick();
+    if let Some(task) = driver.as_mut() {
+        if let Err(error) = task.await {
+            tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                %error, "original prepared driver did not return successfully");
+        }
+    }
+    drop(driver);
     let closing = shared
         .retain_unattached_finite_with_handle(&key, Some(Arc::clone(&rendition)), output, producer)
         .await;
@@ -209,12 +237,28 @@ async fn run_prepared_attempt_cleanup(
 /// from its function item without constructing a dummy native owner.
 #[cfg(target_os = "linux")]
 pub(crate) fn prepared_attempt_cleanup_frame_bytes() -> usize {
-    fn frame_size<A, B, C, D, E, F, G, Fut: std::future::Future>(
-        _: impl Fn(A, B, C, D, E, F, G) -> Fut,
+    fn frame_size<A, B, C, D, E, F, G, H, Fut: std::future::Future>(
+        _: impl Fn(A, B, C, D, E, F, G, H) -> Fut,
     ) -> usize {
         std::mem::size_of::<Fut>()
     }
     frame_size(run_prepared_attempt_cleanup)
+}
+
+#[cfg(target_os = "linux")]
+async fn run_finite_closing(shared: Arc<Shared>, key: String, closing: Arc<FiniteClosingOwner>) {
+    let _running = FiniteClosingRun(Arc::clone(&closing));
+    shared.drive_finite_closing(&key, &closing).await;
+}
+
+/// Includes the cancellation-safe installed-task join inside the real closing
+/// driver; measure the concrete frame without manufacturing an owner.
+#[cfg(target_os = "linux")]
+pub(super) fn finite_closing_frame_bytes() -> usize {
+    fn frame_size<A, B, C, Fut: std::future::Future>(_: impl Fn(A, B, C) -> Fut) -> usize {
+        std::mem::size_of::<Fut>()
+    }
+    frame_size(run_finite_closing)
 }
 
 #[cfg(target_os = "linux")]
@@ -246,6 +290,11 @@ impl PreparedAttemptCleanup {
 
     pub(crate) fn known_closed(&self) -> bool {
         self.closing.known_closed.load(Acquire)
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn close_driver_idle_for_test(&self) -> bool {
+        self.closing.cleanup_ready.load(Acquire) && !self.closing.running.load(Acquire)
     }
 
     #[cfg(all(test, feature = "cluster-integration-tests"))]
@@ -398,6 +447,21 @@ impl PreparedAttemptRendition {
         self.key.capacity().checked_add(std::mem::size_of::<Self>())
     }
 
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn original_driver_id_for_test(&self) -> Option<tokio::task::Id> {
+        self.original_driver
+            .as_ref()
+            .map(tokio::task::JoinHandle::id)
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn abort_original_driver_for_test(&self) {
+        self.original_driver
+            .as_ref()
+            .expect("original registered driver")
+            .abort();
+    }
+
     /// The registered M4 task takes this one-shot fence before it keeps the
     /// pending owner across peer replies. Its final Drop must follow the
     /// actual charged registry entry and coordinator future, whether the
@@ -412,15 +476,33 @@ impl PreparedAttemptRendition {
     }
 
     pub(crate) async fn prepare_worker_binding(
-        &self,
+        &mut self,
         deadline: Instant,
     ) -> Result<(String, String), String> {
+        if self.installed {
+            return Err("adaptive worker binding is already published".into());
+        }
+        if self.original_driver.is_none() {
+            // This assignment has no await: cancellation of input preparation
+            // always leaves the exact registered task in this original owner.
+            self.original_driver = Some(super::driver::spawn_prepared_finite_driver(
+                Arc::clone(&self.shared),
+                Arc::clone(self.rendition()),
+            ));
+        }
         let producer = self
             .rendition()
             .dir
             .finite_producer()
             .expect("adaptive attempt has its original producer");
         let prepared = producer.prepare_adaptive_inputs(deadline).await?;
+        if self
+            .original_driver
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+        {
+            return Err("original adaptive driver ended before Prepared".into());
+        }
         let output = self
             .rendition()
             .dir
@@ -433,12 +515,19 @@ impl PreparedAttemptRendition {
     }
 
     /// The committed Store Adopt is the only caller that may publish this
-    /// already charged rendition and start its original driver.
+    /// already charged rendition and authorize its original registered driver.
     pub(crate) async fn install_after_adoption(&mut self) -> Result<(), String> {
         if self.installed {
             return Ok(());
         }
+        if self.original_driver.is_none() {
+            return Err("adaptive publication has no original prepared driver".into());
+        }
         let rendition = Arc::clone(self.rendition());
+        let producer = rendition
+            .dir
+            .finite_producer()
+            .expect("published finite attempt has its original producer");
         {
             let mut closings = self.shared.finite_closing.lock().await;
             let mut renditions = self.shared.renditions.lock().await;
@@ -449,11 +538,18 @@ impl PreparedAttemptRendition {
                 .shared
                 .take_finite_build_for_publication(&self.key, &rendition, &closings)?
                 .ok_or("adaptive finite publication lost its original build arm")?;
+            // Activation and publication have no await between them. A real
+            // reader cannot find the map entry before its original driver is
+            // activated, and publication adds no synthetic demand wake.
+            producer.install_original_driver(
+                self.original_driver
+                    .take()
+                    .expect("publication transfers the registered original driver"),
+            );
             renditions.insert(self.key.clone(), Arc::clone(&rendition));
             cleanup.published(&mut closings);
         }
         self.installed = true;
-        let _driver = spawn_driver(Arc::clone(&self.shared), rendition);
         self.build_guard.take();
         Ok(())
     }
@@ -473,14 +569,18 @@ impl PreparedAttemptRendition {
             .dir
             .finite_producer()
             .expect("adaptive attempt built a fresh finite producer");
+        let _ = producer.request_stop();
+        rendition.closed.store(true, Release);
+        rendition.kick();
         let shared = Arc::clone(&self.shared);
         let key = std::mem::take(&mut self.key);
         let gate = self.build_guard.take();
         let lease = self.application_lease.take();
+        let driver = self.original_driver.take();
         // The original charged owner is moved into a detached existing
         // finite-closing registration. Dropping the waiter cannot discard it.
         Some(tokio::spawn(run_prepared_attempt_cleanup(
-            shared, key, gate, rendition, output, producer, lease,
+            shared, key, gate, rendition, output, producer, driver, lease,
         )))
     }
 
@@ -500,6 +600,12 @@ impl Drop for PreparedAttemptRendition {
         }
         if tokio::runtime::Handle::try_current().is_ok() {
             let _ = self.launch_abandoned_cleanup();
+        } else if let Some(rendition) = self.rendition.as_ref() {
+            if let Some(producer) = rendition.dir.finite_producer() {
+                let _ = producer.request_stop();
+            }
+            rendition.closed.store(true, Release);
+            rendition.kick();
         }
         // Without an executor, the core runtime retains the full unresolved
         // obligation. Dropping Rust selectors grants no native-close proof.
@@ -1115,6 +1221,7 @@ impl Shared {
             key,
             rendition: Some(rendition),
             build_guard: Some(build_guard),
+            original_driver: None,
             application_lease: Some(application_lease),
             installed: false,
         })
@@ -2255,10 +2362,7 @@ impl Shared {
             return None;
         }
         let shared = Arc::clone(self);
-        Some(tokio::spawn(async move {
-            let _running = FiniteClosingRun(Arc::clone(&closing));
-            shared.drive_finite_closing(&key, &closing).await;
-        }))
+        Some(tokio::spawn(run_finite_closing(shared, key, closing)))
     }
 
     #[cfg(target_os = "linux")]
@@ -2363,14 +2467,22 @@ impl Shared {
                         .await
                     {
                         Ok(true) => {}
-                        Ok(false) => tracing::warn!(target: "plurxd::vodserve", rendition = %key,
-                            "finite driver aborted; original native owner still must close"),
+                        Ok(false) => {
+                            tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                                "finite driver aborted; cleanup remains unknown and held");
+                            return;
+                        }
                         Err(error) => {
                             tracing::warn!(target: "plurxd::vodserve", rendition = %key,
                                 %error, "finite driver still owns rendition metadata");
                             return;
                         }
                     }
+                }
+                if let Err(error) = producer.join_installed_driver().await {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                        %error, "original installed driver join remains unknown and held");
+                    return;
                 }
             }
             // The actual driver no longer reports Materialized events. This

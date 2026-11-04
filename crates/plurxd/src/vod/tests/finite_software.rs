@@ -1722,3 +1722,224 @@ async fn selected_copy_quota_fixture(case: u8) {
         _ => unreachable!("closed quota fixture cases"),
     }
 }
+
+async fn original_driver_pending(
+    fixture: &FiniteCancellationFixture,
+) -> (String, shared::PreparedAttemptRendition) {
+    let duration_ms = plan_duration_ms(&fixture.plan);
+    let identity = fixture
+        .recipe
+        .encoding
+        .as_ref()
+        .expect("frozen software recipe")
+        .identity(&fixture.recipe.file, duration_ms as f64 / 1_000.0);
+    let key = rendition_key(&fixture.recipe, &identity);
+    // Charge the concrete prepared owner and its actual abandoned-cleanup
+    // frame. This focused fixture has no remote registry/coordinator fields.
+    let application_bytes = std::mem::size_of::<shared::PreparedAttemptRendition>()
+        + key.capacity()
+        + shared::prepared_attempt_cleanup_frame_bytes();
+    let pending = fixture
+        .serve
+        .shared
+        .prepare_adaptive_attempt(
+            key.clone(),
+            identity,
+            None,
+            fixture.recipe.clone(),
+            duration_ms,
+            &fixture.settings,
+            application_bytes,
+            None,
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("actual prepared owner: {}", failure.message));
+    (key, pending)
+}
+
+#[tokio::test]
+async fn adopted_prepared_rendition_installs_the_same_original_dormant_driver() {
+    let fixture = finite_cancellation_fixture().await;
+    let baseline = fixture.runtime.accounting().expect("baseline");
+    let (key, mut pending) = original_driver_pending(&fixture).await;
+    assert!(pending.original_driver_id_for_test().is_none());
+    let producer = pending
+        .rendition()
+        .dir
+        .finite_producer()
+        .expect("original producer");
+    pending
+        .prepare_worker_binding(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("original held input binding");
+    let original_id = pending
+        .original_driver_id_for_test()
+        .expect("registered before Prepared");
+    // Even a stray notification cannot turn registration into trial entry.
+    pending.rendition().kick();
+    tokio::task::yield_now().await;
+    assert!(producer.driver_dormant_for_test());
+    pending
+        .prepare_worker_binding(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("same binding is idempotent");
+    assert_eq!(pending.original_driver_id_for_test(), Some(original_id));
+    pending
+        .install_after_adoption()
+        .await
+        .expect("publish original prepared owner");
+    assert!(pending.original_driver_id_for_test().is_none());
+    assert_eq!(
+        producer.installed_driver_id_for_test().await,
+        Some(original_id)
+    );
+    tokio::task::yield_now().await;
+    assert!(producer.driver_waiting_for_demand_for_test());
+    assert!(fixture
+        .serve
+        .shared
+        .renditions
+        .lock()
+        .await
+        .contains_key(&key));
+    drop(pending);
+    drop(producer);
+    fixture
+        .serve
+        .shared
+        .purge_if_dormant(&key, Duration::ZERO)
+        .await;
+    wait_until(
+        "same original installed task and native owner close",
+        Duration::from_secs(30),
+        || async {
+            fixture
+                .runtime
+                .accounting()
+                .expect("actual accounting")
+                .used
+                == baseline.used
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cancelled_prepared_binding_joins_original_driver_despite_cancelled_cleanup_waiter() {
+    let fixture = finite_cancellation_fixture().await;
+    let baseline = fixture.runtime.accounting().expect("baseline");
+    let (key, mut pending) = original_driver_pending(&fixture).await;
+    let producer = pending
+        .rendition()
+        .dir
+        .finite_producer()
+        .expect("original producer");
+    // Hold the actual owner lock, not a replacement input implementation, so
+    // preparation must suspend after registration but before acquiring inputs.
+    let held_owner = producer.hold_original_owner_for_test().await;
+    {
+        let mut binding =
+            Box::pin(pending.prepare_worker_binding(Instant::now() + Duration::from_secs(30)));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(binding.as_mut(), &mut context).is_pending());
+    }
+    assert!(pending.original_driver_id_for_test().is_some());
+    assert!(producer.driver_dormant_for_test());
+    // Block only closing registration. The original driver can return, while
+    // a cancelled waiter cannot consume the cleanup task that owns its join.
+    let original_closing = fixture
+        .serve
+        .shared
+        .finite_closing
+        .lock()
+        .await
+        .get(&key)
+        .cloned()
+        .expect("original pre-entry closing owner");
+    let held_registration = original_closing.hold_registration_for_test().await;
+    let mut task = pending
+        .begin_abandon()
+        .expect("transfer exact original driver");
+    drop(held_owner);
+    assert!(producer
+        .wait_driver_quiescent(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("original dormant driver returns after stop"));
+    assert!(!task.is_finished());
+    assert!(tokio::time::timeout(Duration::ZERO, task.join())
+        .await
+        .is_err());
+    assert!(!task.is_finished());
+    drop(held_registration);
+    let cleanup = task
+        .join()
+        .await
+        .expect("recover same retained cleanup task");
+    drop(producer);
+    wait_until(
+        "same original prepared cleanup known close",
+        Duration::from_secs(30),
+        || async { cleanup.known_closed() },
+    )
+    .await;
+    assert_eq!(
+        fixture
+            .runtime
+            .accounting()
+            .expect("actual known close")
+            .used,
+        baseline.used
+    );
+}
+
+#[tokio::test]
+async fn aborted_original_prepared_driver_never_grants_known_close_or_refund() {
+    let fixture = finite_cancellation_fixture().await;
+    let (_key, mut pending) = original_driver_pending(&fixture).await;
+    let producer = pending
+        .rendition()
+        .dir
+        .finite_producer()
+        .expect("original producer");
+    let held_owner = producer.hold_original_owner_for_test().await;
+    {
+        let mut binding =
+            Box::pin(pending.prepare_worker_binding(Instant::now() + Duration::from_secs(30)));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(binding.as_mut(), &mut context).is_pending());
+    }
+    assert!(producer.driver_dormant_for_test());
+    let held = fixture
+        .runtime
+        .accounting()
+        .expect("original full R charge");
+    assert_eq!(held.unknown_peak_producers, 1);
+    // No await has followed registration: abort the actual original task
+    // before its first poll, then retain and join that same handle in cleanup.
+    pending.abort_original_driver_for_test();
+    let mut task = pending
+        .begin_abandon()
+        .expect("retain aborted original join");
+    drop(held_owner);
+    let cleanup = task
+        .join()
+        .await
+        .expect("original cleanup registration task");
+    assert!(!producer
+        .wait_driver_quiescent(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("actual task recorded an aborted outcome"));
+    wait_until(
+        "original aborted closing pass returns without settlement",
+        Duration::from_secs(30),
+        || async { cleanup.close_driver_idle_for_test() },
+    )
+    .await;
+    assert!(!cleanup.known_closed());
+    let after = fixture
+        .runtime
+        .accounting()
+        .expect("unknown original charge remains held");
+    assert_eq!(after.used, held.used);
+    assert_eq!(after.unknown_peak_producers, held.unknown_peak_producers);
+}

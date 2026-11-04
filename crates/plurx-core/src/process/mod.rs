@@ -4,6 +4,16 @@
 pub mod bounded;
 #[cfg(test)]
 mod census;
+#[cfg(all(target_os = "linux", any(test, feature = "fixtures")))]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "The atomic launcher is compiled for fixture qualification; no production profile is minted before the sandbox audit."
+    )
+)]
+mod contained_launch;
+pub mod containment;
 #[cfg(target_os = "linux")]
 pub(crate) mod fixed_planning_engine;
 #[doc(hidden)]

@@ -29,6 +29,7 @@ pub(crate) use memory_claim::MemoryClaim;
 mod task_claim;
 pub(crate) use task_claim::TaskClaim;
 mod history_mix;
+pub mod owner_inventory;
 
 pub mod physical_graph;
 mod retained;
