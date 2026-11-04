@@ -582,3 +582,8 @@ pub(in crate::adaptive_resources) use runtime_bridge::{
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(target_os = "linux")]
+mod application;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources) use application::ApplicationReference;

@@ -18,7 +18,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | File | Answers | |
 |---|---|---|
 | [ADAPTIVE-PLAYBACK-CONTRACT-HISTORY.md](ADAPTIVE-PLAYBACK-CONTRACT-HISTORY.md) | Accepted bounded copy/M4 design decisions and verbatim original M0 proposals; not implementation or acceptance evidence. | done |
-| [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Original planning/finite output/cache custody, copy payload ownership and exact compiler evidence; open retry/drain/controller work and M0–M7 acceptance. | open |
+| [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Original planning/finite output/cache custody and exact compiler evidence; 17 direct application cases pass; full inventory and M0–M7 acceptance remain open. | open |
 | [ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) | Production refusal of speculative growth, original-attempt retry/cleanup, bounded service evidence and remaining trial prerequisites. | open |
 | [ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md) | Original kernel-domain ownership, atomic entry, complete affected-owner inventory and pre-Winner driver prerequisites for real trials. | open |
 | [ADAPTIVE-PLAYBACK-DELIVERY.md](ADAPTIVE-PLAYBACK-DELIVERY.md) | Authoritative ordinary VOD V1–V5 OPEN/CLOSED source list; separate R1 recovery, later M0–M7 generality and final acceptance. | open |

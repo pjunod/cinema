@@ -51,7 +51,10 @@ impl InventoryAdmission<'_> {
         }
     }
 
-    fn owner_slot(&self, owner: &RuntimeInventoryOwner) -> Result<Option<usize>, InventoryError> {
+    pub(super) fn owner_slot(
+        &self,
+        owner: &RuntimeInventoryOwner,
+    ) -> Result<Option<usize>, InventoryError> {
         match owner {
             RuntimeInventoryOwner::Overflow { .. } if self.state.overflowed => Ok(None),
             RuntimeInventoryOwner::Overflow { .. } => Err(InventoryError::MissingOwner),

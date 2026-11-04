@@ -683,3 +683,5 @@ async fn source_retry_finishes_after_other_member_finalizes_shared_domain() {
         ResourceVector::default()
     );
 }
+
+mod application_tests;

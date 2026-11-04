@@ -37,6 +37,27 @@ impl DirectSourceClosure {
 }
 
 impl NodeResourceRuntime {
+    pub(in crate::adaptive_resources::runtime) fn register_direct_application_reference(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+    ) -> Result<crate::adaptive_resources::owner_inventory::ApplicationReference, OperationError>
+    {
+        self.validate_preparation(owner)?;
+        self.affected_owners
+            .with_runtime_mutation(|inventory| {
+                let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+                let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+                inventory
+                    .register_application_reference(
+                        role.inventory.as_ref().ok_or(OperationError::State)?,
+                        Uuid::new_v4(),
+                    )
+                    .map_err(|_| OperationError::State)
+            })
+            .map_err(|_| OperationError::State)?
+    }
+
     /// Join and close the original registered SourceCell while its full role
     /// charge remains held. The cell retains the native close fact for the
     /// later exact typed settlement.

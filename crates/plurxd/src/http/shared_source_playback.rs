@@ -46,6 +46,8 @@ struct SourceStartEntry {
     registration_gate: std::sync::Arc<ingress::RegistrationGate>,
     changed: tokio::sync::Notify,
     result: std::sync::Mutex<Option<Result<SourceStartOwned, SourceStartFailure>>>,
+    // HTTP terminal observation only. Never native/application close authority.
+    direct_terminal: std::sync::Mutex<Option<SourceDirectTerminal>>,
     task: SourceStartTask,
 }
 // These are retained observations of this exact task, not wire authority or a
@@ -351,6 +353,7 @@ impl SourceStartRegistry {
             registration_gate: Default::default(),
             changed: tokio::sync::Notify::new(),
             result: std::sync::Mutex::new(None),
+            direct_terminal: Default::default(),
             task: SourceStartTask::default(),
         });
         entry.remember_authenticated_hash(authenticated_hash)?;
@@ -401,45 +404,126 @@ impl SourceEndOwner {
         }
     }
 }
+#[derive(Clone, Copy)]
+struct SourceDirectTerminal {
+    incarnation_id: Uuid,
+}
+
+impl SourceStartRegistry {
+    /// At most eight working entries plus 64 cached terminal receipts. Take
+    /// only bounded handles under maps, then destroy rich aliases outside them.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn reconcile_direct_applications(&self) {
+        let entries: [Option<std::sync::Arc<SourceStartEntry>>; 72] = {
+            let active = self.entries.lock().expect("Source HTTP starts");
+            let settled = self.settled.lock().expect("Source settled HTTP receipts");
+            let mut entries = std::array::from_fn(|_| None);
+            for (slot, entry) in entries.iter_mut().zip(active.iter().chain(settled.iter())) {
+                *slot = Some(std::sync::Arc::clone(entry));
+            }
+            entries
+        };
+        for entry in entries.into_iter().flatten() {
+            entry.compact_direct_application();
+        }
+    }
+}
+impl SourceStartEntry {
+    fn direct_terminal(&self) -> Option<SourceDirectTerminal> {
+        *self
+            .direct_terminal
+            .lock()
+            .expect("Source direct terminal observation")
+    }
+    fn compact_direct_application(&self) {
+        let retired = {
+            let mut result = self.result.lock().expect("Source HTTP outcome");
+            let Some(Ok(owned)) = result.as_ref() else {
+                return;
+            };
+            if !owned.actor.is_direct() || owned.actor.settlement_status() != Some(Ok(())) {
+                return;
+            }
+            // This records the original actor's known HTTP/native/SQL outcome,
+            // solely to replay terminal responses after dropping our alias.
+            *self
+                .direct_terminal
+                .lock()
+                .expect("Source direct terminal observation") = Some(SourceDirectTerminal {
+                incarnation_id: owned.assignment.binding().incarnation_id(),
+            });
+            result.replace(Err(SourceStartFailure::Unavailable))
+        };
+        drop(retired);
+        self.changed.notify_waiters();
+    }
+    fn terminal_end_receipt(&self, terminal: SourceDirectTerminal) -> SourceEndReceipt {
+        let published = self.published.lock().expect("actual Source publication");
+        SourceEndReceipt {
+            reference: self.identity.reference.clone(),
+            request_id: self.identity.request_id,
+            incarnation_id: terminal.incarnation_id,
+            session_id: published.as_ref().map(|p| p.session_id),
+            control_epoch: published.as_ref().map(|p| p.control_epoch),
+            state: "settled",
+            confirmation_id: Uuid::new_v4(),
+            settled: true,
+        }
+    }
+}
+fn terminal_status_facts(entry: &SourceStartEntry, incarnation_id: Uuid, settled: bool) -> Value {
+    let published = entry
+        .published
+        .lock()
+        .expect("actual Source publication")
+        .clone();
+    let mut facts = serde_json::json!({"reference":entry.identity.reference,"request_id":entry.identity.request_id,"incarnation_id":incarnation_id,"state":if settled {"settled"} else {"unresolved"}});
+    if let Some(published) = published {
+        facts["session_id"] = serde_json::json!(published.session_id);
+        facts["control_epoch"] = serde_json::json!(published.control_epoch);
+    }
+    facts
+}
+
 impl SourceStartEntry {
     fn actual_settled(&self) -> bool {
-        self.result
-            .lock()
-            .expect("Source HTTP outcome")
-            .as_ref()
-            .is_some_and(|result| {
-                result
-                    .as_ref()
-                    .is_ok_and(|owned| owned.actor.settlement_status() == Some(Ok(())))
-            })
+        let result = self.result.lock().expect("Source HTTP outcome");
+        if self.direct_terminal().is_some() {
+            return true;
+        }
+        result.as_ref().is_some_and(|result| {
+            result
+                .as_ref()
+                .is_ok_and(|owned| owned.actor.settlement_status() == Some(Ok(())))
+        })
     }
     /// A joined error may still own an ambiguous durable/physical obligation.
     /// Only an exact cleanup receipt allows that acquired obligation to leave
     /// admission capacity. Failure before any claim owns no durable work here.
     fn actual_finished(&self) -> bool {
-        self.result
-            .lock()
-            .expect("Source HTTP outcome")
-            .as_ref()
-            .is_some_and(|result| match result {
-                Ok(owned) => owned.actor.settlement_status() == Some(Ok(())),
-                Err(_) => {
-                    self.task
-                        .cleanup_confirmation
-                        .lock()
-                        .expect("Source cleanup confirmation")
-                        .is_some()
-                        || (matches!(
-                            *self.task.joined.lock().expect("Source joined task"),
-                            Some(SourceStartTaskJoined::Returned)
-                        ) && matches!(
-                            *self.task.stage.lock().expect("Source start stage"),
-                            SourceStartTaskStage::Registered
-                                | SourceStartTaskStage::ReadingIntent { .. }
-                                | SourceStartTaskStage::IntentReady { .. }
-                        ))
-                }
-            })
+        let result = self.result.lock().expect("Source HTTP outcome");
+        if self.direct_terminal().is_some() {
+            return true;
+        }
+        result.as_ref().is_some_and(|result| match result {
+            Ok(owned) => owned.actor.settlement_status() == Some(Ok(())),
+            Err(_) => {
+                self.task
+                    .cleanup_confirmation
+                    .lock()
+                    .expect("Source cleanup confirmation")
+                    .is_some()
+                    || (matches!(
+                        *self.task.joined.lock().expect("Source joined task"),
+                        Some(SourceStartTaskJoined::Returned)
+                    ) && matches!(
+                        *self.task.stage.lock().expect("Source start stage"),
+                        SourceStartTaskStage::Registered
+                            | SourceStartTaskStage::ReadingIntent { .. }
+                            | SourceStartTaskStage::IntentReady { .. }
+                    ))
+            }
+        })
     }
     async fn release_uninvoked(
         &self,
@@ -586,6 +670,9 @@ impl SourceStartEntry {
                 let owned = match entry.wait(deadline).await {
                     Ok(owned) => owned,
                     Err(_) => {
+                        if let Some(terminal) = entry.direct_terminal() {
+                            return Ok(entry.terminal_end_receipt(terminal));
+                        }
                         if let Some(assignment) = ingress::actual_assignment(&entry) {
                             ingress::retire_custody(&state, &assignment, deadline)
                                 .await
@@ -634,6 +721,9 @@ impl SourceStartEntry {
                 })
             }
             .await;
+            if result.is_ok() {
+                entry.compact_direct_application();
+            }
             *task.result.lock().expect("Source End outcome") = Some(result);
             task.changed.notify_waiters();
         });
@@ -1006,11 +1096,28 @@ async fn status(
         .validate_known(input.known.as_ref())
         .inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.known_lineage", error_class = "operation_refused", "Source status refused"); })
         .map_err(SourceStartFailure::response)?;
-    let owned = entry
-        .wait(deadline)
-        .await
-        .inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.entry_wait", error_class = "operation_refused", "Source status refused"); })
-        .map_err(SourceStartFailure::response)?;
+    if let Some(terminal) = entry.direct_terminal() {
+        return Ok(
+            axum::Json(terminal_status_facts(&entry, terminal.incarnation_id, true))
+                .into_response(),
+        );
+    }
+    let owned = match entry.wait(deadline).await {
+        Ok(owned) => owned,
+        Err(error) => {
+            // Compaction may have replaced the live outcome after the first
+            // terminal observation. Re-read before mapping a live-only error.
+            if let Some(terminal) = entry.direct_terminal() {
+                return Ok(axum::Json(terminal_status_facts(
+                    &entry,
+                    terminal.incarnation_id,
+                    true,
+                ))
+                .into_response());
+            }
+            return Err(error.response());
+        }
+    };
     let ledger = state
         .store
         .source_ingress_custody(&owned.assignment)
@@ -1084,16 +1191,11 @@ async fn status(
     tracing::debug!(target: "plurx::sharing", stage = "source_status.cleanup_projection", cleanup_only, current_authority = current.is_ok(), "Source status returns terminal-only projection");
     // Revoked grants get no live metadata, resources or readiness. The exact
     // retained cleanup identity may observe only genuine terminal settlement.
-    let published = entry
-        .published
-        .lock()
-        .expect("actual Source publication")
-        .clone();
-    let mut facts = serde_json::json!({"reference":entry.identity.reference,"request_id":entry.identity.request_id,"incarnation_id":owned.assignment.binding().incarnation_id(),"state":if owned.actor.settlement_status()==Some(Ok(())){"settled"}else{"unresolved"}});
-    if let Some(published) = published {
-        facts["session_id"] = serde_json::json!(published.session_id);
-        facts["control_epoch"] = serde_json::json!(published.control_epoch);
-    }
+    let facts = terminal_status_facts(
+        &entry,
+        owned.assignment.binding().incarnation_id(),
+        owned.actor.settlement_status() == Some(Ok(())),
+    );
     Ok(axum::Json(facts).into_response())
 }
 async fn end(

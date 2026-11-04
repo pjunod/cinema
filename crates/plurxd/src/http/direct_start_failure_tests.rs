@@ -209,6 +209,25 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
         1,
         "native ticket handoff alone is not the final joined settlement"
     );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("same original resource accounting")
+            .used,
+        charged
+    );
+    assert!(runtime
+        .affected_owner_inventory()
+        .snapshot()
+        .expect("original owner census snapshot")
+        .records()
+        .any(|row| matches!(
+            row.kind,
+            plurx_core::adaptive_resources::owner_inventory::OwnerKind::Reference { .. }
+        )));
+    // A real escaped actor alias is part of the charged application payload.
+    // It may not survive a refund merely because its direct-file alias retired.
+    drop(actor);
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let custody = manager.fixture_source_direct_restart_custody();
@@ -228,7 +247,6 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
         runtime.accounting().expect("actual typed R refund").used,
         plurx_core::adaptive_resources::ResourceVector::default()
     );
-    drop(actor);
     let status = state.serving.restart_drain_status(0).await;
     assert_eq!(status.admissions_in_flight, 0);
     assert!(
@@ -246,5 +264,89 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
     std::fs::rename(&missing_path, &original_path).expect("restore source after actual retirement");
     drop(manager);
     drop(state);
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_direct_original_worker_and_payload_reference_close_after_response_guard() {
+    let fixture =
+        super::super::real_source_start_fixture_with(super::super::SourceFixtureMode::Direct, None)
+            .await;
+    let state = &fixture.state;
+    let manager = &state.transcode;
+    let runtime = state
+        .resource_runtime
+        .as_ref()
+        .expect("actual selected local direct runtime");
+    let snapshot = state
+        .store
+        .playback_planning_snapshot(1, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await
+        .expect("original planning snapshot read")
+        .expect("original fixture file");
+    let opened = manager
+        .open_local_direct(
+            state,
+            plurx_core::adaptive_resources::runtime::direct_source::DirectSourceBinding::Local {
+                authenticated_user_id: 1,
+                file_id: snapshot.file.id,
+            },
+            &snapshot.file,
+            Instant::now() + Duration::from_secs(30),
+        )
+        .await
+        .expect("actual admitted local direct open");
+    assert_eq!(opened.length, snapshot.file.size as u64);
+    let charged = runtime
+        .accounting()
+        .expect("same original resource accounting")
+        .used;
+    assert!(charged.handles > 0);
+    assert_eq!(manager.fixture_local_direct_custody(), (1, 0));
+    assert!(runtime
+        .affected_owner_inventory()
+        .snapshot()
+        .expect("original owner census snapshot")
+        .records()
+        .any(|row| matches!(
+            row.kind,
+            plurx_core::adaptive_resources::owner_inventory::OwnerKind::Reference { .. }
+        )));
+    manager.fixture_drive_local_direct();
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("same original resource accounting")
+            .used,
+        charged
+    );
+    drop(opened);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            manager.fixture_drive_local_direct();
+            if manager.fixture_local_direct_custody() == (0, 0) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("actual original local worker and same ticket close");
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("same original resource accounting")
+            .used,
+        plurx_core::adaptive_resources::ResourceVector::default()
+    );
+    assert_eq!(
+        runtime
+            .affected_owner_inventory()
+            .snapshot()
+            .expect("original owner census snapshot")
+            .records()
+            .count(),
+        0
+    );
     fixture.shutdown().await;
 }

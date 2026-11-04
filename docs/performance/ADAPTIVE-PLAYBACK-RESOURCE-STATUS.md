@@ -1,6 +1,6 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation active · updated 2026-11-03. Codex has
+**Status:** open · implementation active · updated 2026-11-04. Codex has
 resumed Claude's adaptive effort #1248. The effort remains a draft; no release
 qualification or deployment is claimed.
 
@@ -25,6 +25,8 @@ records the bounded repair and two new actual-read cases at source tree
 `4cb874ba`: 21 focused core and three affected daemon cases pass. Distinct source-scoped total: 66.
 Exact-candidate checks are recorded in that task PR.
 The earlier 51-case qualification retains its original source boundary.
+The [direct application continuation](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#direct-applications-retain-original-workers-and-whole-payloads)
+records 17 scoped passes for original-worker and rich-payload reference custody; full M0 stays open.
 
 The [finite ledger](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
 and [policy ledger](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) retain their earlier
