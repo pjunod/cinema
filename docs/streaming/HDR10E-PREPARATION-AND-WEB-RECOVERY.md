@@ -9,13 +9,13 @@ Companion to [playback](../PLAYBACK.md) (delivery and progress),
 This ledger distinguishes three faults reported during one 4K P7 playback
 investigation. It does not declare physical acceptance from unit tests.
 
-## Current-main source custody changes require new qualification
+## Current-main source custody integration and qualification
 
 Main `71a776b3a` landed the separate startup/source-custody repair in #1366.
 Production DV windows now read through the held-source service, with exact
 capability and Range validation and settlement after actual child reap. The
-32-window measurements below qualify the earlier direct-descriptor graph;
-they do not qualify this integration.
+current source-service measurements appear first below. The later historical
+direct-descriptor measurements qualify only that earlier graph.
 
 The synchronous source-service baseline retained every check and original
 surround audio. Its 32 windows contained 1,536 frames over 64 seconds, but
