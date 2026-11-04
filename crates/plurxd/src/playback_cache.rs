@@ -394,6 +394,7 @@ pub(crate) async fn reserve(path: &Path, bytes: u64) -> io::Result<Option<CacheR
 /// grants no capacity: publication must still take its ordinary reservation.
 /// Never queue behind another operation or an unknown ceiling, and bound the
 /// optional wait to a quarter of the unchanged inventory freshness interval.
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) async fn warm_inventory(path: &Path) {
     let Some(budget) = lookup(path) else { return };
     let Ok(_operation) = budget.operations.try_lock() else {
@@ -570,11 +571,11 @@ impl PlaybackCacheBudget {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) async fn inventory_operation_for_control(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.operations.lock().await
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn inventory_warmed_since_for_control(&self, since: Instant) -> bool {
         self.lock()
             .sample
