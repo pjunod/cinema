@@ -10,34 +10,33 @@ qualification or deployment is claimed.
 
 ## Current continuation — source-bound task qualification
 
-Task PRs #1293, #1338, #1360–#1365, #1368, #1371 and #1375 are merged into
-draft effort #1248. #1368 and #1371 passed development gates 6411/6422;
-#1375 landed at `edb5b79ff902b7eea5fe95d8954b1e5af99a5752` after eight green
-jobs in gate 6437. [Owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md)
-retains its earlier 44 passing cases and exact source identities separately.
+Draft effort #1248 includes merged task PRs #1293, #1338, #1360–#1365, #1368,
+#1371 and #1375. The latter landed at `edb5b79f` after eight green jobs in gate
+6437; #1368/#1371 passed gates 6411/6422. [Owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md)
+keeps the earlier 44 cases separate from 51 selected-bridge core passes on
+production-identical `6ee93330`/`ca85f07f` and three daemon passes on `ca85f07f`.
+Seven unchanged overlap failures remain reproduced baseline exceptions.
 
-The selected runtime inventory bridge is built and has scoped core
-qualification: 51 distinct passes, including all seven new regressions, on
-production-identical sources `6ee93330`/`ca85f07f`. Seven unchanged
-unknown-producer-overlap fixture failures were reproduced on exact `edb5b79f`
-baseline; they remain explicit exceptions. The
-[selected bridge qualification](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#selected-runtime-qualification--51-distinct-core-cases)
-records counts, fixture corrections and limits. Three affected daemon cases
-also pass on `ca85f07f`, including real lifecycle and process restart.
+[PR #1377](http://forge.lan:3000/noirr/plurx/pulls/1377) now has a built direct
+retirement amendment, not yet merged. Exact `7658db4c` execution
+reproduced three core and two daemon ticket-retention failures. The
+[original-selector follow-up](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#direct-retirement-follow-up--original-selectors-replace-permanent-aliases)
+records the bounded repair and two new actual-read cases at source tree
+`4cb874ba`: 21 focused core and three affected daemon cases pass. The amended
+exact-candidate hook/gate remains owed. Distinct source-scoped total: 66.
+The earlier 51-case qualification retains its original source boundary.
 
-The [finite qualification](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
-records six earlier reader cases plus lifecycle/restart; the
-[policy continuation](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) records fourteen
-refusal/service cases. #1365's controlled two-node fixture and the exact-owner
-lease/publication guards retain their source-bound evidence in the
-[delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md). Those results do not imply
-naturally selected performance or M0–M7 acceptance.
+The [finite ledger](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
+and [policy ledger](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) retain their earlier
+reader/lifecycle/restart and fourteen refusal/service results. #1365's
+controlled two-node and exact-owner publication evidence remains in the
+[delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md). None establishes naturally
+selected performance or M0–M7 acceptance.
 
-Still open: M0 full inventory/contracts, M3a/C2 native and allocator bounds,
-production trials, V1–V5, broader adapters/platforms, current-main integration
-and Main promotion. The handoff's “M0 owned containment” differs from the
-plan's M0 inventory. The pre-existing actor-application lease regression and
-selected-static FFmpeg `-display_rotation` capability decision remain open.
+Still open: full inventory/M0, M3a/C2 native and allocator bounds, production
+trials, V1–V5, broader adapters/platforms, current-main integration and Main
+promotion. The actor-application lease regression and selected-static FFmpeg
+`-display_rotation` decision remain separate open items. No deployment.
 
 ## 2026-10-29 checkpoint — historical source-bound evidence
 

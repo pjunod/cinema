@@ -279,3 +279,60 @@ Kernel enforcement, ownership regressions and exact-source compiler results
 are recorded separately. Authored fixture cases do not establish
 production coverage, startup/cleanup bounds, M0 acceptance or trial eligibility.
 The effort remains draft; V1–V5 and Main promotion remain open.
+
+## Direct retirement follow-up — original selectors replace permanent aliases
+
+**Status:** built amendment to [PR #1377](http://forge.lan:3000/noirr/plurx/pulls/1377);
+scoped core/daemon qualification passes; exact amended gate and merge pending. The earlier
+51-case heading and source
+boundaries above remain unchanged.
+
+On exact committed source `7658db4c4fdb5027a6283bafa00018c121ed6ec5`, the
+[actual direct-source module](../../crates/plurx-core/src/adaptive_resources/runtime/direct_source/tests.rs)
+ran five cases: two passed, three failed, zero ignored. The failures covered
+last-source/domain retirement, a cancelled original read waiter, and bounded
+chunk retirement. Two actual daemon cases also failed: original restart
+admission moving to the retained direct ticket, and unpublished direct-open
+failure releasing its own source reservation. Both retained one cleanup ticket
+where none should remain. The original read-join-before-End daemon case passed.
+These failures are this task's direct-finalization blocker, separate from the
+seven unchanged baseline overlap exceptions above.
+
+The direct retirement ticket cloned its preparation into finalization while
+retaining that same preparation. The shared read domain retained another
+permanent clone. Actual native and journal settlement could therefore finish,
+but final `Arc::try_unwrap` could never consume the rich bundle. Retrying the
+same ticket could not remove those permanent aliases.
+
+Source tree `4cb874ba40ed4f607138e271eb2d113f3cec7df8` changes only
+[the runtime finalizer](../../crates/plurx-core/src/adaptive_resources/runtime/operations.rs),
+[direct-source ownership](../../crates/plurx-core/src/adaptive_resources/runtime/direct_source.rs)
+and its actual-read tests. The synchronous owned-selector finalizer consumes
+an `Option<OwnedPreparation>` and restores the same original selector on Busy
+or error. A live source owner still retains its alias, so rich worker ownership
+continues to block premature destruction.
+
+The first source shares the domain's bundle. Its ticket drops only the
+redundant selector after known source settlement; the domain retains the
+original until its last member closes. The last ticket takes that original,
+releases domain/registry locks, then finalizes without an intervening await.
+A missing selector with no committed completion flag means Busy, never absence.
+An explicit completed-domain flag lets another retired source finish its own
+remaining bundle even after the registry entry disappears. Original physical
+proofs, application closure, rich bundle destruction and matching ledger
+absence still precede census removal.
+
+The two new actual-read regressions cover restoring the original domain
+selector after busy finalization, and a source retry after another member
+finishes the shared domain in the opposite closing order. Existing actual-read
+cases now also assert census retention while an application or original read
+is held, and an empty census only after final closure. Source review found no
+blocking issue. All 21 focused core cases pass on `4cb874ba`: seven actual
+direct cases, six inventory cases, six binding/typed/settlement callers and
+two finite-initialization fences. Twelve repeat affected earlier cases; the
+source-scoped distinct core total is 60. The pinned test build passes in
+2 min 56 s. All three affected daemon Direct cases also pass on `4cb874ba`, including
+the two reproduced retained-ticket failures. Combined source-scoped evidence
+has 60 distinct core and six daemon passes: 24 amended-source cases and
+42 retained earlier cases. The exact amended commit hook/gate remains owed.
+Full inventory/M0, producer bounds, trials and Main promotion remain open.

@@ -1837,15 +1837,7 @@ impl NodeResourceRuntime {
             .map_err(|_| OperationError::State)?
     }
 
-    /// Bounded in-memory operation retention is reclaimed only after ALL exact
-    /// roles have refunded and all proof-bearing operations have completed.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        allow(
-            dead_code,
-            reason = "Current direct/copy/planning native callers are Linux-only; preserve portable original-owner preparation and cleanup APIs for unsupported-platform refusal coverage."
-        )
-    )]
+    #[cfg(test)]
     pub(crate) async fn forget_preparation(
         &self,
         owner: OwnedPreparation,
@@ -1861,8 +1853,27 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         drop(bundle);
+        self.try_forget_preparation_owned(&mut Some(owner))
+    }
+
+    /// Consume the actual final selector only after all proof-bearing roles
+    /// settled. Busy/error preserves that SAME selector for the original ticket.
+    /// No await separates taking it, rich destruction and census finalization.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Production direct-source finalization is Linux-only; preserve portable original-owner tests."
+        )
+    )]
+    pub(in crate::adaptive_resources::runtime) fn try_forget_preparation_owned(
+        &self,
+        selection: &mut Option<OwnedPreparation>,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(selection.as_ref().ok_or(OperationError::State)?)?;
         self.affected_owners
             .with_runtime_mutation(|inventory| {
+                let owner = selection.as_ref().ok_or(OperationError::State)?;
                 let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
                 let stored = book.bundles.get(&owner.id).ok_or(OperationError::State)?;
                 if !Arc::ptr_eq(stored, &owner.state) {
@@ -1898,6 +1909,7 @@ impl NodeResourceRuntime {
                             .map_err(|_| OperationError::State)?;
                     }
                 }
+                let owner = selection.take().ok_or(OperationError::State)?;
                 let stored = book
                     .bundles
                     .remove(&owner.id)
@@ -1911,8 +1923,12 @@ impl NodeResourceRuntime {
                 let mut bundle = match Arc::try_unwrap(state) {
                     Ok(state) => state.into_inner(),
                     Err(state) => {
-                        book.bundles.insert(owner_id, state);
-                        let _ = owner_ledger;
+                        book.bundles.insert(owner_id, Arc::clone(&state));
+                        *selection = Some(OwnedPreparation {
+                            ledger: owner_ledger,
+                            id: owner_id,
+                            state,
+                        });
                         return Err(OperationError::State);
                     }
                 };
