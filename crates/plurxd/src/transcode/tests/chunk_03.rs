@@ -1599,7 +1599,10 @@
     #[tokio::test]
     async fn rolling_publication_budget_eof_keeps_the_slow_viewers_protected_tail() {
         let directory = crate::test_tempdir().expect("EOF publication budget");
-        let session = test_session(directory.path().to_path_buf());
+        let mut session = test_session(directory.path().to_path_buf());
+        // The first snapshot is for this requested Resume. Prepublication
+        // Rendering telemetry alone cannot establish a different playhead.
+        session.start_seconds = 360.0;
         accept_rolling_publication_demand(
             &session,
             1,
@@ -1692,6 +1695,9 @@
         const SEGMENT_MS: i64 = 2_000;
         let directory = crate::test_tempdir().expect("held rolling producer");
         let session = test_session(directory.path().to_path_buf());
+        session.control.bind_response_publication_contract(
+            "held-rolling-presentation".to_owned(), Arc::clone(&session.failed),
+        ).await.expect("bind simulated presentation");
         let poll_ms = i64::try_from(poll.as_millis()).expect("poll");
         let consumed_per_poll_ms = ((poll_ms as f64) * playback_rate).round() as i64;
         let exchange_ms = i64::from(crate::playback_control::NEXT_EXCHANGE_MS);
@@ -1810,6 +1816,15 @@
                 }
             }
             if published.is_some() && !playing {
+                // The simulated viewer actually receives the video playlist.
+                // Subsequent advancing reports must pass the same actor
+                // admission as production before either clock extrapolates.
+                session.control.authorize_response_publication(
+                    crate::playback_control::RollingResponsePublication::attempt_media(
+                        crate::playback_control::RollingResponseObject::VideoMediaPlaylist,
+                        session.control.current_producer_attempt(), None,
+                    ), None, now + Duration::from_secs(1),
+                ).await.expect("simulated video playlist response");
                 playing = true;
             }
             served_end_ms = published;
@@ -1844,7 +1859,7 @@
                 physical_ahead: None,
                 produced_end_ms: (segments > 0).then_some(produced_end_ms),
                 staged_publication_seconds,
-                startup_protected: false,
+                startup_protected: lease.startup.protects_from_time_hold(),
                 media_origin_ms: 0,
                 lease_mode: lease.mode,
                 demand: lease.demand.as_ref(),
