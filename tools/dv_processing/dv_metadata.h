@@ -12,11 +12,29 @@
 #include <libplacebo/utils/libav.h>
 #include "nlq_clipping.h"
 
+#if PL_API_VER != 387
+#error "DV reconstruction requires the pinned libplacebo 7.387 ABI"
+#endif
+
 struct dv_decoded_mapping {
   struct pl_dovi_metadata dovi;
   const AVDOVIMetadata *source;
   int polynomial_segments, mmr_segments;
 };
+
+// The admitted manual libdovi control path and the public AVFrame mapper use
+// the same API387 units: integer EL offset, unfurled LINEAR_DZ coefficients,
+// and the actual residual clip bound. Admission remains independently bounded.
+static inline struct pl_dovi_nlq_data dv_fel_nlq_projection(
+    uint16_t offset, uint64_t slope, uint64_t threshold,
+    uint64_t maximum_integer, uint64_t maximum_fraction) {
+  const double denominator = 8388608.0;
+  return (struct pl_dovi_nlq_data){
+      .offset = offset,
+      .deadzone_slope = slope / denominator,
+      .deadzone_threshold = threshold / denominator,
+      .hdr_in_max = maximum_integer + maximum_fraction / denominator};
+}
 
 static inline bool dv_metadata_rational(AVRational q, double limit) {
   return q.den > 0 && isfinite(av_q2d(q)) && fabs(av_q2d(q)) <= limit;
@@ -125,7 +143,7 @@ static inline bool dv_map_metadata(const AVDOVIMetadata *data, size_t size,
         !dv_metadata_rational(c->rgb_to_lms_matrix[i], 2))
       return false;
   // Public mapper preserves every active polynomial/MMR piece, signalled
-  // pivot clamp and matrix. The public shader reshapes BL before adding NLQ
+  // input pivot clamp and matrix. The public shader reshapes BL before adding NLQ
   // residuals, then performs the nonlinear/linear color transforms.
   pl_map_dovi_metadata(&result.dovi, data);
   result.dovi.nlq_active = fel;
@@ -133,7 +151,8 @@ static inline bool dv_map_metadata(const AVDOVIMetadata *data, size_t size,
     if (!isfinite(result.dovi.nonlinear_offset[comp]) ||
         (fel && (!isfinite(result.dovi.nlq[comp].offset) ||
                  !isfinite(result.dovi.nlq[comp].deadzone_slope) ||
-                 !isfinite(result.dovi.nlq[comp].deadzone_threshold))))
+                 !isfinite(result.dovi.nlq[comp].deadzone_threshold) ||
+                 !isfinite(result.dovi.nlq[comp].hdr_in_max))))
       return false;
     const AVDOVIReshapingCurve *curve = &m->curves[comp];
     for (int i = 0; i < curve->num_pivots; i++)

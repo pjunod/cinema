@@ -143,6 +143,8 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
                                   .map_dovi = true)),
             "public base AVFrame upload");
   }
+  // Keep the importer's actual sample/color depth and shift for software and
+  // hardware. API387 applies DV code/2^depth normalization; do not re-divide.
   struct pl_dovi_metadata dovi = mapping->dovi;
   source.repr.dovi = &dovi;
   source.enhancement_layer = NULL;
@@ -162,8 +164,8 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   cmap.metadata = PL_HDR_METADATA_NONE;
   struct pl_render_params params = pl_render_fast_params;
   params.color_map_params = &cmap;
-  params.plane_upscaler = &pl_filter_nearest;
-  params.plane_downscaler = &pl_filter_nearest;
+  params.plane_upscaler = &pl_filter_bilinear;
+  params.plane_downscaler = &pl_filter_bilinear;
   params.dither_params = NULL;
   params.peak_detect_params = NULL;
   params.color_adjustment = NULL;

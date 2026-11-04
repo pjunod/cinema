@@ -90,7 +90,7 @@ static void probe_log(void *priv, enum pl_log_level level,
 }
 
 // Actual frames use the shared public decoder metadata mapper. The no-frame
-// branch retains the original identity-only synthetic control projection.
+// branch retains the admitted identity-only controls, projected in API387 units.
 static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
                            struct pl_dovi_metadata *out, bool observations,
                            int picture_width, int picture_height) {
@@ -185,7 +185,7 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
                   fraction[0] == 0 && fraction[1] == 0,
               "identity polynomial coefficient control");
       out->comp[component].num_pivots = 2;
-      out->comp[component].pivots[1] = curve->pivots.data[1] / 1023.0f;
+      out->comp[component].pivots[1] = curve->pivots.data[1] / 1024.0f;
       out->comp[component].poly_coeffs[0][1] =
           integer[1] + fraction[1] / denominator;
     }
@@ -203,12 +203,10 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
                                    nlq->vdr_in_max[component]),
             "unsupported bounded vdr_in_max residual clipping");
     if (!frame) {
-      double slope = nlq->linear_deadzone_slope[component];
-      double threshold = nlq->linear_deadzone_threshold[component];
-      out->nlq[component].offset = nlq->nlq_offset[component] / 1023.0f;
-      out->nlq[component].deadzone_slope = 1023.0 * slope / denominator;
-      out->nlq[component].deadzone_threshold =
-          (threshold - slope / 2) / denominator;
+      out->nlq[component] = dv_fel_nlq_projection(
+          nlq->nlq_offset[component], nlq->linear_deadzone_slope[component],
+          nlq->linear_deadzone_threshold[component],
+          nlq->vdr_in_max_int[component], nlq->vdr_in_max[component]);
     }
   }
   if (frame) {
@@ -479,7 +477,8 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
     }
   struct pl_frame enhancement_frame = {
       .num_planes = 3,
-      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL},
+      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL,
+               .bits = {.sample_depth = 10, .color_depth = 10}},
       .color = pl_color_space_hdr10};
   struct pl_frame source = {
       .num_planes = 3,
@@ -493,7 +492,8 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
     // Map each decoded surface, then restate the representation the native
     // path uses: DV-coded full-range BL with the parsed metadata, and raw EL
     // residual components. The mapped sample/colour depth (10 in 16) keeps
-    // the same code/1023 normalization as the host upload.
+    // integer source code as the host code/1023 upload. API387 normalizes
+    // DV BL to code/1024 and EL back to integer codes before NLQ.
     bool mapped = true;
     for (int layer = 0; layer < 2 && mapped; layer++) {
       struct pl_frame *live = &fel_mapped[layer];
@@ -516,7 +516,7 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
       dv_hw_host_copy = true;
       source.num_planes = enhancement_frame.num_planes = 3;
       source.repr.bits = (struct pl_bit_encoding){.sample_depth = 10, .color_depth = 10};
-      enhancement_frame.repr.bits = (struct pl_bit_encoding){0};
+      enhancement_frame.repr.bits = (struct pl_bit_encoding){.sample_depth = 10, .color_depth = 10};
       require(dv_host_pack != NULL, "decoded surface host copy");
       // The caller owns and frees decoded[].
       for (int layer = 0; layer < 2; layer++)
@@ -548,21 +548,8 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
   }
   pl_frame_set_chroma_location(&source, bl_chroma);
   pl_frame_set_chroma_location(&enhancement_frame, el_chroma);
-  // Native point resampling has exact texel-edge ties (e.g. odd BL x on
-  // half-sized left-sited EL). At non-power-of-two rasters, interpolation of
-  // normalized float coordinates can approach that edge from either side.
-  // Resolve ties toward the positive texel with a fixed 1/64 reference-pixel
-  // bias. Our admitted ratios are 1, 1/2 and 1/4; every non-tie sample is at
-  // least 1/8 texel from an edge, so this does not change its nearest texel.
-  // This explicit point policy is backend mechanics, not a Dolby filter claim.
-  for (int c = 0; c < source.num_planes; c++) {
-    source.planes[c].shift_x -= 1.0f / 64;
-    source.planes[c].shift_y -= 1.0f / 64;
-  }
-  for (int c = 0; c < enhancement_frame.num_planes; c++) {
-    enhancement_frame.planes[c].shift_x -= 1.0f / 64;
-    enhancement_frame.planes[c].shift_y -= 1.0f / 64;
-  }
+  // Bilinear plane reconstruction uses each layer's signalled chroma siting.
+  // No point-sampler texel-edge bias applies to this continuous filter.
 
   pl_tex output_texture = context.output_texture;
   bool resized = EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT;
@@ -583,8 +570,8 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
   color_map.metadata = PL_HDR_METADATA_NONE;
   struct pl_render_params parameters = pl_render_fast_params;
   parameters.color_map_params = &color_map;
-  parameters.plane_upscaler = &pl_filter_nearest;
-  parameters.plane_downscaler = &pl_filter_nearest;
+  parameters.plane_upscaler = &pl_filter_bilinear;
+  parameters.plane_downscaler = &pl_filter_bilinear;
   parameters.dither_params = NULL;
   parameters.peak_detect_params = NULL;
   parameters.color_adjustment = NULL;

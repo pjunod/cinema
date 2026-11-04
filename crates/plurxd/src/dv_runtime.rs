@@ -326,7 +326,7 @@ impl ToolSet {
             if manifest.schema != 1
                 || manifest.source_sha256 != renderer_source_identity()
                 || manifest.graph != "dv-native-master-or-closed-form-dm-v1"
-                || manifest.abi.get("libplacebo") != Some(&374)
+                || manifest.abi.get("libplacebo") != Some(&387)
                 || !["avcodec", "avformat", "avutil"]
                     .iter()
                     .all(|key| manifest.abi.get(*key).is_some_and(|major| *major > 0))
@@ -3237,13 +3237,13 @@ mod bundle_capture_tests {
         ] {
             std::fs::write(root.join("bin").join(name), name).expect("stub helper");
         }
-        std::fs::write(root.join("lib/libplacebo.so.374"), b"fixture placebo")
+        std::fs::write(root.join("lib/libplacebo.so.387"), b"fixture placebo")
             .expect("write stub placebo library");
         std::fs::write(root.join("sources/libdovi.a"), b"fixture parser")
             .expect("write stub parser library");
         std::fs::write(
             root.join("sources/abi.json"),
-            br#"{"libplacebo":374,"avcodec":62,"avformat":62,"avutil":60}"#,
+            br#"{"libplacebo":387,"avcodec":62,"avformat":62,"avutil":60}"#,
         )
         .expect("write fixture ABI");
         let source = fixture.path().join("source");
@@ -3286,6 +3286,45 @@ mod bundle_capture_tests {
                 .canonicalize()
                 .expect("canonical fixture renderer")
         );
+        // A coherent legacy bundle has the same current source/tool bytes,
+        // matching ABI metadata and matching library hash; the runtime ABI
+        // boundary must still refuse it before this daemon can own its tools.
+        let abi_path = root.join("sources/abi.json");
+        let current_abi = std::fs::read(&abi_path).expect("read current fixture ABI");
+        let mut legacy_abi: serde_json::Value =
+            serde_json::from_slice(&current_abi).expect("parse current fixture ABI");
+        legacy_abi["libplacebo"] = serde_json::json!(374);
+        std::fs::write(
+            &abi_path,
+            serde_json::to_vec(&legacy_abi).expect("serialize legacy fixture ABI"),
+        )
+        .expect("write legacy fixture ABI");
+        let legacy_library = root.join("lib/libplacebo.so.374");
+        std::fs::copy(root.join("lib/libplacebo.so.387"), &legacy_library)
+            .expect("copy identical legacy fixture library bytes");
+        let manifest_path = root.join("build-identity.json");
+        let mut legacy_manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&manifest_path).expect("read current fixture manifest"),
+        )
+        .expect("parse current fixture manifest");
+        legacy_manifest["abi"] = legacy_abi;
+        legacy_manifest["libraries"][0]["path"] = serde_json::json!("lib/libplacebo.so.374");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&legacy_manifest).expect("serialize legacy fixture manifest"),
+        )
+        .expect("write coherent legacy fixture manifest");
+        assert!(
+            matches!(ToolSet::capture_at(root.clone()).await, Err(error) if error == "unsupported DV build identity"),
+            "capture rejects a self-consistent legacy ABI despite current source and matching artifacts"
+        );
+        std::fs::write(&abi_path, current_abi).expect("restore current fixture ABI");
+        std::fs::remove_file(legacy_library).expect("remove legacy fixture library");
+        generate(installer);
+        assert!(ToolSet::capture_at(root.clone())
+            .await
+            .expect("validate restored API387 bundle")
+            .is_some());
         for missing in ["author_p81.c", "movie_source_io.h", "source_reader.h"] {
             // Exercise the producer's actual INPUTS, independently of source
             // formatting or quote style. The final generated manifest is

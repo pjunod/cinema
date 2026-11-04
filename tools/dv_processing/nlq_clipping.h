@@ -5,8 +5,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Admission for the supported 10-bit LINEAR_DZ subset. The renderer does not
-// implement vdr_in_max clipping, so admit only a limit which cannot bind for
+// Admission for the supported 10-bit LINEAR_DZ subset. API387 implements
+// vdr_in_max clipping, but this port preserves the existing admitted subset:
+// only a limit which cannot bind for
 // ANY decoded EL code, not just the pixels observed in a sample frame.
 static inline bool nlq_clip_is_nonbinding(uint16_t offset, uint64_t slope,
                                          uint64_t threshold,
@@ -25,8 +26,8 @@ static inline bool nlq_clip_is_nonbinding(uint16_t offset, uint64_t slope,
   if (worst == 0)
     return true;
   // Restrict reconstructed residual magnitude to <= 1 and reserve 2^-16 for
-  // binary32 shader rounding. With this bound, the folded slope is below 2.01;
-  // normalization/subtraction/multiply/add error is well below this margin.
+  // binary32 shader rounding. Preserve the original conservative margin when
+  // moving to integer-code NLQ; admitting binding limits is a separate change.
   const uint64_t rounding_margin = 2 * denominator / 65536;
   return worst <= 2 * denominator && worst + rounding_margin <= limit;
 }
