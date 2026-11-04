@@ -18,6 +18,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 
+mod recovery;
+
+pub(crate) fn configure_recovery_backend(authoritative: bool) {
+    recovery::configure_backend(authoritative);
+}
+
+pub(crate) async fn replay_verified_recovery(
+    store: &Arc<dyn Store>,
+    node: &str,
+) -> Result<(), String> {
+    recovery::replay(store, node).await
+}
+
 const LEASE_MS: i64 = 30_000;
 pub(crate) const SERVICE_EPOCH_MS: i64 = 5_000;
 pub(crate) const BACKGROUND_QUANTUM: u64 = 1_048_576;
@@ -120,7 +133,8 @@ fn clear_settlement_receipt(receipt: &SettlementReceipt) -> Result<(), String> {
     let Some(dir) = SETTLEMENT_JOURNAL.get() else {
         return Ok(());
     };
-    clear_settlement_receipt_at(dir, receipt)
+    clear_settlement_receipt_at(dir, receipt)?;
+    recovery::clear(receipt)
 }
 
 fn clear_settlement_receipt_at(dir: &Path, receipt: &SettlementReceipt) -> Result<(), String> {
@@ -149,6 +163,7 @@ pub(crate) async fn activate_foreground_with_journal(
     };
     let lock = receipt_lock(&settlement_name(&receipt));
     let _guard = lock.lock().await;
+    recovery::foreground(&token)?;
     write_settlement_receipt(&receipt)?;
     let activated = store
         .activate_foreground_source_custody(token.clone(), activation_id.clone())
@@ -208,6 +223,7 @@ pub(crate) async fn activate_background_with_journal(
     };
     let lock = receipt_lock(&settlement_name(&receipt));
     let _guard = lock.lock().await;
+    recovery::background(&token)?;
     write_settlement_receipt(&receipt)?;
     let activated = store
         .activate_background_source_custody(token.clone(), activation_id.clone())
@@ -390,6 +406,7 @@ async fn replay_local_settlements_at(store: &Arc<dyn Store>, dir: &Path) -> Resu
             }
         }
         clear_settlement_receipt_at(dir, &receipt)?;
+        recovery::clear(&receipt)?;
     }
     Ok(())
 }

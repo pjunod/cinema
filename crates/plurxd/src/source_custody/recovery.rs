@@ -1,0 +1,463 @@
+//! Recovery evidence is distinct from a pre-read activation or a joined receipt.
+//! Only a verified reboot of the same physical host proves all former readers,
+//! including escaped process groups, stopped. Same-boot evidence stays held.
+use super::*;
+use plurx_core::store::background_jobs_resources::{
+    BackgroundSourceCustodyToken, BackgroundSourceOwner,
+};
+use serde::{Deserialize, Serialize};
+use std::io::Read;
+
+const MAX_BYTES: u64 = 1_048_576;
+const MAX_RECORDS: usize = 128;
+const MAX_FILES: usize = 4096;
+static AUTHORITATIVE_BACKEND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(super) fn configure_backend(authoritative: bool) {
+    AUTHORITATIVE_BACKEND.store(authoritative, std::sync::atomic::Ordering::Release);
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Envelope {
+    version: u32,
+    machine_id: String,
+    boot_id: String,
+    node_id: String,
+    records: Vec<Record>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Record {
+    Foreground { token: ForegroundSourceToken },
+    Background { token: BackgroundSourceCustodyToken },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Identity {
+    machine_id: String,
+    boot_id: String,
+}
+
+impl Identity {
+    fn current() -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            // Containers receive a read-only host identity bind; an image's
+            // generated machine-id is not evidence of the host rebooting.
+            let machine_id = std::fs::read_to_string("/run/plurx-host-machine-id")
+                .or_else(|error| {
+                    if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
+                    {
+                        Err(error)
+                    } else {
+                        std::fs::read_to_string("/etc/machine-id")
+                    }
+                })
+                .ok()?;
+            let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+            let identity = Self {
+                machine_id: machine_id.trim().to_owned(),
+                boot_id: boot_id.trim().to_owned(),
+            };
+            identity.valid().then_some(identity)
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
+    }
+
+    fn valid(&self) -> bool {
+        self.machine_id.len() == 32
+            && self.machine_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && uuid::Uuid::parse_str(&self.boot_id).is_ok()
+    }
+}
+
+impl Record {
+    fn same_owner(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Foreground { token: left }, Self::Foreground { token: right }) => {
+                left.owner == right.owner
+            }
+            (Self::Background { token: left }, Self::Background { token: right }) => {
+                use plurx_core::store::background_jobs_resources::background_owner_key;
+                left.custody_id == right.custody_id
+                    && matches!((background_owner_key(&left.owner), background_owner_key(&right.owner)), (Ok(left), Ok(right)) if left == right)
+            }
+            _ => false,
+        }
+    }
+
+    fn node(&self) -> &str {
+        match self {
+            Self::Foreground { token } => &token.owner.node_id,
+            Self::Background { token } => match &token.owner {
+                BackgroundSourceOwner::Job { token } => &token.node_id,
+                BackgroundSourceOwner::Analysis { node_id, .. }
+                | BackgroundSourceOwner::Offline { node_id, .. } => node_id,
+                BackgroundSourceOwner::ReadAttestation { lease, .. } => &lease.owner_node_id,
+                BackgroundSourceOwner::Companion { token } => &token.owner.node_id,
+            },
+        }
+    }
+
+    fn name(&self) -> Result<String, String> {
+        let (kind, id) = match self {
+            Self::Foreground { token } => ("foreground", &token.owner.owner_id),
+            Self::Background { token } => {
+                if matches!(token.owner, BackgroundSourceOwner::Companion { .. }) {
+                    return Err("companion recovery belongs to foreground custody".into());
+                }
+                ("background", &token.custody_id)
+            }
+        };
+        uuid::Uuid::parse_str(id).map_err(|error| error.to_string())?;
+        Ok(format!("{kind}-{id}.json"))
+    }
+}
+
+fn directory() -> Option<PathBuf> {
+    Some(
+        SETTLEMENT_JOURNAL
+            .get()?
+            .parent()?
+            .join("source-custody-recovery/v1"),
+    )
+}
+
+fn private_directory(dir: &Path) -> Result<(), String> {
+    if dir.file_name().is_none_or(|name| name != "v1")
+        || dir
+            .parent()
+            .and_then(Path::file_name)
+            .is_none_or(|name| name != "source-custody-recovery")
+    {
+        return Err("unexpected source recovery directory layout".into());
+    }
+    for path in [dir.parent().ok_or("missing recovery parent")?, dir] {
+        std::fs::create_dir_all(path).map_err(|error| error.to_string())?;
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("source recovery directory is not a private directory".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_directory(dir: &Path) -> Result<(), String> {
+    for path in [dir.parent().ok_or("missing recovery parent")?, dir] {
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("source recovery directory must not be a symlink".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.mode() & 0o077 != 0 {
+                return Err("source recovery directory is not private".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read(path: &Path) -> Result<Envelope, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_BYTES {
+        return Err("invalid source recovery record size/type".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
+            return Err("source recovery evidence must be private and have one link".into());
+        }
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("source recovery record grew past its bound".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+}
+
+fn write_active_at(dir: &Path, record: Record, identity: Option<Identity>) -> Result<(), String> {
+    private_directory(dir)?;
+    let path = dir.join(record.name()?);
+    if path.try_exists().map_err(|error| error.to_string())? {
+        let existing = read(&path)?;
+        if existing.version == 1
+            && existing.records.len() == 1
+            && existing.node_id == record.node()
+            && existing.records[0].same_owner(&record)
+        {
+            // Replaying an activation cannot rewrite the earlier boot proof.
+            return Ok(());
+        }
+        return Err("source recovery identity already has different evidence".into());
+    }
+    if std::fs::read_dir(dir)
+        .map_err(|error| error.to_string())?
+        .take(MAX_FILES)
+        .count()
+        >= MAX_FILES
+    {
+        return Err("source recovery journal needs operator attention: capacity reached".into());
+    }
+    let identity = identity.unwrap_or(Identity {
+        machine_id: String::new(),
+        boot_id: String::new(),
+    });
+    let envelope = Envelope {
+        version: 1,
+        machine_id: identity.machine_id,
+        boot_id: identity.boot_id,
+        node_id: record.node().to_owned(),
+        records: vec![record],
+    };
+    let bytes = serde_json::to_vec(&envelope).map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("source recovery record exceeds its bound".into());
+    }
+    let temporary = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> std::io::Result<()> {
+        let mut file = options.open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)?;
+        std::fs::File::open(dir)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|error| error.to_string())
+}
+
+pub(super) fn foreground(token: &ForegroundSourceToken) -> Result<(), String> {
+    let Some(dir) = directory() else {
+        return Ok(());
+    };
+    write_active_at(
+        &dir,
+        Record::Foreground {
+            token: token.clone(),
+        },
+        Identity::current(),
+    )
+}
+
+pub(super) fn background(token: &BackgroundSourceCustodyToken) -> Result<(), String> {
+    let Some(dir) = directory() else {
+        return Ok(());
+    };
+    write_active_at(
+        &dir,
+        Record::Background {
+            token: token.clone(),
+        },
+        Identity::current(),
+    )
+}
+
+pub(super) fn clear(receipt: &SettlementReceipt) -> Result<(), String> {
+    let record = match receipt {
+        SettlementReceipt::Foreground(token) => Record::Foreground {
+            token: token.clone(),
+        },
+        SettlementReceipt::Background(token) => Record::Background {
+            token: token.clone(),
+        },
+        _ => return Ok(()),
+    };
+    let Some(dir) = directory() else {
+        return Ok(());
+    };
+    clear_at(&dir, &record)
+}
+
+fn clear_at(dir: &Path, record: &Record) -> Result<(), String> {
+    let path = dir.join(record.name()?);
+    if !path.try_exists().map_err(|error| error.to_string())? {
+        return Ok(());
+    }
+    let envelope = read(&path)?;
+    if envelope.version != 1
+        || envelope.records.len() != 1
+        || !envelope.records[0].same_owner(record)
+    {
+        return Err("source recovery cleanup identity mismatch".into());
+    }
+    std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    std::fs::File::open(dir)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| error.to_string())
+}
+
+fn verified(envelope: &Envelope, identity: &Identity, node: &str) -> bool {
+    let prior = Identity {
+        machine_id: envelope.machine_id.clone(),
+        boot_id: envelope.boot_id.clone(),
+    };
+    envelope.version == 1
+        && prior.valid()
+        && identity.valid()
+        && prior.machine_id == identity.machine_id
+        && prior.boot_id != identity.boot_id
+        && envelope.node_id == node
+        && !envelope.records.is_empty()
+        && envelope.records.len() <= MAX_RECORDS
+        && envelope
+            .records
+            .iter()
+            .all(|record| record.node() == node && record.name().is_ok())
+}
+
+pub(super) async fn replay(store: &Arc<dyn Store>, node: &str) -> Result<(), String> {
+    // SQLite activation-recovery is not the cluster's authoritative Store.
+    // Its successful local write must never consume replicated-owner evidence.
+    if !AUTHORITATIVE_BACKEND.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(());
+    }
+    let (Some(dir), Some(identity)) = (directory(), Identity::current()) else {
+        return Ok(());
+    };
+    replay_at(store, &dir, &identity, node).await
+}
+
+async fn replay_at(
+    store: &Arc<dyn Store>,
+    dir: &Path,
+    identity: &Identity,
+    node: &str,
+) -> Result<(), String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    verify_directory(dir)?;
+    let mut paths = entries
+        .take(MAX_FILES + 1)
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if paths.len() > MAX_FILES {
+        return Err("source recovery file inventory exceeds its bound".into());
+    }
+    paths.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    paths.sort();
+    // Rotate batches: an unchanged-boot record cannot hide later reboot proof.
+    static CURSOR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+    let after = CURSOR
+        .lock()
+        .map_err(|_| "recovery cursor poisoned")?
+        .clone();
+    let offset = after
+        .as_ref()
+        .map_or(0, |after| paths.partition_point(|path| path <= after));
+    let length = paths.len();
+    if length == 0 {
+        return Ok(());
+    }
+    paths.rotate_left(offset % length);
+    for path in paths.into_iter().take(MAX_RECORDS) {
+        *CURSOR.lock().map_err(|_| "recovery cursor poisoned")? = Some(path.clone());
+        let envelope = match read(&path) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                tracing::warn!(%error, "invalid source recovery evidence retained");
+                continue;
+            }
+        };
+        if !verified(&envelope, identity, node) {
+            continue;
+        }
+        for record in &envelope.records {
+            match record {
+                Record::Background { token } => {
+                    if store
+                        .mark_background_source_settled(token.clone())
+                        .await
+                        .map_err(|error| error.to_string())?
+                        && !store
+                            .release_background_source_custody(
+                                token.clone(),
+                                crate::state::clock_ms(),
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?
+                    {
+                        return Err(
+                            "background reboot recovery release needs reconciliation".into()
+                        );
+                    }
+                }
+                Record::Foreground { token } => {
+                    if store
+                        .mark_foreground_source_settled(token.clone())
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        if let Some(current) = store
+                            .resolve_foreground_source(token.clone())
+                            .await
+                            .map_err(|error| error.to_string())?
+                        {
+                            if !store
+                                .release_foreground_source(current, crate::state::clock_ms())
+                                .await
+                                .map_err(|error| error.to_string())?
+                            {
+                                return Err(
+                                    "foreground reboot recovery release needs reconciliation"
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Record removal only follows authoritative settlement acknowledgement.
+        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+        std::fs::File::open(dir)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| error.to_string())?;
+        tracing::info!(
+            records = envelope.records.len(),
+            "source custody recovered after verified host reboot"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

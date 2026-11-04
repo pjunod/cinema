@@ -1927,7 +1927,9 @@ pub struct BackgroundSourceCustodyToken {
     pub custody_id: String,
     pub owner: BackgroundSourceOwner,
 }
-fn background_owner_key(owner: &BackgroundSourceOwner) -> Result<String, StoreError> {
+/// Canonical immutable physical owner identity. Renewable lease timestamps and
+/// revisions are excluded; equality is not evidence that a reader has stopped.
+pub fn background_owner_key(owner: &BackgroundSourceOwner) -> Result<String, StoreError> {
     Ok(match owner {
         BackgroundSourceOwner::Companion { token } => {
             if !token.owner.valid() || token.fence <= 0 {

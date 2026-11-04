@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Source-reader recovery preserves exact ownership evidence across crashes and
+  can settle abandoned custody after a verified reboot of the same Linux host.
+  Activity explains expired reader reservations that block queued library scans.
+
 - Rolling HLS startup measures coverage from the requested position and starts
   legacy consumption on actual media delivery. Web Resume retires destination
   waits at proven seek completion and preserves attached-media fault ownership.

@@ -10,9 +10,9 @@ bounds), and [worker refinement](../cluster/WORKER-REFINEMENT-STATUS.md)
 proposed repair, scheduling contract, queue management design, and remaining
 work. It is the canonical ledger for backlog project P42.
 
-Read §1–3 before implementing §4–7. This change is documentation only: no
-production ownership record has been released, no scheduler fix is built,
-and no runtime acceptance is claimed. Do not replace physical reader-stop
+Read §1–3 before implementing §4–7. The initial bounded recovery fix is now
+tracked in [its implementation ledger](SOURCE-CUSTODY-RECOVERY.md); remaining
+scheduling work and runtime acceptance are open. Do not replace physical reader-stop
 proof with lease expiry, job deletion, or a higher priority number.
 
 ## 1. The immediate failure is an abandoned shared reader
@@ -447,10 +447,11 @@ polling, and test mixed-version, partial-cluster, and non-admin responses.
 
 ## 7. Build and accept the repair in separate milestones
 
-**Execution:** this document is proposed, with no implementation owner yet.
-Documentation owner: Codex; branch `codex/cinema-job-queue-rca`. Use
-`effort/cinema-job-queue` for implementation; reviewed task branches target
-that effort. Shared store, scanner, worker, and UI files make the independent
+**Execution:** Codex owns the initial independent main-bound incident recovery
+fix on `codex/source-custody-recovery`; see [the task ledger](SOURCE-CUSTODY-RECOVERY.md)
+for its narrower proof boundary. Remaining containment and M2–M4 use
+`effort/cinema-job-queue`; reviewed task branches target that effort.
+Shared store, scanner, worker, and UI files make the independent
 file-ownership exception inappropriate. Follow
 [the development pipeline](../DEVELOPMENT_PIPELINE.md), including the pinned
 compiler loop before Rust edits, focused regressions, effort gates, and exact

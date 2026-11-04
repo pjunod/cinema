@@ -10,6 +10,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 
 | File | Answers | |
 |---|---|---|
+| [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md) | Initial P42 recovery fix: exact-owner reboot evidence, the legacy helper, fail-closed limits, and validation/review ledger. | open |
 | [JOB-QUEUE-ROOT-CAUSE-AND-FIX.md](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md) | Why abandoned source-reader custody blocks manual scans despite idle workers; proposed recovery, interactive scheduling, queue controls, and acceptance milestones. | open |
 | [HTTPS-IMPLEMENTATION.md](HTTPS-IMPLEMENTATION.md) | Optional public HTTPS, certificate ownership and administration contract; physical acceptance open. | built |
 | [HTTPS-BUILD.md](HTTPS-BUILD.md) | HTTPS implementation built, physical acceptance open; qualification receipts and merge outcome tracked by [promotion PR #1134](http://forge.lan:3000/noirr/plurx/pulls/1134). | built |
