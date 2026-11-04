@@ -210,7 +210,9 @@ credited as its acceptance.
 
 ### 2.5 Authority ownership and capability parity are entry gates
 
-Before P3 changes code, record a source-backed ownership/API decision. A small
+Before authority-bearing extraction changes code, record a source-backed
+ownership/API decision. The sole early exception is the primitive-only P3a
+slice below; it moves no authority representation or trusted factory. A small
 `plurx-authority` package owns the sealed trait, private proof representations,
 revocation state and trusted local/replicated implementations. Backend-neutral
 Store/domain contracts may consume its opaque proofs; the authority package
@@ -238,12 +240,25 @@ their ownership overlaps and does not qualify for the disjoint-file exception.
 Native Receiver custody also needs a real capability/parity fixture: its current
 no-feature uninhabited type cannot establish standalone sharing acceptance.
 
-This is an ownership sketch, not an approved constructor API. P3 entry requires
+This is an ownership sketch, not an approved constructor API. P3c entry requires
 actual proposed signatures, the dependency-cycle check, identification of every
 trusted minting path, and downstream compile-fail fixtures proving callers
 cannot implement the sealed authority or construct/modify its proofs. Real-store
 revocation, stale native boot and lost replicated-authority tests accompany it.
 Do not proceed if the sketch can only compile by exposing an unchecked mint.
+The complete gate applies before moving any proof, trusted factory, credential
+owner, SDK hook or backend-selection responsibility, regardless of task name.
+
+The [boundary decision](CINEMA-CONTRACTS-BOUNDARIES.md) records Astra's admission
+of only the first primitive slice: StoreError with its SQLite conversion,
+Lease/LeaseClaim and checked validators, catalogue DTOs, principal/checked UUID
+values and CandidateRoute. Core keeps explicit compatibility reexports and
+existing visibility. Newly public contracts validators are checked value
+operations; they cannot mint opaque authority. The task owns its manifests and
+compatibility facades, preserves private viewer-key construction and wire
+formats, and proves a contracts-only consumer/dependency graph in isolation.
+Identity/authority extraction remains blocked on that decision's unresolved
+startup, credential, SDK-hook, Receiver and downstream proof obligations.
 
 Every timing pair includes a capability manifest. Equal-capability optimization
 and intentionally smaller packages are separate result categories. The initial
@@ -424,8 +439,9 @@ each supported distribution, including new migration tooling.
 | Stage | Source/evidence | Disposition |
 |---|---|---|
 | P0 | Plan draft based on `f30dfbbc9`; source/dependency and historical timing audit | Astra confirmed all four findings and two clarifications addressed; P1/P2 allowed in order; no build improvement implemented |
-| P1 | Existing non-voter VM verified: Rust 1.97.1, no daemon/compiler tenant, warm owned compiler slot | Fresh baseline measurement pending |
-| P2–P6 | No results yet | Open; standalone dependency omission is not yet achieved |
+| P1 | Fixed `cf095b203` / `e1ce9af4ce` source; three samples per case, preserved raw reports, actual source restoration and Cargo artifact events | Baseline collected; guarded runner belongs to its own task PR |
+| P2b measurement | Equal-capability system/LLD Cargo commands; all 450 observed units have identical features/profiles | Median edit reductions: CSS 58%, daemon 56%, small API 35%; full ranges retained, including a 55-second LLD daemon outlier. Named developer recipe and PR validation still pending; no cold/release/Mac claim |
+| P3–P6 | Primitive-only entry admitted; authority obligations remain explicit and unresolved | Open; standalone dependency omission is not yet achieved |
 
 Record Astra's findings and individual dispositions with the review, then
 update this ledger and the backlog row in the same task changes. Retain the

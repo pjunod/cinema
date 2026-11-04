@@ -68,3 +68,21 @@ actual candidate.
 No build optimization has acceptance credit from this review. Baseline timings,
 before/after measurements, final package dependency omission, source freshness,
 helper process handoff and platform/runtime acceptance remain the plan's gates.
+
+## 5. Primitive sequencing — narrow admission, authority gate retained
+
+Astra reviewed the source-backed boundary decision against runtime `5484d7986`.
+It permits only the enumerated primitive-only P3a extraction; P3c remains
+blocked. Two requested corrections are applied in the canonical plan and
+[boundary decision](../ci/CINEMA-CONTRACTS-BOUNDARIES.md): explicitly limit the
+early exception, and identify validators' intentional cross-crate visibility
+while retaining Core's old visibility and exact clock/helper ownership.
+
+No proof representation, trusted factory, credential owner, SDK hook or backend
+selection may move under that exception. The complete original authority gate
+applies regardless of task name. The admitted direction is acyclic; StoreError
+moves with its SQLite conversion, while Core's local row-to-value conversions
+stay legal beside local row types. Private viewer-key construction, checked
+UUID parsing, wire values and old type paths survive through genuine reexports.
+Contracts-only consumer/graph checks cannot rely on workspace unification.
+This was source review, with no Rust edits, builds or authority acceptance.
