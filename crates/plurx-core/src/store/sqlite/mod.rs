@@ -29,6 +29,7 @@ mod library;
 mod library_channels;
 mod live_tv_resource;
 mod media;
+mod native_sharing;
 mod offline;
 mod outbox;
 mod playback_handoffs;
@@ -1333,6 +1334,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA,
     // v123: prepared artifact operations do not read original media.
     super::subtitle_managed_schema::PREPARED_MIGRATION,
+    // v124: native storage authority and local boot census. Older binaries
+    // refuse this schema before trying to activate native SQLite into Raft.
+    "CREATE TABLE storage_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance_id TEXT NOT NULL, node_id TEXT NOT NULL, generation TEXT NOT NULL) STRICT; CREATE TABLE sharing_local_census (node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),generation INTEGER NOT NULL CHECK(generation>0),claimed_at_ms INTEGER NOT NULL CHECK(claimed_at_ms>0)) STRICT;",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1497,7 +1501,7 @@ fn user_from_row(row: &Row<'_>) -> rusqlite::Result<User> {
 }
 
 pub struct SqliteStore {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<RetainedConnection>,
     /// Dedicated read-only connections, for file-backed stores.
     ///
     /// Serializing writes through the one guarded connection is right;
@@ -1525,6 +1529,23 @@ pub struct SqliteStore {
     settings_reads: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
+/// Connection work owns this shared state, including after its async caller
+/// was cancelled. The opaque owner is dropped only after the connection.
+/// Storage runtimes can retain their own lifetime authority without teaching
+/// the SQLite backend anything about a directory, deployment mode or Raft.
+struct RetainedConnection {
+    connection: Mutex<Connection>,
+    _lifetime_guard: Option<Arc<dyn Send + Sync>>,
+}
+
+impl std::ops::Deref for RetainedConnection {
+    type Target = Mutex<Connection>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
 pub use housekeeping::prometheus_sqlite_health;
 
 /// A few read-only connections picked round-robin. Opened READ_ONLY so a
@@ -1533,6 +1554,7 @@ pub use housekeeping::prometheus_sqlite_health;
 struct ReadPool {
     conns: Vec<Mutex<Connection>>,
     next: AtomicUsize,
+    _lifetime_guard: Option<Arc<dyn Send + Sync>>,
 }
 
 /// Two: enough that a settings read and a metadata read can overlap, few
@@ -1569,9 +1591,31 @@ impl SqliteStore {
         path: &Path,
         read_connections: usize,
     ) -> Result<Self, StoreError> {
+        Self::open_retaining(path, read_connections, None)
+    }
+
+    /// Retain a caller-owned lifetime capability in every writer, reader and
+    /// queued blocking operation. The guard contains no backend policy here.
+    pub(crate) fn open_with_lifetime_guard(
+        path: &Path,
+        guard: Arc<dyn Send + Sync>,
+    ) -> Result<Self, StoreError> {
+        Self::open_retaining(path, READ_CONNS, Some(guard))
+    }
+
+    fn open_retaining(
+        path: &Path,
+        read_connections: usize,
+        guard: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
-        housekeeping::boot_integrity_check(&conn, path, housekeeping::BOOT_CHECK_BUDGET)?;
-        let mut store = Self::init(conn)?;
+        housekeeping::boot_integrity_check(
+            &conn,
+            path,
+            housekeeping::BOOT_CHECK_BUDGET,
+            guard.as_ref().map(Arc::downgrade),
+        )?;
+        let mut store = Self::init_retaining(conn, guard.clone())?;
         store.path = Some(Arc::new(path.to_owned()));
         // After init: the writer has migrated, so the schema the readers see
         // is the one this binary expects.
@@ -1582,6 +1626,7 @@ impl SqliteStore {
         store.reads = Some(Arc::new(ReadPool {
             conns,
             next: AtomicUsize::new(0),
+            _lifetime_guard: guard,
         }));
         Ok(store)
     }
@@ -1610,11 +1655,21 @@ impl SqliteStore {
     }
 
     fn init(conn: Connection) -> Result<Self, StoreError> {
+        Self::init_retaining(conn, None)
+    }
+
+    fn init_retaining(
+        conn: Connection,
+        guard: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<Self, StoreError> {
         housekeeping::configure_writer(&conn)?;
         Self::migrate(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
-            conn: Arc::new(Mutex::new(conn)),
+            conn: Arc::new(RetainedConnection {
+                connection: Mutex::new(conn),
+                _lifetime_guard: guard,
+            }),
             reads: None,
             token_activity: Arc::default(),
             path: None,
@@ -1816,6 +1871,10 @@ impl SqliteStore {
     }
 
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
+        Self::migrate_schema(conn, true)
+    }
+
+    fn migrate_schema(conn: &Connection, initialize_instance: bool) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
         if current > target {
@@ -1897,7 +1956,7 @@ impl SqliteStore {
                 |row| row.get(0),
             )
             .optional()?;
-        if existing.is_none() {
+        if initialize_instance && existing.is_none() {
             let id = uuid::Uuid::new_v4().to_string();
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)",

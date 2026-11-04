@@ -3,7 +3,7 @@
 **Status:** original package qualified; all 18 updated configurations checked
 locally; CI and promotion qualification separate ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`594210a783986d4da5ec7184f0895433ffe98b90` (2026-11-03 pause extension below) · **Scope:** bound `library_scan` and
+`cf095b203ec78d083385cbb6ecce13dc01378256` (2026-11-04 native entry review below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -13,6 +13,40 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+
+## Native runtime entry — scoped source review on 2026-11-04
+
+Astra independently compared the admitted fingerprints with runtime candidate
+`cf095b203ec78d083385cbb6ecce13dc01378256`. The five reviewed source files
+also have identical bytes in the local integration `0cd29c10b`. The old
+SQLite pin matches `dac9e2c7`, the job-lease pin `431581e2`, and the state pin
+`bd3bfffb`; the review used those exact prior contents, not just a newer merge
+base. Twelve whole-file rows follow the inspected source.
+
+The new `LocalJobAuthority` grants local job admission only in the native
+runtime composition. It does not replace durable claim/domain leases or
+publication fences. The selected acquisition, heartbeat, release, publication
+facade, queue SQL and SQLite `with_fenced_conn` transaction remain unchanged.
+`AppState` selects real membership authority in cluster mode. Native selection
+is a separate startup prerequisite, not a model-derived grant.
+
+SQLite v124 adds native identity/census tables without changing the selected
+queue/resource guards. `RetainedConnection` and the read pool retain the native
+directory lease through queued blocking work and connection drop. The existing
+transaction body and lock acquisition are unchanged; this stronger lifetime
+binding is not a model proof of directory locking, restart, migration or
+shutdown. The native opener validates that its held lock belongs to the same
+directory before attaching it to the Store.
+
+Runtime proof obligations remain with
+`native_store_restarts_with_the_same_identity_and_excludes_other_daemons` and
+`cloned_native_writers_retain_the_directory_lease_after_handle_drop` in
+[native storage tests](../../crates/plurx-core/src/storage/native.rs), and
+`standalone_default_and_explicit_sqlite_start_with_cluster_ports_unavailable`
+in [daemon selection tests](../../crates/plurxd/src/storage_runtime/tests.rs).
+These are source test references, not execution credit from this review.
+Model/configuration/property/fairness bytes and historical qualification
+receipts remain unchanged. Current static and TLC results are separate evidence.
 
 ## Source pause — finite correspondence on 2026-11-03
 

@@ -4,12 +4,19 @@ use super::{
     sharing_catalogue_source, sharing_source_sessions, MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA,
 };
 
+#[cfg(feature = "hiqlite-store")]
+mod native_import;
+#[cfg(feature = "hiqlite-store")]
+pub(crate) use native_import::prepare_fresh_cluster_for_native_import;
+
 // Frozen installed Source family layout remains71; custody is an adjunct.
 pub(crate) const SOURCE_LAYOUT_VERSION: i64 = 71;
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const SOURCE_SCHEMA_VERSION: i64 = 82;
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const SOURCE_SCHEMA_PREDECESSOR: i64 = 81;
 /// Additive, wire-compatible dispatch assertion. Never retains successful rows.
-pub(crate) const DISPATCH_GUARD_SCHEMA: &str = hiqlite::Error::SOURCE_LAYOUT_GUARD_DDL;
+pub(crate) const DISPATCH_GUARD_SCHEMA: &str = "CREATE TABLE sharing_source_dispatch_guard (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CONSTRAINT plurx_source_layout_guard_v1 CHECK(passed=1)) STRICT";
 
 pub(crate) fn dispatch_guard_shape() -> String {
     format!(
@@ -18,10 +25,13 @@ pub(crate) fn dispatch_guard_shape() -> String {
     )
 }
 
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const BOOT_INTENTS_SCHEMA: &str = "CREATE TABLE sharing_source_boot_intents (node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),raft_id INTEGER NOT NULL CHECK(raft_id>0),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),master_fingerprint TEXT NOT NULL CHECK(length(master_fingerprint)=64),membership_generation INTEGER NOT NULL CHECK(membership_generation>=0)) STRICT";
 pub(crate) const INSTALLATION_SCHEMA: &str = "CREATE TABLE sharing_source_schema_installation (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=71),master_fingerprint TEXT NOT NULL CHECK(length(master_fingerprint)=64),installed_at_ms INTEGER NOT NULL CHECK(installed_at_ms>0)) STRICT";
 pub(crate) const TRANSACTION_SCHEMA: &str = "CREATE TABLE sharing_source_schema_transaction_guard (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CHECK(passed=1)) STRICT";
+#[cfg(feature = "hiqlite-store")]
 struct DispatchGuardRow(i64);
+#[cfg(feature = "hiqlite-store")]
 impl From<&mut hiqlite::Row<'_>> for DispatchGuardRow {
     fn from(row: &mut hiqlite::Row<'_>) -> Self {
         Self(row.get("count"))
@@ -30,6 +40,7 @@ impl From<&mut hiqlite::Row<'_>> for DispatchGuardRow {
 
 /// Provision only at Store construction, never from serving session I/O.
 /// Competing initializers may adopt an exact winner; fragments are never repaired.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) async fn provision_dispatch_guard(
     client: &hiqlite::Client,
 ) -> Result<(), crate::error::StoreError> {
@@ -80,7 +91,129 @@ pub(crate) async fn provision_dispatch_guard(
     Ok(())
 }
 
-const FAMILIES: [&str; 7] = [
+pub(crate) fn restore_interest_trigger() -> &'static str {
+    include_str!("background_jobs_source_interest.sql")
+        .split("-- next statement")
+        .map(str::trim)
+        .find(|sql| {
+            sql.starts_with("CREATE TRIGGER IF NOT EXISTS playback_analysis_restore_effects\n")
+        })
+        .expect("closed Source interest trigger")
+}
+
+/// ALTER TABLE validates external triggers and views while a table is absent.
+/// Only audited definitions may be detached and restored within the rebuild.
+pub(crate) fn validated_external_rebuild_dependencies(
+    objects: Vec<(String, String, String, String)>,
+) -> Result<Vec<(String, String)>, crate::error::StoreError> {
+    validated_external_rebuild_dependencies_with(objects, &[])
+}
+
+pub(crate) fn validated_external_rebuild_dependencies_with(
+    objects: Vec<(String, String, String, String)>,
+    additional_trigger_definitions: &[String],
+) -> Result<Vec<(String, String)>, crate::error::StoreError> {
+    use crate::error::StoreError;
+    let mut detached = Vec::new();
+    for (kind, name, table, sql) in objects {
+        if FAMILIES.contains(&table.as_str())
+            || !sql
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|word| {
+                    FAMILIES
+                        .iter()
+                        .any(|table| word.eq_ignore_ascii_case(table))
+                })
+        {
+            continue;
+        }
+        if kind == "trigger" && additional_trigger_definitions.contains(&sql) {
+            detached.push((name, sql));
+            continue;
+        }
+        // Their exact declarations were already checked by predecessor_layout_guard.
+        if kind == "trigger"
+            && matches!(
+                name.as_str(),
+                "background_analysis_viewer_refresh"
+                    | "jellyfin_watch_own_insert"
+                    | "jellyfin_watch_own_update"
+            )
+        {
+            continue;
+        }
+        let expected = restore_interest_trigger()
+            .trim_end_matches(';')
+            .replace("CREATE TRIGGER IF NOT EXISTS", "CREATE TRIGGER");
+        if kind != "trigger"
+            || name != "playback_analysis_restore_effects"
+            || table != "background_job_commands"
+            || sql != expected
+        {
+            return Err(StoreError::Migration(format!(
+                "Source rebuild has an unrecognized dependent {kind}: {name}"
+            )));
+        }
+        detached.push((name, sql));
+    }
+    if !detached
+        .iter()
+        .any(|(name, _)| name == "playback_analysis_restore_effects")
+    {
+        return Err(StoreError::Migration(
+            "Source interest dependency is missing".into(),
+        ));
+    }
+    Ok(detached)
+}
+
+#[cfg(feature = "hiqlite-store")]
+pub(crate) struct ReplicatedRebuildDependencies {
+    pub(crate) inventory: String,
+    pub(crate) detached: Vec<(String, String)>,
+}
+
+/// Read the genuine committed schema through Raft. The captured inventory is
+/// asserted again by the actual schema-write transaction before detachment.
+#[cfg(feature = "hiqlite-store")]
+pub(crate) async fn capture_replicated_rebuild_dependencies(
+    client: &hiqlite::Client,
+) -> Result<ReplicatedRebuildDependencies, crate::error::StoreError> {
+    use crate::error::StoreError;
+    struct DependencyRow(String);
+    impl From<&mut hiqlite::Row<'_>> for DependencyRow {
+        fn from(row: &mut hiqlite::Row<'_>) -> Self {
+            Self(row.get("payload"))
+        }
+    }
+    let objects=client.query_consistent_map::<DependencyRow,_>(
+        "SELECT json_array(type,name,tbl_name,sql) AS payload FROM sqlite_master WHERE type IN('trigger','view') AND sql IS NOT NULL ORDER BY type,name",
+        hiqlite::params!(),
+    ).await.map_err(|error|StoreError::Database(error.to_string()))?.into_iter().map(|row|serde_json::from_str::<(String,String,String,String)>(&row.0).map_err(|error|StoreError::Migration(error.to_string()))).collect::<Result<Vec<_>,_>>()?;
+    let detached = validated_external_rebuild_dependencies_with(
+        objects.clone(),
+        &crate::cluster::membership::source_rebuild_membership_trigger_definitions(),
+    )?;
+    Ok(ReplicatedRebuildDependencies {
+        inventory: serde_json::to_string(&objects)
+            .map_err(|error| StoreError::Migration(error.to_string()))?,
+        detached,
+    })
+}
+
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn rebuild_dependency_inventory_guard(parameter: usize) -> String {
+    assert!((1..=256).contains(&parameter));
+    format!("(SELECT json_group_array(json_array(type,name,tbl_name,sql)) FROM (SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN('trigger','view') AND sql IS NOT NULL ORDER BY type,name))=${parameter}")
+}
+
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn restored_dependency_guard(parameter: usize) -> String {
+    assert!((1..=256).contains(&parameter));
+    format!("NOT EXISTS(SELECT 1 FROM json_each(${parameter}) expected WHERE NOT EXISTS(SELECT 1 FROM sqlite_master current WHERE current.type='trigger' AND current.name=json_extract(expected.value,'$[0]') AND current.sql=json_extract(expected.value,'$[1]')))")
+}
+
+pub(crate) const FAMILIES: [&str; 7] = [
     "media_session_requests",
     "media_playback_pointers",
     "media_sessions",
@@ -102,6 +235,7 @@ fn exact_object(statement: &str) -> String {
         quote(statement)
     )
 }
+#[cfg(feature = "hiqlite-store")]
 pub(crate) fn boot_shape_guard() -> String {
     format!(
         "({}) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='sharing_source_boot_intents')",
@@ -111,6 +245,7 @@ pub(crate) fn boot_shape_guard() -> String {
 /// The captured attempt set must still be the complete active roster, with
 /// each attempt explicitly advertised by that process's current heartbeat.
 /// Mere retained startup rows from a stopped process confer no authority.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) fn boot_authority_guard(parameter: usize) -> String {
     assert!((1..=256).contains(&parameter));
     format!(
@@ -118,6 +253,7 @@ pub(crate) fn boot_authority_guard(parameter: usize) -> String {
         boot_shape_guard()
     )
 }
+#[cfg(feature = "hiqlite-store")]
 fn installed_shape_guard_at(version: i64) -> String {
     format!(
         "({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION}) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",
@@ -128,6 +264,7 @@ fn installed_shape_guard_at(version: i64) -> String {
         sharing_source_sessions::schema_guard()
     )
 }
+#[cfg(feature = "hiqlite-store")]
 pub(crate) fn installed_shape_guard() -> String {
     format!(
         "({}) AND ({})",
@@ -137,10 +274,11 @@ pub(crate) fn installed_shape_guard() -> String {
 }
 /// Coordination refusal fence only: this does not create a cleanup proof.
 /// Original owners must retire held reservations before upgrading their marker.
-#[cfg(test)]
+#[cfg(all(test, feature = "hiqlite-store"))]
 pub(crate) fn legacy_source_work_drained_guard() -> &'static str {
     "NOT EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE reservation_state='held') AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE principal_kind='sharing' AND state='starting') AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE principal_kind='sharing' AND state!='ended') AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE principal_kind='sharing')"
 }
+#[cfg(feature = "hiqlite-store")]
 pub(crate) fn installed_guard() -> String {
     format!(
         "({}) AND EXISTS(SELECT 1 FROM sharing_source_schema_transaction_guard WHERE singleton=1 AND passed=1) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE master_fingerprint NOT GLOB '*[^0-9a-f]*')",
@@ -217,7 +355,16 @@ fn legacy_object_guard() -> String {
         predicates.join(") AND (")
     )
 }
+#[cfg(feature = "hiqlite-store")]
 pub(crate) fn predecessor_layout_guard() -> String {
+    predecessor_layout_guard_for(&format!("EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={SOURCE_SCHEMA_PREDECESSOR})"))
+}
+pub(crate) fn native_predecessor_layout_guard() -> String {
+    predecessor_layout_guard_for(
+        "EXISTS(SELECT 1 FROM pragma_user_version WHERE user_version>=124)",
+    )
+}
+fn predecessor_layout_guard_for(marker: &str) -> String {
     let mut objects = vec![
         "sharing_source_schema_installation".to_owned(),
         "sharing_source_schema_transaction_guard".to_owned(),
@@ -250,9 +397,7 @@ pub(crate) fn predecessor_layout_guard() -> String {
         .collect::<Vec<_>>()
         .join(",");
     let mut guards = vec![
-        format!(
-            "EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={SOURCE_SCHEMA_PREDECESSOR})"
-        ),
+        marker.to_owned(),
         format!("NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN({names}))"),
     ];
     for table in FAMILIES {
@@ -277,12 +422,28 @@ pub(crate) fn predecessor_layout_guard() -> String {
     guards.push(super::jellyfin_watch::session_dependency_guard());
     format!("({})", guards.join(") AND ("))
 }
+#[cfg(feature = "hiqlite-store")]
 pub(crate) fn predecessor_guard(now_parameter: usize) -> String {
     assert!((1..=256).contains(&now_parameter));
     format!(
         "({}) AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE state!='ended') AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE state='starting') AND NOT EXISTS(SELECT 1 FROM media_session_preparations) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE expires_at_ms>${now_parameter})",
         predecessor_layout_guard()
     )
+}
+
+pub(crate) const NATIVE_BOOT_SCHEMA: &str = "CREATE TABLE sharing_native_source_boot (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),node_id TEXT NOT NULL,storage_generation TEXT NOT NULL,boot_id TEXT NOT NULL CHECK(length(boot_id)=36),generation INTEGER NOT NULL CHECK(generation>0),master_fingerprint TEXT NOT NULL CHECK(length(master_fingerprint)=64)) STRICT";
+
+pub(crate) fn native_layout_shape_guard() -> String {
+    format!("({}) AND ({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM pragma_user_version WHERE user_version>=124) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0))",
+        super::jellyfin_watch::session_dependency_guard(),
+        exact_object(NATIVE_BOOT_SCHEMA),exact_object(INSTALLATION_SCHEMA),exact_object(TRANSACTION_SCHEMA),
+        sharing_source_sessions::schema_guard_for(false),dispatch_guard_shape())
+}
+pub(crate) fn native_installed_shape_guard() -> String {
+    format!("({}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION})",native_layout_shape_guard())
+}
+pub(crate) fn native_installed_guard() -> String {
+    format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM sharing_source_schema_transaction_guard WHERE singleton=1 AND passed=1) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation i JOIN sharing_native_source_boot b ON b.singleton=i.singleton AND b.master_fingerprint=i.master_fingerprint JOIN storage_identity s ON s.singleton=1 AND s.node_id=b.node_id AND s.generation=b.storage_generation)",native_installed_shape_guard(),super::sharing_ingress_custody::schema_guard())
 }
 
 /// Frozen statement order preserves child authority rows and then seeds the
@@ -306,7 +467,7 @@ pub(crate) fn layout_statements() -> Vec<String> {
     statements.extend(sharing_source_sessions::candidate_statements());
     statements
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "hiqlite-store"))]
 mod tests {
     use super::*;
     use crate::store::{SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -326,6 +487,39 @@ mod tests {
             statement.query_row(rusqlite::params![10000], |row| row.get::<_, i64>(0))
         };
         result.expect("closed predicate") == 1
+    }
+
+    #[test]
+    fn sharing_source_rebuild_refuses_schema_race_and_requires_exact_dependency_restore() {
+        let conn = Connection::open_in_memory().expect("schema mutation fixture");
+        conn.execute_batch("CREATE TABLE media_sessions(id INTEGER); CREATE TABLE commands(id INTEGER); CREATE TRIGGER retained_dependency AFTER INSERT ON commands BEGIN DELETE FROM media_sessions WHERE id=NEW.id; END").expect("external dependency");
+        let objects=conn.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN('trigger','view') AND sql IS NOT NULL ORDER BY type,name").expect("inventory").query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?))).expect("inventory rows").collect::<Result<Vec<_>,_>>().expect("inventory values");
+        let inventory = serde_json::to_string(&objects).expect("captured inventory");
+        let predicate = |guard: String, value: &str| {
+            conn.query_row(&format!("SELECT ({guard})"), [value], |row| {
+                row.get::<_, bool>(0)
+            })
+            .expect("actual schema guard")
+        };
+        assert!(predicate(rebuild_dependency_inventory_guard(1), &inventory));
+        conn.execute_batch("CREATE VIEW raced_dependency AS SELECT * FROM media_sessions")
+            .expect("concurrent dependency change");
+        assert!(
+            !predicate(rebuild_dependency_inventory_guard(1), &inventory),
+            "schema change after observation cannot enter the ownership rebuild"
+        );
+        conn.execute_batch("DROP VIEW raced_dependency")
+            .expect("remove race fixture");
+        let retained = serde_json::to_string(&[(objects[0].1.clone(), objects[0].3.clone())])
+            .expect("retained exact SQL");
+        conn.execute_batch("DROP TRIGGER retained_dependency; CREATE TRIGGER retained_dependency AFTER INSERT ON commands BEGIN SELECT 1; END").expect("same name substituted semantics");
+        assert!(!predicate(restored_dependency_guard(1), &retained));
+        conn.execute_batch("DROP TRIGGER retained_dependency")
+            .expect("remove substitution");
+        conn.execute_batch(&objects[0].3)
+            .expect("restore original semantics");
+        assert!(predicate(restored_dependency_guard(1), &retained));
+        assert!(predicate(rebuild_dependency_inventory_guard(1), &inventory));
     }
 
     #[test]

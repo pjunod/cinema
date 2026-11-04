@@ -181,7 +181,9 @@ pub(super) fn configure_writer(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    #[cfg(target_os = "macos")]
+    conn.pragma_update(None, "fullfsync", true)?;
     Ok(())
 }
 
@@ -363,6 +365,7 @@ pub(super) fn boot_integrity_check(
     conn: &Connection,
     path: &Path,
     budget: Duration,
+    lifetime_guard: Option<std::sync::Weak<dyn Send + Sync>>,
 ) -> Result<(), StoreError> {
     let checked = within_budget(conn, budget, |conn| {
         conn.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))
@@ -384,7 +387,7 @@ pub(super) fn boot_integrity_check(
                 "the boot integrity check did not finish in its budget; starting, and running \
                  the full integrity check in the background at the top of the next hour"
             );
-            background_integrity_check(path.to_owned());
+            background_integrity_check(path.to_owned(), lifetime_guard);
             Ok(())
         }
         // SQLITE_CORRUPT or SQLITE_NOTADB surface as errors, not findings.
@@ -408,7 +411,10 @@ pub(super) fn boot_integrity_check(
 /// read-only connection (WAL readers do not block the writer), starting at
 /// the top of the next wall-clock hour so it does not add to the load of
 /// the startup that just ran long.
-fn background_integrity_check(path: PathBuf) {
+fn background_integrity_check(
+    path: PathBuf,
+    lifetime_guard: Option<std::sync::Weak<dyn Send + Sync>>,
+) {
     let spawned = std::thread::Builder::new()
         .name("sqlite-integrity".to_owned())
         .spawn(move || {
@@ -417,6 +423,16 @@ fn background_integrity_check(path: PathBuf) {
                 .map(|elapsed| elapsed.as_secs())
                 .unwrap_or(0);
             std::thread::sleep(Duration::from_secs(3_600 - now % 3_600));
+            // Sleeping does not pin an otherwise closed runtime for an hour.
+            // An obsolete deferred check never opens a replacement authority
+            // at this path; a live check pins its owner until its reader ends.
+            let _owner = match lifetime_guard {
+                Some(owner) => match owner.upgrade() {
+                    Some(owner) => Some(owner),
+                    None => return,
+                },
+                None => None,
+            };
             let finding = open_reader(&path).and_then(|conn| {
                 Ok(conn.query_row("PRAGMA integrity_check(1)", [], |row| row.get::<_, String>(0))?)
             });

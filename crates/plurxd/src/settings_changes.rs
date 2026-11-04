@@ -13,6 +13,23 @@ use std::future::Future;
 
 use plurx_core::error::StoreError;
 
+/// Adapter-owned change observation. Cloning must create an independent
+/// observation cursor; consuming one reader's notification cannot consume it
+/// for another reader.
+#[async_trait::async_trait]
+pub(crate) trait SettingsChangeObserver: Send + Sync {
+    fn clone_observer(&self) -> Box<dyn SettingsChangeObserver>;
+    fn applied_index(&self) -> Option<u64>;
+    fn live(&self) -> bool;
+    async fn changed(&mut self) -> bool;
+}
+
+impl Clone for Box<dyn SettingsChangeObserver> {
+    fn clone(&self) -> Self {
+        self.clone_observer()
+    }
+}
+
 /// What tells a parked settings observer that the replicated settings may
 /// have changed on another node. Each reader holds its own clone: a watch
 /// marks what its holder has seen, so readers never consume each other's
@@ -30,7 +47,7 @@ pub(crate) enum SettingsChangeSource {
     Polled,
     /// This node's in-process Raft watch: a write anywhere in the cluster
     /// moves the applied index once this replica applies it.
-    Applied(hiqlite::LocalDbRaftMetrics),
+    Applied(Box<dyn SettingsChangeObserver>),
     /// An applied index a test moves by hand.
     #[cfg(test)]
     Test(tokio::sync::watch::Receiver<u64>),
@@ -40,7 +57,7 @@ impl SettingsChangeSource {
     pub(crate) fn applied_index(&self) -> Option<u64> {
         match self {
             Self::LocalOnly | Self::Polled => None,
-            Self::Applied(metrics) => metrics.snapshot().last_applied_index,
+            Self::Applied(observer) => observer.applied_index(),
             #[cfg(test)]
             Self::Test(applied) => Some(*applied.borrow()),
         }
@@ -53,7 +70,7 @@ impl SettingsChangeSource {
         match self {
             Self::LocalOnly => true,
             Self::Polled => false,
-            Self::Applied(metrics) => metrics.membership_snapshot().running,
+            Self::Applied(observer) => observer.live(),
             #[cfg(test)]
             Self::Test(applied) => applied.has_changed().is_ok(),
         }
@@ -63,7 +80,7 @@ impl SettingsChangeSource {
     pub(crate) async fn changed(&mut self) -> bool {
         match self {
             Self::LocalOnly | Self::Polled => std::future::pending().await,
-            Self::Applied(metrics) => metrics.wait_for_change().await,
+            Self::Applied(observer) => observer.changed().await,
             #[cfg(test)]
             Self::Test(applied) => applied.changed().await.is_ok(),
         }
@@ -154,4 +171,50 @@ impl ProofMark {
 pub(crate) struct Proved<T> {
     pub(crate) value: T,
     applied: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct WatchObserver(tokio::sync::watch::Receiver<u64>);
+    #[async_trait::async_trait]
+    impl SettingsChangeObserver for WatchObserver {
+        fn clone_observer(&self) -> Box<dyn SettingsChangeObserver> {
+            Box::new(self.clone())
+        }
+        fn applied_index(&self) -> Option<u64> {
+            Some(*self.0.borrow())
+        }
+        fn live(&self) -> bool {
+            self.0.has_changed().is_ok()
+        }
+        async fn changed(&mut self) -> bool {
+            self.0.changed().await.is_ok()
+        }
+    }
+
+    #[tokio::test]
+    async fn cloned_observers_consume_independent_change_notifications() {
+        let (sender, receiver) = tokio::sync::watch::channel(1);
+        let mut first = SettingsChangeSource::Applied(Box::new(WatchObserver(receiver)));
+        let mut second = first.clone();
+        sender.send_replace(2);
+        assert!(first.changed().await);
+        assert!(second.changed().await);
+        assert_eq!(first.applied_index(), Some(2));
+        assert_eq!(second.applied_index(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn closed_observer_cannot_reuse_a_proof_at_its_last_applied_index() {
+        let (sender, receiver) = tokio::sync::watch::channel(1);
+        let mut source = SettingsChangeSource::Applied(Box::new(WatchObserver(receiver)));
+        let mut held = source.mark().proved(7_u64);
+        drop(sender);
+        assert!(!source.live());
+        assert!(!source.changed().await);
+        assert!(!source.confirms(&mut held, || async { Ok(7_u64) }).await);
+    }
 }

@@ -479,6 +479,50 @@ while the rollback remains active. To resume normal fleet updates, restore
 `deploy/.env` to `main`, fetch the repository, and check out the revision named
 by the pulled image before running `make docker-image-up`.
 
+### Storage modes and upgrades
+
+A fresh server uses native SQLite at `<PLURX_DATA>/plurx.db`. It opens no
+Raft/private-cluster ports and needs no quorum to play media. The durable
+`storage-mode.json` records the selected backend and database generation;
+`GET /api/v1/server` reports `storage_mode` and `cluster_enabled` from that
+selection. Do not edit or remove the manifest to change modes.
+
+An old private, never-peered singleton is converted on startup from a verified
+current committed Hiqlite image. The retained root `plurx.db` from before
+activation is never the migration source. Checksummed receipts, the replicated
+source and the stale root image are retained under the data directory; startup
+recovers its durable publication journal before opening either backend. Allow
+space for the source image, native copy and retained originals. Unknown schema,
+past peer admission, removed-member history, identity mismatch or incomplete
+verification stops startup and leaves the prior authority intact.
+
+Existing explicitly configured/admitted clusters retain Raft and quorum
+fencing, even if only one voter is reachable. `storage.mode = "cluster"` can
+select a fresh cluster directory; it cannot silently replace an existing
+native authority. With the standalone daemon stopped, use
+`plurxd --config plurx.toml cluster create` for verified native-to-cluster
+promotion. Joining an existing cluster requires a fresh eligible directory;
+an existing standalone library is never implicitly overwritten or merged.
+
+Native backups use the existing schedule/retention controls with a SQLite
+artifact containing its manifest, consistent image, checksums and credential
+key. Verify with `plurxd restore --archive <artifact> --verify`, then restore into a fresh
+directory using the existing `restore` command. Cluster remapping/advertisement
+options do not apply to a native backup. Restoring disables sharing and
+revokes the image's exports, invitations and delivery grants: an older image
+cannot prove later revocations. Old purpose-key envelopes remain archived under
+the preserved credential master; a fresh local sharing identity receives new
+active keys. Re-pair sharing deliberately after restore. `refresh-metadata` can open native
+storage exclusively while the daemon is stopped; a running daemon owns the
+directory lock. Password reset keeps the existing authentication/cache safety
+rules.
+
+Conversion is a storage upgrade: retain all source/receipt material and use a
+binary that understands the published mode. The activation breadcrumb is
+retained to make older binaries refuse; do not remove it to force a downgrade.
+The [migration contract](cluster/STANDALONE-SQLITE-MODE-PROPOSAL.md) records the
+supported cohort and remaining qualification evidence.
+
 ### Rolling back a deploy
 
 The SQLite snapshot procedure below applies to a node that has not activated
@@ -4177,11 +4221,11 @@ or `qvbr:<q>` when it is created and reuses that value after every yield or
 restart; it never reads the current global pair on resume. SQLite v18 adds the
 non-null column and backfills existing packages to `vbr`. Replicated schema v5
 has the same column while retaining protocol v4. N3's cache-artifact migration
-therefore moves to SQLite v19. Production opens the activated one-voter
-Hiqlite backend after fresh bootstrap/import; retained SQLite is only the
-pre-membership rollback source. N1 does not invent the cluster
-rolling-migration protocol: an existing replicated v4 cluster remains
-incompatible and must not be pointed at this binary.
+therefore moved to SQLite v19. N1 originally shipped through the activated
+one-voter Hiqlite backend; that historical deployment path is superseded by
+native SQLite standalone and explicit cluster selection. Its old replicated-v4
+incompatibility remains historical migration evidence, not permission to boot
+an unsupported cluster schema or to reuse a retained rollback database.
 
 The effective value is server policy, not a client request option. The first
 accepted `request_id` owns it: retrying the identical create after a global

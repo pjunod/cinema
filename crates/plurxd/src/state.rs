@@ -741,6 +741,9 @@ pub struct AppState {
     pub(crate) serving: crate::serving_fence::ServingFence,
     /// Join/add/remove lifecycle and privacy-safe per-node health.
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    /// Actual durable deployment mode, selected before constructing services.
+    pub(crate) storage_mode: plurx_core::storage::mode::StorageMode,
+    pub(crate) local_source: Option<plurx_core::sharing_source_sessions::LocalSourceAuthority>,
     /// Shared complete observation owner. Pending startup hands this exact
     /// handle to normal HTTP; a second loop cannot claim its receiver.
     pub(crate) clock_observer: crate::clock_offset::ClockObserver,
@@ -1085,8 +1088,18 @@ impl AppState {
                 catalogue,
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
                 data_dir: PathBuf::new(),
-                credential_key_path: PathBuf::new(),
-                backup_client: None,
+                storage_mode: plurx_core::storage::mode::StorageMode::Sqlite,
+                local_source: None,
+                settings_changes: crate::settings_changes::SettingsChangeSource::LocalOnly,
+                backup_provider: crate::backup::native::NativeBackupProvider::new(
+                    PathBuf::new(),
+                    PathBuf::new(),
+                    plurx_core::storage::LocalIdentity {
+                        instance_id: String::new(),
+                        node_id: String::new(),
+                    },
+                    String::new(),
+                ),
             },
             store,
             dirs,
@@ -1124,11 +1137,20 @@ impl AppState {
             catalogue,
             snapshot_recovery_budgets,
             data_dir,
-            credential_key_path,
-            backup_client,
+            storage_mode,
+            local_source,
+            settings_changes,
+            backup_provider,
         } = config;
         crate::source_custody::configure_settlement_journal(&data_dir);
-        let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
+        let serving = match storage_mode {
+            plurx_core::storage::mode::StorageMode::Sqlite => {
+                crate::serving_fence::ServingFence::local()
+            }
+            plurx_core::storage::mode::StorageMode::Cluster => {
+                crate::serving_fence::ServingFence::new(replication.metrics_handle())
+            }
+        };
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -1153,13 +1175,19 @@ impl AppState {
         // registry can distinguish active tuner scratch from restart debris.
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
+        let job_authority: Arc<dyn ClusterJobAuthority> = match storage_mode {
+            plurx_core::storage::mode::StorageMode::Sqlite => {
+                Arc::new(crate::job_lease::LocalJobAuthority)
+            }
+            plurx_core::storage::mode::StorageMode::Cluster => Arc::new(membership.clone()),
+        };
         let jobs = Arc::new(
             JobManager::new_with_scan_prune_percent(
                 Arc::clone(&store),
                 artwork_dir.clone(),
                 scan_prune_percent,
                 node_id.clone(),
-                Arc::new(membership.clone()),
+                job_authority,
             )
             .with_source_checkpoint_dir(
                 (!data_dir.as_os_str().is_empty())
@@ -1173,30 +1201,11 @@ impl AppState {
             data_dir.join("sharing-tls"),
             sharing_network,
         ));
-        // A replicated daemon applies the Raft log in this process; that watch
-        // is how an idle settings reader (the Live TV observer, the takeover
-        // gate, the clock-enforcement follower) learns of a save elsewhere.
-        let settings_changes = match backup_client
-            .as_ref()
-            .and_then(|client| client.local_db_raft_metrics().ok())
-        {
-            Some(applied) => crate::settings_changes::SettingsChangeSource::Applied(applied),
-            None if membership.is_replicated() => {
-                crate::settings_changes::SettingsChangeSource::Polled
-            }
-            None => crate::settings_changes::SettingsChangeSource::LocalOnly,
-        };
         let subtitle_models = Arc::new(crate::subtitle_models::Runtime::new(&data_dir));
-        let backup = crate::backup::BackupManager::new(
+        let backup = crate::backup::BackupManager::new_with_provider(
             Arc::clone(&store),
             Arc::clone(&jobs),
-            backup_client,
-            data_dir,
-            credential_key_path,
-            node_id.clone(),
-            credential_key.id().to_owned(),
-            Duration::from_secs(snapshot_recovery_budgets.transfer_secs)
-                .saturating_add(Duration::from_secs(45)),
+            backup_provider,
         );
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
@@ -1320,6 +1329,8 @@ impl AppState {
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             replication,
+            storage_mode,
+            local_source,
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(
                 membership.clone(),
             ),
@@ -1380,6 +1391,29 @@ impl AppState {
             hls_route_hooks: crate::http::hls::unfilled_hls_route_hooks(),
             started_at: Instant::now(),
         }
+    }
+
+    pub(crate) fn source_authority_provider(
+        &self,
+    ) -> crate::source_authority::SourceAuthoritySource {
+        match self.storage_mode {
+            plurx_core::storage::mode::StorageMode::Sqlite => {
+                crate::source_authority::SourceAuthoritySource::local(
+                    self.local_source.clone(),
+                    self.sharing.accepted_drivers.boot_id(),
+                )
+            }
+            plurx_core::storage::mode::StorageMode::Cluster => {
+                crate::cluster_runtime::source_admission::from_membership(self.membership.clone())
+            }
+        }
+    }
+
+    pub(crate) async fn source_admission_members(
+        &self,
+    ) -> Result<Option<plurx_core::sharing_source_sessions::SourceAdmissionMembers>, StoreError>
+    {
+        self.source_authority_provider().observe().await
     }
 
     /// Refresh all Store-backed Prometheus gauges as one complete sample.
@@ -1514,8 +1548,10 @@ pub struct AppConfig {
     pub catalogue: CatalogueReader,
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
     pub data_dir: PathBuf,
-    pub credential_key_path: PathBuf,
-    pub backup_client: Option<hiqlite::Client>,
+    pub storage_mode: plurx_core::storage::mode::StorageMode,
+    pub local_source: Option<plurx_core::sharing_source_sessions::LocalSourceAuthority>,
+    pub settings_changes: crate::settings_changes::SettingsChangeSource,
+    pub backup_provider: Arc<dyn crate::backup::BackupProvider>,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.

@@ -2552,7 +2552,18 @@ fn booted_state(dir: &std::path::Path) -> AppState {
         "test-node".to_owned(),
         "test-cluster".to_owned(),
         Arc::new(plurx_core::secrets::CredentialKey::generate()),
+        plurx_core::storage::mode::StorageMode::Sqlite,
         None,
+        crate::settings_changes::SettingsChangeSource::LocalOnly,
+        crate::backup::native::NativeBackupProvider::new(
+            PathBuf::new(),
+            PathBuf::new(),
+            plurx_core::storage::LocalIdentity {
+                instance_id: String::new(),
+                node_id: String::new(),
+            },
+            String::new(),
+        ),
         plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
         plurx_core::cluster::membership::MembershipManager::unavailable(),
         catalogue,
@@ -2595,9 +2606,20 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
             catalogue,
             replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
-            identity: handle.identity,
+            identity: handle.identity.into(),
             credential_key: handle.credential_key,
-            backup_client: None,
+            storage_mode: plurx_core::storage::mode::StorageMode::Sqlite,
+            local_source: None,
+            settings_changes: crate::settings_changes::SettingsChangeSource::LocalOnly,
+            backup_provider: crate::backup::native::NativeBackupProvider::new(
+                PathBuf::new(),
+                PathBuf::new(),
+                plurx_core::storage::LocalIdentity {
+                    instance_id: String::new(),
+                    node_id: String::new(),
+                },
+                String::new(),
+            ),
             dirs: create_dirs(root.path()).expect("dirs"),
             encoder_caps: Default::default(),
             system: Default::default(),
@@ -3258,10 +3280,9 @@ fn startup_names_the_server_and_the_node_separately() {
     let tmp = crate::test_tempdir().expect("tempdir");
     log_startup(
         &config_in(tmp.path()),
-        &plurx_core::cluster::ClusterIdentity {
-            cluster_id: "instance-1".to_owned(),
+        &plurx_core::storage::LocalIdentity {
+            instance_id: "instance-1".to_owned(),
             node_id: "node-2".to_owned(),
-            raft_id: 1,
         },
     );
 }
@@ -3460,9 +3481,20 @@ async fn boot_serve_and_drain_in_runtime(
             catalogue,
             replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
-            identity: handle.identity,
+            identity: handle.identity.into(),
             credential_key: handle.credential_key,
-            backup_client: None,
+            storage_mode: plurx_core::storage::mode::StorageMode::Sqlite,
+            local_source: None,
+            settings_changes: crate::settings_changes::SettingsChangeSource::LocalOnly,
+            backup_provider: crate::backup::native::NativeBackupProvider::new(
+                PathBuf::new(),
+                PathBuf::new(),
+                plurx_core::storage::LocalIdentity {
+                    instance_id: String::new(),
+                    node_id: String::new(),
+                },
+                String::new(),
+            ),
             dirs: create_dirs(root).expect("dirs"),
             encoder_caps: Default::default(),
             system: Default::default(),
@@ -4302,10 +4334,9 @@ async fn a_gdm_port_that_cannot_be_bound_is_a_warning_not_a_failure() {
 fn the_startup_line_names_both_identities_and_the_data_dir() {
     let tmp = crate::test_tempdir().expect("tempdir");
     let config = config_in(tmp.path());
-    let identity = plurx_core::cluster::ClusterIdentity {
-        cluster_id: "cluster-abc".to_owned(),
+    let identity = plurx_core::storage::LocalIdentity {
+        instance_id: "cluster-abc".to_owned(),
         node_id: "node-2".to_owned(),
-        raft_id: 1,
     };
 
     let logs = captured(|| log_startup(&config, &identity));

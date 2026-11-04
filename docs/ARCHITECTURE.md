@@ -38,7 +38,7 @@ relay but hold no vote and may not open a tuner.
         │      │                                            │               │
         │      │                                     ffmpeg (child proc)    │
         │      ├──▶ scanner + metadata agents                               │
-        │      └──▶ Store trait ──▶ Hiqlite: voters + non-voting learners   │
+        │      └──▶ Store ──▶ SQLite, or explicit clustered Hiqlite        │
         └───────────────┬───────────────────────────────┬──────────────────┘
                         │ read-only                      │ HTTPS
                         ▼                                ▼
@@ -47,7 +47,7 @@ relay but hold no vote and may not open a tuner.
 ```
 
 The human-visible server name follows the **`Store` boundary** too.
-`server.name` in TOML seeds a new store once; the durable replicated setting is
+`server.name` in TOML seeds a new store once; the durable Store setting is
 authoritative thereafter. Existing installs therefore retain their configured
 name on upgrade, while a joining node cannot silently rename the logical server.
 Cluster discovery keeps that logical identity while making each voter
@@ -57,7 +57,7 @@ deduplication and carries the replicated id separately as `Logical-Identifier`.
 Legacy single-node discovery remains byte-for-byte unchanged.
 
 The load-bearing boundary is the **`Store` trait**: every read and write goes
-through it, so one-voter and multi-voter stores use the same call sites. That
+through it, so native SQLite and replicated stores use the same call sites. That
 is what made HA a backend swap (Phase 4) instead of a rewrite — the boundary
 existed from the first commit specifically so this promise could be kept.
 
@@ -73,23 +73,33 @@ seconds."
 
 ### 2.1 Consensus & storage — embed the store, don't run a database
 
-**Decided: embed the maintained hiqlite 0.14 fork** —
-raft-replicated SQLite built on openraft for the exact "1 node or 3+ nodes, no
-external infra" shape. The spike confirmed its `execute`/`query_map`/`txn` API
+**Standalone uses native SQLite; clustering is explicit.** A normal server
+constructs no Raft node, cluster transport, membership heartbeat or quorum
+sampler. Its local storage, startup and drain state determine serving authority.
+SQLite uses WAL with `synchronous=FULL` (and `fullfsync` on macOS).
+
+For explicitly configured clusters, embed the maintained hiqlite 0.14 fork:
+Raft-replicated SQLite built on openraft. The spike confirmed its
+`execute`/`query_map`/`txn` API
 maps onto the existing rusqlite row mappers, and the shipped fork now carries
 the compatibility patches listed in
 [`PLURX-PATCH.md`](../vendor/hiqlite/PLURX-PATCH.md). See
 [PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md). All cluster access stays behind the
-one internal `Store` trait; openraft is an implementation dependency, not a
-second ready-to-select backend.
+one internal `Store` trait. Backend construction lives in the daemon's storage
+composition boundary; local identity, durability, backup and publication code
+in `plurx-core::storage` does not depend on a cluster client. Quorum readiness,
+replication workers and clustered backup live in separate cluster adapters so
+clustering can be extracted without moving native storage into it.
 
-Single-node mode is the same code path with a 1-voter raft (a supported
-openraft/hiqlite pattern) — no "cluster edition" fork, and any single node can
-later grow into a cluster by adding voters. A fresh data directory imports its
-SQLite state into the replicated store on first boot, and activation is
-one-way. If activation is interrupted, the next start permits one explicitly
-warned unreplicated SQLite recovery boot; restart after that recovery completes
-activation. The backup and restore boundary is specified in
+A durable storage manifest binds backend, logical/local identity and database
+generation before the writer opens. Cluster creation/join is deliberate, and
+loss of peers never changes that choice. Upgrading a historical private
+singleton exports its current committed Hiqlite image into verified native
+SQLite; it never reuses the stale pre-activation root database. Publication is
+journaled and retains the replicated source and rollback-fencing marker.
+Ambiguous history and former clusters refuse automatic conversion. See the
+[mode decision and migration contract](cluster/STANDALONE-SQLITE-MODE-PROPOSAL.md).
+The cluster backup and restore boundary is specified in
 [CLUSTER-BACKUP-AND-RESTORE.md](cluster/CLUSTER-BACKUP-AND-RESTORE.md).
 
 ### 2.2 Replication classes — not everything needs consensus
@@ -548,10 +558,11 @@ never version-skew against the API it talks to.
 
 ## 7. Key decisions, each with its reason
 
-1. **One binary, one code path for 1 or N nodes.** A "cluster edition" fork
-   doubles the test surface and rots the single-node path. Cost accepted: the
-   single-node case carries a 1-voter raft it doesn't strictly need. Worth it —
-   there is exactly one code path to keep correct.
+1. **One application contract, explicit storage backends.** Standalone uses
+   native SQLite without consensus. An explicitly adopted cluster uses Raft.
+   Native and cluster adapters share the Store contract, with independent
+   lifecycle and authority. This supersedes the earlier one-voter-everywhere
+   maintenance tradeoff; its history is retained in the mode decision.
 2. **The `Store` trait from commit one.** Everything touches storage through it,
    so Phase 4 swaps SQLite for hiqlite behind the trait. The scar this avoids:
    media servers that grew a database assumption into 500 call sites and could

@@ -723,6 +723,7 @@ function developerPanels(){
       // portable backup and fenced restore and reached `developerPanel`
       // without being composed here, so this whole gate died on its name.
       shippedSource("clusterBackupCard"),
+      shippedSource("nativeBackupCard"),
       shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"), shippedSource("cinemaSharingCard"), shippedSource("cinemaRemoteCard"), shippedSource("cinemaRemoteInvitationsCard"),
       shippedSource("diagnosticDeveloperCard"),
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
@@ -2472,4 +2473,17 @@ test("display targeting remains editable with unavailable or unmet advice",()=>{
     }
   }
   assert.doesNotMatch(shippedSource("displayTargetHdr10Card"),/disabled/);
+});
+
+test("standalone backup settings belong to Maintenance without cluster controls", () => {
+  const panels=developerPanels();
+  panels.server.storage_mode="sqlite";
+  panels.server.cluster_enabled=false;
+  const html=panels.maintenancePanel({backup_destination:"/mnt/backups",backup_schedule_utc:"03:45",backup_keep:7},null,{items:[]});
+  assert.match(html,/Server backups/);
+  assert.match(html,/id="native-backup-destination" value="\/mnt\/backups"/);
+  assert.match(html,/FOOT:saveNativeBackup/);
+  assert.doesNotMatch(html,/voter snapshot|Portable cluster backup/);
+  panels.server.storage_mode="cluster";
+  assert.doesNotMatch(panels.maintenancePanel({},null,{items:[]}),/native-backup-destination/);
 });

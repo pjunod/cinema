@@ -43,7 +43,9 @@ pub struct ServerInfo {
     pub node_id: String,
     /// True when discovery publishes one record per configured cluster node.
     pub cluster_advertisement: bool,
-    /// Explicit cluster configuration or a persisted network member.
+    /// The durable backend selected before startup.
+    pub storage_mode: plurx_core::storage::mode::StorageMode,
+    /// True only when an explicitly configured cluster is authoritative.
     pub cluster_enabled: bool,
     pub uptime_seconds: u64,
     /// True when no users exist yet — the web app shows first-run setup.
@@ -97,9 +99,8 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         instance_id,
         node_id: state.node_id.clone(),
         cluster_advertisement: state.cluster_advertisement,
-        cluster_enabled: state
-            .membership
-            .cluster_enabled(state.cluster_advertisement),
+        storage_mode: state.storage_mode,
+        cluster_enabled: state.storage_mode == plurx_core::storage::mode::StorageMode::Cluster,
         uptime_seconds: state.started_at.elapsed().as_secs(),
         setup_required,
         android_app,

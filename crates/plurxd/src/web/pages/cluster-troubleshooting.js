@@ -69,7 +69,8 @@ function clusterPanel(d){
   // Belt and braces: viewSettings already turns a non-admin away at the door,
   // and the endpoints behind this are admin-only on their own account.
   if(!ME||!ME.is_admin) return "";
-  if(!settingsClusterEnabled(d)) return setHead("Cluster","Clustering is not enabled.");
+  if(!settingsClusterEnabled(d)) return setHead("Cluster","Clustering is not enabled.")+
+    (typeof SERVER!=="undefined"&&SERVER?.storage_mode==="sqlite"?`<div class="card"><h2>Standalone SQLite</h2><p>To create a cluster from this library, stop the server and run <code>plurxd --config &lt;config-file&gt; cluster create</code> with this server's configuration. The managed operation preserves and verifies your data before switching storage.</p><p>Joining an existing cluster uses a fresh data directory.</p></div>`:"");
   const cluster=d.cluster;
   if(!cluster) return `<div class="card"><h2 class="section" style="margin-top:0">Cluster</h2>
     <div class="empty">Loading…</div></div>`;

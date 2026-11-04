@@ -3028,6 +3028,7 @@ fn open_validated_source(
         )));
     }
     verify_source(&source)?;
+    verify_native_runtime_metadata(&source)?;
     verify_source_dv_recovery_guards(&source, schema_version)?;
     let (instance_id, instance_updated_at) = source
         .query_row(
@@ -3045,6 +3046,54 @@ fn open_validated_source(
             instance_updated_at,
         },
     ))
+}
+
+/// These two exact native runtime tables never become replicated state.
+/// The first binds a local database file/generation; the second belongs to a
+/// stopped native boot. Domain sharing tables remain in the ordinary import
+/// inventory and must not acquire a prefix-based exclusion.
+const NATIVE_RUNTIME_TABLES: [&str; 2] = ["storage_identity", "sharing_local_census"];
+
+fn verify_native_runtime_metadata(source: &Connection) -> Result<(), StoreError> {
+    let canonical = super::sqlite::MIGRATIONS[123];
+    for name in NATIVE_RUNTIME_TABLES {
+        let mut rows = source.prepare("SELECT type,sql FROM sqlite_master WHERE name=?1")?;
+        let definitions = rows
+            .query_map([name], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if definitions.is_empty() {
+            continue;
+        }
+        let expected = canonical
+            .split(';')
+            .find(|sql| sql.split_whitespace().nth(2) == Some(name))
+            .ok_or_else(|| import_error("native runtime metadata has no canonical schema"))?;
+        let normalize = |sql: &str| {
+            sql.chars()
+                .filter(|c| !c.is_ascii_whitespace())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        };
+        if !matches!(definitions.as_slice(),[(kind,sql)] if kind=="table" && normalize(sql)==normalize(expected))
+        {
+            return Err(import_error(format!(
+                "native-only table {name} has an unrecognized schema"
+            )));
+        }
+        let triggers: i64 = source.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name=?1",
+            [name],
+            |row| row.get(0),
+        )?;
+        if triggers != 0 {
+            return Err(import_error(format!(
+                "native-only table {name} has unexpected triggers"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn source_schema_version(source: &Connection) -> Result<i64, StoreError> {
@@ -3671,3 +3720,35 @@ impl From<&mut Row<'_>> for ParityPageRow {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_runtime_metadata_tests {
+    use super::*;
+    #[test]
+    fn native_boot_metadata_is_classified_by_exact_table_and_shape() {
+        let source = Connection::open_in_memory().expect("native metadata fixture");
+        source
+            .execute_batch(super::super::sqlite::MIGRATIONS[123])
+            .expect("native metadata fixture");
+        source
+            .execute(
+                "INSERT INTO storage_identity VALUES(1,'server','node',?1)",
+                [uuid::Uuid::new_v4().to_string()],
+            )
+            .expect("native metadata fixture");
+        source
+            .execute(
+                "INSERT INTO sharing_local_census VALUES('node',?1,1,1000)",
+                [uuid::Uuid::new_v4().to_string()],
+            )
+            .expect("native metadata fixture");
+        verify_native_runtime_metadata(&source).expect("native metadata fixture");
+        for name in NATIVE_RUNTIME_TABLES {
+            assert!(!TABLES.iter().any(|table| table.name == name));
+        }
+        source
+            .execute_batch("ALTER TABLE sharing_local_census ADD COLUMN application_secret TEXT")
+            .expect("native metadata fixture");
+        assert!(verify_native_runtime_metadata(&source).is_err());
+    }
+}

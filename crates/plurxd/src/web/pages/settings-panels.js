@@ -189,7 +189,27 @@ function maintenancePanel(settings,dv,readiness){
     ${togRow("job-boot","Scan every library at startup","About 30 seconds after the server starts — a server switched off while files landed doesn't notice them until its next scheduled run.",settings.scan_on_startup)}
     ${setCardFoot("saveMaintenance")}`);
   return `${setHead("Maintenance","Background work this node does on its own: what is scheduled, what it costs, and where to turn it off.")}
-    <div class="setgrid2">${jobs}${precachePanel(settings)}${subtitleStorePanel(settings)}${subtitleStoredSourcesCard(settings,readiness)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${subtitleTranscriptionCard()}${telemetryPanel(settings)}</div>`;
+    <div class="setgrid2">${jobs}${typeof SERVER!=="undefined"&&SERVER?.storage_mode==="sqlite"?nativeBackupCard(settings):""}${precachePanel(settings)}${subtitleStorePanel(settings)}${subtitleStoredSourcesCard(settings,readiness)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${subtitleTranscriptionCard()}${telemetryPanel(settings)}</div>`;
+}
+function nativeBackupCard(settings){
+  return setCard(`${cardHead("Server backups","Save a consistent SQLite image and the credential key needed to restore it.")}
+    <label class="setfield"><span>Destination</span><input id="native-backup-destination" value="${esc(settings.backup_destination||"")}" placeholder="/mnt/backups"></label>
+    <div class="setgrid"><label class="setfield"><span>Daily UTC time</span><input id="native-backup-schedule" value="${esc(settings.backup_schedule_utc||"02:30")}"></label>
+    <label class="setfield"><span>Backups to keep</span><input id="native-backup-keep" type="number" min="1" max="365" value="${Number(settings.backup_keep)||14}"></label></div>
+    <div class="hint">An empty destination stops scheduled backups. Restore into an isolated directory to verify recovery.</div>
+    <div class="err" id="native-backup-error" role="alert"></div>${setCardFoot("saveNativeBackup")}`,{id:"native-backup-settings"});
+}
+async function saveNativeBackup(btn){
+  const err=document.getElementById("native-backup-error"); if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      backup_destination:(/** @type {HTMLInputElement} */ (document.getElementById("native-backup-destination"))).value,
+      backup_schedule_utc:(/** @type {HTMLInputElement} */ (document.getElementById("native-backup-schedule"))).value,
+      backup_keep:Number((/** @type {HTMLInputElement} */ (document.getElementById("native-backup-keep"))).value)
+    }}));
+    toast("Backup settings saved"); if(btn)setCardSaved(btn);
+  }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }
 const PRODUCE_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const CACHE_SIZES=[0,10,25,50,100,250,500,1000];

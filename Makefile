@@ -2150,3 +2150,25 @@ web-shared-library-browser-check: ## Check Shared browse and enriched details at
 	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
 		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
 		--test tests/web/shared-libraries.browser.cjs
+
+.PHONY: standalone-storage-test standalone-storage-process-test
+standalone-storage-test: ## Native storage, local authority and backup contracts
+	$(CARGO) test --locked -p plurx-core --no-default-features --lib storage::
+	$(CARGO) test --locked -p plurx-core --no-default-features --lib native_sharing::tests::
+	$(CARGO) test --locked -p plurx-core --no-default-features --lib sharing_source_session
+	$(CARGO) test --locked -p plurx-core --no-default-features --lib config::tests::
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib cluster::migration::standalone_export::tests::
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib cluster::migration::native_import::tests::
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib cluster::migration::native_promotion::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd storage_runtime::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd source_authority::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd source_copy_attachment_registers_current_producer_and_reaps_owned_permit
+	$(CARGO) test --locked -p plurxd --bin plurxd source_copy_cold_index_refuses_expired_original_observation_before_child
+	$(CARGO) test --locked -p plurxd --bin plurxd sharing_source_http_real_h1_h2_playlist_init_and_segment_echo_exact_lineage
+	$(CARGO) test --locked -p plurxd --bin plurxd cluster_runtime::create::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd cluster_runtime::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd serving_fence::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd backup::
+
+standalone-storage-process-test: ## Shipping daemon converts an actual private singleton without lost writes
+	$(CARGO) test --locked -p plurxd --features cluster-integration-tests --test standalone_conversion

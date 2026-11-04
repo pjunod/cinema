@@ -1356,12 +1356,17 @@ mod tests {
                     .await
                     .expect("desktop control fixture");
             }
+            let services = crate::cluster_runtime::services(&selected, &config)
+                .expect("cluster fixture services");
             let mut state = crate::build_state(
                 &config,
                 selected.identity.node_id.clone(),
                 selected.identity.cluster_id.clone(),
                 Arc::clone(&selected.credential_key),
-                selected.local_client(),
+                plurx_core::storage::mode::StorageMode::Cluster,
+                None,
+                services.settings_changes,
+                services.backup,
                 selected.replication_monitor(),
                 selected.membership_manager(),
                 selected.catalogue_reader(),

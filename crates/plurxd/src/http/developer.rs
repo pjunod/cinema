@@ -3110,13 +3110,30 @@ fn sharing_endpoint_requirement(
 async fn cinema_sharing(state: &AppState, enabled: bool) -> DeveloperEnableItem {
     // Refresh through this existing admin read, without a background task or
     // mutating the saved enablement choice.
+    let native = state.storage_mode == plurx_core::storage::mode::StorageMode::Sqlite;
+    let source_ready = if native {
+        state
+            .source_admission_members()
+            .await
+            .ok()
+            .map(|proof| proof.is_some())
+    } else {
+        state.membership.source_layout_ready().await.ok()
+    };
     state
         .sharing
-        .observe_source_activation_current(state.membership.source_layout_ready().await.ok());
+        .observe_source_activation_current(source_ready);
     let endpoints = sharing_endpoint_requirement(state.store.sharing_endpoint_manifest().await);
     let status = state.sharing.status();
+    let source_evidence = match (native, status.source_activation_current) {
+        (true, Some(true)) => "Native SQLite Source startup prepared this process's local generation and sealed keys. Requests still verify local authority, grants and application leases before sending.".to_owned(),
+        (true, Some(false)) => "Local Source authority is unavailable on this process. Your saved choice is unchanged.".to_owned(),
+        (_, Some(true)) => "The current Source layout is verified. Startup activation remains a separate historical observation; playback still requires its live authority checks.".to_owned(),
+        (_, Some(false)) => "Source activation is pending. It completes automatically once cluster compatibility and authority checks pass; a coordinated restart is not required. Your saved choice is unchanged.".to_owned(),
+        (_, None) => "The current Source layout could not be verified. Readiness is advisory and saving remains available.".to_owned(),
+    };
     DeveloperEnableItem {id:"cinema_sharing",title:"Cinema shared libraries",enabled:Some(enabled),setting:Some("sharing_enabled"),requirements:vec![
-        DeveloperRequirement {id:"source_activation",title:"Current Source activation",status:match status.source_activation_current {Some(true)=>RequirementStatus::Met,Some(false)=>RequirementStatus::Unmet,None=>RequirementStatus::Unknown},evidence:match status.source_activation_current {Some(true)=>"The current Source layout is verified. Startup activation remains a separate historical observation; playback still requires its live authority checks.".into(),Some(false)=>"Source activation is pending. It completes automatically once cluster compatibility and authority checks pass; a coordinated restart is not required. Your saved choice is unchanged.".into(),None=>"The current Source layout could not be verified. Readiness is advisory and saving remains available.".into()}},
+        DeveloperRequirement {id:"source_activation",title:"Current Source activation",status:match status.source_activation_current {Some(true)=>RequirementStatus::Met,Some(false)=>RequirementStatus::Unmet,None=>RequirementStatus::Unknown},evidence:source_evidence},
         DeveloperRequirement {id:"listener",title:"Private sharing listener",status:if status.listener=="listening" {RequirementStatus::Met}else{RequirementStatus::Unmet},evidence:format!("This node reports {} at {} inside its process network namespace. A listening socket does not prove another Cinema can reach it. Ordinary local APIs never mount private peer routes.",status.listener,status.listener_address)},
         DeveloperRequirement {id:"tls",title:"Node certificate and pin",status:if status.certificate.is_some() && status.certificate_renewal=="healthy" {RequirementStatus::Met}else{RequirementStatus::Unknown},evidence:status.certificate.map(|certificate|format!("Certificate expires at {} ms UTC. Renewal status: {}. The identity pin is shown under sharing status.",certificate.expires_at_ms,status.certificate_renewal)).unwrap_or_else(||"No active node certificate was observed. Enabling may create one; a missing key beside an existing certificate requires repair.".into())},
         endpoints,

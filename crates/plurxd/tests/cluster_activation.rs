@@ -411,6 +411,7 @@ fn migration_quiescence_precedes_directory_cleanup_probes_and_http_bind() {
             "[server]\n\
              bind = \"127.0.0.1:{server_port}\"\n\
              [storage]\n\
+             mode = \"cluster\"\n\
              data_dir = \"{}\"\n\
              [cluster]\n\
              raft_bind = \"127.0.0.1:{}\"\n\
@@ -523,6 +524,7 @@ fn run_to_completion_with_failpoint(root: &std::path::Path, failpoint: &str) -> 
             "[server]\n\
              bind = \"127.0.0.1:{}\"\n\
              [storage]\n\
+             mode = \"cluster\"\n\
              data_dir = \"{}\"\n\
              [cluster]\n\
              raft_bind = \"127.0.0.1:{}\"\n\
@@ -573,6 +575,7 @@ fn m2_ignores_explicit_non_loopback_cluster_listener_hosts() {
             "[server]\n\
              bind = \"127.0.0.1:{}\"\n\
              [storage]\n\
+             mode = \"cluster\"\n\
              data_dir = \"{}\"\n\
              [cluster]\n\
              raft_bind = \"192.0.2.40:{}\"\n\
@@ -631,6 +634,7 @@ fn maintenance_commands_obey_their_activated_store_boundaries() {
             "[server]\n\
              bind = \"127.0.0.1:{server_port}\"\n\
              [storage]\n\
+             mode = \"cluster\"\n\
              data_dir = \"{}\"\n\
              [cluster]\n\
              raft_bind = \"127.0.0.1:{}\"\n\
@@ -711,6 +715,7 @@ fn subsequent_plurxd_run_reopens_the_completed_replicated_target() {
             "[server]\n\
              bind = \"127.0.0.1:{server_port}\"\n\
              [storage]\n\
+             mode = \"cluster\"\n\
              data_dir = \"{}\"\n\
              [cluster]\n\
              raft_bind = \"127.0.0.1:{}\"\n\
@@ -827,6 +832,7 @@ async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
             "[server]\n\
              bind = \"127.0.0.1:{server_port}\"\n\
              [storage]\n\
+             mode = \"cluster\"\n\
              data_dir = \"{}\"\n\
              [cluster]\n\
              raft_bind = \"127.0.0.1:{}\"\n\

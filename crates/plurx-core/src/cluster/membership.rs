@@ -788,6 +788,288 @@ struct AdditiveColumn {
     statement: &'static str,
 }
 
+/// A fresh import runs only on its real local, committed one-voter Raft node.
+/// A remote management client or an application directory row is not evidence.
+pub(crate) async fn require_native_import_singleton(
+    client: &Client,
+    actual_local_raft_id: u64,
+) -> Result<(), MembershipError> {
+    let local = client.local_db_raft_metrics()?.membership_snapshot();
+    let expected = BTreeSet::from([actual_local_raft_id]);
+    if actual_local_raft_id == 0
+        || !local.running
+        || !local.committed
+        || local.node_id != actual_local_raft_id
+        || local.members != expected
+        || local.voters != expected
+    {
+        return Err(MembershipError::Incompatible);
+    }
+    let committed = client.metrics_db().await?;
+    if committed.current_leader != Some(actual_local_raft_id)
+        || committed
+            .membership_config
+            .voter_ids()
+            .collect::<BTreeSet<_>>()
+            != expected
+        || committed
+            .membership_config
+            .nodes()
+            .map(|(id, _)| *id)
+            .collect::<BTreeSet<_>>()
+            != expected
+    {
+        return Err(MembershipError::Incompatible);
+    }
+    Ok(())
+}
+
+/// The initial singleton observation directory used by ordinary clock startup
+/// and managed native promotion. Addresses come from actual committed Raft
+/// membership; timestamp zero publishes neither heartbeat nor capability.
+pub(crate) async fn register_singleton_observation_identity(
+    client: &Client,
+    node_id: &str,
+    actual_local_raft_id: u64,
+) -> Result<(), MembershipError> {
+    if node_id.is_empty() || node_id.len() > 256 {
+        return Err(MembershipError::Incompatible);
+    }
+    require_native_import_singleton(client, actual_local_raft_id).await?;
+    let local = client.local_db_raft_metrics()?;
+    let captured = local.membership_snapshot();
+    let metrics = client.metrics_db().await?;
+    let (_, peer) = metrics
+        .membership_config
+        .nodes()
+        .next()
+        .ok_or(MembershipError::Incompatible)?;
+    let raft_id = i64::try_from(actual_local_raft_id).map_err(|_| MembershipError::Incompatible)?;
+    require_native_import_singleton(client, actual_local_raft_id).await?;
+    client
+        .execute(
+            "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, \
+         last_seen_at, removed_at, role) VALUES ($1,$2,$3,$4,0,NULL,'voter') \
+         ON CONFLICT(node_id) DO NOTHING",
+            params!(
+                node_id,
+                raft_id,
+                peer.addr_raft.as_str(),
+                peer.addr_api.as_str()
+            ),
+        )
+        .await?;
+    let rows=client.query_consistent_map::<CountRow,_>(
+        "SELECT count(*) AS count FROM cluster_nodes WHERE node_id=$1 AND raft_id=$2 AND removed_at IS NULL AND role='voter'",
+        params!(node_id,raft_id),
+    ).await?;
+    if local.membership_snapshot() != captured || !matches!(rows.as_slice(),[row] if row.count==1) {
+        return Err(MembershipError::ClockUnbounded(
+            ClockRefusal::GenerationChanged,
+        ));
+    }
+    Ok(())
+}
+
+/// Prepare canonical cluster control schema for a new native import target.
+/// This creates no member, heartbeat, capability, intent or boot-authority row.
+/// Normal activation must still install the actual local member identity.
+pub(crate) async fn prepare_fresh_native_import_membership_schema(
+    client: &Client,
+    actual_local_raft_id: u64,
+) -> Result<(), MembershipError> {
+    require_native_import_singleton(client, actual_local_raft_id).await?;
+    let sharing = sharing_member_admission_guard_schema();
+    // AUTH_SCHEMA owns these two empty bootstrap tables before membership
+    // exists. Adopt their exact closed singleton layouts, never an activation
+    // row or mutation intent. All remaining control objects must be absent.
+    let shared_bootstrap = [
+        "cluster_credential_mutation_intents",
+        "cluster_credential_guard_activation",
+    ];
+    let shared_guard=shared_bootstrap.iter().map(|name| {
+        let declaration=MEMBERSHIP_SCHEMA.iter().find(|sql|sql.replace(" IF NOT EXISTS", "").split_whitespace().nth(2)==Some(*name)).expect("closed credential bootstrap declaration").replace(" IF NOT EXISTS", "");
+        let normalized=declaration.chars().filter(|c|!c.is_ascii_whitespace()).flat_map(char::to_lowercase).collect::<String>();
+        format!("EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='{name}' AND lower(replace(replace(replace(replace(replace(replace(sql,' ',''),char(9),''),char(10),''),char(11),''),char(12),''),char(13),''))='{normalized}') AND NOT EXISTS(SELECT 1 FROM {name}) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE tbl_name='{name}' AND type IN('trigger','index'))")
+    }).collect::<Vec<_>>().join(" AND ");
+    let names = MEMBERSHIP_SCHEMA
+        .iter()
+        .copied()
+        .chain(sharing.iter().map(String::as_str))
+        .filter(|sql| sql.starts_with("CREATE "))
+        .filter_map(|sql| {
+            let canonical = sql.replace(" IF NOT EXISTS", "");
+            let name = canonical
+                .split_whitespace()
+                .nth(2)
+                .expect("closed membership DDL");
+            if shared_bootstrap.contains(&name) {
+                return None;
+            }
+            Some(format!(
+                "'{}'",
+                name.split('(')
+                    .next()
+                    .expect("closed name")
+                    .replace('\'', "''")
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    struct FreshImportShape(String);
+    impl From<&mut Row<'_>> for FreshImportShape {
+        fn from(row: &mut Row<'_>) -> Self {
+            Self(row.get("payload"))
+        }
+    }
+    let shape=client.query_consistent_map::<FreshImportShape,_>(
+        format!("SELECT json_object('schema_version',(SELECT schema_version FROM cluster_meta WHERE singleton=1),'conflicts',json((SELECT json_group_array(name) FROM (SELECT name FROM sqlite_master WHERE name IN({names}) ORDER BY name))),'shared_exact',CASE WHEN ({shared_guard}) THEN 1 ELSE 0 END,'users',(SELECT count(*) FROM users),'items',(SELECT count(*) FROM items),'files',(SELECT count(*) FROM files),'dispatch',(SELECT count(*) FROM sharing_source_dispatch_guard)) AS payload"),params!(),
+    ).await?;
+    let [shape] = shape.as_slice() else {
+        return Err(MembershipError::Incompatible);
+    };
+    let observed: serde_json::Value =
+        serde_json::from_str(&shape.0).map_err(|_| MembershipError::Incompatible)?;
+    if observed["schema_version"].as_i64()
+        != Some(crate::store::sharing_source_schema::SOURCE_SCHEMA_PREDECESSOR)
+        || observed["conflicts"]
+            .as_array()
+            .is_none_or(|rows| !rows.is_empty())
+        || observed["shared_exact"].as_i64() != Some(1)
+        || ["users", "items", "files", "dispatch"]
+            .into_iter()
+            .any(|field| observed[field].as_i64() != Some(0))
+    {
+        return Err(MembershipError::Internal(format!(
+            "fresh native import membership preconditions refused: {}",
+            shape.0
+        )));
+    }
+    let mut statements = vec![
+        (hiqlite::Error::SOURCE_LAYOUT_GUARD_SQL.to_owned(), params!(crate::store::sharing_source_schema::SOURCE_SCHEMA_PREDECESSOR)),
+        (format!("INSERT INTO sharing_source_dispatch_guard VALUES(1,CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN({names})) AND ({shared_guard}) AND NOT EXISTS(SELECT 1 FROM users) AND NOT EXISTS(SELECT 1 FROM items) AND NOT EXISTS(SELECT 1 FROM files) THEN 1 ELSE 0 END)"),params!()),
+    ];
+    statements.extend(
+        MEMBERSHIP_SCHEMA
+            .iter()
+            .map(|sql| ((*sql).to_owned(), params!())),
+    );
+    statements.extend(
+        MEMBERSHIP_ADDITIVE_COLUMNS
+            .iter()
+            .map(|column| (column.statement.to_owned(), params!())),
+    );
+    statements.extend(membership_fencing_statements());
+    statements.extend(sharing.into_iter().map(|sql| (sql, params!())));
+    statements.push((
+        "INSERT INTO cluster_membership_meta VALUES(1,$1)".to_owned(),
+        params!(MEMBERSHIP_SCHEMA_VERSION),
+    ));
+    statements.push((
+        "DELETE FROM sharing_source_dispatch_guard".to_owned(),
+        params!(),
+    ));
+    require_native_import_singleton(client, actual_local_raft_id).await?;
+    client
+        .txn(statements)
+        .await?
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    require_native_import_singleton(client, actual_local_raft_id).await
+}
+
+/// Closed declarations whose external Source dependencies may be detached only
+/// during an atomic Source ownership rebuild, then restored verbatim.
+pub(crate) fn source_rebuild_membership_trigger_definitions() -> Vec<String> {
+    MEMBERSHIP_SCHEMA
+        .iter()
+        .map(|sql| (*sql).to_owned())
+        .chain(
+            membership_fencing_statements()
+                .into_iter()
+                .map(|(sql, _)| sql),
+        )
+        .chain(sharing_member_admission_guard_schema())
+        .filter(|sql| sql.starts_with("CREATE TRIGGER"))
+        .map(|sql| {
+            sql.replace(" IF NOT EXISTS", "")
+                .trim_end_matches(';')
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Canonical fencing adjunct shared by ordinary activation and the fresh
+/// import target. Neither path fabricates a membership identity or capability.
+fn membership_fencing_statements() -> Vec<(String, Vec<Param>)> {
+    vec![
+        (BACKFILL_REMOVAL_ATTEMPT_REFS_SQL.to_owned(), params!()),
+        (REQUIRE_REMOVAL_INTENT_SQL.to_owned(), params!()),
+        (REQUIRE_LEARNER_JOIN_INTENT_SQL.to_owned(), params!()),
+        (
+            "DROP TRIGGER IF EXISTS cluster_operation_lease_heartbeat_expiry".to_owned(),
+            params!(),
+        ),
+        (
+            EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL.to_owned(),
+            params!(),
+        ),
+        (
+            REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL.to_owned(),
+            params!(),
+        ),
+        (
+            REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL.to_owned(),
+            params!(),
+        ),
+        (
+            // Replace the aborting d0 candidate trigger atomically:
+            // the compatibility guard below still refuses every
+            // unproved mutation, but lets a legacy heartbeat advance
+            // to the trusted UPDATE-owned expiry path.
+            "DROP TRIGGER IF EXISTS cluster_operation_lease_delete_intent_guard".to_owned(),
+            params!(),
+        ),
+        (
+            REQUIRE_OPERATION_LEASE_DELETE_INTENT_SQL.to_owned(),
+            params!(),
+        ),
+        (
+            REQUIRE_CACHE_ADMIN_LEASE_INSERT_INTENT_SQL.to_owned(),
+            params!(),
+        ),
+        (
+            REQUIRE_CACHE_ADMIN_LEASE_UPDATE_INTENT_SQL.to_owned(),
+            params!(),
+        ),
+        (
+            REQUIRE_CACHE_ADMIN_LEASE_DELETE_INTENT_SQL.to_owned(),
+            params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS cluster_cache_admin_lease_heartbeat_expiry".to_owned(),
+            params!(),
+        ),
+        (
+            EXPIRE_CACHE_ADMIN_LEASE_FROM_HEARTBEAT_SQL.to_owned(),
+            params!(),
+        ),
+        (BACKFILL_LIVE_TV_ACTIVATION_SQL.to_owned(), params!()),
+        (
+            MIRROR_LIVE_TV_ACTIVATION_ON_INSERT_SQL.to_owned(),
+            params!(),
+        ),
+        (
+            MIRROR_LIVE_TV_ACTIVATION_ON_UPDATE_SQL.to_owned(),
+            params!(),
+        ),
+        (
+            MIRROR_LIVE_TV_ACTIVATION_ON_DELETE_SQL.to_owned(),
+            params!(),
+        ),
+    ]
+}
+
 const MEMBERSHIP_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS cluster_membership_meta (\
          singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
@@ -1673,7 +1955,7 @@ fn sharing_membership_generation_shape_predicate() -> String {
     guards.join(" AND ")
 }
 
-const PURPOSE_BOOTSTRAP_GUARD_SCHEMA: &str = "CREATE TABLE cluster_sharing_purpose_bootstrap_guard(singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CHECK(passed=1)) STRICT";
+pub(crate) const PURPOSE_BOOTSTRAP_GUARD_SCHEMA: &str = "CREATE TABLE cluster_sharing_purpose_bootstrap_guard(singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CHECK(passed=1)) STRICT";
 fn sharing_admission_schema_shape_predicate() -> String {
     sharing_member_admission_guard_schema()
         .into_iter()
@@ -5306,20 +5588,12 @@ impl MembershipManager {
             // exact singleton vote. Only establish the observation directory;
             // timestamp zero is not a normal heartbeat or serving capability.
             manager.install_membership_schema_only().await?;
-            inner
-                .client
-                .execute(
-                    "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, \
-                  last_seen_at, removed_at, role) VALUES ($1,$2,$3,$4,0,NULL,'voter') \
-                  ON CONFLICT(node_id) DO NOTHING",
-                    params!(
-                        inner.identity.node_id.as_str(),
-                        inner.identity.raft_id as i64,
-                        inner.local.raft_address.as_str(),
-                        inner.local.api_address.as_str()
-                    ),
-                )
-                .await?;
+            register_singleton_observation_identity(
+                &inner.client,
+                &inner.identity.node_id,
+                inner.identity.raft_id,
+            )
+            .await?;
             if inner.local_metrics.current().as_ref() != Some(&applied) {
                 return Err(MembershipError::ClockUnbounded(
                     ClockRefusal::GenerationChanged,
@@ -5723,72 +5997,7 @@ impl MembershipManager {
         }
         inner
             .client
-            .txn(vec![
-                (BACKFILL_REMOVAL_ATTEMPT_REFS_SQL.to_owned(), params!()),
-                (REQUIRE_REMOVAL_INTENT_SQL.to_owned(), params!()),
-                (REQUIRE_LEARNER_JOIN_INTENT_SQL.to_owned(), params!()),
-                (
-                    "DROP TRIGGER IF EXISTS cluster_operation_lease_heartbeat_expiry".to_owned(),
-                    params!(),
-                ),
-                (
-                    EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    // Replace the aborting d0 candidate trigger atomically:
-                    // the compatibility guard below still refuses every
-                    // unproved mutation, but lets a legacy heartbeat advance
-                    // to the trusted UPDATE-owned expiry path.
-                    "DROP TRIGGER IF EXISTS cluster_operation_lease_delete_intent_guard".to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_OPERATION_LEASE_DELETE_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_CACHE_ADMIN_LEASE_INSERT_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_CACHE_ADMIN_LEASE_UPDATE_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_CACHE_ADMIN_LEASE_DELETE_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    "DROP TRIGGER IF EXISTS cluster_cache_admin_lease_heartbeat_expiry".to_owned(),
-                    params!(),
-                ),
-                (
-                    EXPIRE_CACHE_ADMIN_LEASE_FROM_HEARTBEAT_SQL.to_owned(),
-                    params!(),
-                ),
-                (BACKFILL_LIVE_TV_ACTIVATION_SQL.to_owned(), params!()),
-                (
-                    MIRROR_LIVE_TV_ACTIVATION_ON_INSERT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    MIRROR_LIVE_TV_ACTIVATION_ON_UPDATE_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    MIRROR_LIVE_TV_ACTIVATION_ON_DELETE_SQL.to_owned(),
-                    params!(),
-                ),
-            ])
+            .txn(membership_fencing_statements())
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;

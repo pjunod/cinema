@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Standalone servers use native SQLite without Raft or quorum serving checks.
+  Verified private singleton upgrades preserve current data, identities, sealed
+  keys and local observations; clusters require explicit creation or joining.
+  Native backup, restore and maintenance have independent storage adapters.
 - Rolling HLS startup measures coverage from the requested position and starts
   legacy consumption on actual media delivery. Web Resume retires destination
   waits at proven seek completion and preserves attached-media fault ownership.

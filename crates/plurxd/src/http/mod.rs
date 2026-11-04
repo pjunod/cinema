@@ -514,6 +514,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/server"
         | "/api/v1/server/node"
         | "/api/v1/settings"
+        | "/api/v1/backups"
         | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-translation"
         | "/api/v1/subtitle-translation/models"
@@ -1940,6 +1941,7 @@ pub fn router(state: AppState) -> Router {
         .route("/cluster/jobs/{id}/cancel", post(background_jobs::cancel))
         .route("/cluster/jobs/{id}/retry", post(background_jobs::retry))
         .route("/cluster/backups", post(crate::backup::create))
+        .route("/backups", post(crate::backup::create))
         .route("/cluster/leave", post(cluster::leave))
         .route(
             "/cluster/protocol/learner/activate",

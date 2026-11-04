@@ -29,6 +29,29 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Native runtime entry — scoped source review on 2026-11-04
+
+Astra independently compared `job_lease.rs` at its exact admitted fingerprint
+(`431581e204888af3b71c255d4e477df3fee3145b`) with runtime candidate
+`cf095b203ec78d083385cbb6ecce13dc01378256`. The only change is the new
+`LocalJobAuthority` implementation. All existing `ActiveJobLease` acquisition,
+heartbeat, cancellation, publication, release and drop bodies remain identical.
+Twenty source-binding fingerprints and their containing correspondence hash
+follow those bytes; action/boundary inventories, exact anchors, trust classes,
+schedule references and gap text are unchanged.
+
+[The operation wait map](../operation-progress/WAIT-MAP.md#native-runtime-entry--scoped-source-review-on-2026-11-04)
+records the reviewed native/cluster composition and runtime proof obligations.
+The native job-admission grant is an entry assumption of this worker model;
+it does not bypass the durable claim/domain/publication checks. Actual
+exclusive-directory ownership and native startup, migration, shutdown and
+SQLite scheduling are not represented by this model or its seven schedules.
+Cluster mode retains real membership authority and its existing refusals.
+
+This is independent source correspondence review, not runtime or schedule
+execution. No state/action/fairness simulation is added, no existing gap is
+closed, and no historical model or release qualification is renewed.
+
 ## Playback startup custody — scoped source review on 2026-11-03
 
 Codex agent `/root/other_formal_correspondence` compared base
