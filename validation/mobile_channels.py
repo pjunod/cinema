@@ -36,15 +36,17 @@ def changed_platforms(root: Path, base: str, head: str) -> list[str]:
     for revision in (base, head):
         if not re.fullmatch(r"[0-9a-f]{40}", revision):
             raise ValueError("push revisions must be full commit SHAs")
-    if base == "0" * 40:
-        return ["ios", "tvos", "android"]
     # NUL separation preserves whitespace; both old and new names of a rename
     # matter (moving a source out of the app still changes the shipped app).
-    paths = git(root, "diff", "--no-renames", "--name-only", "-z", base, head)
+    paths = (
+        git(root, "ls-tree", "-r", "--name-only", "-z", head)
+        if base == "0" * 40 else
+        git(root, "diff", "--no-renames", "--name-only", "-z", base, head)
+    )
     return platforms_for_paths(tuple(paths.rstrip("\0").split("\0")))
 
 
-def release(base: str, head: str, *, all_platforms: bool = False) -> None:
+def release(base: str, head: str) -> None:
     source = Path(os.environ.get("PLURX_MOBILE_SOURCE_REPO", "~/code/plurx")).expanduser().resolve()
     ansible = Path(os.environ.get("PLURX_ANSIBLE_DIR", "~/code/ansible/media")).expanduser().resolve()
     inventory = Path(os.environ.get("PLURX_ANSIBLE_INVENTORY", str(ansible / "inventory.yml"))).expanduser()
@@ -66,7 +68,7 @@ def release(base: str, head: str, *, all_platforms: bool = False) -> None:
         # A queued event can publish newer main, but cannot publish an unrelated
         # repository or a history which no longer contains the triggering push.
         subprocess.run(["git", "-C", str(source), "merge-base", "--is-ancestor", head, current], check=True)
-        platforms = ["ios", "tvos", "android"] if all_platforms else changed_platforms(source, base, current)
+        platforms = changed_platforms(source, base, current)
         if not platforms:
             print("No mobile release inputs changed.")
             return
@@ -94,12 +96,11 @@ def main() -> int:
     parser.add_argument("mode", choices=("scope", "release"))
     parser.add_argument("--base", default=os.environ.get("MOBILE_BEFORE", ""))
     parser.add_argument("--head", default=os.environ.get("MOBILE_SHA", ""))
-    parser.add_argument("--all", action="store_true", dest="all_platforms")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     try:
         if args.mode == "scope":
-            platforms = ["ios", "tvos", "android"] if args.all_platforms else changed_platforms(root, args.base, args.head)
+            platforms = changed_platforms(root, args.base, args.head)
             print(f"publish={'true' if platforms else 'false'}")
             print("platforms=" + ",".join(platforms))
         else:
@@ -109,7 +110,7 @@ def main() -> int:
                 raise ValueError("mobile channel publishing accepts main pushes or manual recovery only")
             if not re.fullmatch(r"[0-9a-f]{40}", args.head):
                 raise ValueError("publishing requires the full triggering commit SHA")
-            release(args.base, args.head, all_platforms=args.all_platforms)
+            release(args.base, args.head)
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         print(f"mobile channels: {exc}", file=sys.stderr)
         return 1

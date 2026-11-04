@@ -49,27 +49,38 @@ files and passwords on the controller, outside the repository.
 
 | Environment setting | Purpose |
 |---|---|
-| `PLURX_ANSIBLE_DIR` | Private playbook directory; defaults to `~/code/ansible/media`. It must contain `mobile-channels.yml`. |
+| `PLURX_ANSIBLE_DIR` | Private playbook directory; defaults to `~/code/ansible/media`. The signing controller sets this to its tested, commit-specific source snapshot under `~/.local/share/plurx-mobile-publisher/versions/`. It must contain `mobile-channels.yml`. |
 | `PLURX_ANSIBLE_INVENTORY` | Controller inventory; defaults to `inventory.yml` in that directory. Its `control` host must execute locally under the signing account. |
 | `PLURX_MOBILE_SOURCE_REPO` | Authenticated durable source clone; defaults to `~/code/plurx`. |
 | `PLURX_MOBILE_VARS_FILE` | Optional private Ansible vars file for signing settings, including the team ID and API-key path. |
-| `ASC_KEY_ID`, `ASC_ISSUER_ID` | App Store Connect API identity. Its private key defaults to `~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8`; override `mobile_release_channels_apple_private_key` in the vars file. |
+| `ASC_KEY_ID`, `ASC_ISSUER_ID` | Required only for the private playbook's `api-key` authentication mode. Its private key defaults to `~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8`; override `mobile_release_channels_apple_private_key` in the vars file. The signing controller uses `xcode-account` mode instead. |
 | `CINEMA_ANDROID_KEYSTORE`, `CINEMA_ANDROID_KEYSTORE_PASSWORD`, `CINEMA_ANDROID_KEY_ALIAS`, `CINEMA_ANDROID_KEY_PASSWORD` | Existing Cinema Play upload signing identity; the keystore path must be absolute. |
 | `GOOGLE_PLAY_JSON_KEY` | Absolute path to a Google Play service-account credential with testing-release access to Cinema. |
 | `PLURX_MOBILE_STATE_DIR` | Persistent receipts and controller lock; defaults to `~/.local/state/noirr/mobile-channels`. Preserve it when clearing build caches. |
 
-**Prerequisites still require operator setup.** The private infrastructure
-signing notes dated 2026-11-01 record that the existing Apple API key could
-read App Store Connect but received HTTP 403 for cloud-managed distribution
-signing, while export with the signed-in Xcode account succeeded. The channel
-playbook currently uses API-key authentication: give that key the required
-distribution-signing access, or add account-signing support in the private
-playbook before enabling its Apple lane. The same notes record that the Play
-service-account JSON was missing. Install that credential and complete Play's
-initial app/signing/testing-track setup before relying on automatic Android
-uploads. A compilation runner or a successful manual store upload does not
-establish either prerequisite. Missing credentials and rejected uploads fail
-the job.
+**Signing controller, 2026-11-03.** The repository-scoped
+`plurx-mobile-signing` runner uses a separate user LaunchAgent,
+`tv.plurx.mobile-signing`, with capacity one. Its private configuration is in
+`~/.config/plurx/mobile-runner/`; work and logs are in
+`~/.local/share/plurx-mobile-runner/`. The existing Apple CI standby is a
+separate service. This signing runner carries no `apple` or `lab` label.
+
+The private publisher supports
+`mobile_release_channels_apple_auth_mode: xcode-account`, which uses the
+already-signed-in Xcode account and omits the API-key arguments for archive,
+export and upload. The existing API key's cloud-signing HTTP 403 is preserved
+as historical evidence in the private signing notes, rather than worked
+around by granting it more access. Export of the existing Cinema iOS and
+tvOS distribution archives succeeded with the Xcode account on 2026-11-03;
+these checks submitted no new builds to TestFlight.
+
+The Cinema Play upload key remains in its existing private signing file.
+The service-account JSON is stored at `~/.config/noirr/google-play.json`
+with mode `0600`. Its Play grant covers Cinema only: view app information
+and release apps to testing tracks, with no account-wide or production
+permissions. API activation and a successful authenticated validation are
+separate acceptance steps; a local key file alone does not prove access.
+Missing credentials and rejected uploads fail the job.
 
 **Queued runs and recovery.** Workflow concurrency queues this repository's
 releases without cancelling an upload. A controller file lock also refuses
@@ -84,8 +95,10 @@ not a live store query: after a crash between store acceptance and receipt
 writing, inspect the store before retrying.
 
 Use Forgejo's **Run workflow** action on **mobile beta channels**, from
-`main`, to recover or submit all three Cinema targets. A manual run from any
-other branch is skipped. The workflow is disabled on the public GitHub mirror.
+`main`, to retry a mobile update. Supply its original push's full before-SHA
+as `base_sha`; recovery selects only platforms changed since that baseline.
+There is no build-all override. A manual run from any other branch is skipped.
+The workflow is disabled on the public GitHub mirror.
 It does not require attached devices and does not install apps on them.
 
 **How to read the result.** `uploaded` means the store accepted submission;

@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Full before-SHA from the mobile update to retry; unchanged platforms are skipped
+        required: true
+        type: string
 
 concurrency:
   group: mobile-beta-channels
@@ -25,17 +30,17 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           ref: ${{ github.sha }}
-      - name: Select changed app platforms (all on manual recovery)
+      - name: Select only changed app platforms
         id: scope
         env:
           MOBILE_BEFORE: ${{ github.event.before }}
           MOBILE_SHA: ${{ github.sha }}
           MOBILE_EVENT: ${{ github.event_name }}
+          MOBILE_RETRY_BASE: ${{ inputs.base_sha }}
         run: |
           set -euo pipefail
-          args=()
-          if [ "$MOBILE_EVENT" = workflow_dispatch ]; then args+=(--all); fi
-          python3 -m validation.mobile_channels scope "${args[@]}" >> "$GITHUB_OUTPUT"
+          if [ "$MOBILE_EVENT" = workflow_dispatch ]; then export MOBILE_BEFORE="$MOBILE_RETRY_BASE"; fi
+          python3 -m validation.mobile_channels scope >> "$GITHUB_OUTPUT"
 
   publish:
     name: upload TestFlight and Google Play internal builds
@@ -55,6 +60,7 @@ jobs:
           MOBILE_BEFORE: ${{ github.event.before }}
           MOBILE_SHA: ${{ github.sha }}
           MOBILE_EVENT: ${{ github.event_name }}
+          MOBILE_RETRY_BASE: ${{ inputs.base_sha }}
           MOBILE_RELEASE_ENV: ${{ vars.MOBILE_RELEASE_ENV }}
         run: |
           set -euo pipefail
@@ -64,6 +70,5 @@ jobs:
           set -a
           source "$release_env"
           set +a
-          args=()
-          if [ "$MOBILE_EVENT" = workflow_dispatch ]; then args+=(--all); fi
-          python3 -m validation.mobile_channels release "${args[@]}"
+          if [ "$MOBILE_EVENT" = workflow_dispatch ]; then export MOBILE_BEFORE="$MOBILE_RETRY_BASE"; fi
+          python3 -m validation.mobile_channels release

@@ -84,8 +84,10 @@ class MobileChannelsCase(unittest.TestCase):
         self.assertEqual(platforms_for_paths(("clients/apple/project.yml",)), ["ios", "tvos"])
         self.assertEqual(platforms_for_paths(("clients/android/app/build.gradle.kts",)), ["android"])
 
-    def test_first_push_selects_all_and_invalid_revision_fails(self) -> None:
-        self.assertEqual(changed_platforms(self.source, "0" * 40, self.base), ["ios", "tvos", "android"])
+    def test_first_push_selects_only_existing_mobile_sources_and_invalid_revision_fails(self) -> None:
+        self.assertEqual(changed_platforms(self.source, "0" * 40, self.base), [])
+        head = self.commit("clients/apple/Sources/Shared/Player.swift")
+        self.assertEqual(changed_platforms(self.source, "0" * 40, head), ["ios", "tvos"])
         with self.assertRaises(ValueError):
             changed_platforms(self.source, "--option", self.base)
 
@@ -109,23 +111,38 @@ class MobileChannelsCase(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 release(self.base, head)
 
-    def test_manual_recovery_selects_all_platforms_without_a_push_baseline(self) -> None:
-        release("", self.base, all_platforms=True)
+    def test_apple_only_update_never_builds_or_submits_android(self) -> None:
+        head = self.commit("clients/apple/Sources/Shared/Player.swift")
+        release(self.base, head)
         command = json.loads((self.root / "command.json").read_text())
-        self.assertEqual(json.loads(command[-1])["mobile_release_channels_platforms"], ["ios", "tvos", "android"])
+        self.assertEqual(json.loads(command[-1])["mobile_release_channels_platforms"], ["ios", "tvos"])
+
+    def test_android_only_update_never_builds_or_submits_apple(self) -> None:
+        head = self.commit("clients/android/app/src/main/AndroidManifest.xml")
+        release(self.base, head)
+        command = json.loads((self.root / "command.json").read_text())
+        self.assertEqual(json.loads(command[-1])["mobile_release_channels_platforms"], ["android"])
+
+    def test_manual_retry_requires_a_real_change_baseline(self) -> None:
+        with self.assertRaisesRegex(ValueError, "full commit SHAs"):
+            release("", self.base)
+        self.assertFalse((self.root / "command.json").exists())
 
     def test_release_cli_refuses_non_main_and_pull_request_events(self) -> None:
         for ref, event in (("refs/heads/topic", "workflow_dispatch"), ("refs/heads/main", "pull_request")):
             with self.subTest(ref=ref, event=event), patch.dict(os.environ, {
                 "GITHUB_REF": ref, "GITHUB_EVENT_NAME": event,
-            }), patch("sys.argv", ["mobile_channels", "release", "--all", "--head", self.base]), contextlib.redirect_stderr(io.StringIO()):
+            }), patch("sys.argv", ["mobile_channels", "release", "--head", self.base]), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(main(), 1)
         self.assertFalse((self.root / "command.json").exists())
 
     def test_non_mobile_push_does_not_invoke_publisher(self) -> None:
-        head = self.commit("docs/PUBLISHING.md")
-        release(self.base, head)
-        self.assertFalse((self.root / "command.json").exists())
+        for path in ("docs/PUBLISHING.md", "clients/apple/Tests/PlayerTests.swift",
+                     "clients/android/app/src/test/PlayerTest.kt", "crates/plurxd/src/main.rs"):
+            with self.subTest(path=path):
+                head = self.commit(path)
+                release(self.base, head)
+                self.assertFalse((self.root / "command.json").exists())
 
     def test_controller_lock_prevents_overlapping_publishers(self) -> None:
         state = self.root / "state"
