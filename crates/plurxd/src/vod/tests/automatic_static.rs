@@ -1,7 +1,24 @@
 // Authored qualification fixture: real selected store/runtime and FFmpeg.
 // Missing native tools/capacity fail explicitly; compilation is not execution.
+#[derive(Clone, Copy)]
+enum StaticApplicationSurvivor {
+    Entry,
+    Frame,
+    Fence,
+}
 #[tokio::test]
 async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retained_output() {
+    automatic_static_application_fixture(StaticApplicationSurvivor::Entry).await;
+}
+#[tokio::test]
+async fn automatic_static_completed_inline_frame_retains_original_m_after_store_close() {
+    automatic_static_application_fixture(StaticApplicationSurvivor::Frame).await;
+}
+#[tokio::test]
+async fn automatic_static_escaped_job_fence_retains_original_m_after_store_close() {
+    automatic_static_application_fixture(StaticApplicationSurvivor::Fence).await;
+}
+async fn automatic_static_application_fixture(survivor: StaticApplicationSurvivor) {
     use plurx_core::playback::candidate::CandidateRoute;
     use plurx_core::store::background_jobs::*;
     eprintln!("automatic static fixture: entered original fixture body");
@@ -300,126 +317,235 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         JobKind::EncodedOutputPrepare,
     )
     .expect("owner");
-    let controller = crate::background_jobs::BackgroundJobController::new(*claimed, active);
-    let fence = controller.fence();
-    let heavy = manager
-        .admit_encoded_preparation()
-        .expect("existing heavy lane");
-    let observation = manager.copy_preparation_attachment_observation();
-    assert!(
-        manager.uses_selected_static_intent(&file, &intent),
-        "automatic claim uses the same selected predicate as state.rs"
-    );
-    let compatibility_pool = encoding.admissions.clone();
-    let compatibility_baseline = compatibility_pool.snapshot();
-    // Only this shared admissions service survives the catalog recipe. It has
-    // no report/native ownership. Destroy Encoding before its original M lease.
-    drop(encoding);
-    drop(catalog_application);
-    catalog_cleanup
-        .finish_retirement(Instant::now() + Duration::from_secs(40))
-        .await
-        .expect("original catalog P/M positive cleanup");
-    assert!(catalog_cleanup.known_closed());
-    assert_eq!(
-        runtime.accounting().expect("catalog fixture retired").used,
-        resource_baseline
-    );
-    drop(catalog_cleanup);
-    let legacy = compatibility_pool
-        .try_admit_software(0, 1, crate::admission::Priority::Live)
-        .expect("actual original legacy owner");
-    let deadline = Instant::now() + Duration::from_secs(40);
-    let error = manager
-        .produce_encoded_output_job(
-            &file,
-            controller.job(),
-            fence.clone(),
-            deadline,
-            observation,
-        )
-        .await
-        .expect_err("selected background R must not bypass the live legacy owner");
-    assert!(
-        matches!(
-            &error,
-            crate::background_jobs::PreparationError::Yield("owner_busy")
-        ),
-        "the actual foreground-idle guard must yield before background admission: {error:?}"
-    );
-    assert_eq!(
-        runtime.accounting().expect("foreground yield ledger").used,
-        resource_baseline,
-        "foreground demand refuses background entry before any new P or R charge"
-    );
-    assert_eq!(
-        compatibility_pool.snapshot().software_used,
-        compatibility_baseline.software_used + 1,
-        "pre-R refusal leaves the same original legacy claim"
-    );
-    drop(legacy);
-    assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
-    // A background legacy occupant does not trip the foreground-idle guard,
-    // so the selected static constructor itself must refuse the shared
-    // compatibility alias. The same original P stays with the entry and the
-    // resume below must settle it.
-    let background_legacy = compatibility_pool
-        .try_admit_software(0, 1, crate::admission::Priority::Background)
-        .expect("actual original background legacy owner");
-    let error = manager
-        .produce_encoded_output_job(
-            &file,
-            controller.job(),
-            fence.clone(),
-            deadline,
-            observation,
-        )
-        .await
-        .expect_err("selected static R must not bypass the background legacy owner");
-    assert!(
-        matches!(&error, crate::background_jobs::PreparationError::Retry(message)
+    let application = active.fence().application_group().clone();
+    let pass = async {
+        let controller = crate::background_jobs::BackgroundJobController::new(*claimed, active);
+        let fence = controller.fence();
+        let heavy = manager
+            .admit_encoded_preparation()
+            .expect("existing heavy lane");
+        let observation = manager.copy_preparation_attachment_observation();
+        assert!(
+            manager.uses_selected_static_intent(&file, &intent),
+            "automatic claim uses the same selected predicate as state.rs"
+        );
+        let compatibility_pool = encoding.admissions.clone();
+        let compatibility_baseline = compatibility_pool.snapshot();
+        // Only this shared admissions service survives the catalog recipe. It has
+        // no report/native ownership. Destroy Encoding before its original M lease.
+        drop(encoding);
+        drop(catalog_application);
+        catalog_cleanup
+            .finish_retirement(Instant::now() + Duration::from_secs(40))
+            .await
+            .expect("original catalog P/M positive cleanup");
+        assert!(catalog_cleanup.known_closed());
+        assert_eq!(
+            runtime.accounting().expect("catalog fixture retired").used,
+            resource_baseline
+        );
+        drop(catalog_cleanup);
+        let legacy = compatibility_pool
+            .try_admit_software(0, 1, crate::admission::Priority::Live)
+            .expect("actual original legacy owner");
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let error = manager
+            .produce_encoded_output_job(
+                &file,
+                controller.job(),
+                fence.clone(),
+                deadline,
+                observation,
+            )
+            .await
+            .expect_err("selected background R must not bypass the live legacy owner");
+        assert!(
+            matches!(
+                &error,
+                crate::background_jobs::PreparationError::Yield("owner_busy")
+            ),
+            "the actual foreground-idle guard must yield before background admission: {error:?}"
+        );
+        assert_eq!(
+            runtime.accounting().expect("foreground yield ledger").used,
+            resource_baseline,
+            "foreground demand refuses background entry before any new P or R charge"
+        );
+        assert_eq!(
+            compatibility_pool.snapshot().software_used,
+            compatibility_baseline.software_used + 1,
+            "pre-R refusal leaves the same original legacy claim"
+        );
+        drop(legacy);
+        assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
+        // A background legacy occupant does not trip the foreground-idle guard,
+        // so the selected static constructor itself must refuse the shared
+        // compatibility alias. The same original P stays with the entry and the
+        // resume below must settle it.
+        let background_legacy = compatibility_pool
+            .try_admit_software(0, 1, crate::admission::Priority::Background)
+            .expect("actual original background legacy owner");
+        let error = manager
+            .produce_encoded_output_job(
+                &file,
+                controller.job(),
+                fence.clone(),
+                deadline,
+                observation,
+            )
+            .await
+            .expect_err("selected static R must not bypass the background legacy owner");
+        assert!(
+            matches!(&error, crate::background_jobs::PreparationError::Retry(message)
             if message.contains("compatibility pool")),
-        "the actual static R compatibility refusal: {error:?}"
-    );
-    assert_eq!(
-        compatibility_pool.snapshot().software_used,
-        compatibility_baseline.software_used + 1,
-        "R refusal leaves only the same original background legacy claim"
-    );
-    drop(background_legacy);
-    assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
-    // Production runs the VodServe maintenance tick from startup. A new
-    // retained artifact is exposed only after that startup inventory has
-    // converged; before it, exposure is a Retry with the artifact kept.
-    for _ in 0..16 {
-        serve.maintain().await;
-        if serve.shared.retained_artifacts.cold_ready() {
-            break;
+            "the actual static R compatibility refusal: {error:?}"
+        );
+        assert_eq!(
+            compatibility_pool.snapshot().software_used,
+            compatibility_baseline.software_used + 1,
+            "R refusal leaves only the same original background legacy claim"
+        );
+        drop(background_legacy);
+        assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
+        // Production runs the VodServe maintenance tick from startup. A new
+        // retained artifact is exposed only after that startup inventory has
+        // converged; before it, exposure is a Retry with the artifact kept.
+        for _ in 0..16 {
+            serve.maintain().await;
+            if serve.shared.retained_artifacts.cold_ready() {
+                break;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        serve.shared.retained_artifacts.cold_ready(),
-        "the real maintenance tick converges the startup retained inventory"
-    );
-    assert!(manager
-        .produce_encoded_output_job(
-            &file,
-            controller.job(),
-            fence.clone(),
-            deadline,
-            observation
-        )
-        .await
-        .expect("same original automatic owner resumes under zero policy"));
-    assert_eq!(
+        assert!(
+            serve.shared.retained_artifacts.cold_ready(),
+            "the real maintenance tick converges the startup retained inventory"
+        );
+        assert!(manager
+            .produce_encoded_output_job(
+                &file,
+                controller.job(),
+                fence.clone(),
+                deadline,
+                observation
+            )
+            .await
+            .expect("same original automatic owner resumes under zero policy"));
+        assert_eq!(
         compatibility_pool.snapshot(),
         compatibility_baseline,
         "known original static R-to-S releases compatibility credit without counting retained S as CPU work"
     );
-    drop(heavy);
-    drop(fence);
-    let _ = controller.finish().await;
+        drop(heavy);
+        drop(fence);
+        let entry_alias = manager
+            .fixture_static_application_alias()
+            .expect("actual rich static entry");
+        let fence_alias = controller.fence();
+        let original_claim = controller.job().token.clone().expect("same original claim");
+        let receipt = controller.finish().await;
+        assert!(
+            receipt.closes_original(&original_claim),
+            "actual original heartbeat and logical Store Close precede survivor checks"
+        );
+        (entry_alias, fence_alias)
+    };
+    let mut original_pass = Box::pin(
+        application
+            .frame(pass)
+            .expect("same complete inline pass as state.rs"),
+    );
+    let (entry_alias, fence_alias) = original_pass.as_mut().await;
+    manager.fixture_reconcile_static_application().await;
+    manager.fixture_reconcile_static_application().await;
+    assert!(
+        manager.fixture_static_application_alias().is_none(),
+        "actual rich registry entry was extracted into independent compact cleanup"
+    );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("original native P/R closure")
+            .unknown_peak_producers,
+        0,
+        "actual native P and R close before isolated survivor assertions"
+    );
+    // Keep one independently owned original allocation graph at a time.
+    // Terminal reconciliation has extracted the entry's controller selector,
+    // so the entry-only case cannot be masked by its original JobFence Arc.
+    let held_m = runtime
+        .planning_ownership_diagnostics()
+        .expect("actual P/M book")
+        .metadata_owners;
+    assert_eq!(held_m, 1);
+    match survivor {
+        StaticApplicationSurvivor::Entry => {
+            drop(original_pass);
+            drop(fence_alias);
+            manager.fixture_reconcile_static_application().await;
+            runtime
+                .maintain_planning_cleanup(Instant::now() + Duration::from_millis(500))
+                .await;
+            assert_eq!(
+                runtime
+                    .planning_ownership_diagnostics()
+                    .expect("entry-only M")
+                    .metadata_owners,
+                held_m
+            );
+            drop(entry_alias);
+        }
+        StaticApplicationSurvivor::Frame => {
+            drop(entry_alias);
+            drop(fence_alias);
+            manager.fixture_reconcile_static_application().await;
+            runtime
+                .maintain_planning_cleanup(Instant::now() + Duration::from_millis(500))
+                .await;
+            assert_eq!(
+                runtime
+                    .planning_ownership_diagnostics()
+                    .expect("completed-F-only M")
+                    .metadata_owners,
+                held_m
+            );
+            drop(original_pass);
+        }
+        StaticApplicationSurvivor::Fence => {
+            drop(entry_alias);
+            drop(original_pass);
+            manager.fixture_reconcile_static_application().await;
+            runtime
+                .maintain_planning_cleanup(Instant::now() + Duration::from_millis(500))
+                .await;
+            assert_eq!(
+                runtime
+                    .planning_ownership_diagnostics()
+                    .expect("escaped-Fence-only M")
+                    .metadata_owners,
+                held_m
+            );
+            drop(fence_alias);
+        }
+    }
+    manager.fixture_reconcile_static_application().await;
+    let original_m_deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        runtime.maintain_planning_cleanup(original_m_deadline).await;
+        if runtime
+            .planning_ownership_diagnostics()
+            .expect("original M finalization")
+            .metadata_owners
+            == 0
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < original_m_deadline,
+            "the same original M did not positively retire after its sole survivor dropped"
+        );
+        tokio::task::yield_now().await;
+    }
     assert_eq!(
         runtime
             .accounting()
@@ -511,7 +637,10 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         .retained_output
         .as_ref()
         .expect("actual settled complete output");
-    let carrier = session.rendition.as_ref().expect("retained carrier rendition");
+    let carrier = session
+        .rendition
+        .as_ref()
+        .expect("retained carrier rendition");
     assert!(
         carrier.finite_metadata_lease.is_some() && carrier.finite_client_lease.is_some(),
         "a retained carrier charges its metadata and readers to the settled S role"
@@ -571,7 +700,12 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         serve
             .shared
             .retained_artifacts
-            .acquire_prepared_candidate(&rendition.retained_probe(), &logical, &resolved_file, &wrong_offset)
+            .acquire_prepared_candidate(
+                &rendition.retained_probe(),
+                &logical,
+                &resolved_file,
+                &wrong_offset
+            )
             .await
             .is_none(),
         "a different audio offset cannot borrow the settled origin"
@@ -586,7 +720,12 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         serve
             .shared
             .retained_artifacts
-            .acquire_prepared_candidate(&rendition.retained_probe(), &logical, &resolved_file, &wrong_geometry)
+            .acquire_prepared_candidate(
+                &rendition.retained_probe(),
+                &logical,
+                &resolved_file,
+                &wrong_geometry
+            )
             .await
             .is_none(),
         "a different candidate geometry cannot borrow the settled origin"
@@ -633,7 +772,11 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         retained_charge,
         "pressure alone cannot refund the original live-body S"
     );
-    serve.shared.retained_artifacts.collect(&serve.shared.base).await;
+    serve
+        .shared
+        .retained_artifacts
+        .collect(&serve.shared.base)
+        .await;
     assert_eq!(
         serve.shared.retained_artifacts.test_capacity_snapshot().0,
         retained_charge,
@@ -644,7 +787,11 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     // the terminal tombstone keeps its counted session state in S's client
     // partition for the late-response window, exactly as for any finite
     // rendition. S stays charged until that original retention expires.
-    serve.shared.retained_artifacts.collect(&serve.shared.base).await;
+    serve
+        .shared
+        .retained_artifacts
+        .collect(&serve.shared.base)
+        .await;
     assert_eq!(
         serve.shared.retained_artifacts.test_capacity_snapshot().0,
         retained_charge,
@@ -654,7 +801,11 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     // Existing maintenance resumes the same queued original eviction; no
     // replacement native operation or daemon/path-based refund is minted.
     for _ in 0..16 {
-        serve.shared.retained_artifacts.collect(&serve.shared.base).await;
+        serve
+            .shared
+            .retained_artifacts
+            .collect(&serve.shared.base)
+            .await;
         if serve.shared.retained_artifacts.test_capacity_snapshot().0 == 0 {
             break;
         }

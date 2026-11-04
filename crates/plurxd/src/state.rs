@@ -12123,14 +12123,17 @@ impl JobManager {
             };
             let (job, active, fence) = match claim {
                 crate::background_jobs::PreparationClaim::Encoded(job, active, _admission) => {
-                    let controller =
-                        crate::background_jobs::BackgroundJobController::new(job, active);
-                    let job = controller.job();
-                    let fence = controller.fence();
-                    let observation = transcode.copy_preparation_attachment_observation();
-                    let result = {
-                        let operation = async {
-                            let plurx_core::store::background_jobs::JobPayload::EncodedOutputPrepare {
+                    let application = active.fence().application_group().clone();
+                    let pass = async {
+                        let _admission = _admission;
+                        let controller =
+                            crate::background_jobs::BackgroundJobController::new(job, active);
+                        let job = controller.job();
+                        let fence = controller.fence();
+                        let observation = transcode.copy_preparation_attachment_observation();
+                        let result = {
+                            let operation = async {
+                                let plurx_core::store::background_jobs::JobPayload::EncodedOutputPrepare {
                                 file_id, source_size, source_mtime, reason, intent, ..
                             } = job.supported_payload().map_err(|_| {
                                 crate::background_jobs::PreparationError::Fail(
@@ -12142,101 +12145,108 @@ impl JobManager {
                                     "encoded_payload_unsupported",
                                 ));
                             };
-                            let Some(file) =
-                                crate::transcode::TranscodeManager::claimed_preparation_file(
-                                    self.store.as_ref(),
-                                    file_id,
-                                    source_size,
-                                    source_mtime,
-                                    &fence,
-                                )
-                                .await?
-                            else {
-                                return Ok(false);
-                            };
-                            let item = self
-                                .store
-                                .get_item(file.item_id)
-                                .await
-                                .map_err(|error| error.to_string())?;
-                            self.publish_preparation(&file, item.as_ref(), &reason, index)
-                                .await;
-                            let roots = match item {
-                                Some(item) => self
+                                let Some(file) =
+                                    crate::transcode::TranscodeManager::claimed_preparation_file(
+                                        self.store.as_ref(),
+                                        file_id,
+                                        source_size,
+                                        source_mtime,
+                                        &fence,
+                                    )
+                                    .await?
+                                else {
+                                    return Ok(false);
+                                };
+                                let item = self
                                     .store
-                                    .get_library(item.library_id)
+                                    .get_item(file.item_id)
                                     .await
-                                    .map_err(|error| error.to_string())?
-                                    .map(|library| library.paths)
-                                    .unwrap_or_default(),
-                                None => Vec::new(),
-                            };
-                            #[cfg(target_os = "linux")]
-                            let selected_static =
-                                transcode.uses_selected_static_intent(&file, &intent);
-                            #[cfg(not(target_os = "linux"))]
-                            let selected_static = {
-                                let _ = &intent;
-                                false
-                            };
-                            if !selected_static {
-                                let original =
-                                    job.token.as_ref().ok_or("encoded claim token missing")?;
-                                if fence.snapshot_for_claim(original).await.is_none() {
-                                    return Err(crate::background_jobs::PreparationError::Stop(
-                                        "ownership_lost",
-                                    ));
+                                    .map_err(|error| error.to_string())?;
+                                self.publish_preparation(&file, item.as_ref(), &reason, index)
+                                    .await;
+                                let roots = match item {
+                                    Some(item) => self
+                                        .store
+                                        .get_library(item.library_id)
+                                        .await
+                                        .map_err(|error| error.to_string())?
+                                        .map(|library| library.paths)
+                                        .unwrap_or_default(),
+                                    None => Vec::new(),
+                                };
+                                #[cfg(target_os = "linux")]
+                                let selected_static =
+                                    transcode.uses_selected_static_intent(&file, &intent);
+                                #[cfg(not(target_os = "linux"))]
+                                let selected_static = {
+                                    let _ = &intent;
+                                    false
+                                };
+                                if !selected_static {
+                                    let original =
+                                        job.token.as_ref().ok_or("encoded claim token missing")?;
+                                    if fence.snapshot_for_claim(original).await.is_none() {
+                                        return Err(
+                                            crate::background_jobs::PreparationError::Stop(
+                                                "ownership_lost",
+                                            ),
+                                        );
+                                    }
+                                    crate::transcode::pretranscode_source_snapshot(&file, &roots)
+                                        .await
+                                        .ok_or("encoded source unavailable on owner")?;
                                 }
-                                crate::transcode::pretranscode_source_snapshot(&file, &roots)
+                                transcode
+                                    .produce_encoded_output_job(
+                                        &file,
+                                        job,
+                                        fence.clone(),
+                                        deadline,
+                                        observation,
+                                    )
                                     .await
-                                    .ok_or("encoded source unavailable on owner")?;
-                            }
-                            transcode
-                                .produce_encoded_output_job(
-                                    &file,
-                                    job,
-                                    fence.clone(),
-                                    deadline,
-                                    observation,
-                                )
-                                .await
+                            };
+                            // Activity's Stop reaches a running preparation here:
+                            // the watcher polls this every PRODUCER_POLL and
+                            // abandons the operation, and the settle below
+                            // cancels the job instead of yielding it.
+                            crate::background_jobs::watch_copy_preparation(
+                                &fence,
+                                deadline.into(),
+                                || {
+                                    !self.stop_producing.load(Ordering::Relaxed)
+                                        && transcode.encoded_preparation_still_idle(observation)
+                                },
+                                operation,
+                            )
+                            .await
                         };
-                        // Activity's Stop reaches a running preparation here:
-                        // the watcher polls this every PRODUCER_POLL and
-                        // abandons the operation, and the settle below
-                        // cancels the job instead of yielding it.
-                        crate::background_jobs::watch_copy_preparation(
-                            &fence,
-                            deadline.into(),
-                            || {
-                                !self.stop_producing.load(Ordering::Relaxed)
-                                    && transcode.encoded_preparation_still_idle(observation)
-                            },
-                            operation,
-                        )
-                        .await
-                    };
-                    let reason = self
-                        .settle_output_preparation(
-                            job,
-                            &fence,
-                            "encoded_output",
-                            result,
-                            fence.loss_token().is_cancelled()
-                                || std::time::Instant::now() >= deadline
-                                || !transcode.encoded_preparation_still_idle(observation),
-                            self.stop_producing.load(Ordering::Relaxed),
-                        )
-                        .await;
-                    match reason {
-                        None => produced += 1,
-                        Some(reason) => {
-                            skipped += 1;
-                            *reasons.entry(reason).or_default() += 1;
+                        let reason = self
+                            .settle_output_preparation(
+                                job,
+                                &fence,
+                                "encoded_output",
+                                result,
+                                fence.loss_token().is_cancelled()
+                                    || std::time::Instant::now() >= deadline
+                                    || !transcode.encoded_preparation_still_idle(observation),
+                                self.stop_producing.load(Ordering::Relaxed),
+                            )
+                            .await;
+                        match reason {
+                            None => produced += 1,
+                            Some(reason) => {
+                                skipped += 1;
+                                *reasons.entry(reason).or_default() += 1;
+                            }
                         }
-                    }
-                    drop(fence);
-                    let _ = controller.finish().await;
+                        drop(fence);
+                        let _ = controller.finish().await;
+                    };
+                    application
+                        .frame(pass)
+                        .expect("original inline encoded pass registered before M entry")
+                        .await;
                     continue;
                 }
                 crate::background_jobs::PreparationClaim::Transcode(job, active, fence) => {

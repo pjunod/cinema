@@ -21,6 +21,7 @@ use crate::resource_custody::{
     ProcessIdentity, RecoverySnapshot, Role,
 };
 
+pub mod application;
 mod capacity_observer;
 #[cfg(target_os = "linux")]
 mod finite_policy;

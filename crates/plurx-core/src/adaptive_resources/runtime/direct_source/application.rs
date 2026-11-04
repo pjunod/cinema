@@ -109,7 +109,7 @@ impl ApplicationLeaseState {
                         reference: reference.identity(),
                     };
                     inventory
-                        .finish_application_close(reference, closed)
+                        .finish_application_close(reference, closed.into())
                         .map_err(|_| invalid())?;
                     state.reference = None;
                 }

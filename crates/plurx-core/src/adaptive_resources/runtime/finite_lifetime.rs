@@ -17,6 +17,9 @@ struct FiniteAppCounts {
     application_limit: usize,
     application_taken: bool,
     application_live: bool,
+    // Retain registered original custody if its daemon selector disappears.
+    #[cfg(target_os = "linux")]
+    registered: Option<Arc<super::application::ApplicationState>>,
 }
 
 pub(super) struct FiniteAppGuard {
@@ -51,6 +54,8 @@ impl FiniteAppState {
                 application_limit,
                 application_taken: false,
                 application_live: false,
+                #[cfg(target_os = "linux")]
+                registered: None,
             }),
             changed: Notify::new(),
         })
@@ -74,6 +79,48 @@ impl FiniteAppState {
         Some(FiniteApplicationLease {
             state: Arc::clone(self),
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn take_registered_application(
+        self: &Arc<Self>,
+        bytes: usize,
+        group: Arc<super::application::ApplicationState>,
+        register: impl FnOnce() -> Result<
+            crate::adaptive_resources::owner_inventory::ApplicationReference,
+            super::application::ApplicationError,
+        >,
+    ) -> Result<
+        (
+            FiniteApplicationLease,
+            crate::adaptive_resources::owner_inventory::ApplicationReference,
+        ),
+        super::application::ApplicationError,
+    > {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| super::application::ApplicationError)?;
+        if inner.sealed
+            || inner.failed
+            || inner.application_taken
+            || bytes == 0
+            || bytes > inner.application_limit
+        {
+            return Err(super::application::ApplicationError);
+        }
+        // Caller holds census -> book -> group -> finite. Every deterministic
+        // refusal precedes insertion; nothing fallible follows registration.
+        let reference = register()?;
+        inner.application_taken = true;
+        inner.application_live = true;
+        inner.registered = Some(group);
+        Ok((
+            FiniteApplicationLease {
+                state: Arc::clone(self),
+            },
+            reference,
+        ))
     }
 
     pub(super) fn new_guard(self: &Arc<Self>) -> Option<Arc<FiniteAppGuard>> {
