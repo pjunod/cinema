@@ -5,7 +5,7 @@
 
 ## HDR enhancement quality repair — 2026-11-03
 
-Open: make RPU/DYN/FEL preserve their benefit after delivery. A measured RGB conversion bias has a source correction prepared; full-window encoder comparison and production improvement remain. [Canonical ledger](docs/streaming/DV_HDR_QUALITY_REPAIR.md).
+Open: make RPU/DYN/FEL preserve their benefit after delivery. Measurement repair is integrated into the effort. Uncapped source-budget and exact codec/recipe repairs pass independent review, native checks, ten core and ten daemon cases, replicated-storage and native authoring controls. Integration, promotion and final-delivery acceptance remain. The direct-export prototype fails real-FEL controls; native-player captures await exact paired BL/EL/RPU identity. [Canonical ledger](docs/streaming/DV_HDR_QUALITY_REPAIR.md).
 
 
 ## 2026-11-03 · Playback publication and Resume overlay

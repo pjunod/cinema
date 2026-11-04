@@ -1325,15 +1325,9 @@ impl VaapiHdrPolicy {
     }
 }
 
-/// The reconstructed Profile 8.1's video rate ceiling. The route replaces a
-/// copy of the disc's base layer at full source rate, so it gets a delivery
-/// rate near that, not the 2160p transcode rung (20 Mb/s).
-pub const RECONSTRUCTED_P81_MAX_VIDEO_KBPS: u32 = 60_000;
-
-/// Identity of the route's encode recipe; part of every per-title FEL
-/// qualification verdict, so changing it re-qualifies every title.
+/// Recipe identity invalidates every qualification made under the old cap.
 pub const RECONSTRUCTED_P81_RECIPE: &str =
-    "p81-vbr:b=min(source,60000k):maxrate=1.5b:bufsize=2b:bf=0:radeonsi-compression_level=0:v1";
+    "p81-vbr:source-budget-preserved:checked-peak-cpb-hevc-dv-envelope:bf=0:radeonsi-compression_level=0:v2";
 
 /// The route's VA-API encode of one sample window for the per-title FEL
 /// qualification: the same Main10 contract arguments and route flags as
@@ -1352,9 +1346,17 @@ pub fn reconstructed_p81_window_encode_args(
     let contract = CompletedReconstructedOutputContract::resolve(Encoder::Vaapi)?;
     let mut args = contract.encode_args(bitrate_kbps, true, Some(1));
     args.extend(policy.reconstructed_profile81_flags().map(str::to_owned));
-    let level = hevc_level_for(width, height, rate.0, rate.1)?;
-    let at = args.iter().position(|arg| arg == "-level:v")?;
-    args[at + 1] = level.to_owned();
+    let envelope = super::EnhancementRateEnvelope::resolve(
+        bitrate_kbps,
+        super::EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+        width,
+        height,
+        rate,
+        true,
+        Default::default(),
+    )
+    .ok()?;
+    envelope.apply_args(&mut args, Encoder::Vaapi);
     let gop = frames.to_string();
     args.extend(
         [
@@ -1372,28 +1374,37 @@ pub fn reconstructed_p81_window_encode_args(
     Some(args)
 }
 
-/// The reconstructed Profile 8.1's target video rate: the source's average
-/// bitrate (the whole file's, so an upper bound on its video's), capped at
-/// [`RECONSTRUCTED_P81_MAX_VIDEO_KBPS`]. VBR at this target with the ordinary
-/// VBV (`-maxrate` 1.5x, `-bufsize` 2x) kept every measured 2 s segment
-/// under the advertised peak (worst 58 Mb/s at a 60 Mb/s target).
-pub fn reconstructed_p81_video_kbps(source: &crate::domain::MediaFile) -> u32 {
-    let measured = source
-        .bitrate
-        .filter(|bps| *bps > 0)
-        .map(|bps| bps / 1000)
-        .or_else(|| {
-            source
-                .duration_ms
-                .filter(|ms| *ms > 0)
-                .map(|ms| source.size.saturating_mul(8) / ms)
-        });
-    measured
-        .and_then(|kbps| u32::try_from(kbps).ok())
-        .map_or(RECONSTRUCTED_P81_MAX_VIDEO_KBPS, |kbps| {
-            kbps.min(RECONSTRUCTED_P81_MAX_VIDEO_KBPS)
-        })
-        .max(1_000)
+/// A measured conservative video budget; unknown rates never invent a target.
+pub fn reconstructed_p81_video_kbps(
+    source: &crate::domain::MediaFile,
+) -> Result<u32, &'static str> {
+    super::enhancement_source_budget(source, None).map(|(target, _)| target)
+}
+
+/// Compatibility helper for callers selecting a source-copy enhancement.
+/// Declared peak conflicts are errors; they never reduce the measured target.
+pub fn source_copy_hdr10_video_kbps(
+    source: &crate::domain::MediaFile,
+    _rung_kbps: u32,
+    width: u32,
+    height: u32,
+    rate: Option<(u32, u32)>,
+    video_peak_limit_bps: Option<u64>,
+) -> Result<u32, &'static str> {
+    let (target, provenance) = super::enhancement_source_budget(source, None)?;
+    super::EnhancementRateEnvelope::resolve(
+        target,
+        provenance,
+        width,
+        height,
+        rate.ok_or("enhancement cadence unavailable")?,
+        false,
+        super::EnhancementRateLimits {
+            video_peak_bps: video_peak_limit_bps,
+            ..Default::default()
+        },
+    )
+    .map(|envelope| envelope.target_kbps())
 }
 
 /// Physical inventory, independent of whether an encoder initialized successfully.
@@ -3261,6 +3272,21 @@ mod tests {
             frames >= 10,
             "{frames} frames is not enough for a lookahead"
         );
+    }
+
+    #[test]
+    fn hdr10_source_copy_rate_preserves_measurements_without_an_invented_cap() {
+        let mut source = crate::transcode::tests::file(Some("hdr10"));
+        source.bitrate = Some(90_893_001);
+        assert_eq!(reconstructed_p81_video_kbps(&source), Ok(90_894));
+        source.bitrate = Some(8_000_000);
+        assert_eq!(reconstructed_p81_video_kbps(&source), Ok(8_000));
+        source.bitrate = None;
+        source.duration_ms = Some(1001);
+        source.size = 10_000_000;
+        assert_eq!(reconstructed_p81_video_kbps(&source), Ok(79_921));
+        source.size = 0;
+        assert!(reconstructed_p81_video_kbps(&source).is_err());
     }
 
     #[test]

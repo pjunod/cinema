@@ -394,6 +394,144 @@ pub enum VerdictState {
     Current(FelVerdict),
 }
 
+pub const VARIANTS_KEY: &str = "plurx_dv_fel_variants_v3";
+pub const REQUESTS_KEY: &str = "plurx_dv_fel_requests_v3";
+pub const MAX_RECIPE_VARIANTS: usize = 8;
+
+/// Exact renderer export and picture clock measured by the receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FelRecipeOutput {
+    pub video_stream: u32,
+    pub width: u32,
+    pub height: u32,
+    pub rate: (u32, u32),
+}
+impl FelRecipeOutput {
+    pub fn new(video_stream: u32, raster: (u32, u32), rate: (u32, u32)) -> Self {
+        let (mut a, mut b) = rate;
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        let divisor = a.max(1);
+        Self {
+            video_stream,
+            width: raster.0,
+            height: raster.1,
+            rate: (rate.0 / divisor, rate.1 / divisor),
+        }
+    }
+    pub const EXPORT: &'static str = "pq-bilinear-yuv420p10-v1";
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FelRecipeRequest {
+    pub identity: String,
+    pub backend_identity: String,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub envelope: super::EnhancementRateEnvelope,
+    pub output: FelRecipeOutput,
+}
+impl FelRecipeRequest {
+    pub fn new(
+        backend_identity: String,
+        source_size: i64,
+        source_mtime: i64,
+        envelope: super::EnhancementRateEnvelope,
+        output: FelRecipeOutput,
+    ) -> Self {
+        let identity = hex::encode(Sha256::digest(
+            serde_json::to_vec(&(
+                "fel-video-recipe-v3",
+                FelRecipeOutput::EXPORT,
+                output,
+                &backend_identity,
+                envelope.identity(),
+            ))
+            .expect("bounded recipe"),
+        ));
+        Self {
+            identity,
+            backend_identity,
+            source_size,
+            source_mtime,
+            envelope,
+            output,
+        }
+    }
+    pub fn valid(&self) -> bool {
+        self.source_size >= 0
+            && self.source_mtime >= 0
+            && self.backend_identity.len() == 64
+            && self.backend_identity.bytes().all(|b| b.is_ascii_hexdigit())
+            && *self
+                == Self::new(
+                    self.backend_identity.clone(),
+                    self.source_size,
+                    self.source_mtime,
+                    self.envelope,
+                    self.output,
+                )
+            && self
+                .envelope
+                .dv_level()
+                .is_some_and(|v| (1..=13).contains(&v))
+            && self.envelope.target_kbps() > 0
+            && self.envelope.peak_kbps() >= self.envelope.target_kbps()
+            && self.envelope.buffer_kbits() > 0
+            && self.envelope.hevc_level() != "invalid"
+            && self.output.width >= 64
+            && self.output.height >= 64
+            && self.output.width.is_multiple_of(2)
+            && self.output.height.is_multiple_of(2)
+            && self.output.rate.0 > 0
+            && self.output.rate.1 > 0
+            && self.output
+                == FelRecipeOutput::new(
+                    self.output.video_stream,
+                    (self.output.width, self.output.height),
+                    self.output.rate,
+                )
+            && self
+                .envelope
+                .validate_picture(self.output.width, self.output.height, self.output.rate)
+                .is_ok()
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FelRecipeVerdict {
+    pub request: FelRecipeRequest,
+    pub verdict: FelVerdict,
+}
+
+pub fn pending_recipes(document: &str, size: i64, mtime: i64) -> Vec<FelRecipeRequest> {
+    serde_json::from_str::<serde_json::Value>(document)
+        .ok()
+        .and_then(|doc| {
+            doc.get(REQUESTS_KEY)
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+        })
+        .map(|rows| {
+            rows.into_iter()
+                .take(MAX_RECIPE_VARIANTS)
+                .filter_map(|(key, value)| {
+                    serde_json::from_value::<FelRecipeRequest>(value)
+                        .ok()
+                        .filter(|r| {
+                            r.valid()
+                                && r.identity == key
+                                && r.source_size == size
+                                && r.source_mtime == mtime
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Read a title's verdict from its stored probe document. A verdict for
 /// another source size/mtime, renderer or recipe is not this title's verdict.
 pub fn verdict_state(
@@ -404,7 +542,20 @@ pub fn verdict_state(
 ) -> VerdictState {
     probe_json
         .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
-        .and_then(|document| document.get(PROBE_KEY).cloned())
+        .and_then(|document| {
+            document
+                .get(VARIANTS_KEY)
+                .and_then(|rows| rows.get(identity))
+                .cloned()
+                .and_then(|row| serde_json::from_value::<FelRecipeVerdict>(row).ok())
+                .filter(|row| {
+                    row.request.valid()
+                        && row.request.identity == identity
+                        && row.verdict.identity == identity
+                })
+                .and_then(|row| serde_json::to_value(row.verdict).ok())
+                .or_else(|| document.get(PROBE_KEY).cloned())
+        })
         .and_then(|value| serde_json::from_value::<FelVerdict>(value).ok())
         .filter(|verdict| {
             verdict.schema == SCHEMA

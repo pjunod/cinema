@@ -14,6 +14,48 @@ source mapping**, not an automatic refinement proof. Source hashes in
 that set complete or that the abstractions are correct.
 
 
+## HDR recipe requests — scoped source review on 2026-11-03
+
+Codex compared effort source `701e90d6e` with HDR repair `4de042586`.
+The [queue trait and adapter](../../crates/plurx-core/src/store/background_jobs.rs)
+add only the title-specific `request_dv_fel_variant` method and delegation.
+Selected library claim, token, renewal, binding, cancellation, settlement,
+retention and fenced item-publication bodies are unchanged. The
+[conformance parent](../../crates/plurx-core/tests/store_contract.rs) adds one
+method-inventory entry; its `formal_publication` registration is unchanged.
+
+The [title store](../../crates/plurx-core/src/store/dv_title_jobs.rs) reopens
+`dv_title_jobs_demand.terminal` for current-source pending recipes after active
+title work ends. Shared `background_jobs` terminal rows and durable library
+request/waiter results retain their existing transitions. Reclaiming a yielded
+title job follows the existing running-to-queued settlement and fresh claim
+fence. Source size/mtime, scanner and demand-revision guards still bind title
+selection and publication. Exact FEL receipts use source CAS, preserve peer
+variants and remove only their matching request. Title scanning, demand
+binding and FEL receipt publication retain the exclusion documented below;
+this finite model gains no title-worker transition or progress claim.
+
+The [exact-variant runtime regression](../../crates/plurx-core/tests/store_contract/dv_title_jobs.rs)
+executes queued reclamation, late requests, source CAS and bounded receipt
+retention on SQLite memory/file stores and a three-voter Hiqlite cluster.
+Those runtime results supply evidence for the excluded title path; they are
+separate from this model's properties and qualification.
+
+Independent Astra review approved this scope disposition. Four reviewed source
+files update fourteen live mapping rows, whose anchors remain unique.
+Relative to that historical HDR-only comparison, models, configurations,
+bounds, properties, toolchain pins, historical source anchors and qualification
+receipts retained their identities. The current integration also preserves
+main's separately reviewed source-pause model and configuration extension
+below. This source correspondence adds no TLC execution or new formal proof; fresh affected smoke
+receipts remain a separate CI obligation outside effort compile-only mode.
+
+During integration onto current main, the shared queue keeps main's exact
+paused-owner renewal and reacquisition rules. The HDR method/delegation and
+title-specific receipt changes remain outside the selected publication path;
+the refreshed whole-file pins cover both source changes without restoring
+older model, configuration or authority mappings.
+
 ## Source pause — finite correspondence on 2026-11-03
 
 The source audit compares each drifted file with the Git version whose bytes
