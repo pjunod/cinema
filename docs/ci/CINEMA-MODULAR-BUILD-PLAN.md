@@ -221,6 +221,23 @@ the high-level cluster backend back into the package. Extract the minimum
 verification primitives together when this is necessary to prevent a cycle.
 A feature-disabled authority package must itself pass the no-Hiqlite graph gate.
 
+The source audit identified two concrete extraction constraints. Primitive
+DTO/error/crypto/lease contracts and the full Store API need separate owners:
+Store methods consume authority proofs, while authority consumes primitives.
+Combining these packages would create a dependency cycle. Also, generic SQL
+implementations such as `impl<T: Backend> SharingStore for T` cannot move to a
+third crate once their trait is foreign under Rust's orphan rules. Keep each
+trait with its generic implementation initially, or use shared free functions
+with backend-owned forwarding implementations; never duplicate the SQL.
+
+The P3 constructor/API decision must therefore refine the initial sketch into
+an acyclic primitive-contracts → canonical-schema → authority → Store-API
+layering before extracting adapters. One integrator owns central manifests,
+core re-exports and the heavily shared Store module. These tasks land serially;
+their ownership overlaps and does not qualify for the disjoint-file exception.
+Native Receiver custody also needs a real capability/parity fixture: its current
+no-feature uninhabited type cannot establish standalone sharing acceptance.
+
 This is an ownership sketch, not an approved constructor API. P3 entry requires
 actual proposed signatures, the dependency-cycle check, identification of every
 trusted minting path, and downstream compile-fail fixtures proving callers
@@ -359,6 +376,12 @@ candidate. Preserve the regression fields in the landing commit (including
 the explicit merge-message field when using the Forgejo API). Freeze task
 merges for final effort-to-main qualification. No force-push or reset of other
 work and no source/receipt deletion to get a green result.
+
+The authenticated history binding requires live main to be an ancestor of the
+effort base and the effort base to be an ancestor of the task head. Reconcile
+those refs before dispatch, then use a new first-attempt workflow dispatch.
+Re-running an old failed attempt does not satisfy that binding. A green
+paperwork-only task status does not replace the explicit effort gate.
 
 ## 6. Final gates — prove omission and preserved behavior
 
