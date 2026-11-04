@@ -7,6 +7,7 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
+| [CINEMA-MODULAR-BUILD-ASTRA-REVIEW.md](CINEMA-MODULAR-BUILD-ASTRA-REVIEW.md) | Astra review of the modular build plan: whole-distribution dependency omission, migration helper handoff, sealed authority, timing parity and individual dispositions. | done |
 | [PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md](PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md) | Actual storage-owner implementation review: seven findings corrected and final focused evidence approved. | done |
 | [PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md](PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md) | Adversarial review of the October 8 playback-buffer repair: capacity handoff, early cancellation, restart and cleanup-failure ownership; findings and dispositions. | open |
 | [S11-GRAIN720-NAL-EVIDENCE-20261002.md](S11-GRAIN720-NAL-EVIDENCE-20261002.md) | One retained synthetic Grain720 header census: 35 first IDRs, two extras, reviewable historical parser/control/result/process/cleanup snapshots and private audit-byte retention; sanitized-not-raw and original S11 qualification limits. | done |
