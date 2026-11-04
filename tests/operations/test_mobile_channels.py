@@ -85,9 +85,9 @@ class MobileChannelsCase(unittest.TestCase):
         self.assertEqual(platforms_for_paths(("clients/android/app/build.gradle.kts",)), ["android"])
 
     def test_first_push_selects_only_existing_mobile_sources_and_invalid_revision_fails(self) -> None:
-        self.assertEqual(changed_platforms(self.source, "0" * 40, self.base), [])
+        self.assertEqual(changed_platforms(self.source, "0" * 40, self.base, initial_push=True), [])
         head = self.commit("clients/apple/Sources/Shared/Player.swift")
-        self.assertEqual(changed_platforms(self.source, "0" * 40, head), ["ios", "tvos"])
+        self.assertEqual(changed_platforms(self.source, "0" * 40, head, initial_push=True), ["ios", "tvos"])
         with self.assertRaises(ValueError):
             changed_platforms(self.source, "--option", self.base)
 
@@ -104,6 +104,7 @@ class MobileChannelsCase(unittest.TestCase):
         self.assertIs(variables["mobile_release_channels_upload"], True)
         self.assertEqual(command[-4:-2], ["-e", "@" + str(self.root / "local vars.yml")])
         self.assertEqual(variables["mobile_release_repositories"]["cinema"]["source_path"], str(self.source))
+        self.assertEqual(variables["mobile_release_expected_commits"], {"cinema": self.run_git("rev-parse", "HEAD")})
 
     def test_store_failure_is_not_reported_as_success(self) -> None:
         head = self.commit("clients/android/app/build.gradle.kts")
@@ -126,6 +127,23 @@ class MobileChannelsCase(unittest.TestCase):
     def test_manual_retry_requires_a_real_change_baseline(self) -> None:
         with self.assertRaisesRegex(ValueError, "full commit SHAs"):
             release("", self.base)
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch"}):
+            with self.assertRaisesRegex(ValueError, "real ancestor commit"):
+                release("0" * 40, self.base)
+        self.assertFalse((self.root / "command.json").exists())
+
+    def test_manual_scope_rejects_the_initial_push_zero_sha(self) -> None:
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch"}), patch(
+            "sys.argv", ["mobile_channels", "scope", "--base", "0" * 40, "--head", self.base]
+        ), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(), 1)
+
+    def test_non_ancestor_baseline_never_invokes_the_publisher(self) -> None:
+        other = self.commit("clients/apple/project.yml")
+        self.run_git("reset", "--hard", self.base)
+        head = self.commit("docs/PUBLISHING.md")
+        with self.assertRaises(subprocess.CalledProcessError):
+            release(other, head)
         self.assertFalse((self.root / "command.json").exists())
 
     def test_release_cli_refuses_non_main_and_pull_request_events(self) -> None:

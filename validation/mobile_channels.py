@@ -32,10 +32,14 @@ def git(root: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
 
 
-def changed_platforms(root: Path, base: str, head: str) -> list[str]:
+def changed_platforms(root: Path, base: str, head: str, *, initial_push: bool = False) -> list[str]:
     for revision in (base, head):
         if not re.fullmatch(r"[0-9a-f]{40}", revision):
             raise ValueError("push revisions must be full commit SHAs")
+    if base == "0" * 40 and not initial_push:
+        raise ValueError("recovery requires a real ancestor commit; the zero SHA is only valid for an initial push")
+    if base != "0" * 40:
+        subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", base, head], check=True)
     # NUL separation preserves whitespace; both old and new names of a rename
     # matter (moving a source out of the app still changes the shipped app).
     paths = (
@@ -68,7 +72,7 @@ def release(base: str, head: str) -> None:
         # A queued event can publish newer main, but cannot publish an unrelated
         # repository or a history which no longer contains the triggering push.
         subprocess.run(["git", "-C", str(source), "merge-base", "--is-ancestor", head, current], check=True)
-        platforms = changed_platforms(source, base, current)
+        platforms = changed_platforms(source, base, current, initial_push=os.environ.get("GITHUB_EVENT_NAME") == "push")
         if not platforms:
             print("No mobile release inputs changed.")
             return
@@ -79,6 +83,7 @@ def release(base: str, head: str) -> None:
             "mobile_release_channels_android_track": "internal",
             "mobile_release_channels_upload": True,
             "mobile_release_channels_receipts": str(state),
+            "mobile_release_expected_commits": {"cinema": current},
             "mobile_release_repositories": {
                 "cinema": {"source_path": str(source), "metadata_kind": "plurx"},
             },
@@ -100,7 +105,7 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     try:
         if args.mode == "scope":
-            platforms = changed_platforms(root, args.base, args.head)
+            platforms = changed_platforms(root, args.base, args.head, initial_push=os.environ.get("GITHUB_EVENT_NAME") == "push")
             print(f"publish={'true' if platforms else 'false'}")
             print("platforms=" + ",".join(platforms))
         else:

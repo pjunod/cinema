@@ -87,8 +87,10 @@ releases without cancelling an upload. A controller file lock also refuses
 overlapping publishers using this entry point; other apps and manual channel
 runs must honor the same lock or run separately. A queued run publishes the
 latest `origin/main` containing its triggering commit, and includes subsequent
-mobile changes in its selection. Rewritten history is refused. The private
-playbook checks main again before uploading; if main advances during the
+mobile changes in its selection. The selected revision is passed to the
+private publisher and checked before any build starts. Rewritten history and
+non-ancestor recovery baselines are refused. The private playbook checks main
+again before uploading; if main advances during the
 build, rerun after merges settle. Successful upload receipts let retries skip
 version/build/platform/track combinations already submitted. The receipt is
 not a live store query: after a crash between store acceptance and receipt
