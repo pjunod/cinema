@@ -33,10 +33,26 @@ async fn actual_capacity_refusal_leaves_no_new_reservation_or_prepare_owner() {
     let root = tempfile::tempdir().expect("fixture");
     let runtime = runtime(root.path());
     runtime
-        .update_capacity(1, Metric::Known(vector(1)))
+        .update_capacity(2, Metric::Known(vector(1)))
         .unwrap();
     let error = FiniteVodError::from(
-        prepare(&runtime, vec![plan()], deadline())
+        runtime
+            .prepare_families(
+                &[FamilyDemand {
+                    identity: runtime.new_family().unwrap(),
+                    roles: &[FamilyRoleDemand {
+                        role: FamilyRole::Video,
+                        demand: WorkloadDemand {
+                            resources: Metric::Known(vector(2)),
+                            limit_epoch: 2,
+                            trial: false,
+                        },
+                        retained: None,
+                    }],
+                }],
+                vec![plan()],
+                deadline(),
+            )
             .err()
             .expect("capacity refusal"),
     );

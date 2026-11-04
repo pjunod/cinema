@@ -339,6 +339,31 @@ async fn actual_journal_reopen_retains_prepared_trial_cost_paths_and_owner_data(
     ))
     .expect("composed real reconstruction");
     assert!(runtime.has_recovered_obligations());
+    let census = runtime
+        .affected_owner_inventory()
+        .snapshot()
+        .expect("restored before native imports");
+    let obligation = runtime.recovery().obligations[0].obligation_id;
+    assert_eq!(census.records().count(), 1);
+    assert_eq!(
+        census.records().next().unwrap().identity,
+        super::super::owner_inventory::InventoryIdentity::Reservation(
+            runtime.recovered_bindings[&obligation]
+        )
+    );
+    assert_eq!(
+        census.records().next().unwrap().phase,
+        super::super::owner_inventory::OwnerPhase::UnknownHeld
+    );
+    assert!(!census.completeness().is_complete());
+    assert!(
+        runtime
+            .recovered_inventory
+            .lock()
+            .unwrap()
+            .contains_key(&obligation),
+        "unsupported recovery retains its original durable-keyed selector"
+    );
     assert_eq!(runtime.accounting().expect("full charge").used, vector(2));
     assert_eq!(runtime.accounting().expect("full hold").unknown_held, 1);
     assert!(runtime.accounting().expect("trial").trial_held);

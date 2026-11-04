@@ -68,10 +68,11 @@ consumers are references to one original producer. Their application closure
 cannot be inferred from the producer's physical receipt.
 
 Each node runtime owns one book, initially unbridged. The selected runtime
-bridge needs census → operations book → ledger lock order, a compact original
-close-proof handoff before rich bundle destruction, and an atomic conserving
-R→S rebind. Closing R and registering a separate S row would create an absence
-gap. Recovered obligations must register as held before native imports open.
+bridge uses census → operations book → ledger lock order. It retains a compact
+original close-proof handoff through rich bundle destruction and conserves the
+same row during R→S. Recovered obligations register as held before native
+imports open. This bridge is built and has scoped core qualification;
+its implementation does not mint coverage for any broader family.
 
 A snapshot has an epoch and explicit unbridged-family coverage. Admission must
 hold the same mutation lock through the actual reservation and new original
@@ -80,23 +81,94 @@ family refuses positive completeness. Production coverage has no generic
 boolean constructor. Each adapter must establish its own real entry and final
 close boundary before obtaining coverage.
 
-| Affected work | Original owner that must supply entry/close integration | Current census bridge |
-|---|---|---|
-| Selected planning, R, retained S, cleanup and UnknownHeld | Core runtime `Operations.bundles → OwnedRole`; original reservation and final physical/application settlement | Open |
-| Buffered/shared finite VOD | `Shared.renditions`, unpublished prepared owners and `finite_closing`; one producer across viewers | Open |
-| Rolling and continuous output | Transcode sessions, retired presentations/copy tickets and original rolling retirement settlement | Open |
-| Live transport | `LiveTvRegistry`, original DVR transport task and each viewer feed | Open |
-| DVR recording sinks | Original writer task through stop, fsync and actual join; absence from activity UI is insufficient | Open |
-| Source actors and escaped response bodies | `SourceWorkerRegistry`, direct tasks, viewer owners and `SourceResponseGuard` | Open |
-| Local direct reads | Fixed `LocalDirectOwners` Active/Settling slots and core `DirectReadDomain` jobs | Open |
-| Background static generation | Original `StaticArtifactRuns` slot through planning, admission uncertainty and closing | Open |
-| Preparation and retained output | Preparation storage, retained artifacts, rolling registry and active cache readers | Open |
-| Relay, network/source domains and legacy helper graphs | Original relay/body, audio/subtitle/probe and processed-output owners | Open |
+| Affected work | Original entry hook | Final-close ownership hook | Current census bridge |
+|---|---|---|---|
+| Selected planning, R, retained S, cleanup and UnknownHeld | [Core operations](../../crates/plurx-core/src/adaptive_resources/runtime/operations.rs): original role before journal publication/native latch | Same `OwnedRole` through physical/application settlement and rich bundle destruction | Built; 51 distinct core cases pass; broader coverage open |
+| Buffered/shared finite VOD | [Shared finite build slot](../../crates/plurxd/src/vod/shared.rs): original unpublished producer/output before the first post-R await | `drive_finite_closing`: join original driver, drain allocations/application aliases, finish same close ticket | Open |
+| Rolling and continuous output | [Transcode manager](../../crates/plurxd/src/transcode.rs): original session/producer attempt before publication | [Rolling retirement](../../crates/plurxd/src/transcode/rolling/retirement.rs): retired presentation retains its original session; [compact copy-ticket maintenance](../../crates/plurxd/src/transcode/manager/maintenance.rs) joins original actor and settles same native ticket | Open |
+| Live transport | [DVR transport](../../crates/plurxd/src/live_tv/dvr.rs): one original tuner worker; separate viewer feed queues | `close_transport_arc` and actual tuner/body join, plus each viewer pump/feed destruction; its `closed` signal alone is insufficient | Open |
+| DVR recording sinks | [DVR sink](../../crates/plurxd/src/live_tv/dvr.rs): original sink before `start_sink_writer` | `sink_writer_loop` file write/flush/fsync and `settle_sink` joining the original handle; activity-row removal supplies no proof | Open |
+| Source actors and escaped response bodies | [Source factory](../../crates/plurxd/src/transcode/source_actor.rs): original registry owner before spawn; original response reference before body publication | Original physical/preparation settlement and every `SourceResponseGuard`; [Source direct task registry](../../crates/plurxd/src/transcode/source_direct.rs) retains Active/Settling/Failed custody | Open |
+| Local direct reads | [Local direct open](../../crates/plurxd/src/transcode/local_direct.rs): fixed 64-slot claim, core preparation and original worker before native entry | `reconcile_local_direct_owners`: join Active worker, destroy rich entry/application lease, retain Settling ticket until final retirement; [core direct domain](../../crates/plurx-core/src/adaptive_resources/runtime/direct_source.rs) owns the actual reads | Open |
+| Background static generation | [Static run reservation](../../crates/plurxd/src/transcode/background_static.rs): original controller slot before P native awaits | `reconcile_static_artifact_run`: retain AdmissionUnknown/Closing, original controller receipt and actual rich payload destruction before application lease release | Open |
+| Preparation and retained output | [Retained artifact registry](../../crates/plurxd/src/vod/retained.rs): same retained S and original preparation origin | Original finite closing ticket plus each artifact/read alias; [cache reader guards](../../crates/plurxd/src/cachekeep.rs) last through actual consumer destruction | Open |
+| Relay, network/source domains and legacy helper graphs | [Relay response pump](../../crates/plurxd/src/media_sessions.rs) before spawn; original [probe](../../crates/plurxd/src/transcode/source_preparation.rs), [index](../../crates/plurxd/src/fragindex.rs) and [subtitle](../../crates/plurxd/src/transcode/source_subtitles.rs) operations | Actual pump/upstream/queued-body destruction and original helper settlement; other legacy audio/processed graphs still need their own adapters | Open |
 
 These rows identify required hooks; they are not assertions that those hooks
 are installed. Copying current serving maps or a truncated capture observation
 cannot establish absence. CPU and RAM initially share a whole-node domain;
 narrower device, source and storage domains require their own backed identity.
+
+### Transfers and disappearing rows cannot certify close
+
+The Source factory's `finish_source_owner` removes its registry entry even
+when physical cleanup remains unresolved. Its census selector must survive in
+independent UnknownHeld custody; the registry's absence is not a close event.
+Live TV's `run_live_session` transfers an unconfirmed process and scratch
+obligation to `OrphanSession` before retiring the session. That transfer must
+move the same original census identity, with no absent interval.
+
+The DVR transport's `close_transport_arc` currently removes the transport,
+ignores timeout/JoinError from its worker join and then signals `closed`.
+A census adapter cannot use that signal as positive settlement. It must retain
+the original task until its actual join and owned tuner body destruction are
+confirmed, with uncertainty remaining held. DVR writer completion also remains
+separate from successful fsync and from destruction of queued body allocations.
+
+### Application references need their own sealed final-close mechanism
+
+The next implementation slice is local direct and Source direct application
+ownership, then static background controllers. The selected core bridge already
+registers native roles created by these typed preparations. Daemon application
+hooks must reference those original identities, rather than count a second
+producer. `OwnerInventory::register_reference` currently creates a reference,
+but its physical-receipt close method cannot retire it: a reference deliberately
+has no producer physical binding. Add a sealed application-close mechanism
+backed by the original owner, actual rich payload destruction and original
+worker join. A copied UUID, registry removal, dropped waiter or producer receipt
+cannot mint this authority.
+
+Keep admission/settlement mutation under a single documented lock order.
+Local direct holds its slot mutex while preparing the core role; Source direct
+holds registry/task locks across that preparation. A future census→daemon-map
+snapshot would invert those orders. Move original typed selectors through the
+existing slots without introducing the reverse census acquisition.
+
+All family coverage bits remain unbridged until every relevant entry path,
+legacy path, recovery import and application reference in that family has a
+concrete adapter. Completing local direct alone cannot certify all SourceReader
+work. Lost selectors and census overflow retain uncertainty and never evict an
+older owner to claim completeness.
+
+## Selected runtime keeps its original census row
+
+Registration precedes journal publication and the common native-entry latch.
+The latch checks its current physical binding under the same census boundary.
+An exhausted census retains an explicit selector under the existing operation
+book and permanently loses positive completeness; ordinary admission keeps its
+existing ledger capacity. Overflow lookups publish only after accepted enqueue,
+so failed construction cannot accumulate stale bindings.
+
+A committed R→S transfer changes the current binding, family and kind in the
+original slot under the same lock as the ledger swap. Its original identity
+survives. Observed uncertainty is never cleared by ordinary activation or
+retirement. The original recovered selector moves into its imported role;
+unsupported or unclassified recovery stays held.
+
+Native absence and application destruction are separate. A private nonclone
+`NativeNeverAcquired` comes only from the original sealed graph and its exact
+Reserved ledger custody; it cannot construct `PhysicalCloseReceipt`. Sources,
+bootstrap tasks, response allocations and application aliases need their own
+actual closure. Generic baseline refunds keep a pending original census owner
+visible as UnknownHeld until the final unaliased rich bundle is destroyed.
+Lost or unsupported proof retains uncertainty. Finite finalization also carries
+earlier P close handoffs through the same final bundle destruction, preserving
+original proofs on every busy or fallible boundary.
+
+These are selected-runtime hooks. Live transports, recording sinks, escaped
+source bodies, background generation, relay and other legacy application
+owners still need concrete registration and positive-close adapters. Missing
+family coverage and unknown peaks continue to refuse real production trials.
 
 ## Prepared work keeps one driver through adoption or abandonment
 
@@ -113,6 +185,57 @@ session/route. Only verified `Materialized` output supplies candidate progress.
 Abort drains the original bounded channel while joining original root/writer
 and application tasks. A lost waiter, replay or failed join cannot grant a
 new permit, deadline or close receipt.
+
+## Selected runtime qualification — 51 distinct core cases
+
+The selected runtime bridge is built and has scoped core qualification on
+2026-11-03. Core production sources are identical between source trees
+`6ee933307bf59d4b8ae656c9aa62ca4b22b0d2df` and
+`ca85f07f995da9938e607244fb200e27e2ff7fcf`; the latter changes three fixtures
+only. The parent qualification ran pinned Rust 1.97.1 on Linux with
+`fixtures,hiqlite-contract-tests,scratch-fault-injection`. Behavioral runs used
+protected repository-local temporary storage after the default temporary
+location correctly refused custody setup as `UnsupportedStorage`.
+
+| Executed scope | Distinct passes | Evidence boundary |
+|---|---:|---|
+| [Owner census](../../crates/plurx-core/src/adaptive_resources/owner_inventory/tests.rs) | 14 | Original ownership, references, overflow and serialized admission |
+| [Runtime operation book](../../crates/plurx-core/src/adaptive_resources/runtime/operations/tests.rs) | 29 | Includes all six new [inventory bridge cases](../../crates/plurx-core/src/adaptive_resources/runtime/operations/tests/inventory.rs); seven baseline exceptions remain below |
+| [Actual software retirement/readers](../../crates/plurx-core/src/adaptive_resources/runtime/finite_vod/tests/retirement_readers.rs) | 7 | Includes the new original-identity R→S case and final empty census after actual application/native closure |
+| [Actual journal reopen](../../crates/plurx-core/src/adaptive_resources/runtime/tests.rs) | 1 | Original durable-keyed selectors are UnknownHeld before native imports |
+
+These are 51 distinct passing cases, including all seven new regressions.
+The new bridge cases exercise registration before the native latch, dropped
+selection and waiter custody, a remaining rich-bundle alias, lost original
+tokens, ordinary admission after census exhaustion, and later-construction
+refusal without stale overflow lookups. The actual software case conserves one
+original identity through R→S and retires it only at final closure.
+
+Seven existing multi-role bookkeeping fixtures still fail at unknown-producer
+overlap admission. Every failure was reproduced individually as zero passed,
+one failed on exact effort baseline
+`edb5b79ff902b7eea5fe95d8954b1e5af99a5752` under the same protected temporary
+storage. Their source and the governing refusal remain unchanged. They cover
+three preparation/successor cases, two application preflight cases, the
+second-role overage latch, and dropped typed multi-role preparation. They are
+recorded exceptions, not passing evidence or permission to relax unknown
+memory/task policy.
+
+Two other historical fixture failures were reproduced on that baseline and
+corrected here: capacity refusal now advances both cap and demand to epoch 2;
+duplicate settlement now asserts the existing refunded-owner rejection before
+journal entry. Both corrected cases pass. The new overflow-construction case
+also passes after using the admitted P/M shape, retaining P's unknown peak and
+a heap-only M, so its intended invalid second attempt ID is reached. None of
+these fixture corrections changes production policy.
+
+Three affected daemon cases pass on `ca85f07f`: same-original-driver Adopt,
+real finite lifecycle (79.10 s native body; 81.97 s invocation), and real
+process restart (85.38 s native parent body; 87.85 s invocation). Restart
+includes a separate successful child invocation, not a fourth distinct case.
+The earlier daemon results below retain their earlier source boundary.
+This qualification does not close full inventory coverage, M0, complete native
+and allocator bounds, production trials, V1–V5, or Main promotion.
 
 ## Qualification records distinct boundaries
 
@@ -148,8 +271,9 @@ cases pass, zero failed/ignored, at their stated sources.
 Pinned workspace/all-target strict Clippy, formatting, catalog and JavaScript
 syntax pass; task paperwork passes 14/14. Independent source reviews cover the
 domain/launcher, census and driver boundaries. Task
-[PR #1375](http://forge.lan:3000/noirr/plurx/pulls/1375) tracks the exact-candidate
-Effort development gate and landing; that gate is required before effort merge.
+[PR #1375](http://forge.lan:3000/noirr/plurx/pulls/1375) merged into the effort at
+`edb5b79ff902b7eea5fe95d8954b1e5af99a5752` after all eight jobs of Effort
+development gate 6437 passed. Its landing tree matches the qualified candidate.
 
 Kernel enforcement, ownership regressions and exact-source compiler results
 are recorded separately. Authored fixture cases do not establish

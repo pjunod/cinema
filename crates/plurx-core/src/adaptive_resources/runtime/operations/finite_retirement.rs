@@ -552,72 +552,85 @@ impl NodeResourceRuntime {
         role.bootstrap.clear();
         // The original post-COMMIT capability is retained before any ledger or
         // operation-book lock. Failure preserves it for this exact continuation.
-        let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
-        if !book.closing.contains(&role.binding)
-            || book
-                .bindings
-                .get(&role.binding)
-                .is_none_or(|h| h.obligation_id() != source_obligation_id)
-            || book
-                .bindings
-                .contains_key(&retirement.swap.target_binding())
-        {
-            return Err(OperationError::State);
-        }
-        let cleanup = self.ledger.commit_retained_swap(
-            &mut retirement.swap,
-            retirement
-                .committed
-                .as_ref()
-                .expect("retained committed receipt"),
-        )?;
-        // Single ledger replacement succeeded. Everything below is infallible
-        // in-memory rebinding under the original bundle + operation-book locks.
-        book.bindings.remove(&role.binding);
-        book.closing.remove(&role.binding);
-        role.binding = retirement.swap.target_binding();
-        role.durable_tag = retirement.swap.target_durable();
-        book.bindings
-            .insert(role.binding, retirement.target.clone());
-        role.bootstrap.clear();
-        role.bootstrap.insert(
-            retirement.target_member,
-            retirement
-                .native
-                .take()
-                .expect("validated retained native member"),
-        );
-        role.members.clear();
-        role.typed_members = Some(std::mem::take(&mut retirement.manifest.members));
-        role.armed.clear();
-        role.armed.insert(retirement.target_member);
-        role.invoked.clear();
-        role.invoked.insert(retirement.target_member);
-        role.sources.clear();
-        role.roots.clear();
-        role.sealed = None;
-        role.finite_vod = None;
-        role._cleanup = cleanup;
-        role.handle = Some(retirement.target.clone());
-        role.sequence = known_sequence;
-        role.phase = Phase::Sealed;
-        retirement.installed = true;
-        // The exact command and physical receipt were required until this
-        // known ledger replacement. Neither may keep producer-scale payloads
-        // alive after credit returns to the node.
-        retirement.committed = None;
-        retirement.source = None;
-        bootstrap::readers::notify_progress(
-            role.bootstrap
-                .get(&retirement.target_member)
-                .expect("installed retained member"),
-        );
-        role.bootstrap
-            .get(&retirement.target_member)
-            .expect("installed retained member")
-            .progress_signal()
-            .notify_waiters();
-        Ok(retirement.target_member)
+        self.affected_owners
+            .with_runtime_mutation(|inventory| {
+                let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
+                if !book.closing.contains(&role.binding)
+                    || book
+                        .bindings
+                        .get(&role.binding)
+                        .is_none_or(|h| h.obligation_id() != source_obligation_id)
+                    || book
+                        .bindings
+                        .contains_key(&retirement.swap.target_binding())
+                {
+                    return Err(OperationError::State);
+                }
+                let committed = retirement
+                    .committed
+                    .as_ref()
+                    .expect("retained committed receipt");
+                let cleanup = inventory.rebind_runtime(
+                    role.inventory.as_mut().ok_or(OperationError::State)?,
+                    committed,
+                    || {
+                        self.ledger
+                            .commit_retained_swap(&mut retirement.swap, committed)
+                    },
+                )?;
+                if book.inventory_overflow.remove(&role.binding) {
+                    book.inventory_overflow
+                        .insert(retirement.swap.target_binding());
+                }
+                // Single ledger replacement succeeded. Everything below is infallible
+                // in-memory rebinding under the original bundle + operation-book locks.
+                book.bindings.remove(&role.binding);
+                book.closing.remove(&role.binding);
+                role.binding = retirement.swap.target_binding();
+                role.durable_tag = retirement.swap.target_durable();
+                book.bindings
+                    .insert(role.binding, retirement.target.clone());
+                role.bootstrap.clear();
+                role.bootstrap.insert(
+                    retirement.target_member,
+                    retirement
+                        .native
+                        .take()
+                        .expect("validated retained native member"),
+                );
+                role.members.clear();
+                role.typed_members = Some(std::mem::take(&mut retirement.manifest.members));
+                role.armed.clear();
+                role.armed.insert(retirement.target_member);
+                role.invoked.clear();
+                role.invoked.insert(retirement.target_member);
+                role.sources.clear();
+                role.roots.clear();
+                role.sealed = None;
+                role.finite_vod = None;
+                role._cleanup = cleanup;
+                role.handle = Some(retirement.target.clone());
+                role.sequence = known_sequence;
+                role.phase = Phase::Sealed;
+                retirement.installed = true;
+                // The exact command and physical receipt were required until this
+                // known ledger replacement. Neither may keep producer-scale payloads
+                // alive after credit returns to the node.
+                retirement.committed = None;
+                retirement.source = None;
+                bootstrap::readers::notify_progress(
+                    role.bootstrap
+                        .get(&retirement.target_member)
+                        .expect("installed retained member"),
+                );
+                role.bootstrap
+                    .get(&retirement.target_member)
+                    .expect("installed retained member")
+                    .progress_signal()
+                    .notify_waiters();
+                Ok(retirement.target_member)
+            })
+            .map_err(|_| OperationError::State)?
     }
 }
 

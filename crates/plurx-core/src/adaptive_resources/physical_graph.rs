@@ -35,6 +35,8 @@ pub(in crate::adaptive_resources) mod fixed_engine;
 #[cfg(target_os = "linux")]
 pub(in crate::adaptive_resources) mod fixed_probe;
 mod live_close;
+mod never_acquired;
+pub(in crate::adaptive_resources) use never_acquired::NativeNeverAcquired;
 mod live_jobs;
 mod source_files;
 pub use source_files::GraphSourceFile;

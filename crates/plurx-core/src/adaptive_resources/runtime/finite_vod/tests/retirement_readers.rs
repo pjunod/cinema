@@ -320,6 +320,8 @@ impl OriginalOutput {
             .expect("known native cleanup and final refund");
         let final_state = runtime.accounting().expect("final accounting");
         assert_eq!(final_state.held, 0);
+        assert_eq!(runtime.affected_owner_inventory().snapshot().unwrap().records().count(), 0,
+            "final physical/application destruction and ledger refund retire the original census row");
         assert_eq!(final_state.unknown_peak_producers, 0);
         assert_eq!(final_state.used, ResourceVector::default());
         drop(ticket);
@@ -768,4 +770,45 @@ async fn finite_frozen_reader_observe_before_ack_observed_waits_for_same_handoff
         bootstrap::readers::ack_observation_fixture::Stage::Observe,
     )
     .await;
+}
+
+#[tokio::test]
+async fn conserving_retirement_keeps_original_census_identity_through_final_close() {
+    use crate::adaptive_resources::owner_inventory::{OwnerFamily, OwnerKind};
+    let fixture = OriginalOutput::produced().await;
+    let before = fixture
+        .runtime
+        .affected_owner_inventory()
+        .snapshot()
+        .unwrap();
+    let original = before.records().next().expect("original R row");
+    assert_eq!(before.records().count(), 1);
+    assert_eq!(original.family, OwnerFamily::BufferedVod);
+    assert_eq!(original.kind, OwnerKind::Producer);
+    let identity = original.identity;
+    fixture.freeze().await;
+    let retained = fixture
+        .owner
+        .retire_output(deadline())
+        .await
+        .expect("actual conserving R-to-S commit");
+    let after = fixture
+        .runtime
+        .affected_owner_inventory()
+        .snapshot()
+        .unwrap();
+    assert_eq!(
+        after.records().count(),
+        1,
+        "replacement never registers a second owner"
+    );
+    let survivor = after.records().next().unwrap();
+    assert_eq!(
+        survivor.identity, identity,
+        "the same original identity survives the swap"
+    );
+    assert_eq!(survivor.family, OwnerFamily::RetainedResidency);
+    assert_eq!(survivor.kind, OwnerKind::Residency);
+    assert!(after.epoch() > before.epoch());
+    fixture.finish(retained).await;
 }

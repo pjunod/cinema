@@ -17,8 +17,9 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 /// Includes producers, references and cleanup selectors, not just the policy's
-/// protected playback rows. Exhaustion refuses entry and permanently makes the
-/// census unknown; it never evicts an old owner to admit a new one.
+/// protected playback rows. Exhaustion permanently makes the census unknown;
+/// public registration refuses while the selected ledger bridge retains an
+/// explicit overflow selector. No old owner is evicted to admit a new one.
 pub const MAX_INVENTORY_OWNERS: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,6 +226,20 @@ impl OwnerInventory {
         }
     }
 
+    /// Ordinary runtime mutations share the census boundary even while wider
+    /// adapter coverage is unknown. The borrowed guard cannot leave this
+    /// synchronous closure; callers acquire operations and ledger locks inside.
+    pub(in crate::adaptive_resources) fn with_runtime_mutation<T>(
+        &self,
+        mutate: impl FnOnce(&mut InventoryAdmission<'_>) -> T,
+    ) -> Result<T, InventoryError> {
+        let mut state = self.state.lock().map_err(|_| InventoryError::Unavailable)?;
+        Ok(mutate(&mut InventoryAdmission {
+            inventory: self,
+            state: &mut state,
+        }))
+    }
+
     pub fn install_audited_coverage(
         &self,
         coverage: AuditedAdapterCoverage,
@@ -312,7 +327,7 @@ impl OwnerInventory {
     }
 
     /// Registers a separately retained consumer against the same original
-    /// producer. This never registers another producer or duplicates its cost.
+    /// producer or residency. This never duplicates the original owner's cost.
     pub fn register_reference(
         &self,
         producer: &InventoryOwner,
@@ -332,7 +347,7 @@ impl OwnerInventory {
             .flatten()
             .find(|record| producer.registered && record.identity == producer.identity)
             .ok_or(InventoryError::MissingOwner)?;
-        if parent.kind != OwnerKind::Producer
+        if !matches!(parent.kind, OwnerKind::Producer | OwnerKind::Residency)
             || !matches!(parent.phase, OwnerPhase::Registered | OwnerPhase::Active)
         {
             return Err(InventoryError::InvalidPhase);
@@ -559,6 +574,11 @@ impl Drop for InventoryOwner {
         }
     }
 }
+
+mod runtime_bridge;
+pub(in crate::adaptive_resources) use runtime_bridge::{
+    PendingRuntimeClose, RuntimeInventoryOwner,
+};
 
 #[cfg(test)]
 mod tests;

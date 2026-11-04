@@ -115,6 +115,16 @@ pub struct NodeResourceRuntime {
     #[cfg(target_os = "linux")]
     finite_policy: Mutex<finite_policy::FinitePolicyRegistry>,
     recovered_bindings: BTreeMap<Uuid, ReservationBinding>,
+    // Original restored census custody exists before native imports can open.
+    // Only installation of that obligation's runtime placeholder takes it.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Unsupported recovery still retains the same original selectors; only Linux has native adoption consumers."
+        )
+    )]
+    recovered_inventory: Mutex<BTreeMap<Uuid, super::owner_inventory::RuntimeInventoryOwner>>,
     // Reopened native S owners remain under their complete restored holds.
     // Import alone cannot authorize serving or old-owner journal settlement.
     #[cfg(target_os = "linux")]
@@ -169,17 +179,37 @@ impl NodeResourceRuntime {
             Metric::Unknown(UnknownReason::InsufficientEvidence),
             &recovered,
         )?;
+        let affected_owners = super::owner_inventory::OwnerInventory::new();
+        let recovered_inventory = affected_owners
+            .with_runtime_mutation(|inventory| {
+                let mut restored = BTreeMap::new();
+                for (&obligation, &binding) in &recovered_bindings {
+                    // Recovery does not reconstruct an executable typed owner.
+                    // Keep unsupported inventories unknown, including entries
+                    // beyond the bounded census's original-owner slots.
+                    let owner = inventory.register_selected_runtime(
+                        binding,
+                        None,
+                        super::owner_inventory::OwnerPhase::UnknownHeld,
+                    )?;
+                    restored.insert(obligation, owner);
+                }
+                Ok::<_, super::owner_inventory::InventoryError>(restored)
+            })
+            .map_err(|_| AdmissionRefusal::Unavailable)?
+            .map_err(|_| AdmissionRefusal::Unavailable)?;
         Ok(Self {
             journal,
             owner,
             recovered,
             ledger,
-            affected_owners: super::owner_inventory::OwnerInventory::new(),
+            affected_owners,
             #[cfg(target_os = "linux")]
             history,
             #[cfg(target_os = "linux")]
             finite_policy: Mutex::new(finite_policy::FinitePolicyRegistry::default()),
             recovered_bindings,
+            recovered_inventory: Mutex::new(recovered_inventory),
             #[cfg(target_os = "linux")]
             recovered_s: Mutex::new(BTreeMap::new()),
             #[cfg(target_os = "linux")]

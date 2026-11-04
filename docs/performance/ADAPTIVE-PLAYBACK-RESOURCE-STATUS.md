@@ -10,37 +10,34 @@ qualification or deployment is claimed.
 
 ## Current continuation — source-bound task qualification
 
-Task PRs #1293, #1338, #1360–#1365, #1368 and #1371 are merged into
-draft effort #1248. #1368 landed at `8aa9cae1b28dd6d6dc9fdb5db3265ef549e8d2f7`
-after gate 6411; #1371 at `122d0ba086f9310e653bf19b0fe326baa94d352c` after gate
-6422. The [finite qualification](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
-records six reader cases plus lifecycle and graceful restart. The
+Task PRs #1293, #1338, #1360–#1365, #1368, #1371 and #1375 are merged into
+draft effort #1248. #1368 and #1371 passed development gates 6411/6422;
+#1375 landed at `edb5b79ff902b7eea5fe95d8954b1e5af99a5752` after eight green
+jobs in gate 6437. [Owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md)
+retains its earlier 44 passing cases and exact source identities separately.
+
+The selected runtime inventory bridge is built and has scoped core
+qualification: 51 distinct passes, including all seven new regressions, on
+production-identical sources `6ee93330`/`ca85f07f`. Seven unchanged
+unknown-producer-overlap fixture failures were reproduced on exact `edb5b79f`
+baseline; they remain explicit exceptions. The
+[selected bridge qualification](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#selected-runtime-qualification--51-distinct-core-cases)
+records counts, fixture corrections and limits. Three affected daemon cases
+also pass on `ca85f07f`, including real lifecycle and process restart.
+
+The [finite qualification](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
+records six earlier reader cases plus lifecycle/restart; the
 [policy continuation](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) records fourteen
-scoped refusal/service cases. [Owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md)
-now tracks kernel entry, complete affected-owner inventory and pre-Winner
-custody. Its 44 passing cases retain actual source identities; PR #1375 tracks gate/landing.
+refusal/service cases. #1365's controlled two-node fixture and the exact-owner
+lease/publication guards retain their source-bound evidence in the
+[delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md). Those results do not imply
+naturally selected performance or M0–M7 acceptance.
 
-#1365 landed at `c6e6c918f7ec4a2d8be44c58055d779594a4e97e` after nine green
-jobs. Its two-node fixture uses three distinct ladder rungs and controls only
-the peer proxy's advisory I/O/speed ranking; clock, eligibility, capacity,
-identity and control exchanges remain real. This proves controlled placement
-and serving, not naturally selected performance.
-
-The exact attached owner may renew its lease between Adopt and publication.
-Publication compares current matching route/job-lease copies while retaining
-original custody, owner, epoch, pointer and live-lease guards. Five affected
-cases passed with SQLite and the real three-voter backend at `4a6461e6214c`;
-the two new cases fail on `099eafdcee4c`. Pinned Rust 1.97.1 strict all-target
-Clippy, fixture/cluster features and paperwork 15/15 passed. The guard batch
-at `5d65151d3` passed 5/5, zero ignored. The [delivery log](ADAPTIVE-PLAYBACK-DELIVERY.md)
-also records the committed-Adopt-to-attachment settlement race and its bounded
-original-owner guard. These task results do not imply M0–M7 acceptance.
-
-Still open: M0 coverage/contracts, M3a/C2 native and allocator containment,
-V1–V5, broader adapters/platforms, current-main integration and Main promotion.
-The handoff's “M0 owned containment” differs from the plan's M0 inventory.
-The pre-existing actor-application lease regression and selected-static FFmpeg
-`-display_rotation` capability decision remain open; neither is silently accepted.
+Still open: M0 full inventory/contracts, M3a/C2 native and allocator bounds,
+production trials, V1–V5, broader adapters/platforms, current-main integration
+and Main promotion. The handoff's “M0 owned containment” differs from the
+plan's M0 inventory. The pre-existing actor-application lease regression and
+selected-static FFmpeg `-display_rotation` capability decision remain open.
 
 ## 2026-10-29 checkpoint — historical source-bound evidence
 

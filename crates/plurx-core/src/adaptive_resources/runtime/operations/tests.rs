@@ -7,6 +7,8 @@ mod admission_provenance;
 mod binding;
 #[cfg(unix)]
 mod finite_application;
+#[cfg(unix)]
+mod inventory;
 mod live_typed_settlement;
 mod native_entry;
 mod typed;
@@ -271,6 +273,19 @@ async fn durable_graph_drop_and_public_cleanup_cannot_bypass_journal_settlement(
         .await
         .expect("actual never-armed owner can cancel");
     assert_eq!(runtime.accounting().expect("settled first").held, 0);
+    let census = runtime
+        .affected_owner_inventory()
+        .snapshot()
+        .expect("lost original remains unknown");
+    assert_eq!(census.records().count(), 1);
+    assert_eq!(
+        census.records().next().unwrap().phase,
+        crate::adaptive_resources::owner_inventory::OwnerPhase::UnknownHeld
+    );
+    assert!(
+        owner.state.lock().await.roles[0].inventory.is_some(),
+        "baseline ledger refund does not invent an original absence proof"
+    );
     runtime.drain().expect("drain");
 }
 
