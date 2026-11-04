@@ -1,6 +1,6 @@
 # Adaptive owned containment — what still stands before real trials
 
-**Status:** open · scoped implementation qualified; task gate pending ·
+**Status:** open · scoped implementation qualified; production coverage open ·
 2026-11-03. Companion to the [production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
 and [canonical resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md).
 The [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) remains normative.
@@ -147,8 +147,9 @@ cases pass, zero failed/ignored, at their stated sources.
 
 Pinned workspace/all-target strict Clippy, formatting, catalog and JavaScript
 syntax pass; task paperwork passes 14/14. Independent source reviews cover the
-domain/launcher, census and driver boundaries. The exact-candidate Effort
-development gate is still required before task merge.
+domain/launcher, census and driver boundaries. Task
+[PR #1375](http://forge.lan:3000/noirr/plurx/pulls/1375) tracks the exact-candidate
+Effort development gate and landing; that gate is required before effort merge.
 
 Kernel enforcement, ownership regressions and exact-source compiler results
 are recorded separately. Authored fixture cases do not establish
