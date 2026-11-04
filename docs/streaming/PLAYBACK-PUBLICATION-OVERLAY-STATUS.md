@@ -2,7 +2,11 @@
 
 Companion to [the startup implementation ledger](PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md) and [the playback surface contract](../clients/PLAYBACK-SURFACE-CONTRACT.md) — this records the deployed acceptance failures, their corrections, and the PR's progress toward merge.
 
-**Status:** Adversarial review complete; its regression-fixture finding is addressed. Final compilation, focused Rust regression execution and one main fast lane are next. **Owner:** Codex/root; Sol owns the web lifecycle patch. **Branch:** `codex/playback-publication-overlay`. **PR:** Not opened yet. **Base:** `d367abf3d`. **Updated:** 2026-11-03.
+**Status:** open — validation and merge pending.
+
+**Progress:** Adversarial review finished; its regression-fixture finding is addressed. Final compilation, focused Rust regressions and one main fast lane are next.
+
+**Owner:** Codex/root; Sol owns the web lifecycle patch. **Branch:** `codex/playback-publication-overlay`. **PR:** Not opened yet. **Base:** `d367abf3d`. **Updated:** 2026-11-03.
 
 ## Acceptance found two distinct ownership defects
 
