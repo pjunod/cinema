@@ -11,11 +11,71 @@ use std::io::Read;
 const MAX_BYTES: u64 = 1_048_576;
 const MAX_RECORDS: usize = 128;
 const MAX_FILES: usize = 4096;
-static AUTHORITATIVE_BACKEND: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
-pub(super) fn configure_backend(authoritative: bool) {
-    AUTHORITATIVE_BACKEND.store(authoritative, std::sync::atomic::Ordering::Release);
+struct Context {
+    store: std::sync::Weak<dyn Store>,
+    dir: PathBuf,
+    authoritative: bool,
+}
+
+#[derive(Clone)]
+struct ContextSnapshot {
+    dir: PathBuf,
+    authoritative: bool,
+}
+
+static CONTEXTS: std::sync::OnceLock<std::sync::Mutex<Vec<Context>>> = std::sync::OnceLock::new();
+
+/// A source journal belongs to the exact Store selected for this daemon boot.
+/// SQLite activation-recovery and unrelated test Stores cannot inherit the
+/// authoritative backend's directory or consume its physical-stop evidence.
+pub(super) fn configure_backend(
+    store: &Arc<dyn Store>,
+    data_dir: &Path,
+    authoritative: bool,
+) -> Result<(), String> {
+    if authoritative && data_dir.as_os_str().is_empty() {
+        return Err("authoritative source recovery needs a persistent data directory".into());
+    }
+    let context = Context {
+        store: Arc::downgrade(store),
+        dir: data_dir.join("source-custody-recovery/v1"),
+        authoritative,
+    };
+    let mut contexts = CONTEXTS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .map_err(|_| "source recovery context registry poisoned")?;
+    contexts.retain(|context| context.store.strong_count() != 0);
+    if let Some(existing) = contexts.iter_mut().find(|context| {
+        context
+            .store
+            .upgrade()
+            .is_some_and(|configured| Arc::ptr_eq(&configured, store))
+    }) {
+        *existing = context;
+    } else {
+        contexts.push(context);
+    }
+    Ok(())
+}
+
+fn context_snapshot(store: &Arc<dyn Store>) -> Result<Option<ContextSnapshot>, String> {
+    let Some(contexts) = CONTEXTS.get() else {
+        return Ok(None);
+    };
+    let mut contexts = contexts
+        .lock()
+        .map_err(|_| "source recovery context registry poisoned")?;
+    contexts.retain(|context| context.store.strong_count() != 0);
+    Ok(contexts.iter().find_map(|context| {
+        context.store.upgrade().and_then(|configured| {
+            Arc::ptr_eq(&configured, store).then(|| ContextSnapshot {
+                dir: context.dir.clone(),
+                authoritative: context.authoritative,
+            })
+        })
+    }))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,16 +178,14 @@ impl Record {
     }
 }
 
-fn directory() -> Option<PathBuf> {
-    Some(
-        SETTLEMENT_JOURNAL
-            .get()?
-            .parent()?
-            .join("source-custody-recovery/v1"),
-    )
+fn private_directory(dir: &Path) -> Result<(), String> {
+    private_directory_with_sync(dir, |path| std::fs::File::open(path)?.sync_all())
 }
 
-fn private_directory(dir: &Path) -> Result<(), String> {
+fn private_directory_with_sync(
+    dir: &Path,
+    mut sync: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     if dir.file_name().is_none_or(|name| name != "v1")
         || dir
             .parent()
@@ -136,8 +194,20 @@ fn private_directory(dir: &Path) -> Result<(), String> {
     {
         return Err("unexpected source recovery directory layout".into());
     }
-    for path in [dir.parent().ok_or("missing recovery parent")?, dir] {
-        std::fs::create_dir_all(path).map_err(|error| error.to_string())?;
+    let base = dir.parent().ok_or("missing recovery parent")?;
+    let data = base
+        .parent()
+        .ok_or("missing source recovery data directory")?;
+    let metadata = std::fs::symlink_metadata(data).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("source recovery data directory must already exist without symlinks".into());
+    }
+    for path in [base, dir] {
+        match std::fs::create_dir(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.to_string()),
+        }
         let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err("source recovery directory is not a private directory".into());
@@ -148,6 +218,12 @@ fn private_directory(dir: &Path) -> Result<(), String> {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
                 .map_err(|error| error.to_string())?;
         }
+        // Fsync the new directory's metadata and its name in the parent before
+        // proceeding to the next level. Repeat both syncs for an existing
+        // directory: an earlier attempt may have failed after mkdir/chmod.
+        sync(path).map_err(|error| error.to_string())?;
+        sync(path.parent().ok_or("missing publication parent")?)
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -258,12 +334,15 @@ fn write_active_at(dir: &Path, record: Record, identity: Option<Identity>) -> Re
     result.map_err(|error| error.to_string())
 }
 
-pub(super) fn foreground(token: &ForegroundSourceToken) -> Result<(), String> {
-    let Some(dir) = directory() else {
+pub(super) fn foreground(
+    store: &Arc<dyn Store>,
+    token: &ForegroundSourceToken,
+) -> Result<(), String> {
+    let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
         return Ok(());
     };
     write_active_at(
-        &dir,
+        &context.dir,
         Record::Foreground {
             token: token.clone(),
         },
@@ -271,12 +350,15 @@ pub(super) fn foreground(token: &ForegroundSourceToken) -> Result<(), String> {
     )
 }
 
-pub(super) fn background(token: &BackgroundSourceCustodyToken) -> Result<(), String> {
-    let Some(dir) = directory() else {
+pub(super) fn background(
+    store: &Arc<dyn Store>,
+    token: &BackgroundSourceCustodyToken,
+) -> Result<(), String> {
+    let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
         return Ok(());
     };
     write_active_at(
-        &dir,
+        &context.dir,
         Record::Background {
             token: token.clone(),
         },
@@ -284,7 +366,10 @@ pub(super) fn background(token: &BackgroundSourceCustodyToken) -> Result<(), Str
     )
 }
 
-pub(super) fn clear(receipt: &SettlementReceipt) -> Result<(), String> {
+pub(super) fn clear(store: &Arc<dyn Store>, receipt: &SettlementReceipt) -> Result<(), String> {
+    let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
+        return Ok(());
+    };
     let record = match receipt {
         SettlementReceipt::Foreground(token) => Record::Foreground {
             token: token.clone(),
@@ -294,10 +379,52 @@ pub(super) fn clear(receipt: &SettlementReceipt) -> Result<(), String> {
         },
         _ => return Ok(()),
     };
-    let Some(dir) = directory() else {
-        return Ok(());
+    clear_at(&context.dir, &record)
+}
+
+/// Activation success also clears its legacy intent. Only this separate path
+/// may remove active evidence, after an authoritative exact-owner absence.
+/// An unconfigured/non-authoritative Store returns `true` only because there
+/// is no modern metadata cleanup for it. That is not negative authority proof
+/// and never touches another Store's recovery evidence.
+pub(super) async fn clear_aborted_if_absent(
+    store: &Arc<dyn Store>,
+    receipt: &SettlementReceipt,
+) -> Result<bool, String> {
+    let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
+        return Ok(true);
     };
-    clear_at(&dir, &record)
+    let record = match receipt {
+        SettlementReceipt::ForegroundActivation { token, .. } => {
+            if store
+                .resolve_foreground_source(token.clone())
+                .await
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                return Ok(false);
+            }
+            Record::Foreground {
+                token: token.clone(),
+            }
+        }
+        SettlementReceipt::BackgroundActivation { token, .. } => {
+            if store
+                .resolve_background_source_custody(token.clone())
+                .await
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                return Ok(false);
+            }
+            Record::Background {
+                token: token.clone(),
+            }
+        }
+        _ => return Err("abort cleanup requires an exact activation receipt".into()),
+    };
+    clear_at(&context.dir, &record)?;
+    Ok(true)
 }
 
 fn clear_at(dir: &Path, record: &Record) -> Result<(), String> {
@@ -340,13 +467,13 @@ fn verified(envelope: &Envelope, identity: &Identity, node: &str) -> bool {
 pub(super) async fn replay(store: &Arc<dyn Store>, node: &str) -> Result<(), String> {
     // SQLite activation-recovery is not the cluster's authoritative Store.
     // Its successful local write must never consume replicated-owner evidence.
-    if !AUTHORITATIVE_BACKEND.load(std::sync::atomic::Ordering::Acquire) {
-        return Ok(());
-    }
-    let (Some(dir), Some(identity)) = (directory(), Identity::current()) else {
+    let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
         return Ok(());
     };
-    replay_at(store, &dir, &identity, node).await
+    let Some(identity) = Identity::current() else {
+        return Ok(());
+    };
+    replay_at(store, &context.dir, &identity, node).await
 }
 
 async fn replay_at(
@@ -461,3 +588,11 @@ async fn replay_at(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod abort_tests;
+
+#[cfg(test)]
+pub(super) fn fail_activation_clear_for_test() -> bool {
+    abort_tests::fail_clear()
+}

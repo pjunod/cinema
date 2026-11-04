@@ -11,9 +11,9 @@ use plurx_core::store::background_jobs_library::{
 };
 use plurx_core::store::background_jobs_resources::{ForegroundSourceOwner, ForegroundSourcePolicy};
 
-const NODE: &str = "recovery-node";
-const OLD_BOOT: &str = "11111111-1111-4111-8111-111111111111";
-const NEW_BOOT: &str = "22222222-2222-4222-8222-222222222222";
+pub(super) const NODE: &str = "recovery-node";
+pub(super) const OLD_BOOT: &str = "11111111-1111-4111-8111-111111111111";
+pub(super) const NEW_BOOT: &str = "22222222-2222-4222-8222-222222222222";
 
 fn identity(boot_id: &str) -> Identity {
     Identity {
@@ -22,15 +22,15 @@ fn identity(boot_id: &str) -> Identity {
     }
 }
 
-struct Fixture {
-    root: tempfile::TempDir,
+pub(super) struct Fixture {
+    pub(super) root: tempfile::TempDir,
     database: PathBuf,
-    dir: PathBuf,
-    store: Arc<dyn Store>,
+    pub(super) dir: PathBuf,
+    pub(super) store: Arc<dyn Store>,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = tempfile::tempdir().expect("recovery fixture directory");
         let database = root.path().join("plurx.db");
         let store = Arc::new(
@@ -45,7 +45,7 @@ impl Fixture {
         }
     }
 
-    fn connection(&self) -> rusqlite::Connection {
+    pub(super) fn connection(&self) -> rusqlite::Connection {
         rusqlite::Connection::open(&self.database).expect("fixture connection")
     }
 
@@ -61,7 +61,7 @@ impl Fixture {
             .expect("custody count")
     }
 
-    fn background(&self, kind: &str) -> Record {
+    pub(super) fn background(&self, kind: &str) -> Record {
         let id = uuid::Uuid::new_v4().to_string();
         let (owner, owner_kind, work_id, key_parts) = match kind {
             "job" => {
@@ -163,7 +163,7 @@ impl Fixture {
         Record::Background { token }
     }
 
-    fn foreground(&self) -> Record {
+    pub(super) fn foreground(&self) -> Record {
         let token = ForegroundSourceToken {
             owner: ForegroundSourceOwner {
                 owner_id: uuid::Uuid::new_v4().to_string(),
@@ -202,7 +202,7 @@ impl Fixture {
         Record::Foreground { token }
     }
 
-    fn envelope(&self, records: Vec<Record>) -> Envelope {
+    pub(super) fn envelope(&self, records: Vec<Record>) -> Envelope {
         Envelope {
             version: 1,
             machine_id: identity(OLD_BOOT).machine_id,
@@ -212,7 +212,7 @@ impl Fixture {
         }
     }
 
-    fn write(&self, envelope: &Envelope) -> PathBuf {
+    pub(super) fn write(&self, envelope: &Envelope) -> PathBuf {
         private_directory(&self.dir).expect("private recovery directory");
         let path = self
             .dir
@@ -583,17 +583,109 @@ const PROCESS_FIXTURE: &str = "source_custody::recovery::tests::recovery_process
 #[cfg(target_os = "linux")]
 #[test]
 fn dead_daemon_with_live_reader_cannot_release_same_real_boot_custody() {
-    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+    use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
+    let root = tempfile::tempdir().expect("supervisor diagnostics directory");
+    let output_path = root.path().join("supervisor.log");
+    let output = std::fs::File::create(&output_path).expect("bounded supervisor diagnostics");
+    let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
         .args(["--exact", PROCESS_FIXTURE, "--nocapture"])
         .env("PLURX_RECOVERY_PROCESS_ROLE", "supervisor")
-        .output()
+        .process_group(0)
+        .stdout(output.try_clone().expect("supervisor stdout"))
+        .stderr(output)
+        .spawn()
         .expect("isolated real-process supervisor");
+    let mut supervisor = OwnedFixtureGroup {
+        child,
+        joined: false,
+    };
+    let finished = supervisor
+        .observe_exit_within(std::time::Duration::from_secs(20))
+        .expect("bounded supervisor observation");
+    let status = supervisor
+        .stop_and_join()
+        .expect("join exact supervisor group");
+    let mut diagnostics = Vec::new();
+    std::fs::File::open(output_path)
+        .expect("supervisor log")
+        .take(64 * 1024)
+        .read_to_end(&mut diagnostics)
+        .expect("bounded supervisor diagnostics");
     assert!(
-        output.status.success(),
-        "supervisor failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        finished,
+        "supervisor timed out:\n{}",
+        String::from_utf8_lossy(&diagnostics)
     );
+    assert!(
+        status.success(),
+        "supervisor failed:\n{}",
+        String::from_utf8_lossy(&diagnostics)
+    );
+}
+
+#[cfg(target_os = "linux")]
+struct OwnedFixtureGroup {
+    child: std::process::Child,
+    joined: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedFixtureGroup {
+    fn observe_exit_within(&self, timeout: std::time::Duration) -> std::io::Result<bool> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            // WNOWAIT observes exit without reaping. The owned supervisor's
+            // unreaped PID therefore reserves the exact fresh process-group
+            // identity until stop_and_join has signalled every descendant.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.child.id(),
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == -1 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EINTR) {
+                    return Err(error);
+                }
+            } else if unsafe { info.si_pid() } != 0 {
+                return Ok(true);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn stop_and_join(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let group = i32::try_from(self.child.id()).map_err(std::io::Error::other)?;
+        // All fixture processes inherit this group, including the daemon and
+        // its reader. The parent owns the unreaped leader; no guessed PID or
+        // group that could have been reused is ever signalled.
+        if unsafe { libc::kill(-group, libc::SIGKILL) } == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        let status = self.child.wait()?;
+        self.joined = true;
+        Ok(status)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnedFixtureGroup {
+    fn drop(&mut self) {
+        if !self.joined {
+            let _ = self.stop_and_join();
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -607,24 +699,10 @@ impl Drop for OwnedProcess {
         if self.joined {
             return;
         }
-        let group = i32::try_from(self.child.id()).expect("fixture group fits pid_t");
-        // The daemon's unreaped PID reserves this fresh group, including on a
-        // failure before the reader identity/cleanup guard was constructed.
-        unsafe {
-            libc::kill(-group, libc::SIGKILL);
-        }
+        // An early failure here still runs the outer group's cleanup guard,
+        // which stops inherited descendants before reaping the supervisor.
+        let _ = self.child.kill();
         let _ = self.child.wait();
-        // Subreaper adoption makes the deliberately orphaned group children
-        // ours to reap after killing the daemon and every fixture descendant.
-        unsafe {
-            loop {
-                if libc::waitpid(-group, std::ptr::null_mut(), 0) == -1
-                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
-                {
-                    break;
-                }
-            }
-        }
     }
 }
 
@@ -653,7 +731,6 @@ impl Drop for AdoptedReader {
 #[test]
 fn recovery_process_fixture() {
     use std::io::{Read as _, Seek as _};
-    use std::os::unix::process::CommandExt as _;
     use std::time::{Duration, Instant};
     let Ok(role) = std::env::var("PLURX_RECOVERY_PROCESS_ROLE") else {
         return;
@@ -733,7 +810,6 @@ fn recovery_process_fixture() {
                     .args(["--exact", PROCESS_FIXTURE, "--nocapture"])
                     .env("PLURX_RECOVERY_PROCESS_ROLE", "daemon")
                     .env("PLURX_RECOVERY_PROCESS_ROOT", fixture.root.path())
-                    .process_group(0)
                     .spawn()
                     .expect("daemon fixture");
             let mut daemon = OwnedProcess {
@@ -768,4 +844,118 @@ fn recovery_process_fixture() {
             assert!(fixture.dir.join(record.name().expect("name")).exists());
             drop(reader);
         });
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_directory_publication_syncs_child_then_parent_before_each_next_level() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().expect("existing data directory");
+    let data = root.path();
+    let base = data.join("source-custody-recovery");
+    let dir = base.join("v1");
+    let mut observed = Vec::new();
+    private_directory_with_sync(&dir, |path| {
+        observed.push(path.to_path_buf());
+        if path == data {
+            assert!(
+                !dir.exists(),
+                "data-parent publication precedes the v1 mkdir"
+            );
+        }
+        std::fs::File::open(path)?.sync_all()
+    })
+    .expect("durably publish both directory levels");
+    assert_eq!(
+        observed,
+        vec![base.clone(), data.to_path_buf(), dir.clone(), base.clone()]
+    );
+    assert_eq!(
+        base.metadata().expect("base").permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        dir.metadata().expect("v1").permissions().mode() & 0o777,
+        0o700
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_parent_sync_failure_blocks_next_level_and_retry_syncs_existing_names() {
+    let root = tempfile::tempdir().expect("existing data directory");
+    let data = root.path();
+    let base = data.join("source-custody-recovery");
+    let dir = base.join("v1");
+    let mut failed_attempt = Vec::new();
+    let error = private_directory_with_sync(&dir, |path| {
+        failed_attempt.push(path.to_path_buf());
+        if path == data {
+            return Err(std::io::Error::other(
+                "injected data-directory fsync failure",
+            ));
+        }
+        std::fs::File::open(path)?.sync_all()
+    })
+    .expect_err("the pre-read publication barrier must fail");
+    assert!(error.contains("injected data-directory fsync failure"));
+    assert_eq!(failed_attempt, vec![base.clone(), data.to_path_buf()]);
+    assert!(base.is_dir());
+    assert!(
+        !dir.exists(),
+        "failed parent publication prevents the next level and active evidence"
+    );
+    assert_eq!(
+        std::fs::read_dir(&base).expect("unpublished base").count(),
+        0
+    );
+
+    // The first retry encounters an existing base from the failed attempt;
+    // the second encounters both existing levels. Neither may skip fsync.
+    for _ in 0..2 {
+        let mut observed = Vec::new();
+        private_directory_with_sync(&dir, |path| {
+            observed.push(path.to_path_buf());
+            std::fs::File::open(path)?.sync_all()
+        })
+        .expect("retry establishes each durable publication barrier");
+        assert_eq!(
+            observed,
+            vec![base.clone(), data.to_path_buf(), dir.clone(), base.clone()]
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_directory_creation_rejects_missing_data_and_symlink_levels() {
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
+    let root = tempfile::tempdir().expect("directory fixture");
+    let missing = root.path().join("missing-data");
+    assert!(private_directory(&missing.join("source-custody-recovery/v1")).is_err());
+    assert!(
+        !missing.exists(),
+        "startup must not invent unsynced data-directory ancestors"
+    );
+    assert!(private_directory(&root.path().join("unexpected/v1")).is_err());
+    assert!(!root.path().join("unexpected").exists());
+
+    let outside = root.path().join("outside-data");
+    std::fs::create_dir(&outside).expect("outside fixture");
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755))
+        .expect("outside permissions");
+    let link = root.path().join("linked-data");
+    symlink(&outside, &link).expect("data symlink");
+    assert!(private_directory(&link.join("source-custody-recovery/v1")).is_err());
+    assert!(!outside.join("source-custody-recovery").exists());
+
+    let data = root.path().join("data");
+    std::fs::create_dir(&data).expect("data fixture");
+    symlink(&outside, data.join("source-custody-recovery")).expect("base symlink");
+    assert!(private_directory(&data.join("source-custody-recovery/v1")).is_err());
+    assert_eq!(
+        outside.metadata().expect("outside").permissions().mode() & 0o777,
+        0o755
+    );
+    assert!(!outside.join("v1").exists());
 }

@@ -2141,6 +2141,22 @@ pub(super) async fn settled_background_custody<T: QueueSql>(
         .iter().map(|row| decode(row)).collect()
 }
 
+pub(super) async fn resolve_background_custody<T: QueueSql>(
+    store: &T,
+    token: BackgroundSourceCustodyToken,
+) -> Result<Option<BackgroundSourceCustodyToken>, StoreError> {
+    if uuid::Uuid::parse_str(&token.custody_id).is_err() {
+        return Err(StoreError::Task("invalid background custody lookup".into()));
+    }
+    let owner_key = background_owner_key(&token.owner)?;
+    let rows = store.queue_sql(
+        "SELECT json_object('custody_id',custody_id,'owner',json(owner_json)) AS result_json FROM background_source_custody WHERE custody_id=json_extract($1,'$.custody_id') AND owner_key=json_extract($1,'$.owner_key')".into(),
+        encode(&serde_json::json!({"custody_id":token.custody_id,"owner_key":owner_key}))?,
+        false, true,
+    ).await?;
+    rows.first().map(|row| decode(row)).transpose()
+}
+
 /// One physical owner's shared budget. Replaying a receipt never replenishes
 /// local bytes: all readers of this owner share its receipt-id spend ledger.
 #[derive(Debug, Clone, Serialize, Deserialize)]

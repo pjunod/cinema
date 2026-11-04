@@ -1926,8 +1926,12 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let store = Arc::clone(&selected.store);
         crate::source_custody::configure_settlement_journal(&config.storage.data_dir);
         crate::source_custody::configure_recovery_backend(
+            &store,
+            &config.storage.data_dir,
             selected.backend == SelectedBackend::Replicated,
-        );
+        )
+        .map_err(anyhow::Error::msg)
+        .context("configuring exact-Store source recovery")?;
         if let Err(error) =
             crate::source_custody::replay_verified_recovery(&store, &selected.identity.node_id)
                 .await
