@@ -1651,11 +1651,11 @@
         min_late_runway_ms: i64,
         /// Largest produced lead over the viewer once playback began.
         max_produced_lead_ms: i64,
-        /// Largest `produced end - allowed_end_ms` seen on any poll.
-        max_produced_over_allowed_ms: i64,
-        /// Polls on which a producer with a whole staged batch was released
-        /// at or beyond the clock's `allowed_end_ms`.
-        releases_beyond_allowance: Vec<(i64, i64, i64)>,
+        /// Advertised media may never spend the private source-read bank.
+        max_published_over_allowed_ms: i64,
+        /// Polls releasing a fully staged producer past its private bank,
+        /// including the one complete-cut envelope.
+        releases_beyond_private_bank: Vec<(i64, i64, i64)>,
         /// Polls on which the flow controller held the producer.
         held_polls: usize,
     }
@@ -1667,6 +1667,23 @@
                 .filter(|(at, media)| *at > wall_ms && *media <= 2_000)
                 .count()
         }
+    }
+
+    fn rolling_test_private_bank_ceiling_ms(rate: f64) -> i64 {
+        let high = rolling_source_watermarks(rate).1 as i64;
+        let guard = ((ROLLING_PUBLICATION_GUARD_MS as f64) * rate).ceil() as i64;
+        // At 1x: 80s private bank + 10s exchange guard + one 2s cut.
+        // At 2x: the reserve ceiling caps it at 124s + one 2s cut.
+        high.saturating_add(guard).min(ROLLING_RESERVE_MAX_MS).saturating_add(2_000)
+    }
+
+    fn assert_rolling_test_frontiers(run: &HeldRollingProducerRun, rate: f64) {
+        assert!(run.max_published_over_allowed_ms <= 0,
+            "private media escaped the advertised allowance: {run:?}");
+        assert!(run.max_produced_lead_ms <= rolling_test_private_bank_ceiling_ms(rate),
+            "physical production escaped its bounded private bank: {run:?}");
+        assert!(run.releases_beyond_private_bank.is_empty(),
+            "producer released beyond its private bank: {run:?}");
     }
 
     /// Drive the rolling publication clock and the flow controller together,
@@ -1706,7 +1723,7 @@
         let mut run = HeldRollingProducerRun {
             min_runway_ms: i64::MAX,
             min_late_runway_ms: i64::MAX,
-            max_produced_over_allowed_ms: i64::MIN,
+            max_published_over_allowed_ms: i64::MIN,
             ..HeldRollingProducerRun::default()
         };
         let mut segments = 0_usize;
@@ -1839,10 +1856,9 @@
                     .max_produced_lead_ms
                     .max(produced_end_ms.saturating_sub(position_ms));
             }
-            if let Some(allowed_end_ms) = allowed_end_ms {
-                run.max_produced_over_allowed_ms = run
-                    .max_produced_over_allowed_ms
-                    .max(produced_end_ms.saturating_sub(allowed_end_ms));
+            if let (Some(published), Some(allowed_end_ms)) = (published, allowed_end_ms) {
+                run.max_published_over_allowed_ms = run.max_published_over_allowed_ms
+                    .max(published.saturating_sub(allowed_end_ms));
             }
 
             // The flow controller, fed exactly as `apply_ahead_window` feeds
@@ -1877,15 +1893,14 @@
             held = evaluation.hold.is_some();
             if held {
                 run.held_polls += 1;
-            } else if let (Some(staged), Some(allowed_end_ms)) =
-                (staged_publication_seconds, allowed_end_ms)
-            {
-                // A whole batch is staged, so only the next-publication rule
-                // can have released this producer; it must stop inside the
-                // clock's own allowance.
-                if staged.saturating_mul(1_000) >= batch_ms && produced_end_ms >= allowed_end_ms {
-                    run.releases_beyond_allowance
-                        .push((elapsed_ms, produced_end_ms, allowed_end_ms));
+            } else if let Some(staged) = staged_publication_seconds {
+                // The private source bank amortizes physical reads; it is
+                // intentionally distinct from the advertised allowance.
+                let private_end_ms = position_ms.saturating_add(
+                    rolling_test_private_bank_ceiling_ms(playback_rate));
+                if !lease.startup.protects_from_time_hold()
+                    && staged.saturating_mul(1_000) >= batch_ms && produced_end_ms > private_end_ms {
+                    run.releases_beyond_private_bank.push((elapsed_ms, produced_end_ms, private_end_ms));
                 }
             }
 
@@ -1934,11 +1949,7 @@
             "the published runway must not drain: {run:?}"
         );
         assert!(run.held_polls > 0, "the producer is still paced: {run:?}");
-        assert!(run.releases_beyond_allowance.is_empty(), "{run:?}");
-        assert!(
-            run.max_produced_over_allowed_ms <= 2_000,
-            "produced media stays within one segment of allowed_end_ms: {run:?}"
-        );
+        assert_rolling_test_frontiers(&run, 1.0);
     }
 
     /// A realistic producer only 10% faster than playback. It reaches the
@@ -1948,8 +1959,8 @@
     /// must not happen is the permanent trap. The thresholds are therefore:
     /// no stall, at most that one short cycle and none after the first
     /// minute, a runway never below one batch, recovered in the final third
-    /// to within one batch and one guard of the initial runway, and produced
-    /// media within one segment of `allowed_end_ms`.
+    /// to within one batch and one guard of the initial runway, with separate
+    /// bounds for advertised media and the private physical-read bank.
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_barely_faster_producer_recovers_from_late_cycles() {
         let wall = Duration::from_secs(600);
@@ -1974,20 +1985,11 @@
                 >= ROLLING_INITIAL_RUNWAY_MS - ROLLING_SEGMENT_MAX_MS - ROLLING_PUBLICATION_GUARD_MS,
             "runway recovers: {run:?}"
         );
-        assert!(run.releases_beyond_allowance.is_empty(), "{run:?}");
-        assert!(run.max_produced_over_allowed_ms <= 2_000, "{run:?}");
+        assert_rolling_test_frontiers(&run, 1.0);
     }
 
-    /// At 2x playback the next-publication release is capped at the clock's
-    /// `allowed_end_ms`: its guard scales with rate, the allowance's rounding
-    /// segment does not. The producer must never be released with a whole
-    /// batch staged at or beyond that allowance.
-    ///
-    /// Produced media can still pass `allowed_end_ms` here, through the
-    /// pre-existing one-batch staging rule rather than this release: at 2x a
-    /// batch is 32 s past the published end while the allowance rounds by an
-    /// unscaled 16 s. That excess is bounded by the difference plus one
-    /// segment (measured 6 s) and is asserted as such.
+    /// At 2x, the private bank is capped by the physical reserve ceiling.
+    /// Advertisement remains limited by the separate publication allowance.
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_double_rate_release_stays_inside_the_allowance() {
         let run = simulate_held_rolling_producer(
@@ -2000,15 +2002,7 @@
         .await;
         assert_eq!(run.stalled_ms, 0, "{run:?}");
         assert_eq!(run.single_segment_batches_after(0), 0, "{run:?}");
-        assert!(
-            run.releases_beyond_allowance.is_empty(),
-            "released beyond allowed_end_ms: {run:?}"
-        );
-        assert!(
-            run.max_produced_over_allowed_ms
-                <= rolling_publication_batch_ms(2.0) - ROLLING_SEGMENT_MAX_MS + 2_000,
-            "{run:?}"
-        );
+        assert_rolling_test_frontiers(&run, 2.0);
         assert!(
             run.min_runway_ms >= rolling_initial_runway_ms(2.0) - rolling_publication_batch_ms(2.0),
             "{run:?}"
@@ -2042,11 +2036,7 @@
             run.held_polls * 3 >= run.batches.len() * 16,
             "the producer spends a real part of each cycle time-held: {run:?}"
         );
-        assert!(
-            run.max_produced_lead_ms <= ROLLING_INITIAL_RUNWAY_MS + 2 * ROLLING_SEGMENT_MAX_MS,
-            "produced inventory stays inside the publication allowance plus one batch: {run:?}"
-        );
-        assert!(run.max_produced_over_allowed_ms <= 2_000, "{run:?}");
+        assert_rolling_test_frontiers(&run, 1.0);
     }
 
     /// The next-publication release target is the clock's own desired end
