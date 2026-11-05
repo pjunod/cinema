@@ -833,7 +833,8 @@ impl Drop for AdoptedReader {
 #[cfg(target_os = "linux")]
 #[test]
 fn recovery_process_fixture() {
-    use std::io::{Read as _, Seek as _};
+    use std::io::{Read as _, Seek as _, Write as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
     use std::time::{Duration, Instant};
     let Ok(role) = std::env::var("PLURX_RECOVERY_PROCESS_ROLE") else {
         return;
@@ -907,11 +908,16 @@ fn recovery_process_fixture() {
                 node_id: NODE.into(),
                 records: vec![record.clone()],
             };
-            std::fs::write(
-                fixture.root.path().join("prepared.json"),
-                serde_json::to_vec(&envelope).expect("prepared"),
-            )
-            .expect("prepare child ownership");
+            let mut prepared = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(fixture.root.path().join("prepared.json"))
+                .expect("create private child ownership evidence");
+            prepared
+                .write_all(&serde_json::to_vec(&envelope).expect("prepared"))
+                .expect("prepare child ownership");
+            drop(prepared);
             std::fs::write(fixture.root.path().join("source.bin"), [42_u8; 4096])
                 .expect("source fixture");
             let daemon =
