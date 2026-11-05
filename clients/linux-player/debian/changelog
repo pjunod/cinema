@@ -1,3 +1,17 @@
+plurx-player (0.4.2+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Keep Dolby Vision reconstruction free of inherited mastering/scene tone
+    mapping, preserving the RPU, creative display management and target.
+  * Preserve software planar 10-bit DV and limited BT.2020/PQ HDR10 sampling
+    precision in owned UNORM16 staging; retain hardware imports and refuse
+    accidentally incomplete required FEL input. Honor explicit suppression with
+    the existing format:enhancement-layer=no option without changing RPU or DM.
+  * Exercise the shipped color/layout admission, packing, upload and frame
+    cleanup code with CPU controls. Keep private dependency pins and the
+    existing five patches and shipped tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Tue, 03 Nov 2026 12:00:00 +0000
+
 plurx-player (0.4.1+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
 
   * Make both Cinema Info buttons show live playback diagnostics, including

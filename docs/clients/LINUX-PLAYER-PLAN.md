@@ -442,6 +442,44 @@ HDR10-E session; their fixes reach the player through
   screenshot of the Dumb Money frame is bit-identical before and after. The
   server's display-targeted renders use the same code.
 
+### Reconstruction precision correction — 0.4.2 candidate
+
+Explicit `--vf=format:enhancement-layer=no` remains supported: it suppresses FEL
+application without disabling RPU reconstruction or display management. Its EL
+decoder still runs. The required-layer refusal applies to accidental loss, and
+the extracted C regression distinguishes the two cases without rewriting metadata.
+
+The 2026-11-03 correction appends two mpv patches while preserving the five
+existing patches and pinned dependency versions. Reconstruction uses fresh
+BT.2020/PQ color metadata with explicit .005–10000 nit bounds, so inherited
+mastering/scene fields cannot activate libplacebo's additional shadow mapping.
+RPU representation, creative DM and display-target selection are unchanged.
+Software planar 10-bit DV BL and paired EL, plus limited-range BT.2020
+non-constant-luminance/PQ HDR10 and HDR10-E, use owned high-aligned UNORM16
+staging. The additional HDR10 predicate does not admit SDR, HLG, full-range or other
+matrices/primaries; the existing planar/layout/linear-format guards still apply.
+Hardware/P010/integer fallback paths remain unchanged. Unless explicitly suppressed,
+active NLQ requires its paired EL, with partial-frame cleanup on setup failure and refusal
+of reported reconstruction errors.
+
+Executable CPU controls exercise the actual shipped packing, upload entry point
+and cleanup helpers, including failure after host-copy consumption. Private
+local synthetic GPU controls demonstrate the metadata-triggered shadow lift;
+fixed paired-source experiments support the two mechanisms on two titles.
+A later private one-condition ablation verified the same 48 q14 frames decode
+to identical visible YUV and timing with software and CUDA. Software HDR10
+frames 0/47 then matched frozen NVDEC PNG/full-RGB hashes; NVDEC frame 0 and
+Dolby source A/B frame 32 retained their prior corrected output. This supports
+the upload-precision mechanism on those controls, without treating NVDEC as a
+normative reference or claiming compression tails are fixed.
+
+Those experiments do not qualify every profile, GPU or frame. The generalized
+production patch still needs its exact native compile, package checks, DV/HDR10/P8
+regressions and staging-cost measurement before release or installation. The
+unchanged original MPI callback upload path has a separate upstream failure
+ownership risk; the new staging path uses callback-null consumption/copy
+semantics and does not inherit that risk.
+
 ## 6. Non-goals for v1
 
 - **No browsing UI in the player.** The web app is the browser, and a second

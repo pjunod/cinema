@@ -18,3 +18,6 @@
 0003-vo_gpu_next-map-Dolby-Vision-with-plurx-s-closed-for.patch
 0004-vulkan-context-start-Wayland-swapchains-pass-through.patch
 0005-osc-draw-a-film-timeline-the-application-provides.patch
+# Reconstruction metadata and software DV sampling precision.
+0006-vo_gpu_next-normalize-DV-reconstruction-metadata.patch
+0007-vo_gpu_next-preserve-DV-software-sampling-precision.patch
