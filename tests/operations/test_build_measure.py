@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import importlib.machinery
 import importlib.util
+import itertools
 import os
 from pathlib import Path
 import signal
@@ -44,6 +45,11 @@ root=pathlib.Path.cwd()
 pending=root/'.build-measure-pending.json'
 content=(root/'crates/plurxd/src/http/web.rs').read_text()
 mode=sys.argv[1]
+if mode=='orphan-exit' and pending.exists():
+ import subprocess
+ observer="import pathlib,time;time.sleep(.5);p=pathlib.Path("+repr(sys.argv[2]+'.seen')+");p.write_text(pathlib.Path('crates/plurxd/src/http/web.rs').read_text())"
+ subprocess.Popen([sys.executable,'-c',observer])
+ raise SystemExit(0)
 if mode=='wait' and pending.exists():
  def stopped(_signum,_frame):
   pathlib.Path(sys.argv[2]+'.seen').write_text((root/'crates/plurxd/src/http/web.rs').read_text())
@@ -307,6 +313,78 @@ print(json.dumps({'reason':'build-finished','success':True}))
 
     def test_failed_child_registration_drains_before_restoration(self):
         self.lifecycle_fault("journal")
+
+    def reaped_group_fixture(self, child, waitpid):
+        signals = []
+        def signal_group(_pid, signum):
+            if signum:
+                signals.append(signum)
+            # The numeric PGID now names a live, unrelated group.
+        with (mock.patch.object(MEASURE.os, "waitpid", side_effect=waitpid),
+              mock.patch.object(MEASURE.os, "killpg", side_effect=signal_group),
+              mock.patch.object(MEASURE.time, "monotonic", side_effect=itertools.count()),
+              mock.patch.object(MEASURE.time, "sleep")):
+            with self.assertRaises(MEASURE.UndrainedCompiler):
+                MEASURE.stop_group(child)
+        return signals
+
+    def test_reaped_or_nonchild_group_never_receives_a_numeric_signal(self):
+        for returncode in (0, None):
+            with self.subTest(returncode=returncode):
+                child = mock.Mock(pid=98765, returncode=returncode)
+                def no_child(*_args):
+                    raise ChildProcessError("leader already reaped")
+                self.assertEqual(self.reaped_group_fixture(child, no_child), [])
+
+    def test_leader_reaped_after_term_never_receives_a_later_kill(self):
+        child = mock.Mock(pid=98765, returncode=None)
+        child.wait.side_effect = lambda **_kwargs: setattr(child, "returncode", -signal.SIGTERM)
+        self.assertEqual(self.reaped_group_fixture(child, lambda *_args: (0, 0)),
+                         [signal.SIGTERM])
+
+    def test_exited_unreaped_leader_is_collected_without_signalling(self):
+        child = mock.Mock(pid=98765, returncode=None)
+        signals = self.reaped_group_fixture(child, lambda *_args: (child.pid, 7 << 8))
+        self.assertEqual(signals, [])
+        self.assertEqual(child.returncode, 7)
+
+    def test_unsafe_reaping_context_refuses_before_compiler_launch(self):
+        for unsafe in ("signal", "thread"):
+            with self.subTest(unsafe=unsafe), mock.patch.object(MEASURE.subprocess, "Popen") as spawn:
+                patch = (mock.patch.object(MEASURE.signal, "getsignal", return_value=signal.SIG_IGN)
+                         if unsafe == "signal" else
+                         mock.patch.object(MEASURE.threading, "active_count", return_value=2))
+                with patch, self.assertRaises(MEASURE.UndrainedCompiler):
+                    MEASURE.run_command([sys.executable, "-V"], dict(os.environ), self.source,
+                                        self.base / "unsafe.log", (), 1)
+                spawn.assert_not_called()
+
+    def test_real_term_ignoring_child_is_killed_while_still_owned(self):
+        ready = self.base / "ignoring-term"
+        code = ("import pathlib,signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                f"pathlib.Path({str(ready)!r}).write_text('ready');time.sleep(60)")
+        child = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                if child.poll() is not None or time.monotonic() >= deadline:
+                    self.fail("TERM-ignoring child did not start")
+                time.sleep(.01)
+            MEASURE.stop_group(child, grace=.05)
+            self.assertEqual(child.returncode, -signal.SIGKILL)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+
+    def test_exited_leader_with_descendants_retains_the_probe(self):
+        self.write_recipe("orphan-exit")
+        result = self.run_tool("--cases", "leaf")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("command exited before its compiler descendants", result.stderr)
+        self.assertTrue((self.source / MEASURE.PENDING).exists())
+        self.assertIn("build-measure-1", self.web.read_text())
+        self.assertIn("build-measure-1", (self.base / "ready.seen").read_text())
 
     def test_uncertain_launch_refuses_automatic_recovery(self):
         (self.source / MEASURE.PENDING).write_text(json.dumps({"compiler_state": "launching"}))

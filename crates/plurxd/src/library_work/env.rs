@@ -11,6 +11,26 @@ use tokio_util::sync::CancellationToken;
 type WorkResult<'a> = (PublicationStore<'a>, Result<(), StoreError>);
 type WorkFuture<'a> = Pin<Box<dyn Future<Output = WorkResult<'a>> + Send + 'a>>;
 
+fn probe_work<'a>(
+    manager: &'a JobManager,
+    job_id: &'a str,
+    library_id: i64,
+    lease: &'a ActiveJobLease,
+    publisher: &'a PublicationStore<'a>,
+    fence: &'a crate::background_jobs::JobFence,
+) -> impl Future<Output = Result<(), StoreError>> + Send + 'a {
+    // Each generic task-local/admission scope otherwise carries the complete
+    // producer state and amplifies its native poll frame. Keep that state on
+    // the heap before entering any scope, while retaining direct await and the
+    // same publisher/domain/fence ownership through JoinWork.
+    let work =
+        Box::pin(manager.process_library_requests(job_id, library_id, lease, publisher, fence));
+    plurx_core::scan::probe::with_probe_inputs(
+        Arc::new(super::probe_input::LibraryProbeInputs(fence.clone())),
+        work,
+    )
+}
+
 /// One selection over the worker's four sources. The parameter types fix the
 /// call-site order (`work` is a future, `pressure` an interval, so swapping
 /// them does not compile), and `library_worker_select_prefers_ready_work_to_a_ready_tick`
@@ -136,11 +156,7 @@ impl<'a> TokioEnvironment<'a> {
                 None,
                 &fence,
                 || async { true },
-                plurx_core::scan::probe::with_probe_inputs(
-                    Arc::new(super::probe_input::LibraryProbeInputs(fence.clone())),
-                    manager
-                        .process_library_requests(&job_id, library_id, &lease, &publisher, &fence),
-                ),
+                probe_work(manager, &job_id, library_id, &lease, &publisher, &fence),
             )
             .await;
             (publisher, result)
@@ -401,5 +417,45 @@ impl Environment for TokioEnvironment<'_> {
                 Reply::Done
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+
+    #[test]
+    fn library_scan_scope_futures_fit_a_normal_worker_stack() {
+        fn scoped_size<F: Future>(
+            _: impl FnOnce(
+                &'static JobManager,
+                &'static str,
+                i64,
+                &'static ActiveJobLease,
+                &'static PublicationStore<'static>,
+                &'static crate::background_jobs::JobFence,
+            ) -> F,
+        ) -> usize {
+            std::mem::size_of::<F>()
+        }
+        fn driver_size<F: Future>(
+            _: impl FnOnce(&'static mut TokioEnvironment<'static>) -> F,
+        ) -> usize {
+            std::mem::size_of::<F>()
+        }
+        let scoped = scoped_size(probe_work);
+        let driver = driver_size(TokioEnvironment::poll_work);
+        eprintln!("library producer scope: {scoped} bytes; driver: {driver} bytes");
+        // Generic admission/task-local scopes must carry a small payload.
+        // The real-daemon seed separately exercises the ordinary worker stack;
+        // future size alone cannot prove its complete native poll-stack bound.
+        assert!(
+            scoped < 4 * 1024,
+            "library producer scope is {scoped} bytes"
+        );
+        assert!(
+            driver < 32 * 1024,
+            "library driver future is {driver} bytes"
+        );
     }
 }

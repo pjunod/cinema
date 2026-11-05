@@ -23,6 +23,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -183,24 +184,53 @@ def changed_bytes(case: str, original: bytes, sample: int) -> bytes:
     raise ValueError("unknown probe")
 
 
-def stop_group(child: subprocess.Popen) -> None:
-    for signum, timeout in [(signal.SIGTERM, 5), (signal.SIGKILL, 5)]:
-        try:
-            os.killpg(child.pid, signum)
-        except ProcessLookupError:
-            pass
-        try:
-            child.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            pass
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+def require_exclusive_reaper() -> None:
+    # An unreaped direct child pins its PID/group identity only while this
+    # process is the sole reaper. Refuse contexts that can reap it elsewhere.
+    if (threading.current_thread() is not threading.main_thread()
+            or threading.active_count() != 1
+            or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL):
+        raise UndrainedCompiler("exclusive child reaping is unavailable; owned outer cleanup required")
+
+
+def signal_unreaped_group(child: subprocess.Popen, signum: int) -> None:
+    # stop_group defers cancellation throughout ownership checks and drainage.
+    if child.returncode is not None:
+        return
+    require_exclusive_reaper()
+    try:
+        pid, status = os.waitpid(child.pid, os.WNOHANG)
+    except ChildProcessError:
+        return  # Already reaped: its numeric group ID may belong to someone else.
+    if pid == child.pid:
+        child.returncode = os.waitstatus_to_exitcode(status)
+        return
+    if pid != 0:
+        raise UndrainedCompiler("direct-child ownership is uncertain; probe retained")
+    # waitpid == 0 proves our child remains unreaped. Even if it exits now,
+    # its zombie pins the PID until this sole reaper calls wait.
+    try:
+        os.killpg(child.pid, signum)
+    except ProcessLookupError:
+        pass
+
+
+def stop_group(child: subprocess.Popen, grace: float = 5) -> None:
+    with defer_cancellation():
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            signal_unreaped_group(child, signum)
             try:
-                os.killpg(child.pid, 0)
-            except ProcessLookupError:
-                return
-            time.sleep(0.01)
-    raise UndrainedCompiler("compiler group did not terminate; source probe retained")
+                child.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
+            deadline = time.monotonic() + grace
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(child.pid, 0)
+                except ProcessLookupError:
+                    return
+                time.sleep(0.01)
+        raise UndrainedCompiler("compiler group did not terminate; source probe retained")
 
 
 @contextlib.contextmanager
@@ -221,6 +251,7 @@ def defer_cancellation():
 
 def run_command(command: list[str], environment: dict[str, str], source: Path,
                 log: Path, lease: tuple[int, ...], timeout: float) -> dict:
+    require_exclusive_reaper()
     started = time.monotonic()
     timed = command
     memory_log = log.with_suffix(".time.log")

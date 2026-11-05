@@ -65,7 +65,10 @@ source staging time and target size separately.
 
 Probe journals preserve original bytes and generated hashes. Cancellation
 drains the compiler process group before restoration; uncertain child ownership
-retains the probe. `--recover` uses the same arguments and refuses live or
+retains the probe. Numeric group signals require a live, unreaped direct child,
+default SIGCHLD handling and a sole reaper. A reaped leader cannot authorize
+signalling its old numeric group ID: remaining descendants require checked
+outer cleanup, while the probe is retained. `--recover` uses the same arguments and refuses live or
 uncertain compiler ownership and unexpected source edits. Inspect retained
 receipts before manual recovery; restored source alone does not qualify its
 compiled artifacts. Never run a benchmark artifact as a release candidate.
@@ -94,9 +97,12 @@ and GNU ld 2.46. Compiler-result wrappers and Rust flag overrides were absent.
 The initial check inspected the compiler guest but missed a legacy daemon on
 its physical host. These runs predate correcting that host-isolation mistake;
 they are diagnostic evidence, not acceptance of a safe developer recipe.
-Further compilation uses the repository's voter-build limits (8 GiB, no
-additional swap, four CPUs). Both timing variants must be rerun under those
-same limits before recipe acceptance. The original results remain retained.
+Mac-hosted compilation now uses the repository's voter-build limits (8 GiB,
+no additional swap, four CPUs). A separately verified physical non-voter
+compiler has also passed the pinned compiler and native SDK checks in a
+24 GiB/no-swap/four-CPU scope. Both timing variants must be rerun on the same
+verified host with identical actual resource limits and the normal development
+profile before recipe acceptance. The original results remain retained.
 Source archive creation/transfer/staging took 7.14 seconds, outside Cargo time.
 The warm target's initial 243.26-second rebuild is excluded from these medians;
 it is not a cold compiler measurement.
@@ -120,8 +126,17 @@ the baseline report's SHA-256 is
 `410755c0ecb5baf5b0656db1f36fdc2c1251e3af2291aa63ac4e6891e2d4d310`.
 Subsequent runner hardening makes restoration rebuild validation automatic,
 records inherited compiler/target selection, refuses nested targets and keeps
-CLI output short. Its 21 focused tests pass. These later checks do not alter
+CLI output short. Its initial 21 focused tests passed. These later checks do not alter
 the frozen timing loop; actual baseline restoration events were independently
 postvalidated. The developer-recipe task records its own after measurements
 and acceptance, including every outlier. No disk-size or cold-build gain is
 claimed by this baseline.
+
+Before P1 merge, Astra confirmed a cancellation defect: signalling a numeric
+process group after reaping its leader could affect an unrelated reused group.
+The public runner now verifies sole-reaper ownership before each TERM/KILL and
+retains changed source when descendant drainage is uncertain. Its SHA-256 is
+`24e05df06ded864b5b401e87b74449d0bc7520f162d837e6c428ff87a7bce470`.
+All 27 focused tests pass on macOS and Linux. This corrects cleanup safety;
+it does not qualify new performance measurements. A fresh exact-head effort
+gate remains required, and the final dependency-omission milestone stays open.

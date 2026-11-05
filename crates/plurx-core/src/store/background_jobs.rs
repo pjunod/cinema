@@ -2428,6 +2428,12 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn settled_background_source_custody(
         &self,
     ) -> Result<Vec<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>;
+    /// Authoritative exact-owner lookup; absence may reconcile cleanup, but
+    /// neither a present row nor an expired lease proves physical termination.
+    async fn resolve_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+    ) -> Result<Option<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>;
     async fn register_background_source_custody(
         &self,
         owner: super::background_jobs_resources::BackgroundSourceOwner,
@@ -4338,6 +4344,13 @@ LIMIT 1
     ) -> Result<Vec<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>
     {
         super::background_jobs_resources::settled_background_custody(self).await
+    }
+    async fn resolve_background_source_custody(
+        &self,
+        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
+    ) -> Result<Option<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>
+    {
+        super::background_jobs_resources::resolve_background_custody(self, token).await
     }
     async fn register_background_source_custody(
         &self,

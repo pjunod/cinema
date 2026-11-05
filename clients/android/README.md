@@ -20,9 +20,12 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.8.0**, build `188` — progressive captions discover stopped
-> operations before explicit Resume and show current nonretryable range failures.
-> Discovery creates no demand; focused validation and physical acceptance remain open.
+> Status: **v0.8.0**, build `189` — media waits retire with their settled or superseded
+> destination intent, matching the shared playback-surface contract. Native qualification
+> is tracked in PR #1378; physical acceptance remains open.
+>
+> Build `188` — progressive captions discover stopped operations before explicit Resume
+> and show current nonretryable range failures. Discovery creates no demand.
 >
 > Build `185` — the player shows the server's Dolby
 > Vision enhancement: one teal `FEL` / `RPU` / `DYN` pill per active

@@ -32,6 +32,12 @@ services:
     #   - "32443:32443"
 
     volumes:
+      # Linux host reboot proof for source-custody recovery. The daemon must
+      # see this host's machine AND boot identity, never image/namespace IDs.
+      # Use real readable host files; native macOS/Windows recovery remains
+      # fail-closed. See docs/server/SOURCE-CUSTODY-RECOVERY.md before use.
+      # - /etc/machine-id:/run/plurx-host-machine-id:ro
+      # - /proc/sys/kernel/random/boot_id:/run/plurx-host-boot-id:ro
       # Optional supplied HTTPS identity directory. Use /etc/plurx/tls paths
       # in the HTTPS card and permit the service uid to read both PEM files.
       # Mount the certificate manager's symlink targets too; renew at restart.

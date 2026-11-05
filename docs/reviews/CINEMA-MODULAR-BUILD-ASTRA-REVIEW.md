@@ -100,9 +100,42 @@ A second source review identified restoration qualification and inherited
 compiler-selection gaps. Restoration now requires owner/dependent rebuilds;
 compiler metadata records the actual explicit compiler and target selection.
 Root review also requires disjoint source/target directories so a nested cache
-cannot hide source inputs. All 21 focused runner tests passed. The controlled
+cannot hide source inputs. The initial 21 focused runner tests passed; the cleanup correction below adds
+six further cases. The controlled
 real-Cargo pair separately validates source restoration and equal observed
 features/profiles; test fixtures alone do not establish real build behavior.
 The outer legacy compiler wrapper's cooperation limit remains explicit in the
 measurement ledger. This review provides no final package omission or release
 qualification credit.
+
+
+## 7. P1 cleanup correction — process-group identity
+
+Before merge, review of the bare-host adapter exposed a product-runner defect:
+`stop_group` could send TERM/KILL after `child.wait` had reaped the original
+leader. A reused numeric process-group ID could then name an unrelated group.
+Astra confirmed that this blocks P1; a private adapter alone does not fix the
+public script. The earlier green gate covers the prior candidate only.
+
+The correction requires single-threaded/default-SIGCHLD reaping and checks
+`waitpid(WNOHANG)` before every mutating signal. A live, unreaped direct child
+pins that identity until this sole reaper collects it. An already-set return
+code, exited child or ECHILD forbids signalling; unresolved descendants retain
+the probe for checked outer cleanup. Cancellation remains deferred through
+cleanup. Non-mutating group-presence checks may conservatively refuse recovery.
+
+All 27 focused Python tests pass on macOS and Linux, including deterministic reused-group
+and ECHILD refusal, no KILL after TERM reaps the leader, unsafe-reaper refusal,
+a real TERM-ignoring child and an exited leader leaving a real observer. That
+observer sees the retained changed probe until it exits; it is not killed as
+an unowned group. Final source review, normal hooks and a new exact-head gate
+are required before merge. These checks do not qualify a timing pair or the
+final standalone package.
+
+Current-main integration also exposed a recovery process-fixture defect under
+the ordinary `022` umask: its prepared evidence was created as `0644`, which
+production correctly rejects. Astra reviewed the fixture-only correction to
+create a new `0600` file and finish `write_all` before starting its child.
+Production permission checks and process-global umask remain unchanged. The
+earlier 19/20 recovery result is a failure; the corrected suite must pass on
+the new candidate before task merge.
