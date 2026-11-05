@@ -1244,7 +1244,7 @@ struct Shared {
     /// Per-rendition single-flight gates. Slow Store/filesystem/ffmpeg build
     /// work owns only its key; the node-wide rendition registry is held solely
     /// for short lookup/install/remove transactions.
-    rendition_builds: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
+    rendition_builds: shared::RenditionBuildDirectory,
     renditions: Mutex<HashMap<String, Arc<Rendition>>>,
     /// Exact finite native owner after the rich rendition leaves the serving
     /// registry. A same-key build must observe this under its build gate.

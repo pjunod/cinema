@@ -1491,7 +1491,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
 /// the transaction boundary.
 pub(super) struct RenditionAttachment {
     pub(super) rendition: Arc<Rendition>,
-    pub(super) _build_guard: tokio::sync::OwnedMutexGuard<()>,
+    pub(super) _build_guard: super::shared::RenditionBuildGuard,
 }
 
 pub(super) struct TerminalEvictionCandidate {

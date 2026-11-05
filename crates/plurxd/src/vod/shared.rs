@@ -1,5 +1,84 @@
 use super::*;
 
+/// One original per-key mutex directory. Raw handles and Weak entries stay in
+/// this module so later conserving custody cannot fork a key's exclusion.
+#[derive(Default)]
+pub(super) struct RenditionBuildDirectory {
+    entries: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
+}
+
+impl RenditionBuildDirectory {
+    fn gate(&self, key: &str) -> RenditionBuildGate {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(inner) = entries.get(key).and_then(Weak::upgrade) {
+            return RenditionBuildGate { inner };
+        }
+        let inner = Arc::new(Mutex::new(()));
+        entries.insert(key.to_owned(), Arc::downgrade(&inner));
+        RenditionBuildGate { inner }
+    }
+
+    fn prune(&self) {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, gate| gate.strong_count() > 0);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+}
+
+/// Opaque access to the same original mutex; cloning allocates no new gate.
+#[derive(Clone)]
+#[repr(transparent)]
+pub(super) struct RenditionBuildGate {
+    inner: Arc<Mutex<()>>,
+}
+
+impl RenditionBuildGate {
+    pub(super) fn lock_owned(self) -> impl std::future::Future<Output = RenditionBuildGuard> {
+        use futures_util::FutureExt;
+        self.inner
+            .lock_owned()
+            .map(|guard| RenditionBuildGuard { _guard: guard })
+    }
+
+    pub(super) fn try_lock_owned(self) -> Result<RenditionBuildGuard, tokio::sync::TryLockError> {
+        self.inner
+            .try_lock_owned()
+            .map(|guard| RenditionBuildGuard { _guard: guard })
+    }
+
+    pub(super) fn lock(
+        &self,
+    ) -> impl std::future::Future<Output = RenditionBuildBorrowedGuard<'_>> {
+        use futures_util::FutureExt;
+        self.inner
+            .lock()
+            .map(|guard| RenditionBuildBorrowedGuard { _guard: guard })
+    }
+}
+
+/// Only destruction unlocks; callers cannot recover or clone the raw mutex.
+#[repr(transparent)]
+pub(super) struct RenditionBuildGuard {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+#[repr(transparent)]
+pub(super) struct RenditionBuildBorrowedGuard<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
 #[cfg(target_os = "linux")]
 pub(super) struct FiniteClosingOwner {
     /// Kept until the real producer driver has stopped reporting output.
@@ -149,7 +228,7 @@ pub(crate) struct PreparedAttemptRendition {
     shared: Arc<Shared>,
     key: String,
     rendition: Option<Arc<Rendition>>,
-    build_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    build_guard: Option<RenditionBuildGuard>,
     original_driver: Option<tokio::task::JoinHandle<()>>,
     // Last: the original core charge stays live until every rich field above
     // and the detached abandoned-owner transfer have been destroyed.
@@ -204,7 +283,7 @@ pub(crate) struct PreparedAttemptCleanupTask {
 async fn run_prepared_attempt_cleanup(
     shared: Arc<Shared>,
     key: String,
-    gate: Option<tokio::sync::OwnedMutexGuard<()>>,
+    gate: Option<RenditionBuildGuard>,
     rendition: Arc<Rendition>,
     output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
     producer: Arc<super::finite_software::FiniteSoftwareProducer>,
@@ -891,24 +970,17 @@ impl Shared {
             .retain(|_, lifecycle| lifecycle.strong_count() > 0);
     }
 
-    pub(super) fn rendition_build_gate(&self, key: &str) -> Arc<Mutex<()>> {
-        let mut builds = self
-            .rendition_builds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(build) = builds.get(key).and_then(Weak::upgrade) {
-            return build;
-        }
-        let build = Arc::new(Mutex::new(()));
-        builds.insert(key.to_owned(), Arc::downgrade(&build));
-        build
+    pub(super) fn rendition_build_gate(&self, key: &str) -> RenditionBuildGate {
+        self.rendition_builds.gate(key)
     }
 
     pub(super) fn prune_rendition_builds(&self) {
-        self.rendition_builds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|_, build| build.strong_count() > 0);
+        self.rendition_builds.prune();
+    }
+
+    #[cfg(test)]
+    pub(super) fn rendition_build_count_for_test(&self) -> usize {
+        self.rendition_builds.len()
     }
 
     /// Arm ruling A3's producer deadline once per demanded plan entry. The
@@ -1284,7 +1356,7 @@ impl Shared {
         recipe: Recipe,
         duration_ms: i64,
         settings: VodSettings,
-        build_guard: tokio::sync::OwnedMutexGuard<()>,
+        build_guard: RenditionBuildGuard,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         canonical_processing_key: Option<(String, Option<Arc<tokio::sync::OwnedSemaphorePermit>>)>,
     ) -> Result<Option<RenditionAttachment>, String> {

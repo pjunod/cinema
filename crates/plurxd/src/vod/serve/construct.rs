@@ -466,7 +466,7 @@ impl VodServe {
                 passive_grants: passive_grant::Registry::default(),
                 preparing_sessions: StdMutex::new(HashMap::new()),
                 session_lifecycles: StdMutex::new(HashMap::new()),
-                rendition_builds: StdMutex::new(HashMap::new()),
+                rendition_builds: shared::RenditionBuildDirectory::default(),
                 renditions: Mutex::new(HashMap::new()),
                 #[cfg(target_os = "linux")]
                 finite_closing: Mutex::new(std::collections::BTreeMap::new()),
