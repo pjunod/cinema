@@ -393,7 +393,18 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
         SurfaceClass.Hold,
         retiredBy = setOf(SurfaceRetirement.SystemResumed),
     ),
-    SurfaceSourceRow(SurfaceSources.MEDIA_WAITING, "attached", SurfaceClass.Buffering),
+    SurfaceSourceRow(
+        SurfaceSources.MEDIA_WAITING,
+        "attached",
+        SurfaceClass.Buffering,
+        retiredBy = setOf(
+            SurfaceRetirement.Presenting,
+            SurfaceRetirement.PlaybackNotRequested,
+            SurfaceRetirement.IntentSettled,
+            SurfaceRetirement.IntentSuperseded,
+            SurfaceRetirement.AttachedRetired,
+        ),
+    ),
     SurfaceSourceRow(SurfaceSources.OWNER_RECOVERY_STEP, "any", SurfaceClass.Recovering),
     SurfaceSourceRow(SurfaceSources.READINESS_DEADLINE_RUNGS_LEFT, "any", SurfaceClass.Recovering),
     SurfaceSourceRow(
