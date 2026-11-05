@@ -10,6 +10,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [Native media-wait retirement](../apple-builds/1378-native-media-wait-retirement.md) | Apple and Android source-table parity for intent settlement and supersession, found during recovery qualification. | built |
 | [Apple TV settings labels](../apple-builds/1130-settings-labels.md) | Persistent setting names beside selected values, one focusable menu row and native Settings regression; physical Apple TV acceptance pending. | built |
 | [LINUX-PLAYER-CINEMA-UI.md](LINUX-PLAYER-CINEMA-UI.md) | Cinema-style native controls, scoped library metadata and Next, quality replacement ownership, package qualification and installed 0.4.0; owner confirms UI/quality switching, live TV Next pending. | open |
 | [LINUX-PLAYER-PLAN.md](LINUX-PLAYER-PLAN.md) | How Dolby Vision plays on Linux through plurx: a web handoff to plurx Player (an mpv launcher), the server playback handoff (§3.1), Profile 7 FEL composed in the player (reconstructed Profile 8.1 from the server for clients that cannot compose), the closed-form mapping in a private mpv, packaging, and the milestones with their acceptance. | open |

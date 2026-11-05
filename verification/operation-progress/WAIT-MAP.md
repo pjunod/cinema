@@ -5,6 +5,91 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared the frozen corrections with
+`460d8e6d3ec494f2335ed4bbdfa6601f54bfa380`. The previous whole-file pin for the
+[library environment](../../crates/plurxd/src/library_work/env.rs) matches
+that base, and its selected acquisition anchor remains unique. Refresh only
+that one existing row; the authored review is not independent review or an
+execution receipt.
+
+The non-async `probe_work` factory heap-pins the producer before the generic
+probe-input/admission wrappers receive it. Work still runs by direct await,
+under the same task-local budget, cancellation and pause scopes. The same
+outer future owns publisher/domain references through `JoinWork`; selection
+priority, cancellation, admission retention, release, retirement and field drop
+order are unchanged. This removes native stack amplification without adding a
+worker action, detached task, deadline, retry or new completion premise.
+
+The related [Hiqlite bootstrap](../../crates/plurx-core/src/store/hiqlite_background_jobs.rs)
+correction recognizes an already exact canonical version-4 layout and marker
+in both success branches. It does not weaken shape validation, replace the
+managed view or change SQL authority guards. That startup dependency is pinned
+and audited by the [durable contract](../durable-jobs/CONTRACT.md#scan-stack-and-canonical-bootstrap--scoped-source-audit-on-2026-11-04),
+not modeled here. The model still assumes a running backend rather than
+proving startup, schema installation or host recovery terminates.
+
+The PR's future-size regression, ordinary-stack empty-library scan and real
+one-voter bootstrap/identity regression are runtime evidence with their own
+scope. An empty scan proves neither media parsing nor the full UI; a future
+size proves neither total native poll-stack use nor whole-daemon liveness.
+No model/configuration, bound, property, fairness premise, selected schedule
+or historical receipt identity changes. New source pins do not renew the
+earlier formal qualification or cover these external failure mechanisms.
+
+## Verified host-reboot recovery — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared `88fa37663` in
+[PR #1378](http://forge.lan:3000/noirr/plurx/pulls/1378) with
+`edf6d08faf549554b9892dee582406ff79af1c97`; all five affected previous
+whole-file pins match that base. The agent participated in implementation,
+so this authored audit is not independent Astra review or execution evidence.
+
+[Core claiming](../../crates/plurx-core/src/store/background_jobs.rs) only
+adds an exact-owner custody lookup to the trait/adapter; selected claim,
+renewal, binding and publication guards do not change.
+[Resource helpers](../../crates/plurx-core/src/store/background_jobs_resources.rs)
+retain the existing immutable key algorithm and add the consistent read.
+[Queue cleanup](../../crates/plurxd/src/background_jobs.rs) now passes its
+Store into custody journal cleanup without changing the selected token,
+heartbeat, publication or domain-release lock order.
+
+[Startup](../../crates/plurxd/src/main.rs) registers the exact Store/backend
+and awaits [verified recovery](../../crates/plurxd/src/source_custody/recovery.rs)
+before producers. [The scheduler](../../crates/plurxd/src/state.rs) retries it
+before ordinary settled-source replay. The new path clones its Store context
+before filesystem/Store work; its registry mutex is not held across an await.
+It may still await filesystem durability and authoritative Store replies.
+The existing finite worker model does not include these startup/scheduler
+steps, active-reader journals, abort cleanup, or physical custody states.
+
+The mapping refreshes 11 existing rows and adds four external dependency pins:
+the exact resource lookup, [custody integration](../../crates/plurxd/src/source_custody.rs),
+the recovery module, and [challenge preparation](../../scripts/source-custody-recovery).
+This expands drift detection, not modeled coverage. Trusted host identity,
+changed-kernel-boot proof, terminated descendants, fsync publication,
+exact-Store/fallback isolation and lost-ack abort reconciliation remain
+separate runtime obligations in the
+[recovery plan](../../docs/server/JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). Same-boot
+or missing proof remains a legitimate indefinite obstruction; the filesystem,
+backend and runtime return premises do not imply a reboot or discharge it.
+
+**Identity-source corrections (2026-11-04):** subsequent recovery-module
+dependency refreshes require both actual-host inputs, read-only bound at
+`/run/plurx-host-machine-id` and `/run/plurx-host-boot-id`, for native services
+and containers alike. Missing container markers do not justify image-local
+`/etc/machine-id`; a namespace's `/proc` boot UUID is not host-reboot proof
+either. Machine identity must be nonzero and host boot identity a canonical
+nonnil UUID. Missing or invalid input keeps recovery unproved and custody
+held. These remain external runtime obligations, not model progress evidence.
+
+Retain the historical `source-anchors.json`, all selected action/wait anchors,
+model/configuration bytes, bounds, properties, fairness and receipt identities.
+No historical schedule or temporal result gains a host-recovery, whole-daemon
+liveness or scan-completion guarantee. Static validation, fresh TLC smoke and
+runtime tests are distinct evidence.
+
 ## Playback startup custody — scoped source review on 2026-11-03
 
 Codex agent `/root/other_formal_correspondence` compared base

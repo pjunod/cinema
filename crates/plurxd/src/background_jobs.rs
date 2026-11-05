@@ -413,7 +413,9 @@ pub(crate) async fn settle_joined_source_custody(
     loop {
         match store.mark_background_source_settled(receipt.clone()).await {
             Ok(false) => {
-                if let Err(error) = crate::source_custody::clear_background_settlement(&receipt) {
+                if let Err(error) =
+                    crate::source_custody::clear_background_settlement(store, &receipt)
+                {
                     tracing::warn!(%error,"background source journal cleanup will replay");
                 }
                 return;
@@ -432,7 +434,9 @@ pub(crate) async fn settle_joined_source_custody(
         let deleted = faults::after_commit(faults::SOURCE_RELEASE, deleted);
         match deleted {
             Ok(_) => {
-                if let Err(error) = crate::source_custody::clear_background_settlement(&receipt) {
+                if let Err(error) =
+                    crate::source_custody::clear_background_settlement(store, &receipt)
+                {
                     tracing::warn!(%error,"background source journal cleanup will replay");
                 }
                 return;

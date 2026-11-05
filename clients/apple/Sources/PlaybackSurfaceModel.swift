@@ -488,7 +488,7 @@ enum PlaybackSurfaceContract {
         SourceRow("media_owner_lost_410", nil, .recovering, thenWhenStopped: .stopped, carries: ["position_ms"]),
         SourceRow("control_hold", .attached, .hold),
         SourceRow("system_interruption", .attached, .hold, retiredBy: [.systemResumed]),
-        SourceRow("media_waiting", .attached, .buffering),
+        SourceRow("media_waiting", .attached, .buffering, retiredBy: [.presenting, .playbackNotRequested, .intentSettled, .intentSuperseded, .attachedRetired]),
         SourceRow("owner_recovery_step", nil, .recovering),
         SourceRow("readiness_deadline_rungs_left", nil, .recovering),
         SourceRow("decoder_failed", nil, .stopped, requiresPlayerStopped: true),

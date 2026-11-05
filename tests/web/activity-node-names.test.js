@@ -80,6 +80,9 @@ const BORROWED = [
   "durableJobReason",
   "activityBlockedScans",
   "activityBlockedScansHtml",
+  "activitySourceRecovery",
+  "activitySourceRecoveryHtml",
+  "analysisLiveProgress",
   "restoreDurableFocus",
   "paintActivityBody",
 ];
@@ -742,6 +745,71 @@ test("several blocked scans are counted and their text is escaped", () => {
   assert.match(html, /&lt;b&gt;films&lt;\/b&gt;/);
   assert.match(html, /root &lt;x&gt; unreadable/);
   assert.doesNotMatch(html, /<b><b>films|<x>/);
+});
+
+function sourceObservation(holders, overrides={}) {
+  return {available:true,now_ms:Date.now(),source_io_holders:holders,...overrides};
+}
+function sourceHolder(overrides={}) {
+  return {active_occupancy:true,work_id:"pruned-job",resource_key:"source_io",lease_expires_at_ms:0,phase:"cleanup_pending",...overrides};
+}
+test("expired source custody stays prominent after its job disappears and escapes identities", () => {
+  Object.assign(painter.durable,{rows:[],activeJobs:[]});
+  const html=paint(snapshot({analysis:sourceObservation([sourceHolder({work_id:'gone-<reader>"',resource_key:'source_io:<disk>'})])}));
+  const banner=html.indexOf("data-activity-source-recovery");
+  assert.ok(banner>html.indexOf('id="activity-status"'));
+  assert.ok(banner<html.indexOf('id="cluster-workers"'));
+  assert.match(html,/Shared source reads need recovery/);
+  assert.match(html,/even when their jobs are no longer listed/);
+  assert.match(html,/Lease expiry does not prove a physical read has stopped/);
+  assert.match(html,/gone-&lt;reader&gt;&quot;/);
+  assert.match(html,/source_io:&lt;disk&gt;/);
+  assert.match(html,/previous authority expired/);
+  assert.match(html,/href="#\/analysis">Review source readers and analysis/);
+  assert.doesNotMatch(html,/<reader>|<disk>|force.unlock/i);
+});
+test("source recovery uses observed authority and active occupancy rather than browser lease speculation", () => {
+  const observed=Date.now()-10000;
+  for(const holder of [
+    sourceHolder({phase:"reading",lease_expires_at_ms:observed+5000}),
+    sourceHolder({active_occupancy:false}),
+  ]) {
+    const html=paint(snapshot({analysis:sourceObservation([holder],{now_ms:observed})}));
+    assert.doesNotMatch(html,/data-activity-source-recovery|Source capacity unknown/);
+  }
+  const expired=paint(snapshot({analysis:sourceObservation([sourceHolder({phase:"reading",lease_expires_at_ms:observed})],{now_ms:observed})}));
+  assert.match(expired,/data-activity-source-recovery/);
+});
+test("missing unavailable or stale reader observations leave source capacity unknown", () => {
+  for(const analysis of [undefined,{available:false},sourceObservation([],{now_ms:Date.now()-60000}),sourceObservation([],{now_ms:Date.now()+60000}),sourceObservation([],{source_io_holders:undefined})]) {
+    const html=paint(snapshot({analysis}));
+    assert.match(html,/Source capacity unknown/);
+    assert.doesNotMatch(html,/data-activity-source-recovery|No shared source readers/);
+  }
+});
+test("source recovery details stay administrator-only", () => {
+  painter.me.is_admin=false;
+  try {
+    const html=paint(snapshot({analysis:sourceObservation([sourceHolder({work_id:"private-source-owner"})])}));
+    assert.doesNotMatch(html,/data-activity-source-recovery|data-activity-source-capacity|private-source-owner/);
+  } finally {painter.me.is_admin=true;}
+});
+test("queued library work explains global source recovery without guessing domain ownership", () => {
+  const job={id:"scan",kind:"library_scan",library_id:1,library:"Movies",state:"queued",supported:true,priority:2,age_ms:60000};
+  Object.assign(painter.durable,{rows:[job],activeJobs:[]});
+  try {
+    for(const kind of ["library_scan","metadata_refresh"]) {
+      job.kind=kind;
+      const html=paint(snapshot({analysis:sourceObservation([sourceHolder()])}));
+      assert.match(html,/durable-reason[^>]*>Shared source capacity is reserved by work awaiting recovery/);
+    }
+    for(const holder of [sourceHolder({resource_key:"source_io:other-library"}),sourceHolder({phase:"reading",lease_expires_at_ms:Date.now()+60000})]) {
+      const html=paint(snapshot({analysis:sourceObservation([holder])}));
+      assert.doesNotMatch(html,/durable-reason[^>]*>Shared source capacity/);
+    }
+    job.state="running";
+    assert.doesNotMatch(paint(snapshot({analysis:sourceObservation([sourceHolder()])})),/durable-reason[^>]*>Shared source capacity/);
+  } finally {Object.assign(painter.durable,{rows:[],activeJobs:[]});}
 });
 
 test("watching stays above both tabs and the selected workspace survives polling", () => {
