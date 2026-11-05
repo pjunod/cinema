@@ -17,6 +17,13 @@ bump may break compatibility and a **patch** bump never does.
 
 - Dolby Vision enhancement quality checks use an accurate BT.2020/PQ colour
   conversion and remeasure verdicts made with the old conversion.
+
+- Subtitle workers keep polling pending writes during pressure checks, avoiding
+  a deadlock that retained source-reader reservations and blocked library scans.
+
+- Docker builds fetch snapshot-pinned Debian packages from regular mirrors with
+  automatic snapshot fallback and bounded retries for download failures.
+
 - Library scans avoid async stack exhaustion on ordinary worker threads, and
   repeated startup recognizes the current canonical managed subtitle schema.
 
