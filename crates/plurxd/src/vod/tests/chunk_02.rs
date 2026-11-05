@@ -2539,12 +2539,7 @@ async fn compatibility_recipe_preview_preserves_reader_and_producer_registries()
         .lock()
         .expect("lifecycle registry")
         .is_empty());
-    assert!(serve
-        .shared
-        .rendition_builds
-        .lock()
-        .expect("build registry")
-        .is_empty());
+    assert_eq!(serve.shared.rendition_build_count_for_test(), 0);
     assert_eq!(
         serve
             .shared
@@ -3098,4 +3093,82 @@ fn shared_soundtrack_restart_uses_its_own_interval_boundary() {
     entry.kind = PlanEntryKind::AudioTail;
     muxed.entries.push(entry);
     assert_eq!(video_entry_at_or_before(&muxed, tail), tail - 1);
+}
+
+#[tokio::test]
+async fn opaque_build_gates_keep_original_mutex_through_cancellation_and_prune() {
+    use std::task::Poll;
+
+    let base = crate::test_tempdir().expect("build gate fixture");
+    let serve = bare_serve(base.path());
+    let held = serve
+        .shared
+        .rendition_build_gate("original-key")
+        .lock_owned()
+        .await;
+    let queued_gate = serve.shared.rendition_build_gate("original-key");
+    {
+        let first = queued_gate.clone().lock_owned();
+        let second = queued_gate.clone().lock_owned();
+        tokio::pin!(first, second);
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
+        {
+            let cancelled = queued_gate.clone().lock_owned();
+            tokio::pin!(cancelled);
+            assert!(futures_util::poll!(cancelled.as_mut()).is_pending());
+        }
+        assert!(queued_gate.clone().try_lock_owned().is_err());
+        let other = serve
+            .shared
+            .rendition_build_gate("independent-key")
+            .try_lock_owned()
+            .expect("another key acquires while the original remains held");
+        drop(other);
+
+        drop(held);
+        let Poll::Ready(first_guard) = futures_util::poll!(first.as_mut()) else {
+            panic!("the first queued waiter must acquire the original gate");
+        };
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
+        drop(first_guard);
+        let Poll::Ready(second_guard) = futures_util::poll!(second.as_mut()) else {
+            panic!("queued cancellation must preserve the second waiter's place");
+        };
+        drop(second_guard);
+    }
+
+    let held = queued_gate.clone().lock_owned().await;
+    drop(queued_gate);
+    serve.shared.prune_rendition_builds();
+    assert_eq!(serve.shared.rendition_build_count_for_test(), 1);
+    let from_guard_only = serve.shared.rendition_build_gate("original-key");
+    assert!(from_guard_only.clone().try_lock_owned().is_err());
+    drop(held);
+
+    let borrowed = from_guard_only.lock().await;
+    assert!(serve
+        .shared
+        .rendition_build_gate("original-key")
+        .try_lock_owned()
+        .is_err());
+    drop(borrowed);
+    let final_guard = from_guard_only
+        .clone()
+        .try_lock_owned()
+        .expect("borrowed release unlocks the same original mutex");
+    drop(from_guard_only);
+    serve.shared.prune_rendition_builds();
+    assert_eq!(serve.shared.rendition_build_count_for_test(), 1);
+    drop(final_guard);
+    serve.shared.prune_rendition_builds();
+    assert_eq!(serve.shared.rendition_build_count_for_test(), 0);
+
+    #[cfg(target_os = "linux")]
+    println!(
+        "BUILD_GATE_FRAME_LAYOUT {} {} {}",
+        super::shared::finite_closing_frame_bytes(),
+        super::shared::prepared_attempt_cleanup_frame_bytes(),
+        super::finite_software::projected_driver_future_bytes(),
+    );
 }

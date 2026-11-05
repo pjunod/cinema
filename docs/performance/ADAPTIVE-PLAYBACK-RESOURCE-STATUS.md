@@ -36,8 +36,8 @@ cleanup. Its 63 distinct source-scoped passes are recorded there. The pre-M
 census span and all family coverage remain unbridged.
 
 [Finite driver custody](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md#finite-vod-keeps-the-original-driver-through-every-join)
-records 13 scoped daemon passes, zero ignored. Rich R/S and pre-Winner whole-F
-closure remain open.
+records 13 scoped daemon passes, zero ignored. Opaque build gates preserve
+original mutexes; rich R/S and pre-Winner whole-F closure remain open.
 
 The [finite ledger](ADAPTIVE-PLAYBACK-DELIVERY.md#finite-lifecycle-and-restart-qualification)
 and [policy ledger](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) retain their earlier

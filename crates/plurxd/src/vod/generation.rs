@@ -1863,7 +1863,7 @@ impl RenditionSink {
     async fn reserved_dependencies(
         &self,
     ) -> io::Result<(
-        tokio::sync::OwnedMutexGuard<()>,
+        super::shared::RenditionBuildGuard,
         Vec<plurx_core::playback::continuous_quality::QualityInterval>,
     )> {
         if !quality_reservations_possible(&self.rendition.recipe) {

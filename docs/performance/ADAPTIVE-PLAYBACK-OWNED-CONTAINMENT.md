@@ -345,6 +345,46 @@ capacity fail explicitly. This task does not complete counted R/S rich payload
 destruction, pre-Winner coordinator/abandoned-cleanup whole-F custody, broader
 census coverage, full M0 or real-trial eligibility.
 
+## Opaque build gates keep the original mutex
+
+The Codex continuation on `codex/adaptive-build-gate-custody` returns opaque
+handles and guards from every rendition build-gate lookup. The private
+[directory](../../crates/plurxd/src/vod/shared.rs) keeps its original
+Weak-upgrade-or-create algorithm and prunes only after the last real strong
+handle or owned guard disappears. Sibling source cannot recover its Arc,
+Weak, raw mutex or raw guard. Owned and borrowed locking use the same original
+Tokio futures; wrapping them creates no Box, task or extra Arc allocation.
+
+The opaque guard crosses prepared-attempt cleanup, reader attachment and
+quality dependency return boundaries. Its one-field transparent layout keeps
+the underlying guard value's size and alignment. Enclosing async frames still
+require their own evidence: the actual compiler projections remain the source
+of requested bytes before R admission and at postconstruction fits. This is
+not a complete executor, allocator or producer peak claim.
+
+**Qualification:** five distinct daemon cases pass, zero failed or ignored.
+The new original-mutex FIFO, queued cancellation, guard-only prune and borrowed
+lock case passes on source tree `8eba312ae0473ba85b0b11c32f3968ad682f366b`.
+Three existing exclusion/cancellation/reap cases and the changed recipe-preview
+registry assertion pass on `59f51cea0ce6a7cc19d51478f62b26f213b7e799`, after
+porting onto actual support landing `2d95be48`. The product patch remains
+byte-identical; the later tree adds only documentation. These counts overlap
+other tasks and are not added to them.
+
+The temporary pre-change layout harness is retained separately as measurement,
+with no regression credit. In the same native Linux x86_64 unoptimized test
+profile with cluster integration, core fixtures and Hiqlite contract features,
+all three measured frame sizes stay unchanged: 2624 bytes for finite closing,
+712 for prepared cleanup and 16160 for the combined driver projection.
+Production non-test layout equality is unmeasured. Pinned Rust 1.97.1
+formatting, full workspace/all-target check and strict Clippy pass on their
+recorded sources. Exact committed-candidate and effort-gate checks retain
+their own source boundary in the task pull request.
+
+This prerequisite installs no finalizer pool, new task, reservation or slot
+policy. Independent collector funding, full R/S application ownership,
+pre-Winner whole-F closure, complete inventory and real trials remain open.
+
 ## Selected runtime keeps its original census row
 
 Registration precedes journal publication and the common native-entry latch.
