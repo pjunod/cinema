@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Subtitle workers keep polling pending writes during pressure checks, avoiding
+  a deadlock that retained source-reader reservations and blocked library scans.
+
 - Docker builds fetch snapshot-pinned Debian packages from regular mirrors with
   automatic snapshot fallback and bounded retries for download failures.
 
