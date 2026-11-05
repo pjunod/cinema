@@ -4,7 +4,6 @@
 //! The journal remains separate from replicated Store and advisory telemetry.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -23,6 +22,7 @@ use crate::resource_custody::{
 
 pub mod application;
 mod capacity_observer;
+pub(in crate::adaptive_resources) mod finalization_support;
 #[cfg(target_os = "linux")]
 mod finite_policy;
 #[cfg(target_os = "linux")]
@@ -142,6 +142,7 @@ pub struct NodeResourceRuntime {
     recovered_adoptions: Mutex<BTreeMap<Uuid, Arc<tokio::sync::Mutex<recovery::RecoveryAdoption>>>>,
     #[cfg(target_os = "linux")]
     direct_read_domain: Mutex<Option<Arc<direct_source::DirectReadDomain>>>,
+    finalization_support: Mutex<finalization_support::SupportSlot>,
     capacity_observer: tokio::sync::Mutex<capacity_observer::CapacityObserver>,
     #[cfg(target_os = "linux")]
     mount_namespace_inode: Option<u64>,
@@ -223,6 +224,7 @@ impl NodeResourceRuntime {
             recovered_adoptions: Mutex::new(BTreeMap::new()),
             #[cfg(target_os = "linux")]
             direct_read_domain: Mutex::new(None),
+            finalization_support: Mutex::new(finalization_support::SupportSlot::new()),
             capacity_observer: tokio::sync::Mutex::new(capacity_observer::CapacityObserver::new()),
             #[cfg(target_os = "linux")]
             mount_namespace_inode: {
@@ -308,6 +310,9 @@ impl NodeResourceRuntime {
 
     #[cfg(not(target_os = "linux"))]
     pub fn has_unreconciled_custody(&self) -> bool {
+        if self.ledger.finalization_support_present() {
+            return true;
+        }
         self.has_recovered_obligations()
     }
 
@@ -333,6 +338,15 @@ impl NodeResourceRuntime {
     /// Blocking final-owner shutdown, not request cancellation or settlement.
     /// Charges remain durable; joining the DB owner grants no physical refund.
     pub fn drain(self) -> Result<(), CustodyError> {
+        if self.ledger.finalization_support_present() {
+            return Err(CustodyError {
+                kind: crate::resource_custody::ErrorKind::Conflict,
+                operation_id: None,
+                obligations: Vec::new(),
+                certainty: crate::resource_custody::CommitCertainty::NotStarted,
+                message: "finalization support still owns original runtime custody",
+            });
+        }
         self.journal.drain()
     }
 }

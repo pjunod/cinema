@@ -205,6 +205,9 @@ impl NodeResourceRuntime {
         original_preparation_cutoff: Instant,
         now: Instant,
     ) -> TrialRefusal {
+        if self.ledger.finalization_support_present() {
+            return TrialRefusal::InsufficientEvidence;
+        }
         finite_trial_refusal_for(
             MemoryClaim::UnknownProducerPeak,
             original,
@@ -242,6 +245,9 @@ impl NodeResourceRuntime {
         original_preparation_cutoff: Instant,
         now: Instant,
     ) -> TrialRefusal {
+        if self.ledger.finalization_support_present() {
+            return TrialRefusal::InsufficientEvidence;
+        }
         finite_trial_refusal_for(
             request.producer.memory_claim(),
             request.continuous_entry_deadline.as_ref(),
