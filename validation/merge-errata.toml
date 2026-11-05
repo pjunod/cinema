@@ -484,3 +484,7 @@ parents = ["7ea74370bf216585efbda76af722a1cc0cecc804", "c505a1a05efbdb8b8b26af22
 title = "fix(ci): reconcile runner drift and bound standby caches"
 pull = "1359"
 reason = "Verified PR #1359 main merge; its immutable subject lacks the PR number required by the landing parser. Full main run #6425 exposed four inherited corrective commits outside a recognized carrier. All nine original Regression-Test fields resolve in this exact merge tree and remain mandatory evidence. This row recognizes only the real commit, tree, ordered parents and PR identity; it adds no errata, moves no boundary and claims no runtime execution."
+
+[[errata]]
+commit = "3e92751c1859f1fb1be7ad61815f5744b1b0aa63"
+reason = "The immutable #1388 landing names DockerSnapshotTests.test_live_mirrors_serve_only_debs_and_indexes_stay_pinned in its Regression-Test field. The historical resolver expects the bare method name. The test is present as tests/operations/test_docker_snapshot.py::test_live_mirrors_serve_only_debs_and_indexes_stay_pinned and passed against the Dockerfile and snapshot helper extracted from that landing. Effort gate task 26385 exposed the spelling mismatch on #1391."
