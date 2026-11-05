@@ -2,9 +2,9 @@
 //! original operation and supplies no replacement close or refund proof.
 use super::*;
 use crate::adaptive_resources::runtime::finite_vod::{
-    cleanup_tests::original_software_fixture_with_producer, FiniteFile, FiniteOutput, FiniteReader,
-    FiniteResponseBuffer, FiniteVodError, FiniteWriterOutcome, SoftwareAvcPumpPlan,
-    SoftwareVodEvent, SoftwareVodOwner,
+    cleanup_tests::original_software_fixture_with_producer, FiniteCloseIdentity,
+    FiniteCloseWorkspace, FiniteFile, FiniteOutput, FiniteReader, FiniteResponseBuffer,
+    FiniteVodError, FiniteWriterOutcome, SoftwareAvcPumpPlan, SoftwareVodEvent, SoftwareVodOwner,
 };
 use crate::adaptive_resources::ResourceVector;
 use crate::fmp4::{CutPolicy, FiniteSegmenterLimits, FragmentReaderBounds, MergeMemoryLimits};
@@ -100,6 +100,8 @@ struct OriginalOutput {
     member: Uuid,
     output: FiniteOutput,
     init_len: u64,
+    original_close_identity: FiniteCloseIdentity,
+    original_reservation: u64,
     // Drop the installation after its original native selectors.
     root: FixtureRoot,
 }
@@ -242,6 +244,8 @@ impl OriginalOutput {
             .expect("original inventory")
             .expect("actual published init");
         assert!(init_len > 1);
+        let original_close_identity = preparation.finite_identity(0);
+        let original_reservation = preparation.state.lock().await.roles[0].binding.reservation;
         (
             Self {
                 runtime,
@@ -250,6 +254,8 @@ impl OriginalOutput {
                 member,
                 output,
                 init_len,
+                original_close_identity,
+                original_reservation,
                 root,
             },
             early_reader,
@@ -305,6 +311,14 @@ impl OriginalOutput {
             .prepare_eviction(deadline())
             .await
             .expect("original retained cleanup");
+        assert_eq!(ticket.original_identity(), self.original_close_identity);
+        assert_ne!(
+            self.preparation.state.lock().await.roles[0]
+                .binding
+                .reservation,
+            self.original_reservation,
+            "R-to-S changes the reservation, never the original close identity"
+        );
         let Self {
             runtime,
             owner,
@@ -314,17 +328,31 @@ impl OriginalOutput {
             ..
         } = self;
         drop((retained, output, owner, preparation));
+        let original = ticket.original_identity();
+        let mut workspace = FiniteCloseWorkspace::new();
         ticket
-            .finish_retirement(deadline())
+            .finish_retirement_in(&mut workspace, deadline())
             .await
-            .expect("known native cleanup and final refund");
+            .expect("known native cleanup and final refund with fixed workspace");
+        let completed = match ticket.into_completed() {
+            Ok(completed) => completed,
+            Err(_) => panic!("real retained close must consume its empty ticket"),
+        };
+        assert_eq!(completed.original_identity(), original);
         let final_state = runtime.accounting().expect("final accounting");
         assert_eq!(final_state.held, 0);
-        assert_eq!(runtime.affected_owner_inventory().snapshot().unwrap().records().count(), 0,
-            "final physical/application destruction and ledger refund retire the original census row");
+        assert_eq!(
+            runtime
+                .affected_owner_inventory()
+                .snapshot()
+                .unwrap()
+                .records()
+                .count(),
+            0,
+            "final physical/application destruction and ledger refund retire the original census row"
+        );
         assert_eq!(final_state.unknown_peak_producers, 0);
         assert_eq!(final_state.used, ResourceVector::default());
-        drop(ticket);
         Arc::try_unwrap(runtime)
             .ok()
             .expect("all original selectors dropped")

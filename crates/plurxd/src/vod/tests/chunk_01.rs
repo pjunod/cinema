@@ -2626,17 +2626,16 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
     let _build_gate = serve
         .shared
         .rendition_build_gate(&rendition.key)
+        .expect("running rendition gate directory")
         .lock_owned()
         .await;
-    assert!(
-        serve
-            .shared
-            .renditions
-            .lock()
-            .await
-            .insert(rendition.key.clone(), Arc::clone(&rendition))
-            .is_none()
-    );
+    assert!(serve
+        .shared
+        .renditions
+        .lock()
+        .await
+        .insert(rendition.key.clone(), Arc::clone(&rendition))
+        .is_none());
     let media = [rendition];
     let baseline = encoding.admissions.snapshot();
     let snapshot = sqlite
@@ -2657,16 +2656,14 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
         "legacy hardware zero remains disabled"
     );
 
-    assert!(
-        sqlite
-            .put_resource_capacity(&CapacityUpdate {
-                expected_revision: snapshot.revision,
-                hardware_sessions: Some(LimitChoice::Explicit { value: 0 }),
-                software_pool_threads: Some(LimitChoice::Explicit { value: 0 }),
-            })
-            .await
-            .expect("typed explicit zero")
-    );
+    assert!(sqlite
+        .put_resource_capacity(&CapacityUpdate {
+            expected_revision: snapshot.revision,
+            hardware_sessions: Some(LimitChoice::Explicit { value: 0 }),
+            software_pool_threads: Some(LimitChoice::Explicit { value: 0 }),
+        })
+        .await
+        .expect("typed explicit zero"));
     assert!(
         VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
             .await
@@ -2679,16 +2676,14 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
         .await
         .expect("explicit snapshot")
         .expect("installed capacity schema");
-    assert!(
-        sqlite
-            .put_resource_capacity(&CapacityUpdate {
-                expected_revision: explicit.revision,
-                hardware_sessions: Some(LimitChoice::Automatic),
-                software_pool_threads: Some(LimitChoice::Automatic),
-            })
-            .await
-            .expect("explicit Automatic selection")
-    );
+    assert!(sqlite
+        .put_resource_capacity(&CapacityUpdate {
+            expected_revision: explicit.revision,
+            hardware_sessions: Some(LimitChoice::Automatic),
+            software_pool_threads: Some(LimitChoice::Automatic),
+        })
+        .await
+        .expect("explicit Automatic selection"));
     let automatic = sqlite
         .resource_capacity_snapshot()
         .await
@@ -2735,16 +2730,14 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
         .await
         .expect("current revision")
         .expect("installed capacity schema");
-    assert!(
-        sqlite
-            .put_resource_capacity(&CapacityUpdate {
-                expected_revision: before_zero.revision,
-                hardware_sessions: None,
-                software_pool_threads: Some(LimitChoice::Explicit { value: 0 }),
-            })
-            .await
-            .expect("explicit serialized software policy")
-    );
+    assert!(sqlite
+        .put_resource_capacity(&CapacityUpdate {
+            expected_revision: before_zero.revision,
+            hardware_sessions: None,
+            software_pool_threads: Some(LimitChoice::Explicit { value: 0 }),
+        })
+        .await
+        .expect("explicit serialized software policy"));
     let incumbent_weight = encoding.resources().cpu_threads;
     assert!(
         incumbent_weight > 0,

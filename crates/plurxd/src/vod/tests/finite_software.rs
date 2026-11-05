@@ -902,6 +902,269 @@ async fn finite_cancellation_fixture() -> FiniteCancellationFixture {
     }
 }
 
+#[tokio::test]
+async fn ordinary_collector_installed_dormant_r_joins_original_driver_and_refunds() {
+    let fixture = finite_cancellation_fixture().await;
+    fixture
+        .serve
+        .initialize_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("actual production collector startup");
+    let baseline = fixture.runtime.accounting().expect("support-paid baseline");
+    let envelope = finite_metadata::closing_owner_heap_bytes(255).expect("actual bounded envelope");
+    eprintln!("ordinary closing envelope requested bytes: {envelope}");
+    assert!(envelope <= plurx_core::adaptive_resources::runtime::ordinary_finite_collector::DAEMON_CLOSING_ENVELOPE_BYTES);
+    let duration_ms = plan_duration_ms(&fixture.plan);
+    let identity = fixture
+        .recipe
+        .encoding
+        .as_ref()
+        .expect("actual encoding")
+        .identity(&fixture.recipe.file, duration_ms as f64 / 1_000.0);
+    let key = rendition_key(&fixture.recipe, &identity);
+    let attachment = fixture
+        .serve
+        .shared
+        .attach_rendition(
+            &key,
+            &identity,
+            None,
+            fixture.recipe.clone(),
+            duration_ms,
+            &fixture.settings,
+        )
+        .await
+        .expect("ordinary installation")
+        .expect("nonempty rendition");
+    let producer = attachment
+        .rendition
+        .dir
+        .finite_producer()
+        .expect("actual R producer");
+    let original_id = producer
+        .installed_driver_id_for_test()
+        .await
+        .expect("same original driver retained before publication");
+    assert_eq!(
+        fixture
+            .runtime
+            .accounting()
+            .expect("actual R")
+            .unknown_peak_producers,
+        1
+    );
+    let escaped = attachment
+        .rendition
+        .dir
+        .finite_output()
+        .expect("actual output alias");
+    let original_slot = producer.collector_slot().expect("same paid collector slot");
+    drop(attachment);
+    fixture
+        .serve
+        .shared
+        .purge_if_dormant(&key, Duration::ZERO)
+        .await;
+    producer
+        .join_installed_driver()
+        .await
+        .expect("positive original driver join");
+    assert!(producer.original_driver_joined_for_test(original_id).await);
+    drop(producer);
+    assert_eq!(
+        fixture
+            .runtime
+            .accounting()
+            .expect("alias holds R")
+            .unknown_peak_producers,
+        1
+    );
+    drop(escaped);
+    wait_until(
+        "same paid service consumes native completion",
+        Duration::from_secs(30),
+        || async {
+            fixture
+                .runtime
+                .accounting()
+                .expect("actual accounting")
+                .used
+                == baseline.used
+                && fixture.serve.shared.finite_closing.lock().await.is_empty()
+        },
+    )
+    .await;
+    original_slot
+        .wait_terminal(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("actual original ticket consumed before Terminal");
+    drop(original_slot);
+    let incoming_guard = fixture
+        .serve
+        .shared
+        .rendition_build_gate(&key)
+        .expect("same original gate after stop")
+        .lock_owned()
+        .await;
+    let restarted = finite_software::build(
+        &fixture.serve.shared,
+        &key,
+        None,
+        fixture.recipe.clone(),
+        fixture.plan.clone(),
+        &fixture.settings,
+    )
+    .await
+    .expect("same-key real R restart while incoming guard owns the original mutex");
+    assert_eq!(
+        fixture
+            .runtime
+            .accounting()
+            .expect("actual restarted R")
+            .unknown_peak_producers,
+        1
+    );
+    drop(restarted);
+    assert_eq!(
+        fixture
+            .runtime
+            .accounting()
+            .expect("original gate still excludes refund")
+            .unknown_peak_producers,
+        1
+    );
+    drop(incoming_guard);
+    wait_until(
+        "same-key restarted R closes through original gate",
+        Duration::from_secs(30),
+        || async {
+            fixture
+                .runtime
+                .accounting()
+                .expect("actual restart refund")
+                .used
+                == baseline.used
+                && fixture.serve.shared.finite_closing.lock().await.is_empty()
+        },
+    )
+    .await;
+    fixture
+        .serve
+        .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("original collector and support close");
+}
+
+#[tokio::test]
+async fn ordinary_collector_saturation_and_shutdown_preserve_the_same_held_gate() {
+    let fixture = finite_cancellation_fixture().await;
+    fixture
+        .serve
+        .initialize_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("actual production collector startup");
+    let key = "ordinary-saturation-0";
+    let held_gate = fixture
+        .serve
+        .shared
+        .rendition_build_gate(key)
+        .expect("original directory gate")
+        .lock_owned()
+        .await;
+    let mut slots = Vec::with_capacity(256);
+    slots.push(
+        fixture
+            .serve
+            .shared
+            .reserve_collector_slot(key)
+            .expect("same held gate is adopted")
+            .expect("installed pool"),
+    );
+    let same_gate = fixture
+        .serve
+        .shared
+        .rendition_build_gate(key)
+        .expect("same directory remains available");
+    assert!(
+        same_gate.try_lock_owned().is_err(),
+        "slot adoption must not fork the held mutex"
+    );
+    for index in 1..256 {
+        slots.push(
+            fixture
+                .serve
+                .shared
+                .reserve_collector_slot(&format!("ordinary-saturation-{index}"))
+                .expect("fixed production capacity")
+                .expect("installed pool"),
+        );
+    }
+    assert!(
+        fixture
+            .serve
+            .shared
+            .reserve_collector_slot("ordinary-saturation-overflow")
+            .is_err(),
+        "the 257th simultaneous unbound reservation must defer before R"
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .accounting()
+            .expect("no R grant")
+            .unknown_peak_producers,
+        0
+    );
+    for slot in &slots {
+        slot.cancel_unbound()
+            .expect("core verifies no real grant occurred");
+    }
+    for slot in &slots {
+        slot.wait_terminal(Instant::now() + Duration::from_secs(30))
+            .await
+            .expect("core-known never-granted rollback wakes retained observers");
+    }
+    drop(slots);
+    assert!(
+        fixture
+            .serve
+            .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(1))
+            .await
+            .is_err(),
+        "the actual held gate prevents support destruction"
+    );
+    assert!(
+        fixture
+            .serve
+            .shared
+            .rendition_build_gate("legacy-fallback-during-close")
+            .is_err(),
+        "global Closing must refuse lookup before any legacy fallback"
+    );
+    assert!(
+        fixture
+            .serve
+            .shared
+            .reserve_collector_slot("fresh-r-during-close")
+            .is_err(),
+        "Closing must not manufacture a replacement slot"
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .accounting()
+            .expect("Closing refuses before R")
+            .unknown_peak_producers,
+        0
+    );
+    drop(held_gate);
+    fixture
+        .serve
+        .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("same shutdown owner retries after original gate release");
+}
+
 struct FiniteMetadataPause {
     key: String,
     pause: Arc<crate::seam_hooks::AsyncPause>,
@@ -938,16 +1201,33 @@ impl VodSharedHooks for FiniteMetadataPause {
 
 #[tokio::test]
 async fn cancelled_finite_metadata_wait_keeps_the_installed_original_cleanup_owner() {
-    finite_metadata_wait_abandonment(false).await;
+    finite_metadata_wait_abandonment(false, false).await;
 }
 
 #[tokio::test]
 async fn finite_metadata_deadline_arms_the_same_original_cleanup_owner() {
-    finite_metadata_wait_abandonment(true).await;
+    finite_metadata_wait_abandonment(true, false).await;
 }
 
-async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
+#[tokio::test]
+async fn ordinary_collector_cancelled_metadata_wait_retains_alias_and_refunds_original_r() {
+    finite_metadata_wait_abandonment(false, true).await;
+}
+
+#[tokio::test]
+async fn ordinary_collector_metadata_deadline_uses_same_paid_service() {
+    finite_metadata_wait_abandonment(true, true).await;
+}
+
+async fn finite_metadata_wait_abandonment(exhaust_deadline: bool, collected: bool) {
     let mut fixture = finite_cancellation_fixture().await;
+    if collected {
+        fixture
+            .serve
+            .initialize_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+            .await
+            .expect("actual production collector startup");
+    }
     fixture
         .serve
         .shared
@@ -1011,6 +1291,7 @@ async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
         .serve
         .shared
         .rendition_build_gate(&key)
+        .expect("running rendition gate directory")
         .lock_owned()
         .await;
     let pause = crate::seam_hooks::AsyncPause::new("accepted finite metadata reservation");
@@ -1049,7 +1330,7 @@ async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
         .get(&key)
         .cloned()
         .expect("original selector is installed before the metadata await");
-    let cleanup = shared::PreparedAttemptCleanup::from_closing(Arc::clone(&original));
+    let cleanup = shared::PreparedAttemptCleanup::from_closing(original.clone());
     let escaped = cleanup.original_output_for_test().await;
     assert_eq!(
         fixture
@@ -1094,7 +1375,7 @@ async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
             .lock()
             .await
             .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(current, &original)),
+            .is_some_and(|current| shared::FiniteClosingRef::ptr_eq(current, &original)),
         "same original cleanup selector"
     );
     assert!(
@@ -1140,6 +1421,17 @@ async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
         .lock()
         .await
         .contains_key(&key));
+    if collected {
+        // Observation aliases keep the independently paid closing allocation
+        // alive after R refund; releasing them permits original pool shutdown.
+        drop(original);
+        drop(cleanup);
+        fixture
+            .serve
+            .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+            .await
+            .expect("actual service join and support release");
+    }
 }
 
 #[tokio::test]
@@ -1201,6 +1493,7 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
         .serve
         .shared
         .rendition_build_gate(&key)
+        .expect("running rendition gate directory")
         .lock_owned()
         .await;
     let rendition = finite_software::build(
@@ -1293,7 +1586,7 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
             .lock()
             .await
             .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(current, &original)),
+            .is_some_and(|current| shared::FiniteClosingRef::ptr_eq(current, &original)),
         "same original cleanup selector"
     );
     assert!(
@@ -1788,6 +2081,73 @@ async fn original_driver_pending(
 }
 
 #[tokio::test]
+async fn ordinary_collector_abandon_registers_before_external_application_release() {
+    let fixture = finite_cancellation_fixture().await;
+    fixture
+        .serve
+        .initialize_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("actual production collector startup");
+    let baseline = fixture.runtime.accounting().expect("support-paid baseline");
+    let (_key, mut pending) = original_driver_pending(&fixture).await;
+    pending
+        .prepare_worker_binding(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("original dormant driver registered before Prepared");
+    let original_id = pending
+        .original_driver_id_for_test()
+        .expect("actual original task");
+    let producer = pending
+        .rendition()
+        .dir
+        .finite_producer()
+        .expect("original producer");
+    let application_lease = pending
+        .take_application_lease()
+        .expect("actual external registry fence");
+    let mut observation = pending.begin_abandon().expect("same paid closing service");
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), observation.wait_registered())
+        .await
+        .expect("registration must precede caller-held application release")
+        .expect("original AbandonRegistered observation");
+    producer
+        .join_installed_driver()
+        .await
+        .expect("same actual original task joined");
+    assert!(producer.original_driver_joined_for_test(original_id).await);
+    assert!(
+        !cleanup.known_closed(),
+        "registration is not native completion"
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .accounting()
+            .expect("external fence holds R")
+            .unknown_peak_producers,
+        1
+    );
+    drop(producer);
+    drop(application_lease);
+    wait_until(
+        "original external application fence drains",
+        Duration::from_secs(30),
+        || async { cleanup.known_closed() },
+    )
+    .await;
+    assert_eq!(
+        fixture.runtime.accounting().expect("actual R refund").used,
+        baseline.used
+    );
+    drop(cleanup);
+    fixture
+        .serve
+        .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("same original root release");
+}
+
+#[tokio::test]
 async fn adopted_prepared_rendition_installs_the_same_original_dormant_driver() {
     let fixture = finite_cancellation_fixture().await;
     let baseline = fixture.runtime.accounting().expect("baseline");
@@ -1895,14 +2255,14 @@ async fn cancelled_prepared_binding_joins_original_driver_despite_cancelled_clea
         .wait_driver_quiescent(Instant::now() + Duration::from_secs(30))
         .await
         .expect("original dormant driver returns after stop"));
-    assert!(!task.is_finished());
-    assert!(tokio::time::timeout(Duration::ZERO, task.join())
+    assert!(!task.registration_ready());
+    assert!(tokio::time::timeout(Duration::ZERO, task.wait_registered())
         .await
         .is_err());
-    assert!(!task.is_finished());
+    assert!(!task.registration_ready());
     drop(held_registration);
     let cleanup = task
-        .join()
+        .wait_registered()
         .await
         .expect("recover same retained cleanup task");
     drop(producer);
@@ -1952,7 +2312,7 @@ async fn aborted_original_prepared_driver_never_grants_known_close_or_refund() {
         .expect("retain aborted original join");
     drop(held_owner);
     let cleanup = task
-        .join()
+        .wait_registered()
         .await
         .expect("original cleanup registration task");
     assert!(!producer
@@ -1991,9 +2351,17 @@ async fn cancelled_installed_original_driver_join_retains_the_same_dormant_task(
     let original_id = pending
         .original_driver_id_for_test()
         .expect("same registered original task");
-    assert!(
-        producer.join_installed_driver().await.is_err(),
-        "a registered task still held by Prepared is not a never-spawned path"
+    {
+        // The producer retains the original handle before the first binding
+        // await. Cancelling a pre-Adopt join only drops this observer; the
+        // dormant original task and its handle remain in that same producer.
+        let mut join = Box::pin(producer.join_installed_driver());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(join.as_mut(), &mut context).is_pending());
+    }
+    assert_eq!(
+        producer.installed_driver_id_for_test().await,
+        Some(original_id)
     );
     pending
         .install_after_adoption()

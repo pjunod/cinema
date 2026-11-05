@@ -1423,10 +1423,10 @@ pub(super) async fn on_init_drift(shared: &Arc<Shared>, rendition: &Arc<Renditio
     let from_disk = rendition.identity.lock().await.from_disk;
     let admitted = rendition.manifest.lock().await.is_admitted();
     if from_disk && !admitted {
-        let _dependency_guard = shared
-            .rendition_build_gate(&rendition.key)
-            .lock_owned()
-            .await;
+        let Ok(gate) = shared.rendition_build_gate(&rendition.key) else {
+            return;
+        };
+        let _dependency_guard = gate.lock_owned().await;
         let dependencies = shared
             .store
             .quality_reserved_intervals(&rendition.key)
@@ -1871,6 +1871,7 @@ impl RenditionSink {
                 .publication_lock(
                     self.shared
                         .rendition_build_gate(&self.rendition.key)
+                        .map_err(io::Error::other)?
                         .lock_owned(),
                 )
                 .await?;
@@ -1890,6 +1891,7 @@ impl RenditionSink {
                 .publication_lock(
                     self.shared
                         .rendition_build_gate(&self.rendition.key)
+                        .map_err(io::Error::other)?
                         .lock_owned(),
                 )
                 .await?;

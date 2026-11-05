@@ -55,6 +55,9 @@ pub(crate) struct FiniteSoftwareProducer {
     // entry separately and transfers the exact original task handle here.
     driver_activated: AtomicBool,
     installed_driver: Mutex<OriginalDriver>,
+    collector_slot: std::sync::Mutex<
+        Option<plurx_core::adaptive_resources::runtime::ordinary_finite_collector::OrdinarySlot>,
+    >,
     #[cfg(all(test, feature = "cluster-integration-tests"))]
     panic_driver_after_return: AtomicBool,
 }
@@ -122,8 +125,58 @@ impl FiniteSoftwareProducer {
             driver_change: Notify::new(),
             driver_activated: AtomicBool::new(false),
             installed_driver: Mutex::new(OriginalDriver::NeverInstalled),
+            collector_slot: std::sync::Mutex::new(None),
             #[cfg(all(test, feature = "cluster-integration-tests"))]
             panic_driver_after_return: AtomicBool::new(false),
+        }
+    }
+    pub(super) fn bind_collector_slot(
+        &self,
+        slot: Option<
+            plurx_core::adaptive_resources::runtime::ordinary_finite_collector::OrdinarySlot,
+        >,
+    ) {
+        *self.collector_slot.lock().expect("original collector slot") = slot;
+    }
+    pub(super) fn collector_slot(
+        &self,
+    ) -> Option<plurx_core::adaptive_resources::runtime::ordinary_finite_collector::OrdinarySlot>
+    {
+        self.collector_slot
+            .lock()
+            .expect("original collector slot")
+            .clone()
+    }
+    pub(super) fn original_driver_finished(&self) -> bool {
+        let Ok(driver) = self.installed_driver.try_lock() else {
+            return false;
+        };
+        match &*driver {
+            OriginalDriver::NeverInstalled => false,
+            OriginalDriver::Pending(task) | OriginalDriver::Failed(task) => task.is_finished(),
+            OriginalDriver::Joined(_) => true,
+        }
+    }
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn original_driver_id_now_for_test(&self) -> Option<tokio::task::Id> {
+        let driver = self
+            .installed_driver
+            .try_lock()
+            .expect("original dormant driver custody");
+        match &*driver {
+            OriginalDriver::NeverInstalled => None,
+            OriginalDriver::Pending(task) | OriginalDriver::Failed(task) => Some(task.id()),
+            OriginalDriver::Joined(id) => Some(*id),
+        }
+    }
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn abort_original_driver_now_for_test(&self) {
+        let driver = self
+            .installed_driver
+            .try_lock()
+            .expect("original dormant driver custody");
+        if let OriginalDriver::Pending(task) = &*driver {
+            task.abort();
         }
     }
     pub(crate) fn generation_epoch(&self) -> u64 {
@@ -466,9 +519,18 @@ pub(super) fn selected_recipe(recipe: &Recipe, private: bool, ephemeral: bool) -
 }
 
 fn attach_metadata_partitions(
+    rendition: Arc<Rendition>,
+    metadata: FiniteMetadataLease,
+    client: FiniteClientStateLease,
+) -> Result<Arc<Rendition>, (String, Arc<Rendition>)> {
+    attach_metadata_partitions_for(rendition, metadata, client, false)
+}
+
+fn attach_metadata_partitions_for(
     mut rendition: Arc<Rendition>,
     metadata: FiniteMetadataLease,
     client: FiniteClientStateLease,
+    collected_ordinary: bool,
 ) -> Result<Arc<Rendition>, (String, Arc<Rendition>)> {
     let checked = (|| {
         let value = Arc::get_mut(&mut rendition)
@@ -489,7 +551,7 @@ fn attach_metadata_partitions(
         let actual = value
             .requested_retained_metadata_bytes()
             .ok_or("finite rendition metadata capacity could not be measured")?
-            .checked_add(projected_driver_future_bytes())
+            .checked_add(projected_driver_future_bytes_for(collected_ordinary))
             .ok_or("finite driver frame capacity overflowed")?;
         value
             .finite_metadata_lease
@@ -513,6 +575,10 @@ fn attach_metadata_partitions(
 /// Tokio's private task allocation/header and allocator rounding are separate
 /// from this application-owned future frame.
 pub(super) fn projected_driver_future_bytes() -> usize {
+    projected_driver_future_bytes_for(false)
+}
+
+fn projected_driver_future_bytes_for(collected_ordinary: bool) -> usize {
     fn frame_bytes<F: std::future::Future<Output = ()>>(
         _: fn(
             Arc<Shared>,
@@ -550,7 +616,13 @@ pub(super) fn projected_driver_future_bytes() -> usize {
     // fields add no heap; private executor/timer/allocator peaks remain Unknown.
     frame_bytes(run)
         .checked_add(build_frame_bytes(build_inner))
-        .and_then(|bytes| bytes.checked_add(super::shared::finite_closing_frame_bytes()))
+        .and_then(|bytes| {
+            bytes.checked_add(if collected_ordinary {
+                0
+            } else {
+                super::shared::finite_closing_frame_bytes()
+            })
+        })
         .expect("compiler-projected finite frames fit usize")
 }
 
@@ -860,13 +932,42 @@ async fn build_inner(
     )
     .await
     .map_err(|_| "finite build cleanup slot deadline elapsed".to_owned())??;
+    let collected_ordinary =
+        application_owner_bytes.is_none() && build_slot.collector_slot().is_some();
+    if collected_ordinary {
+        // Only ordinary cleanup really executes in the independently paid
+        // service. Builder/producer-driver and adaptive allowances stay R/S.
+        let moved = finite_metadata::closing_owner_heap_bytes(key.len())
+            .and_then(|bytes| bytes.checked_add(super::shared::finite_closing_frame_bytes()))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or("collected finite metadata partition overflowed")?;
+        request.output.retained_metadata_bytes = request
+            .output
+            .retained_metadata_bytes
+            .checked_sub(moved)
+            .ok_or("collected finite metadata partition is inconsistent")?;
+        let plurx_core::process::observation::Metric::Known(resources) =
+            &mut request.demand.resources
+        else {
+            return Err("collected finite memory request is unknown".into());
+        };
+        resources.peak_memory_bytes = resources
+            .peak_memory_bytes
+            .checked_sub(moved)
+            .ok_or("collected finite memory partition is inconsistent")?;
+    }
     let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
     let compatibility = compatibility.enter();
     // This is only a refusal candidate. Successful conservative admission
     // below ignores it; policy cannot turn unknown peaks into a trial permit.
     let speculative_refusal = application_owner_bytes
         .map(|_| runtime.finite_trial_refusal(&request, original_policy_cutoff, Instant::now()));
-    let owner = match runtime.prepare_software_vod(request, admission_deadline) {
+    let prepared = if let Some(slot) = build_slot.collector_slot() {
+        runtime.prepare_collected_software_vod(request, slot, admission_deadline)
+    } else {
+        runtime.prepare_software_vod(request, admission_deadline)
+    };
+    let owner = match prepared {
         Ok(owner) => owner,
         Err(error) => {
             if error.definitely_before_reservation() {
@@ -947,7 +1048,11 @@ async fn build_inner(
         projected_metadata
             .checked_add(output.requested_heap_bytes()?)?
             .checked_add(producer.requested_heap_bytes()?)?
-            .checked_add(finite_metadata::closing_owner_heap_bytes(key.len())?)
+            .checked_add(if collected_ordinary {
+                0
+            } else {
+                finite_metadata::closing_owner_heap_bytes(key.len())?
+            })
     })();
     let Some(projected_metadata) = projection else {
         record_cleanup(failed_attempt_cleanup);
@@ -1009,7 +1114,12 @@ async fn build_inner(
         }
         return Err("fresh finite compatibility entitlement is not the original claim".into());
     }
-    match attach_metadata_partitions(rendition, metadata_lease, client_lease) {
+    match attach_metadata_partitions_for(
+        rendition,
+        metadata_lease,
+        client_lease,
+        collected_ordinary,
+    ) {
         Ok(rendition) => Ok((rendition, application_lease)),
         Err((error, rendition)) => {
             if application_owner_bytes.is_some() {

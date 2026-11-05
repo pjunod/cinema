@@ -4,6 +4,25 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## Ordinary finite collector — scoped source correspondence on 2026-11-04
+
+Codex parent `/root` compared collector candidate `9ea38401cae75fea34035560711f5a3021b35a85`
+with effort base `4bb7606d31c281f408b7ea48115930b0243eed8a`. Manager construction
+adds Linux delegates for ordinary collector startup and shutdown; the mapped
+`admit_fragment` body is unchanged. Startup initializes that collector before
+listener publication and retains its external lifecycle authority. Shutdown
+awaits the same original collector and includes actual support release in the
+clean-stop decision. A failure remains an unclean stop with ownership held.
+The mapped library-worker spawn and its arguments are unchanged.
+
+Only Tables 41 and 44 whole-file pins follow these reviewed bytes. Their exact
+anchors remain unique. The selected library-worker claim, authority, lock,
+renewal, settlement and publication paths are unchanged. The new collector is
+outside this finite library-worker model's scope. Models, configurations,
+properties, fairness premises and historical review identities are unchanged.
+This source correspondence supplies no new TLC or runtime qualification; the
+collector's native regression receipts remain separately scoped.
+
 ## Effort/main integration — source correspondence on 2026-11-02
 
 Claude (claude-opus-5-5) merged main `7ea74370b` into effort `ca95fde57` on

@@ -3,6 +3,19 @@
 //! the original receipt and operation across an uncertain completion.
 use super::*;
 
+/// One original ordinary finite role has one final census-close token.
+/// The collector owns this inline storage independently through the R/S refund.
+#[derive(Default)]
+pub struct FiniteCloseWorkspace {
+    pending: Option<PendingRuntimeClose>,
+}
+
+impl FiniteCloseWorkspace {
+    pub const fn new() -> Self {
+        Self { pending: None }
+    }
+}
+
 impl NodeResourceRuntime {
     pub(in crate::adaptive_resources::runtime) fn finite_app_state(
         &self,
@@ -24,8 +37,31 @@ impl NodeResourceRuntime {
         index: usize,
         deadline: Instant,
     ) -> Result<(), OperationError> {
-        self.finish_application_close(selection, index, FinalApplicationRole::Finite, deadline)
-            .await
+        self.finish_application_close(
+            selection,
+            index,
+            FinalApplicationRole::Finite,
+            None,
+            deadline,
+        )
+        .await
+    }
+
+    pub(in crate::adaptive_resources::runtime) async fn finish_finite_close_in(
+        &self,
+        selection: &mut Option<OwnedPreparation>,
+        index: usize,
+        workspace: &mut FiniteCloseWorkspace,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.finish_application_close(
+            selection,
+            index,
+            FinalApplicationRole::Finite,
+            Some(workspace),
+            deadline,
+        )
+        .await
     }
 
     #[cfg(target_os = "linux")]
@@ -39,6 +75,7 @@ impl NodeResourceRuntime {
             selection,
             index,
             FinalApplicationRole::PlanningMetadata,
+            None,
             deadline,
         )
         .await
@@ -49,12 +86,27 @@ impl NodeResourceRuntime {
         selection: &mut Option<OwnedPreparation>,
         index: usize,
         kind: FinalApplicationRole,
+        mut workspace: Option<&mut FiniteCloseWorkspace>,
         deadline: Instant,
     ) -> Result<(), OperationError> {
+        if workspace
+            .as_ref()
+            .is_some_and(|fixed| fixed.pending.is_some())
+        {
+            return Err(OperationError::State);
+        }
         let owner = selection.as_ref().ok_or(OperationError::State)?;
         self.validate_preparation(owner)?;
         let unaccepted = {
             let bundle = owner.state.lock().await;
+            if workspace.is_some()
+                && (!matches!(kind, FinalApplicationRole::Finite)
+                    || index != 0
+                    || bundle.roles.len() != 1
+                    || bundle.roles[0].pending_inventory_close.is_some())
+            {
+                return Err(OperationError::State);
+            }
             matches!(kind, FinalApplicationRole::Finite)
                 && finite_prepare_definitely_unaccepted(&bundle)
         };
@@ -136,7 +188,11 @@ impl NodeResourceRuntime {
                 let (binding, durable, _cancel_without_physical_receipt) = {
                     let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
                     let role = bundle.roles.get(index).ok_or(OperationError::State)?;
-                    if bundle.id != owner.id
+                    if (workspace.is_some()
+                        && (index != 0
+                            || bundle.roles.len() != 1
+                            || role.pending_inventory_close.is_some()))
+                        || bundle.id != owner.id
                         || !bundle.prepare.acknowledged
                         || !kind.matches(&bundle, index)
                         || role.refunded
@@ -296,12 +352,19 @@ impl NodeResourceRuntime {
                 // capacities, native closures and the final core app-state owner.
                 let close =
                     inventory.take_validated_close(&mut bundle.roles[index].inventory, proof);
-                let mut pending: Vec<_> = bundle
-                    .roles
-                    .iter_mut()
-                    .filter_map(|role| role.pending_inventory_close.take())
-                    .collect();
-                pending.push(close);
+                // The fixed ordinary path allocates no pending-close vector.
+                // Multi-role legacy/planning callers retain their separate scope.
+                let mut pending = Vec::new();
+                if let Some(fixed) = workspace.as_deref_mut() {
+                    fixed.pending = Some(close);
+                } else {
+                    pending = bundle
+                        .roles
+                        .iter_mut()
+                        .filter_map(|role| role.pending_inventory_close.take())
+                        .collect();
+                    pending.push(close);
+                }
                 drop(bundle);
                 ledger
                     .entries
@@ -311,8 +374,16 @@ impl NodeResourceRuntime {
                 ledger
                     .release(binding.reservation)
                     .expect("prevalidated locked finite refund");
-                for close in pending {
+                if let Some(fixed) = workspace {
+                    let close = fixed
+                        .pending
+                        .take()
+                        .expect("prevalidated single finite close");
                     inventory.finish_runtime_close(close, &self.ledger, &ledger);
+                } else {
+                    for close in pending {
+                        inventory.finish_runtime_close(close, &self.ledger, &ledger);
+                    }
                 }
                 Ok(())
             })

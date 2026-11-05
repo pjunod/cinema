@@ -186,7 +186,7 @@ impl VodServe {
             rendition.detach_reader(&shared.pool, &session_id).await;
             drop(root_admission);
             rendition.kick();
-            let serve = VodServe { shared };
+            let serve = VodServe::callback_handle(shared);
             serve.emit_lifecycle(
                 &session_id,
                 file_id,

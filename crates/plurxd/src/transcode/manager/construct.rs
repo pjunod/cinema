@@ -1523,6 +1523,36 @@ impl TranscodeManager {
         })
     }
 
+    pub(crate) async fn initialize_ordinary_finalizer(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            self.vod.initialize_ordinary_finalizer(deadline).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = deadline;
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn shutdown_ordinary_finalizer(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            self.vod.shutdown_ordinary_finalizer(deadline).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = deadline;
+            Ok(())
+        }
+    }
+
     /// Read the actual legacy permit books and heavy lane, not sampled load.
     pub(crate) fn original_legacy_drain_counts(&self) -> (crate::admission::PoolSnapshot, bool) {
         (

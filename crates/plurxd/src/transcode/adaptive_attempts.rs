@@ -2531,7 +2531,7 @@ impl super::TranscodeManager {
         let AttemptState::Handoff(handoff) = &mut *state else {
             return Ok(());
         };
-        if !handoff.task.is_finished() {
+        if !handoff.task.registration_ready() {
             return Ok(());
         }
         if entry
@@ -2542,7 +2542,7 @@ impl super::TranscodeManager {
         {
             return Err("adaptive original application fence was already retained".into());
         }
-        let cleanup = handoff.task.join().await?;
+        let cleanup = handoff.task.wait_registered().await?;
         let AttemptState::Handoff(handoff) = std::mem::replace(&mut *state, AttemptState::Unknown)
         else {
             unreachable!();

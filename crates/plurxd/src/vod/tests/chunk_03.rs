@@ -6475,7 +6475,10 @@ async fn retirement_releases_background_admission_with_publication_locks_held() 
             epoch: 0,
             retirement: registration.retirement(),
         };
-        let gate = serve.shared.rendition_build_gate(&rendition.key);
+        let gate = serve
+            .shared
+            .rendition_build_gate(&rendition.key)
+            .expect("running rendition gate directory");
         let build = if hold_build {
             Some(gate.lock().await)
         } else {

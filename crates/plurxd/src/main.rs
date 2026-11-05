@@ -2451,6 +2451,15 @@ async fn boot_observing(
     // production rate-control arguments against this boot's real drivers and
     // publish only the effective result before any session can start.
     state.transcode.initialize_rate_control().await?;
+    if let Err(error) = state
+        .transcode
+        .initialize_ordinary_finalizer(std::time::Instant::now() + Duration::from_secs(30))
+        .await
+    {
+        // The root retains any allocated original actor. New ordinary R is
+        // refused; captured static S can still serve without a new encoder.
+        tracing::warn!(%error, "ordinary finite finalizer is unavailable");
+    }
     state.live_tv.start_caption_probe();
     // Which artifact identity this node plans into, before anything can plan,
     // and the only time it is decided. It is part of every cache key the node
@@ -2496,6 +2505,7 @@ async fn boot_observing(
 
     let progress = Arc::clone(&state.progress);
     let telemetry_store = Arc::clone(&state.store);
+    let ordinary_finalizer_root = Arc::clone(&state.transcode);
     let leave_shutdown = state.shutdown.clone();
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
@@ -2616,13 +2626,24 @@ async fn boot_observing(
         .await
     };
     // The last census write. It is marked clean only when the HTTP server
-    // stopped with every connection drained: then no façade request can still
+    // drained and the original finite collector released its ownership.
+    // Once every connection drained, no façade request can still
     // be counted, and the clean mark tells the next start that nothing was
     // lost. A drain that timed out leaves connections that may still finish
     // and be counted after this write, and a serving error says nothing about
     // them, so both write an unclean final record and the next start counts an
     // unclean stop. A failed write is read the same way, which is honest too.
-    let clean = matches!(served, Ok(HttpDrain::Complete));
+    let ordinary_finalizer_result = ordinary_finalizer_root
+        .shutdown_ordinary_finalizer(std::time::Instant::now() + Duration::from_secs(30))
+        .await;
+    if let Err(error) = &ordinary_finalizer_result {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(desktop) = &desktop {
+            desktop.record_auxiliary_failure();
+        }
+        tracing::warn!(%error, "ordinary finalizer shutdown retains unresolved ownership");
+    }
+    let clean = matches!(served, Ok(HttpDrain::Complete)) && ordinary_finalizer_result.is_ok();
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         if let Some(server) = desktop_server {

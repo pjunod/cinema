@@ -125,7 +125,7 @@ impl VodServe {
             keys.dedup();
             let mut guards = Vec::with_capacity(keys.len());
             for key in keys {
-                guards.push(self.shared.rendition_build_gate(key).lock_owned().await);
+                guards.push(self.shared.rendition_build_gate(key)?.lock_owned().await);
             }
             let mut derived_audio = Vec::new();
             for interval in current.iter().filter(|interval| !old.contains(interval)) {
