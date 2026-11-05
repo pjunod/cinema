@@ -52,11 +52,8 @@ ARG DEBIAN_SNAPSHOT=20260928T000000Z
 ARG TARGETARCH
 ARG PLURX_DV_BUILD_JOBS=2
 ENV PLURX_DV_BUILD_JOBS=${PLURX_DV_BUILD_JOBS} PLURX_DV_BUILD_INPUTS=/build-inputs
-RUN sed -i \
-      -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/'"${DEBIAN_SNAPSHOT}"'/|' \
-      -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/'"${DEBIAN_SNAPSHOT}"'/|' \
-      /etc/apt/sources.list.d/debian.sources \
-    && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
+RUN --mount=type=bind,source=scripts/configure-debian-snapshot,target=/tmp/configure-debian-snapshot \
+    sh /tmp/configure-debian-snapshot "$DEBIAN_SNAPSHOT" \
     && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl build-essential patch pkg-config ninja-build nasm python3-venv \
       libvulkan-dev glslang-dev libxxhash-dev libva-dev libdrm-dev \
@@ -84,11 +81,8 @@ RUN sh /build-inputs/dv_processing/build-bundle.sh /opt/dv-dependencies /opt/dv-
 # Headless bundle/loader qualification without the daemon or production encoder.
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS dv-processing-helper-check
 ARG DEBIAN_SNAPSHOT=20260928T000000Z
-RUN sed -i \
-      -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/'"${DEBIAN_SNAPSHOT}"'/|' \
-      -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/'"${DEBIAN_SNAPSHOT}"'/|' \
-      /etc/apt/sources.list.d/debian.sources \
-    && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
+RUN --mount=type=bind,source=scripts/configure-debian-snapshot,target=/tmp/configure-debian-snapshot \
+    sh /tmp/configure-debian-snapshot "$DEBIAN_SNAPSHOT" \
     && apt-get update && apt-get install -y --no-install-recommends \
       python3 libvulkan1 mesa-vulkan-drivers liblcms2-2 libstdc++6 libva2 libva-drm2 libdrm2 \
     && rm -rf /var/lib/apt/lists/*
@@ -106,11 +100,8 @@ RUN python3 /usr/lib/plurx/dv-processing/sources/bundle-manifest.py \
 # GPU backend keep the service child independent of user PATH/loader settings.
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS subtitle-engine-build
 ARG DEBIAN_SNAPSHOT=20260928T000000Z
-RUN sed -i \
-      -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/'"${DEBIAN_SNAPSHOT}"'/|' \
-      -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/'"${DEBIAN_SNAPSHOT}"'/|' \
-      /etc/apt/sources.list.d/debian.sources \
-    && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
+RUN --mount=type=bind,source=scripts/configure-debian-snapshot,target=/tmp/configure-debian-snapshot \
+    sh /tmp/configure-debian-snapshot "$DEBIAN_SNAPSHOT" \
     && apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake python3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -184,12 +175,9 @@ COPY scripts/build-static-vmaf-scorer /usr/local/libexec/build-static-vmaf-score
 # declaring it here would rebuild this whole layer on every commit.
 # docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md §5.6 has the
 # comparison.
-RUN sed -i \
-        -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/'"${DEBIAN_SNAPSHOT}"'/|' \
-        -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/'"${DEBIAN_SNAPSHOT}"'/|' \
-        -e 's/Components: main/Components: main non-free non-free-firmware/' \
-        /etc/apt/sources.list.d/debian.sources \
-    && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
+RUN --mount=type=bind,source=scripts/configure-debian-snapshot,target=/tmp/configure-debian-snapshot \
+    sh /tmp/configure-debian-snapshot "$DEBIAN_SNAPSHOT" \
+    && sed -i 's/Components: main/Components: main non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential pkg-config nasm curl ca-certificates xz-utils meson ninja-build xxd python3 patch \
