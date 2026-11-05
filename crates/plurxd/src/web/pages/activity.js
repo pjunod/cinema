@@ -87,6 +87,23 @@ function activityBlockedScansHtml(d){
     :'<p class="muted">Ask an administrator to check the library locations.</p>';
   return `<section class="system-attention" data-activity-blocked-scans><h2>${heading}</h2>${clustered?'<p class="muted">Another node that can read these folders can still run the scan.</p>':""}${blocked.map(sc=>`<p><b>${esc(sc.library)}</b><br>${esc(sc.status.error)}</p>`).join("")}${action}</section>`;
 }
+function activitySourceRecovery(d){
+  const summary=d.analysis,observed=summary?.now_ms;
+  // The summary is one Store observation. Browser time only bounds its age;
+  // lease expiry is evaluated at that observation, never against a peer clock.
+  if(summary?.available!==true||!Number.isSafeInteger(observed)||observed<=0||Math.abs(Date.now()-observed)>=30000||!Array.isArray(summary.source_io_holders))return null;
+  return summary.source_io_holders.filter(holder=>holder&&holder.active_occupancy!==false
+    &&typeof holder.resource_key==="string"&&(holder.resource_key==="source_io"||holder.resource_key.startsWith("source_io:"))
+    &&Number.isSafeInteger(holder.lease_expires_at_ms)&&holder.lease_expires_at_ms>=0
+    &&(holder.phase==="cleanup_pending"||holder.lease_expires_at_ms<=observed));
+}
+function activitySourceRecoveryHtml(d){
+  if(!ME?.is_admin)return "";
+  const holders=activitySourceRecovery(d);
+  if(holders===null)return '<p class="hint" data-activity-source-capacity role="status">Source capacity unknown: a fresh shared-reader observation is unavailable.</p>';
+  if(!holders.length)return "";
+  return `<section class="system-attention" data-activity-source-recovery role="status"><h2>Shared source reads need recovery</h2><p>These reservations can block queued scans and other media work even when their jobs are no longer listed. Lease expiry does not prove a physical read has stopped. Recovery must confirm it has stopped before releasing capacity.</p><ul>${holders.map(holder=>`<li><b>${esc(holder.work_id)}</b> · ${esc(holder.resource_key)} · ${holder.phase==="cleanup_pending"?"cleanup pending":"lease expired"} · ${holder.lease_expires_at_ms===0?"previous authority expired":`authority expiry ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}`}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
+}
 function setActivityTab(tab){
   ACTIVITY_VIEW.tab=tab==="jobs"&&ME?.is_admin?"jobs":"status";
   for(const name of ["status","jobs"]){const pane=document.getElementById("activity-"+name);if(pane)pane.hidden=name!==ACTIVITY_VIEW.tab;const button=document.getElementById("activity-tab-"+name);if(button)button.setAttribute("aria-selected",String(name===ACTIVITY_VIEW.tab));}
@@ -121,7 +138,11 @@ function durableJobReason(job){
   if(job.library_id==null||job.state!=="queued"||!["library_scan","metadata_refresh"].includes(job.kind))return "";
   // Eligibility is a local observation, not a durable failure. Match by ID so
   // two libraries with the same display name cannot borrow each other's error.
-  return (ACTIVITY_SNAPSHOT?.scans||[]).find(scan=>scan.library_id===job.library_id&&scan.status?.phase==="queued")?.status?.error||"";
+  const root=(ACTIVITY_SNAPSHOT?.scans||[]).find(scan=>scan.library_id===job.library_id&&scan.status?.phase==="queued")?.status?.error;
+  // A domain-specific reader cannot be attributed to this library from this
+  // projection. Only the global source_io reservation applies to every root.
+  const recovery=ME?.is_admin&&activitySourceRecovery(ACTIVITY_SNAPSHOT||{})?.some(holder=>holder.resource_key==="source_io");
+  return [root,recovery?"Shared source capacity is reserved by work awaiting recovery; its physical read is not confirmed stopped.":""].filter(Boolean).join(" ");
 }
 function durableQueueHtml(nodeNames={}){
   if(!ME||!ME.is_admin)return "";

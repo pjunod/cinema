@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1378: native media-wait retirement matches the existing shared fixture.
+[[fixes]]
+id = "apple.media-wait-intent-retirement-parity"
+commits = ["8fb5bab8f226b451c95e0cfaf8be3139386ed7ba"]
+source = "clients/apple/Sources/PlaybackSurfaceModel.swift"
+source_anchor = 'SourceRow("media_waiting", .attached, .buffering, retiredBy:'
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testTheSwiftSurfaceTablesAreTheFixtureVerbatim()"
+
+[[fixes]]
+id = "android.media-wait-intent-retirement-parity"
+commits = []
+supplements = "apple.media-wait-intent-retirement-parity"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.kt"
+source_anchor = "SurfaceSources.MEDIA_WAITING,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceReducerTest.kt"
+test_anchor = "fun sourcesAreTheFixtureVerbatimAndInOrder()"
+
 [[fixes]]
 id = "apple.tv-settings-category-input-adapter"
 commits = ["91f218139058f527d89b031a3c6d86d69d561535"]

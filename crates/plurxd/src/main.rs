@@ -1995,6 +1995,17 @@ async fn run(config: Config) -> anyhow::Result<()> {
             storage_runtime::RuntimeStore::Cluster(cluster) => cluster.catalogue_reader(),
             storage_runtime::RuntimeStore::Native { .. } => catalogue,
         };
+        crate::source_custody::configure_settlement_journal(&config.storage.data_dir);
+        // Both selected runtimes own durable authoritative storage. Native
+        // recovery uses the same exact-Store custody protocol without Raft.
+        crate::source_custody::configure_recovery_backend(&store, &config.storage.data_dir, true)
+            .map_err(anyhow::Error::msg)
+            .context("configuring exact-Store source recovery")?;
+        if let Err(error) =
+            crate::source_custody::replay_verified_recovery(&store, &identity.node_id).await
+        {
+            tracing::warn!(%error, "source recovery evidence retained for retry");
+        }
         let dirs = create_dirs_for_config(&config)?;
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a

@@ -3,7 +3,7 @@
 **Status:** original package qualified; all 18 updated configurations checked
 locally; CI and promotion qualification separate ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`cf095b203ec78d083385cbb6ecce13dc01378256` (2026-11-04 native entry review below) · **Scope:** bound `library_scan` and
+`10f9b3fd5209895f668aceb624f4fd617999e797` + `72409a430` (2026-11-04 integration review below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -13,6 +13,51 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+
+## Native and recovery integration — scoped review on 2026-11-04
+
+Astra independently reviewed the merge of effort
+`10f9b3fd5209895f668aceb624f4fd617999e797` and main `72409a430`.
+Both parent audits below retain their original scope and attribution. This
+integration preserves the native runtime entry, the exact-owner recovery
+lookup, the active/abort journal integration, and the scan-stack/bootstrap
+corrections. No modeled action or source authority is inferred from a refreshed
+whole-file hash.
+
+The combined [startup](../../crates/plurxd/src/main.rs) registers the exact
+`Arc<dyn Store>` returned by `RuntimeStore::store` and replays custody with
+`RuntimeStore::identity().node_id` before producers. Marking this selected
+Store authoritative in both modes is justified by
+[selection](../../crates/plurxd/src/storage_runtime.rs): native selection owns
+its actual retained database; [cluster opening](../../crates/plurxd/src/cluster_runtime.rs)
+explicitly refuses `SelectedBackend::SqliteRecovery`. It does not promote the
+old activation-recovery projection to authority. The
+[recovery registry](../../crates/plurxd/src/source_custody/recovery.rs) still
+matches the exact Store by `Arc::ptr_eq`, clones its context before awaits,
+and requires same-host/different-boot evidence before settling retained owners.
+Native local job admission remains separate from this physical-stop proof;
+cluster jobs retain real membership admission and the existing refusal paths.
+
+The merged [state](../../crates/plurxd/src/state.rs) retains mode-specific job
+authority and adds verified recovery before ordinary settled-custody replay.
+The inspected queue/domain/publication SQL, acquisition and retirement bodies
+remain unchanged. Recovery can add filesystem and Store waits before worker
+dispatch; unavailable host proof can retain custody indefinitely. Neither the
+finite progress premises nor local admission promises recovery or scan success.
+The host helper is an operator-on-actual-host prerequisite; the daemon still
+requires its explicitly bound host identity files. Neither supplies a modeled
+physical-termination transition.
+
+Six durable rows and four operation-progress rows receive the combined
+`state.rs`/`main.rs` fingerprints. Other row identities retain the appropriate
+reviewed parent, including both native-entry and recovery dependency pins.
+Worker correspondence composes the native lease, queue-cleanup and boxed-work
+pins and preserves the expanded `FinishRetire` gap. Exact selected anchors,
+models, configurations, bounds, properties, fairness and validators are unchanged.
+Fresh mapping checks and bounded smoke receipts are separate evidence. This
+source review is not merged-runtime execution, a refinement theorem, or renewed
+historical/promotion qualification. Runtime regression of both native and
+cluster recovery composition remains a separate integration obligation.
 
 ## Native runtime entry — scoped source review on 2026-11-04
 
@@ -47,6 +92,99 @@ in [daemon selection tests](../../crates/plurxd/src/storage_runtime/tests.rs).
 These are source test references, not execution credit from this review.
 Model/configuration/property/fairness bytes and historical qualification
 receipts remain unchanged. Current static and TLC results are separate evidence.
+
+## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` reviewed the frozen working-tree
+corrections against `460d8e6d3ec494f2335ed4bbdfa6601f54bfa380`. The two previous
+source fingerprints match that commit; all retained anchors remain unique.
+This is an authored correspondence audit, not independent Astra review or an
+execution receipt. Three existing rows change: two for the library environment
+and one for the Hiqlite queue adapter. No dependency or modeled action is added.
+
+The [library environment](../../crates/plurxd/src/library_work/env.rs) extracts
+the concrete `probe_work` factory and heap-pins `process_library_requests`
+before passing it through the probe-input and admission scopes. It remains
+directly awaited in the same task, so task-local budget/cancellation/pause
+bindings still cover the producer. The outer owned work future retains the
+publisher and domain reference. Physical admission, `JoinWork`, completed-work
+drop, domain release, queue retirement and environment field drop order retain
+their prior implementations. Heap allocation changes native stack demand,
+not the selected worker authority or cleanup transitions.
+
+The [Hiqlite adapter](../../crates/plurx-core/src/store/hiqlite_background_jobs.rs)
+recognizes version 4 in both managed-bootstrap success branches. Its existing
+`managed_bootstrap_layout` first checks the canonical DDL shape through
+`subtitle_managed_schema::bootstrap_version` and the matching singleton marker.
+The repair therefore preserves an already canonical version-4 resource view;
+it does not accept an arbitrary version marker, replace that view, alter SQL
+guards, or change claim/renewal/bind/publication protocol. Membership and node
+identity checks remain outside and unchanged. Startup/schema convergence is
+not a transition of this worker model.
+
+The PR records separate runtime evidence: the actual scoped future shrinks
+from 16104 to 64 bytes, the driver future is 656 bytes, and an empty-library
+scan completes on the ordinary daemon worker stack with zero scan errors.
+That limited scan does not qualify media parsing or the full UI. The real
+one-voter bootstrap/reopen and identity-drift rejection regression is separate
+from TLC. Future-state size does not prove the whole native poll-stack bound,
+and no old-base comparison establishes when the stack problem was introduced.
+Model/configuration bytes, bounds, properties, fairness, source-custody proof
+obligations and historical qualification identities remain unchanged.
+
+## Verified host-reboot recovery — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared source candidate
+`88fa37663` in [PR #1378](http://forge.lan:3000/noirr/plurx/pulls/1378) with
+`edf6d08faf549554b9892dee582406ff79af1c97`. All five affected previous
+whole-file fingerprints match that base. This is an authored correspondence
+audit: the agent contributed implementation and tests, so it is not an
+independent review. The PR owns subsequent Astra review and execution.
+
+The [queue Store](../../crates/plurx-core/src/store/background_jobs.rs)
+adds an exact physical-custody lookup and delegation. Its claim, renewal,
+binding, cancellation, settlement and publication SQL is unchanged.
+[Resource helpers](../../crates/plurx-core/src/store/background_jobs_resources.rs)
+expose the existing canonical owner key without changing its body and add
+a consistent exact-owner read. Neither equality nor absence is a new proof
+of physical termination or authority to publish. The existing ledger's
+claim veto and actual-reservation publication guards remain in force.
+
+[Daemon cleanup](../../crates/plurxd/src/background_jobs.rs) passes its exact
+Store to journal cleanup. [State](../../crates/plurxd/src/state.rs) retries
+verified recovery before ordinary settled-custody replay;
+[startup](../../crates/plurxd/src/main.rs) configures the exact Store/backend
+and attempts recovery before producers. Selected worker acquisition, binding,
+publication, heartbeat retirement and drop order retain their prior bodies.
+These new filesystem/Store calls are additional external waits, not modeled
+transitions or an eventual-recovery guarantee.
+
+The mapping refreshes 17 existing rows and adds four explicit dependency pins
+for startup, [custody integration](../../crates/plurxd/src/source_custody.rs),
+[recovery](../../crates/plurxd/src/source_custody/recovery.rs), and the
+[host helper](../../scripts/source-custody-recovery). Those pins expose future
+drift; they do not map physical reboot proof into `DurableJobs`. Same-machine
+boot identity, descendant termination, fsync durability, aborted-activation
+reconciliation, exact-Store isolation and safe legacy challenge preparation
+remain runtime obligations in the
+[recovery plan](../../docs/server/JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). Same-boot
+or unproved ownership may still block indefinitely. No model result proves
+that source custody becomes available or that a real scan completes.
+
+**Identity-source corrections (2026-11-04):** subsequent recovery-module
+dependency refreshes require both actual-host inputs, read-only bound at
+`/run/plurx-host-machine-id` and `/run/plurx-host-boot-id`, for native services
+and containers alike. Missing container markers never establish native
+execution; neither image-local `/etc/machine-id` nor a namespace's `/proc`
+boot UUID is a fallback or physical-stop proof. Machine identity must be
+nonzero, and host boot identity a canonical nonnil UUID. Missing or invalid
+input retains custody without automatic recovery. These external proof
+prerequisites supply no additional modeled transition or guarantee.
+
+All previous exact anchors remain unique. Model, configuration, bounds,
+properties, fairness, toolchain and historical qualification identities are
+unchanged. Fresh static/smoke receipts remain separate from this audit and
+from runtime crash/replay evidence; no new refinement theorem is claimed.
 
 ## Source pause — finite correspondence on 2026-11-03
 

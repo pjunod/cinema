@@ -33,6 +33,10 @@ RestartSec=5
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict
+# Explicit actual-host identity for physical source-custody recovery. Never
+# infer host identity from a possibly image-local /etc/machine-id in the daemon.
+BindReadOnlyPaths=-/etc/machine-id:/run/plurx-host-machine-id
+BindReadOnlyPaths=-/proc/sys/kernel/random/boot_id:/run/plurx-host-boot-id
 ReadWritePaths=/var/lib/plurx
 ProtectHome=true
 # Media usually lives under /home or /mnt. ProtectHome=true hides /home; an

@@ -6477,6 +6477,12 @@ impl JobManager {
     }
 
     async fn replay_settled_source_custody(&self) {
+        if let Err(error) =
+            crate::source_custody::replay_verified_recovery(&self.store, self.coordinator.node_id())
+                .await
+        {
+            tracing::warn!(%error, "source recovery evidence retained for retry");
+        }
         if let Err(error) = crate::source_custody::replay_local_settlements(&self.store).await {
             tracing::warn!(%error,"replaying local source settlement journal");
         }
