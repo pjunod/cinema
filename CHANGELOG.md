@@ -13,6 +13,9 @@ bump may break compatibility and a **patch** bump never does.
 - Subtitle workers keep polling pending writes during pressure checks, avoiding
   a deadlock that retained source-reader reservations and blocked library scans.
 
+- Docker builds fetch snapshot-pinned Debian packages from regular mirrors with
+  automatic snapshot fallback and bounded retries for download failures.
+
 - Library scans avoid async stack exhaustion on ordinary worker threads, and
   repeated startup recognizes the current canonical managed subtitle schema.
 
