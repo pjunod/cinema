@@ -102,7 +102,7 @@ function activitySourceRecoveryHtml(d){
   const holders=activitySourceRecovery(d);
   if(holders===null)return '<p class="hint" data-activity-source-capacity role="status">Source capacity unknown: a fresh shared-reader observation is unavailable.</p>';
   if(!holders.length)return "";
-  return `<section class="system-attention" data-activity-source-recovery role="status"><h2>Shared source reads need recovery</h2><p>These reservations can block queued scans and other media work even when their jobs are no longer listed. Lease expiry does not prove a physical read has stopped. Recovery must confirm it has stopped before releasing capacity.</p><ul>${holders.map(holder=>`<li><b>${esc(holder.work_id)}</b> · ${esc(holder.resource_key)} · ${holder.phase==="cleanup_pending"?"cleanup pending":"lease expired"} · ${holder.lease_expires_at_ms===0?"previous authority expired":`authority expiry ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}`}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
+  return `<section class="system-attention" data-activity-source-recovery role="status"><h2>Shared source reads need recovery</h2><p>These reservations can block queued scans and other media work even when their jobs are no longer listed. Lease expiry does not prove a physical read has stopped. Recovery must confirm it has stopped before releasing capacity.</p><ul>${holders.map(holder=>`<li>${holder.origin_job_kind?`<a href="#/activity/jobs/${esc(encodeURIComponent(holder.work_id))}">${esc(holder.origin_job_kind.replace(/_/g," "))}</a> · job now ${esc(holder.origin_job_state||"unknown")} · `:""}<b>${esc(holder.work_id)}</b>${holder.origin_node_id?` · reader on ${esc(nodeLabel(d.node_hostnames||{},holder.origin_node_id))}`:""} · ${esc(holder.resource_key)} · ${holder.phase==="cleanup_pending"?"cleanup pending":"lease expired"} · ${holder.lease_expires_at_ms===0?"previous authority expired":`authority expiry ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}`}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
 }
 function setActivityTab(tab){
   ACTIVITY_VIEW.tab=tab==="jobs"&&ME?.is_admin?"jobs":"status";
@@ -144,6 +144,17 @@ function durableJobReason(job){
   const recovery=ME?.is_admin&&activitySourceRecovery(ACTIVITY_SNAPSHOT||{})?.some(holder=>holder.resource_key==="source_io");
   return [root,recovery?"Shared source capacity is reserved by work awaiting recovery; its physical read is not confirmed stopped.":""].filter(Boolean).join(" ");
 }
+// Compute both views from the same server window, independent of job filters.
+function durableProcessingHtml(nodeNames={}){
+  const q=DURABLE_ACTIVITY,p=q.processing;
+  if(!p||p.window_ms!==300000||!Array.isArray(p.nodes)||q.error||!q.observed||Math.abs(Date.now()-q.observed)>30000)return '<p class="hint">Job processing rate unavailable.</p>';
+  const rows=new Map(p.nodes.map(r=>[r.node_id,r]));
+  const ids=[...new Set([...Object.keys(nodeNames),...rows.keys()])].sort((a,b)=>nodeLabel(nodeNames,a).localeCompare(nodeLabel(nodeNames,b)));
+  const rate=n=>(n/5).toFixed(1);
+  const total=p.nodes.reduce((t,r)=>[t[0]+r.succeeded,t[1]+r.failed],[0,0]);
+  const overdue=(q.counts||[]).reduce((n,c)=>n+(c.overdue_manual||0),0);
+  return `<section class="card" aria-label="Job processing rate"><h3>Job processing rate</h3><p><b>${rate(total[0])} completed/min</b> · ${rate(total[1])} failed/min · last 5 minutes</p>${activityIsClustered()&&ids.length?`<div class="tbl"><table aria-label="Processing rate by worker"><thead><tr><th>Worker</th><th>Completed/min</th><th>Failed/min</th></tr></thead><tbody>${ids.map(id=>`<tr><td>${esc(nodeLabel(nodeNames,id))}</td><td>${rate(rows.get(id)?.succeeded||0)}</td><td>${rate(rows.get(id)?.failed||0)}</td></tr>`).join("")}</tbody></table></div>`:""}<p class="hint">Based on retained worker completions. Retries and cancellations are excluded.</p></section>${overdue?`<section class="system-attention" role="status"><h3>Manual library work is waiting</h3><p>${overdue} manual library job${overdue===1?" has":"s have"} been due for at least 5 minutes without starting. Check source recovery and worker availability.</p></section>`:""}`;
+}
 function durableQueueHtml(nodeNames={}){
   if(!ME||!ME.is_admin)return "";
   const q=DURABLE_ACTIVITY;
@@ -155,7 +166,7 @@ function durableQueueHtml(nodeNames={}){
     <td data-label="Worker">${job.owner_node_id?`<span title="${esc(job.owner_node_id)}">${clustered?esc(nodeLabel(nodeNames,job.owner_node_id)):"This server"}</span>${durableLeaseExpired(job)?'<small> · previous owner</small>':""}`:job.target_node_id?`Destination: ${clustered?esc(nodeLabel(nodeNames,job.target_node_id)):"This server"}`:"Awaiting worker"}</td>
     <td class="durable-age" data-label="Since requested">${esc(durableDuration(job.age_ms))}</td><td class="durable-reason" data-label="Reason">${esc(durableJobReason(job)||(!job.supported?"Requires a worker that understands this payload":"—"))}</td>
     <td data-label="Actions">${["queued","running"].includes(job.state)?`<button class="ghost sm" data-durable-focus="cancel-${esc(job.id)}" onclick="cancelDurableJob(${esc(JSON.stringify(job.id))},this)">Cancel</button>`:job.retry_supported?`<button class="ghost sm" data-durable-focus="retry-${esc(job.id)}" onclick="retryDurableJob(${esc(JSON.stringify(job.id))},this)">Retry</button>`:""}</td></tr>`).join("");
-  return `<h2 class="section">Jobs</h2><div class="activity-jobs-layout">${durableTypeBreakdownHtml()}<div class="activity-job-list"><div class="card durable-queue"><div class="durable-body">
+  return `<h2 class="section">Jobs</h2>${durableProcessingHtml(nodeNames)}<div class="activity-jobs-layout">${durableTypeBreakdownHtml()}<div class="activity-job-list"><div class="card durable-queue"><div class="durable-body">
     <div class="durable-toolbar"><label>State <select data-durable-focus="state" aria-label="Durable job state" onchange="filterDurableJobs(this.value)">${states.map(state=>`<option value="${state}"${q.state===state?" selected":""}>${state} (${count(state)})</option>`).join("")}</select></label>
     ${clustered?`<label>Node <select data-durable-focus="node" aria-label="Durable job node" onchange="filterDurableNode(this.value)"><option value="">All nodes</option>${Object.entries(nodeNames).map(([id,name])=>`<option value="${esc(id)}"${q.node===id?" selected":""}>${esc(nodeLabel(nodeNames,id))}</option>`).join("")}</select></label>`:""}<label>Per page <select data-durable-focus="size" aria-label="Durable jobs per page" onchange="resizeDurableJobs(this.value)">${[10,20,50].map(size=>`<option value="${size}"${(q.pageSize||20)===size?" selected":""}>${size}</option>`).join("")}</select></label><button class="ghost sm" data-durable-focus="refresh" onclick="refreshDurableActivity(true)"${q.busy?" disabled":""}>${q.busy?"Refreshing…":"Refresh"}</button></div>
     <p class="hint">${q.observed?`Durable state observed ${esc(new Date(q.observed).toLocaleTimeString())}. Since requested includes waiting and retries; it is not execution time. Select a job for worker observations and attempt history.${clustered?" Node scope includes assignments and explicit destinations; shared unassigned work remains under All nodes.":""}`:"Loading durable work…"}</p>
@@ -202,7 +213,7 @@ async function refreshDurableActivity(force=false){
     const query=new URLSearchParams({state:q.state,limit:String(q.pageSize||20)});if(q.kind)query.set("kind",q.kind);if(q.node)query.set("node_id",q.node);if(q.cursor)query.set("cursor",q.cursor);
     const page=await api(`/cluster/jobs?${query}`);
     if(epoch!==q.epoch||generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity")return;
-    q.rows=page.jobs;q.repairs=page.repairs||[];q.counts=page.counts;q.migration=page.migration;q.next=page.next_cursor;q.observed=page.observed_at_ms;q.error=null;
+    q.processing=page.processing||null;q.rows=page.jobs;q.repairs=page.repairs||[];q.counts=page.counts;q.migration=page.migration;q.next=page.next_cursor;q.observed=page.observed_at_ms;q.error=null;
     q.activeJobs=page.active_jobs||[];q.activeTruncated=!!page.active_truncated;
     paintDurableActivity();
     if(detailId&&q.selectedId===detailId&&q.detailEpoch===detailEpoch){
@@ -310,7 +321,7 @@ function resetActivityWork(){
   if(typeof history!=="undefined"&&history.state?.plurxActivityJob){const state={...history.state};delete state.plurxActivityJob;delete state.plurxActivityAccount;history.replaceState(state,"",location.hash);}
   closeActivityInspector();
   Object.assign(ACTIVITY_VIEW,{pendingJob:null,tab:"status",inspector:null,detailTab:"summary",returnFocus:null});
-  Object.assign(DURABLE_ACTIVITY,{busy:false,request:(DURABLE_ACTIVITY.request||0)+1,migration:null,activeTruncated:false,rows:[],counts:[],activeJobs:[],detail:null,detailError:null,selectedId:null,history:[],pendingFocus:null,cursor:null,next:null,observed:0,error:null,kind:"",node:"",state:"queued",repairs:[],epoch:DURABLE_ACTIVITY.epoch+1});
+  Object.assign(DURABLE_ACTIVITY,{busy:false,request:(DURABLE_ACTIVITY.request||0)+1,migration:null,processing:null,activeTruncated:false,rows:[],counts:[],activeJobs:[],detail:null,detailError:null,selectedId:null,history:[],pendingFocus:null,cursor:null,next:null,observed:0,error:null,kind:"",node:"",state:"queued",repairs:[],epoch:DURABLE_ACTIVITY.epoch+1});
   DURABLE_ACTIVITY.retries.clear();
   document.getElementById("activity-work-inspector")?.remove();
 }

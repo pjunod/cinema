@@ -55,6 +55,147 @@ async fn claimed(store: &SqliteStore, request: ClaimJob) -> BackgroundJob {
 }
 
 #[tokio::test]
+async fn completed_job_with_unreleased_reader_keeps_origin_and_raises_recovery_gauge() {
+    use super::MetricsStore;
+    let dir = tempfile::tempdir().expect("directory");
+    let path = dir.path().join("jobs.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let db = rusqlite::Connection::open(path).expect("fixture connection");
+    let job = enqueue(1000);
+    let id = job.id.clone();
+    store.enqueue_job(job).await.expect("accepted");
+    db.execute(
+        "UPDATE background_jobs SET state='succeeded' WHERE id=?1",
+        [&id],
+    )
+    .expect("completed work");
+    let owner = serde_json::json!({"kind":"job","token":{"node_id":"previous-worker","job_id":id,"fence":1}});
+    db.execute("INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms,settlement_proof)
+        VALUES ('reader','owner',?1,'[\"source_io\"]','job',?2,1,'active',1000,1000,2000,NULL)",rusqlite::params![owner.to_string(),id]).expect("retained physical reader");
+    let holders = store
+        .source_io_holders(3000)
+        .await
+        .expect("source observations");
+    let held = holders
+        .iter()
+        .find(|h| h.work_id == id)
+        .expect("reported even with no running job");
+    assert_eq!(held.origin_node_id.as_deref(), Some("previous-worker"));
+    assert_eq!(
+        held.origin_job_kind.as_deref(),
+        Some("fragment_index_build")
+    );
+    assert_eq!(held.origin_job_state.as_deref(), Some("succeeded"));
+    assert_eq!(held.phase.as_deref(), Some("cleanup_pending"));
+    let metrics = store
+        .prometheus_store_snapshot("observer", 3)
+        .await
+        .expect("sample");
+    assert_eq!(metrics.background_jobs.source_io_reservations, 0);
+    assert_eq!(metrics.background_jobs.source_recovery_pending, 1);
+}
+
+#[tokio::test]
+async fn processing_counts_terminal_attempts_by_worker_and_finish_time() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("processing.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let connection = rusqlite::Connection::open(&path).expect("fixture connection");
+    let now = 400_000;
+    let after = now - JOB_PROCESSING_WINDOW_MS;
+    for (node, outcome, finished) in [
+        ("a", "succeeded", after),
+        ("a", "succeeded", after + 1),
+        ("b", "succeeded", now),
+        ("a", "failed", now),
+        ("b", "succeeded", now + 1),
+        ("c", "retry", now),
+        ("c", "yielded", now),
+        ("c", "cancelled", now),
+        ("c", "lease_expired", now),
+    ] {
+        let mut request = enqueue(1);
+        request.dedupe_key.clone_from(&request.id);
+        let id = request.id.clone();
+        store.enqueue_job(request).await.expect("seed job");
+        connection
+            .execute(
+                "INSERT INTO background_job_attempts
+                (job_id, fence, claim_id, owner_node_id, owner_boot_id,
+                 started_at_ms, resolve_until_ms, finished_at_ms, outcome)
+             VALUES (?1, 1, ?1, ?2, 'boot', 1, 120001, ?3, ?4)",
+                rusqlite::params![id, node, finished, outcome],
+            )
+            .expect("seed attempt");
+    }
+    assert_eq!(
+        store.recent_job_completions(now).await.expect("processing"),
+        vec![
+            NodeJobCompletions {
+                node_id: "a".into(),
+                succeeded: 1,
+                failed: 1
+            },
+            NodeJobCompletions {
+                node_id: "b".into(),
+                succeeded: 1,
+                failed: 0
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn overdue_manual_counts_only_library_work_due_for_five_minutes() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = SqliteStore::open(&directory.path().join("overdue.db")).expect("store");
+    let now = 400_000;
+    let cutoff = now - JOB_PROCESSING_WINDOW_MS;
+    for (kind, priority, created, due) in [
+        (JobKind::LibraryScan, 2, cutoff, cutoff),
+        (JobKind::MetadataRefresh, 2, 1, cutoff),
+        (JobKind::LibraryScan, 0, 1, 1),
+        (JobKind::LibraryScan, 2, 1, cutoff + 1),
+        (JobKind::LibraryScan, 2, cutoff + 1, cutoff + 1),
+        (JobKind::LibraryScan, 2, 1, now + 1),
+        (JobKind::FragmentIndexBuild, 2, 1, 1),
+    ] {
+        let mut request = enqueue(created);
+        request.payload = match kind {
+            JobKind::LibraryScan => JobPayload::LibraryScan {
+                library_id: 1,
+                generation: request.id.clone(),
+            },
+            JobKind::MetadataRefresh => JobPayload::MetadataRefresh {
+                library_id: 1,
+                generation: request.id.clone(),
+            },
+            _ => request.payload,
+        };
+        request.dedupe_key.clone_from(&request.id);
+        request.priority = priority;
+        request.not_before_ms = due;
+        assert!(matches!(
+            store.enqueue_job(request).await.expect("enqueue"),
+            EnqueueOutcome::Accepted { .. }
+        ));
+    }
+    let counts = store.job_counts(now).await.expect("counts");
+    let overdue: Vec<_> = counts
+        .iter()
+        .map(|group| (group.kind.as_str(), group.overdue_manual))
+        .collect();
+    assert_eq!(
+        overdue,
+        [
+            ("fragment_index_build", 0),
+            ("library_scan", 1),
+            ("metadata_refresh", 1)
+        ]
+    );
+}
+
+#[tokio::test]
 async fn background_job_claim_resource_lookup_does_not_scan_settled_history() {
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("claim-cost.db");

@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Activity shows blocked shared reads above both tabs, identifies the originating
+  worker and job when available, and reports overdue manual scans alongside
+  five-minute completion and failure rates for the cluster and each worker.
+
 - Subtitle workers keep polling pending writes during pressure checks, avoiding
   a deadlock that retained source-reader reservations and blocked library scans.
 
