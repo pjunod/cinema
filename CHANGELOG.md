@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Subtitle workers keep polling pending writes during pressure checks, avoiding
+  a deadlock that retained source-reader reservations and blocked library scans.
+
 - Library scans avoid async stack exhaustion on ordinary worker threads, and
   repeated startup recognizes the current canonical managed subtitle schema.
 
