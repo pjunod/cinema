@@ -54,7 +54,18 @@ pub(crate) struct FiniteSoftwareProducer {
     // Registration precedes Store Prepared. Publication authorizes ordinary
     // entry separately and transfers the exact original task handle here.
     driver_activated: AtomicBool,
-    installed_driver: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    installed_driver: Mutex<OriginalDriver>,
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    panic_driver_after_return: AtomicBool,
+}
+
+/// The successful callback is separate from actual task/F destruction. Keep
+/// a consumed failed handle so no later waiter can reinterpret absence as join.
+enum OriginalDriver {
+    NeverInstalled,
+    Pending(tokio::task::JoinHandle<()>),
+    Joined(tokio::task::Id),
+    Failed(tokio::task::JoinHandle<()>),
 }
 
 /// Registered before spawn. A dropped task ends daemon observations but is
@@ -74,6 +85,10 @@ impl FiniteDriverCompletion {
 
 impl Drop for FiniteDriverCompletion {
     fn drop(&mut self) {
+        #[cfg(all(test, feature = "cluster-integration-tests"))]
+        if self.returned && self.producer.panic_driver_after_return.load(Acquire) {
+            panic!("original finite driver destructor after returned callback");
+        }
         if !self.returned {
             self.producer.driver_state.store(DRIVER_ABORTED, Release);
             self.producer.driver_change.notify_waiters();
@@ -106,7 +121,9 @@ impl FiniteSoftwareProducer {
             driver_state: AtomicU8::new(DRIVER_UNREGISTERED),
             driver_change: Notify::new(),
             driver_activated: AtomicBool::new(false),
-            installed_driver: Mutex::new(None),
+            installed_driver: Mutex::new(OriginalDriver::NeverInstalled),
+            #[cfg(all(test, feature = "cluster-integration-tests"))]
+            panic_driver_after_return: AtomicBool::new(false),
         }
     }
     pub(crate) fn generation_epoch(&self) -> u64 {
@@ -198,38 +215,85 @@ impl FiniteSoftwareProducer {
         self.driver_activated.store(true, Release);
     }
 
-    pub(super) fn install_original_driver(&self, driver: tokio::task::JoinHandle<()>) {
+    /// Retain the original handle before either publication or abandonment.
+    /// This does not authorize native entry or create a synthetic demand wake.
+    pub(super) fn retain_original_driver(&self, driver: tokio::task::JoinHandle<()>) {
         let mut installed = self
             .installed_driver
             .try_lock()
             .expect("original driver installation has no concurrent join");
         assert!(
-            installed.is_none(),
-            "original finite driver is published once"
+            matches!(*installed, OriginalDriver::NeverInstalled),
+            "original finite driver is retained once"
         );
-        *installed = Some(driver);
+        *installed = OriginalDriver::Pending(driver);
+    }
+
+    pub(super) fn install_original_driver(&self, driver: tokio::task::JoinHandle<()>) {
+        self.retain_original_driver(driver);
         self.activate_driver();
     }
 
     /// Keep the exact handle in its owner while awaiting it. Cancelling a
     /// cleanup waiter releases only this lock, never the registered task.
+    /// A callback can precede a destructor panic; only successful original
+    /// task join produces Joined, and every failed join remains failed.
     pub(super) async fn join_installed_driver(&self) -> io::Result<()> {
         let mut installed = self.installed_driver.lock().await;
-        if let Some(driver) = installed.as_mut() {
-            let joined = driver.await;
-            installed.take();
-            joined.map_err(io::Error::other)?;
+        match &mut *installed {
+            OriginalDriver::NeverInstalled if self.driver_never_registered() => Ok(()),
+            OriginalDriver::NeverInstalled => Err(io::Error::other(
+                "registered original finite driver has not been retained",
+            )),
+            OriginalDriver::Joined(original_id) => {
+                tracing::trace!(driver = %original_id, "original finite driver already joined");
+                Ok(())
+            }
+            OriginalDriver::Failed(original) => Err(io::Error::other(format!(
+                "original finite driver {} join previously failed",
+                original.id()
+            ))),
+            OriginalDriver::Pending(driver) => {
+                let original_id = driver.id();
+                match driver.await {
+                    Ok(()) => {
+                        *installed = OriginalDriver::Joined(original_id);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let OriginalDriver::Pending(original) =
+                            std::mem::replace(&mut *installed, OriginalDriver::NeverInstalled)
+                        else {
+                            unreachable!("the same original driver remains under its join lock")
+                        };
+                        *installed = OriginalDriver::Failed(original);
+                        Err(io::Error::other(error))
+                    }
+                }
+            }
         }
-        Ok(())
     }
 
     #[cfg(all(test, feature = "cluster-integration-tests"))]
     pub(super) async fn installed_driver_id_for_test(&self) -> Option<tokio::task::Id> {
-        self.installed_driver
-            .lock()
-            .await
-            .as_ref()
-            .map(tokio::task::JoinHandle::id)
+        match &*self.installed_driver.lock().await {
+            OriginalDriver::Pending(driver) | OriginalDriver::Failed(driver) => Some(driver.id()),
+            OriginalDriver::NeverInstalled | OriginalDriver::Joined(_) => None,
+        }
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) async fn original_driver_joined_for_test(
+        &self,
+        original_id: tokio::task::Id,
+    ) -> bool {
+        matches!(*self.installed_driver.lock().await,
+            OriginalDriver::Joined(joined_id) if joined_id == original_id)
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn panic_original_driver_after_return_for_test(&self) {
+        self.panic_driver_after_return.store(true, Release);
     }
 
     #[cfg(all(test, feature = "cluster-integration-tests"))]

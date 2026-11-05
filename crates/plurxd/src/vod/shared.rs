@@ -208,7 +208,7 @@ async fn run_prepared_attempt_cleanup(
     rendition: Arc<Rendition>,
     output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
     producer: Arc<super::finite_software::FiniteSoftwareProducer>,
-    mut driver: Option<tokio::task::JoinHandle<()>>,
+    driver: Option<tokio::task::JoinHandle<()>>,
     lease: Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease>,
 ) -> Arc<FiniteClosingOwner> {
     // Stop is synchronous and does not wait for the input-preparation owner
@@ -217,13 +217,13 @@ async fn run_prepared_attempt_cleanup(
     let _ = producer.request_stop();
     rendition.closed.store(true, Release);
     rendition.kick();
-    if let Some(task) = driver.as_mut() {
-        if let Err(error) = task.await {
-            tracing::warn!(target: "plurxd::vodserve", rendition = %key,
-                %error, "original prepared driver did not return successfully");
-        }
+    if let Some(task) = driver {
+        producer.retain_original_driver(task);
     }
-    drop(driver);
+    if let Err(error) = producer.join_installed_driver().await {
+        tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+            %error, "original prepared driver did not return successfully");
+    }
     let closing = shared
         .retain_unattached_finite_with_handle(&key, Some(Arc::clone(&rendition)), output, producer)
         .await;
@@ -1429,6 +1429,18 @@ impl Shared {
             } else {
                 #[cfg(target_os = "linux")]
                 let cleanup = self.take_finite_build_for_publication(key, &rendition, &closings)?;
+                #[cfg(target_os = "linux")]
+                if let Some(producer) = rendition.dir.finite_producer() {
+                    // Validation precedes construction. No await separates
+                    // retaining/activating this original task and publication;
+                    // cancellation or a losing builder never spawns a driver.
+                    // Spawn holds no driver mutex. Even shutdown destruction
+                    // drops only extra Arc clones of these caller-held values.
+                    producer.install_original_driver(spawn_driver(
+                        Arc::clone(self),
+                        Arc::clone(&rendition),
+                    ));
+                }
                 renditions.insert(key.to_string(), Arc::clone(&rendition));
                 #[cfg(target_os = "linux")]
                 if let Some(cleanup) = cleanup {
@@ -1452,7 +1464,13 @@ impl Shared {
             if adopted_bytes > 0 && private_storage.is_none() {
                 self.working_set.fetch_add(adopted_bytes, Relaxed);
             }
-            let _driver = spawn_driver(Arc::clone(self), Arc::clone(&rendition));
+            #[cfg(target_os = "linux")]
+            let spawn_after_publication = rendition.dir.finite_producer().is_none();
+            #[cfg(not(target_os = "linux"))]
+            let spawn_after_publication = true;
+            if spawn_after_publication {
+                let _driver = spawn_driver(Arc::clone(self), Arc::clone(&rendition));
+            }
             if adopted_bytes > 0 && private_storage.is_none() {
                 self.preparation_storage.adopt(self, &rendition).await;
             }
