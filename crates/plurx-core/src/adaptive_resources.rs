@@ -23,7 +23,9 @@ use uuid::Uuid;
 use crate::process::observation::{Metric, UnknownReason};
 
 mod capacity;
+mod finalization_support;
 pub use capacity::ResourceCapacity;
+pub use finalization_support::{FinalizationSupportPhase, FinalizationSupportSnapshot};
 mod memory_claim;
 pub(crate) use memory_claim::MemoryClaim;
 mod task_claim;
@@ -381,12 +383,17 @@ struct State {
     trial: Option<BTreeSet<u64>>,
     invalid: bool,
     draining: bool,
+    // Ephemeral daemon support is not a native role or persisted producer claim.
+    support: Option<finalization_support::SupportEntry>,
+    next_support_generation: u64,
 }
 
 #[derive(Clone)]
 pub struct ResourceLedger {
     id: u64,
     inner: Arc<Mutex<State>>,
+    // Startup-owned marker: active Drop never takes the ledger/census locks.
+    support_unknown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct ResourceReservation {
@@ -426,6 +433,9 @@ pub struct LedgerSnapshot {
     pub held: usize,
     pub unknown_held: usize,
     pub trial_held: bool,
+    /// Separate non-native structural allowance; absent keeps the old wire shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalization_support: Option<finalization_support::FinalizationSupportSnapshot>,
     /// Cumulative extra charge observed by native-I/O snapshots. Overflowed
     /// cumulative accounting reports Unknown rather than a misleading value.
     pub native_overage_debt: Metric<ResourceVector>,
@@ -446,7 +456,7 @@ impl State {
 
     fn memory_claims_fit(&self, additional: &[MemoryClaim]) -> Result<(), AdmissionRefusal> {
         let mut active = 0usize;
-        let mut unknown = false;
+        let mut unknown = self.support.is_some();
         for claim in self
             .entries
             .values()
@@ -463,7 +473,7 @@ impl State {
     }
     fn task_claims_fit(&self, additional: &[TaskClaim]) -> Result<(), AdmissionRefusal> {
         let mut active = 0usize;
-        let mut unknown = false;
+        let mut unknown = self.support.is_some();
         for claim in self
             .entries
             .values()
@@ -510,6 +520,9 @@ impl State {
         self.memory_claims_fit(&[claim])?;
         let task_claim = TaskClaim::from_processes(resources.processes);
         self.task_claims_fit(&[task_claim])?;
+        if demand.trial && self.support.is_some() {
+            return Err(AdmissionRefusal::InsufficientEvidence);
+        }
         if demand.trial && self.trial.is_some() {
             return Err(AdmissionRefusal::TrialAlreadyHeld);
         }
@@ -583,7 +596,10 @@ impl ResourceLedger {
                 trial: None,
                 invalid: false,
                 draining: false,
+                support: None,
+                next_support_generation: 1,
             })),
+            support_unknown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -698,6 +714,9 @@ impl ResourceLedger {
         let mut missing = Vec::new();
         if state.invalid {
             return Err(AdmissionRefusal::Unavailable);
+        }
+        if state.support.is_some() && roles.iter().any(|(_, demand, _)| demand.trial) {
+            return Err(AdmissionRefusal::InsufficientEvidence);
         }
         for (family_role, demand, retained) in roles {
             if demand.limit_epoch != state.epoch {
@@ -1007,10 +1026,11 @@ impl ResourceLedger {
                     Metric::Known(u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
                 })
                 .unwrap_or(Metric::Unknown(UnknownReason::InsufficientEvidence)),
-            managed_memory_peak_bytes: if state
-                .entries
-                .values()
-                .any(|entry| entry.memory_claim == MemoryClaim::UnknownProducerPeak)
+            managed_memory_peak_bytes: if state.support.is_some()
+                || state
+                    .entries
+                    .values()
+                    .any(|entry| entry.memory_claim == MemoryClaim::UnknownProducerPeak)
             {
                 Metric::Unknown(UnknownReason::InsufficientEvidence)
             } else {
@@ -1043,10 +1063,11 @@ impl ResourceLedger {
                         == TaskClaim::UnknownProducerPeak
                 })
                 .count(),
-            managed_kernel_task_peak: if state.entries.values().any(|entry| {
-                TaskClaim::from_processes(entry.resources.processes)
-                    == TaskClaim::UnknownProducerPeak
-            }) {
+            managed_kernel_task_peak: if state.support.is_some()
+                || state.entries.values().any(|entry| {
+                    TaskClaim::from_processes(entry.resources.processes)
+                        == TaskClaim::UnknownProducerPeak
+                }) {
                 Metric::Unknown(UnknownReason::Unbounded)
             } else {
                 Metric::Known(0)
@@ -1064,6 +1085,9 @@ impl ResourceLedger {
                 .filter(|entry| entry.state == ReservationState::UnknownHeld)
                 .count(),
             trial_held: state.trial.is_some(),
+            finalization_support: state
+                .support
+                .map(|entry| entry.snapshot(self.support_unknown.load(Ordering::Acquire))),
             native_overage_debt: if state.invalid && state.native_overage_fenced {
                 Metric::Unknown(UnknownReason::Unbounded)
             } else {

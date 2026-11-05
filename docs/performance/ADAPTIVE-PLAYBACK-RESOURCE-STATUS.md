@@ -6,7 +6,8 @@ qualification or deployment is claimed.
 
 [Plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) ·
 [finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) ·
-[policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) · [containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md).
+[policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) · [containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md) ·
+[proposed fixture-only support](ADAPTIVE-PLAYBACK-FINALIZATION-SUPPORT.md).
 
 ## Current continuation — source-bound task qualification
 

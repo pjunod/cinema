@@ -316,3 +316,45 @@ fn repeated_commit_returns_the_same_target_without_double_refund() {
     assert_eq!(after_second.used, after_first.used);
     assert_eq!(after_second.held, after_first.held);
 }
+
+#[test]
+fn support_hold_survives_native_retirement_swap_and_source_token_drop() {
+    use crate::adaptive_resources::finalization_support::FinalizationSupportProfile;
+    let (ledger, source_owner, source, durable, resources) = source_fixture(false);
+    let mut capacity = ledger.snapshot().expect("initial capacity").capacity;
+    capacity.memory_bytes = Metric::Known(1_000_000);
+    ledger
+        .observe_capacity(capacity, std::time::Instant::now())
+        .expect("fresh known RAM without changing epoch");
+    ledger
+        .reserve_finalization_support(
+            FinalizationSupportProfile::fixture(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            7,
+            |_| Ok(()),
+        )
+        .expect("support beside one native producer");
+    let retained = retained_from(resources);
+    let mut swap = ledger
+        .prepare_retained_swap(source, durable, Uuid::new_v4(), retained)
+        .expect("original native retirement");
+    // Existing accounting-only known-COMMIT fixture; not native-close acceptance.
+    let proof = receipt(source, swap.target_binding());
+    let _retained_owner = ledger
+        .commit_retained_swap(&mut swap, &proof)
+        .expect("same R to S commit");
+    drop(source_owner);
+    let snapshot = ledger.snapshot().expect("support plus exact S");
+    assert_eq!(
+        snapshot.used.peak_memory_bytes,
+        64 * 1024 + retained.peak_memory_bytes
+    );
+    assert_eq!(snapshot.used.cpu_ns_per_second, retained.cpu_ns_per_second);
+    assert_eq!(snapshot.held, 1);
+    assert!(snapshot.finalization_support.is_some());
+    assert!(matches!(
+        snapshot.managed_memory_peak_bytes,
+        Metric::Unknown(_)
+    ));
+}

@@ -576,9 +576,11 @@ impl Drop for InventoryOwner {
 }
 
 mod runtime_bridge;
+mod support;
 pub(in crate::adaptive_resources) use runtime_bridge::{
     PendingRuntimeClose, RuntimeInventoryOwner,
 };
+pub(in crate::adaptive_resources) use support::{SupportInventoryMarker, SupportInventoryOwner};
 
 #[cfg(test)]
 mod tests;
