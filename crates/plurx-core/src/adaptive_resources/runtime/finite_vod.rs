@@ -413,6 +413,30 @@ pub struct FiniteOutput {
     _app_guard: Arc<super::finite_lifetime::FiniteAppGuard>,
 }
 
+pub use super::operations::FiniteCloseWorkspace;
+
+/// Stable process-local operation/role identity; R-to-S can replace its reservation.
+/// Identity alone grants no native completion or admission authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FiniteCloseIdentity {
+    pub(in crate::adaptive_resources::runtime) ledger: u64,
+    pub(in crate::adaptive_resources::runtime) operation: Uuid,
+    pub(in crate::adaptive_resources::runtime) role_index: usize,
+}
+
+/// Consuming completion of the original ticket, with no retained runtime graph.
+/// Only an actual successful native/application retirement can produce this value.
+#[derive(Debug)]
+pub struct FiniteCloseCompleted {
+    identity: FiniteCloseIdentity,
+}
+
+impl FiniteCloseCompleted {
+    pub fn original_identity(&self) -> FiniteCloseIdentity {
+        self.identity
+    }
+}
+
 /// Original finite close selection. The runtime book keeps the native proof,
 /// durable operation and complete charge if this selector or waiter drops.
 /// It is deliberately separate from an output or producer application alias.
@@ -420,9 +444,28 @@ pub struct FiniteCloseTicket {
     runtime: Arc<NodeResourceRuntime>,
     preparation: Option<OwnedPreparation>,
     app_state: Option<Arc<super::finite_lifetime::FiniteAppState>>,
+    original_identity: FiniteCloseIdentity,
+    // Selection can be taken before a fallible destructor. Empty options alone
+    // cannot establish that the matching ledger/census close actually succeeded.
+    retirement_succeeded: bool,
 }
 
 impl FiniteCloseTicket {
+    pub fn original_identity(&self) -> FiniteCloseIdentity {
+        self.original_identity
+    }
+
+    /// Destroy the actual empty ticket before publishing a compact terminal status.
+    /// Refusal returns the same original graph-bearing selection to its owner.
+    pub fn into_completed(self) -> Result<FiniteCloseCompleted, Self> {
+        if !self.retirement_succeeded || self.preparation.is_some() || self.app_state.is_some() {
+            return Err(self);
+        }
+        let identity = self.original_identity;
+        drop(self);
+        Ok(FiniteCloseCompleted { identity })
+    }
+
     /// Drain actual application aliases outside any daemon key gate. This is
     /// only a heap fence; native and durable close still belong to the ticket.
     pub async fn wait_application_release(
@@ -449,8 +492,24 @@ impl FiniteCloseTicket {
         self.wait_application_release(deadline).await?;
         self.runtime
             .finish_finite_close(&mut self.preparation, 0, deadline)
-            .await
-            .map_err(Into::into)
+            .await?;
+        self.retirement_succeeded = true;
+        Ok(())
+    }
+
+    /// The independently owned collector supplies this fixed close workspace.
+    /// No heap close-vector allocation may survive the original R/S refund.
+    pub async fn finish_retirement_in(
+        &mut self,
+        workspace: &mut FiniteCloseWorkspace,
+        deadline: Instant,
+    ) -> Result<(), FiniteVodError> {
+        self.wait_application_release(deadline).await?;
+        self.runtime
+            .finish_finite_close_in(&mut self.preparation, 0, workspace, deadline)
+            .await?;
+        self.retirement_succeeded = true;
+        Ok(())
     }
 }
 
@@ -639,6 +698,8 @@ impl FiniteOutput {
             runtime: Arc::clone(&self.runtime),
             preparation: Some(self.preparation.clone()),
             app_state: Some(app_state),
+            original_identity: self.preparation.finite_identity(0),
+            retirement_succeeded: false,
         })
     }
 
@@ -1123,6 +1184,41 @@ impl SoftwareVodOwner {
             runtime: Arc::clone(&self.runtime),
             preparation: Some(self.preparation.clone()),
             app_state: Some(app_state),
+            original_identity: self.preparation.finite_identity(0),
+            retirement_succeeded: false,
+        })
+    }
+}
+
+impl NodeResourceRuntime {
+    /// A real grant is owned before the daemon constructs its closing envelope.
+    /// Recover cleanup from that same original preparation when construction or
+    /// handoff fails; this never invents an absent task or a replacement owner.
+    pub(in crate::adaptive_resources::runtime) async fn prepare_collector_ticket(
+        self: &Arc<Self>,
+        original: &OwnedPreparation,
+        deadline: Instant,
+    ) -> Result<FiniteCloseTicket, FiniteVodError> {
+        self.original_finite_control(original)?.request()?;
+        let accepted = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.acknowledge_finite_preparation_for_cleanup(original),
+        )
+        .await
+        .map_err(|_| OperationError::Deadline)??;
+        if accepted {
+            self.prepare_failed_finite_vod_close(original, 0, deadline)
+                .await?;
+        } else {
+            self.prepare_unaccepted_finite_close(original, 0).await?;
+        }
+        let app_state = self.finite_app_state(original, 0)?;
+        Ok(FiniteCloseTicket {
+            runtime: Arc::clone(self),
+            preparation: Some(original.clone()),
+            app_state: Some(app_state),
+            original_identity: original.finite_identity(0),
+            retirement_succeeded: false,
         })
     }
 }
@@ -1181,8 +1277,30 @@ impl NodeResourceRuntime {
         request: SoftwareVodRequest,
         deadline: Instant,
     ) -> Result<SoftwareVodOwner, FiniteVodError> {
-        self.prepare_software_vod_with_naming(request, deadline, false, |_| Ok(()))
+        if self.ledger.finalization_support_present() {
+            return Err(OperationError::BeforeReservation(
+                super::operations::PreReservationRefusal::Admission(
+                    crate::adaptive_resources::AdmissionRefusal::InsufficientEvidence,
+                ),
+            )
+            .into());
+        }
+        self.prepare_software_vod_with_naming(request, deadline, false, None, |_| Ok(()))
             .map(|(owner, ())| owner)
+    }
+
+    /// Reserve ordinary R only through the same live collector slot/generation.
+    pub fn prepare_collected_software_vod(
+        self: &Arc<Self>,
+        request: SoftwareVodRequest,
+        slot: &super::ordinary_finite_collector::OrdinarySlot,
+        deadline: Instant,
+    ) -> Result<SoftwareVodOwner, FiniteVodError> {
+        let result = self
+            .prepare_software_vod_with_naming(request, deadline, false, Some(slot), |_| Ok(()))
+            .map(|(owner, ())| owner);
+        slot.wake_failure();
+        result
     }
 
     /// Admit the same fixed software graph with one additional, counted
@@ -1221,7 +1339,7 @@ impl NodeResourceRuntime {
             .peak_memory_bytes
             .checked_add(manifest_workspace_bytes)
             .ok_or_else(invalid)?;
-        self.prepare_software_vod_with_naming(request, deadline, true, |state| {
+        self.prepare_software_vod_with_naming(request, deadline, true, None, |state| {
             state
                 .take_application_lease(application_owner_bytes)
                 .ok_or_else(invalid)
@@ -1233,6 +1351,7 @@ impl NodeResourceRuntime {
         request: SoftwareVodRequest,
         deadline: Instant,
         static_artifact: bool,
+        collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
         application: impl FnOnce(
             &Arc<super::finite_lifetime::FiniteAppState>,
         ) -> Result<T, FiniteVodError>,
@@ -1654,53 +1773,55 @@ impl NodeResourceRuntime {
         let directory_for_output = Arc::clone(&directory_path);
         let guard_for_output = Arc::clone(&app_guard);
         let producer_memory_claim = request.producer.memory_claim();
-        let (preparation, events) = match self.prepare_typed_families_claiming_initialized(
-            &[FamilyDemand {
-                identity: family,
-                roles: &roles,
-            }],
-            vec![TypedGraphPlan {
-                attempt_id: None,
-                members: plans,
-            }],
-            Some(&[producer_memory_claim]),
-            continuous_entry_deadline,
-            deadline,
-            |preparation| {
-                let output = FiniteOutput {
-                    runtime: Arc::clone(self),
-                    preparation: preparation.clone(),
-                    member: scratch_member.uuid(),
-                    directory_path: directory_for_output,
-                    encoded_process_marker: request.encoded_process_marker,
-                    _app_guard: guard_for_output,
-                };
-                let (pump, events) =
-                    pump::SoftwarePump::from_encoded_output(output, request.producer);
-                #[cfg(target_os = "linux")]
-                let pump = {
-                    let mut pump = pump;
-                    if let Some(basis) = history_basis {
-                        pump.bind_history_context(basis, self.ledger.clone(), family);
-                    }
-                    pump
-                };
-                self.initialize_finite_vod(
-                    preparation,
-                    0,
-                    root_member.uuid(),
-                    task_member.uuid(),
-                    root_acquisition_id.uuid(),
-                    source_members_for_launch,
-                    request.command,
-                    pump,
-                    control_for_launch,
-                    app_state,
-                    response_budget,
-                );
-                events
-            },
-        ) {
+        let (preparation, events) = match self
+            .prepare_typed_families_claiming_initialized_collected(
+                &[FamilyDemand {
+                    identity: family,
+                    roles: &roles,
+                }],
+                vec![TypedGraphPlan {
+                    attempt_id: None,
+                    members: plans,
+                }],
+                Some(&[producer_memory_claim]),
+                continuous_entry_deadline,
+                deadline,
+                collector,
+                |preparation| {
+                    let output = FiniteOutput {
+                        runtime: Arc::clone(self),
+                        preparation: preparation.clone(),
+                        member: scratch_member.uuid(),
+                        directory_path: directory_for_output,
+                        encoded_process_marker: request.encoded_process_marker,
+                        _app_guard: guard_for_output,
+                    };
+                    let (pump, events) =
+                        pump::SoftwarePump::from_encoded_output(output, request.producer);
+                    #[cfg(target_os = "linux")]
+                    let pump = {
+                        let mut pump = pump;
+                        if let Some(basis) = history_basis {
+                            pump.bind_history_context(basis, self.ledger.clone(), family);
+                        }
+                        pump
+                    };
+                    self.initialize_finite_vod(
+                        preparation,
+                        0,
+                        root_member.uuid(),
+                        task_member.uuid(),
+                        root_acquisition_id.uuid(),
+                        source_members_for_launch,
+                        request.command,
+                        pump,
+                        control_for_launch,
+                        app_state,
+                        response_budget,
+                    );
+                    events
+                },
+            ) {
             Ok(preparation) => preparation,
             Err(error) => {
                 // No accepted bundle means no source/native work was entered.

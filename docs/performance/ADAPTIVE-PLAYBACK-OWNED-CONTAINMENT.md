@@ -4,6 +4,8 @@
 2026-11-04. Companion to the [production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
 and [canonical resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md).
 The [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) remains normative.
+The [ordinary collector](ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md) records
+48 scoped passes; complete ownership and trial prerequisites remain open.
 The handoff's “M0 owned containment” includes native containment work; the
 plan's M0 also requires the complete affected-work inventory below.
 

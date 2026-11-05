@@ -1217,6 +1217,16 @@ struct Shared {
     runtime_cache: PathBuf,
     store: Arc<dyn Store>,
     resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
+    #[cfg(target_os = "linux")]
+    ordinary_collector: StdMutex<
+        Option<
+            plurx_core::adaptive_resources::runtime::ordinary_finite_collector::OrdinaryPoolClient,
+        >,
+    >,
+    #[cfg(target_os = "linux")]
+    ordinary_collector_required: AtomicBool,
+    #[cfg(target_os = "linux")]
+    ordinary_collector_draining: AtomicBool,
     /// Files a start was refused `vod_index_pending` for, newest first, for
     /// the node-local fragment-index pass to examine before its round-robin
     /// backlog ([`VodServe::local_index_demand`]). Bounded: it is a priority
@@ -1249,7 +1259,7 @@ struct Shared {
     /// Exact finite native owner after the rich rendition leaves the serving
     /// registry. A same-key build must observe this under its build gate.
     #[cfg(target_os = "linux")]
-    finite_closing: Mutex<std::collections::BTreeMap<String, Arc<shared::FiniteClosingOwner>>>,
+    finite_closing: Mutex<std::collections::BTreeMap<String, shared::FiniteClosingRef>>,
     head_regeneration_slots: Arc<Semaphore>,
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
@@ -1515,9 +1525,20 @@ impl Shared {
 
 pub struct VodServe {
     shared: Arc<Shared>,
+    // This root is never reachable from Shared or the permanent service F.
+    #[cfg(target_os = "linux")]
+    ordinary_finalizer: Option<Arc<Mutex<plurx_core::adaptive_resources::runtime::ordinary_finite_collector::OrdinaryFinalizerLifecycle>>>,
 }
 
 impl VodServe {
+    fn callback_handle(shared: Arc<Shared>) -> Self {
+        Self {
+            shared,
+            #[cfg(target_os = "linux")]
+            ordinary_finalizer: None,
+        }
+    }
+
     /// Files whose start was refused `vod_index_pending`, newest first.
     pub(crate) fn local_index_demand(&self) -> Vec<i64> {
         self.shared
@@ -1572,6 +1593,9 @@ mod vod_serve_serve;
 // split: end vod-serve
 
 // split: begin vod-shared
+#[cfg(target_os = "linux")]
+#[path = "vod/finite_finalizer.rs"]
+mod finite_finalizer;
 #[cfg(target_os = "linux")]
 #[path = "vod/finite_profile.rs"]
 mod finite_profile;

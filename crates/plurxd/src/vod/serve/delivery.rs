@@ -1069,7 +1069,13 @@ impl VodServe {
             }
             let mut guards = Vec::new();
             for key in keys {
-                guards.push(self.shared.rendition_build_gate(key).lock_owned().await);
+                guards.push(
+                    self.shared
+                        .rendition_build_gate(key)
+                        .map_err(VodError::ProducerFailed)?
+                        .lock_owned()
+                        .await,
+                );
             }
             for (rendition, expected, _) in &verified {
                 if rendition.closed.load(Relaxed)
@@ -1420,7 +1426,7 @@ impl VodServe {
                 // waits: publication itself needs these same gates.
                 let _gate = self
                     .shared
-                    .rendition_build_gate(rendition_id)
+                    .rendition_build_gate(rendition_id)?
                     .lock_owned()
                     .await;
                 let init = super::vod_serve_serve::read_rendition_artifact(
@@ -1492,7 +1498,7 @@ impl VodServe {
                         }
                         let _gate = self
                             .shared
-                            .rendition_build_gate(audio.rendition_id())
+                            .rendition_build_gate(audio.rendition_id())?
                             .lock_owned()
                             .await;
                         let init = super::vod_serve_serve::read_rendition_artifact(

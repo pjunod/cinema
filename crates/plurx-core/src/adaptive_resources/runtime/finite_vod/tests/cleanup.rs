@@ -651,3 +651,103 @@ async fn existing_rendition_child_fails_start_and_original_cancel_settles_the_wh
         .drain()
         .expect("join original journal");
 }
+
+#[tokio::test]
+async fn fixed_finite_workspace_consumes_only_actual_completed_ticket() {
+    let root = tempfile::tempdir().expect("original fixed-workspace fixture");
+    let (runtime, owner) = original_owner(root.path(), false);
+    assert!(runtime
+        .acknowledge_finite_preparation_for_cleanup(&owner.preparation)
+        .await
+        .expect("original accepted preparation"));
+    runtime
+        .arm_scratch_bootstrap(&owner.preparation, 0, owner.scratch_member, deadline())
+        .await
+        .expect("original bootstrap with no native root");
+    let original = owner.preparation.finite_identity(0);
+    let ticket = owner
+        .prepare_cancel(deadline())
+        .await
+        .expect("original ticket");
+    assert_eq!(ticket.original_identity(), original);
+    let mut ticket = match ticket.into_completed() {
+        Err(original) => original,
+        Ok(_) => panic!("live native/application selection cannot become terminal"),
+    };
+    let charge = runtime.accounting().expect("original charge").used;
+    let output = owner.output();
+    let control = owner.control();
+    let mut workspace = FiniteCloseWorkspace::new();
+    assert!(ticket
+        .finish_retirement_in(&mut workspace, Instant::now() + Duration::from_millis(1))
+        .await
+        .is_err());
+    assert_eq!(runtime.accounting().expect("held aliases").used, charge);
+    drop((owner, output, control));
+    ticket
+        .finish_retirement_in(&mut workspace, deadline())
+        .await
+        .expect("actual original close with fixed workspace");
+    let completed = match ticket.into_completed() {
+        Ok(completed) => completed,
+        Err(_) => panic!("actual successful empty ticket must be consumable"),
+    };
+    assert_eq!(completed.original_identity(), original);
+    assert_eq!(
+        runtime.accounting().expect("one refund").used,
+        ResourceVector::default()
+    );
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("completed scalar retains no runtime or native graph")
+        .drain()
+        .expect("original journal join");
+}
+
+#[tokio::test]
+async fn empty_finite_ticket_selectors_without_native_success_refuse_completion() {
+    let root = tempfile::tempdir().expect("original incomplete-ticket fixture");
+    let (runtime, owner) = original_owner(root.path(), false);
+    assert!(runtime
+        .acknowledge_finite_preparation_for_cleanup(&owner.preparation)
+        .await
+        .expect("original accepted preparation"));
+    runtime
+        .arm_scratch_bootstrap(&owner.preparation, 0, owner.scratch_member, deadline())
+        .await
+        .expect("original bootstrap with no native root");
+    let mut ticket = owner
+        .prepare_cancel(deadline())
+        .await
+        .expect("original ticket");
+    let original = ticket.original_identity();
+    let charge = runtime.accounting().expect("original live charge").used;
+    // A destructor panic after selection.take can leave these options empty.
+    // Keep their real owners here to prove emptiness supplies no native result.
+    let preparation = ticket.preparation.take();
+    let app_state = ticket.app_state.take();
+    let mut ticket = match ticket.into_completed() {
+        Err(original) => original,
+        Ok(_) => panic!("missing selectors cannot mint a native completion"),
+    };
+    assert_eq!(ticket.original_identity(), original);
+    assert_eq!(runtime.accounting().expect("no false refund").used, charge);
+    ticket.preparation = preparation;
+    ticket.app_state = app_state;
+    drop(owner);
+    let mut workspace = FiniteCloseWorkspace::new();
+    ticket
+        .finish_retirement_in(&mut workspace, deadline())
+        .await
+        .expect("restored same original selection completes through real proof");
+    assert!(ticket.into_completed().is_ok());
+    assert_eq!(
+        runtime.accounting().expect("actual final refund").used,
+        ResourceVector::default()
+    );
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("no original ticket graph survives")
+        .drain()
+        .expect("original journal join");
+}

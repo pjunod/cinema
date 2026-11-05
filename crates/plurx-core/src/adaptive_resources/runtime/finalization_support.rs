@@ -1,12 +1,11 @@
-//! Fixture-qualified support custody. Production construction waits for the
-//! actual finalizer pool/frame audit. No native role or entry authority exists.
 #![cfg_attr(
-    not(test),
+    not(unix),
     allow(
         dead_code,
-        reason = "No production profile constructor exists before the actual finalizer storage and frame audit."
+        reason = "Native support construction is Unix-only; keep portable ledger diagnostics and the common close identity."
     )
 )]
+//! Independent support custody and original task/payload destruction.
 
 use super::*;
 use crate::adaptive_resources::finalization_support::{
@@ -37,6 +36,10 @@ impl SupportSlot {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Original post-panic custody and destruction proof stay inline; boxing would add an allocation after destruction."
+)]
 enum SupportCustody {
     Empty,
     Held {
@@ -64,23 +67,32 @@ struct Counts {
 }
 
 trait StoredPayload: Send + Sync {
-    fn unique(&self) -> bool;
-    fn destroy(self: Box<Self>);
+    fn unique(&mut self) -> bool;
+    fn additional_requested() -> Option<usize>
+    where
+        Self: Sized,
+    {
+        Some(0)
+    }
+    fn destroy(self: Box<Self>) -> Option<SealIdentity>;
 }
+#[cfg(test)]
 struct OwnedPayload<T> {
     original: Arc<SupportPayload<T>>,
 }
+#[cfg(test)]
 impl<T: Send + Sync + 'static> StoredPayload for OwnedPayload<T> {
-    fn unique(&self) -> bool {
-        Arc::strong_count(&self.original) == 1 && Arc::weak_count(&self.original) == 0
+    fn unique(&mut self) -> bool {
+        Arc::get_mut(&mut self.original).is_some()
     }
-    fn destroy(self: Box<Self>) {
+    fn destroy(self: Box<Self>) -> Option<SealIdentity> {
         let Self { original } = *self;
         let actual = Arc::try_unwrap(original).unwrap_or_else(|_| {
             unreachable!("sealed payload uniqueness was checked before state destruction")
         });
         // With no exposed Weak, try_unwrap has already freed the Arc allocation.
         drop(actual);
+        None
     }
 }
 struct SupportPayload<T> {
@@ -110,6 +122,7 @@ pub(super) struct FinalizationSupportLease {
     identity: SupportIdentity,
     armed: bool,
     marker: SupportFailureMarker,
+    profile: FinalizationSupportProfile,
 }
 impl Drop for FinalizationSupportLease {
     fn drop(&mut self) {
@@ -143,10 +156,25 @@ impl Drop for DestructionPending {
     }
 }
 
+/// Copyable identity binding; this scalar alone supplies no close authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SealIdentity {
+    support: SupportIdentity,
+    directory: Uuid,
+    epoch: u64,
+}
+
 /// Scalar, non-clone proof. Only the synchronous actual-storage destructor
 /// below (or the sealed never-allocation branch) can construct it.
 pub(in crate::adaptive_resources) struct FinalizationSupportClosed {
     identity: SupportIdentity,
+    collector: Option<SealIdentity>,
+}
+
+/// Only the final original census/ledger commit and slot clear mint this.
+struct FinalizationSupportReleased {
+    identity: SupportIdentity,
+    collector: Option<SealIdentity>,
 }
 impl FinalizationSupportClosed {
     pub(in crate::adaptive_resources) fn identity(&self) -> SupportIdentity {
@@ -208,19 +236,13 @@ impl NodeResourceRuntime {
                     identity,
                     armed: true,
                     marker,
+                    profile,
                 })
             })
             .map_err(inventory_error)?
     }
 
-    /// The actual-observation production seam has no constructible profile yet.
-    #[cfg_attr(
-        test,
-        allow(
-            dead_code,
-            reason = "The actual observation seam has no production profile constructor yet; deterministic fixture cases exercise the same locked preflight."
-        )
-    )]
+    /// Refresh actual capacity before private support reservation.
     async fn reserve_observed_support(
         self: &Arc<Self>,
         profile: FinalizationSupportProfile,
@@ -252,13 +274,33 @@ impl FinalizationSupportLease {
     {
         let executor =
             tokio::runtime::Handle::try_current().map_err(|_| AdmissionRefusal::Unavailable)?;
+        self.activate_registered(executor, make_payload, make_task, |original| OwnedPayload {
+            original,
+        })
+    }
+
+    /// Internal fixture kernel: concrete storage supplies its own typed layout.
+    /// This is not a production payload/profile constructor.
+    fn activate_registered<T, F, S>(
+        &mut self,
+        executor: tokio::runtime::Handle,
+        make_payload: impl FnOnce() -> T,
+        make_task: impl FnOnce(SupportPayloadRef<T>) -> F,
+        make_storage: impl FnOnce(Arc<SupportPayload<T>>) -> S,
+    ) -> Result<SupportPayloadRef<T>, AdmissionRefusal>
+    where
+        T: Send + Sync + 'static,
+        F: Future<Output = ()> + Send + 'static,
+        S: StoredPayload + 'static,
+    {
         let requested = std::mem::size_of::<SupportState>()
             .checked_add(std::mem::size_of::<SupportPayload<T>>())
-            .and_then(|v| v.checked_add(std::mem::size_of::<OwnedPayload<T>>()))
+            .and_then(|v| v.checked_add(std::mem::size_of::<S>()))
             .and_then(|v| v.checked_add(registered_future_size::<F>()))
             .and_then(|v| v.checked_add(8 * std::mem::size_of::<usize>()))
+            .and_then(|v| v.checked_add(S::additional_requested()?))
             .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
-        if !FinalizationSupportProfile::fixture().fits_inline(requested) {
+        if !self.profile.fits_inline(requested) {
             return Err(AdmissionRefusal::HardLimit(
                 super::super::ResourceDimension::Memory,
             ));
@@ -320,7 +362,7 @@ impl FinalizationSupportLease {
                 joined: false,
                 failed: false,
                 task: None,
-                storage: Some(Box::new(OwnedPayload { original: actual })),
+                storage: Some(Box::new(make_storage(actual))),
             }),
             published: Notify::new(),
         });
@@ -390,6 +432,10 @@ impl FinalizationSupportLease {
     /// Synchronous after joins: no large state is captured by the caller's
     /// async frame across destruction/final accounting.
     fn try_close(&mut self) -> Result<(), AdmissionRefusal> {
+        self.try_close_released().map(|_| ())
+    }
+
+    fn try_close_released(&mut self) -> Result<FinalizationSupportReleased, AdmissionRefusal> {
         if !self.armed {
             return Err(AdmissionRefusal::InvalidTransition);
         }
@@ -500,6 +546,7 @@ impl FinalizationSupportLease {
                         ..
                     } if *identity == self.identity => Some(FinalizationSupportClosed {
                         identity: self.identity,
+                        collector: None,
                     }),
                     _ => return Err(AdmissionRefusal::InvalidTransition),
                 }
@@ -567,16 +614,21 @@ impl FinalizationSupportLease {
                             .finish_support_close(owner, closed)
                             .map_err(inventory_error)
                     })?;
+                let collector = closed.collector;
                 self.armed = false;
                 let old = std::mem::replace(&mut slot.inner, SupportCustody::Empty);
                 let SupportCustody::Held { runtime_pin, .. } = old else {
                     unreachable!("matching original closing slot")
                 };
-                Ok(runtime_pin)
+                Ok((runtime_pin, collector))
             })
             .map_err(inventory_error)??;
+        let (runtime_pin, collector) = runtime_pin;
         drop(runtime_pin); // Never destroy even the runtime pin under locks.
-        Ok(())
+        Ok(FinalizationSupportReleased {
+            identity: self.identity,
+            collector,
+        })
     }
 }
 
@@ -647,14 +699,14 @@ fn destroy_actual_state(
     state: Arc<SupportState>,
     marker: SupportFailureMarker,
 ) -> Result<FinalizationSupportClosed, (AdmissionRefusal, Arc<SupportState>)> {
-    let ready = state.inner.lock().is_ok_and(|counts| {
+    let ready = state.inner.lock().is_ok_and(|mut counts| {
         counts.sealed
             && counts.joined
             && !counts.failed
             && counts.task.is_none()
             && counts
                 .storage
-                .as_ref()
+                .as_mut()
                 .is_some_and(|payload| payload.unique())
     });
     if !ready {
@@ -678,15 +730,21 @@ fn destroy_actual_state(
     let mut counts = inner
         .into_inner()
         .unwrap_or_else(|_| unreachable!("original support mutex was unpoisoned and unique"));
-    counts
+    let collector = counts
         .storage
         .take()
         .expect("actual sealed support payload")
         .destroy();
     drop(counts);
     pending.armed = false;
-    Ok(FinalizationSupportClosed { identity })
+    Ok(FinalizationSupportClosed {
+        identity,
+        collector,
+    })
 }
+
+#[cfg(unix)]
+pub mod collector;
 
 #[cfg(all(test, unix))]
 mod tests;

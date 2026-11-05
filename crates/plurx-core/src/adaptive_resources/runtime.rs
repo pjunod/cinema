@@ -23,8 +23,13 @@ use crate::resource_custody::{
 pub mod application;
 mod capacity_observer;
 pub(in crate::adaptive_resources) mod finalization_support;
+#[cfg(unix)]
+pub use finalization_support::collector as ordinary_finite_collector;
 #[cfg(target_os = "linux")]
 mod finite_policy;
+#[cfg(not(unix))]
+#[path = "runtime/finalization_support/portable_gates.rs"]
+pub mod ordinary_finite_collector;
 #[cfg(target_os = "linux")]
 pub use finite_policy::FinitePolicyServiceDiagnostics;
 #[cfg(target_os = "linux")]

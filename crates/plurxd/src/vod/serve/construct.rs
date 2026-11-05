@@ -448,12 +448,25 @@ impl VodServe {
             ENCODED_RECONCILE_BATCH,
             &HashSet::new(),
         );
+        let rendition_builds = shared::RenditionBuildDirectory::default();
+        #[cfg(target_os = "linux")]
+        let ordinary_finalizer = Some(Arc::new(Mutex::new(
+            plurx_core::adaptive_resources::runtime::ordinary_finite_collector::OrdinaryFinalizerLifecycle::new(rendition_builds.clone()),
+        )));
         Arc::new(VodServe {
+            #[cfg(target_os = "linux")]
+            ordinary_finalizer,
             shared: Arc::new(Shared {
                 base,
                 runtime_cache,
                 store,
                 resource_runtime,
+                #[cfg(target_os = "linux")]
+                ordinary_collector: StdMutex::new(None),
+                #[cfg(target_os = "linux")]
+                ordinary_collector_required: AtomicBool::new(false),
+                #[cfg(target_os = "linux")]
+                ordinary_collector_draining: AtomicBool::new(false),
                 local_index_demand: StdMutex::new(VecDeque::new()),
                 obsolete_encoded_generations: Mutex::new(VecDeque::from(
                     obsolete_encoded_generations,
@@ -466,7 +479,7 @@ impl VodServe {
                 passive_grants: passive_grant::Registry::default(),
                 preparing_sessions: StdMutex::new(HashMap::new()),
                 session_lifecycles: StdMutex::new(HashMap::new()),
-                rendition_builds: shared::RenditionBuildDirectory::default(),
+                rendition_builds,
                 renditions: Mutex::new(HashMap::new()),
                 #[cfg(target_os = "linux")]
                 finite_closing: Mutex::new(std::collections::BTreeMap::new()),

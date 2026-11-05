@@ -618,7 +618,9 @@ impl RetainedVodArtifact {
             // Verified old bytes are never authority for a new producer.
             return Err(io::ErrorKind::InvalidData.into());
         }
-        let gate = shared.rendition_build_gate(&rendition.key);
+        let gate = shared
+            .rendition_build_gate(&rendition.key)
+            .map_err(io::Error::other)?;
         let _gate = gate.lock().await;
         let init = rendition.identity.lock().await.identity.clone();
         let _manifest = rendition.manifest.lock().await;
@@ -1963,11 +1965,9 @@ impl RetainedArtifactRegistry {
         rendition: &Arc<Rendition>,
         preparation: &super::copy_preparation::CopyPreparation,
         artifact: &Arc<RetainedVodArtifact>,
-    ) -> bool {
-        let _gate = shared
-            .rendition_build_gate(&rendition.key)
-            .lock_owned()
-            .await;
+    ) -> Result<bool, String> {
+        let gate = shared.rendition_build_gate(&rendition.key)?;
+        let _gate = gate.lock_owned().await;
         let readers = rendition.readers.lock().await;
         if !readers.is_empty()
             || !preparation.publication_current(rendition)
@@ -1983,12 +1983,12 @@ impl RetainedArtifactRegistry {
                 .complete_observation()
                 .is_some_and(|current| current == artifact.observation)
         {
-            return false;
+            return Ok(false);
         }
         let Some(source_metadata) = manual_source_metadata(&rendition.recipe.file) else {
-            return false;
+            return Ok(false);
         };
-        preparation.publish_staged(rendition, artifact, |artifact| {
+        Ok(preparation.publish_staged(rendition, artifact, |artifact| {
             let mut state = self.state.lock().expect("retained registry lock");
             let _ = artifact.private_preparation_origin.set(PreparedOrigin {
                 _reservation: preparation.allowance.nonce,
@@ -2006,7 +2006,7 @@ impl RetainedArtifactRegistry {
                     idle_since: None,
                 },
             );
-        })
+        }))
     }
 
     async fn link_complete(
@@ -2019,7 +2019,9 @@ impl RetainedArtifactRegistry {
             tracing::debug!(target: "plurxd::vodserve", phase = "link", reason, io_kind = ?error.kind(), "complete output assembly refused");
             error
         }
-        let gate = shared.rendition_build_gate(&rendition.key);
+        let gate = shared
+            .rendition_build_gate(&rendition.key)
+            .map_err(io::Error::other)?;
         let _gate = gate.lock().await;
         let init = rendition.identity.lock().await.identity.clone();
         let _manifest = rendition.manifest.lock().await;

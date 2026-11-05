@@ -36,6 +36,8 @@ mod finite_settlement;
 #[cfg(unix)]
 mod finite_terminal;
 #[cfg(unix)]
+pub use finite_terminal::FiniteCloseWorkspace;
+#[cfg(unix)]
 mod finite_vod;
 mod inventory;
 mod live_settlement;
@@ -103,6 +105,18 @@ pub(crate) struct OwnedPreparation {
     ledger: u64,
     id: Uuid,
     state: Arc<AsyncMutex<Bundle>>,
+}
+impl OwnedPreparation {
+    pub(in crate::adaptive_resources::runtime) fn finite_identity(
+        &self,
+        role_index: usize,
+    ) -> super::finite_vod::FiniteCloseIdentity {
+        super::finite_vod::FiniteCloseIdentity {
+            ledger: self.ledger,
+            operation: self.id,
+            role_index,
+        }
+    }
 }
 
 struct Bundle {
@@ -501,6 +515,7 @@ impl NodeResourceRuntime {
             None,
             None,
             deadline,
+            None,
             |_| (),
         )
         .map(|(owner, ())| owner)
@@ -558,6 +573,33 @@ impl NodeResourceRuntime {
         deadline: Instant,
         initialize: impl FnOnce(&OwnedPreparation) -> T,
     ) -> Result<(OwnedPreparation, T), OperationError> {
+        self.prepare_typed_families_claiming_initialized_collected(
+            families,
+            plans,
+            claims,
+            continuous_entry_deadline,
+            deadline,
+            None,
+            initialize,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "One private atomic preparation seam forwards the original claims, cutoff and deadline together with its checked collector slot."
+    )]
+    pub(in crate::adaptive_resources::runtime) fn prepare_typed_families_claiming_initialized_collected<
+        T,
+    >(
+        &self,
+        families: &[FamilyDemand<'_>],
+        plans: Vec<TypedGraphPlan>,
+        claims: Option<&[MemoryClaim]>,
+        continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
+        deadline: Instant,
+        collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
+        initialize: impl FnOnce(&OwnedPreparation) -> T,
+    ) -> Result<(OwnedPreparation, T), OperationError> {
         self.prepare_plan_families(
             families,
             plans
@@ -576,6 +618,7 @@ impl NodeResourceRuntime {
             claims,
             continuous_entry_deadline,
             deadline,
+            collector,
             initialize,
         )
     }
@@ -593,6 +636,7 @@ impl NodeResourceRuntime {
         claims: Option<&[MemoryClaim]>,
         continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
         deadline: Instant,
+        collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
         initialize: impl FnOnce(&OwnedPreparation) -> T,
     ) -> Result<(OwnedPreparation, T), OperationError> {
         if families.is_empty()
@@ -609,337 +653,360 @@ impl NodeResourceRuntime {
         }
         self.affected_owners
             .with_runtime_mutation(|inventory| {
-                let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
-                if book.draining {
-                    return Err(OperationError::BeforeReservation(
-                        PreReservationRefusal::Draining,
-                    ));
-                }
-                if book.bundles.len() >= MAX_RESERVATIONS {
-                    return Err(OperationError::BeforeReservation(
-                        PreReservationRefusal::Admission(AdmissionRefusal::LedgerFull),
-                    ));
-                }
-                let mut requests = Vec::new();
-                let mut missing = 0;
-                let mut trial = None;
-                let mut retained_bindings = BTreeSet::new();
-                for family in families {
-                    let durable_family = book
-                        .families
-                        .get(&family.identity)
-                        .ok_or(OperationError::State)?;
-                    let mut roles = Vec::new();
-                    for role in family.roles {
-                        let target = if let Some(retained) = role.retained {
-                            if book.closing.contains(&retained.binding) {
-                                return Err(OperationError::State);
-                            }
-                            retained_bindings.insert(retained.binding);
-                            RoleTarget::Retained(
-                                book.bindings
-                                    .get(&retained.binding)
-                                    .ok_or(OperationError::State)?
-                                    .clone(),
-                            )
-                        } else {
-                            trial.get_or_insert(role.demand.trial);
-                            let index = missing;
-                            missing += 1;
-                            RoleTarget::New(index)
-                        };
-                        roles.push((
-                            match role.role {
-                                FamilyRole::Video => Role::Video,
-                                FamilyRole::Audio => Role::Audio,
-                                FamilyRole::Companion => Role::Companion,
-                            },
-                            target,
+                // Lock order: census -> original directory/slot -> book -> ledger.
+                let mut grant =
+                    collector
+                        .map(|slot| slot.grant(self))
+                        .transpose()
+                        .map_err(|error| {
+                            OperationError::BeforeReservation(PreReservationRefusal::Admission(
+                                error,
+                            ))
+                        })?;
+                let result = (|| {
+                    let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
+                    if book.draining {
+                        return Err(OperationError::BeforeReservation(
+                            PreReservationRefusal::Draining,
                         ));
                     }
-                    requests.push(FamilyRequest {
-                        family: durable_family.clone(),
-                        roles,
-                    });
-                }
-                if plans.len() != missing || missing == 0 {
-                    return Err(OperationError::BeforeReservation(
-                        PreReservationRefusal::Admission(AdmissionRefusal::InvalidBundle),
-                    ));
-                }
-                let owned = self
-                    .ledger
-                    .reserve_families_claiming(families, claims)
-                    .map_err(|error| {
-                        OperationError::BeforeReservation(PreReservationRefusal::Admission(error))
-                    })?;
-                let id = Uuid::new_v4();
-                let typed_obligation_ids: Vec<Uuid> = if typed {
-                    (0..missing).map(|_| Uuid::new_v4()).collect()
-                } else {
-                    Vec::new()
-                };
-                let mut obligations = Vec::new();
-                let mut typed_obligations = Vec::new();
-                let mut roles = Vec::new();
-                for ((reservation, cleanup), plan) in owned.into_iter().zip(plans) {
-                    let binding = reservation.custody_binding();
-                    // Graph construction creates only private memory custody, no kernel
-                    // object, child, task, file or other counted member.
-                    let graph = reservation.into_physical_graph()?;
-                    let identity = graph.identity();
-                    if identity.process_instance != self.owner.owner_id {
-                        return Err(OperationError::State);
+                    if book.bundles.len() >= MAX_RESERVATIONS {
+                        return Err(OperationError::BeforeReservation(
+                            PreReservationRefusal::Admission(AdmissionRefusal::LedgerFull),
+                        ));
                     }
-                    // Resolve process-local references exactly once, BEFORE any journal
-                    // command/fingerprint exists. No supplied or guessed graph ID is
-                    // accepted for source-copy owners, recovery or the actual VOD task.
-                    let typed_members = plan
-                        .typed
-                        .map(|members| {
-                            let owner_id = v2::Id::new(identity.process_instance)?;
-                            let graph_id = v2::Id::new(identity.generation)?;
-                            let bound = members
-                                .into_iter()
-                                .map(|member| {
-                                    member.bind(owner_id, graph_id, &typed_obligation_ids)
-                                })
-                                .collect::<Result<Vec<_>, _>>()?;
-                            // M admits one MemberPlan allocation and settlement checks
-                            // capacity <= 1. Collector capacity is not that contract:
-                            // establish the exact survivor layout before publication.
-                            let bound = if matches!(
-                                bound.as_slice(),
-                                [v2::MemberPlan::FixedProbeMetadataV1 { .. }]
-                            ) {
-                                bound.into_boxed_slice().into_vec()
+                    let mut requests = Vec::new();
+                    let mut missing = 0;
+                    let mut trial = None;
+                    let mut retained_bindings = BTreeSet::new();
+                    for family in families {
+                        let durable_family = book
+                            .families
+                            .get(&family.identity)
+                            .ok_or(OperationError::State)?;
+                        let mut roles = Vec::new();
+                        for role in family.roles {
+                            let target = if let Some(retained) = role.retained {
+                                if book.closing.contains(&retained.binding) {
+                                    return Err(OperationError::State);
+                                }
+                                retained_bindings.insert(retained.binding);
+                                RoleTarget::Retained(
+                                    book.bindings
+                                        .get(&retained.binding)
+                                        .ok_or(OperationError::State)?
+                                        .clone(),
+                                )
                             } else {
-                                bound
+                                trial.get_or_insert(role.demand.trial);
+                                let index = missing;
+                                missing += 1;
+                                RoleTarget::New(index)
                             };
-                            Ok::<_, CustodyError>(bound)
-                        })
-                        .transpose()?;
-                    let (resources, memory_claim) = {
-                        let state = self
-                            .ledger
-                            .inner
-                            .lock()
-                            .map_err(|_| OperationError::State)?;
-                        let entry = state
-                            .entries
-                            .get(&binding.reservation)
-                            .ok_or(OperationError::State)?;
-                        (entry.resources, entry.memory_claim)
-                    };
-                    if let Some(members) = &typed_members {
-                        typed_obligations.push(TypedNewObligation {
-                            runtime_binding: binding,
-                            allocation_epoch: binding.allocation_epoch,
-                            resources,
-                            memory_claim,
-                            manifest: v2::Manifest {
-                                version: 2,
-                                owner_id: v2::Id::new(identity.process_instance)?,
-                                graph_id: v2::Id::new(identity.generation)?,
-                                attempt_id: plan.attempt_id.map(v2::Id::new).transpose()?,
-                                members: members.clone(),
-                            },
-                        });
-                    } else {
-                        obligations.push(NewObligation {
-                            runtime_binding: binding,
-                            allocation_epoch: binding.allocation_epoch,
-                            resources,
-                            manifest: Manifest {
-                                version: 1,
-                                owner_id: identity.process_instance,
-                                graph_id: identity.generation,
-                                attempt_id: plan.attempt_id,
-                                members: plan.legacy.clone(),
-                            },
+                            roles.push((
+                                match role.role {
+                                    FamilyRole::Video => Role::Video,
+                                    FamilyRole::Audio => Role::Audio,
+                                    FamilyRole::Companion => Role::Companion,
+                                },
+                                target,
+                            ));
+                        }
+                        requests.push(FamilyRequest {
+                            family: durable_family.clone(),
+                            roles,
                         });
                     }
-                    let census_owner = inventory
-                        .register_selected_runtime(
-                            binding,
-                            inventory::classification(typed_members.as_deref()),
-                            crate::adaptive_resources::owner_inventory::OwnerPhase::Registered,
-                        )
-                        .map_err(|_| OperationError::State)?;
-                    roles.push(OwnedRole {
-                        inventory: Some(census_owner),
-                        pending_inventory_close: None,
-                        native_never_acquired: None,
-                        binding,
-                        continuous_entry_deadline: continuous_entry_deadline.clone(),
-                        durable_tag: id,
-                        members: plan.legacy,
-                        typed_members,
-                        scratch: BTreeMap::new(),
-                        bootstrap: BTreeMap::new(),
-                        #[cfg(unix)]
-                        sources: BTreeMap::new(),
-                        #[cfg(unix)]
-                        finite_vod: None,
-                        #[cfg(target_os = "linux")]
-                        copy_vod: None,
-                        #[cfg(target_os = "linux")]
-                        copy_cleanup: None,
-                        #[cfg(unix)]
-                        finite_app: None,
-                        #[cfg(target_os = "linux")]
-                        planning_metadata: None,
-                        #[cfg(target_os = "linux")]
-                        planning_tasks: None,
-                        #[cfg(unix)]
-                        retirement: None,
-                        #[cfg(unix)]
-                        response_budget: None,
-                        armed: BTreeSet::new(),
-                        invoked: BTreeSet::new(),
-                        roots: BTreeMap::new(),
-                        drains: BTreeMap::new(),
-                        closed_drains: BTreeMap::new(),
-                        graph: Some(graph),
-                        sealed: None,
-                        _cleanup: cleanup,
-                        handle: None,
-                        sequence: 0,
-                        phase: Phase::Prepared,
-                        transition: None,
-                        #[cfg(unix)]
-                        pending_finite_close: None,
-                        receipt: None,
-                        refunded: false,
-                    });
-                }
-                // All fallible local construction precedes the write-ahead binding. No
-                // DB operation, randomness or OS call occurs under this accounting lock.
-                {
-                    let mut state = self
+                    if plans.len() != missing || missing == 0 {
+                        return Err(OperationError::BeforeReservation(
+                            PreReservationRefusal::Admission(AdmissionRefusal::InvalidBundle),
+                        ));
+                    }
+                    let owned = self
                         .ledger
-                        .inner
-                        .lock()
-                        .map_err(|_| OperationError::State)?;
-                    for role in &roles {
-                        let entry = state
-                            .entries
-                            .get(&role.binding.reservation)
-                            .ok_or(OperationError::State)?;
-                        if entry.binding != role.binding
-                            || entry.durable.is_some()
-                            || entry.state != ReservationState::Reserved
-                        {
+                        .reserve_families_claiming(families, claims)
+                        .map_err(|error| {
+                            OperationError::BeforeReservation(PreReservationRefusal::Admission(
+                                error,
+                            ))
+                        })?;
+                    let id = Uuid::new_v4();
+                    let typed_obligation_ids: Vec<Uuid> = if typed {
+                        (0..missing).map(|_| Uuid::new_v4()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let mut obligations = Vec::new();
+                    let mut typed_obligations = Vec::new();
+                    let mut roles = Vec::new();
+                    for ((reservation, cleanup), plan) in owned.into_iter().zip(plans) {
+                        let binding = reservation.custody_binding();
+                        // Graph construction creates only private memory custody, no kernel
+                        // object, child, task, file or other counted member.
+                        let graph = reservation.into_physical_graph()?;
+                        let identity = graph.identity();
+                        if identity.process_instance != self.owner.owner_id {
                             return Err(OperationError::State);
                         }
-                    }
-                    for role in &roles {
-                        state
-                            .entries
-                            .get_mut(&role.binding.reservation)
-                            .ok_or(OperationError::State)?
-                            .durable = Some(id);
-                    }
-                }
-                // Queue acceptance transfers the command to the DB owner. Even a
-                // prepare timeout after acceptance cannot make these charges disappear.
-                let queued = if typed {
-                    self.journal.prepare_typed(
-                        id,
-                        TypedPrepareBatch {
-                            obligations: typed_obligations,
-                            families: requests,
-                            trial: trial.unwrap_or(false),
-                        },
-                        typed_obligation_ids.clone(),
-                        deadline,
-                    )
-                } else {
-                    self.journal.prepare(
-                        id,
-                        PrepareBatch {
-                            obligations,
-                            families: requests,
-                            trial: trial.unwrap_or(false),
-                        },
-                        deadline,
-                    )
-                };
-                let pending = match queued {
-                    Ok(pending) => pending,
-                    Err(error) => {
-                        // enqueue failure is definite NOT accepted, before acquisition.
-                        // Keep any failed refund held; never turn it into capacity.
-                        for role in &mut roles {
-                            refund(&self.ledger, inventory, id, role)?;
-                            book.inventory_overflow.remove(&role.binding);
+                        // Resolve process-local references exactly once, BEFORE any journal
+                        // command/fingerprint exists. No supplied or guessed graph ID is
+                        // accepted for source-copy owners, recovery or the actual VOD task.
+                        let typed_members = plan
+                            .typed
+                            .map(|members| {
+                                let owner_id = v2::Id::new(identity.process_instance)?;
+                                let graph_id = v2::Id::new(identity.generation)?;
+                                let bound = members
+                                    .into_iter()
+                                    .map(|member| {
+                                        member.bind(owner_id, graph_id, &typed_obligation_ids)
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?;
+                                // M admits one MemberPlan allocation and settlement checks
+                                // capacity <= 1. Collector capacity is not that contract:
+                                // establish the exact survivor layout before publication.
+                                let bound = if matches!(
+                                    bound.as_slice(),
+                                    [v2::MemberPlan::FixedProbeMetadataV1 { .. }]
+                                ) {
+                                    bound.into_boxed_slice().into_vec()
+                                } else {
+                                    bound
+                                };
+                                Ok::<_, CustodyError>(bound)
+                            })
+                            .transpose()?;
+                        let (resources, memory_claim) = {
+                            let state = self
+                                .ledger
+                                .inner
+                                .lock()
+                                .map_err(|_| OperationError::State)?;
+                            let entry = state
+                                .entries
+                                .get(&binding.reservation)
+                                .ok_or(OperationError::State)?;
+                            (entry.resources, entry.memory_claim)
+                        };
+                        if let Some(members) = &typed_members {
+                            typed_obligations.push(TypedNewObligation {
+                                runtime_binding: binding,
+                                allocation_epoch: binding.allocation_epoch,
+                                resources,
+                                memory_claim,
+                                manifest: v2::Manifest {
+                                    version: 2,
+                                    owner_id: v2::Id::new(identity.process_instance)?,
+                                    graph_id: v2::Id::new(identity.generation)?,
+                                    attempt_id: plan.attempt_id.map(v2::Id::new).transpose()?,
+                                    members: members.clone(),
+                                },
+                            });
+                        } else {
+                            obligations.push(NewObligation {
+                                runtime_binding: binding,
+                                allocation_epoch: binding.allocation_epoch,
+                                resources,
+                                manifest: Manifest {
+                                    version: 1,
+                                    owner_id: identity.process_instance,
+                                    graph_id: identity.generation,
+                                    attempt_id: plan.attempt_id,
+                                    members: plan.legacy.clone(),
+                                },
+                            });
                         }
-                        // This failed enqueue precedes initialization/publication. No
-                        // app selector exists, so destroy the actual roles before
-                        // retiring their original compact census custody.
-                        let state = self
+                        let census_owner = inventory
+                            .register_selected_runtime(
+                                binding,
+                                inventory::classification(typed_members.as_deref()),
+                                crate::adaptive_resources::owner_inventory::OwnerPhase::Registered,
+                            )
+                            .map_err(|_| OperationError::State)?;
+                        roles.push(OwnedRole {
+                            inventory: Some(census_owner),
+                            pending_inventory_close: None,
+                            native_never_acquired: None,
+                            binding,
+                            continuous_entry_deadline: continuous_entry_deadline.clone(),
+                            durable_tag: id,
+                            members: plan.legacy,
+                            typed_members,
+                            scratch: BTreeMap::new(),
+                            bootstrap: BTreeMap::new(),
+                            #[cfg(unix)]
+                            sources: BTreeMap::new(),
+                            #[cfg(unix)]
+                            finite_vod: None,
+                            #[cfg(target_os = "linux")]
+                            copy_vod: None,
+                            #[cfg(target_os = "linux")]
+                            copy_cleanup: None,
+                            #[cfg(unix)]
+                            finite_app: None,
+                            #[cfg(target_os = "linux")]
+                            planning_metadata: None,
+                            #[cfg(target_os = "linux")]
+                            planning_tasks: None,
+                            #[cfg(unix)]
+                            retirement: None,
+                            #[cfg(unix)]
+                            response_budget: None,
+                            armed: BTreeSet::new(),
+                            invoked: BTreeSet::new(),
+                            roots: BTreeMap::new(),
+                            drains: BTreeMap::new(),
+                            closed_drains: BTreeMap::new(),
+                            graph: Some(graph),
+                            sealed: None,
+                            _cleanup: cleanup,
+                            handle: None,
+                            sequence: 0,
+                            phase: Phase::Prepared,
+                            transition: None,
+                            #[cfg(unix)]
+                            pending_finite_close: None,
+                            receipt: None,
+                            refunded: false,
+                        });
+                    }
+                    // All fallible local construction precedes the write-ahead binding. No
+                    // DB operation, randomness or OS call occurs under this accounting lock.
+                    {
+                        let mut state = self
                             .ledger
                             .inner
                             .lock()
                             .map_err(|_| OperationError::State)?;
                         for role in &roles {
-                            let close = role
-                                .pending_inventory_close
-                                .as_ref()
+                            let entry = state
+                                .entries
+                                .get(&role.binding.reservation)
                                 .ok_or(OperationError::State)?;
-                            inventory
-                                .validate_pending_runtime_close(close, &self.ledger, &state)
+                            if entry.binding != role.binding
+                                || entry.durable.is_some()
+                                || entry.state != ReservationState::Reserved
+                            {
+                                return Err(OperationError::State);
+                            }
+                        }
+                        for role in &roles {
+                            state
+                                .entries
+                                .get_mut(&role.binding.reservation)
+                                .ok_or(OperationError::State)?
+                                .durable = Some(id);
+                        }
+                    }
+                    // Queue acceptance transfers the command to the DB owner. Even a
+                    // prepare timeout after acceptance cannot make these charges disappear.
+                    let queued = if typed {
+                        self.journal.prepare_typed(
+                            id,
+                            TypedPrepareBatch {
+                                obligations: typed_obligations,
+                                families: requests,
+                                trial: trial.unwrap_or(false),
+                            },
+                            typed_obligation_ids.clone(),
+                            deadline,
+                        )
+                    } else {
+                        self.journal.prepare(
+                            id,
+                            PrepareBatch {
+                                obligations,
+                                families: requests,
+                                trial: trial.unwrap_or(false),
+                            },
+                            deadline,
+                        )
+                    };
+                    let pending = match queued {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            // enqueue failure is definite NOT accepted, before acquisition.
+                            // Keep any failed refund held; never turn it into capacity.
+                            for role in &mut roles {
+                                refund(&self.ledger, inventory, id, role)?;
+                                book.inventory_overflow.remove(&role.binding);
+                            }
+                            // This failed enqueue precedes initialization/publication. No
+                            // app selector exists, so destroy the actual roles before
+                            // retiring their original compact census custody.
+                            let state = self
+                                .ledger
+                                .inner
+                                .lock()
                                 .map_err(|_| OperationError::State)?;
+                            for role in &roles {
+                                let close = role
+                                    .pending_inventory_close
+                                    .as_ref()
+                                    .ok_or(OperationError::State)?;
+                                inventory
+                                    .validate_pending_runtime_close(close, &self.ledger, &state)
+                                    .map_err(|_| OperationError::State)?;
+                            }
+                            let pending: Vec<_> = roles
+                                .iter_mut()
+                                .filter_map(|role| role.pending_inventory_close.take())
+                                .collect();
+                            drop(roles);
+                            for close in pending {
+                                inventory.finish_runtime_close(close, &self.ledger, &state);
+                            }
+                            return Err(error.into());
                         }
-                        let pending: Vec<_> = roles
-                            .iter_mut()
-                            .filter_map(|role| role.pending_inventory_close.take())
-                            .collect();
-                        drop(roles);
-                        for close in pending {
-                            inventory.finish_runtime_close(close, &self.ledger, &state);
+                    };
+                    // Install overflow lookups only after accepted prepare. Failed
+                    // local construction cannot accumulate dead census selectors.
+                    for role in &roles {
+                        if matches!(
+                            &role.inventory,
+                            Some(RuntimeInventoryOwner::Overflow { .. })
+                        ) {
+                            book.inventory_overflow.insert(role.binding);
                         }
-                        return Err(error.into());
                     }
-                };
-                // Install overflow lookups only after accepted prepare. Failed
-                // local construction cannot accumulate dead census selectors.
-                for role in &roles {
-                    if matches!(
-                        &role.inventory,
-                        Some(RuntimeInventoryOwner::Overflow { .. })
-                    ) {
-                        book.inventory_overflow.insert(role.binding);
+                    let state = Arc::new(AsyncMutex::new(Bundle {
+                        id,
+                        typed_obligation_ids,
+                        family_ids: families.iter().map(|f| f.identity).collect(),
+                        retained: retained_bindings.clone(),
+                        prepare: JournalOperation::queued(pending),
+                        installed: false,
+                        roles,
+                    }));
+                    let owner = OwnedPreparation {
+                        ledger: self.ledger.id,
+                        id,
+                        state: Arc::clone(&state),
+                    };
+                    // The book lock excludes maintenance, and the state has never been
+                    // published. Install infallible fixed payloads before exposing it.
+                    if let Some(grant) = grant.as_mut() {
+                        grant.bind(&owner);
+                    }
+                    let initialized = initialize(&owner);
+                    book.bundles.insert(id, Arc::clone(&state));
+                    for family in families {
+                        book.family_users
+                            .entry(family.identity)
+                            .or_default()
+                            .insert(id);
+                    }
+                    for binding in retained_bindings {
+                        book.retained_users.entry(binding).or_default().insert(id);
+                    }
+                    Ok((owner, initialized))
+                })();
+                if matches!(&result, Err(OperationError::BeforeReservation(_))) {
+                    if let Some(grant) = grant.as_mut() {
+                        grant.no_grant();
                     }
                 }
-                let state = Arc::new(AsyncMutex::new(Bundle {
-                    id,
-                    typed_obligation_ids,
-                    family_ids: families.iter().map(|f| f.identity).collect(),
-                    retained: retained_bindings.clone(),
-                    prepare: JournalOperation::queued(pending),
-                    installed: false,
-                    roles,
-                }));
-                let owner = OwnedPreparation {
-                    ledger: self.ledger.id,
-                    id,
-                    state: Arc::clone(&state),
-                };
-                // The book lock excludes maintenance, and the state has never been
-                // published. Install infallible fixed payloads before exposing it.
-                let initialized = initialize(&owner);
-                book.bundles.insert(id, Arc::clone(&state));
-                for family in families {
-                    book.family_users
-                        .entry(family.identity)
-                        .or_default()
-                        .insert(id);
-                }
-                for binding in retained_bindings {
-                    book.retained_users.entry(binding).or_default().insert(id);
-                }
-                Ok((owner, initialized))
+                result
             })
             .map_err(|_| OperationError::State)?
     }

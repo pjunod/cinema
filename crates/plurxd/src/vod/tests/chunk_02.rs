@@ -1,4 +1,3 @@
-
 /// Liveness is the engine's half, and it answers before the slot is
 /// touched: a session that has ended takes no successor, and one that is
 /// gone from the registry has no gate at all.
@@ -100,7 +99,10 @@ async fn one_rendition_build_gate_does_not_block_other_keys_or_purge_maintenance
         .await
         .insert(key.clone(), Arc::clone(&rendition));
 
-    let gate = serve.shared.rendition_build_gate(&key);
+    let gate = serve
+        .shared
+        .rendition_build_gate(&key)
+        .expect("running rendition gate directory");
     let (held_tx, held_rx) = tokio::sync::oneshot::channel();
     let paused_build = tokio::spawn(async move {
         let _guard = gate.lock_owned().await;
@@ -109,7 +111,10 @@ async fn one_rendition_build_gate_does_not_block_other_keys_or_purge_maintenance
     });
     held_rx.await.expect("key A gate held");
 
-    let other = serve.shared.rendition_build_gate("unrelated-key");
+    let other = serve
+        .shared
+        .rendition_build_gate("unrelated-key")
+        .expect("running rendition gate directory");
     let other_guard = tokio::time::timeout(Duration::from_millis(250), other.lock_owned())
         .await
         .expect("key B must not queue behind key A");
@@ -131,7 +136,10 @@ async fn one_rendition_build_gate_does_not_block_other_keys_or_purge_maintenance
         .await
         .expect_err("paused build is cancelled")
         .is_cancelled());
-    let released = serve.shared.rendition_build_gate(&key);
+    let released = serve
+        .shared
+        .rendition_build_gate(&key)
+        .expect("running rendition gate directory");
     let released_guard = tokio::time::timeout(Duration::from_millis(250), released.lock_owned())
         .await
         .expect("cancellation releases exactly key A");
@@ -470,7 +478,10 @@ async fn cancelled_dormant_purge_keeps_key_and_accounting_owned_until_settlement
         .expect_err("maintenance caller cancelled")
         .is_cancelled());
 
-    let retry_gate = serve.shared.rendition_build_gate(&key);
+    let retry_gate = serve
+        .shared
+        .rendition_build_gate(&key)
+        .expect("running rendition gate directory");
     assert!(
         tokio::time::timeout(Duration::from_millis(25), retry_gate.lock_owned())
             .await
@@ -491,7 +502,10 @@ async fn cancelled_dormant_purge_keeps_key_and_accounting_owned_until_settlement
         },
     )
     .await;
-    let retry_gate = serve.shared.rendition_build_gate(&key);
+    let retry_gate = serve
+        .shared
+        .rendition_build_gate(&key)
+        .expect("running rendition gate directory");
     let retry = tokio::time::timeout(Duration::from_secs(2), retry_gate.lock_owned())
         .await
         .expect("same-key rebuild authority releases after exact settlement");
@@ -611,7 +625,10 @@ async fn cancelled_build_waiter_cannot_release_same_key_before_confirmed_head_re
     let base = crate::test_tempdir().expect("base");
     let serve = bare_serve(base.path());
     let key = "cancelled-head-key";
-    let gate = serve.shared.rendition_build_gate(key);
+    let gate = serve
+        .shared
+        .rendition_build_gate(key)
+        .expect("running rendition gate directory");
     let reap_pause = crate::seam_hooks::AsyncPause::new("head child before reap");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let result = spawn_cancellation_independent({
@@ -634,7 +651,10 @@ async fn cancelled_build_waiter_cannot_release_same_key_before_confirmed_head_re
     drop(result); // the request waiting for the build result is cancelled
     let held = reap_pause.reached().await;
 
-    let retry_gate = serve.shared.rendition_build_gate(key);
+    let retry_gate = serve
+        .shared
+        .rendition_build_gate(key)
+        .expect("running rendition gate directory");
     assert!(
         tokio::time::timeout(Duration::from_millis(25), retry_gate.lock_owned())
             .await
@@ -642,7 +662,10 @@ async fn cancelled_build_waiter_cannot_release_same_key_before_confirmed_head_re
         "same-key retry cannot acquire spawn authority while reap is paused"
     );
     held.release();
-    let retry_gate = serve.shared.rendition_build_gate(key);
+    let retry_gate = serve
+        .shared
+        .rendition_build_gate(key)
+        .expect("running rendition gate directory");
     let retry = tokio::time::timeout(Duration::from_secs(2), retry_gate.lock_owned())
         .await
         .expect("same-key authority releases after confirmed reap");
@@ -660,7 +683,10 @@ async fn production_head_deadline_reaps_child_and_releases_build_gate() {
     let base = crate::test_tempdir().expect("base");
     let serve = bare_serve(base.path());
     let key = "head-timeout";
-    let gate = serve.shared.rendition_build_gate(key);
+    let gate = serve
+        .shared
+        .rendition_build_gate(key)
+        .expect("running rendition gate directory");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let timed = tokio::spawn(async move {
         let _build_guard = gate.lock_owned().await;
@@ -694,7 +720,10 @@ async fn production_head_deadline_reaps_child_and_releases_build_gate() {
         "deadline return requires confirmed child reap"
     );
 
-    let released = serve.shared.rendition_build_gate(key);
+    let released = serve
+        .shared
+        .rendition_build_gate(key)
+        .expect("running rendition gate directory");
     let released_guard = tokio::time::timeout(Duration::from_millis(250), released.lock_owned())
         .await
         .expect("head timeout releases the exact build gate");
@@ -3104,9 +3133,13 @@ async fn opaque_build_gates_keep_original_mutex_through_cancellation_and_prune()
     let held = serve
         .shared
         .rendition_build_gate("original-key")
+        .expect("running rendition gate directory")
         .lock_owned()
         .await;
-    let queued_gate = serve.shared.rendition_build_gate("original-key");
+    let queued_gate = serve
+        .shared
+        .rendition_build_gate("original-key")
+        .expect("running rendition gate directory");
     {
         let first = queued_gate.clone().lock_owned();
         let second = queued_gate.clone().lock_owned();
@@ -3122,6 +3155,7 @@ async fn opaque_build_gates_keep_original_mutex_through_cancellation_and_prune()
         let other = serve
             .shared
             .rendition_build_gate("independent-key")
+            .expect("running rendition gate directory")
             .try_lock_owned()
             .expect("another key acquires while the original remains held");
         drop(other);
@@ -3142,7 +3176,10 @@ async fn opaque_build_gates_keep_original_mutex_through_cancellation_and_prune()
     drop(queued_gate);
     serve.shared.prune_rendition_builds();
     assert_eq!(serve.shared.rendition_build_count_for_test(), 1);
-    let from_guard_only = serve.shared.rendition_build_gate("original-key");
+    let from_guard_only = serve
+        .shared
+        .rendition_build_gate("original-key")
+        .expect("running rendition gate directory");
     assert!(from_guard_only.clone().try_lock_owned().is_err());
     drop(held);
 
@@ -3150,6 +3187,7 @@ async fn opaque_build_gates_keep_original_mutex_through_cancellation_and_prune()
     assert!(serve
         .shared
         .rendition_build_gate("original-key")
+        .expect("running rendition gate directory")
         .try_lock_owned()
         .is_err());
     drop(borrowed);

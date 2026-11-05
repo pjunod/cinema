@@ -158,7 +158,7 @@ impl VodServe {
             for rendition in &media {
                 gates.push(
                     self.shared
-                        .rendition_build_gate(&rendition.key)
+                        .rendition_build_gate(&rendition.key)?
                         .lock_owned()
                         .await,
                 );

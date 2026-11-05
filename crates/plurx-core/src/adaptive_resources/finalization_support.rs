@@ -36,6 +36,16 @@ impl FinalizationSupportProfile {
         }
     }
 
+    #[cfg(unix)]
+    pub(super) fn ordinary(requested: usize) -> Result<Self, AdmissionRefusal> {
+        Ok(Self {
+            requested_bytes: u64::try_from(requested)
+                .map_err(|_| AdmissionRefusal::ArithmeticOverflow)?,
+            record_slots: 256,
+            task_slots: 1,
+        })
+    }
+
     pub(super) fn resources(self) -> ResourceVector {
         ResourceVector {
             peak_memory_bytes: self.requested_bytes,
@@ -113,7 +123,10 @@ impl State {
         {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
-        if profile.requested_bytes == 0 || profile.record_slots != 1 || profile.task_slots != 1 {
+        if profile.requested_bytes == 0
+            || !matches!(profile.record_slots, 1 | 256)
+            || profile.task_slots != 1
+        {
             return Err(AdmissionRefusal::InvalidBundle);
         }
         // Installation must itself preserve the unknown-cohort invariant.

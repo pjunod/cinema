@@ -649,7 +649,7 @@ impl VodServe {
             let rendition = Arc::clone(&reuse.rendition);
             let gate = self
                 .shared
-                .rendition_build_gate(&rendition.key)
+                .rendition_build_gate(&rendition.key)?
                 .lock_owned()
                 .await;
             let cached = self.shared.renditions.lock().await;
@@ -702,7 +702,7 @@ impl VodServe {
                     "adopted adaptive rendition no longer matches its selected recipe".into(),
                 );
             }
-            let gate = self.shared.rendition_build_gate(&key).lock_owned().await;
+            let gate = self.shared.rendition_build_gate(&key)?.lock_owned().await;
             let cached = self.shared.renditions.lock().await;
             if !cached
                 .get(&key)
@@ -1216,7 +1216,7 @@ impl VodServe {
         {
             return Ok(None);
         }
-        let gate = self.shared.rendition_build_gate(key).lock_owned().await;
+        let gate = self.shared.rendition_build_gate(key)?.lock_owned().await;
         if self.shared.finite_closing.lock().await.contains_key(key) {
             return Ok(None);
         }
@@ -2105,7 +2105,7 @@ impl VodServe {
         for child in &media {
             build_guards.push(
                 self.shared
-                    .rendition_build_gate(&child.key)
+                    .rendition_build_gate(&child.key)?
                     .lock_owned()
                     .await,
             );
@@ -2596,7 +2596,7 @@ impl VodServe {
                 if let Some(flight) = obsolete_window_flight {
                     crate::subtitles::abandon_session_window(&cleanup_id, flight).await;
                 }
-                VodServe { shared }.emit_lifecycle(
+                VodServe::callback_handle(shared).emit_lifecycle(
                     &cleanup_id,
                     file_id,
                     file_height,

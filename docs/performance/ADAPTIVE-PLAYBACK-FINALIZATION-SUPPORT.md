@@ -6,6 +6,10 @@ source review. Companion to [owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINM
 and the [canonical resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md).
 The [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) remains normative.
 
+Current continuation: the [ordinary collector](ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md)
+adds the concrete production pool and daemon path with 48 scoped passes;
+task integration remains pending. Stage-1 scope and evidence below are historical.
+
 ## Context — the finalizer cannot refund its own frame
 
 The current finite closing future can still own its key and rich closing state

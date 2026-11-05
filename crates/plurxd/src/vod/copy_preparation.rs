@@ -134,7 +134,7 @@ impl PreparedCopyOutput {
                 &self.preparation,
                 &self.artifact,
             )
-            .await;
+            .await?;
         Ok(self.exposed)
     }
 
@@ -207,7 +207,7 @@ impl PreparedCopyOutput {
                 &self.preparation,
                 &self.artifact,
             )
-            .await;
+            .await?;
         Ok(self.exposed)
     }
 }
@@ -483,10 +483,12 @@ pub(super) async fn fence_cancelled_epoch(
     if rendition.cancelled_preparation_epoch.load(Acquire) != epoch.saturating_add(1) {
         return false;
     }
-    let _build = shared
-        .rendition_build_gate(&rendition.key)
-        .lock_owned()
-        .await;
+    let Ok(gate) = shared.rendition_build_gate(&rendition.key) else {
+        // The caller treats true as stopping this driver pass. An unavailable
+        // original directory cannot be interpreted as permission to continue.
+        return true;
+    };
+    let _build = gate.lock_owned().await;
     let readers = rendition.readers.lock().await;
     if !readers.is_empty() {
         rendition.cancelled_preparation_epoch.store(0, Release);

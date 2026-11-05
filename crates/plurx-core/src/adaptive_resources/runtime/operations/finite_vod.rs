@@ -107,6 +107,31 @@ impl FiniteTaskDisposition {
 }
 
 impl NodeResourceRuntime {
+    /// Retain the same original control when a granted owner never reached a
+    /// daemon envelope. A missing launch remains unresolved, never NoTask.
+    pub(in crate::adaptive_resources::runtime) fn original_finite_control(
+        &self,
+        owner: &OwnedPreparation,
+    ) -> Result<Arc<crate::adaptive_resources::runtime::finite_vod::FiniteControl>, OperationError>
+    {
+        self.validate_preparation(owner)?;
+        let book = self.operations.lock().map_err(|_| OperationError::State)?;
+        let original = book.bundles.get(&owner.id).ok_or(OperationError::State)?;
+        if !Arc::ptr_eq(original, &owner.state) {
+            return Err(OperationError::State);
+        }
+        let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+        if bundle.id != owner.id || bundle.roles.len() != 1 {
+            return Err(OperationError::State);
+        }
+        let role = &bundle.roles[0];
+        if role.refunded {
+            return Err(OperationError::State);
+        }
+        let launch = role.finite_vod.as_ref().ok_or(OperationError::State)?;
+        Ok(Arc::clone(&launch.control))
+    }
+
     /// Store-side negative equality for the exact prepared finite graph and
     /// its original planned output. These hashes are not native identity,
     /// physical proof, a reservation or publication authority.

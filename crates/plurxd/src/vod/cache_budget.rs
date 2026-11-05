@@ -267,7 +267,10 @@ impl CacheOwner for VodCacheOwner {
         }
         // Writers and attachments own this same gate. Never queue behind a
         // publisher while a write reservation is asking us to release space.
-        let Ok(_gate) = shared.rendition_build_gate(key).try_lock_owned() else {
+        let Ok(gate) = shared.rendition_build_gate(key) else {
+            return Ok(false);
+        };
+        let Ok(_gate) = gate.try_lock_owned() else {
             return Ok(false);
         };
         if shared

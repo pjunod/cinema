@@ -16,9 +16,8 @@ use std::path::PathBuf;
 /// HashMap, removed historical entries cannot leave a large sparse table.
 #[cfg(target_os = "linux")]
 pub(super) fn closing_owner_heap_bytes(key_capacity: usize) -> Option<usize> {
-    let entry = std::mem::size_of::<String>().checked_add(std::mem::size_of::<
-        std::sync::Arc<super::shared::FiniteClosingOwner>,
-    >())?;
+    let entry = std::mem::size_of::<String>()
+        .checked_add(std::mem::size_of::<super::shared::FiniteClosingRef>())?;
     let nodes = entry
         .checked_mul(11)?
         .checked_add(16 * std::mem::size_of::<usize>())?
@@ -26,7 +25,10 @@ pub(super) fn closing_owner_heap_bytes(key_capacity: usize) -> Option<usize> {
     std::mem::size_of::<super::shared::FiniteClosingOwner>()
         .checked_add(2 * std::mem::size_of::<usize>())?
         .checked_add(nodes)?
-        .checked_add(key_capacity.checked_mul(3)?)
+        .checked_add(key_capacity.checked_mul(3)?)?
+        // known_retired runs after actual native completion, so the SAME
+        // reservation allocation/header remains support-paid through Drop.
+        .checked_add(crate::vodencode::FiniteSoftwareCompatibility::requested_heap_bytes()?)
 }
 
 pub(super) fn recipe_heap_bytes(recipe: &Recipe) -> Option<usize> {

@@ -952,10 +952,10 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 // through verification and durable reservation. Query outside
                 // the manifest lock so cached GETs can drain during Store I/O.
                 drop(manifest);
-                let _dependency_guard = shared
-                    .rendition_build_gate(&rendition.key)
-                    .lock_owned()
-                    .await;
+                let Ok(gate) = shared.rendition_build_gate(&rendition.key) else {
+                    return;
+                };
+                let _dependency_guard = gate.lock_owned().await;
                 let intervals = match shared
                     .store
                     .quality_reserved_intervals(&rendition.key)

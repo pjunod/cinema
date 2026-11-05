@@ -1,82 +1,70 @@
 use super::*;
 
-/// One original per-key mutex directory. Raw handles and Weak entries stay in
-/// this module so later conserving custody cannot fork a key's exclusion.
-#[derive(Default)]
-pub(super) struct RenditionBuildDirectory {
-    entries: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
+pub(super) use plurx_core::adaptive_resources::runtime::ordinary_finite_collector::{
+    BuildGate as RenditionBuildGate, BuildGateDirectory as RenditionBuildDirectory,
+    BuildGuard as RenditionBuildGuard,
+};
+
+#[cfg(target_os = "linux")]
+use plurx_core::adaptive_resources::runtime::ordinary_finite_collector::OrdinarySlot;
+
+/// Each opaque reference keeps its independent envelope allowance until the
+/// actual Arc allocation has been dropped. No Weak or raw Arc escapes.
+#[cfg(target_os = "linux")]
+pub(super) struct FiniteClosingRef {
+    inner: Option<Arc<FiniteClosingOwner>>,
+    slot: Option<OrdinarySlot>,
 }
 
-impl RenditionBuildDirectory {
-    fn gate(&self, key: &str) -> RenditionBuildGate {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(inner) = entries.get(key).and_then(Weak::upgrade) {
-            return RenditionBuildGate { inner };
+#[cfg(target_os = "linux")]
+impl FiniteClosingRef {
+    fn new(inner: FiniteClosingOwner, slot: Option<OrdinarySlot>) -> Self {
+        Self {
+            inner: Some(Arc::new(inner)),
+            slot,
         }
-        let inner = Arc::new(Mutex::new(()));
-        entries.insert(key.to_owned(), Arc::downgrade(&inner));
-        RenditionBuildGate { inner }
     }
-
-    fn prune(&self) {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|_, gate| gate.strong_count() > 0);
+    pub(super) fn ptr_eq(left: &Self, right: &Self) -> bool {
+        Arc::ptr_eq(
+            left.inner.as_ref().expect("original closing owner"),
+            right.inner.as_ref().expect("original closing owner"),
+        )
     }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+    pub(super) fn collector_slot(&self) -> Option<&OrdinarySlot> {
+        self.slot.as_ref()
     }
 }
 
-/// Opaque access to the same original mutex; cloning allocates no new gate.
-#[derive(Clone)]
-#[repr(transparent)]
-pub(super) struct RenditionBuildGate {
-    inner: Arc<Mutex<()>>,
-}
-
-impl RenditionBuildGate {
-    pub(super) fn lock_owned(self) -> impl std::future::Future<Output = RenditionBuildGuard> {
-        use futures_util::FutureExt;
-        self.inner
-            .lock_owned()
-            .map(|guard| RenditionBuildGuard { _guard: guard })
-    }
-
-    pub(super) fn try_lock_owned(self) -> Result<RenditionBuildGuard, tokio::sync::TryLockError> {
-        self.inner
-            .try_lock_owned()
-            .map(|guard| RenditionBuildGuard { _guard: guard })
-    }
-
-    pub(super) fn lock(
-        &self,
-    ) -> impl std::future::Future<Output = RenditionBuildBorrowedGuard<'_>> {
-        use futures_util::FutureExt;
-        self.inner
-            .lock()
-            .map(|guard| RenditionBuildBorrowedGuard { _guard: guard })
+#[cfg(target_os = "linux")]
+impl Clone for FiniteClosingRef {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.as_ref().map(Arc::clone),
+            slot: self.slot.clone(),
+        }
     }
 }
 
-/// Only destruction unlocks; callers cannot recover or clone the raw mutex.
-#[repr(transparent)]
-pub(super) struct RenditionBuildGuard {
-    _guard: tokio::sync::OwnedMutexGuard<()>,
+#[cfg(target_os = "linux")]
+impl std::ops::Deref for FiniteClosingRef {
+    type Target = FiniteClosingOwner;
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_deref().expect("original closing owner")
+    }
 }
 
-#[repr(transparent)]
-pub(super) struct RenditionBuildBorrowedGuard<'a> {
-    _guard: tokio::sync::MutexGuard<'a, ()>,
+#[cfg(target_os = "linux")]
+impl Drop for FiniteClosingRef {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            let pending = slot.begin_envelope_drop();
+            // This returns only after the payload AND its Arc header are gone
+            // when this was the last reference. Panic keeps the slot Unknown.
+            drop(self.inner.take());
+            pending.finish();
+            drop(slot);
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -113,28 +101,28 @@ impl FiniteClosingOwner {
 pub(crate) struct FiniteBuildCleanup {
     shared: std::sync::Weak<Shared>,
     key: String,
-    closing: Arc<FiniteClosingOwner>,
+    closing: FiniteClosingRef,
     armed: bool,
 }
 
 #[cfg(target_os = "linux")]
 impl FiniteBuildCleanup {
     pub(crate) fn selector(&self) -> PreparedAttemptCleanup {
-        PreparedAttemptCleanup::from_closing(Arc::clone(&self.closing))
+        PreparedAttemptCleanup::from_closing(self.closing.clone())
     }
 
     fn validate_publication(
         &self,
         shared: &Arc<Shared>,
         key: &str,
-        closings: &std::collections::BTreeMap<String, Arc<FiniteClosingOwner>>,
+        closings: &std::collections::BTreeMap<String, FiniteClosingRef>,
     ) -> Result<(), String> {
         if self.key != key
             || !std::sync::Weak::ptr_eq(&self.shared, &Arc::downgrade(shared))
             || self.closing.cleanup_ready.load(Acquire)
             || !closings
                 .get(key)
-                .is_some_and(|current| Arc::ptr_eq(current, &self.closing))
+                .is_some_and(|current| FiniteClosingRef::ptr_eq(current, &self.closing))
         {
             return Err("original finite build cleanup no longer matches publication".into());
         }
@@ -143,14 +131,13 @@ impl FiniteBuildCleanup {
 
     /// Only after the exact rendition was inserted, under both map locks.
     /// No await separates that insertion, disarming and exact slot removal.
-    fn published(
-        mut self,
-        closings: &mut std::collections::BTreeMap<String, Arc<FiniteClosingOwner>>,
-    ) {
+    fn published(mut self, closings: &mut std::collections::BTreeMap<String, FiniteClosingRef>) {
         self.armed = false;
         closings.remove(&self.key);
         if closings.is_empty() {
-            closings.clear();
+            // Empty BTreeMap can retain its final node. Destroy it while the
+            // original support allocation is still paid.
+            drop(std::mem::take(closings));
         }
     }
 }
@@ -165,8 +152,8 @@ impl Drop for FiniteBuildCleanup {
         if let (Ok(_runtime), Some(shared)) =
             (tokio::runtime::Handle::try_current(), self.shared.upgrade())
         {
-            let _original_cleanup = shared
-                .spawn_finite_closing(std::mem::take(&mut self.key), Arc::clone(&self.closing));
+            let _original_cleanup =
+                shared.spawn_finite_closing(std::mem::take(&mut self.key), self.closing.clone());
         }
         // The original selectors were already installed in the map. Executor
         // loss or a failed cleanup keeps that same map owner and full charge.
@@ -177,12 +164,15 @@ impl Drop for FiniteBuildCleanup {
 pub(super) struct FiniteBuildSlot<'a> {
     shared: &'a Arc<Shared>,
     key: String,
-    closings:
-        tokio::sync::MutexGuard<'a, std::collections::BTreeMap<String, Arc<FiniteClosingOwner>>>,
+    closings: tokio::sync::MutexGuard<'a, std::collections::BTreeMap<String, FiniteClosingRef>>,
+    collector_slot: Option<OrdinarySlot>,
 }
 
 #[cfg(target_os = "linux")]
 impl FiniteBuildSlot<'_> {
+    pub(super) fn collector_slot(&self) -> Option<&OrdinarySlot> {
+        self.collector_slot.as_ref()
+    }
     pub(super) fn install(
         mut self,
         owner: plurx_core::adaptive_resources::runtime::finite_vod::SoftwareVodOwner,
@@ -194,22 +184,26 @@ impl FiniteBuildSlot<'_> {
         let producer = dir
             .finite_producer()
             .expect("fresh original finite producer");
-        let closing = Arc::new(FiniteClosingOwner {
-            rich: Mutex::new(None),
-            output: Mutex::new(Some(output)),
-            producer: Mutex::new(Some(producer)),
-            ticket: Mutex::new(None),
-            cache_grant: std::sync::Mutex::new(None),
-            compatibility: std::sync::Mutex::new(None),
-            claimed_bytes: AtomicU64::new(0),
-            claimed_admitted: AtomicBool::new(false),
-            known_closed: AtomicBool::new(false),
-            running: AtomicBool::new(false),
-            cleanup_ready: AtomicBool::new(false),
-        });
+        producer.bind_collector_slot(self.collector_slot.clone());
+        let closing = FiniteClosingRef::new(
+            FiniteClosingOwner {
+                rich: Mutex::new(None),
+                output: Mutex::new(Some(output)),
+                producer: Mutex::new(Some(producer)),
+                ticket: Mutex::new(None),
+                cache_grant: std::sync::Mutex::new(None),
+                compatibility: std::sync::Mutex::new(None),
+                claimed_bytes: AtomicU64::new(0),
+                claimed_admitted: AtomicBool::new(false),
+                known_closed: AtomicBool::new(false),
+                running: AtomicBool::new(false),
+                cleanup_ready: AtomicBool::new(false),
+            },
+            self.collector_slot.clone(),
+        );
         assert!(
             self.closings
-                .insert(self.key.clone(), Arc::clone(&closing))
+                .insert(self.key.clone(), closing.clone())
                 .is_none(),
             "finite build slot is exclusive before accepted R"
         );
@@ -229,7 +223,8 @@ pub(crate) struct PreparedAttemptRendition {
     key: String,
     rendition: Option<Arc<Rendition>>,
     build_guard: Option<RenditionBuildGuard>,
-    original_driver: Option<tokio::task::JoinHandle<()>>,
+    original_driver_registered: bool,
+    cleanup: Option<PreparedAttemptCleanup>,
     // Last: the original core charge stays live until every rich field above
     // and the detached abandoned-owner transfer have been destroyed.
     application_lease:
@@ -242,7 +237,7 @@ pub(crate) struct PreparedAttemptRendition {
 /// this original owner reports a known native and journal close.
 #[cfg(target_os = "linux")]
 pub(crate) struct PreparedAttemptCleanup {
-    closing: Arc<FiniteClosingOwner>,
+    closing: FiniteClosingRef,
 }
 
 #[cfg(target_os = "linux")]
@@ -272,7 +267,8 @@ impl AdaptiveBuildFailure {
 /// recovered the exact finite-closing selector.
 #[cfg(target_os = "linux")]
 pub(crate) struct PreparedAttemptCleanupTask {
-    task: Option<tokio::task::JoinHandle<Arc<FiniteClosingOwner>>>,
+    task: Option<tokio::task::JoinHandle<FiniteClosingRef>>,
+    collected: Option<FiniteClosingRef>,
 }
 
 #[cfg(target_os = "linux")]
@@ -289,7 +285,7 @@ async fn run_prepared_attempt_cleanup(
     producer: Arc<super::finite_software::FiniteSoftwareProducer>,
     driver: Option<tokio::task::JoinHandle<()>>,
     lease: Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease>,
-) -> Arc<FiniteClosingOwner> {
+) -> FiniteClosingRef {
     // Stop is synchronous and does not wait for the input-preparation owner
     // lock. The original task must return before the closing selector can
     // report successful cleanup; JoinError leaves its driver state aborted.
@@ -325,8 +321,8 @@ pub(crate) fn prepared_attempt_cleanup_frame_bytes() -> usize {
 }
 
 #[cfg(target_os = "linux")]
-async fn run_finite_closing(shared: Arc<Shared>, key: String, closing: Arc<FiniteClosingOwner>) {
-    let _running = FiniteClosingRun(Arc::clone(&closing));
+async fn run_finite_closing(shared: Arc<Shared>, key: String, closing: FiniteClosingRef) {
+    let _running = FiniteClosingRun(closing.clone());
     shared.drive_finite_closing(&key, &closing).await;
 }
 
@@ -342,13 +338,33 @@ pub(super) fn finite_closing_frame_bytes() -> usize {
 
 #[cfg(target_os = "linux")]
 impl PreparedAttemptCleanupTask {
-    pub(crate) fn is_finished(&self) -> bool {
+    pub(crate) fn registration_ready(&self) -> bool {
+        if let Some(closing) = self.collected.as_ref() {
+            return closing
+                .collector_slot()
+                .is_some_and(OrdinarySlot::registration_ready);
+        }
         self.task
             .as_ref()
             .is_some_and(tokio::task::JoinHandle::is_finished)
     }
 
-    pub(crate) async fn join(&mut self) -> Result<PreparedAttemptCleanup, String> {
+    pub(crate) async fn wait_registered(&mut self) -> Result<PreparedAttemptCleanup, String> {
+        if let Some(closing) = self.collected.as_ref() {
+            closing
+                .collector_slot()
+                .ok_or("original collected slot missing")?
+                .wait_registered(Instant::now() + Duration::from_secs(30))
+                .await
+                .map_err(|error| {
+                    format!("observing original finite cleanup registration: {error:?}")
+                })?;
+            let closing = self
+                .collected
+                .take()
+                .expect("original collected cleanup observer");
+            return Ok(PreparedAttemptCleanup { closing });
+        }
         let task = self
             .task
             .as_mut()
@@ -363,7 +379,7 @@ impl PreparedAttemptCleanupTask {
 
 #[cfg(target_os = "linux")]
 impl PreparedAttemptCleanup {
-    pub(super) fn from_closing(closing: Arc<FiniteClosingOwner>) -> Self {
+    pub(super) fn from_closing(closing: FiniteClosingRef) -> Self {
         Self { closing }
     }
 
@@ -528,17 +544,21 @@ impl PreparedAttemptRendition {
 
     #[cfg(all(test, feature = "cluster-integration-tests"))]
     pub(super) fn original_driver_id_for_test(&self) -> Option<tokio::task::Id> {
-        self.original_driver
-            .as_ref()
-            .map(tokio::task::JoinHandle::id)
+        if self.installed {
+            return None;
+        }
+        self.rendition()
+            .dir
+            .finite_producer()
+            .and_then(|producer| producer.original_driver_id_now_for_test())
     }
-
     #[cfg(all(test, feature = "cluster-integration-tests"))]
     pub(super) fn abort_original_driver_for_test(&self) {
-        self.original_driver
-            .as_ref()
-            .expect("original registered driver")
-            .abort();
+        self.rendition()
+            .dir
+            .finite_producer()
+            .expect("original prepared producer")
+            .abort_original_driver_now_for_test();
     }
 
     /// The registered M4 task takes this one-shot fence before it keeps the
@@ -561,25 +581,21 @@ impl PreparedAttemptRendition {
         if self.installed {
             return Err("adaptive worker binding is already published".into());
         }
-        if self.original_driver.is_none() {
-            // This assignment has no await: cancellation of input preparation
-            // always leaves the exact registered task in this original owner.
-            self.original_driver = Some(super::driver::spawn_prepared_finite_driver(
-                Arc::clone(&self.shared),
-                Arc::clone(self.rendition()),
-            ));
-        }
         let producer = self
             .rendition()
             .dir
             .finite_producer()
             .expect("adaptive attempt has its original producer");
+        if !self.original_driver_registered {
+            let driver = super::driver::spawn_prepared_finite_driver(
+                Arc::clone(&self.shared),
+                Arc::clone(self.rendition()),
+            );
+            producer.retain_original_driver(driver);
+            self.original_driver_registered = true;
+        }
         let prepared = producer.prepare_adaptive_inputs(deadline).await?;
-        if self
-            .original_driver
-            .as_ref()
-            .is_none_or(tokio::task::JoinHandle::is_finished)
-        {
+        if producer.original_driver_finished() {
             return Err("original adaptive driver ended before Prepared".into());
         }
         let output = self
@@ -599,7 +615,7 @@ impl PreparedAttemptRendition {
         if self.installed {
             return Ok(());
         }
-        if self.original_driver.is_none() {
+        if !self.original_driver_registered {
             return Err("adaptive publication has no original prepared driver".into());
         }
         let rendition = Arc::clone(self.rendition());
@@ -620,22 +636,41 @@ impl PreparedAttemptRendition {
             // Activation and publication have no await between them. A real
             // reader cannot find the map entry before its original driver is
             // activated, and publication adds no synthetic demand wake.
-            producer.install_original_driver(
-                self.original_driver
-                    .take()
-                    .expect("publication transfers the registered original driver"),
-            );
+            producer.activate_driver();
             renditions.insert(self.key.clone(), Arc::clone(&rendition));
             cleanup.published(&mut closings);
         }
         self.installed = true;
+        self.cleanup.take();
         self.build_guard.take();
         Ok(())
     }
 
-    fn launch_abandoned_cleanup(
-        &mut self,
-    ) -> Option<tokio::task::JoinHandle<Arc<FiniteClosingOwner>>> {
+    fn abandon_collected(&mut self) -> Option<FiniteClosingRef> {
+        let cleanup = self.cleanup.as_ref()?;
+        if self.installed || cleanup.closing.collector_slot().is_none() {
+            return None;
+        }
+        let rendition = self.rendition.take()?;
+        // Drop only publishes the already owned marker and wake. The paid
+        // service performs native stop outside destructor/map lock contexts.
+        rendition.closed.store(true, Release);
+        rendition.kick();
+        // Neither map registration nor a unique task-handle transfer is needed
+        // here. The original map/producer and core slot already own the work.
+        drop(self.build_guard.take());
+        drop(rendition);
+        drop(self.application_lease.take());
+        let closing = cleanup.closing.clone();
+        closing.cleanup_ready.store(true, Release);
+        closing
+            .collector_slot()
+            .expect("original collected slot")
+            .request_close();
+        Some(closing)
+    }
+
+    fn launch_abandoned_cleanup(&mut self) -> Option<tokio::task::JoinHandle<FiniteClosingRef>> {
         if self.installed {
             return None;
         }
@@ -655,7 +690,7 @@ impl PreparedAttemptRendition {
         let key = std::mem::take(&mut self.key);
         let gate = self.build_guard.take();
         let lease = self.application_lease.take();
-        let driver = self.original_driver.take();
+        let driver = None;
         // The original charged owner is moved into a detached existing
         // finite-closing registration. Dropping the waiter cannot discard it.
         Some(tokio::spawn(run_prepared_attempt_cleanup(
@@ -664,10 +699,19 @@ impl PreparedAttemptRendition {
     }
 
     pub(crate) fn begin_abandon(mut self) -> Result<PreparedAttemptCleanupTask, String> {
+        if let Some(closing) = self.abandon_collected() {
+            return Ok(PreparedAttemptCleanupTask {
+                task: None,
+                collected: Some(closing),
+            });
+        }
         let task = self
             .launch_abandoned_cleanup()
             .ok_or("adaptive attempt no longer owns a dormant rendition")?;
-        Ok(PreparedAttemptCleanupTask { task: Some(task) })
+        Ok(PreparedAttemptCleanupTask {
+            task: Some(task),
+            collected: None,
+        })
     }
 }
 
@@ -675,6 +719,9 @@ impl PreparedAttemptRendition {
 impl Drop for PreparedAttemptRendition {
     fn drop(&mut self) {
         if self.installed || self.rendition.is_none() {
+            return;
+        }
+        if self.abandon_collected().is_some() {
             return;
         }
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -692,7 +739,7 @@ impl Drop for PreparedAttemptRendition {
 }
 
 #[cfg(target_os = "linux")]
-struct FiniteClosingRun(Arc<FiniteClosingOwner>);
+struct FiniteClosingRun(FiniteClosingRef);
 
 #[cfg(target_os = "linux")]
 impl Drop for FiniteClosingRun {
@@ -828,8 +875,10 @@ impl Shared {
             let Some(candidate) = pending.front().cloned() else {
                 break;
             };
-            let Ok(_dependency_guard) = self.rendition_build_gate(&candidate.key).try_lock_owned()
-            else {
+            let Ok(gate) = self.rendition_build_gate(&candidate.key) else {
+                break;
+            };
+            let Ok(_dependency_guard) = gate.try_lock_owned() else {
                 if let Some(candidate) = pending.pop_front() {
                     pending.push_back(candidate);
                 }
@@ -970,8 +1019,13 @@ impl Shared {
             .retain(|_, lifecycle| lifecycle.strong_count() > 0);
     }
 
-    pub(super) fn rendition_build_gate(&self, key: &str) -> RenditionBuildGate {
-        self.rendition_builds.gate(key)
+    pub(super) fn rendition_build_gate(&self, key: &str) -> Result<RenditionBuildGate, String> {
+        self.rendition_builds.gate(key).map_err(|error| {
+            crate::transcode::vod_refusal_error(
+                "vod_family_capacity",
+                format!("rendition gate unavailable: {error:?}"),
+            )
+        })
     }
 
     pub(super) fn prune_rendition_builds(&self) {
@@ -980,7 +1034,7 @@ impl Shared {
 
     #[cfg(test)]
     pub(super) fn rendition_build_count_for_test(&self) -> usize {
-        self.rendition_builds.len()
+        self.rendition_builds.fixture_len()
     }
 
     /// Arm ruling A3's producer deadline once per demanded plan entry. The
@@ -1255,7 +1309,11 @@ impl Shared {
         application_owner_bytes: usize,
         continuous_entry_deadline: Option<plurx_core::cluster::clock::ContinuousDeadline>,
     ) -> Result<PreparedAttemptRendition, AdaptiveBuildFailure> {
-        let build_guard = self.rendition_build_gate(&key).lock_owned().await;
+        let build_guard = self
+            .rendition_build_gate(&key)
+            .map_err(AdaptiveBuildFailure::before_r)?
+            .lock_owned()
+            .await;
         if self.finite_closing.lock().await.contains_key(&key)
             || self.renditions.lock().await.contains_key(&key)
         {
@@ -1288,12 +1346,17 @@ impl Shared {
             continuous_entry_deadline,
         )
         .await?;
+        let cleanup = rendition
+            .dir
+            .finite_build_cleanup_selector()
+            .expect("fresh prepared attempt has its original pre-R cleanup slot");
         Ok(PreparedAttemptRendition {
             shared: Arc::clone(self),
             key,
             rendition: Some(rendition),
             build_guard: Some(build_guard),
-            original_driver: None,
+            original_driver_registered: false,
+            cleanup: Some(cleanup),
             application_lease: Some(application_lease),
             installed: false,
         })
@@ -1314,7 +1377,7 @@ impl Shared {
         if let Some(storage) = private_storage.as_ref() {
             storage.bind(key)?;
         }
-        let build_guard = self.rendition_build_gate(key).lock_owned().await;
+        let build_guard = self.rendition_build_gate(key)?.lock_owned().await;
         // Once exact-key admission succeeds, transfer the entire slow
         // Store/filesystem/head/build transaction to a detached owner before
         // the caller reaches another cancellation point. The successful
@@ -2127,7 +2190,10 @@ impl Shared {
     }
 
     async fn purge_dormant_inner(self: &Arc<Shared>, key: &str, ttl: Duration, pressure: bool) {
-        let Ok(build_guard) = self.rendition_build_gate(key).try_lock_owned() else {
+        let Ok(gate) = self.rendition_build_gate(key) else {
+            return;
+        };
+        let Ok(build_guard) = gate.try_lock_owned() else {
             return;
         };
         #[cfg(target_os = "linux")]
@@ -2217,19 +2283,26 @@ impl Shared {
             let Some(output) = rendition.dir.finite_output() else {
                 return;
             };
-            let closing = Arc::new(FiniteClosingOwner {
-                rich: Mutex::new(Some(Arc::clone(&rendition))),
-                output: Mutex::new(Some(output)),
-                producer: Mutex::new(rendition.dir.finite_producer()),
-                ticket: Mutex::new(None),
-                cache_grant: std::sync::Mutex::new(None),
-                compatibility: std::sync::Mutex::new(None),
-                claimed_bytes: AtomicU64::new(0),
-                claimed_admitted: AtomicBool::new(false),
-                known_closed: AtomicBool::new(false),
-                running: AtomicBool::new(false),
-                cleanup_ready: AtomicBool::new(true),
-            });
+            let collector_slot = rendition
+                .dir
+                .finite_producer()
+                .and_then(|producer| producer.collector_slot());
+            let closing = FiniteClosingRef::new(
+                FiniteClosingOwner {
+                    rich: Mutex::new(Some(Arc::clone(&rendition))),
+                    output: Mutex::new(Some(output)),
+                    producer: Mutex::new(rendition.dir.finite_producer()),
+                    ticket: Mutex::new(None),
+                    cache_grant: std::sync::Mutex::new(None),
+                    compatibility: std::sync::Mutex::new(None),
+                    claimed_bytes: AtomicU64::new(0),
+                    claimed_admitted: AtomicBool::new(false),
+                    known_closed: AtomicBool::new(false),
+                    running: AtomicBool::new(false),
+                    cleanup_ready: AtomicBool::new(true),
+                },
+                collector_slot,
+            );
             let removed = {
                 let mut closings = self.finite_closing.lock().await;
                 let mut renditions = self.renditions.lock().await;
@@ -2243,7 +2316,7 @@ impl Shared {
                     // The tombstone and exact native owner exist before the
                     // rich registry reference goes away. This gate prevents
                     // any same-key build between the two short map writes.
-                    closings.insert(key.to_owned(), Arc::clone(&closing));
+                    closings.insert(key.to_owned(), closing.clone());
                     renditions.remove(key);
                     rendition.closed.store(true, Release);
                     rendition.gen_epoch.fetch_add(1, Relaxed);
@@ -2256,7 +2329,14 @@ impl Shared {
             drop(rendition);
             drop(build_guard);
             if removed {
-                self.retry_finite_closing(key.to_owned(), closing).await;
+                if let Some(slot) = closing.collector_slot() {
+                    // The paid original service owns completion. Maintenance
+                    // does not become a second cleanup future while an alias
+                    // or application lease still holds the native close.
+                    slot.request_close();
+                } else {
+                    self.retry_finite_closing(key.to_owned(), closing).await;
+                }
             }
             return;
         }
@@ -2415,6 +2495,7 @@ impl Shared {
         if key.is_empty() || key.len() > 255 {
             return Err("finite build key exceeds its original role bound".into());
         }
+        let collector_slot = self.reserve_collector_slot(key)?;
         let closings = self.finite_closing.lock().await;
         if closings.contains_key(key) {
             return Err("finite rendition cleanup remains in progress".into());
@@ -2423,6 +2504,7 @@ impl Shared {
             shared: self,
             key: key.to_owned(),
             closings,
+            collector_slot,
         })
     }
 
@@ -2431,7 +2513,7 @@ impl Shared {
         self: &Arc<Self>,
         key: &str,
         rendition: &Rendition,
-        closings: &std::collections::BTreeMap<String, Arc<FiniteClosingOwner>>,
+        closings: &std::collections::BTreeMap<String, FiniteClosingRef>,
     ) -> Result<Option<FiniteBuildCleanup>, String> {
         let cleanup = rendition.dir.take_finite_build_cleanup();
         if let Some(cleanup) = cleanup.as_ref() {
@@ -2446,8 +2528,14 @@ impl Shared {
     fn spawn_finite_closing(
         self: &Arc<Shared>,
         key: String,
-        closing: Arc<FiniteClosingOwner>,
+        closing: FiniteClosingRef,
     ) -> Option<tokio::task::JoinHandle<()>> {
+        if let Some(slot) = closing.collector_slot() {
+            if closing.cleanup_ready.load(Acquire) {
+                slot.request_close();
+            }
+            return None;
+        }
         if !closing.cleanup_ready.load(Acquire) || closing.running.swap(true, AcqRel) {
             return None;
         }
@@ -2456,11 +2544,20 @@ impl Shared {
     }
 
     #[cfg(target_os = "linux")]
-    async fn retry_finite_closing(
+    pub(super) async fn retry_finite_closing(
         self: &Arc<Shared>,
         key: String,
-        closing: Arc<FiniteClosingOwner>,
+        closing: FiniteClosingRef,
     ) {
+        if let Some(slot) = closing.collector_slot() {
+            if closing.cleanup_ready.load(Acquire) {
+                slot.request_close();
+                let _ = slot
+                    .wait_terminal(Instant::now() + Duration::from_secs(30))
+                    .await;
+            }
+            return;
+        }
         // The owner and exact operation remain in the map if this waiter is
         // cancelled, the native result is unknown, or the task fails.
         if let Some(task) = self.spawn_finite_closing(key, closing) {
@@ -2493,12 +2590,12 @@ impl Shared {
         rich: Option<Arc<Rendition>>,
         output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
         producer: Arc<super::finite_software::FiniteSoftwareProducer>,
-    ) -> Arc<FiniteClosingOwner> {
+    ) -> FiniteClosingRef {
         let build_cleanup = rich
             .as_ref()
             .and_then(|rendition| rendition.dir.take_finite_build_cleanup());
         if let Some(cleanup) = build_cleanup {
-            let closing = Arc::clone(&cleanup.closing);
+            let closing = cleanup.closing.clone();
             // Remove the arm from PendingWrites before retaining rich, so
             // map -> rendition can never lead back to this closing owner.
             *closing.rich.lock().await = rich;
@@ -2507,41 +2604,213 @@ impl Shared {
             drop(cleanup); // Arms the existing original map slot synchronously.
             return closing;
         }
-        let closing = Arc::new(FiniteClosingOwner {
-            rich: Mutex::new(rich),
-            output: Mutex::new(Some(output)),
-            producer: Mutex::new(Some(producer)),
-            ticket: Mutex::new(None),
-            cache_grant: std::sync::Mutex::new(None),
-            compatibility: std::sync::Mutex::new(None),
-            claimed_bytes: AtomicU64::new(0),
-            claimed_admitted: AtomicBool::new(false),
-            known_closed: AtomicBool::new(false),
-            running: AtomicBool::new(false),
-            cleanup_ready: AtomicBool::new(true),
-        });
+        let collector_slot = producer.collector_slot();
+        let closing = FiniteClosingRef::new(
+            FiniteClosingOwner {
+                rich: Mutex::new(rich),
+                output: Mutex::new(Some(output)),
+                producer: Mutex::new(Some(producer)),
+                ticket: Mutex::new(None),
+                cache_grant: std::sync::Mutex::new(None),
+                compatibility: std::sync::Mutex::new(None),
+                claimed_bytes: AtomicU64::new(0),
+                claimed_admitted: AtomicBool::new(false),
+                known_closed: AtomicBool::new(false),
+                running: AtomicBool::new(false),
+                cleanup_ready: AtomicBool::new(true),
+            },
+            collector_slot,
+        );
         {
             let mut closings = self.finite_closing.lock().await;
             use std::collections::btree_map::Entry;
             match closings.entry(key.to_owned()) {
                 Entry::Vacant(entry) => {
-                    entry.insert(Arc::clone(&closing));
+                    entry.insert(closing.clone());
                 }
                 Entry::Occupied(_) => {
                     panic!("fresh finite preparation collided under its exact build gate");
                 }
             }
         }
-        let _task = self.spawn_finite_closing(key.to_owned(), Arc::clone(&closing));
+        let _task = self.spawn_finite_closing(key.to_owned(), closing.clone());
         closing
     }
 
     #[cfg(target_os = "linux")]
-    async fn drive_finite_closing(
+    pub(super) async fn drive_collected_closing(
         self: &Arc<Shared>,
-        key: &str,
-        closing: &Arc<FiniteClosingOwner>,
-    ) {
+        port: &plurx_core::adaptive_resources::runtime::ordinary_finite_collector::CoreServicePort,
+        work: &plurx_core::adaptive_resources::runtime::ordinary_finite_collector::OrdinaryCloseWork,
+    ) -> Result<(), String> {
+        let key = work.key();
+        let closing = self.finite_closing.lock().await.get(key).cloned();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        if let Some(closing) = closing.as_ref() {
+            if !closing.cleanup_ready.load(Acquire) {
+                return Err("original finite builder still owns its close arm".into());
+            }
+            // Positive join of the actual original driver precedes both the
+            // registration observation and any application-release wait.
+            let producer = closing.producer.lock().await.as_ref().cloned();
+            let rich = closing.rich.lock().await.as_ref().cloned();
+            if let Some(rendition) = rich.as_ref() {
+                rendition.closed.store(true, Release);
+                rendition.kick();
+            }
+            if let Some(producer) = producer.as_ref() {
+                producer.request_stop().map_err(|error| error.to_string())?;
+                producer
+                    .join_installed_driver()
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            if let Some(rendition) = rich {
+                let manifest = rendition.manifest.lock().await;
+                closing
+                    .claimed_bytes
+                    .store(manifest.materialized_bytes(), Release);
+                closing
+                    .claimed_admitted
+                    .store(manifest.is_admitted(), Release);
+                drop(manifest);
+                closing.rich.lock().await.take();
+                drop(rendition);
+            }
+            drop(producer);
+            port.mark_abandon_registered(work)
+                .map_err(|error| format!("finite registration observation: {error:?}"))?;
+            if !port
+                .has_ticket(work)
+                .await
+                .map_err(|error| format!("finite close ticket state: {error:?}"))?
+            {
+                let output = closing.output.lock().await.as_ref().cloned();
+                let producer = closing.producer.lock().await.as_ref().cloned();
+                let Some(output) = output else {
+                    return Err("original finite output is missing".into());
+                };
+                output
+                    .wait_allocations_release(deadline)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let ticket = if let Some(producer) = producer.as_ref() {
+                    producer
+                        .prepare_terminate(deadline)
+                        .await
+                        .map_err(|error| error.to_string())?
+                } else {
+                    output
+                        .prepare_eviction(deadline)
+                        .await
+                        .map_err(|error| error.to_string())?
+                };
+                // Core owns the exact ticket before any rich selector is
+                // cleared. Cancellation cannot drop the only original ticket.
+                port.install_ticket(work, ticket)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if let Some(producer) = producer.as_ref() {
+                    if let Some(compatibility) = producer.take_compatibility() {
+                        *closing
+                            .compatibility
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(compatibility);
+                    }
+                    if let Some(grant) = producer.take_cache_grant() {
+                        *closing
+                            .cache_grant
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(grant);
+                    }
+                }
+                drop(producer);
+                drop(output);
+                closing.producer.lock().await.take();
+                closing.output.lock().await.take();
+            }
+        } else if !port
+            .has_ticket(work)
+            .await
+            .map_err(|error| format!("finite ticket fallback state: {error:?}"))?
+        {
+            // A panic between real R grant and daemon map installation still
+            // leaves core's original preparation and controls in this slot.
+            port.prepare_original_ticket(work, deadline)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        port.wait_application_release(work, deadline)
+            .await
+            .map_err(|error| error.to_string())?;
+        let gate = port
+            .gate(work)
+            .map_err(|error| format!("original finite finalization gate: {error:?}"))?;
+        let _gate = gate.lock_owned().await;
+        port.finish_retirement(work, deadline)
+            .await
+            .map_err(|error| error.to_string())?;
+        // The ticket was consumed only after real native/application close.
+        // Any surviving empty daemon envelope remains independently charged
+        // until its outer reference drops the actual Arc/header completely.
+        if let Some(closing) = closing.as_ref() {
+            if let Some(compatibility) = closing
+                .compatibility
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                compatibility.known_retired();
+            }
+            if let Some(grant) = closing
+                .cache_grant
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                grant.known_closed();
+            }
+            closing.known_closed.store(true, Release);
+            let (removed, empty_backing) = {
+                let mut closings = self.finite_closing.lock().await;
+                let removed = if closings
+                    .get(key)
+                    .is_some_and(|current| FiniteClosingRef::ptr_eq(current, closing))
+                {
+                    closings.remove_entry(key)
+                } else {
+                    None
+                };
+                let backing = closings.is_empty().then(|| std::mem::take(&mut *closings));
+                (removed, backing)
+            };
+            let was_removed = removed.is_some();
+            // These real allocations remain support-paid through their full
+            // destruction, outside the registry lock and before Terminal.
+            drop(removed);
+            drop(empty_backing);
+            if was_removed {
+                sub_saturating(
+                    if closing.claimed_admitted.load(Acquire) {
+                        &self.completed_cache
+                    } else {
+                        &self.working_set
+                    },
+                    closing.claimed_bytes.load(Acquire),
+                );
+            }
+        }
+        // This service owns the map await too; no uncharged successor kick task.
+        for rendition in self.renditions.lock().await.values() {
+            rendition.kick();
+        }
+        port.complete(work)
+            .map_err(|error| format!("completing original finite service: {error:?}"))
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn drive_finite_closing(self: &Arc<Shared>, key: &str, closing: &FiniteClosingRef) {
         let rich = closing.rich.lock().await.as_ref().cloned();
         if let Some(rendition) = rich {
             let producer = closing.producer.lock().await.as_ref().cloned();
@@ -2666,7 +2935,10 @@ impl Shared {
         // short key gate now spans the known journal commit and tombstone
         // removal, so no uncharged closing-map allocation can wait behind a
         // successor build after the role's final refund.
-        let _build_guard = self.rendition_build_gate(key).lock_owned().await;
+        let Ok(gate) = self.rendition_build_gate(key) else {
+            return;
+        };
+        let _build_guard = gate.lock_owned().await;
         if !closing.known_closed.load(Acquire) {
             let deadline = Instant::now() + Duration::from_secs(30);
             let mut held = closing.ticket.lock().await;
@@ -2701,7 +2973,7 @@ impl Shared {
             let mut closings = self.finite_closing.lock().await;
             if closings
                 .get(key)
-                .is_some_and(|current| Arc::ptr_eq(current, closing))
+                .is_some_and(|current| FiniteClosingRef::ptr_eq(current, closing))
             {
                 closings.remove(key);
                 if closings.is_empty() {
