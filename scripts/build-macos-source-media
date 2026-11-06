@@ -70,11 +70,16 @@ def source_generation_tools(prepared, env):
         run(["make", "install"], cwd=source, env=env)
 
 
-def build_tool_environment():
+def build_search_environment():
     env = dict(os.environ)
     extra = [str(prefix / suffix) for prefix in BREW_PREFIXES
              for suffix in ["bin", "sbin", "opt/texinfo/bin"]]
     env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
+    return env
+
+
+def build_tool_environment():
+    env = build_search_environment()
     missing = sorted({formula for tool, formula in TOOLS.items() if not shutil.which(tool, path=env["PATH"])})
     if missing:
         brew = shutil.which("brew", path=env["PATH"])
@@ -84,8 +89,114 @@ def build_tool_environment():
     return env
 
 
-def build_environment(prepared):
+def xcode_applications():
+    """Try conventional locations, then macOS's bundle-identity index."""
+    for directory in [Path("/Applications"), Path.home() / "Applications"]:
+        yield from sorted(directory.glob("Xcode*.app"))
+    try:
+        # Bundle identity also finds renamed apps and nonstandard locations.
+        indexed = subprocess.check_output(
+            ["/usr/bin/mdfind", "-0", "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode*'"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return
+    for path in indexed.split("\0"):
+        if path and Path(path).is_absolute():
+            yield Path(path)
+
+
+def initialize_xcode(env):
+    """Complete first-launch setup in the terminal only when required."""
+    ready = subprocess.run(["/usr/bin/xcodebuild", "-checkFirstLaunchStatus"], env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if ready.returncode == 0:
+        return
+    developer = env.get("DEVELOPER_DIR")
+    if not developer:
+        developer = subprocess.check_output(["/usr/bin/xcode-select", "-p"], text=True).strip()
+    directory = Path(developer)
+    if directory.suffix == ".app":
+        directory = directory / "Contents/Developer"
+    executable = directory / "usr/bin/xcodebuild"
+    print("native media build: completing Xcode setup; answer the administrator and license prompts below",
+          file=sys.stderr, flush=True)
+    # Use the absolute selected binary: sudo may remove DEVELOPER_DIR.
+    run(["/usr/bin/sudo", executable, "-license"], env=env)
+    run(["/usr/bin/sudo", executable, "-runFirstLaunch"], env=env)
+    run(["/usr/bin/xcodebuild", "-checkFirstLaunchStatus"], env=env)
+
+
+def install_xcode():
+    """Inherit the terminal for Apple authentication, 2FA and administrator prompts."""
+    env = build_search_environment()
+    installer = shutil.which("xcodes", path=env["PATH"])
+    if not installer:
+        brew = recipe("build-macos-source-runtime").ensure_homebrew()
+        env["PATH"] = os.pathsep.join([str(Path(brew).parent), env["PATH"]])
+        run([brew, "install", "xcodesorg/made/xcodes"], env=env)
+        installer = shutil.which("xcodes", path=env["PATH"])
+        if not installer:
+            raise ValueError("Homebrew installed xcodes but its executable cannot be found")
+    print("native media build: installing full Xcode; answer any Apple sign-in or 2FA prompts below",
+          file=sys.stderr, flush=True)
+    # Finish setup ourselves so the license is presented interactively rather
+    # than xcodes accepting it silently. Do not select Xcode system-wide.
+    run([installer, "install", "--latest", "--directory", "/Applications", "--no-superuser"], env=env)
+
+
+def developer_environment():
+    """Find or install full Xcode without changing the system's selection."""
+    env = dict(os.environ)
+
+    def usable(candidate):
+        return subprocess.run(["/usr/bin/xcodebuild", "-version"], env=candidate,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+    if usable(env):
+        initialize_xcode(env)
+        return env
+    # An explicit override is authoritative, including when it is broken.
+    if env.get("DEVELOPER_DIR"):
+        directory = Path(env["DEVELOPER_DIR"])
+        if directory.suffix == ".app":
+            directory = directory / "Contents/Developer"
+        if (directory / "usr/bin/xcodebuild").is_file():
+            initialize_xcode(env)
+            if usable(env):
+                return env
+        raise ValueError("DEVELOPER_DIR does not identify a usable full Xcode; correct or unset it")
+
+    def discovered():
+        for app in xcode_applications():
+            developer = app / "Contents/Developer"
+            if not (developer / "usr/bin/xcodebuild").is_file():
+                continue
+            candidate = dict(env, DEVELOPER_DIR=str(developer))
+            initialize_xcode(candidate)
+            if usable(candidate):
+                print(f"native media build: using Xcode at {developer}", file=sys.stderr)
+                return candidate
+        return None
+
+    candidate = discovered()
+    if candidate is not None:
+        return candidate
+    install_xcode()
+    # xcodes installs a versioned app in /Applications. Search again instead of
+    # assuming the filename or waiting for Spotlight to index a fresh install.
+    candidate = discovered()
+    if candidate is None:
+        raise ValueError("Xcode installation finished but no usable developer directory was found")
+    return candidate
+
+
+def build_environment(prepared, developer_env=None):
+    if developer_env is None:
+        developer_env = developer_environment()
+    # Resolve Xcode before installing Homebrew tools or compiling dependencies.
     env = build_tool_environment()
+    if developer_env.get("DEVELOPER_DIR"):
+        env["DEVELOPER_DIR"] = developer_env["DEVELOPER_DIR"]
     source_generation_tools(prepared, env)
     (prepared / "bin/glibtoolize").symlink_to(shutil.which("libtoolize", path=env["PATH"]))
     for alias, source in [("timeout", "gtimeout"), ("shuf", "gshuf")]:
@@ -95,19 +206,19 @@ def build_environment(prepared):
                 raise ValueError("missing build tool: " + source)
             (prepared / "bin" / alias).symlink_to(executable)
     explicit_toolchain = ""
-    result = subprocess.run(["/usr/bin/xcrun", "-sdk", "macosx", "metal", "-v"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result = subprocess.run(["/usr/bin/xcrun", "-sdk", "macosx", "metal", "-v"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     if result.returncode:
-        component = subprocess.check_output(["/usr/bin/xcodebuild", "-showComponent", "MetalToolchain", "-json"], text=True)
+        component = subprocess.check_output(["/usr/bin/xcodebuild", "-showComponent", "MetalToolchain", "-json"], text=True, env=env)
         facts = json.loads(component)
         if facts.get("status") != "installed":
-            run(["/usr/bin/xcodebuild", "-downloadComponent", "MetalToolchain"])
-            facts = json.loads(subprocess.check_output(["/usr/bin/xcodebuild", "-showComponent", "MetalToolchain", "-json"], text=True))
+            run(["/usr/bin/xcodebuild", "-downloadComponent", "MetalToolchain"], env=env)
+            facts = json.loads(subprocess.check_output(["/usr/bin/xcodebuild", "-showComponent", "MetalToolchain", "-json"], text=True, env=env))
         identifier = facts.get("toolchainIdentifier", "")
         if not identifier or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-" for character in identifier):
             raise ValueError("Metal toolchain has no usable explicit identifier")
-        run(["/usr/bin/xcrun", "--toolchain", identifier, "-sdk", "macosx", "metal", "-v"])
+        run(["/usr/bin/xcrun", "--toolchain", identifier, "-sdk", "macosx", "metal", "-v"], env=env)
         explicit_toolchain = " --toolchain " + identifier
-    metal = subprocess.check_output(["/usr/bin/xcrun", *explicit_toolchain.split(), "-sdk", "macosx", "--find", "metal"], text=True).strip()
+    metal = subprocess.check_output(["/usr/bin/xcrun", *explicit_toolchain.split(), "-sdk", "macosx", "--find", "metal"], text=True, env=env).strip()
     metallib = Path(metal).with_name("metallib")
     if not metallib.is_file():
         raise ValueError("Metal compiler has no matching metallib linker")
@@ -157,6 +268,7 @@ def build(destination, jobs, prepared_build=None, source_archive=None, dependenc
         raise ValueError("jobs must be between 1 and 8")
     if not destination.is_absolute() or destination.exists() or destination.is_symlink():
         raise ValueError("output must be an absolute new directory")
+    developer_env = developer_environment() if prepared_build is None else None
     media = recipe("build-macos-video-ffmpeg")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="plurx-native-media-") as work:
@@ -167,7 +279,7 @@ def build(destination, jobs, prepared_build=None, source_archive=None, dependenc
             media.acquire(source_archive, media.SOURCE_URL, media.SOURCE_SHA256, archive)
             prepared = temporary / "prepared"
             recipe("prepare-macos-video-ffmpeg").prepare(archive, prepared, jobs, dependency_source)
-            env = build_environment(prepared)
+            env = build_environment(prepared, developer_env)
             run(["/bin/bash", prepared / "build.sh"], env=env)
         parser = temporary / "parser"
         run([sys.executable, ROOT / "scripts/build-macos-source-parser", "--output", parser, "--jobs", str(jobs),
