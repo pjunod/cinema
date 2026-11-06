@@ -27,6 +27,20 @@ Existing rustup and standard Homebrew installations are found even when absent
 from `PATH`; a separate Homebrew Rust compiler can remain installed.
 With the pinned toolchain already installed, this step needs no download.
 
+A first media build also requires full Xcode, initialized by opening it and
+completing its first-launch setup, for the Metal compiler. Command Line Tools
+alone cannot build the native media shaders. The builder uses the active Xcode
+or discovers `Xcode*.app` under `/Applications` and `~/Applications`, without
+changing the system's `xcode-select` setting. For a custom location, run:
+
+```sh
+DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer make install-macos
+```
+
+An explicit `DEVELOPER_DIR` takes precedence; correct or unset it if invalid.
+Missing Xcode is reported before source downloads or dependency compilation.
+A verified media cache or supplied complete package needs no media rebuild.
+
 You do not install ffmpeg yourself. The installer fetches the exact build
 plurx needs — see [the media engine](#the-media-engine-jellyfin-ffmpeg-813-1).
 
@@ -90,7 +104,7 @@ The installer validates a complete local package or reuses its verified cache.
 Without one, [`build-macos-source-media`](../scripts/build-macos-source-media)
 builds the pinned Jellyfin source, all codec dependencies, the Plurx patches,
 static MoltenVK, shaderc and libplacebo. The first build needs network access,
-Xcode command line tools and its Metal component, Homebrew build tools, and
+full Xcode and its Metal component, Homebrew build tools, and
 substantial build time. These are build dependencies; the installed media
 binaries link only to macOS libraries and frameworks.
 

@@ -22,6 +22,91 @@ def load(name):
     return module
 
 
+class MacOSDeveloperEnvironmentTests(unittest.TestCase):
+    def setUp(self):
+        self.media = load("build-macos-source-media")
+
+    def test_active_xcode_preserves_explicit_developer_directory(self):
+        with mock.patch.dict(os.environ, {"DEVELOPER_DIR": "/custom/Xcode.app/Contents/Developer"}), \
+                mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=0)) as probe, \
+                mock.patch.object(Path, "glob") as discover:
+            env = self.media.developer_environment()
+        self.assertEqual(env["DEVELOPER_DIR"], "/custom/Xcode.app/Contents/Developer")
+        self.assertEqual(probe.call_args.kwargs["env"], env)
+        discover.assert_not_called()
+
+    def test_clt_selection_discovers_xcode_without_global_changes(self):
+        with tempfile.TemporaryDirectory() as work:
+            app = Path(work) / "Xcode Fixture.app"
+            executable = app / "Contents/Developer/usr/bin/xcodebuild"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            original = {"PATH": "/usr/bin:/bin"}
+            with mock.patch.dict(os.environ, original, clear=True), \
+                    mock.patch.object(Path, "glob", return_value=[app]), \
+                    mock.patch.object(self.media.subprocess, "run", side_effect=[
+                        mock.Mock(returncode=1), mock.Mock(returncode=0)]) as probe:
+                env = self.media.developer_environment()
+                self.assertEqual(dict(os.environ), original)
+            self.assertEqual(env["DEVELOPER_DIR"], str(app / "Contents/Developer"))
+            self.assertEqual(probe.call_args.kwargs["env"], env)
+            self.assertTrue(all(call.args[0] == ["/usr/bin/xcodebuild", "-version"]
+                                for call in probe.call_args_list))
+
+    def test_invalid_explicit_developer_directory_is_not_overridden(self):
+        with mock.patch.dict(os.environ, {"DEVELOPER_DIR": "/custom/invalid"}), \
+                mock.patch.object(Path, "glob") as discover, \
+                mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)):
+            with self.assertRaisesRegex(ValueError, "correct or unset"):
+                self.media.developer_environment()
+        discover.assert_not_called()
+
+    def test_missing_xcode_fails_before_downloads_or_dependency_builds(self):
+        with tempfile.TemporaryDirectory() as work, \
+                mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
+                mock.patch.object(self.media.platform, "system", return_value="Darwin"), \
+                mock.patch.object(Path, "glob", return_value=[]), \
+                mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+                mock.patch.object(self.media, "recipe") as recipe, \
+                mock.patch.object(self.media, "build_tool_environment") as tools:
+            destination = Path(work) / "not-created/package"
+            with self.assertRaisesRegex(ValueError, "Command Line Tools alone are insufficient"):
+                self.media.build(destination, 4)
+            self.assertFalse(destination.parent.exists())
+        recipe.assert_not_called()
+        tools.assert_not_called()
+
+    def test_selected_xcode_reaches_metal_component_and_build_environment(self):
+        for status in ["installed", "not installed"]:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as work:
+                prepared = Path(work)
+                (prepared / "bin").mkdir()
+                metal = prepared / "metal"
+                metal.with_name("metallib").touch()
+                facts = json.dumps({"status": status, "toolchainIdentifier": "com.apple.Metal"})
+                outputs = [facts]
+                if status != "installed":
+                    outputs.append(json.dumps({"status": "installed", "toolchainIdentifier": "com.apple.Metal"}))
+                outputs.extend([str(metal), "/private/build/site-packages"])
+                developer = {"DEVELOPER_DIR": "/custom/Xcode.app/Contents/Developer"}
+                with mock.patch.object(self.media, "build_tool_environment", return_value={"PATH": "/usr/bin:/bin"}), \
+                        mock.patch.object(self.media, "source_generation_tools"), \
+                        mock.patch.object(self.media.shutil, "which", return_value="/usr/bin/true"), \
+                        mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)) as probe, \
+                        mock.patch.object(self.media.subprocess, "check_output", side_effect=outputs) as output, \
+                        mock.patch.object(self.media, "run") as run:
+                    env = self.media.build_environment(prepared, developer)
+                self.assertEqual(env["DEVELOPER_DIR"], developer["DEVELOPER_DIR"])
+                commands = probe.call_args_list + output.call_args_list + run.call_args_list
+                apple_calls = [call for call in commands if call.args[0][0] in
+                               ["/usr/bin/xcrun", "/usr/bin/xcodebuild"]]
+                for call in apple_calls:
+                    self.assertEqual(call.kwargs["env"]["DEVELOPER_DIR"], developer["DEVELOPER_DIR"])
+                downloads = [call for call in run.call_args_list if "-downloadComponent" in call.args[0]]
+                self.assertEqual(len(downloads), int(status != "installed"))
+                self.assertIn(str(metal.with_name("metallib")), (prepared / "bin/xcrun").read_text())
+
+
 class MediaSupportMatrixTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("autoconf") and shutil.which("make"),
                          "requires autoconf and make")

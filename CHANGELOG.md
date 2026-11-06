@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- macOS source installs discover full Xcode when Command Line Tools are selected,
+  preserve explicit developer-directory overrides, and report missing Xcode
+  before downloading or compiling media dependencies.
+
 - Subtitle workers keep polling pending writes during pressure checks, avoiding
   a deadlock that retained source-reader reservations and blocked library scans.
 
