@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -25,6 +26,9 @@ def load(name):
 class MacOSDeveloperEnvironmentTests(unittest.TestCase):
     def setUp(self):
         self.media = load("build-macos-source-media")
+        setup = mock.patch.object(self.media, "initialize_xcode")
+        self.initialize = setup.start()
+        self.addCleanup(setup.stop)
 
     def test_active_xcode_preserves_explicit_developer_directory(self):
         with mock.patch.dict(os.environ, {"DEVELOPER_DIR": "/custom/Xcode.app/Contents/Developer"}), \
@@ -73,16 +77,18 @@ class MacOSDeveloperEnvironmentTests(unittest.TestCase):
                 ["/usr/bin/mdfind", "-0", "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode*'"],
                 text=True, stderr=subprocess.DEVNULL, timeout=10)
 
-    def test_unavailable_application_index_reports_actionable_prerequisite(self):
+    def test_unavailable_application_index_still_attempts_install(self):
         for error in [FileNotFoundError(), subprocess.CalledProcessError(1, "mdfind"),
                       subprocess.TimeoutExpired("mdfind", 10)]:
             with self.subTest(error=type(error).__name__), \
                     mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
                     mock.patch.object(Path, "glob", return_value=[]), \
                     mock.patch.object(self.media.subprocess, "check_output", side_effect=error), \
+                    mock.patch.object(self.media, "install_xcode", side_effect=ValueError("fixture installer failed")) as install, \
                     mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)):
-                with self.assertRaisesRegex(ValueError, "full Xcode is required"):
+                with self.assertRaisesRegex(ValueError, "fixture installer failed"):
                     self.media.developer_environment()
+                install.assert_called_once_with()
 
     def test_invalid_explicit_developer_directory_is_not_overridden(self):
         with mock.patch.dict(os.environ, {"DEVELOPER_DIR": "/custom/invalid"}), \
@@ -92,21 +98,72 @@ class MacOSDeveloperEnvironmentTests(unittest.TestCase):
                 self.media.developer_environment()
         discover.assert_not_called()
 
-    def test_missing_xcode_fails_before_downloads_or_dependency_builds(self):
+    def test_failed_xcode_install_stops_before_downloads_or_dependency_builds(self):
         with tempfile.TemporaryDirectory() as work, \
                 mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
                 mock.patch.object(self.media.platform, "system", return_value="Darwin"), \
+                mock.patch.object(self.media, "install_xcode", side_effect=subprocess.CalledProcessError(7, "xcodes")), \
                 mock.patch.object(self.media.subprocess, "check_output", return_value=""), \
                 mock.patch.object(Path, "glob", return_value=[]), \
                 mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)), \
                 mock.patch.object(self.media, "recipe") as recipe, \
                 mock.patch.object(self.media, "build_tool_environment") as tools:
             destination = Path(work) / "not-created/package"
-            with self.assertRaisesRegex(ValueError, "Command Line Tools alone are insufficient"):
+            with self.assertRaises(subprocess.CalledProcessError) as failure:
                 self.media.build(destination, 4)
+            self.assertEqual(failure.exception.returncode, 7)
             self.assertFalse(destination.parent.exists())
         recipe.assert_not_called()
         tools.assert_not_called()
+
+    def test_missing_xcode_install_resumes_the_native_build(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            app = root / "Xcode-new.app"
+            events = []
+
+            def install():
+                events.append("install")
+                executable = app / "Contents/Developer/usr/bin/xcodebuild"
+                executable.parent.mkdir(parents=True)
+                executable.touch()
+
+            helper = mock.Mock()
+            helper.acquire.side_effect = lambda *args: events.append("download")
+
+            def build_environment(prepared, env):
+                self.assertEqual(env["DEVELOPER_DIR"], str(app / "Contents/Developer"))
+                events.append("environment")
+                return env
+
+            def native_build(argv, **kwargs):
+                self.assertEqual(argv[0], "/bin/bash")
+                self.assertEqual(kwargs["env"]["DEVELOPER_DIR"], str(app / "Contents/Developer"))
+                events.append("native-build")
+                raise RuntimeError("fixture reached native build")
+
+            with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
+                    mock.patch.object(self.media.platform, "system", return_value="Darwin"), \
+                    mock.patch.object(self.media, "xcode_applications", side_effect=[iter([]), iter([app])]), \
+                    mock.patch.object(self.media.subprocess, "run", side_effect=[
+                        mock.Mock(returncode=1), mock.Mock(returncode=0)]), \
+                    mock.patch.object(self.media, "install_xcode", side_effect=install) as installer, \
+                    mock.patch.object(self.media, "recipe", return_value=helper), \
+                    mock.patch.object(self.media, "build_environment", side_effect=build_environment), \
+                    mock.patch.object(self.media, "run", side_effect=native_build):
+                with self.assertRaisesRegex(RuntimeError, "fixture reached native build"):
+                    self.media.build(root / "package", 4)
+            self.assertEqual(events, ["install", "download", "environment", "native-build"])
+            installer.assert_called_once_with()
+
+    def test_successful_installer_without_usable_xcode_is_rejected(self):
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
+                mock.patch.object(self.media, "xcode_applications", return_value=[]), \
+                mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+                mock.patch.object(self.media, "install_xcode") as installer:
+            with self.assertRaisesRegex(ValueError, "no usable developer directory"):
+                self.media.developer_environment()
+        installer.assert_called_once_with()
 
     def test_selected_xcode_reaches_metal_component_and_build_environment(self):
         for status in ["installed", "not installed"]:
@@ -137,6 +194,78 @@ class MacOSDeveloperEnvironmentTests(unittest.TestCase):
                 downloads = [call for call in run.call_args_list if "-downloadComponent" in call.args[0]]
                 self.assertEqual(len(downloads), int(status != "installed"))
                 self.assertIn(str(metal.with_name("metallib")), (prepared / "bin/xcrun").read_text())
+
+
+class MacOSXcodeInstallationTests(unittest.TestCase):
+    def test_homebrew_xcodes_install_inherits_prompt_input(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            prefix = root / "brew"
+            (prefix / "bin").mkdir(parents=True)
+            marker = root / "answered"
+            template = root / "xcodes-template"
+            template.write_text(
+                '#!/bin/sh\n[ "$*" = "install --latest --directory /Applications --no-superuser" ] || exit 2\n'
+                'printf "Apple authentication fixture prompt: "\nIFS= read -r answer\n'
+                '[ "$answer" = "fixture-code" ] || exit 3\n'
+                + 'touch "' + str(marker) + '"\n')
+            template.chmod(0o755)
+            brew = prefix / "bin/brew"
+            brew.write_text('#!/bin/sh\n[ "$*" = "install xcodesorg/made/xcodes" ] || exit 4\n'
+                            + 'cp "' + str(template) + '" "' + str(prefix / "bin/xcodes") + '"\n')
+            brew.chmod(0o755)
+            harness = (
+                "import importlib.machinery; from pathlib import Path; from unittest import mock; "
+                "m = importlib.machinery.SourceFileLoader('media', "
+                + repr(str(ROOT / "scripts/build-macos-source-media")) + ").load_module(); "
+                "m.BREW_PREFIXES = [Path(" + repr(str(prefix)) + ")]; "
+                "m.recipe = lambda name: mock.Mock(ensure_homebrew=lambda: " + repr(str(brew)) + "); "
+                "m.install_xcode()")
+            result = subprocess.run([sys.executable, "-c", harness], input="fixture-code\n",
+                                    env=dict(os.environ, PATH="/usr/bin:/bin"),
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(marker.is_file(), "the installer must receive inherited stdin")
+            self.assertIn("Apple authentication fixture prompt", result.stdout)
+
+    def test_existing_xcodes_skips_homebrew_install(self):
+        media = load("build-macos-source-media")
+        with mock.patch.object(media.shutil, "which", return_value="/custom/bin/xcodes"), \
+                mock.patch.object(media, "recipe") as recipe, mock.patch.object(media, "run") as run:
+            media.install_xcode()
+        recipe.assert_not_called()
+        self.assertEqual(run.call_args.args[0], ["/custom/bin/xcodes", "install", "--latest",
+                                                "--directory", "/Applications", "--no-superuser"])
+        self.assertEqual(set(run.call_args.kwargs), {"env"}, "inherit all three terminal streams")
+
+    def test_pending_first_launch_presents_license_and_finishes_before_continuing(self):
+        media = load("build-macos-source-media")
+        env = {"DEVELOPER_DIR": "/custom/Developer Tools.app/Contents/Developer"}
+        with mock.patch.object(media.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+                mock.patch.object(media, "run") as run:
+            media.initialize_xcode(env)
+        binary = Path(env["DEVELOPER_DIR"]) / "usr/bin/xcodebuild"
+        self.assertEqual(run.call_args_list, [
+            mock.call(["/usr/bin/sudo", binary, "-license"], env=env),
+            mock.call(["/usr/bin/sudo", binary, "-runFirstLaunch"], env=env),
+            mock.call(["/usr/bin/xcodebuild", "-checkFirstLaunchStatus"], env=env)])
+
+    def test_declined_license_stops_first_launch(self):
+        media = load("build-macos-source-media")
+        env = {"DEVELOPER_DIR": "/custom/Xcode.app/Contents/Developer"}
+        with mock.patch.object(media.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+                mock.patch.object(media, "run", side_effect=subprocess.CalledProcessError(1, "license")) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                media.initialize_xcode(env)
+        run.assert_called_once_with(
+            ["/usr/bin/sudo", Path(env["DEVELOPER_DIR"]) / "usr/bin/xcodebuild", "-license"], env=env)
+
+    def test_initialized_xcode_needs_no_setup_prompts(self):
+        media = load("build-macos-source-media")
+        with mock.patch.object(media.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+                mock.patch.object(media, "run") as run:
+            media.initialize_xcode({})
+        run.assert_not_called()
 
 
 class MediaSupportMatrixTests(unittest.TestCase):

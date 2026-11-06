@@ -70,11 +70,16 @@ def source_generation_tools(prepared, env):
         run(["make", "install"], cwd=source, env=env)
 
 
-def build_tool_environment():
+def build_search_environment():
     env = dict(os.environ)
     extra = [str(prefix / suffix) for prefix in BREW_PREFIXES
              for suffix in ["bin", "sbin", "opt/texinfo/bin"]]
     env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
+    return env
+
+
+def build_tool_environment():
+    env = build_search_environment()
     missing = sorted({formula for tool, formula in TOOLS.items() if not shutil.which(tool, path=env["PATH"])})
     if missing:
         brew = shutil.which("brew", path=env["PATH"])
@@ -100,8 +105,47 @@ def xcode_applications():
             yield Path(path)
 
 
+def initialize_xcode(env):
+    """Complete first-launch setup in the terminal only when required."""
+    ready = subprocess.run(["/usr/bin/xcodebuild", "-checkFirstLaunchStatus"], env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if ready.returncode == 0:
+        return
+    developer = env.get("DEVELOPER_DIR")
+    if not developer:
+        developer = subprocess.check_output(["/usr/bin/xcode-select", "-p"], text=True).strip()
+    directory = Path(developer)
+    if directory.suffix == ".app":
+        directory = directory / "Contents/Developer"
+    executable = directory / "usr/bin/xcodebuild"
+    print("native media build: completing Xcode setup; answer the administrator and license prompts below",
+          file=sys.stderr, flush=True)
+    # Use the absolute selected binary: sudo may remove DEVELOPER_DIR.
+    run(["/usr/bin/sudo", executable, "-license"], env=env)
+    run(["/usr/bin/sudo", executable, "-runFirstLaunch"], env=env)
+    run(["/usr/bin/xcodebuild", "-checkFirstLaunchStatus"], env=env)
+
+
+def install_xcode():
+    """Inherit the terminal for Apple authentication, 2FA and administrator prompts."""
+    env = build_search_environment()
+    installer = shutil.which("xcodes", path=env["PATH"])
+    if not installer:
+        brew = recipe("build-macos-source-runtime").ensure_homebrew()
+        env["PATH"] = os.pathsep.join([str(Path(brew).parent), env["PATH"]])
+        run([brew, "install", "xcodesorg/made/xcodes"], env=env)
+        installer = shutil.which("xcodes", path=env["PATH"])
+        if not installer:
+            raise ValueError("Homebrew installed xcodes but its executable cannot be found")
+    print("native media build: installing full Xcode; answer any Apple sign-in or 2FA prompts below",
+          file=sys.stderr, flush=True)
+    # Finish setup ourselves so the license is presented interactively rather
+    # than xcodes accepting it silently. Do not select Xcode system-wide.
+    run([installer, "install", "--latest", "--directory", "/Applications", "--no-superuser"], env=env)
+
+
 def developer_environment():
-    """Resolve full Xcode without changing the machine's xcode-select setting."""
+    """Find or install full Xcode without changing the system's selection."""
     env = dict(os.environ)
 
     def usable(candidate):
@@ -109,24 +153,41 @@ def developer_environment():
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
     if usable(env):
+        initialize_xcode(env)
         return env
     # An explicit override is authoritative, including when it is broken.
-    if not env.get("DEVELOPER_DIR"):
+    if env.get("DEVELOPER_DIR"):
+        directory = Path(env["DEVELOPER_DIR"])
+        if directory.suffix == ".app":
+            directory = directory / "Contents/Developer"
+        if (directory / "usr/bin/xcodebuild").is_file():
+            initialize_xcode(env)
+            if usable(env):
+                return env
+        raise ValueError("DEVELOPER_DIR does not identify a usable full Xcode; correct or unset it")
+
+    def discovered():
         for app in xcode_applications():
             developer = app / "Contents/Developer"
             if not (developer / "usr/bin/xcodebuild").is_file():
                 continue
             candidate = dict(env, DEVELOPER_DIR=str(developer))
+            initialize_xcode(candidate)
             if usable(candidate):
                 print(f"native media build: using Xcode at {developer}", file=sys.stderr)
                 return candidate
-    raise ValueError(
-        "full Xcode is required to build the native media Metal shaders; "
-        "Command Line Tools alone are insufficient. Install and initialize Xcode, "
-        "then retry make install-macos. If automatic discovery cannot find an "
-        "unindexed installation, set "
-        "DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer. "
-        "If DEVELOPER_DIR is already set, correct or unset it.")
+        return None
+
+    candidate = discovered()
+    if candidate is not None:
+        return candidate
+    install_xcode()
+    # xcodes installs a versioned app in /Applications. Search again instead of
+    # assuming the filename or waiting for Spotlight to index a fresh install.
+    candidate = discovered()
+    if candidate is None:
+        raise ValueError("Xcode installation finished but no usable developer directory was found")
+    return candidate
 
 
 def build_environment(prepared, developer_env=None):

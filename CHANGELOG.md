@@ -12,8 +12,9 @@ bump may break compatibility and a **patch** bump never does.
 
 - macOS source installs discover full Xcode when Command Line Tools are selected,
   find renamed or relocated copies through the macOS application index,
-  preserve explicit developer-directory overrides, and report missing Xcode
-  before downloading or compiling media dependencies.
+  preserve explicit developer-directory overrides, and install missing Xcode
+  through Homebrew/xcodes. Apple authentication, license and first-launch setup
+  stay in the terminal; the media build continues after setup completes.
 
 - Subtitle workers keep polling pending writes during pressure checks, avoiding
   a deadlock that retained source-reader reservations and blocked library scans.

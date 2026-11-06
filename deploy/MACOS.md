@@ -27,22 +27,34 @@ Existing rustup and standard Homebrew installations are found even when absent
 from `PATH`; a separate Homebrew Rust compiler can remain installed.
 With the pinned toolchain already installed, this step needs no download.
 
-A first media build also requires full Xcode, initialized by opening it and
-completing its first-launch setup, for the Metal compiler. Command Line Tools
-alone cannot build the native media shaders. The builder uses the active Xcode
-or discovers `Xcode*.app` under `/Applications` and `~/Applications`, then
-queries the macOS application index by Xcode bundle identity. This also finds
-renamed copies and installations in other indexed locations, without changing
-the system's `xcode-select` setting. No path is needed for these installations.
+A first media build needs full Xcode for its Metal compiler. Command Line
+Tools alone cannot build the native media shaders. `make install-macos` uses
+an existing Xcode, searching the standard application folders and the macOS
+application index (including renamed or relocated copies). If none is usable,
+it installs [xcodes](https://github.com/XcodesOrg/xcodes) through Homebrew and
+uses it to download the latest stable Xcode into `/Applications`. Homebrew is
+installed first if missing. The download requires a macOS version supported by
+that Xcode release.
+
+Keep the terminal open and answer any Apple sign-in/2FA, administrator-password,
+and Xcode license prompts. `xcodes` handles Apple authentication and its Keychain
+storage; the builder inherits the terminal and does not collect those credentials.
+The builder completes Xcode's first-launch setup, installs the Metal component
+when needed, and continues the media build in the same invocation. Existing
+Xcode installations that still need first-launch setup use the same terminal
+flow; you do not need to open Xcode separately. Cancelled or failed setup stops
+before media source downloads or dependency compilation.
+
+Xcode selection is local to the build; the system's `xcode-select` setting is
+kept. An explicit `DEVELOPER_DIR` takes precedence; correct or unset it if invalid.
 For an unindexed custom location, you can override discovery:
 
 ```sh
 DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer make install-macos
 ```
 
-An explicit `DEVELOPER_DIR` takes precedence; correct or unset it if invalid.
-Missing Xcode is reported before source downloads or dependency compilation.
-A verified media cache or supplied complete package needs no media rebuild.
+A verified media cache or supplied complete package needs no media rebuild and
+skips this Xcode installation fallback.
 
 You do not install ffmpeg yourself. The installer fetches the exact build
 plurx needs — see [the media engine](#the-media-engine-jellyfin-ffmpeg-813-1).
