@@ -53,6 +53,37 @@ class MacOSDeveloperEnvironmentTests(unittest.TestCase):
             self.assertTrue(all(call.args[0] == ["/usr/bin/xcodebuild", "-version"]
                                 for call in probe.call_args_list))
 
+    def test_clt_selection_discovers_renamed_xcode_outside_applications(self):
+        with tempfile.TemporaryDirectory() as work:
+            app = Path(work) / "External Tools/Apple Developer Suite.app"
+            executable = app / "Contents/Developer/usr/bin/xcodebuild"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            stale = Path(work) / "Removed.app"
+            with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
+                    mock.patch.object(Path, "glob", return_value=[]), \
+                    mock.patch.object(self.media.subprocess, "check_output",
+                                      return_value=str(stale) + "\0" + str(app) + "\0") as lookup, \
+                    mock.patch.object(self.media.subprocess, "run", side_effect=[
+                        mock.Mock(returncode=1), mock.Mock(returncode=0)]) as probe:
+                env = self.media.developer_environment()
+            self.assertEqual(env["DEVELOPER_DIR"], str(app / "Contents/Developer"))
+            self.assertEqual(probe.call_count, 2, "ignore stale index entries")
+            lookup.assert_called_once_with(
+                ["/usr/bin/mdfind", "-0", "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode*'"],
+                text=True, stderr=subprocess.DEVNULL, timeout=10)
+
+    def test_unavailable_application_index_reports_actionable_prerequisite(self):
+        for error in [FileNotFoundError(), subprocess.CalledProcessError(1, "mdfind"),
+                      subprocess.TimeoutExpired("mdfind", 10)]:
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
+                    mock.patch.object(Path, "glob", return_value=[]), \
+                    mock.patch.object(self.media.subprocess, "check_output", side_effect=error), \
+                    mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)):
+                with self.assertRaisesRegex(ValueError, "full Xcode is required"):
+                    self.media.developer_environment()
+
     def test_invalid_explicit_developer_directory_is_not_overridden(self):
         with mock.patch.dict(os.environ, {"DEVELOPER_DIR": "/custom/invalid"}), \
                 mock.patch.object(Path, "glob") as discover, \
@@ -65,6 +96,7 @@ class MacOSDeveloperEnvironmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work, \
                 mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True), \
                 mock.patch.object(self.media.platform, "system", return_value="Darwin"), \
+                mock.patch.object(self.media.subprocess, "check_output", return_value=""), \
                 mock.patch.object(Path, "glob", return_value=[]), \
                 mock.patch.object(self.media.subprocess, "run", return_value=mock.Mock(returncode=1)), \
                 mock.patch.object(self.media, "recipe") as recipe, \

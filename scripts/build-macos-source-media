@@ -84,6 +84,22 @@ def build_tool_environment():
     return env
 
 
+def xcode_applications():
+    """Try conventional locations, then macOS's bundle-identity index."""
+    for directory in [Path("/Applications"), Path.home() / "Applications"]:
+        yield from sorted(directory.glob("Xcode*.app"))
+    try:
+        # Bundle identity also finds renamed apps and nonstandard locations.
+        indexed = subprocess.check_output(
+            ["/usr/bin/mdfind", "-0", "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode*'"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return
+    for path in indexed.split("\0"):
+        if path and Path(path).is_absolute():
+            yield Path(path)
+
+
 def developer_environment():
     """Resolve full Xcode without changing the machine's xcode-select setting."""
     env = dict(os.environ)
@@ -96,19 +112,19 @@ def developer_environment():
         return env
     # An explicit override is authoritative, including when it is broken.
     if not env.get("DEVELOPER_DIR"):
-        for directory in [Path("/Applications"), Path.home() / "Applications"]:
-            for app in sorted(directory.glob("Xcode*.app")):
-                developer = app / "Contents/Developer"
-                if not (developer / "usr/bin/xcodebuild").is_file():
-                    continue
-                candidate = dict(env, DEVELOPER_DIR=str(developer))
-                if usable(candidate):
-                    print(f"native media build: using Xcode at {developer}", file=sys.stderr)
-                    return candidate
+        for app in xcode_applications():
+            developer = app / "Contents/Developer"
+            if not (developer / "usr/bin/xcodebuild").is_file():
+                continue
+            candidate = dict(env, DEVELOPER_DIR=str(developer))
+            if usable(candidate):
+                print(f"native media build: using Xcode at {developer}", file=sys.stderr)
+                return candidate
     raise ValueError(
         "full Xcode is required to build the native media Metal shaders; "
         "Command Line Tools alone are insufficient. Install and initialize Xcode, "
-        "then retry make install-macos. For a custom installation, set "
+        "then retry make install-macos. If automatic discovery cannot find an "
+        "unindexed installation, set "
         "DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer. "
         "If DEVELOPER_DIR is already set, correct or unset it.")
 

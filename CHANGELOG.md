@@ -11,6 +11,7 @@ bump may break compatibility and a **patch** bump never does.
 ### Fixed
 
 - macOS source installs discover full Xcode when Command Line Tools are selected,
+  find renamed or relocated copies through the macOS application index,
   preserve explicit developer-directory overrides, and report missing Xcode
   before downloading or compiling media dependencies.
 

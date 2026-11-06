@@ -30,8 +30,11 @@ With the pinned toolchain already installed, this step needs no download.
 A first media build also requires full Xcode, initialized by opening it and
 completing its first-launch setup, for the Metal compiler. Command Line Tools
 alone cannot build the native media shaders. The builder uses the active Xcode
-or discovers `Xcode*.app` under `/Applications` and `~/Applications`, without
-changing the system's `xcode-select` setting. For a custom location, run:
+or discovers `Xcode*.app` under `/Applications` and `~/Applications`, then
+queries the macOS application index by Xcode bundle identity. This also finds
+renamed copies and installations in other indexed locations, without changing
+the system's `xcode-select` setting. No path is needed for these installations.
+For an unindexed custom location, you can override discovery:
 
 ```sh
 DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer make install-macos
