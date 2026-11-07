@@ -1,8 +1,8 @@
 # Cinema modular builds — smaller dependency graphs and measured rebuilds
 
-**Status:** implemented — actual SDK-free before/after builds and cross-process
-AUTH81/AUTH82 migration pass. Remaining native checks and exact-head promotion
-are in progress through PR #1396; this candidate is not yet merged to main.
+**Status:** built and locally qualified — SDK-free builds, AUTH81/AUTH82 CLI
+migration, native HTTP and storage authority checks pass. Task PR #1396 passed
+its exact-head gate and merged; main delivery is tracked by the promotion PR.
 **Written:** 2026-11-04 · **Owner:** Codex · **Reviewer:** Astra.
 **Review:** [Astra findings and dispositions](../reviews/CINEMA-MODULAR-BUILD-ASTRA-REVIEW.md).
 **Source baseline:** `f30dfbbc9237046a0f6a6f20d893044593f56600`.
@@ -527,7 +527,7 @@ each supported distribution, including new migration tooling.
 | P0 | Plan draft based on `f30dfbbc9`; source/dependency and historical timing audit | Astra confirmed all four findings and two clarifications addressed; P1/P2 allowed in order; no build improvement implemented |
 | P1 | Fixed `cf095b203` / `e1ce9af4ce` source; three samples per case, preserved raw reports, actual source restoration and Cargo artifact events | Baseline collected; guarded runner belongs to its own task PR |
 | P2b historical diagnostic measurement | Equal-capability system/LLD Cargo commands; all 450 observed units had identical features/profiles | Historical diagnostic only: initial apparent reductions and failed isolation evidence are retained in the measurement ledger. The completed capped primary comparison found no useful gain; LLD is not selected. No cold/release/Mac claim |
-| P3b/P4 draft | Native default/explicit cluster composition, separate registry namespaces, optional signed four-target helper and verified-source CLI implemented; selected native daemon/controller/tray graph has no Hiqlite/WAL/OpenRaft | Graph omission established only for those selected roots; current integrated Clippy, SDK compatibility, real FFmpeg HTTP/CLI-child behavior and release qualification remain pending |
+| P3b/P4 draft | Native default/explicit cluster composition, separate registry namespaces, optional signed four-target helper and verified-source CLI implemented; selected native daemon/controller/tray graph has no Hiqlite/WAL/OpenRaft | Integrated Clippy, SDK compatibility, actual CLI/HTTP and graph checks pass; see §9 and the promotion PR for delivery evidence |
 | Core helper regressions | Tree `470952445623eba336ec3d61a1f1d39db694caa2`; run `1f93ad65ebb149eb84307e6bb9a49306`; 16 passing tests including real AUTH81/AUTH82 private singleton data | Focused primary execution on that snapshot; not current candidate or cross-process upgrade qualification |
 | Signed staging regressions | Tree `31f1b3e488e1c0bb7a47d8d2117218756b4b9434`; run `762075cc9e6b4134859683f846ad476f`; seven passing tests | Actual signed capsules, closed archive/hash checks and cleanup leases on that snapshot; not release or daemon/helper child-process acceptance |
 | SQLite close regressions | Tree `888cb4f00d801b162089f28ff6b058c03f67cbfe`; run `20261104-225421-26b4a24c`; three passing tests | ARM execution of concrete native close/ownership checks; no Windows/macOS qualification claim |
@@ -537,7 +537,7 @@ Record Astra's findings and individual dispositions with the review, then
 update this ledger and the backlog row in the same task changes. Retain the
 original before measurements and failures when adding after results.
 
-## 11. Integrated delivery evidence — 2026-11-07
+## 9. Integrated delivery evidence — 2026-11-07
 
 [Task PR #1396](http://forge.lan:3000/noirr/plurx/pulls/1396), commit
 `02ea8ed11d61f737f660a1f60d2f20223d8487c0`, includes main `8c654d37b5`.
@@ -550,5 +550,6 @@ CLI run `e3c20b408c784497ba2611d5f8f2d7c5` passes actual AUTH81/AUTH82 handoff,
 native reopen, preserved settings/IDs/telemetry, safe missing-key handling and
 wrapped credential decryption; five production child-owner fixtures also pass.
 Integrated packaging: 121 tests, one environment skip; one Python-3.15-incompatible
-fixture passes on Python 3.12 retry. Remaining native checks, task/main gates and
-qualification receipt are pending. Deeper extraction remains deferred.
+fixture passes on Python 3.12 retry. All nine focused qualification steps pass;
+task gate 6532 passed and PR #1396 merged as `ca6c894381`. Main promotion
+uses its exact-head receipt. Further extraction is deferred.

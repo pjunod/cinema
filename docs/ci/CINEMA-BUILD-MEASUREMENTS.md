@@ -1,6 +1,6 @@
 # Cinema build measurements — reproducible developer comparisons
 
-**Status:** open — P1 merged; capped linker comparison complete with no useful gain; SDK-free before/after measurements complete; runtime and promotion qualification pending.
+**Status:** open — P1 merged; capped linker comparison complete with no useful gain; SDK-free before/after measurements complete; focused runtime qualification passed; main promotion is tracked in the canonical plan.
 **Written:** 2026-11-04 · **Owner:** Codex.
 
 The [modular-build plan](CINEMA-MODULAR-BUILD-PLAN.md) owns the phases and
@@ -232,5 +232,6 @@ Durable run IDs and sealed bundle identities:
 
 Both retain full samples, Cargo events/timings, exact archives, tool identities,
 resource receipts and restored source inventories outside disposable caches.
-Runtime migration qualification and the main promotion receipt are separate
-acceptance evidence; these measurements alone do not qualify an upgrade.
+All nine focused runtime/graph qualification steps passed on the measured
+after tree, including the separate AUTH81/AUTH82 CLI and real FFmpeg HTTP.
+The main promotion receipt remains separate release acceptance evidence.

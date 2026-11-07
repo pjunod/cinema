@@ -1,12 +1,11 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-05 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-07 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
 ## 2026-11-05 · Standalone compilation and legacy migration packaging
 
-Codex/root is qualifying the native-default/explicit-cluster build and separate bound migration helper. Private authority, schema and credentials remain in Core. Workspace Clippy, 19 migration regressions and 91 packaging tests pass; actual current-main build measurements are recorded. Integrated CLI/HTTP checks and release gates remain pending; this change is not merged to main.
-The [canonical plan and evidence ledger](docs/ci/CINEMA-MODULAR-BUILD-PLAN.md) records acceptance and deferred extraction work.
+Native SQLite standalone, its SDK-free build graph and separate bound migration helper pass all nine focused qualification steps. Actual AUTH81/AUTH82 CLI migration preserves data and credentials; native FFmpeg HTTP, revocation and SQL close pass. Warm rebuilds improve 13–14%. [Task PR #1396](http://forge.lan:3000/noirr/plurx/pulls/1396) merged after gate 6532; main promotion and its qualification receipt are recorded in the [canonical ledger](docs/ci/CINEMA-MODULAR-BUILD-PLAN.md). Further extraction is deferred.
 
 ## 2026-11-03 · Playback publication and Resume overlay
 
