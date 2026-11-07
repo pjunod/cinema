@@ -1,6 +1,6 @@
 # Runner disk — what fills a CI runner, and what is bounded
 
-**Status:** live · **Reconciled:** 2026-11-02
+**Status:** live · **Reconciled:** 2026-11-07
 
 Companion to [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md)
 (how the lanes are meant to get faster) — this is *where the bytes go, who
@@ -11,19 +11,18 @@ Read this before adding a cache to any workflow, and before believing a
 
 ## Current runner roles and reserved labels
 
-The 2026-11-02 roster reconciliation records the existing Forgejo
+The roster reconciliation records the existing Forgejo
 registrations. Neutral names in `validation/runner-fleet.toml` describe logical
 placements; the fleet collector maps live host names through its private alias
 configuration. Keep the existing registration IDs and UUIDs when reconciling
 names.
 
-The Linux ARM64 roles are separate. `gha-maca-linux-arm-01` carries
-`release-arm64` for the native release-image build;
-`gha-macb-linux-arm-01` carries `ci-arm64` for CI packaging. The release guest
-was recovered with its original registration and release-only labels. Its
-online state establishes availability, not a passing release build or permission
-to add CI fallback eligibility. This current placement supersedes the older
-two-runner `ci-arm64` description in the acceleration plan.
+On `maca`, the release-image build uses `gha-maca-linux-arm-01` with
+`release-arm64`. CI packaging uses a separate Linux VM, `gha-maca-linux-arm-02`,
+with `ci-arm64`, one runner slot, four virtual CPUs, 8 GiB of RAM and a 32 GiB
+virtual disk. Each guest has its own Docker engine and Forgejo registration.
+The older `gha-macb-linux-arm-01` retains its `ci-arm64` registration and was
+offline at reconciliation.
 
 Keep `async-proof-owned` on the existing `gha-lab5-general-03` slot.
 The owning `codex/async-store-refinement` branch records its target-only
