@@ -1399,6 +1399,15 @@ def bound_execution(record, item, raw, source_commands=historical_canonical, *, 
         name = witness['historical_name']
         receipts.require(name in historical and name.split(':')[0] == kind, 'Unknown historical command ordinal')
         expected = rust_identity(historical[name]);current = rust_identity(item['invocation']);same_target(expected,current)
+        if (expected['cargo'].get('--manifest-path') == openraft_package.MANIFEST_VARIABLE
+                and origin['kind'] == 'authenticated-ci'
+                and lines[first - 1].lstrip().startswith('Running unittests src/lib.rs (target/openraft-regression/')):
+            from validation.native_wal_openraft import execution
+            body = execution(record, item, raw)
+            actual = retention.log_outcomes(body, record['coverage']['format'])
+            receipts.require(actual == record['coverage']['outcomes'],
+                             'Cropped or contradictory native Openraft outcomes')
+            return body
         start = first-1;end_command = start;parts = []
         while True:
             line = lines[end_command];parts.append(line.removesuffix('\\').strip())
@@ -1419,6 +1428,16 @@ def bound_execution(record, item, raw, source_commands=historical_canonical, *, 
         end=terminal[0] if terminal is not None else len(lines)
         progressed=False
         for index in range(end_command+1,end):
+            if (origin['kind'] == 'authenticated-ci' and next_command
+                    and openraft_package.MANIFEST_VARIABLE in shlex.split(next_command)
+                    and lines[index].lstrip().startswith('Running unittests src/lib.rs (target/openraft-regression/')):
+                from validation.native_wal_openraft import interval
+                span = interval(record, raw)
+                receipts.require(span['previous_line'] == first and span['first_line'] == index + 1,
+                                 'Unprinted external command belongs to another predecessor')
+                end = index
+                progressed = True
+                break
             if re.match(r'^(?:(?:[A-Z_]+=[^ ]+|scripts/require-test-count) +)*(?:cargo|/[^ ]+/cargo) (?:test|run|clippy|check)(?: |$)',lines[index]):
                 value,_=logged_command(lines,index)
                 receipts.require(next_command is not None and display_tokens(value,kind)==display_tokens(next_command,kind),
