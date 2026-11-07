@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "9396707dd1b20c205a39fb757e944946b0f7947fcb3a6d41855c189abac170b2"
+        "sha256": "33a0b6bd4e864fd8b86c58a182ae8b0ffafa67cd3d17922dfa24d2875d20eb18"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "9396707dd1b20c205a39fb757e944946b0f7947fcb3a6d41855c189abac170b2"
+        "sha256": "33a0b6bd4e864fd8b86c58a182ae8b0ffafa67cd3d17922dfa24d2875d20eb18"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "9396707dd1b20c205a39fb757e944946b0f7947fcb3a6d41855c189abac170b2"
+        "sha256": "33a0b6bd4e864fd8b86c58a182ae8b0ffafa67cd3d17922dfa24d2875d20eb18"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "1f6bd3174a68e501f0ee10008cc94c2a7e62b6c48c05e61bfe79aeca5d19489e"
+        "sha256": "5689ad8fd6b693a1bdfed4098a107ac73faeb7f95f52ce0e6d8e630c04db92ec"
       },
       {
         "table": "31 authority implementation",
@@ -255,13 +255,13 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "dfe8a77be79000321ce9a9225538415ac810cb206fe0ee9870a9e903ace7adb5"
+        "sha256": "62bc1533ca1abaf837700e403d41089933acca1b22cf03aa448783868b87609f"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "dfe8a77be79000321ce9a9225538415ac810cb206fe0ee9870a9e903ace7adb5"
+        "sha256": "62bc1533ca1abaf837700e403d41089933acca1b22cf03aa448783868b87609f"
       },
       {
         "table": "44 main worker spawn no shutdown arg",

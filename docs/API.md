@@ -924,9 +924,10 @@ leases are excluded. Counts come from retained attempt history and are lower
 bounds if queue maintenance pruned records inside the window.
 
 Each job-count group includes `overdue_manual`. For queued library scans and
-metadata refreshes this counts priority 2 or higher requests that have been
-created and due for dispatch for at least five minutes. Other groups report
-zero.
+metadata refreshes this counts jobs with a pending manual or targeted request
+that is at least five minutes old and whose job has been due for dispatch
+for at least five minutes. Joining an older scheduled job starts the clock at
+the time of the manual request. Other groups report zero.
 
 Admin Activity source-holder rows include the original reader's
 `origin_node_id` and, for retained durable jobs, `origin_job_kind` and

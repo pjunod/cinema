@@ -127,9 +127,16 @@ pub(super) const COUNTS_SQL: &str = r#"
 SELECT json_object('kind', kind, 'state', state, 'count', COUNT(*),
     'oldest_age_ms', MAX(0, json_extract($1, '$.now_ms') - MIN(created_at_ms)),
     'overdue_manual', COUNT(CASE WHEN state = 'queued' AND kind IN ('library_scan', 'metadata_refresh')
-        AND priority >= 2 AND MAX(created_at_ms, not_before_ms) <= json_extract($1, '$.manual_due_before_ms')
+        AND not_before_ms <= json_extract($1, '$.manual_due_before_ms')
+        AND EXISTS (
+            SELECT 1 FROM background_job_waiters waiter
+            JOIN background_library_requests intent ON intent.request_id = waiter.request_id
+            WHERE waiter.job_id = job.id AND waiter.request_scope = 'library' AND waiter.state = 'pending'
+              AND waiter.created_at_ms <= json_extract($1, '$.manual_due_before_ms')
+              AND (json_extract(intent.input_json, '$.kind') = 'targeted'
+                   OR json_extract(intent.input_json, '$.trigger') = 'manual'))
         THEN 1 END)) AS result_json
-FROM background_jobs GROUP BY kind, state ORDER BY kind, state LIMIT 128
+FROM background_jobs job GROUP BY kind, state ORDER BY kind, state LIMIT 128
 "#;
 
 pub(super) const NODE_COMPLETIONS_SQL: &str = r#"
