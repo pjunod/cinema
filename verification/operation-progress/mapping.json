@@ -51,7 +51,7 @@
         "table": "08 worker acquisition and cleanup",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "plurx_worker_control::library_driver::run_driver(&mut environment)",
-        "sha256": "68a4f24ff127f2d6953e9a191949d25747c7b5c39948a31f1c8e412059dc453b"
+        "sha256": "db4d2125c4f8d3eb8b1e0f05af4da50922fa63d4c4416d7acb4ff006f298b354"
       },
       {
         "table": "09 domain lease acquisition",
@@ -63,13 +63,13 @@
         "table": "10 work iteration bound",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "for _ in 0..8 {",
-        "sha256": "68a4f24ff127f2d6953e9a191949d25747c7b5c39948a31f1c8e412059dc453b"
+        "sha256": "db4d2125c4f8d3eb8b1e0f05af4da50922fa63d4c4416d7acb4ff006f298b354"
       },
       {
         "table": "11 lost reply resolution",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "// A lost completion acknowledgement must not rerun a published result.",
-        "sha256": "68a4f24ff127f2d6953e9a191949d25747c7b5c39948a31f1c8e412059dc453b"
+        "sha256": "db4d2125c4f8d3eb8b1e0f05af4da50922fa63d4c4416d7acb4ff006f298b354"
       },
       {
         "table": "12 domain lease ttl heartbeat",

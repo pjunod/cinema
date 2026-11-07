@@ -517,7 +517,7 @@
       },
       {
         "anchor": "async fn process_library_requests(",
-        "sha256": "68a4f24ff127f2d6953e9a191949d25747c7b5c39948a31f1c8e412059dc453b",
+        "sha256": "db4d2125c4f8d3eb8b1e0f05af4da50922fa63d4c4416d7acb4ff006f298b354",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "proposal \u00a74.1 library worker"
       },
@@ -535,7 +535,7 @@
       },
       {
         "anchor": "                let scan = self",
-        "sha256": "68a4f24ff127f2d6953e9a191949d25747c7b5c39948a31f1c8e412059dc453b",
+        "sha256": "db4d2125c4f8d3eb8b1e0f05af4da50922fa63d4c4416d7acb4ff006f298b354",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:434"
       },

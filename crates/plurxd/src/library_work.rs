@@ -1008,12 +1008,31 @@ mod tests {
             false,
             0,
         );
-        next_worker_event(&mut events, "library", WorkerPoint::CompletionCommitted).await;
+        next_worker_event(&mut events, "library", WorkerPoint::BeforeCompletion).await;
+        // The Store can finish the write while its reply is still pending.
+        // A source check can therefore see the settled waiter and move the
+        // controller into JoinWork before the producer observes the commit.
+        // JoinWork polls the same producer but never starts a second check.
+        let mut observed = Vec::new();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let point = events.recv().await.expect("library worker event").point;
+                observed.push(point);
+                let committed = observed.contains(&WorkerPoint::CompletionCommitted);
+                let checked = observed.contains(&WorkerPoint::SourcePermissionCheck);
+                if committed
+                    && checked
+                    && (point == WorkerPoint::SourcePermissionCheck
+                        || observed.contains(&WorkerPoint::Pressure))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("completion and source check did not converge: {observed:?}"));
         let first = request_record(store.as_ref(), "first-scan").await;
         assert_eq!(first.state, "succeeded");
-        // The database has committed success, but the producer still holds
-        // its publication mutex until it consumes the reply.
-        next_worker_event(&mut events, "library", WorkerPoint::SourcePermissionCheck).await;
         resume
             .expect("completion barrier")
             .send(())
