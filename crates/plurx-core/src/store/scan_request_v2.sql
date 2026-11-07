@@ -49,6 +49,9 @@ BEGIN
     WHERE command.operation = 'enqueue'
         AND json_extract(command.request_json, '$.request.scope') = 'library'
         AND json_extract(command.request_json, '$.request.request_id') = NEW.request_id
+    -- One enqueue command names one request; the order only makes LIMIT 1
+    -- deterministic should that ever stop being true.
+    ORDER BY command.id
     LIMIT 1;
 END;
 -- A retired request takes its sidecar with it, whichever binary retired it.
