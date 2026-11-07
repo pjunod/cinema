@@ -28,6 +28,11 @@ on:
         description: "Optional authenticated partial workspace test evidence descriptor"
         required: false
         default: ""
+      python_unit_evidence:
+        type: string
+        description: "Authenticated prior preflight and reviewed Python source coverage"
+        required: false
+        default: ""
       promotion_pr:
         type: string
         description: "Optional open same-repo effort/integration promotion PR to main"
@@ -258,13 +263,26 @@ jobs:
           PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
           PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
         run: make history-check
+      - name: Prepare authenticated Python test selection
+        id: python-continuation
+        if: inputs.python_unit_evidence != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
+          PYTHON_UNIT_EVIDENCE: ${{ inputs.python_unit_evidence }}
+          RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
+          RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
+        run: python3 -m validation.native_python_execute prepare
       - name: Check validation catalog and contract unit tests
         env:
           RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
+          PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}
         run: |
           make validation-lint
           if [ "$RETAIN_VALIDATION_UNITS" = true ]; then
             echo "Adopted authenticated complete validation unit discovery"
+          elif [ -n "$PYTHON_SELECTION_SHA256" ]; then
+            python3 -m validation.native_python_execute validation
           else
             python3 -m unittest discover -s tests/validation -p 'test_*.py'
           fi
@@ -323,9 +341,12 @@ jobs:
       - name: Check CI, deploy, and shipping contracts
         env:
           RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
+          PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}
         run: |
           if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then
             echo "Adopted authenticated complete operations unit discovery"
+          elif [ -n "$PYTHON_SELECTION_SHA256" ]; then
+            python3 -m validation.native_python_execute operations
           else
             make operations-check
           fi
