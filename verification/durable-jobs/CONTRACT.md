@@ -862,3 +862,7 @@ finite model to caption continuity, playback deadlines or remote-worker
 liveness. Model/configuration bytes, fairness premises and historical
 receipts retain their identities. Offline mapping validation is distinct
 from runtime tests, TLC qualification and a refinement proof.
+
+## November 7 library dispatch and source release
+
+A fresh, readable manual library request now participates in the next shared resource grant. The write still uses the existing claim identity, fence and physical source limits. The source controller can inspect that immutable identity while a completion holds its publication mutex. The durable model covers the resulting claim and settlement, while the dispatch classes, timing and physical file operations are exercised in the Store and worker tests.

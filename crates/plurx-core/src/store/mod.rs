@@ -238,6 +238,7 @@ mod consistent_read_census;
 
 pub mod background_jobs;
 pub use background_jobs::{AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore};
+mod background_job_turns;
 pub mod background_jobs_artwork;
 mod background_jobs_copy_output;
 mod background_jobs_delivery;

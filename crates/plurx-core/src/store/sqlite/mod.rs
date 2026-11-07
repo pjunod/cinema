@@ -1333,6 +1333,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA,
     // v123: prepared artifact operations do not read original media.
     super::subtitle_managed_schema::PREPARED_MIGRATION,
+    // v124: shared dispatch turns for interactive library work.
+    super::background_job_turns::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

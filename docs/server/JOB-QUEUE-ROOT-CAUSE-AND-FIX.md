@@ -458,6 +458,26 @@ compiler loop before Rust edits, focused regressions, effort gates, and exact
 candidate main qualification. Corrective implementation subjects use `fix(`
 or `perf(` and carry real `Regression-Test:` entries.
 
+**November 7 incident release.** Qualify the Activity rate and overdue-request
+display, cross-type scan priority and library completion deadlock together on
+the current effort candidate. Use the ordinary effort gate, main promotion
+receipt and rolling release. Completion requires observing the installed
+Activity page and a real manual scan handoff. Queue management, scan chunking
+and discovery/enrichment separation remain subsequent P42 work.
+
+The observed TV scan committed success while its pressure controller waited
+on the same mutex as the producer whose completion it needed to poll. This
+left a physical reader after the job disappeared from running work. The
+repair validates the physical owner in the Store and allows the producer to
+finish polling its pending write. A worker with verified library paths and
+available capacity advertises a manual request for seven seconds and
+refreshes it every three seconds. A busy worker can reserve the next turn
+for four seconds while it holds an overlapping ordinary source lease.
+When a source-free job occupies its heavy lane, peers may use the disk
+while the manual scan keeps its place on that worker. Existing
+physical readers retain their custody until joined or recovered by the
+documented same-host reboot procedure.
+
 | Milestone | Scope and acceptance before moving on |
 |---|---|
 | M1 · Recovery and visibility | Add exact-owner legacy recovery, versioned durable identity for foreground and every background owner variant, and an Activity blocker projection. Real-process crash/restart cases prove exact settlement for both custody families; surviving or unproven descendants retain custody. Test old/new replay, unknown versions, duplicate startups, and downgrade refusal/drain. Fleet recovery remains separately recorded. |

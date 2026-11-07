@@ -6440,12 +6440,14 @@ impl JobManager {
             }
         };
         let libraries = async {
-            let mut pacing = crate::background_jobs::IdlePoll::new();
             loop {
-                let progressed = self.work_library_queue(&transcode, None).await;
+                let progressed = self.drive_library_queue(&transcode).await;
+                if progressed {
+                    continue;
+                }
                 tokio::select! {
                     () = self.library_wake.notified() => {},
-                    () = tokio::time::sleep(pacing.delay(progressed)) => {},
+                    () = tokio::time::sleep(self.library_readiness.poll_interval()) => {},
                 }
             }
         };

@@ -496,6 +496,8 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
   "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_copy_output,_pretranscode,_fragment,_delivery,_fragment_admission,_observation,_migration,_offline,_domain,_library,_resources,_provider,_subtitle,_transcription,_artwork,_transcode,_preparation,_predictions,_embeddings,_probe,_integrity}.rs",
   "crates/plurx-core/src/store/background_jobs{_schema,_domain,_library,_resources,_provider,_subtitle,_subtitle_reconcile,_retention,_receipt_pressure,_viewer_analysis,_copy_output,_encoded_output,_artwork,_transcode,_predictions,_embeddings,_probe,_integrity}.sql",
+  "crates/plurx-core/src/store/background_job_turns.{rs,sql}",
+  "crates/plurx-core/src/store/hiqlite/dispatch_turns.rs",
   "crates/plurx-core/src/store/background_jobs_foreground.sql",
   "crates/plurx-core/src/store/background_jobs_source_interest.sql",
   "crates/plurx-core/src/store/background_jobs_source_service.sql",
@@ -566,6 +568,8 @@ paths = [
   # K-05 section 3.9: poisoned-connection recovery and the boot integrity
   # check that refuses a corrupt database before migration touches it.
   "crates/plurx-core/src/store/sqlite/housekeeping.rs",
+  "crates/plurx-core/src/store/background_job_turns.{rs,sql}",
+  "crates/plurx-core/src/store/hiqlite/dispatch_turns.rs",
   "crates/plurx-core/src/store/background_jobs_foreground.sql",
   "crates/plurx-core/src/store/background_jobs_source_interest.sql",
   "crates/plurx-core/src/store/background_jobs_source_service.sql",
@@ -656,6 +660,8 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
   "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_copy_output,_pretranscode,_fragment,_delivery,_fragment_admission,_observation,_migration,_offline,_domain,_library,_resources,_provider,_subtitle,_transcription,_artwork,_transcode,_preparation,_predictions,_embeddings,_probe,_integrity}.rs",
   "crates/plurx-core/src/store/background_jobs{_schema,_domain,_library,_resources,_provider,_subtitle,_subtitle_reconcile,_retention,_receipt_pressure,_viewer_analysis,_copy_output,_encoded_output,_artwork,_transcode,_predictions,_embeddings,_probe,_integrity}.sql",
+  "crates/plurx-core/src/store/background_job_turns.{rs,sql}",
+  "crates/plurx-core/src/store/hiqlite/dispatch_turns.rs",
   "crates/plurx-core/src/store/background_jobs_foreground.sql",
   "crates/plurx-core/src/store/background_jobs_source_interest.sql",
   "crates/plurx-core/src/store/background_jobs_source_service.sql",

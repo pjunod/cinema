@@ -770,6 +770,16 @@ WHERE id = json_extract($1, '$.token.job_id')
     OR (state = 'cancelling' AND json_extract($1, '$.settlement.disposition') = 'cancel'))
 "#;
 
+/// A root-readable worker reports whether it can acquire its complete local
+/// library admission, or is waiting for the one heavy permit to turn over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryTurnCapacity {
+    Available,
+    HeavyOccupied,
+    Unavailable,
+}
+
 /// Closed registry. Supporting a payload version is an execution constraint,
 /// never a fleet-wide enablement prerequisite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2302,6 +2312,15 @@ pub trait BackgroundJobStore: Send + Sync {
         mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
         now_ms: i64,
     ) -> Result<bool, StoreError>;
+    async fn advertise_library_turn(
+        &self,
+        job_id: &str,
+        revision: i64,
+        node: &str,
+        roots: &[std::path::PathBuf],
+        capacity: LibraryTurnCapacity,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     async fn enqueue_library_work(
         &self,
         request: NewLibraryWork,
@@ -3065,6 +3084,20 @@ LIMIT 1
         now_ms: i64,
     ) -> Result<bool, StoreError> {
         super::background_jobs_resources::replace(self, mappings, now_ms).await
+    }
+    async fn advertise_library_turn(
+        &self,
+        job_id: &str,
+        revision: i64,
+        node: &str,
+        roots: &[std::path::PathBuf],
+        capacity: LibraryTurnCapacity,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_job_turns::advertise(
+            self, job_id, revision, node, roots, capacity, now_ms,
+        )
+        .await
     }
     async fn enqueue_library_work(
         &self,
