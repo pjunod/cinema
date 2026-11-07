@@ -52,7 +52,7 @@ pub(crate) const SOURCE_FIXTURE_SCHEMA: &str = concat!(
     include_str!("../../src/store/background_jobs_source_service.sql"),
 );
 
-const SOURCE_TAIL_SHAPE: &str = "SELECT type,name,sql FROM sqlite_master
+pub(crate) const SOURCE_TAIL_SHAPE: &str = "SELECT type,name,sql FROM sqlite_master
  WHERE sql IS NOT NULL AND (
  name GLOB 'foreground_source_*' OR name GLOB 'background_source_*'
  OR name GLOB 'playback_analysis_*' OR name='analysis_source_checkpoints'
@@ -71,6 +71,56 @@ fn source_tail_objects(connection: &rusqlite::Connection) -> Vec<(String, String
         .expect("complete source extension fixture objects")
 }
 
+pub(crate) fn validated_source_tail_drops(
+    objects: &[(String, String, String)],
+    counts: &[(String, i64)],
+    dispatch: bool,
+) -> Vec<String> {
+    let expected = rusqlite::Connection::open_in_memory().expect("published source tail witness");
+    expected.execute_batch(
+        "CREATE TABLE background_jobs(id TEXT PRIMARY KEY,state TEXT,fence INTEGER);
+         CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);
+         CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER);
+         CREATE TABLE analysis_requests(request_id TEXT);",
+    ).expect("published source tail dependencies");
+    expected
+        .execute_batch(SOURCE_FIXTURE_SCHEMA)
+        .expect("published v122 source extension");
+    if dispatch {
+        expected
+            .execute_batch(include_str!("../../src/store/background_job_turns.sql"))
+            .expect("published v124 dispatch extension");
+    }
+    assert_eq!(
+        objects,
+        source_tail_objects(&expected),
+        "exact published source tail required"
+    );
+    let expected_counts = objects
+        .iter()
+        .filter(|(kind, _, _)| kind == "table")
+        .map(|(_, name, _)| (name.clone(), i64::from(name == "background_source_schema")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        counts, expected_counts,
+        "source custody, grants, checkpoints or dispatch demand must not be discarded"
+    );
+    let mut statements = Vec::new();
+    for kind in ["trigger", "view", "table"] {
+        for (_, name, _) in objects
+            .iter()
+            .filter(|(object_kind, _, _)| object_kind == kind)
+        {
+            statements.push(format!(
+                "DROP {} \"{}\";",
+                kind.to_ascii_uppercase(),
+                name.replace('"', "\"\"")
+            ));
+        }
+    }
+    statements
+}
+
 /// Rewind an owned, empty v122/v123/v124 source tail to published v121.
 /// Managed operations and receipts remain intact while their exact resource
 /// view and marker return to v3. Source custody, grants and checkpoints refuse.
@@ -85,44 +135,22 @@ fn source_extension_rewind_plan(
         matches!(version, 122..=124),
         "only published source extensions may be rewound"
     );
-    let expected = rusqlite::Connection::open_in_memory().expect("published source tail witness");
-    expected.execute_batch(
-        "CREATE TABLE background_jobs(id TEXT PRIMARY KEY,state TEXT,fence INTEGER);
-         CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);
-         CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER);
-         CREATE TABLE analysis_requests(request_id TEXT);",
-    ).expect("published source tail dependencies");
-    expected
-        .execute_batch(SOURCE_FIXTURE_SCHEMA)
-        .expect("published v122 source extension");
-    if version == 124 {
-        expected
-            .execute_batch(include_str!("../../src/store/background_job_turns.sql"))
-            .expect("published v124 dispatch extension");
-    }
     let objects = source_tail_objects(connection);
-    assert_eq!(
-        objects,
-        source_tail_objects(&expected),
-        "exact published source tail required"
-    );
-    for (kind, name, _) in &objects {
-        if kind != "table" {
-            continue;
-        }
-        let count: i64 = connection
-            .query_row(
-                &format!("SELECT count(*) FROM \"{}\"", name.replace('"', "\"\"")),
-                [],
-                |row| row.get(0),
-            )
-            .expect("source tail accepted data inventory");
-        assert_eq!(
-            count,
-            i64::from(name == "background_source_schema"),
-            "source custody, grants, checkpoints or dispatch demand must not be discarded: {name}"
-        );
-    }
+    let counts = objects
+        .iter()
+        .filter(|(kind, _, _)| kind == "table")
+        .map(|(_, name, _)| {
+            let count: i64 = connection
+                .query_row(
+                    &format!(r#"SELECT count(*) FROM "{}""#, name.replace('"', r#""""#)),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("source tail accepted data inventory");
+            (name.clone(), count)
+        })
+        .collect::<Vec<_>>();
+    let mut statements = validated_source_tail_drops(&objects, &counts, version == 124);
     let marker: i64 = connection
         .query_row(
             "SELECT count(*) FROM background_source_schema WHERE singleton=1 AND version=1",
@@ -148,19 +176,6 @@ fn source_extension_rewind_plan(
         marker, 1,
         "managed generation marker must match the source ordinal"
     );
-    let mut statements = Vec::new();
-    for kind in ["trigger", "view", "table"] {
-        for (_, name, _) in objects
-            .iter()
-            .filter(|(object_kind, _, _)| object_kind == kind)
-        {
-            statements.push(format!(
-                "DROP {} \"{}\";",
-                kind.to_ascii_uppercase(),
-                name.replace('"', "\"\"")
-            ));
-        }
-    }
     if restore_managed && managed_version == 4 {
         statements
             .push(include_str!("../../src/store/subtitle_managed_resources_v3.sql").to_owned());
