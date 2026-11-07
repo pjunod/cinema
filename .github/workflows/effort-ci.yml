@@ -200,11 +200,10 @@ jobs:
     name: effort Rust compile
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    # All-target metadata can exceed general runners' soft memory ceiling.
-    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
-    # Include cold toolchain/cache setup and every-target compilation.
+    # Use the same compiler pool and cold-build budget as main-fast-lane.
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     container: ubuntu:24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     # Bound Cargo before parallel working sets reach the runner's memory cap.
     env:
       CARGO_BUILD_JOBS: "1"
