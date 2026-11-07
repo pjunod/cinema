@@ -469,9 +469,12 @@ The observed TV scan committed success while its pressure controller waited
 on the same mutex as the producer whose completion it needed to poll. This
 left a physical reader after the job disappeared from running work. The
 repair validates the physical owner in the Store and allows the producer to
-finish polling its pending write. Verified local paths and the pending
-library request authorize a seven-second advertisement. The worker renews
-it every three seconds while waiting or working on a previous scan. Existing
+finish polling its pending write. A worker with verified library paths and
+available capacity advertises a manual request for seven seconds and
+refreshes it every three seconds. A busy worker can reserve the next turn
+for four seconds while it holds an overlapping ordinary source lease.
+When a source-free job occupies its heavy lane, peers may use the disk
+while the manual scan keeps its place on that worker. Existing
 physical readers retain their custody until joined or recovered by the
 documented same-host reboot procedure.
 

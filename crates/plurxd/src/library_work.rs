@@ -1169,7 +1169,22 @@ mod tests {
 
     #[tokio::test]
     async fn readable_manual_scan_requests_a_turn_while_maintenance_owns_the_worker() {
-        let (_store, _root, jobs, transcode) = queued_library("busy-manual").await;
+        use plurx_core::store::background_jobs::{ClaimJob, ClaimOutcome, JobKind, SettleJob};
+        let (store, _root, jobs, transcode) = queued_library("busy-manual").await;
+        let library_id = request_record(store.as_ref(), "busy-manual")
+            .await
+            .library_id;
+        // First announce a genuinely idle worker; the subsequent occupied
+        // observation must withdraw this cached positive advertisement.
+        crate::background_jobs::advertise_library_successors(
+            store.as_ref(),
+            jobs.job_authority.as_ref(),
+            &transcode,
+            jobs.coordinator.node_id(),
+            &jobs.library_readiness,
+        )
+        .await
+        .expect("idle worker");
         let running = transcode
             .admit_fragment()
             .await
@@ -1180,6 +1195,51 @@ mod tests {
             transcode.fragment_worker_idle(&running),
             "maintenance retains physical custody"
         );
+        let now = clock_ms();
+        let EnqueueOutcome::Accepted { job_id, .. } = store
+            .enqueue_library_work(NewLibraryWork {
+                request_id: "remote-scheduled".into(),
+                library_id,
+                input: LibraryWorkInput::Full {
+                    refresh: true,
+                    trigger: LibraryTrigger::Scheduled,
+                },
+                now_ms: now,
+            })
+            .await
+            .expect("remote maintenance")
+        else {
+            panic!("expected new maintenance")
+        };
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id,
+                expected_revision: 0,
+                node_id: "remote-worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::MetadataRefresh,
+                payload_version: 1,
+                now_ms: now,
+                dispatched_at_ms: now,
+            })
+            .await
+            .expect("remote may use free disk")
+        else {
+            panic!("busy voter blocked remote work")
+        };
+        assert!(store
+            .settle_job(SettleJob {
+                token: job.token.expect("running"),
+                now_ms: now,
+                settlement: JobSettlement::Yield {
+                    error_code: None,
+                    checkpoint: None,
+                    not_before_ms: now + 60000
+                },
+            })
+            .await
+            .expect("remote released disk"));
         drop(running);
         assert!(
             jobs.work_library_queue(&transcode, None).await,
@@ -1234,7 +1294,7 @@ mod tests {
                         |row| row.get(0),
                     )
                     .expect("turn expiry");
-                if let Some(until) = until {
+                if let Some(until) = until.filter(|until| *until > clock_ms()) {
                     if first.is_some_and(|old| until > old) {
                         break;
                     }

@@ -138,9 +138,11 @@ CREATE TRIGGER dispatch_turn_decide AFTER INSERT ON dispatch_turn_attempt BEGIN
         WHERE fair.owner=NEW.owner AND fair.work=NEW.work)
       ELSE NEW.owner='job' AND NEW.work=winner
     END WHERE singleton=1;
-    UPDATE dispatch_turn_wait SET credits=min(8,credits+1)
-      WHERE credits<8 AND (SELECT allowed FROM dispatch_turn_attempt)=1
-        AND (SELECT interactive FROM dispatch_turn_attempt)=1
+    -- One overlapping maintenance grant serves the whole burst. Retain the
+    -- other contenders and their ordering for the next burst of manual work.
+    UPDATE dispatch_turn_wait SET credits=CASE (SELECT interactive FROM dispatch_turn_attempt)
+        WHEN 1 THEN min(8,credits+1) ELSE 0 END
+      WHERE (SELECT allowed FROM dispatch_turn_attempt)=1
         AND EXISTS(SELECT 1 FROM json_each(keys_json) x JOIN json_each(NEW.keys_json) y
           ON x.value=y.value OR x.value='source_io' OR y.value='source_io');
     DELETE FROM dispatch_turn_wait WHERE owner=NEW.owner AND work=NEW.work AND (SELECT allowed FROM dispatch_turn_attempt)=1;

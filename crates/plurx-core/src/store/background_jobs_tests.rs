@@ -104,7 +104,14 @@ async fn background_job_claim_resource_lookup_does_not_scan_settled_history() {
         panic!("expected new scan")
     };
     assert!(store
-        .advertise_library_turn(&job_id, 0, "node-a", &library.paths, 1001)
+        .advertise_library_turn(
+            &job_id,
+            0,
+            "node-a",
+            &library.paths,
+            LibraryTurnCapacity::Available,
+            1001
+        )
         .await
         .expect("advertise"));
     let mut statement = connection
@@ -1936,7 +1943,14 @@ async fn advertised_manual_scan_wins_cross_type_claim_and_expiry_releases_the_tu
         panic!("not admitted")
     };
     assert!(!store
-        .advertise_library_turn(&job_id, 0, "node-a", &library.paths, 1001)
+        .advertise_library_turn(
+            &job_id,
+            0,
+            "node-a",
+            &library.paths,
+            LibraryTurnCapacity::Available,
+            1001
+        )
         .await
         .expect("scheduled intent"));
     store
@@ -1962,11 +1976,25 @@ async fn advertised_manual_scan_wins_cross_type_claim_and_expiry_releases_the_tu
     let ordinary = enqueue(1000);
     store.enqueue_job(ordinary.clone()).await.expect("fragment");
     assert!(!store
-        .advertise_library_turn(&job_id, revision, "node-a", &["/old-root".into()], 1001)
+        .advertise_library_turn(
+            &job_id,
+            revision,
+            "node-a",
+            &["/old-root".into()],
+            LibraryTurnCapacity::Available,
+            1001
+        )
         .await
         .expect("changed roots"));
     assert!(store
-        .advertise_library_turn(&job_id, revision, "node-a", &library.paths, 1001)
+        .advertise_library_turn(
+            &job_id,
+            revision,
+            "node-a",
+            &library.paths,
+            LibraryTurnCapacity::Available,
+            1001
+        )
         .await
         .expect("verified scan"));
     assert!(matches!(
@@ -1988,7 +2016,14 @@ async fn advertised_manual_scan_wins_cross_type_claim_and_expiry_releases_the_tu
     // The reporting voter vanished. Its expired signal cannot idle the free ordinary slot.
     let fragment = claimed(&store, claim(&ordinary.id, 0, 8001)).await;
     assert!(store
-        .advertise_library_turn(&job_id, revision, "node-b", &library.paths, 8002)
+        .advertise_library_turn(
+            &job_id,
+            revision,
+            "node-b",
+            &library.paths,
+            LibraryTurnCapacity::Available,
+            8002
+        )
         .await
         .expect("live peer"));
     let mut manual = claim(&job_id, revision, 8003);
@@ -2038,4 +2073,144 @@ async fn advertised_manual_scan_wins_cross_type_claim_and_expiry_releases_the_tu
     manual.now_ms = 8005;
     manual.dispatched_at_ms = 8005;
     claimed(&store, manual).await;
+}
+
+#[tokio::test]
+async fn busy_scan_voter_keeps_its_local_turn_without_blocking_a_free_remote_disk(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use super::background_jobs_resources::StorageDomainMapping;
+    use super::LibraryStore;
+    use crate::domain::{LibraryKind, NewLibrary};
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("busy-voter.sqlite");
+    let store = SqliteStore::open(&path)?;
+    let observed = rusqlite::Connection::open(&path)?;
+    let mut libraries = Vec::new();
+    for name in ["a", "b"] {
+        libraries.push(
+            store
+                .create_library(&NewLibrary {
+                    name: name.into(),
+                    kind: LibraryKind::Movies,
+                    paths: vec![format!("/{name}").into()],
+                    anime: false,
+                })
+                .await?,
+        );
+    }
+    let a = &libraries[0];
+    let b = &libraries[1];
+    store
+        .replace_storage_domains(
+            libraries
+                .iter()
+                .map(|l| StorageDomainMapping {
+                    library_id: l.id,
+                    root_path: l.paths[0].display().to_string(),
+                    domain_id: l.name.clone(),
+                })
+                .collect(),
+            900,
+        )
+        .await?;
+    let enqueue_library = |library_id, trigger| NewLibraryWork {
+        library_id,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        now_ms: 1000,
+        input: LibraryWorkInput::Full {
+            refresh: false,
+            trigger,
+        },
+    };
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_library_work(enqueue_library(a.id, LibraryTrigger::Manual))
+        .await?
+    else {
+        panic!("manual scan")
+    };
+    let advertise =
+        |capacity, now| store.advertise_library_turn(&job_id, 0, "node-a", &a.paths, capacity, now);
+    let expiry = || {
+        observed.query_row(
+            "SELECT expires_at_ms FROM dispatch_turn_ready WHERE job_id=?1 AND node_id='node-a'",
+            [&job_id],
+            |r| r.get::<_, i64>(0),
+        )
+    };
+    let yield_grant = |token, now_ms| {
+        store.settle_job(SettleJob {
+            token,
+            now_ms,
+            settlement: JobSettlement::Yield {
+                error_code: None,
+                checkpoint: None,
+                not_before_ms: 100_000,
+            },
+        })
+    };
+
+    assert!(advertise(LibraryTurnCapacity::Available, 1000).await?);
+    for now in [1001, 10001, 20001] {
+        // An unrelated task owns the heavy lane on the only readable node.
+        // Explicit manual intent remains true for priority on its local semaphore.
+        assert!(advertise(LibraryTurnCapacity::HeavyOccupied, now).await?);
+        assert_eq!(
+            expiry()?,
+            now,
+            "withdraw an earlier positive observation immediately"
+        );
+        let mut remote = enqueue(now);
+        remote.dedupe_key = format!("remote:{now}");
+        store.enqueue_job(remote.clone()).await?;
+        let mut attempt = claim(&remote.id, 0, now);
+        attempt.node_id = "node-b".into();
+        let job = claimed(&store, attempt).await;
+        assert!(advertise(LibraryTurnCapacity::HeavyOccupied, now + 1).await?);
+        assert_eq!(
+            expiry()?,
+            now + 1,
+            "another node's source lease cannot justify a handoff"
+        );
+        assert!(yield_grant(job.token.expect("running job token"), now + 2).await?);
+    }
+
+    let EnqueueOutcome::Accepted { job_id: other, .. } = store
+        .enqueue_library_work(enqueue_library(b.id, LibraryTrigger::Scheduled))
+        .await?
+    else {
+        panic!("other disk")
+    };
+    let mut attempt = claim(&other, 0, 30000);
+    attempt.kind = JobKind::LibraryScan;
+    let other = claimed(&store, attempt).await;
+    assert!(advertise(LibraryTurnCapacity::HeavyOccupied, 30001).await?);
+    assert_eq!(expiry()?, 30001, "same node but disjoint source");
+    assert!(yield_grant(other.token.expect("running job token"), 30002).await?);
+
+    let mut holder = enqueue(40000);
+    holder.dedupe_key = "turning-over".into();
+    store.enqueue_job(holder.clone()).await?;
+    let holder = claimed(&store, claim(&holder.id, 0, 40000)).await;
+    assert!(advertise(LibraryTurnCapacity::HeavyOccupied, 40001).await?);
+    assert_eq!(
+        expiry()?,
+        44001,
+        "exact live local fence on an overlapping source gives one short handoff"
+    );
+    assert!(yield_grant(holder.token.expect("running job token"), 40002).await?);
+    let mut contender = enqueue(40003);
+    contender.dedupe_key = "racing-release".into();
+    store.enqueue_job(contender.clone()).await?;
+    let mut remote = claim(&contender.id, 0, 40003);
+    remote.node_id = "node-b".into();
+    assert!(matches!(
+        store.claim_job(remote).await?,
+        ClaimOutcome::Contended
+    ));
+    let mut local = claim(&job_id, 0, 40004);
+    local.kind = JobKind::LibraryScan;
+    claimed(&store, local).await;
+    Ok(())
 }

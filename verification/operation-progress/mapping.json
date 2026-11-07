@@ -9,49 +9,49 @@
         "table": "01 candidate admission",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "546c751606bbd4e7651ef4c8c8840ef6493f921cc8d6f5e3173432ecda68a147"
+        "sha256": "1ad46e38cb4ed4d240977668ff1b283ed882c2144a6d8ef049607dbe4a444dbb"
       },
       {
         "table": "02 claim ambiguity deadline",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn claim_with_resolution_inner(",
-        "sha256": "546c751606bbd4e7651ef4c8c8840ef6493f921cc8d6f5e3173432ecda68a147"
+        "sha256": "1ad46e38cb4ed4d240977668ff1b283ed882c2144a6d8ef049607dbe4a444dbb"
       },
       {
         "table": "03 queue heartbeat lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn renew(&self) -> Result<bool, StoreError> {",
-        "sha256": "546c751606bbd4e7651ef4c8c8840ef6493f921cc8d6f5e3173432ecda68a147"
+        "sha256": "1ad46e38cb4ed4d240977668ff1b283ed882c2144a6d8ef049607dbe4a444dbb"
       },
       {
         "table": "04 bind queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn bind_library(",
-        "sha256": "546c751606bbd4e7651ef4c8c8840ef6493f921cc8d6f5e3173432ecda68a147"
+        "sha256": "1ad46e38cb4ed4d240977668ff1b283ed882c2144a6d8ef049607dbe4a444dbb"
       },
       {
         "table": "05 complete queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn complete_library(",
-        "sha256": "546c751606bbd4e7651ef4c8c8840ef6493f921cc8d6f5e3173432ecda68a147"
+        "sha256": "1ad46e38cb4ed4d240977668ff1b283ed882c2144a6d8ef049607dbe4a444dbb"
       },
       {
         "table": "06 queue heartbeat retirement",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn finish(mut self) {",
-        "sha256": "546c751606bbd4e7651ef4c8c8840ef6493f921cc8d6f5e3173432ecda68a147"
+        "sha256": "1ad46e38cb4ed4d240977668ff1b283ed882c2144a6d8ef049607dbe4a444dbb"
       },
       {
         "table": "07 queue retirement lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
-        "sha256": "546c751606bbd4e7651ef4c8c8840ef6493f921cc8d6f5e3173432ecda68a147"
+        "sha256": "1ad46e38cb4ed4d240977668ff1b283ed882c2144a6d8ef049607dbe4a444dbb"
       },
       {
         "table": "08 worker acquisition and cleanup",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "plurx_worker_control::library_driver::run_driver(&mut environment)",
-        "sha256": "4c0f34a3afba7f0234036b5749192a1be297fb6bb0568eb304be9b3c3df703ce"
+        "sha256": "68a4f24ff127f2d6953e9a191949d25747c7b5c39948a31f1c8e412059dc453b"
       },
       {
         "table": "09 domain lease acquisition",
@@ -63,13 +63,13 @@
         "table": "10 work iteration bound",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "for _ in 0..8 {",
-        "sha256": "4c0f34a3afba7f0234036b5749192a1be297fb6bb0568eb304be9b3c3df703ce"
+        "sha256": "68a4f24ff127f2d6953e9a191949d25747c7b5c39948a31f1c8e412059dc453b"
       },
       {
         "table": "11 lost reply resolution",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "// A lost completion acknowledgement must not rerun a published result.",
-        "sha256": "4c0f34a3afba7f0234036b5749192a1be297fb6bb0568eb304be9b3c3df703ce"
+        "sha256": "68a4f24ff127f2d6953e9a191949d25747c7b5c39948a31f1c8e412059dc453b"
       },
       {
         "table": "12 domain lease ttl heartbeat",
@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "a77ac5ee0de3a09384aefce5bea54930157141103df405494cef10ba0e8efc21"
+        "sha256": "12548c9d17c0e32e902de55b061dc615353cb058313ce709c24bcbe942144d78"
       },
       {
         "table": "31 authority implementation",

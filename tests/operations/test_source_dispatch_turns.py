@@ -45,8 +45,8 @@ class SourceDispatchTurns(unittest.TestCase):
         self.db.execute("INSERT INTO background_job_required_resources VALUES(?,'source_io:a')", (name,))
         self.db.execute("INSERT INTO dispatch_turn_ready VALUES(?,'worker',0,?,'[\"/library\"]')", (name,now+7000))
 
-    def analysis_claim(self, now):
-        return self.db.execute("UPDATE analysis_requests SET state='running',fence=fence+1,updated_at_ms=? WHERE request_id='index' AND state='queued'", (now,)).rowcount
+    def analysis_claim(self, now, name="index"):
+        return self.db.execute("UPDATE analysis_requests SET state='running',fence=fence+1,updated_at_ms=? WHERE request_id=? AND state='queued'", (now,name)).rowcount
 
     def manual_claim(self, name, now):
         return self.db.execute("UPDATE background_jobs SET state='running',fence=fence+1,updated_at_ms=? WHERE id=? AND state='queued'", (now,name)).rowcount
@@ -76,6 +76,28 @@ class SourceDispatchTurns(unittest.TestCase):
         self.assertEqual(self.manual_claim("next", 70101), 0)
         self.assertEqual(self.analysis_claim(70102), 1)
         self.assertEqual(self.manual_claim("next", 70103), 1)
+
+    def test_backlogged_maintenance_gets_one_turn_per_manual_burst(self):
+        waiting = ["index", "index2", "index3"]
+        for name in waiting[1:]:
+            self.db.execute("INSERT INTO analysis_requests VALUES(?,'fragment_index','background','queued',0,1,0)", (name,))
+            self.db.execute("INSERT INTO analysis_required_resources VALUES(?,'source_io:a')", (name,))
+        now = 70000
+        for round_number in range(3):
+            for i in range(8):
+                name = f"manual-{round_number}-{i}"
+                self.manual(name, now)
+                for contender in waiting:
+                    self.assertEqual(self.analysis_claim(now, contender), 0)
+                self.assertEqual(self.manual_claim(name, now), 1)
+                now += 1
+            self.manual("after-burst-" + str(round_number), now)
+            self.assertEqual(self.analysis_claim(now, waiting.pop(0)), 1)
+            for contender in waiting:
+                self.assertEqual(self.analysis_claim(now, contender), 0)
+            # Remove this still-ready request before the next eight-grant cycle.
+            self.db.execute("UPDATE background_job_waiters SET state='cancelled' WHERE request_id=?", ("after-burst-" + str(round_number),))
+            now += 1
 
     def test_playback_analysis_may_take_its_protected_turn(self):
         self.manual("scan", 1000)

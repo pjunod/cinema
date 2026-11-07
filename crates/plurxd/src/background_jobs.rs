@@ -2555,6 +2555,7 @@ const LIBRARY_TURN_REFRESH: Duration = Duration::from_secs(3);
 
 struct LibraryTurnObservation {
     revision: i64,
+    capacity: plurx_core::store::background_jobs::LibraryTurnCapacity,
     recorded: Instant,
     interactive: bool,
 }
@@ -2582,6 +2583,7 @@ impl LibraryReadiness {
         candidate: &BackgroundJob,
         node: &str,
         roots: &[std::path::PathBuf],
+        capacity: plurx_core::store::background_jobs::LibraryTurnCapacity,
     ) -> Result<bool, StoreError> {
         let now = Instant::now();
         {
@@ -2594,13 +2596,20 @@ impl LibraryReadiness {
             });
             if let Some(row) = recent
                 .get(&candidate.id)
-                .filter(|row| row.revision == candidate.revision)
+                .filter(|row| row.revision == candidate.revision && row.capacity == capacity)
             {
                 return Ok(row.interactive);
             }
         }
         let interactive = store
-            .advertise_library_turn(&candidate.id, candidate.revision, node, roots, unix_ms()?)
+            .advertise_library_turn(
+                &candidate.id,
+                candidate.revision,
+                node,
+                roots,
+                capacity,
+                unix_ms()?,
+            )
             .await?;
         self.advertised
             .lock()
@@ -2609,6 +2618,7 @@ impl LibraryReadiness {
                 candidate.id.clone(),
                 LibraryTurnObservation {
                     revision: candidate.revision,
+                    capacity,
                     recorded: now,
                     interactive,
                 },
@@ -2691,7 +2701,7 @@ async fn library_candidate_readiness(
     readiness: &LibraryReadiness,
     candidate: &BackgroundJob,
 ) -> Result<Option<(plurx_core::store::background_jobs::JobKind, bool)>, StoreError> {
-    use plurx_core::store::background_jobs::JobPayload;
+    use plurx_core::store::background_jobs::{JobPayload, LibraryTurnCapacity};
     let Ok(payload) = candidate.supported_payload() else {
         return Ok(None);
     };
@@ -2735,18 +2745,28 @@ async fn library_candidate_readiness(
     if !readable {
         return Ok(None);
     }
-    if !authority.may_run_cluster_jobs().await || transcode.background_yield_reason().is_some() {
+    if !authority.may_run_cluster_jobs().await {
         return Ok(None);
     }
+    let protected = transcode.background_yield_reason().is_some();
+    let capacity = if protected {
+        LibraryTurnCapacity::Unavailable
+    } else if transcode.fragment_worker_may_start() {
+        LibraryTurnCapacity::Available
+    } else if transcode.background_worker_in_use() {
+        LibraryTurnCapacity::HeavyOccupied
+    } else {
+        LibraryTurnCapacity::Unavailable
+    };
     let interactive = match library.as_ref() {
         Some(library) if candidate.priority >= 2 => {
             readiness
-                .advertise(store, candidate, node, &library.paths)
+                .advertise(store, candidate, node, &library.paths, capacity)
                 .await?
         }
         _ => false,
     };
-    Ok(Some((kind, interactive)))
+    Ok((!protected).then_some((kind, interactive)))
 }
 
 async fn library_candidates(
@@ -2776,7 +2796,7 @@ pub(crate) async fn advertise_library_successors(
     readiness: &LibraryReadiness,
 ) -> Result<(), StoreError> {
     use plurx_core::store::background_jobs::{MAX_ACTIVE_JOBS, MAX_PAGE_SIZE};
-    if !authority.may_run_cluster_jobs().await || transcode.background_yield_reason().is_some() {
+    if !authority.may_run_cluster_jobs().await {
         return Ok(());
     }
     let mut cursor = None;
