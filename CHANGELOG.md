@@ -13,6 +13,9 @@ bump may break compatibility and a **patch** bump never does.
 - Manual library scans and explicit refreshes get the next eligible shared
   read slot across job types. A scan finishing under a pressure check can
   release its reader and let the next scan start.
+- Activity shows blocked shared reads above both tabs, identifies the originating
+  worker and job when available, and reports overdue manual scans alongside
+  five-minute completion and failure rates for the cluster and each worker.
 
 - macOS source installs discover full Xcode when Command Line Tools are selected,
   find renamed or relocated copies through the macOS application index,

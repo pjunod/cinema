@@ -14,6 +14,15 @@ source mapping**, not an automatic refinement proof. Source hashes in
 that set complete or that the abstractions are correct.
 
 
+## Queue observation source review on 2026-11-07
+
+Compared with `4ddbf1229`, the shared queue adds read-only counts of recent
+worker attempts and waiting manual requests. The SQLite and Hiqlite metrics
+queries count expired source custody, and the daemon caches that count for
+Activity and its sampler warning. These reads have no effect on claim,
+renewal, physical settlement, or any modeled transition. The focused queue
+regressions cover the observable rates and warnings.
+
 ## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
 
 Codex agent `/root/recovery_design_audit` reviewed the frozen working-tree

@@ -25,11 +25,12 @@ pub use super::background_jobs_library::{
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
 pub use super::background_jobs_migration::JobMigrationStatus;
 pub use super::background_jobs_observation::{
-    BackgroundJobMetrics, JobAttemptObservation, JobCount, JobLabel, SourceIoHolder,
-    JOB_METRIC_KINDS, JOB_METRIC_SLOTS, JOB_METRIC_STATES,
+    BackgroundJobMetrics, JobAttemptObservation, JobCount, JobLabel, NodeJobCompletions,
+    SourceIoHolder, JOB_METRIC_KINDS, JOB_METRIC_SLOTS, JOB_METRIC_STATES,
+    JOB_PROCESSING_WINDOW_MS,
 };
 use super::background_jobs_observation::{
-    ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL, SOURCE_IO_HOLDERS_SQL,
+    ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL, NODE_COMPLETIONS_SQL, SOURCE_IO_HOLDERS_SQL,
 };
 pub use super::background_jobs_offline::JoinOfflineJob;
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
@@ -2381,6 +2382,10 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
     async fn job_labels(&self, ids: &[String]) -> Result<Vec<JobLabel>, StoreError>;
     async fn job_counts(&self, now_ms: i64) -> Result<Vec<JobCount>, StoreError>;
+    async fn recent_job_completions(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<NodeJobCompletions>, StoreError>;
     async fn source_io_holders(&self, now_ms: i64) -> Result<Vec<SourceIoHolder>, StoreError>;
     async fn register_foreground_source(
         &self,
@@ -4241,7 +4246,29 @@ LIMIT 1
         }
         self.queue_sql(
             COUNTS_SQL.into(),
-            encode(&serde_json::json!({"now_ms": now_ms}))?,
+            encode(&serde_json::json!({
+                "now_ms": now_ms,
+                "manual_due_before_ms": now_ms - JOB_PROCESSING_WINDOW_MS,
+            }))?,
+            false,
+            false,
+        )
+        .await?
+        .iter()
+        .map(|row| decode(row))
+        .collect()
+    }
+
+    async fn recent_job_completions(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<NodeJobCompletions>, StoreError> {
+        if now_ms < 0 {
+            return Err(invalid("invalid queue observation time"));
+        }
+        self.queue_sql(
+            NODE_COMPLETIONS_SQL.into(),
+            encode(&serde_json::json!({"after_ms": now_ms - JOB_PROCESSING_WINDOW_MS, "now_ms": now_ms}))?,
             false,
             false,
         )
