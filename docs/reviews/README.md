@@ -7,6 +7,7 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
+| [CINEMA-END-TO-END-REVIEW-2026-11-07.md](CINEMA-END-TO-END-REVIEW-2026-11-07.md) | End-to-end review of the playback start path against HEAD and the live fleet (2026-11-07): why starts are slow or fail (starved fragment-index queue, engine-keyed index identity, 16 s rolling gate, a 10-phase create, consensus for everything), how the October HDR/DV, capability and encoding changes sit on it, and the ranked design adjustments with their acceptance readings. | open |
 | [PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md](PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md) | Actual storage-owner implementation review: seven findings corrected and final focused evidence approved. | done |
 | [PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md](PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md) | Adversarial review of the October 8 playback-buffer repair: capacity handoff, early cancellation, restart and cleanup-failure ownership; findings and dispositions. | open |
 | [S11-GRAIN720-NAL-EVIDENCE-20261002.md](S11-GRAIN720-NAL-EVIDENCE-20261002.md) | One retained synthetic Grain720 header census: 35 first IDRs, two extras, reviewable historical parser/control/result/process/cleanup snapshots and private audit-byte retention; sanitized-not-raw and original S11 qualification limits. | done |
