@@ -7,7 +7,9 @@ use plurx_core::store::{AnalysisRequest, NewAnalysisRequest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{error::ApiError, extract::AdminUser, internal_activity::PeerActivityOutcome};
+#[cfg(feature = "cluster")]
+use super::internal_activity::PeerActivityOutcome;
+use super::{error::ApiError, extract::AdminUser};
 use crate::state::AppState;
 
 const PAGE_SIZE: i64 = 100;
@@ -58,8 +60,9 @@ async fn engines(state: &AppState) -> Result<BTreeMap<String, String>, ApiError>
             crate::ffmpeg::fragment_index_engine_digest().await,
         );
     }
-    if state.membership.is_replicated() {
-        let peers = state.peer_activity.snapshots().await.map_err(|_| {
+    #[cfg(feature = "cluster")]
+    if let Some(peer_activity) = state.peer_activity.as_ref() {
+        let peers = peer_activity.snapshots().await.map_err(|_| {
             ApiError::Conflict("Worker inventory is unavailable; try again.".into())
         })?;
         let now = crate::state::clock_ms();

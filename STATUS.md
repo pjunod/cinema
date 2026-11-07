@@ -1,7 +1,12 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-05 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
+
+## 2026-11-05 · Standalone compilation and legacy migration packaging
+
+Codex/root is qualifying the native-default/explicit-cluster build and separate bound migration helper. Private authority, schema and credentials remain in Core. Workspace Clippy, 19 migration regressions and 91 packaging tests pass; actual current-main build measurements are recorded. Integrated CLI/HTTP checks and release gates remain pending; this change is not merged to main.
+The [canonical plan and evidence ledger](docs/ci/CINEMA-MODULAR-BUILD-PLAN.md) records acceptance and deferred extraction work.
 
 ## 2026-11-03 · Playback publication and Resume overlay
 

@@ -1,9 +1,11 @@
 //! Singleton bounded placement; the ordinary durable consumers own all I/O.
 use super::{clock_ms, JobManager};
 use plurx_core::error::StoreError;
+#[cfg(feature = "cluster")]
 use plurx_core::store::background_jobs::{EnqueueJob, EnqueueOutcome, JobRequest};
 use sha2::{Digest, Sha256};
 
+#[cfg(any(test, feature = "cluster"))]
 fn choose_target<'a>(key: &str, nodes: &'a [String], holders: &[String]) -> Option<&'a str> {
     nodes
         .iter()
@@ -126,10 +128,13 @@ impl JobManager {
         let publisher = lease.publisher(self.store.as_ref());
         let result: Result<(), StoreError> = async {
             let predictions = self.prediction_discoveries().await?;
+            #[cfg(feature = "cluster")]
             let mut nodes = if let Some(membership) = &self.membership {
                 membership.operations_peers().await.map_err(|error| StoreError::Task(error.to_string()))?
                     .into_iter().map(|peer| peer.node_id).collect::<Vec<_>>()
             } else { Vec::new() };
+            #[cfg(not(feature = "cluster"))]
+            let mut nodes: Vec<String> = Vec::new();
             nodes.push(self.coordinator.node_id().into());
             nodes.sort(); nodes.dedup();
             let target = nodes.first().expect("local node exists");
@@ -181,122 +186,129 @@ impl JobManager {
     }
 
     pub(super) async fn prepare_hot_copies(&self) -> Result<(), StoreError> {
-        let Some(membership) = &self.membership else {
-            return Ok(());
-        };
-        let mut nodes = membership
-            .operations_peers()
-            .await
-            .map_err(|error| StoreError::Task(error.to_string()))?
-            .into_iter()
-            .filter(|peer| peer.reachable && peer.http_base.is_some())
-            .map(|peer| peer.node_id)
-            .collect::<Vec<_>>();
-        nodes.push(self.coordinator.node_id().into());
-        nodes.sort();
-        nodes.dedup();
-        nodes.truncate(64);
-        if nodes.len() < 2 {
-            return Ok(());
-        }
-        let Some(lease) = self.acquire_job("candidate:hot-copy".into()).await? else {
-            return Ok(());
-        };
-        let lost = lease.loss_token();
-        let publisher = lease.publisher(self.store.as_ref());
-        let result: Result<(), StoreError> = async {
-            let now = clock_ms();
-            let artifacts = self.store.hot_artifacts(now).await?;
-            let budget = crate::cachekeep::budget_bytes_fallible(&self.store).await?;
-            let mut available = std::collections::HashMap::new();
-            if let Some(budget) = budget {
-                for node in &nodes {
-                    available.insert(
-                        node.clone(),
-                        budget
-                            .saturating_sub(self.store.cache_bytes(node).await?)
-                            .max(0),
-                    );
-                }
-            }
-            let mut admitted = 0;
-            for artifact in artifacts {
-                if lost.is_cancelled() || admitted >= 16 {
-                    break;
-                }
-                let live_holders = artifact
-                    .holders
-                    .iter()
-                    .filter(|node| nodes.contains(node))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if live_holders.len() != 1 || artifact.pending_copy {
-                    continue;
-                }
-                let candidates = nodes
-                    .iter()
-                    .filter(|node| {
-                        !artifact.artifact_key.starts_with("transcode:")
-                            || available
-                                .get(*node)
-                                .is_some_and(|free| *free >= artifact.bytes)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let Some(target) =
-                    choose_target(&artifact.artifact_key, &candidates, &live_holders)
-                else {
-                    continue;
-                };
-                // One bounded recovery cycle per target/hour. A failed receipt
-                // cannot reset its budget on every scheduler tick.
-                let request_id = hex::encode(Sha256::digest(format!(
-                    "{}:{target}:{}",
-                    artifact.artifact_key,
-                    now / 3_600_000
-                )));
-                let key = artifact.artifact_key;
-                let (payload, digest) =
-                    plurx_core::store::background_jobs::hydration_identity(&key, target)?;
-                let request = EnqueueJob {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    payload,
-                    dedupe_key: format!("hydrate:{digest}"),
-                    priority: 0,
-                    not_before_ms: now,
-                    now_ms: now,
-                    request: JobRequest {
-                        scope: "automatic:hot-copy".into(),
-                        request_id,
-                        request_digest: hex::encode(Sha256::digest(format!("{key}:{target}"))),
-                        consumer_kind: "hot_copy".into(),
-                        consumer_ref: key,
-                        target_node_id: Some(target.into()),
-                        deadline_ms: Some(
-                            now.saturating_add(20 * 60 * 1000)
-                                .min(artifact.demanded_at_ms.saturating_add(86_400_000)),
-                        ),
-                        retain_identity: false,
-                    },
-                };
-                match publisher.enqueue_hot_copy(request).await? {
-                    EnqueueOutcome::Accepted { .. } => {
-                        admitted += 1;
-                        if let Some(free) = available.get_mut(target) {
-                            *free = free.saturating_sub(artifact.bytes).max(0);
-                        }
-                    }
-                    EnqueueOutcome::QueueFull => break,
-                    _ => {}
-                }
-            }
+        #[cfg(not(feature = "cluster"))]
+        {
             Ok(())
         }
-        .await;
-        drop(publisher);
-        let release = lease.release().await;
-        result?;
-        release.map(|_| ())
+        #[cfg(feature = "cluster")]
+        {
+            let Some(membership) = &self.membership else {
+                return Ok(());
+            };
+            let mut nodes = membership
+                .operations_peers()
+                .await
+                .map_err(|error| StoreError::Task(error.to_string()))?
+                .into_iter()
+                .filter(|peer| peer.reachable && peer.http_base.is_some())
+                .map(|peer| peer.node_id)
+                .collect::<Vec<_>>();
+            nodes.push(self.coordinator.node_id().into());
+            nodes.sort();
+            nodes.dedup();
+            nodes.truncate(64);
+            if nodes.len() < 2 {
+                return Ok(());
+            }
+            let Some(lease) = self.acquire_job("candidate:hot-copy".into()).await? else {
+                return Ok(());
+            };
+            let lost = lease.loss_token();
+            let publisher = lease.publisher(self.store.as_ref());
+            let result: Result<(), StoreError> = async {
+                let now = clock_ms();
+                let artifacts = self.store.hot_artifacts(now).await?;
+                let budget = crate::cachekeep::budget_bytes_fallible(&self.store).await?;
+                let mut available = std::collections::HashMap::new();
+                if let Some(budget) = budget {
+                    for node in &nodes {
+                        available.insert(
+                            node.clone(),
+                            budget
+                                .saturating_sub(self.store.cache_bytes(node).await?)
+                                .max(0),
+                        );
+                    }
+                }
+                let mut admitted = 0;
+                for artifact in artifacts {
+                    if lost.is_cancelled() || admitted >= 16 {
+                        break;
+                    }
+                    let live_holders = artifact
+                        .holders
+                        .iter()
+                        .filter(|node| nodes.contains(node))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if live_holders.len() != 1 || artifact.pending_copy {
+                        continue;
+                    }
+                    let candidates = nodes
+                        .iter()
+                        .filter(|node| {
+                            !artifact.artifact_key.starts_with("transcode:")
+                                || available
+                                    .get(*node)
+                                    .is_some_and(|free| *free >= artifact.bytes)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let Some(target) =
+                        choose_target(&artifact.artifact_key, &candidates, &live_holders)
+                    else {
+                        continue;
+                    };
+                    // One bounded recovery cycle per target/hour. A failed receipt
+                    // cannot reset its budget on every scheduler tick.
+                    let request_id = hex::encode(Sha256::digest(format!(
+                        "{}:{target}:{}",
+                        artifact.artifact_key,
+                        now / 3_600_000
+                    )));
+                    let key = artifact.artifact_key;
+                    let (payload, digest) =
+                        plurx_core::store::background_jobs::hydration_identity(&key, target)?;
+                    let request = EnqueueJob {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        payload,
+                        dedupe_key: format!("hydrate:{digest}"),
+                        priority: 0,
+                        not_before_ms: now,
+                        now_ms: now,
+                        request: JobRequest {
+                            scope: "automatic:hot-copy".into(),
+                            request_id,
+                            request_digest: hex::encode(Sha256::digest(format!("{key}:{target}"))),
+                            consumer_kind: "hot_copy".into(),
+                            consumer_ref: key,
+                            target_node_id: Some(target.into()),
+                            deadline_ms: Some(
+                                now.saturating_add(20 * 60 * 1000)
+                                    .min(artifact.demanded_at_ms.saturating_add(86_400_000)),
+                            ),
+                            retain_identity: false,
+                        },
+                    };
+                    match publisher.enqueue_hot_copy(request).await? {
+                        EnqueueOutcome::Accepted { .. } => {
+                            admitted += 1;
+                            if let Some(free) = available.get_mut(target) {
+                                *free = free.saturating_sub(artifact.bytes).max(0);
+                            }
+                        }
+                        EnqueueOutcome::QueueFull => break,
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            drop(publisher);
+            let release = lease.release().await;
+            result?;
+            release.map(|_| ())
+        }
     }
 }
 

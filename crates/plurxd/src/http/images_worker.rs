@@ -217,6 +217,7 @@ pub(super) async fn shared_local_variant(
                 && location_filename(location).is_some()
         })
 }
+#[cfg(any(test, feature = "cluster"))]
 pub(super) async fn serve_peer_variant(
     state: &AppState,
     key: &str,
@@ -237,6 +238,16 @@ pub(super) async fn serve_peer_variant(
         .ok_or(ApiError::NotFound("artwork variant"))
 }
 
+#[cfg(not(feature = "cluster"))]
+async fn copy_from_peer(
+    _state: &AppState,
+    _location: &ArtworkLocation,
+    _cancel: &CancellationToken,
+) -> Option<()> {
+    None
+}
+
+#[cfg(feature = "cluster")]
 async fn copy_from_peer(
     state: &AppState,
     location: &ArtworkLocation,
@@ -246,8 +257,9 @@ async fn copy_from_peer(
     let _bytes = state.artwork_fetch.local_permit(MAX_ARTWORK_BYTES).await?;
     let client = state.artwork_fetch.client()?;
     let name = format!("variant-{}", location.artifact_key);
-    let auth = state.membership.artwork_peer_auth(&name).ok()?;
-    let peers = state.membership.reachable_peer_http_urls().await.ok()?;
+    let membership = state.membership.as_ref()?;
+    let auth = membership.artwork_peer_auth(&name).ok()?;
+    let peers = membership.reachable_peer_http_urls().await.ok()?;
     let bytes = tokio::select! {
         () = cancel.cancelled() => return None,
         bytes = fetch_peer_artwork_checked(&client, &peers, &name, &auth, Some((&location.blob_sha256, location.bytes))) => bytes?,

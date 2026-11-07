@@ -13,7 +13,7 @@
 # are gitignored. This developer/fleet path deliberately builds from the
 # checked-out Dockerfile (`up -d --build` the first time and after pulling
 # changes). Tagged releases are published separately to the LAN Forgejo
-# registry at `forge.lan:3000/noirr/plurxd` for image-only installations.
+# registry at `forge.lan:3000/noirr/plurxd-standalone` for image-only installations.
 #
 # Media stays read-only (`:ro`) by default. The only exception is an exact
 # library path an operator deliberately makes writable for the admin-only,
@@ -61,6 +61,7 @@ services:
         # the next.
         PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}
         PLURX_BUILD_SHA: ${PLURX_BUILD_SHA:-}
+        PLURX_BUILD_TREE: ${PLURX_BUILD_TREE:-}
         # The commit time, so a rebuild of one commit stamps the same built_at
         # (crates/plurxd/build_support/source_date.rs). `make docker-up` sets it.
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-}

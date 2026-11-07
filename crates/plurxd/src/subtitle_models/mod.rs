@@ -187,30 +187,35 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, Store
             .map(|v| json!(v))
             .unwrap_or_else(|| unknown_worker(&state.node_id, &state.server_name)),
     );
-    if let Ok(outcomes) = state.peer_activity.snapshots().await {
-        for (node_id, outcome) in outcomes.iter().take(255) {
-            if node_id == &state.node_id {
-                continue;
+    #[cfg(feature = "cluster")]
+    if let Some(peer_activity) = &state.peer_activity {
+        if let Ok(outcomes) = peer_activity.snapshots().await {
+            for (node_id, outcome) in outcomes.iter().take(255) {
+                if node_id == &state.node_id {
+                    continue;
+                }
+                let value = match outcome {
+                    crate::http::internal_activity::PeerActivityOutcome::Answered(snapshot) => {
+                        snapshot
+                            .workers
+                            .as_ref()
+                            .and_then(|workers| workers.subtitles.clone())
+                    }
+                    _ => None,
+                };
+                rows.push(
+                    value
+                        .filter(|v| {
+                            v.node_id == *node_id
+                                && v.expires_at_ms > crate::state::clock_ms()
+                                && v.observed_at_ms <= crate::state::clock_ms().saturating_add(5000)
+                                && v.models.len() <= 4
+                                && v.waits.len() <= 32
+                        })
+                        .map(|v| json!(v))
+                        .unwrap_or_else(|| unknown_worker(node_id, "Unavailable worker")),
+                );
             }
-            let value = match outcome {
-                crate::http::internal_activity::PeerActivityOutcome::Answered(snapshot) => snapshot
-                    .workers
-                    .as_ref()
-                    .and_then(|workers| workers.subtitles.clone()),
-                _ => None,
-            };
-            rows.push(
-                value
-                    .filter(|v| {
-                        v.node_id == *node_id
-                            && v.expires_at_ms > crate::state::clock_ms()
-                            && v.observed_at_ms <= crate::state::clock_ms().saturating_add(5000)
-                            && v.models.len() <= 4
-                            && v.waits.len() <= 32
-                    })
-                    .map(|v| json!(v))
-                    .unwrap_or_else(|| unknown_worker(node_id, "Unavailable worker")),
-            );
         }
     }
     *state.subtitle_models.peers.write().await = Some((Instant::now(), rows.clone()));
@@ -358,14 +363,18 @@ async fn model_operation(
         .iter()
         .find(|model| model.id == id)
         .ok_or(ApiError::NotFound("subtitle model"))?;
-    let mut members = state
-        .membership
-        .activity_peers()
-        .await
-        .map_err(|_| ApiError::ServiceUnavailable("Worker membership unavailable".into()))?
-        .into_iter()
-        .map(|peer| peer.node_id)
-        .collect::<std::collections::BTreeSet<_>>();
+    let mut members = std::collections::BTreeSet::new();
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = &state.membership {
+        members.extend(
+            membership
+                .activity_peers()
+                .await
+                .map_err(|_| ApiError::ServiceUnavailable("Worker membership unavailable".into()))?
+                .into_iter()
+                .map(|peer| peer.node_id),
+        );
+    }
     members.insert(state.node_id.clone());
     let mut outcomes = Vec::new();
     for node_id in request.node_ids {
@@ -662,6 +671,7 @@ fn managed_payload(
 }
 
 impl WorkerObservation {
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn bounded(&self, node: &str) -> bool {
         self.node_id == node
             && self.node_id.len() <= 256
@@ -796,7 +806,7 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
     let observation = WorkerObservation {
         node_id: state.node_id.clone(),
         label: state.server_name.chars().take(64).collect(),
-        eligible: state.serving.is_ready() && !state.membership.local_maintenance_active(),
+        eligible: state.serving.is_ready() && !state.local_maintenance_active(),
         observed_at_ms: now,
         expires_at_ms: now.saturating_add(60_000),
         engine: Some(

@@ -606,10 +606,14 @@ pub async fn download_android(State(state): State<AppState>) -> Response {
 }
 
 /// Fallback for unmatched routes: serve the app for browser navigations,
-/// but return a JSON 404 for anything under `/api` so API clients get a clean
-/// error instead of a page of HTML.
+/// but return a JSON 404 for API and internal service paths so an unavailable
+/// capability cannot look like a successful HTML response.
 pub async fn fallback(uri: axum::http::Uri) -> Response {
-    if uri.path().starts_with("/api") || uri.path().starts_with("/local/") {
+    if uri.path().starts_with("/api")
+        || uri.path().starts_with("/local/")
+        || uri.path().starts_with("/internal/")
+        || uri.path().starts_with("/_internal/")
+    {
         (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "application/json")],

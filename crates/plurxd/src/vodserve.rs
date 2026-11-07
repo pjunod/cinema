@@ -349,6 +349,7 @@ impl Terminal {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn from_control_reason(reason: &str) -> Option<Self> {
         [
             Self::Deleted,
@@ -663,7 +664,9 @@ pub struct ProcessingActivity {
 }
 
 impl ProcessingActivity {
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) const MAX_TEXT: usize = 256;
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn bounded(&self) -> bool {
         [&self.delivered, &self.work, &self.reason]
             .iter()
@@ -681,6 +684,7 @@ pub struct DisplayTargetActivity {
 }
 
 impl VodActivityObservation {
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn bounded(&self) -> bool {
         self.processing
             .as_ref()
@@ -1000,6 +1004,13 @@ pub(crate) struct RetainedCandidateBinding {
 #[derive(Clone)]
 pub(crate) enum RetainedOutputCapture {
     New,
+    #[cfg_attr(
+        not(feature = "cluster"),
+        allow(
+            dead_code,
+            reason = "native and replicated callers share this outcome contract; peer transport constructs this variant"
+        )
+    )]
     ReceiverUnavailable,
     Restore(Option<crate::transcode::RetainedOutputFacts>),
 }
@@ -1212,7 +1223,7 @@ struct Shared {
     encoded_generation_scanner: Arc<StdMutex<EncodedGenerationScanner>>,
     cluster_node_id: Option<String>,
     cluster_index_root: Option<PathBuf>,
-    cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    cluster_membership: Option<crate::cluster_capability::Membership>,
     sessions: Mutex<HashMap<String, Session>>,
     /// Bounded by in-flight VOD request admission and cleaned by exact RAII.
     /// This closes lease loss against a slow resurrection before attachment.
@@ -1531,7 +1542,7 @@ mod vod_serve_construct;
 mod vod_serve_control;
 #[path = "vod/serve/create.rs"]
 mod vod_serve_create;
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 pub(crate) use vod_serve_create::AdmittedSourceVodRendition;
 pub(crate) use vod_serve_create::ReservedSourceVodRendition;
 #[path = "vod/serve/delivery.rs"]

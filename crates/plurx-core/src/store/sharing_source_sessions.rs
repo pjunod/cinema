@@ -101,7 +101,6 @@ fn quote(value: &str) -> String {
 
 /// Every Source write checks the candidate shape again. Missing tables are
 /// observed before preparing application SQL, not repaired on a read path.
-#[cfg(feature = "hiqlite-store")]
 pub(crate) fn schema_guard() -> String {
     schema_guard_for(true)
 }

@@ -94,6 +94,8 @@ async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemap
     let token = worker
         .state
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .issue_token_for_role(Duration::from_secs(120), ClusterRole::Voter)
         .await
         .expect("actual coordinator-issued admission token");
@@ -131,14 +133,17 @@ async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemap
         .expect("actual candidate startup"));
     let mut ingress = crate::http::source_actor_test_state();
     ingress.store = Arc::clone(&selected.store);
-    ingress.membership = selected.membership_manager();
-    ingress.clock_observer = observation
-        .observer()
-        .await
-        .expect("actual ingress clock observer");
+    ingress.membership = Some(selected.membership_manager());
+    ingress.storage_mode = plurx_core::storage::mode::StorageMode::Cluster;
+    ingress.clock_observer = Some(
+        observation
+            .observer()
+            .await
+            .expect("actual ingress clock observer"),
+    );
     ingress.node_id = selected.identity.node_id.clone();
     ingress.catalogue = selected.catalogue_reader();
-    ingress.replication = selected.replication_monitor();
+    ingress.replication = Some(selected.replication_monitor());
     ingress.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
         ingress.membership.clone(),
         Arc::clone(&ingress.store),
@@ -150,20 +155,28 @@ async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemap
     ));
     ingress
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .set_ingress_custody_boot(Some(ingress.sharing.accepted_drivers.boot_id()));
     ingress
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .publish_ingress_custody_boot()
         .await
         .expect("actual ingress registry boot");
     worker
         .state
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .heartbeat()
         .await
         .expect("worker current membership");
     ingress
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .heartbeat()
         .await
         .expect("ingress current membership");
@@ -178,6 +191,8 @@ async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemap
         loop {
             let peers = ingress
                 .membership
+                .as_ref()
+                .expect("actual voter membership")
                 .media_peers()
                 .await
                 .expect("actual bounded-ready media peer observation");
@@ -218,9 +233,12 @@ async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemap
                     axum::routing::get(crate::http::internal_clock::observation_snapshot),
                 )
                 .with_state(crate::http::internal_clock::ObservationContext {
-                    membership: ingress.membership.clone(),
+                    membership: ingress.membership.clone().expect("actual voter membership"),
                     node_id: ingress.node_id.clone(),
-                    observer: ingress.clock_observer.clone(),
+                    observer: ingress
+                        .clock_observer
+                        .clone()
+                        .expect("actual startup observer"),
                 }),
         ),
     );

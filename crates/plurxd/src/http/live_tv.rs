@@ -12,19 +12,22 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
-use super::peer_transport::{
-    deadline_after, PeerAuthMode, PeerResponse, PeerTransport, PeerTransportError,
-};
+#[cfg(feature = "cluster")]
+use super::peer_transport::PeerTransport;
+use super::peer_transport::{deadline_after, PeerAuthMode, PeerResponse, PeerTransportError};
 use crate::live_tv::{
     capability_owner, guide, GuideWindow, LiveTvActivateRequest, LiveTvActivated, LiveTvConfig,
     LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSessionStatus, LiveTvSnapshot,
-    LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness,
-    SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, RESUME_PATH,
-    RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_STATE_PATH, START_V2_PATH, STOP_PATH,
+    LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness, ACTIVATE_PATH,
+    RESOURCE_PATH, RESUME_PATH, RETIRE_PATH, START_PATH, START_STATE_PATH, START_V2_PATH,
+    STOP_PATH,
 };
+#[cfg(feature = "cluster")]
+use crate::live_tv::{SnapshotRequest, GUIDE_PATH, MAX_SNAPSHOT_BYTES, SNAPSHOT_PATH};
 use crate::live_tv_delivery::LivePlaybackRequest;
 use crate::state::AppState;
 
+#[cfg(any(test, feature = "cluster"))]
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(25);
 const START_EXCHANGE_ATTEMPT: Duration = Duration::from_secs(20);
 const CONTROL_EXCHANGE_DEADLINE: Duration = Duration::from_secs(5);
@@ -43,6 +46,7 @@ const CONTROL_EXCHANGE_DEADLINE: Duration = Duration::from_secs(5);
 const PUBLIC_START_DEADLINE: Duration = Duration::from_secs(35);
 const RESOURCE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(12);
 const MAX_START_RESPONSE_BYTES: usize = 32 * 1024;
+#[cfg(feature = "cluster")]
 const GUIDE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(25);
 /// The widest window one request may ask for. It matches the configuration
 /// ceiling rather than sitting under it: a client that can be configured to
@@ -143,8 +147,9 @@ pub(crate) async fn owner_guide(
     if let Some(cached) = state.live_tv.relayed_guide(config.generation).await {
         return cached.clipped(&window);
     }
-    if state.membership.is_replicated() {
-        if let Ok(peers) = state.membership.activity_peers().await {
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref() {
+        if let Ok(peers) = membership.activity_peers().await {
             for peer in peers
                 .into_iter()
                 .filter(|p| p.reachable && p.node_id != state.node_id)
@@ -185,12 +190,15 @@ pub(crate) async fn guide_replica_loop(
     }
 }
 
+#[cfg(feature = "cluster")]
 async fn relay_guide(state: &AppState, config: &LiveTvConfig) -> Result<LiveTvGuide, String> {
-    if !state.membership.is_replicated() {
+    if !state.is_replicated() {
         return Err("the selected owner is not this single-node server".to_owned());
     }
     let peer = state
         .membership
+        .as_ref()
+        .ok_or_else(|| "cluster membership is unavailable".to_owned())?
         .activity_peers()
         .await
         .map_err(|error| error.to_string())?
@@ -309,7 +317,7 @@ pub(crate) async fn guide_readiness(
     });
     checks.push(LiveTvReadinessCheck {
         id: "owner_node",
-        ready: owner_is_local || state.membership.is_replicated(),
+        ready: owner_is_local || state.is_replicated(),
         message: if owner_is_local {
             "This node owns the tuner, so it fetches the guide and other nodes relay its answer."
                 .to_owned()
@@ -788,9 +796,9 @@ async fn select_start_worker(
         return Ok(config);
     }
     let mut candidates = vec![state.node_id.clone()];
-    if state.membership.is_replicated() {
-        let mut peers = state
-            .membership
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref() {
+        let mut peers = membership
             .activity_peers()
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?
@@ -1047,9 +1055,11 @@ pub(crate) async fn readiness_for_config(
         },
     });
 
-    let protocol = state.membership.live_tv_protocol_pending_nodes().await;
-    let protocol_ready = matches!(&protocol, Ok(nodes) if nodes.is_empty());
-    checks.push(LiveTvReadinessCheck {
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref() {
+        let protocol = membership.live_tv_protocol_pending_nodes().await;
+        let protocol_ready = matches!(&protocol, Ok(nodes) if nodes.is_empty());
+        checks.push(LiveTvReadinessCheck {
         id: "cluster_protocol",
         ready: protocol_ready,
         message: match protocol {
@@ -1065,6 +1075,7 @@ pub(crate) async fn readiness_for_config(
             ),
         },
     });
+    }
 
     let serving_ready = state.serving.is_ready();
     checks.push(LiveTvReadinessCheck {
@@ -1088,12 +1099,20 @@ pub(crate) async fn readiness_for_config(
                 .into()
         },
     });
-    let mut nodes = vec![state.node_id.clone()];
-    if let Ok(peers) = state.membership.activity_peers().await {
-        nodes.extend(peers.into_iter().map(|peer| peer.node_id));
+    let nodes = vec![state.node_id.clone()];
+    #[cfg(feature = "cluster")]
+    let mut nodes = nodes;
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref() {
+        if let Ok(peers) = membership.activity_peers().await {
+            nodes.extend(peers.into_iter().map(|peer| peer.node_id));
+        }
     }
-    nodes.sort();
-    nodes.dedup();
+    #[cfg(feature = "cluster")]
+    {
+        nodes.sort();
+        nodes.dedup();
+    }
     let observations = futures_util::future::join_all(nodes.into_iter().map(|node| async move {
         let mut candidate = config.clone();
         candidate.owner_node_id = node.clone();
@@ -1640,7 +1659,8 @@ struct CachedOwnerPeer {
 /// pool that used to be built and dropped per request) and the
 /// `activity_peers` read behind it.
 pub(crate) struct LiveTvPeers {
-    transport: PeerTransport,
+    #[cfg(feature = "cluster")]
+    transport: Option<PeerTransport>,
     owner: StdMutex<Option<CachedOwnerPeer>>,
     metrics: std::sync::Arc<LiveTvPeerMetrics>,
 }
@@ -1673,11 +1693,21 @@ impl LiveTvPeerMetrics {
 }
 
 impl LiveTvPeers {
+    #[cfg(feature = "cluster")]
     pub(crate) fn new(
         membership: plurx_core::cluster::membership::MembershipManager,
     ) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
-            transport: PeerTransport::new(membership),
+            transport: Some(PeerTransport::new(membership)),
+            owner: StdMutex::new(None),
+            metrics: std::sync::Arc::new(LiveTvPeerMetrics::default()),
+        })
+    }
+
+    pub(crate) fn new_local() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            #[cfg(feature = "cluster")]
+            transport: None,
             owner: StdMutex::new(None),
             metrics: std::sync::Arc::new(LiveTvPeerMetrics::default()),
         })
@@ -1766,8 +1796,11 @@ impl LiveTvPeers {
         max_response_bytes: usize,
         auth_mode: PeerAuthMode,
     ) -> Result<PeerResponse, PeerTransportError> {
+        #[cfg(feature = "cluster")]
         let outcome = self
             .transport
+            .as_ref()
+            .ok_or(PeerTransportError::Unreachable)?
             .request(
                 expected_node_id,
                 base,
@@ -1779,6 +1812,20 @@ impl LiveTvPeers {
                 auth_mode,
             )
             .await;
+        #[cfg(not(feature = "cluster"))]
+        let outcome: Result<PeerResponse, PeerTransportError> = {
+            let _ = max_response_bytes;
+            let _ = (
+                expected_node_id,
+                base,
+                method,
+                path,
+                body,
+                deadline,
+                auth_mode,
+            );
+            Err(PeerTransportError::Unreachable)
+        };
         self.note_owner_exchange(
             outcome
                 .as_ref()
@@ -1799,8 +1846,11 @@ impl LiveTvPeers {
         deadline: tokio::time::Instant,
         auth_mode: PeerAuthMode,
     ) -> Result<reqwest::Response, PeerTransportError> {
+        #[cfg(feature = "cluster")]
         let outcome = self
             .transport
+            .as_ref()
+            .ok_or(PeerTransportError::Unreachable)?
             .request_stream(
                 expected_node_id,
                 base,
@@ -1811,6 +1861,19 @@ impl LiveTvPeers {
                 auth_mode,
             )
             .await;
+        #[cfg(not(feature = "cluster"))]
+        let outcome: Result<reqwest::Response, PeerTransportError> = {
+            let _ = (
+                expected_node_id,
+                base,
+                method,
+                path,
+                body,
+                deadline,
+                auth_mode,
+            );
+            Err(PeerTransportError::Unreachable)
+        };
         self.note_owner_exchange(
             outcome
                 .as_ref()
@@ -1827,7 +1890,7 @@ impl LiveTvPeers {
 /// still be feeding. A fleet deploy fences peers for a fraction of a second
 /// several times a night; that window lands here.
 async fn owner_peer(state: &AppState, expected: &str) -> Result<(String, String), ApiError> {
-    if !state.membership.is_replicated() {
+    if !state.is_replicated() {
         return Err(api_error_from(
             LiveTvError::OwnerUnavailable(
                 "the selected owner is not this single-node server".into(),
@@ -1843,12 +1906,20 @@ async fn owner_peer(state: &AppState, expected: &str) -> Result<(String, String)
 
 /// The roster read the cache above stands in front of: one node-local hiqlite
 /// `query_map` plus the in-process metrics read inside `activity_peers`.
+#[cfg(feature = "cluster")]
 async fn resolve_owner_peer(
     state: &AppState,
     expected: &str,
 ) -> Result<(String, String), ApiError> {
     state
         .membership
+        .as_ref()
+        .ok_or_else(|| {
+            api_error_from(
+                LiveTvError::OwnerUnavailable("cluster membership is unavailable".into()),
+                Decided::Ingress,
+            )
+        })?
         .activity_peers()
         .await
         .map_err(|error| {
@@ -1947,9 +2018,12 @@ async fn owner_snapshot(
 ) -> Result<LiveTvSnapshot, LiveTvError> {
     let deadline = deadline_after(PUBLIC_START_DEADLINE);
     let mut candidate = config.clone();
-    let mut nodes = vec![state.node_id.clone()];
-    if state.membership.is_replicated() {
-        if let Ok(peers) = state.membership.activity_peers().await {
+    let nodes = vec![state.node_id.clone()];
+    #[cfg(feature = "cluster")]
+    let mut nodes = nodes;
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref() {
+        if let Ok(peers) = membership.activity_peers().await {
             nodes.extend(
                 peers
                     .into_iter()
@@ -1977,6 +2051,7 @@ async fn owner_snapshot(
     Err(last)
 }
 
+#[cfg(feature = "cluster")]
 async fn owner_snapshot_within(
     state: &AppState,
     config: &LiveTvConfig,
@@ -1990,9 +2065,13 @@ async fn owner_snapshot_within(
         ));
     }
     if config.owner_node_id == state.node_id {
-        if state.membership.is_replicated()
+        if state.is_replicated()
             && !state
                 .membership
+                .as_ref()
+                .ok_or_else(|| {
+                    LiveTvError::OwnerUnavailable("cluster membership is unavailable".into())
+                })?
                 .local_node_is_committed_voter()
                 .await
                 .unwrap_or(false)
@@ -2008,13 +2087,15 @@ async fn owner_snapshot_within(
         .await
         .map_err(|_| LiveTvError::OwnerUnavailable("tuner observation timed out".into()))?;
     }
-    if !state.membership.is_replicated() {
+    if !state.is_replicated() {
         return Err(LiveTvError::OwnerUnavailable(
             "the selected owner is not this single-node server".to_owned(),
         ));
     }
     let peer = state
         .membership
+        .as_ref()
+        .ok_or_else(|| LiveTvError::OwnerUnavailable("cluster membership is unavailable".into()))?
         .activity_peers()
         .await
         .map_err(|error| LiveTvError::OwnerUnavailable(error.to_string()))?
@@ -2466,7 +2547,7 @@ mod tests {
     /// about the cache in front of the roster read, so the resolver is a
     /// closure the test counts; the transport is never used.
     fn test_peers() -> std::sync::Arc<LiveTvPeers> {
-        LiveTvPeers::new(plurx_core::cluster::membership::MembershipManager::unavailable())
+        LiveTvPeers::new_local()
     }
 
     async fn resolved(
@@ -2729,3 +2810,40 @@ mod tests {
 #[cfg(test)]
 #[path = "live_tv_http_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(not(feature = "cluster"))]
+async fn resolve_owner_peer(
+    _state: &AppState,
+    _expected: &str,
+) -> Result<(String, String), ApiError> {
+    Err(api_error_from(
+        LiveTvError::OwnerUnavailable("the selected owner is not this single-node server".into()),
+        Decided::Ingress,
+    ))
+}
+
+#[cfg(not(feature = "cluster"))]
+async fn owner_snapshot_within(
+    state: &AppState,
+    config: &LiveTvConfig,
+    force: bool,
+    probe_graph: bool,
+    budget: tokio::time::Instant,
+) -> Result<LiveTvSnapshot, LiveTvError> {
+    if !state.serving.is_ready() {
+        return Err(LiveTvError::OwnerUnavailable(
+            crate::serving_fence::SERVING_FENCED_MESSAGE.into(),
+        ));
+    }
+    if config.owner_node_id != state.node_id {
+        return Err(LiveTvError::OwnerUnavailable(
+            "the selected owner is not this single-node server".into(),
+        ));
+    }
+    tokio::time::timeout_at(
+        budget,
+        state.live_tv.local_snapshot(config, force, probe_graph),
+    )
+    .await
+    .map_err(|_| LiveTvError::OwnerUnavailable("tuner observation timed out".into()))?
+}

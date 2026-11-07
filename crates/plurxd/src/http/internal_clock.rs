@@ -688,8 +688,14 @@ pub(crate) async fn snapshot(
     request: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
     snapshot_for_membership(
-        &state.membership,
-        &state.clock_observer,
+        state
+            .membership
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
+        state
+            .clock_observer
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
         &state.node_id,
         request,
     )

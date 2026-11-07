@@ -54,6 +54,21 @@ fn main() {
         .or_else(git_describe)
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=PLURX_BUILD={build}");
+    println!("cargo:rerun-if-env-changed=PLURX_BUILD_TREE");
+    let tree = std::env::var("PLURX_BUILD_TREE")
+        .ok()
+        .filter(|value| {
+            value.len() == 40
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .unwrap_or_else(|| "unavailable".to_owned());
+    println!("cargo:rustc-env=PLURX_SOURCE_TREE={tree}");
+    println!(
+        "cargo:rustc-env=PLURX_SOURCE_TARGET={}",
+        std::env::var("TARGET").expect("Cargo target")
+    );
     let explicit_commit = std::env::var("PLURX_BUILD_SHA").ok();
     let source_commit = source_identity::resolve_source_commit(
         explicit_commit.as_deref(),

@@ -1542,19 +1542,19 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertRegex(
             dockerfile,
-            r"cargo build(?: --locked)? --release -p plurxd",
+            r"cargo build(?: --locked)? --release --no-default-features -p plurxd",
         )
         self.assertRegex(
             dockerfile,
             r"cargo build(?: --locked)? --release -p plurx-cluster-check",
         )
-        self.assertIn("cargo tree --locked -p plurxd -e features", dockerfile)
-        self.assertIn("grep -q 'cluster-read-cost-validation'", dockerfile)
+        self.assertIn("cargo tree --locked --no-default-features -p plurxd --features cluster -e features > /tmp/plurx-cluster-features", dockerfile)
+        self.assertIn("awk '/cluster-read-cost-validation/ { forbidden = 1 } END { exit forbidden ? 1 : 0 }'", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-plurxd", dockerfile)
         # Cache-mounted target dirs must never serve a stale workspace crate.
         self.assertIn(
             "find crates vendor -type f -exec touch {} + \\\n"
-            "    && ! cargo tree --locked -p plurxd",
+            "    && cargo tree --locked --no-default-features -p plurxd --features cluster",
             dockerfile,
         )
         self.assertIn("CARGO_TARGET_DIR=/src/target-cluster-check", dockerfile)
@@ -1578,7 +1578,8 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("target: release-binaries", compile_step)
         self.assertIn("scripts/release-package-candidate", bind_step)
         self.assertIn("binary-export release-bin", bind_step)
-        self.assertIn("for name in plurxd plurx-cluster-check", bind_step)
+        self.assertIn("for name in plurxd", bind_step)
+        self.assertNotIn("for name in plurxd plurx-cluster-check", bind_step)
         retention_step = ci_package_steps[
             "Retain candidate binaries for push, tag, and qualification runs"
         ]
@@ -1589,7 +1590,6 @@ assert.equal(context.ACT_TIMER, null);
             [line.strip() for line in artifact_paths.splitlines() if line.strip()],
             [
                 "release-bin/plurxd",
-                "release-bin/plurx-cluster-check",
                 "release-bin/*.dwp",
                 "release-bin/build-manifest.json",
                 "release-bin/*.sha256",
@@ -4328,18 +4328,18 @@ assert.equal(context.ACT_TIMER, null);
         readiness = read(".github/workflows/release-readiness.yml")
 
         self.assertIn("uses: ./.github/workflows/publish-release.yml", ci)
-        self.assertIn("REGISTRY_IMAGE: " + FLEET_REGISTRY_EXPR + "/noirr/plurxd", publisher)
+        self.assertIn("REGISTRY_IMAGE: " + FLEET_REGISTRY_EXPR + "/noirr/${{ inputs.distribution == 'cluster' && 'plurxd-cluster' || 'plurxd-standalone' }}", publisher)
         self.assertEqual(publisher.count("secrets.LOCAL_REGISTRY_TOKEN"), 4)
         self.assertEqual(
             publisher.count("buildkitd-config-inline: |"),
             4,
         )
         self.assertIn(
-            "<Repository>forge.lan:3000/noirr/plurxd:main</Repository>",
+            "<Repository>forge.lan:3000/noirr/plurxd-standalone:latest</Repository>",
             unraid,
         )
         self.assertIn(
-            "<Registry>http://forge.lan:3000/noirr/-/packages/container/plurxd/main</Registry>",
+            "<Registry>http://forge.lan:3000/noirr/-/packages/container/plurxd-standalone/latest</Registry>",
             unraid,
         )
         # Weekly, from a green scheduled run: the cadence Paul chose on
@@ -4931,7 +4931,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("CARGO_TARGET_DIR=\"$PWD/release-source/target\" \\\n          PLURX_PKG_SOURCE_ROOT=\"$PWD/release-source\" \\\n            scripts/package-windows", workflow)
         self.assertIn("compile-workspace: \"false\"", workflow)
         self.assertRegex(workflow, r"BUILD_IMAGE: almalinux:8@sha256:[0-9a-f]{64}")
-        self.assertEqual(len(re.findall(r"(?m)^ +rustup_sha256: [0-9a-f]{64}$", workflow)), 2)
+        self.assertEqual(len(re.findall(r"(?m)^ +rustup_sha256: [0-9a-f]{64}$", workflow)), 4)
         self.assertEqual(len(re.findall(r"(?m)^ +nfpm_sha256: [0-9a-f]{64}$", workflow)), 2)
         # The finished release holds exactly the six artifacts plus checksums,
         # and a back-filled older tag never becomes "latest".
@@ -5035,7 +5035,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("libgtk-4-dev libdbus-1-dev", ci_stage)
         self.assertNotIn("libgtk-4-dev", dockerfile.split("FROM runtime-assets AS ci", 1)[0])
         self.assertNotIn("libgtk-4-dev", dockerfile.split("FROM runtime-assets AS runtime", 1)[1])
-        self.assertIn("cargo build --locked --release -p plurxd", dockerfile)
+        self.assertIn("cargo build --locked --release --no-default-features -p plurxd", dockerfile)
         unit = workflow_job_blocks(".github/workflows/ci.yml")["check"]
         self.assertIn('desktop: "true"', unit)
         self.assertLess(unit.index("uses: ./.github/actions/rust-native-deps"),
@@ -5179,7 +5179,7 @@ assert.equal(context.ACT_TIMER, null);
         # operator CLI, verifies and restores the artefact offline into an
         # empty second volume, and the restored instance keeps its identity,
         # users, tokens and libraries. The container lane runs it after the
-        # stop/start smoke, and `make container-smoke` runs both.
+        # stop/start smoke, and `make container-cluster-smoke` selects it explicitly.
         drill = read("scripts/container-restore-smoke")
         subprocess.run(
             ["sh", "-n", str(ROOT / "scripts/container-restore-smoke")], check=True
@@ -5205,14 +5205,18 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotRegex(drill, r"curl [^\n]+\| grep -q")
 
         makefile = read("Makefile")
-        target = makefile.split("container-smoke: docker", 1)[1].split("\n\n", 1)[0]
-        self.assertIn("@scripts/container-smoke plurx/plurxd:latest", target)
-        self.assertIn("@scripts/container-restore-smoke plurx/plurxd:latest", target)
+        target = makefile.split("container-cluster-smoke: docker-cluster", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("@scripts/container-smoke plurx/plurxd:cluster", target)
+        self.assertIn("@scripts/container-restore-smoke plurx/plurxd:cluster", target)
+        native = makefile.split("container-smoke: docker", 1)[1].split("\n\n", 1)[0]
+        self.assertNotIn("container-restore-smoke", native)
+        self.assertIn('mode = "cluster"', drill)
+        self.assertIn('--config /var/lib/plurx/restore-smoke.toml run', drill)
         workflow = read(".github/workflows/ci.yml")
         package = workflow.split("  package_smoke:", 1)[1].split("\n  publish:", 1)[0]
         self.assertLess(
             package.index('scripts/container-smoke "$IMAGE"'),
-            package.index('run: scripts/container-restore-smoke "$IMAGE"'),
+            package.index('scripts/container-restore-smoke "$IMAGE"'),
         )
 
     def test_container_restore_smoke_keeps_secrets_off_every_command_line(self):

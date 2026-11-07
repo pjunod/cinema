@@ -27,8 +27,10 @@ mod jellyfin_login;
 mod jellyfin_play;
 mod library;
 mod library_channels;
+mod lifecycle;
 mod live_tv_resource;
 mod media;
+mod native_backup;
 mod native_sharing;
 mod offline;
 mod outbox;
@@ -48,7 +50,11 @@ mod watch;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "fixtures")]
+use std::sync::Mutex;
+
+use lifecycle::{ConnectionGuard, ConnectionLifecycle, ConnectionSlot};
 
 use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -1501,6 +1507,7 @@ fn user_from_row(row: &Row<'_>) -> rusqlite::Result<User> {
 }
 
 pub struct SqliteStore {
+    lifecycle: Arc<ConnectionLifecycle>,
     conn: Arc<RetainedConnection>,
     /// Dedicated read-only connections, for file-backed stores.
     ///
@@ -1534,12 +1541,12 @@ pub struct SqliteStore {
 /// Storage runtimes can retain their own lifetime authority without teaching
 /// the SQLite backend anything about a directory, deployment mode or Raft.
 struct RetainedConnection {
-    connection: Mutex<Connection>,
+    connection: ConnectionSlot,
     _lifetime_guard: Option<Arc<dyn Send + Sync>>,
 }
 
 impl std::ops::Deref for RetainedConnection {
-    type Target = Mutex<Connection>;
+    type Target = ConnectionSlot;
 
     fn deref(&self) -> &Self::Target {
         &self.connection
@@ -1552,7 +1559,7 @@ pub use housekeeping::prometheus_sqlite_health;
 /// routing mistake is a loud error instead of a write sneaking around the
 /// writer's serialization.
 struct ReadPool {
-    conns: Vec<Mutex<Connection>>,
+    conns: Vec<ConnectionSlot>,
     next: AtomicUsize,
     _lifetime_guard: Option<Arc<dyn Send + Sync>>,
 }
@@ -1608,20 +1615,22 @@ impl SqliteStore {
         read_connections: usize,
         guard: Option<Arc<dyn Send + Sync>>,
     ) -> Result<Self, StoreError> {
+        let lifecycle = Arc::new(ConnectionLifecycle::default());
         let conn = Connection::open(path)?;
         housekeeping::boot_integrity_check(
             &conn,
             path,
             housekeeping::BOOT_CHECK_BUDGET,
             guard.as_ref().map(Arc::downgrade),
+            Arc::downgrade(&lifecycle),
         )?;
-        let mut store = Self::init_retaining(conn, guard.clone())?;
+        let mut store = Self::init_retaining(conn, guard.clone(), lifecycle)?;
         store.path = Some(Arc::new(path.to_owned()));
         // After init: the writer has migrated, so the schema the readers see
         // is the one this binary expects.
         let mut conns = Vec::with_capacity(read_connections.max(1));
         for _ in 0..read_connections.max(1) {
-            conns.push(Mutex::new(housekeeping::open_reader(path)?));
+            conns.push(ConnectionSlot::new(housekeeping::open_reader(path)?));
         }
         store.reads = Some(Arc::new(ReadPool {
             conns,
@@ -1655,19 +1664,21 @@ impl SqliteStore {
     }
 
     fn init(conn: Connection) -> Result<Self, StoreError> {
-        Self::init_retaining(conn, None)
+        Self::init_retaining(conn, None, Arc::new(ConnectionLifecycle::default()))
     }
 
     fn init_retaining(
         conn: Connection,
         guard: Option<Arc<dyn Send + Sync>>,
+        lifecycle: Arc<ConnectionLifecycle>,
     ) -> Result<Self, StoreError> {
         housekeeping::configure_writer(&conn)?;
         Self::migrate(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
+            lifecycle,
             conn: Arc::new(RetainedConnection {
-                connection: Mutex::new(conn),
+                connection: ConnectionSlot::new(conn),
                 _lifetime_guard: guard,
             }),
             reads: None,
@@ -2037,9 +2048,11 @@ impl SqliteStore {
         F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
         T: Send + 'static,
     {
+        let operation = self.lifecycle.admit()?;
         let conn = Arc::clone(&self.conn);
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
+            let _operation = operation;
             let guard = housekeeping::lock_or_recover(
                 &conn,
                 housekeeping::Pool::Writer,
@@ -2049,6 +2062,39 @@ impl SqliteStore {
         })
         .await
         .map_err(|e| StoreError::Task(e.to_string()))?
+    }
+
+    /// Stop new SQL, drain already admitted blocking readers/writers, and
+    /// explicitly close every SQLite connection. Retained Store handles refuse
+    /// further work. Cancellation of this waiter does not cancel its close
+    /// owner or release the runtime's retained lifetime capability.
+    pub async fn close(&self) -> Result<(), StoreError> {
+        self.lifecycle.begin_close();
+        let lifecycle = Arc::clone(&self.lifecycle);
+        let conn = Arc::clone(&self.conn);
+        let reads = self.reads.clone();
+        // Wait outside the blocking pool. Admitted SQL may still be queued
+        // there; close waiters must not occupy the workers that drain it.
+        tokio::spawn(async move {
+            lifecycle.wait_idle().await;
+            tokio::task::spawn_blocking(move || {
+                let _owner = lifecycle
+                    .close_owner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(reads) = reads {
+                    for reader in &reads.conns {
+                        reader.close()?;
+                    }
+                }
+                conn.connection.close()?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| StoreError::Task(error.to_string()))?
+        })
+        .await
+        .map_err(|error| StoreError::Task(error.to_string()))?
     }
 
     /// Execute a durable job publication only while its exact lease token is
@@ -2174,8 +2220,10 @@ impl SqliteStore {
         let Some(pool) = self.reads.clone() else {
             return self.with_conn(f).await;
         };
+        let operation = self.lifecycle.admit()?;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
+            let _operation = operation;
             let idx = pool.next.fetch_add(1, Ordering::Relaxed) % pool.conns.len();
             let guard = housekeeping::lock_or_recover(
                 &pool.conns[idx],

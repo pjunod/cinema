@@ -2284,6 +2284,7 @@ pub(in crate::http) fn control_owner_lost(
 /// Execute a control exchange after ingress (or the exact-write relay) has
 /// proved the durable owner tuple. The manager repeats the tuple fence against
 /// owner-local state before it can renew activity.
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) async fn control_local(
     state: &AppState,
     route: &MediaSessionRoute,

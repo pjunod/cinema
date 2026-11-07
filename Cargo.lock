@@ -3931,6 +3931,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "plurx-storage-migrate"
+version = "0.8.0"
+dependencies = [
+ "clap",
+ "libc",
+ "plurx-core",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "plurx-support"
 version = "0.8.0"
 dependencies = [

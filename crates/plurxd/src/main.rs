@@ -11,9 +11,9 @@ use plurx_core::process::bounded as bounded_process;
 mod queue_fixture;
 // Reuse the exact Core fixture observer. The shared fixture exports helpers
 // used by different packages; this test-only include has no production path.
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 use plurx_core as observer_core;
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 #[allow(dead_code)]
 #[path = "../../plurx-core/tests/fixtures/startup_observer.rs"]
 mod sharing_fixture_clock;
@@ -23,7 +23,10 @@ mod background_jobs;
 mod backup;
 mod cachekeep;
 mod channel_subjects;
+#[cfg(feature = "cluster")]
 mod clock_offset;
+mod cluster_capability;
+#[cfg(feature = "cluster")]
 mod cluster_runtime;
 mod copyseg;
 mod decode_facts;
@@ -97,6 +100,7 @@ mod source_custody;
 mod source_input;
 mod source_probe;
 mod state;
+mod storage_helper;
 mod storage_runtime;
 mod store_result;
 mod storeprobe;
@@ -118,12 +122,16 @@ mod vodencode;
 mod vodgen;
 mod vodserve;
 mod waitpool;
+#[cfg(feature = "cluster")]
 mod wal_cli;
 mod watched;
 #[cfg(windows)]
 mod windows_service;
 
-use std::io::{Read, Write};
+#[cfg(any(test, feature = "cluster"))]
+use std::io::Read;
+#[cfg(feature = "cluster")]
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -138,6 +146,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
 use hyper_util::service::TowerToHyperService;
 use plurx_core::cluster::coordination::StoreCoordinator;
+#[cfg(feature = "cluster")]
 use plurx_core::cluster::migration::{connect_activated_store, StartupClockObserver};
 use plurx_core::config::{Config, StorageConfig};
 use plurx_core::domain::LibraryKind;
@@ -465,6 +474,7 @@ enum Command {
         library: Option<i64>,
     },
     /// Create a cluster offline, or manage one through its running admin API.
+    #[cfg(feature = "cluster")]
     Cluster {
         #[command(subcommand)]
         command: ClusterCommand,
@@ -491,6 +501,7 @@ enum Command {
         advertise_host: Option<String>,
     },
     /// Inspect or back up a stopped local Raft WAL. No source mutation is implemented.
+    #[cfg(feature = "cluster")]
     Wal {
         #[command(subcommand)]
         command: crate::wal_cli::WalCommand,
@@ -530,6 +541,7 @@ enum WindowsServiceCommand {
     Run,
 }
 
+#[cfg(feature = "cluster")]
 #[derive(Subcommand)]
 enum ClusterCommand {
     /// Promote stopped native SQLite storage into a verified explicit cluster.
@@ -603,6 +615,7 @@ impl std::fmt::Display for CliExit {
 
 impl std::error::Error for CliExit {}
 
+#[cfg(any(test, feature = "cluster"))]
 fn cli_exit(code: i32, message: impl Into<String>) -> anyhow::Error {
     CliExit {
         code,
@@ -684,18 +697,19 @@ async fn dispatch(
         Command::ResetPassword { .. } => {
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
+        #[cfg(feature = "cluster")]
         Command::Cluster {
             command: ClusterCommand::Create,
         } => {
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
         Command::RefreshMetadata { .. } => {}
+        #[cfg(feature = "cluster")]
+        Command::Cluster { .. } | Command::Wal { .. } => {}
         Command::Healthcheck
         | Command::MediaRuntimeIdentity
         | Command::Advertise { .. }
-        | Command::Cluster { .. }
         | Command::Restore { .. }
-        | Command::Wal { .. }
         | Command::Sharing { .. }
         | Command::DiagnosticPanic => {}
     }
@@ -750,6 +764,7 @@ async fn dispatch(
             reset_password(&config, &username, password).await
         }
         Command::RefreshMetadata { library } => refresh_metadata(&mut config, library).await,
+        #[cfg(feature = "cluster")]
         Command::Cluster { command } => cluster_command(command, &config).await,
         Command::Restore {
             archive,
@@ -799,46 +814,59 @@ async fn dispatch(
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 }
                 Ok(())
-            } else if verify {
-                if data_dir.is_some() || !remap.is_empty() || advertise_host.is_some() {
-                    anyhow::bail!(
+            } else {
+                #[cfg(feature = "cluster")]
+                {
+                    if verify {
+                        if data_dir.is_some() || !remap.is_empty() || advertise_host.is_some() {
+                            anyhow::bail!(
                         "--verify cannot be combined with --data-dir, --remap, or --advertise-host"
                     );
-                }
-                let report = plurx_core::cluster::migration::verify_cluster_backup_archive(
-                    &archive,
-                    credential_key.as_deref(),
-                )?;
-                println!("{}", serde_json::to_string_pretty(&report)?);
-                Ok(())
-            } else {
-                let data_dir = data_dir.ok_or_else(|| {
-                    anyhow::anyhow!("--data-dir is required unless --verify is used")
-                })?;
-                config.storage.data_dir = data_dir;
-                if let Some(host) = advertise_host {
-                    config.cluster.advertise_host = host;
-                }
-                let remaps = parse_restore_remaps(&remap)?;
-                let report = plurx_core::cluster::migration::restore_cluster_backup_archive(
-                    &archive,
-                    &config,
-                    &remaps,
-                    credential_key.as_deref(),
-                )
-                .await?;
-                println!("{}", serde_json::to_string_pretty(&report)?);
-                eprintln!(
-                    "restore created a fenced first voter; before directing clients here, \
+                        }
+                        let report = plurx_core::cluster::migration::verify_cluster_backup_archive(
+                            &archive,
+                            credential_key.as_deref(),
+                        )?;
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                        Ok(())
+                    } else {
+                        let data_dir = data_dir.ok_or_else(|| {
+                            anyhow::anyhow!("--data-dir is required unless --verify is used")
+                        })?;
+                        config.storage.data_dir = data_dir;
+                        if let Some(host) = advertise_host {
+                            config.cluster.advertise_host = host;
+                        }
+                        let remaps = parse_restore_remaps(&remap)?;
+                        let report =
+                            plurx_core::cluster::migration::restore_cluster_backup_archive(
+                                &archive,
+                                &config,
+                                &remaps,
+                                credential_key.as_deref(),
+                            )
+                            .await?;
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                        eprintln!(
+                            "restore created a fenced first voter; before directing clients here, \
                      rejoin every surviving old member with a join token issued by this voter: \
                      stop the node, create a new empty data directory owned by the service user, \
                      copy plurx.toml and nothing else into it, move the old directory aside as \
                      a retired copy and put the new one at the configured path, write a fresh \
                      join token where join_token_file points, and start the node"
-                );
-                Ok(())
+                        );
+                        Ok(())
+                    }
+                }
+                #[cfg(not(feature = "cluster"))]
+                {
+                    anyhow::bail!(
+                        "this archive requires the explicitly configured cluster distribution"
+                    );
+                }
             }
         }
+        #[cfg(feature = "cluster")]
         Command::Wal { command } => crate::wal_cli::run(command, &config).await,
     }
 }
@@ -872,6 +900,7 @@ async fn media_runtime_identity() -> MediaRuntimeIdentity {
     }
 }
 
+#[cfg(feature = "cluster")]
 fn parse_restore_remaps(values: &[String]) -> anyhow::Result<Vec<(PathBuf, PathBuf)>> {
     values
         .iter()
@@ -887,6 +916,7 @@ fn parse_restore_remaps(values: &[String]) -> anyhow::Result<Vec<(PathBuf, PathB
         .collect()
 }
 
+#[cfg(feature = "cluster")]
 async fn cluster_command(command: ClusterCommand, config: &Config) -> anyhow::Result<()> {
     match command {
         ClusterCommand::Create => {
@@ -927,6 +957,7 @@ async fn cluster_command(command: ClusterCommand, config: &Config) -> anyhow::Re
     }
 }
 
+#[cfg(feature = "cluster")]
 async fn cluster_backup_command(
     server: &str,
     token_file: Option<&std::path::Path>,
@@ -953,6 +984,7 @@ async fn cluster_backup_command(
     Ok(())
 }
 
+#[cfg(feature = "cluster")]
 async fn cluster_status_command(
     server: &str,
     token_file: Option<&std::path::Path>,
@@ -985,6 +1017,7 @@ async fn cluster_status_command(
     ))
 }
 
+#[cfg(feature = "cluster")]
 async fn fetch_cluster_aggregate(
     server: &str,
     token_file: Option<&std::path::Path>,
@@ -999,6 +1032,7 @@ async fn fetch_cluster_aggregate(
     })
 }
 
+#[cfg(feature = "cluster")]
 fn print_cluster_status(status: &crate::http::cluster_operations::ClusterOperationsAggregate) {
     println!(
         "{:<20} {:<12} {:<18} {:<23} {:<18} MEDIA",
@@ -1071,6 +1105,7 @@ fn print_cluster_status(status: &crate::http::cluster_operations::ClusterOperati
     }
 }
 
+#[cfg(feature = "cluster")]
 fn truncate_table(value: &str, width: usize) -> String {
     let mut text = value.chars().take(width).collect::<String>();
     if value.chars().count() > width && width > 1 {
@@ -1080,6 +1115,7 @@ fn truncate_table(value: &str, width: usize) -> String {
     text
 }
 
+#[cfg(feature = "cluster")]
 async fn cluster_support_bundle_command(
     server: &str,
     token_file: Option<&std::path::Path>,
@@ -1111,6 +1147,7 @@ async fn cluster_support_bundle_command(
     Ok(())
 }
 
+#[cfg(feature = "cluster")]
 async fn cluster_prepare_restart_command(
     server: &str,
     token_file: Option<&std::path::Path>,
@@ -1192,6 +1229,7 @@ async fn cluster_prepare_restart_command(
     }
 }
 
+#[cfg(feature = "cluster")]
 async fn cluster_cancel_restart_command(
     server: &str,
     token_file: Option<&std::path::Path>,
@@ -1225,6 +1263,7 @@ async fn cluster_cancel_restart_command(
     Ok(())
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn percent_encode_path_segment(value: &str) -> String {
     value
         .bytes()
@@ -1237,6 +1276,7 @@ fn percent_encode_path_segment(value: &str) -> String {
         .collect()
 }
 
+#[cfg(feature = "cluster")]
 async fn cluster_api_request(
     server: &str,
     token_file: Option<&std::path::Path>,
@@ -1245,6 +1285,7 @@ async fn cluster_api_request(
     cluster_api_request_method(server, token_file, path, reqwest::Method::GET, None).await
 }
 
+#[cfg(feature = "cluster")]
 async fn cluster_api_request_method(
     server: &str,
     token_file: Option<&std::path::Path>,
@@ -1296,6 +1337,7 @@ async fn cluster_api_request_method(
     ))
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn read_owner_only_token(token_file: Option<&std::path::Path>) -> anyhow::Result<String> {
     let path = token_file.ok_or_else(|| {
         cli_exit(
@@ -1354,6 +1396,7 @@ fn read_owner_only_token(token_file: Option<&std::path::Path>) -> anyhow::Result
     Ok(token.to_owned())
 }
 
+#[cfg(feature = "cluster")]
 async fn bounded_cli_response(
     mut response: reqwest::Response,
     max_bytes: usize,
@@ -1789,7 +1832,14 @@ async fn refresh_metadata(config: &mut Config, library_id: Option<i64>) -> anyho
     {
         // The native opener validates the manifest before opening a writer,
         // and retains exclusive directory ownership for this entire command.
-        let native = plurx_core::storage::open_native_store(config)
+        let lock = plurx_core::storage::NativeDirectoryLock::acquire(&config.storage.data_dir)
+            .await
+            .context("acquiring standalone maintenance ownership; stop the daemon first")?;
+        anyhow::ensure!(
+            plurx_core::storage::helper::pending(lock.data_dir())?.is_none(),
+            "finish the pending storage migration through normal startup before maintenance"
+        );
+        let native = plurx_core::storage::open_native_store_locked(config, lock)
             .await
             .context("opening standalone storage for maintenance; stop the daemon first")?;
         std::fs::create_dir_all(&dirs.artwork)?;
@@ -1802,31 +1852,37 @@ async fn refresh_metadata(config: &mut Config, library_id: Option<i64>) -> anyho
         )
         .await;
     }
-    let store = connect_activated_store(config).await.context(
-        "connecting to the activated store: an unmigrated data directory needs \
+    #[cfg(not(feature = "cluster"))]
+    anyhow::bail!("legacy or clustered maintenance requires the cluster distribution or version-matched migration helper");
+    #[cfg(feature = "cluster")]
+    {
+        let store = connect_activated_store(config).await.context(
+            "connecting to the activated store: an unmigrated data directory needs \
              `plurxd run` to import it once, and an activated one needs that daemon \
              running because maintenance commands share its voter rather than \
              opening a second store",
-    )?;
-    let cluster_id = store.instance_id().await?;
-    let identity = plurx_core::cluster::initialize_identity(&config.storage.data_dir, &cluster_id)?;
-    let artwork_dir = dirs.artwork;
-    std::fs::create_dir_all(&artwork_dir)?;
-    // A maintenance command runs the same cluster-wide singleton pass a
-    // scheduled job would, so it is subject to the same rule. This process has
-    // no Raft handle of its own, so the durable admission record in
-    // membership.json is what it has; it can only refuse, never grant.
-    let authority = crate::job_lease::AdmittedRoleJobAuthority::new(
-        plurx_core::cluster::migration::local_cluster_role(&config.storage.data_dir)?,
-    );
-    refresh_metadata_with_store(
-        store,
-        &artwork_dir,
-        library_id,
-        &identity.node_id,
-        &authority,
-    )
-    .await
+        )?;
+        let cluster_id = store.instance_id().await?;
+        let identity =
+            plurx_core::cluster::initialize_identity(&config.storage.data_dir, &cluster_id)?;
+        let artwork_dir = dirs.artwork;
+        std::fs::create_dir_all(&artwork_dir)?;
+        // A maintenance command runs the same cluster-wide singleton pass a
+        // scheduled job would, so it is subject to the same rule. This process has
+        // no Raft handle of its own, so the durable admission record in
+        // membership.json is what it has; it can only refuse, never grant.
+        let authority = crate::job_lease::AdmittedRoleJobAuthority::new(
+            plurx_core::cluster::migration::local_cluster_role(&config.storage.data_dir)?,
+        );
+        refresh_metadata_with_store(
+            store,
+            &artwork_dir,
+            library_id,
+            &identity.node_id,
+            &authority,
+        )
+        .await
+    }
 }
 
 /// What an operator sees when `plurxd refresh-metadata` cannot take the
@@ -1952,20 +2008,32 @@ async fn run(config: Config) -> anyhow::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let desktop = desktop_control::DesktopControl::from_environment()?;
 
+    #[cfg(feature = "cluster")]
     let observation = Arc::new(StartupObservationHttp::new(config.server.bind));
+    #[cfg(feature = "cluster")]
     let mut selected = match storage_runtime::select(&config, Some(observation.as_ref())).await {
         Ok(selected) => selected,
         Err(error) => {
+            #[cfg(feature = "cluster")]
             observation.stop_and_drain().await;
             return Err(error).with_context(|| {
                 format!("selecting store in {}", config.storage.data_dir.display())
             });
         }
     };
+    #[cfg(not(feature = "cluster"))]
+    let mut selected = storage_runtime::select(&config).await.with_context(|| {
+        format!(
+            "selecting native store in {}",
+            config.storage.data_dir.display()
+        )
+    })?;
+    #[cfg(feature = "cluster")]
     if selected.mode() == plurx_core::storage::mode::StorageMode::Sqlite {
         // A legacy conversion may have temporarily owned the authenticated
         // clock-only listener. Drain it with the old cluster before native
         // service claims the public listener and its own local authority.
+        #[cfg(feature = "cluster")]
         observation.stop_and_drain().await;
     }
     tracing::info!(storage_mode=?selected.mode(), "durable storage selected");
@@ -1992,6 +2060,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let identity = selected.identity();
         let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&store));
         let catalogue = match &selected {
+            #[cfg(feature = "cluster")]
             storage_runtime::RuntimeStore::Cluster(cluster) => cluster.catalogue_reader(),
             storage_runtime::RuntimeStore::Native { .. } => catalogue,
         };
@@ -2023,7 +2092,9 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let parts = Boot {
             source_activation_at_boot: Some(source_layout_ready),
             store,
+            #[cfg(feature = "cluster")]
             replication: services.replication,
+            #[cfg(feature = "cluster")]
             membership: services.membership,
             catalogue,
             identity,
@@ -2042,6 +2113,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             parts,
             start_mdns_advertiser,
             shutdown.signalled(),
+            #[cfg(feature = "cluster")]
             Some(Arc::clone(&observation)),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             desktop.clone(),
@@ -2049,6 +2121,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         .await
     };
     let result = serving.await;
+    #[cfg(feature = "cluster")]
     observation.stop_and_drain().await;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let native_commit = if let Some(desktop) = &desktop {
@@ -2058,18 +2131,22 @@ async fn run(config: Config) -> anyhow::Result<()> {
     };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let native_commit = false;
+    let storage_description = match selected.mode() {
+        plurx_core::storage::mode::StorageMode::Sqlite => "native SQLite store",
+        plurx_core::storage::mode::StorageMode::Cluster => "cluster store",
+    };
     let shutdown = if native_commit {
         match tokio::time::timeout(Duration::from_secs(30), selected.shutdown()).await {
-            Ok(result) => result.context("stopping local Hiqlite voter"),
+            Ok(result) => result.with_context(|| format!("closing {storage_description}")),
             Err(_) => Err(anyhow::anyhow!(
-                "local Hiqlite store close timed out during committed native shutdown"
+                "{storage_description} close timed out during committed native shutdown"
             )),
         }
     } else {
         selected
             .shutdown()
             .await
-            .context("stopping local Hiqlite voter")
+            .with_context(|| format!("closing {storage_description}"))
     };
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(desktop) = desktop {
@@ -2083,8 +2160,10 @@ struct Boot {
     source_activation_at_boot: Option<bool>,
     store: Arc<dyn plurx_core::store::Store>,
     catalogue: plurx_core::store::CatalogueReader,
-    replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    membership: plurx_core::cluster::membership::MembershipManager,
+    #[cfg(feature = "cluster")]
+    replication: Option<plurx_core::cluster::migration::status::ReplicationMonitor>,
+    #[cfg(feature = "cluster")]
+    membership: Option<plurx_core::cluster::membership::MembershipManager>,
     identity: plurx_core::storage::LocalIdentity,
     /// Resolved before the store is handed on, so a node that cannot open its
     /// existing Trakt rows fails here rather than at the first sync.
@@ -2102,6 +2181,7 @@ struct Boot {
 /// One public socket owner spanning clock-only observation and normal HTTP.
 /// Routing is selected per request, so already-open keepalive connections
 /// cannot retain the pending router after activation.
+#[cfg(feature = "cluster")]
 struct StartupObservationHttp {
     bind: SocketAddr,
     #[cfg(test)]
@@ -2111,6 +2191,7 @@ struct StartupObservationHttp {
     stop: tokio_util::sync::CancellationToken,
 }
 
+#[cfg(feature = "cluster")]
 struct StartupObservationTasks {
     server: tokio::task::JoinHandle<anyhow::Result<HttpDrain>>,
     observer: crate::clock_offset::ClockObserver,
@@ -2118,6 +2199,7 @@ struct StartupObservationTasks {
     probe_stop: tokio_util::sync::CancellationToken,
 }
 
+#[cfg(feature = "cluster")]
 impl StartupObservationHttp {
     fn new(bind: SocketAddr) -> Self {
         Self {
@@ -2217,10 +2299,12 @@ impl StartupObservationHttp {
 }
 
 /// Seconds a client is told to wait before asking a still-starting server again.
+#[cfg(feature = "cluster")]
 const STARTUP_PENDING_RETRY_SECS: u64 = 2;
 
 /// The page a browser gets while the server is still starting: it says so and
 /// reloads itself, so a tab opened during startup lands in the app on its own.
+#[cfg(feature = "cluster")]
 const STARTUP_PENDING_HTML: &str = concat!(
     "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
@@ -2244,6 +2328,7 @@ const STARTUP_PENDING_HTML: &str = concat!(
 /// `/api/v1/server` was told there was no plurx server here. A 503 with
 /// Retry-After is the truthful answer, and it carries the typed code every
 /// client already dispatches on.
+#[cfg(feature = "cluster")]
 async fn startup_pending(headers: axum::http::HeaderMap) -> axum::response::Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
@@ -2273,6 +2358,7 @@ async fn startup_pending(headers: axum::http::HeaderMap) -> axum::response::Resp
 /// `/readyz` keeps its own contract while pending: plain text, 503, and a
 /// one-word reason (API.md §22.1), so status tables that print the body show
 /// `starting` rather than a JSON object.
+#[cfg(feature = "cluster")]
 async fn startup_pending_readyz() -> axum::response::Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
@@ -2286,6 +2372,7 @@ async fn startup_pending_readyz() -> axum::response::Response {
     )
 }
 
+#[cfg(feature = "cluster")]
 fn startup_pending_headers(mut response: axum::response::Response) -> axum::response::Response {
     use axum::http::{header, HeaderValue};
     let headers = response.headers_mut();
@@ -2297,12 +2384,14 @@ fn startup_pending_headers(mut response: axum::response::Response) -> axum::resp
     response
 }
 
+#[cfg(feature = "cluster")]
 impl Drop for StartupObservationHttp {
     fn drop(&mut self) {
         self.stop.cancel();
     }
 }
 
+#[cfg(feature = "cluster")]
 impl StartupClockObserver for StartupObservationHttp {
     fn start(
         &self,
@@ -2404,6 +2493,7 @@ async fn boot(
         parts,
         advertiser,
         shutdown,
+        #[cfg(feature = "cluster")]
         None,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         None,
@@ -2416,11 +2506,12 @@ async fn boot_observing(
     parts: Boot,
     advertiser: MdnsAdvertiser,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-    observation: Option<Arc<StartupObservationHttp>>,
+    #[cfg(feature = "cluster")] observation: Option<Arc<StartupObservationHttp>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))] desktop: Option<
         Arc<desktop_control::DesktopControl>,
     >,
 ) -> anyhow::Result<()> {
+    #[cfg(feature = "cluster")]
     let observation = match observation {
         Some(owner) if owner.tasks.lock().await.is_some() => Some(owner),
         _ => None,
@@ -2437,7 +2528,9 @@ async fn boot_observing(
     let Boot {
         source_activation_at_boot,
         store,
+        #[cfg(feature = "cluster")]
         replication,
+        #[cfg(feature = "cluster")]
         membership,
         catalogue,
         identity,
@@ -2468,6 +2561,7 @@ async fn boot_observing(
     tracing::debug!(expiry_since, "sign-in expiry clock");
     log_startup(&config, &identity);
 
+    #[cfg(feature = "cluster")]
     let purpose_master = Arc::clone(&credential_key);
     let instance_id = identity.instance_id;
     let node_id = identity.node_id;
@@ -2480,7 +2574,9 @@ async fn boot_observing(
         local_source,
         settings_changes,
         backup_provider,
+        #[cfg(feature = "cluster")]
         replication,
+        #[cfg(feature = "cluster")]
         membership,
         catalogue,
         store,
@@ -2499,16 +2595,21 @@ async fn boot_observing(
     state
         .sharing
         .observe_source_activation_at_boot(source_activation_at_boot);
+    #[cfg(feature = "cluster")]
     if let Some(owner) = &observation {
         let observer = owner.observer().await.ok_or_else(|| {
             anyhow::anyhow!("startup observation owner disappeared before activation")
         })?;
         anyhow::ensure!(
-            observer.belongs_to(&state.membership),
+            state
+                .membership
+                .as_ref()
+                .is_some_and(|membership| observer.belongs_to(membership)),
             "foreign startup clock owner"
         );
-        state.clock_observer = observer;
+        state.clock_observer = Some(observer);
     }
+    #[cfg(feature = "cluster")]
     crate::cluster_runtime::prepare_source_authority(&state, purpose_master).await?;
 
     // The stored request is not an ffmpeg contract. Exercise the exact
@@ -2593,6 +2694,9 @@ async fn boot_observing(
     tokio::task::spawn_blocking(http::web::warm_static_assets)
         .await
         .context("precompute embedded web assets")?;
+    #[cfg(not(feature = "cluster"))]
+    let listener = bind_listener(config.server.bind).await?;
+    #[cfg(feature = "cluster")]
     let listener = if observation.is_none() {
         Some(bind_listener(config.server.bind).await?)
     } else {
@@ -2656,6 +2760,18 @@ async fn boot_observing(
         public_listener_stop.cancel();
         jellyfin_stop.cancel();
     };
+    #[cfg(not(feature = "cluster"))]
+    let served = serve(
+        listener,
+        app,
+        jellyfin,
+        https_serving,
+        progress,
+        mdns,
+        shutdown,
+    )
+    .await;
+    #[cfg(feature = "cluster")]
     let served = if let Some(owner) = observation {
         serve_observed(
             owner,
@@ -3515,8 +3631,12 @@ fn build_state(
     local_source: Option<plurx_core::sharing_source_sessions::LocalSourceAuthority>,
     settings_changes: crate::settings_changes::SettingsChangeSource,
     backup_provider: Arc<dyn crate::backup::BackupProvider>,
-    replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    membership: plurx_core::cluster::membership::MembershipManager,
+    #[cfg(feature = "cluster")] replication: Option<
+        plurx_core::cluster::migration::status::ReplicationMonitor,
+    >,
+    #[cfg(feature = "cluster")] membership: Option<
+        plurx_core::cluster::membership::MembershipManager,
+    >,
     catalogue: plurx_core::store::CatalogueReader,
     store: Arc<dyn plurx_core::store::Store>,
     dirs: crate::state::Dirs,
@@ -3533,7 +3653,9 @@ fn build_state(
             trusted_proxies: config.server.trusted_proxies.clone(),
             scan_prune_percent: config.storage.scan_prune_percent,
             credential_key,
+            #[cfg(feature = "cluster")]
             replication,
+            #[cfg(feature = "cluster")]
             membership,
             cluster_id,
             shared_cache_dir: config.cluster.shared_cache_dir.clone(),
@@ -3625,6 +3747,7 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    #[cfg(feature = "cluster")]
     crate::cluster_runtime::spawn_background_loops(state, &background_shutdown);
     tokio::spawn(http::remote::invitations::worker::run(
         state.clone(),
@@ -3666,7 +3789,9 @@ fn spawn_background_loops(
     tokio::spawn(
         std::sync::Arc::clone(&state.transcode).serving_fence_loop(state.serving.subscribe()),
     );
+    #[cfg(feature = "cluster")]
     tokio::spawn(std::sync::Arc::clone(&state.media_pool).poll_loop());
+    #[cfg(feature = "cluster")]
     tokio::spawn(
         std::sync::Arc::clone(&state.media_pool)
             .root_readability_loop(std::sync::Arc::clone(&state.store)),
@@ -3814,6 +3939,7 @@ fn spawn_background_loops(
     );
 
     tokio::spawn(crate::http::images::durable_artwork_loop(state.clone()));
+    #[cfg(feature = "cluster")]
     tokio::spawn(crate::http::transcode_copies::run(state.clone()));
 
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
@@ -3890,6 +4016,7 @@ async fn serve(
 
 /// The observation socket transfers its router per request, but shares the
 /// same TLS/Jellyfin/progress ownership order as ordinary startup.
+#[cfg(feature = "cluster")]
 async fn serve_observed(
     owner: Arc<StartupObservationHttp>,
     app: axum::Router,
@@ -4490,7 +4617,42 @@ fn primary_lan_address() -> Option<IpAddr> {
 /// The machine name the picker shows: the same resolution the cluster roster
 /// and `/api/v1/server` use, so a picker row and Settings name a node alike.
 fn system_hostname() -> Option<String> {
-    plurx_core::cluster::membership::system_short_hostname()
+    fn checked(raw: &str) -> Option<String> {
+        let hostname = raw.trim().trim_end_matches('.');
+        if hostname.parse::<IpAddr>().is_ok() {
+            return None;
+        }
+        let label = hostname.split('.').next().unwrap_or_default().trim();
+        if label.is_empty()
+            || label.eq_ignore_ascii_case("localhost")
+            || label.eq_ignore_ascii_case("unknown")
+            || (matches!(label.len(), 12 | 64) && label.bytes().all(|b| b.is_ascii_hexdigit()))
+            || label.chars().any(char::is_control)
+        {
+            return None;
+        }
+        Some(label.chars().take(63).collect())
+    }
+    if let Some(hostname) = std::env::var("PLURX_NODE_HOSTNAME")
+        .ok()
+        .and_then(|s| checked(&s))
+    {
+        return Some(hostname);
+    }
+    #[cfg(unix)]
+    {
+        let mut buffer = [0_u8; 256];
+        // SAFETY: the buffer is writable for exactly the supplied length.
+        if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+            return None;
+        }
+        let end = buffer.iter().position(|b| *b == 0).unwrap_or(buffer.len());
+        checked(&String::from_utf8_lossy(&buffer[..end]))
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::var("COMPUTERNAME").ok().and_then(|s| checked(&s))
+    }
 }
 
 #[derive(Deserialize)]

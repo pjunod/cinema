@@ -4,35 +4,51 @@
 //! every response is read under the caller's common deadline and byte budget,
 //! and exact requests bind their raw body and route into the node signature.
 
+#[cfg(feature = "cluster")]
 use std::future::Future;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(feature = "cluster")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "cluster")]
 use plurx_core::cluster::membership::{
     normalize_internal_http_base, ActivityPeerAuth, InternalPeerAuth, MembershipManager,
 };
 
+#[cfg(feature = "cluster")]
 pub(crate) const NODE_HEADER: &str = "x-plurx-cluster-node";
+#[cfg(feature = "cluster")]
 pub(crate) const TARGET_HEADER: &str = "x-plurx-cluster-target";
+#[cfg(feature = "cluster")]
 pub(crate) const TIMESTAMP_HEADER: &str = "x-plurx-cluster-time-ms";
+#[cfg(feature = "cluster")]
 pub(crate) const NONCE_HEADER: &str = "x-plurx-cluster-nonce";
+#[cfg(feature = "cluster")]
 pub(crate) const SIGNATURE_HEADER: &str = "x-plurx-cluster-signature";
+#[cfg(feature = "cluster")]
 pub(crate) const RESPONSE_SIGNATURE_HEADER: &str = "x-plurx-response-signature";
 
 #[derive(Clone, Copy)]
 pub(crate) enum PeerAuthMode {
+    #[cfg(feature = "cluster")]
     LegacyActivity,
     ExactRequest,
     /// A voter control response must prove its status and exact body too.
     ExactRequestAndResponse,
     /// A committed member, including a learner, must prove the response.
+    #[cfg(feature = "cluster")]
     ExactRequestAndMemberResponse,
 }
 
 #[derive(Debug)]
 pub(crate) struct PeerResponse {
+    // Retained for common response parser fixtures; live peer I/O is cluster-only.
+    #[cfg_attr(not(any(test, feature = "cluster")), allow(dead_code))]
     pub(crate) dv_processing_header: Option<String>,
     pub(crate) status: reqwest::StatusCode,
     pub(crate) body: Vec<u8>,
+    // The common transport DTO preserves its timing slot across build profiles.
+    #[cfg_attr(not(feature = "cluster"), allow(dead_code))]
     pub(crate) clock_timing: Option<(i64, i64, plurx_core::cluster::clock::ClockDecisionTicket)>,
 }
 
@@ -44,11 +60,13 @@ pub(crate) enum PeerTransportError {
 }
 
 #[derive(Clone)]
+#[cfg(feature = "cluster")]
 pub(crate) struct PeerTransport {
     membership: MembershipManager,
     client: Result<reqwest::Client, String>,
 }
 
+#[cfg(feature = "cluster")]
 impl PeerTransport {
     pub(crate) fn new(membership: MembershipManager) -> Self {
         Self {
@@ -380,6 +398,7 @@ impl PeerTransport {
 
 /// A peer's `Retry-After` in delay-seconds form, bounded to one minute. An
 /// HTTP-date or anything larger is dropped rather than relayed verbatim.
+#[cfg(feature = "cluster")]
 pub(crate) fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u32> {
     headers
         .get(reqwest::header::RETRY_AFTER)?
@@ -391,6 +410,7 @@ pub(crate) fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Optio
         .filter(|seconds| *seconds <= 60)
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) fn signed_response_payload(status: u16, body: &[u8]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(2 + body.len());
     payload.extend_from_slice(&status.to_be_bytes());
@@ -398,11 +418,13 @@ pub(crate) fn signed_response_payload(status: u16, body: &[u8]) -> Vec<u8> {
     payload
 }
 
+#[cfg(feature = "cluster")]
 enum SignedPeerAuth {
     Activity(ActivityPeerAuth),
     Exact(InternalPeerAuth),
 }
 
+#[cfg(feature = "cluster")]
 trait PeerAuthHeaders {
     fn node_id(&self) -> &str;
     fn target_node_id(&self) -> &str;
@@ -413,6 +435,7 @@ trait PeerAuthHeaders {
     fn signature(&self) -> &str;
 }
 
+#[cfg(feature = "cluster")]
 impl PeerAuthHeaders for ActivityPeerAuth {
     fn node_id(&self) -> &str {
         &self.node_id
@@ -431,6 +454,7 @@ impl PeerAuthHeaders for ActivityPeerAuth {
     }
 }
 
+#[cfg(feature = "cluster")]
 impl PeerAuthHeaders for InternalPeerAuth {
     fn node_id(&self) -> &str {
         &self.node_id
@@ -453,6 +477,7 @@ impl PeerAuthHeaders for InternalPeerAuth {
     }
 }
 
+#[cfg(feature = "cluster")]
 fn signed_headers<T: PeerAuthHeaders>(
     request: reqwest::RequestBuilder,
     auth: &T,
@@ -468,6 +493,7 @@ fn signed_headers<T: PeerAuthHeaders>(
     }
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) fn exact_auth_from_headers(headers: &axum::http::HeaderMap) -> Option<InternalPeerAuth> {
     let node_id = headers.get(NODE_HEADER)?.to_str().ok()?;
     let target_node_id = headers.get(TARGET_HEADER)?.to_str().ok()?;
@@ -495,6 +521,7 @@ pub(crate) fn exact_auth_from_headers(headers: &axum::http::HeaderMap) -> Option
     })
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) fn peer_url(base: &str, path: &str) -> Option<reqwest::Url> {
     if !path.starts_with('/') || path.contains('?') || path.contains('#') {
         return None;
@@ -505,6 +532,7 @@ pub(crate) fn peer_url(base: &str, path: &str) -> Option<reqwest::Url> {
     Some(url)
 }
 
+#[cfg(feature = "cluster")]
 async fn read_then_verify<F, Fut>(
     response: reqwest::Response,
     deadline: tokio::time::Instant,
@@ -542,6 +570,7 @@ where
         .map_err(|_| PeerTransportError::TimedOut)?
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn read_bounded(
     mut response: reqwest::Response,
     deadline: tokio::time::Instant,
@@ -592,6 +621,7 @@ pub(crate) fn deadline_after(timeout: Duration) -> tokio::time::Instant {
     tokio::time::Instant::now() + timeout
 }
 
+#[cfg(feature = "cluster")]
 fn unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -600,7 +630,7 @@ fn unix_ms() -> i64 {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 mod tests {
     use super::*;
     use std::convert::Infallible;

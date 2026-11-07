@@ -20763,6 +20763,34 @@ async fn activation_node_observation_fixture() {
     )
     .expect("decode marker");
     assert_eq!(marker.source_schema_version, launch.source_version);
+    // The fixture starts the Core voter directly. Publish the same validated
+    // authority binding the daemon publishes for this explicit cluster before
+    // a maintenance client is allowed to attach. Preserve it on restart.
+    use plurx_core::storage::mode::{StorageManifest, StorageMode};
+    let manifest = match StorageManifest::read(&launch.data_dir).expect("read authority") {
+        Some(manifest) => manifest,
+        None => StorageManifest {
+            version: 1,
+            mode: StorageMode::Cluster,
+            database: HIQLITE_ACTIVE_DIRNAME.into(),
+            instance_id: selected.identity.cluster_id.clone(),
+            node_id: selected.identity.node_id.clone(),
+            generation: uuid::Uuid::new_v4().to_string(),
+            schema_version: marker.replicated_schema_version,
+        },
+    };
+    assert_eq!(manifest.instance_id, selected.identity.cluster_id);
+    assert_eq!(manifest.node_id, selected.identity.node_id);
+    plurx_core::cluster::migration::validate_cluster_storage_manifest(&launch.config(), &manifest)
+        .expect("bind the actual opened voter and committed activation identity");
+    if StorageManifest::read(&launch.data_dir)
+        .expect("read committed mode")
+        .is_none()
+    {
+        manifest
+            .publish(&launch.data_dir)
+            .expect("publish explicit cluster authority");
+    }
     println!("PLURX_ACTIVATION_NODE_READY");
     std::io::stdout()
         .flush()

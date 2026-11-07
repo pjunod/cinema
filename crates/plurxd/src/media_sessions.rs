@@ -2,6 +2,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+#[cfg(any(test, feature = "cluster"))]
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -9,33 +10,45 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::cluster_capability::Membership as MembershipManager;
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderName, Response, StatusCode};
-use futures_util::{future::BoxFuture, stream, StreamExt};
+#[cfg(any(test, feature = "cluster"))]
+use futures_util::future::BoxFuture;
+use futures_util::{stream, StreamExt};
+#[cfg(any(test, feature = "cluster"))]
 use plurx_core::cluster::clock::{
     ClockDecision, ClockRefusal, ClusterClockGuard, OwnedClockAcquisitionTicket,
 };
-use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::{
     MediaSessionActivation, MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
-    MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor, OwnedMediaSessionLease,
-    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
+    MediaSessionRoute, OwnedMediaSessionLease, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
+#[cfg(any(test, feature = "cluster"))]
+use plurx_core::domain::{MediaSessionTakeover, MediaSessionTakeoverCursor};
 use plurx_core::error::StoreError;
 use plurx_core::store::Store;
 use plurx_core::transcode::OutputGrade;
 use serde::{Deserialize, Serialize};
 
-use crate::http::peer_transport::{
-    deadline_after, PeerAuthMode, PeerResponse, PeerTransport, PeerTransportError,
-};
+#[cfg(feature = "cluster")]
+use crate::http::peer_transport::deadline_after;
+#[cfg(any(test, feature = "cluster"))]
+use crate::http::peer_transport::PeerResponse;
+use crate::http::peer_transport::PeerTransportError;
+#[cfg(feature = "cluster")]
+use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
+#[cfg(any(test, feature = "cluster"))]
 use crate::media_pool::MediaOfferRequest;
+#[cfg(any(test, feature = "cluster"))]
 use crate::settings_changes::{Proved, SettingsChangeSource};
 use crate::state::AppState;
+#[cfg(any(test, feature = "cluster"))]
 use crate::transcode::{
-    ClusterReplacementGuard, SessionAdoptionToken, SessionKind, SessionRequest,
-    SessionTakeoverStart, StartInfo, TranscodeManager,
+    ClusterReplacementGuard, SessionAdoptionToken, SessionTakeoverStart, TranscodeManager,
 };
+use crate::transcode::{SessionKind, SessionRequest, StartInfo};
 
 pub(crate) const START_PATH: &str = "/internal/cluster/media/sessions/start";
 pub(crate) const PREPARE_PATH: &str = "/internal/cluster/media/sessions/prepare";
@@ -43,9 +56,13 @@ pub(crate) const ACTIVATE_PATH: &str = "/internal/cluster/media/sessions/activat
 pub(crate) const ABORT_PATH: &str = "/internal/cluster/media/sessions/abort";
 pub(crate) const RELAY_PATH: &str = "/internal/cluster/media/sessions/relay";
 pub(crate) const CONTROL_PATH: &str = "/internal/cluster/media/sessions/control";
+#[cfg(feature = "cluster")]
 pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 96 * 1024;
+#[cfg(feature = "cluster")]
 pub(crate) const MAX_ACTIVATION_REQUEST_BYTES: usize = 128 * 1024;
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) const REMOTE_START_OWNERSHIP_HEADER: &str = "x-plurx-start-ownership";
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) const REMOTE_START_OWNERSHIP_V1: &str = "created-v1";
 /// Durable marker carried by a prepared successor's persisted start response.
 ///
@@ -55,10 +72,12 @@ pub(crate) const REMOTE_START_OWNERSHIP_V1: &str = "created-v1";
 /// publication fence waits for predecessor projection.
 pub(crate) const PREPARED_SUCCESSOR_PLAN_NOTE: &str = "prepared_quality_handoff";
 
+#[cfg(feature = "cluster")]
 const MAX_START_RESPONSE_BYTES: usize = 128 * 1024;
 pub(crate) const START_DEADLINE: Duration = Duration::from_secs(50);
 pub(crate) const OWNER_ASSIGNMENT_DEADLINE: Duration = Duration::from_secs(3);
 pub(crate) const ACTIVATION_STORE_DEADLINE: Duration = Duration::from_secs(3);
+#[cfg(feature = "cluster")]
 const ABORT_DEADLINE: Duration = Duration::from_secs(5);
 /// Post-header streaming is deliberately disjoint from the request's
 /// preparation budget. A media lookup may spend almost its whole request
@@ -128,6 +147,7 @@ pub(crate) const LEASE_TTL_MS: i64 = 12_000;
 /// first ordinary renewal path. After that first renewal it returns to the
 /// normal 12-second lease. The longer one-shot claim is an ownership fence,
 /// not an inactivity or playback-progress watchdog.
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_CLAIM_LEASE_TTL_MS: i64 = 24_000;
 /// Begins on the worker before the start response leaves it, so it must
 /// strictly outlive ingress placement, owner assignment, the fixed activation
@@ -158,9 +178,11 @@ const RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE: Duration = Duration::from_secs(2);
 const RELAY_PLAYLIST_MAX_LIFETIME: Duration = Duration::from_secs(60);
 /// Public status, subtitle-segment, and release requests only perform bounded
 /// response publication/control work.
+#[cfg(any(test, feature = "cluster"))]
 const RELAY_SHORT_MAX_LIFETIME: Duration = Duration::from_secs(5);
 /// A media segment can spend 30 seconds in a VOD blocked GET plus the five
 /// second publication fence.
+#[cfg(any(test, feature = "cluster"))]
 const RELAY_SEGMENT_MAX_LIFETIME: Duration = Duration::from_secs(35);
 const ROUTE_QUERY_SHARDS: usize = 32;
 const ROUTE_GENERATION_SHARDS: usize = 4_096;
@@ -187,21 +209,29 @@ const RELEASE_RECONCILIATION_FANOUT: usize = 4;
 const RELEASE_RECONCILIATION_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 const RELEASE_RECONCILIATION_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const RELEASE_CLEANUP_CAPACITY: usize = 128;
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_DEADLINE: Duration = Duration::from_secs(8);
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_BATCH: usize = 16;
+#[cfg(feature = "cluster")]
 const TAKEOVER_FANOUT: usize = 4;
 const TAKEOVER_OVERLAP_MARGIN_MS: i64 = 2_000;
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_CLEANUP_DEADLINE: Duration = Duration::from_secs(2);
 /// Commit-unknown takeover settlement owns only the fixed lease proposed by
 /// the CAS. Store attempts are kept short enough to make several exact reads
 /// inside that lease; immediate failures back off so an unavailable Store
 /// cannot become a busy loop.
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_RECONCILIATION_STORE_DEADLINE: Duration = Duration::from_secs(1);
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_RECONCILIATION_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 /// Enough authority to finish one bounded publication mutation and still
 /// reach the next ordinary lease tick, complete its owner inventory, and
 /// enter the renewal Store with the full fail-closed admission window.
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_PUBLICATION_MIN_RUNWAY: Duration = Duration::from_secs(
     TAKEOVER_RECONCILIATION_STORE_DEADLINE.as_secs()
         + LEASE_INTERVAL.as_secs()
@@ -210,6 +240,7 @@ const TAKEOVER_PUBLICATION_MIN_RUNWAY: Duration = Duration::from_secs(
         + 1,
 );
 
+#[cfg(any(test, feature = "cluster"))]
 fn try_admit_takeover_settlement() -> Option<tokio::sync::OwnedSemaphorePermit> {
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     Arc::clone(SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(TAKEOVER_BATCH))))
@@ -275,12 +306,19 @@ const TAKEOVER_BUCKETS_MS: [u64; 7] = [100, 250, 500, 1_000, 2_500, 5_000, 10_00
 /// Index into the metric arrays. Named because "2" appearing on four
 /// unrelated return paths is how an operator ends up reading a histogram that
 /// counts the wrong thing.
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_METHOD_COPY: usize = 0;
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_METHOD_TRANSCODE: usize = 1;
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_METHOD_UNKNOWN: usize = 2;
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_WON: usize = 0;
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_LOST: usize = 1;
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_SKIPPED: usize = 2;
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_FAILED: usize = 3;
 
 struct TakeoverMetrics {
@@ -295,6 +333,7 @@ static TAKEOVER_METRICS: LazyLock<TakeoverMetrics> = LazyLock::new(|| TakeoverMe
     duration_micros: std::array::from_fn(|_| AtomicU64::new(0)),
 });
 
+#[cfg(any(test, feature = "cluster"))]
 struct TakeoverMetricGuard {
     method: usize,
     outcome: usize,
@@ -305,6 +344,7 @@ struct TakeoverMetricGuard {
 /// claim becomes commit-unknown. Keeping this as one move-only value makes it
 /// impossible for a request deadline to drop the worker while leaving either
 /// the release generation or replacement serialization behind.
+#[cfg(any(test, feature = "cluster"))]
 struct PendingTakeoverSettlement<W = TakeoverWorkerGuard, A = SessionAdoptionToken> {
     original: MediaSessionRoute,
     claim: MediaSessionTakeover,
@@ -316,12 +356,15 @@ struct PendingTakeoverSettlement<W = TakeoverWorkerGuard, A = SessionAdoptionTok
     metric: TakeoverMetricGuard,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 struct TakeoverClockAdmission {
     ticket: OwnedClockAcquisitionTicket,
     monotonic_expiry: tokio::time::Instant,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl TakeoverClockAdmission {
+    #[cfg(any(test, feature = "cluster"))]
     fn claim(
         &self,
         original: &MediaSessionRoute,
@@ -343,6 +386,7 @@ impl TakeoverClockAdmission {
 /// by its own clock, so the owner itself must be bounded: an unobserved
 /// learner that coverage excuses is never contested, and every revalidation of
 /// the ticket re-checks that owner.
+#[cfg(any(test, feature = "cluster"))]
 fn acquire_takeover_clock(
     clock: &Arc<ClusterClockGuard>,
     owner_node_id: &str,
@@ -358,6 +402,7 @@ fn acquire_takeover_clock(
     })
 }
 
+#[cfg(any(test, feature = "cluster"))]
 trait TakeoverWorkerLifecycle: Send + Sized + 'static {
     fn retain_until(&mut self, expires_at_ms: i64, monotonic_expiry: tokio::time::Instant);
     fn stop(self, reason: &'static str) -> BoxFuture<'static, ()>;
@@ -370,6 +415,7 @@ trait TakeoverWorkerLifecycle: Send + Sized + 'static {
     fn publish(self);
 }
 
+#[cfg(any(test, feature = "cluster"))]
 trait TakeoverSettlementIo<A: Send + 'static, W: Send + 'static>: Sync {
     fn route_generation(&self, session_id: &str) -> u64;
     fn claim<'a>(
@@ -414,6 +460,7 @@ trait TakeoverSettlementIo<A: Send + 'static, W: Send + 'static>: Sync {
     ) -> BoxFuture<'a, bool>;
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl TakeoverSettlementIo<SessionAdoptionToken, TakeoverWorkerGuard> for AppState {
     fn route_generation(&self, session_id: &str) -> u64 {
         self.media_sessions.route_generation(session_id)
@@ -583,6 +630,7 @@ impl TakeoverSettlementIo<SessionAdoptionToken, TakeoverWorkerGuard> for AppStat
 /// Fail-closed cleanup owner for the provisional or adopted local worker.
 /// Every normal verdict consumes this guard; cancellation or panic transfers
 /// the exact worker and replacement serialization into detached teardown.
+#[cfg(any(test, feature = "cluster"))]
 struct TakeoverWorkerGuard {
     manager: Arc<TranscodeManager>,
     local_session_id: String,
@@ -592,7 +640,9 @@ struct TakeoverWorkerGuard {
     retain_until: Option<(i64, tokio::time::Instant)>,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl TakeoverWorkerGuard {
+    #[cfg(any(test, feature = "cluster"))]
     fn new(
         manager: Arc<TranscodeManager>,
         local_session_id: String,
@@ -610,10 +660,12 @@ impl TakeoverWorkerGuard {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn adopted(&mut self, durable_session_id: &str) {
         self.local_session_id = durable_session_id.to_owned();
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn retain_settlement_until(
         &mut self,
         expires_at_ms: i64,
@@ -622,6 +674,7 @@ impl TakeoverWorkerGuard {
         self.retain_until = Some((expires_at_ms, monotonic_expiry));
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn spawn_teardown(&mut self, reason: &'static str) -> Option<tokio::task::JoinHandle<()>> {
         let replacement = self.replacement.take()?;
         // From here this hold is a teardown, not a start. Nothing is waiting on
@@ -659,6 +712,7 @@ impl TakeoverWorkerGuard {
         }))
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     async fn stop(mut self, reason: &'static str) {
         // A normal caller reaches this only with a definitive loss or before
         // claim submission. Unexpected Drop retains the armed fixed lease;
@@ -669,6 +723,7 @@ impl TakeoverWorkerGuard {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     async fn stop_and_retain_until(
         mut self,
         reason: &'static str,
@@ -683,6 +738,7 @@ impl TakeoverWorkerGuard {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn publish(mut self) {
         drop(self.replacement.take());
         drop(self.settlement.take());
@@ -690,6 +746,7 @@ impl TakeoverWorkerGuard {
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl TakeoverWorkerLifecycle for TakeoverWorkerGuard {
     fn retain_until(&mut self, expires_at_ms: i64, monotonic_expiry: tokio::time::Instant) {
         self.retain_settlement_until(expires_at_ms, monotonic_expiry);
@@ -718,12 +775,14 @@ impl TakeoverWorkerLifecycle for TakeoverWorkerGuard {
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl crate::transcode::SessionAdoptionOwner for TakeoverWorkerGuard {
     fn adopted_session_id(&mut self, durable_session_id: &str) {
         self.adopted(durable_session_id);
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl Drop for TakeoverWorkerGuard {
     fn drop(&mut self) {
         drop(self.spawn_teardown("media-session takeover settlement owner dropped"));
@@ -733,12 +792,15 @@ impl Drop for TakeoverWorkerGuard {
 /// Owns the creation child and its exact cleanup capability as one value.
 /// Dropping a JoinHandle detaches its task, so supervisor cancellation must
 /// instead abort and await that child before exact worker teardown can begin.
+#[cfg(any(test, feature = "cluster"))]
 struct TakeoverCreationOwner<W: TakeoverWorkerLifecycle = TakeoverWorkerGuard> {
     handle: Option<tokio::task::JoinHandle<Result<StartInfo, String>>>,
     worker: Option<W>,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl<W: TakeoverWorkerLifecycle> TakeoverCreationOwner<W> {
+    #[cfg(any(test, feature = "cluster"))]
     fn new(handle: tokio::task::JoinHandle<Result<StartInfo, String>>, worker: W) -> Self {
         Self {
             handle: Some(handle),
@@ -746,6 +808,7 @@ impl<W: TakeoverWorkerLifecycle> TakeoverCreationOwner<W> {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     async fn finish(mut self, deadline: tokio::time::Instant) -> Result<(StartInfo, W), String> {
         let outcome = tokio::time::timeout_at(
             deadline,
@@ -800,6 +863,7 @@ impl<W: TakeoverWorkerLifecycle> TakeoverCreationOwner<W> {
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl<W: TakeoverWorkerLifecycle> Drop for TakeoverCreationOwner<W> {
     fn drop(&mut self) {
         let Some(handle) = self.handle.take() else {
@@ -824,13 +888,16 @@ impl<W: TakeoverWorkerLifecycle> Drop for TakeoverCreationOwner<W> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "cluster"))]
 enum TakeoverClaimVerdict {
     Won(Box<MediaSessionRoute>),
     Pending,
     Lost,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl TakeoverMetricGuard {
+    #[cfg(any(test, feature = "cluster"))]
     fn new() -> Self {
         Self {
             method: TAKEOVER_METHOD_UNKNOWN,
@@ -863,6 +930,7 @@ pub(crate) fn settlement_protected_ids() -> HashSet<String> {
         .collect()
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl Drop for TakeoverMetricGuard {
     fn drop(&mut self) {
         let elapsed = self.started.elapsed();
@@ -965,6 +1033,7 @@ enum RouteLockSite {
     /// `cache_queried_route_result` (a Store lookup's answer).
     QueriedInsert = 2,
     /// `cache_route_if_generation` (generation-checked activation).
+    #[cfg(any(test, feature = "cluster"))]
     GenerationInsert = 3,
 }
 
@@ -1604,6 +1673,7 @@ impl From<RemotePrepareRequest> for RemotePrepareRequestWire {
 }
 
 impl RemotePrepareRequest {
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn is_valid(&self) -> bool {
         self.protocol_version == crate::media_pool::PROTOCOL_VERSION
             && uuid::Uuid::parse_str(&self.incarnation_id).is_ok()
@@ -1624,6 +1694,7 @@ pub(crate) struct RemoteActivateRequest {
 }
 
 impl RemoteActivateRequest {
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn is_valid_for(&self, target_node_id: &str) -> bool {
         self.activation.owner_node_id == target_node_id
             && self.activation.request_id.is_some()
@@ -1639,13 +1710,35 @@ pub(crate) struct RemoteSessionStart {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RemoteSessionStartOwnership {
+    #[cfg_attr(
+        not(feature = "cluster"),
+        allow(
+            dead_code,
+            reason = "native and replicated callers share this outcome contract; peer transport constructs this variant"
+        )
+    )]
     Created,
+    #[cfg_attr(
+        not(feature = "cluster"),
+        allow(
+            dead_code,
+            reason = "native and replicated callers share this outcome contract; peer transport constructs this variant"
+        )
+    )]
     Recovered,
     /// A pre-negotiation peer returned the legacy 200 response, which does
     /// not reveal whether this request created the worker or replayed one.
+    #[cfg_attr(
+        not(feature = "cluster"),
+        allow(
+            dead_code,
+            reason = "native and replicated callers share this outcome contract; peer transport constructs this variant"
+        )
+    )]
     LegacyAmbiguous,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn decode_remote_start_response(
     response: crate::http::peer_transport::PeerResponse,
 ) -> Result<RemoteSessionStart, PeerTransportError> {
@@ -1715,6 +1808,7 @@ impl From<StartInfo> for RemoteStartResponse {
 
 impl RemoteStartResponse {
     /// Optional bounded sidecar keeps older strict START body readers valid.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn processed_dv_header(&self) -> Option<String> {
         self.processed_dv_profile
             .filter(|_| self.is_valid())
@@ -1727,6 +1821,7 @@ impl RemoteStartResponse {
             })
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn processed_dv_profile_from_header(&self, header: &str) -> Option<u8> {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -1813,6 +1908,7 @@ pub(crate) struct RemoteAbortRequest {
 }
 
 impl RemoteAbortRequest {
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.incarnation_id).is_ok()
             && uuid::Uuid::parse_str(&self.session_id).is_ok()
@@ -1824,6 +1920,7 @@ impl RemoteAbortRequest {
             })
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn without_reason(&self) -> Self {
         Self {
             incarnation_id: self.incarnation_id.clone(),
@@ -1923,6 +2020,7 @@ impl RelayHeaders {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn is_valid(&self) -> bool {
         [
             &self.range,
@@ -1971,6 +2069,7 @@ impl RelayResource {
         resource
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn is_valid(&self) -> bool {
         match self {
             Self::Status | Self::VideoPlaylist | Self::ContinuousFamily | Self::Delete => true,
@@ -2010,6 +2109,7 @@ impl RelayResource {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn max_lifetime(&self) -> Duration {
         match self {
             Self::Playlist { .. }
@@ -2026,6 +2126,7 @@ impl RelayResource {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn max_inherited_lifetime(&self) -> Duration {
         self.max_lifetime()
             .saturating_add(RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE)
@@ -2045,6 +2146,7 @@ pub(crate) struct RelayRequest {
 }
 
 impl RelayRequest {
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.session_id).is_ok()
             && self.resource.is_valid()
@@ -2053,6 +2155,7 @@ impl RelayRequest {
             && self.headers.is_valid()
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn remaining_at(&self, now_unix_ms: i64) -> Option<Duration> {
         let remaining_ms = u64::try_from(self.deadline_unix_ms.saturating_sub(now_unix_ms))
             .ok()
@@ -2063,6 +2166,7 @@ impl RelayRequest {
     /// Convert the origin's own wall-clock envelope into its transport
     /// budget. No skew is spendable here because the sender has the same
     /// clock that produced the wire deadline.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn transport_budget_at(&self, now_unix_ms: i64) -> Option<Duration> {
         Some(
             self.remaining_at(now_unix_ms)?
@@ -2076,6 +2180,7 @@ impl RelayRequest {
     /// publish after the ingress transport has already abandoned the request.
     /// The origin's earlier absolute deadline otherwise remains authoritative;
     /// reconstructing this later consumes time rather than refreshing it.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn owner_budget_at(&self, now_unix_ms: i64) -> Option<Duration> {
         let budget = self
             .remaining_at(now_unix_ms)?
@@ -2084,6 +2189,7 @@ impl RelayRequest {
         (!budget.is_zero()).then_some(budget)
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn deadline_is_plausible_at(&self, now_unix_ms: i64) -> bool {
         let max_ms =
             i64::try_from(self.resource.max_inherited_lifetime().as_millis()).unwrap_or(i64::MAX);
@@ -2091,6 +2197,7 @@ impl RelayRequest {
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn valid_resource_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
@@ -2103,8 +2210,10 @@ fn valid_resource_name(value: &str) -> bool {
 
 #[derive(Clone)]
 pub(crate) struct MediaSessionCoordinator {
-    membership: MembershipManager,
-    transport: PeerTransport,
+    #[cfg(feature = "cluster")]
+    membership: Option<MembershipManager>,
+    #[cfg(feature = "cluster")]
+    transport: Option<PeerTransport>,
     store: Arc<dyn Store>,
     routes: Arc<tokio::sync::Mutex<HashMap<String, CachedRoute>>>,
     /// Capability releases which have been admitted but whose durable end is
@@ -2234,9 +2343,15 @@ impl ControlAdmission {
 }
 
 impl MediaSessionCoordinator {
-    pub(crate) fn new(membership: MembershipManager, store: Arc<dyn Store>) -> Arc<Self> {
+    pub(crate) fn new(membership: Option<MembershipManager>, store: Arc<dyn Store>) -> Arc<Self> {
+        #[cfg(not(feature = "cluster"))]
+        let _ = membership;
         Arc::new(Self {
-            transport: PeerTransport::new(membership.clone()),
+            #[cfg(feature = "cluster")]
+            transport: membership
+                .as_ref()
+                .map(|member| PeerTransport::new(member.clone())),
+            #[cfg(feature = "cluster")]
             membership,
             store,
             routes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -2886,6 +3001,7 @@ impl MediaSessionCoordinator {
         self.cache_route_result(&session_id, Some(route)).await;
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn route_generation(&self, session_id: &str) -> u64 {
         let shard = route_hash(session_id) % self.route_generations.len();
         self.route_generations[shard].load(std::sync::atomic::Ordering::Acquire)
@@ -2895,6 +3011,7 @@ impl MediaSessionCoordinator {
     /// this cache shard after the authoritative operation began. Release
     /// admission advances the generation before its Store End, so a delayed
     /// takeover cannot overwrite the tombstone it eventually publishes.
+    #[cfg(any(test, feature = "cluster"))]
     async fn cache_route_if_generation(
         &self,
         route: MediaSessionRoute,
@@ -3028,12 +3145,26 @@ impl MediaSessionCoordinator {
         std::mem::take(&mut *self.lease_seeds.lock().await)
     }
 
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
+    #[cfg(feature = "cluster")]
     async fn peer_base(
         &self,
         node_id: &str,
         deadline: tokio::time::Instant,
     ) -> Result<String, PeerTransportError> {
-        tokio::time::timeout_at(deadline, self.membership.media_peers())
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
+        }
+        #[cfg(feature = "cluster")]
+        {
+            tokio::time::timeout_at(
+                deadline,
+                self.membership
+                    .as_ref()
+                    .ok_or(PeerTransportError::Unreachable)?
+                    .media_peers(),
+            )
             .await
             .map_err(|_| PeerTransportError::TimedOut)?
             .map_err(|_| PeerTransportError::Unreachable)?
@@ -3041,33 +3172,45 @@ impl MediaSessionCoordinator {
             .find(|peer| peer.node_id == node_id && peer.reachable)
             .and_then(|peer| peer.http_base)
             .ok_or(PeerTransportError::Unreachable)
+        }
     }
 
     /// Shared receiver bytes retain the existing authenticated streaming driver.
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn receiver_forward_stream(
         &self,
         owner_node_id: &str,
         body: Vec<u8>,
         deadline: tokio::time::Instant,
     ) -> Result<reqwest::Response, PeerTransportError> {
-        if body.len() > 128 * 1024 || tokio::time::Instant::now() >= deadline {
-            return Err(PeerTransportError::InvalidResponse);
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
         }
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        self.transport
-            .request_stream(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                "/internal/cluster/sharing/receiver/forward",
-                body,
-                deadline,
-                PeerAuthMode::ExactRequest,
-            )
-            .await
+        #[cfg(feature = "cluster")]
+        {
+            if body.len() > 128 * 1024 || tokio::time::Instant::now() >= deadline {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            self.transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request_stream(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    "/internal/cluster/sharing/receiver/forward",
+                    body,
+                    deadline,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await
+        }
     }
 
     /// Only the named receiver control/custody operations use signed replies.
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn receiver_forward_bounded(
         &self,
         owner_node_id: &str,
@@ -3075,56 +3218,76 @@ impl MediaSessionCoordinator {
         body: Vec<u8>,
         deadline: tokio::time::Instant,
     ) -> Result<crate::http::peer_transport::PeerResponse, PeerTransportError> {
-        if !matches!(
-            path,
-            "/internal/cluster/sharing/receiver/control"
-                | "/internal/cluster/sharing/receiver/register"
-                | "/internal/cluster/sharing/receiver/ack"
-        ) || body.len() > 128 * 1024
-            || tokio::time::Instant::now() >= deadline
+        #[cfg(not(feature = "cluster"))]
         {
-            return Err(PeerTransportError::InvalidResponse);
+            Err(PeerTransportError::Unreachable)
         }
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        self.transport
-            .request(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
+        #[cfg(feature = "cluster")]
+        {
+            if !matches!(
                 path,
-                body,
-                deadline,
-                64 * 1024,
-                PeerAuthMode::ExactRequestAndMemberResponse,
-            )
-            .await
+                "/internal/cluster/sharing/receiver/control"
+                    | "/internal/cluster/sharing/receiver/register"
+                    | "/internal/cluster/sharing/receiver/ack"
+            ) || body.len() > 128 * 1024
+                || tokio::time::Instant::now() >= deadline
+            {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            self.transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    path,
+                    body,
+                    deadline,
+                    64 * 1024,
+                    PeerAuthMode::ExactRequestAndMemberResponse,
+                )
+                .await
+        }
     }
 
     /// Source body relay: keep byte backpressure and accepted-writer custody.
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn source_forward_stream(
         &self,
         owner_node_id: &str,
         body: Vec<u8>,
         deadline: tokio::time::Instant,
     ) -> Result<reqwest::Response, PeerTransportError> {
-        if body.len() > 1024 * 1024 {
-            return Err(PeerTransportError::InvalidResponse);
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
         }
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        self.transport
-            .request_stream(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                "/internal/cluster/sharing/source/forward",
-                body,
-                deadline,
-                crate::http::peer_transport::PeerAuthMode::ExactRequest,
-            )
-            .await
+        #[cfg(feature = "cluster")]
+        {
+            if body.len() > 1024 * 1024 {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            self.transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request_stream(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    "/internal/cluster/sharing/source/forward",
+                    body,
+                    deadline,
+                    crate::http::peer_transport::PeerAuthMode::ExactRequest,
+                )
+                .await
+        }
     }
 
     /// Bounded Source control and custody answers authenticate status/body too.
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn source_forward_bounded(
         &self,
         owner_node_id: &str,
@@ -3132,166 +3295,201 @@ impl MediaSessionCoordinator {
         body: Vec<u8>,
         deadline: tokio::time::Instant,
     ) -> Result<crate::http::peer_transport::PeerResponse, PeerTransportError> {
-        if body.len() > 1024 * 1024
-            || !matches!(
-                path,
-                "/internal/cluster/sharing/source/locate"
-                    | "/internal/cluster/sharing/source/prepare"
-                    | "/internal/cluster/sharing/source/control"
-                    | "/internal/cluster/sharing/source/register"
-                    | "/internal/cluster/sharing/source/ack"
-            )
+        #[cfg(not(feature = "cluster"))]
         {
-            return Err(PeerTransportError::InvalidResponse);
+            Err(PeerTransportError::Unreachable)
         }
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        self.transport
-            .request(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                path,
-                body,
-                deadline,
-                64 * 1024,
-                crate::http::peer_transport::PeerAuthMode::ExactRequestAndMemberResponse,
-            )
-            .await
+        #[cfg(feature = "cluster")]
+        {
+            if body.len() > 1024 * 1024
+                || !matches!(
+                    path,
+                    "/internal/cluster/sharing/source/locate"
+                        | "/internal/cluster/sharing/source/prepare"
+                        | "/internal/cluster/sharing/source/control"
+                        | "/internal/cluster/sharing/source/register"
+                        | "/internal/cluster/sharing/source/ack"
+                )
+            {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            self.transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    path,
+                    body,
+                    deadline,
+                    64 * 1024,
+                    crate::http::peer_transport::PeerAuthMode::ExactRequestAndMemberResponse,
+                )
+                .await
+        }
     }
 
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn start_remote(
         &self,
         owner_node_id: &str,
         request: &RemoteStartRequest,
         deadline: tokio::time::Instant,
     ) -> Result<RemoteSessionStart, PeerTransportError> {
-        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
-        if body.len() > MAX_CONTROL_REQUEST_BYTES {
-            return Err(PeerTransportError::InvalidResponse);
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
         }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(PeerTransportError::TimedOut);
+        #[cfg(feature = "cluster")]
+        {
+            let body =
+                serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+            if body.len() > MAX_CONTROL_REQUEST_BYTES {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(PeerTransportError::TimedOut);
+            }
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            let response = self
+                .transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request_with_static_header(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    START_PATH,
+                    body,
+                    deadline,
+                    MAX_START_RESPONSE_BYTES,
+                    PeerAuthMode::ExactRequest,
+                    (REMOTE_START_OWNERSHIP_HEADER, REMOTE_START_OWNERSHIP_V1),
+                )
+                .await?;
+            let started = decode_remote_start_response(response)?;
+            if request.retained_output_receiver != Some(1) && started.info.retained_output.is_some()
+            {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            Ok(started)
         }
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        let response = self
-            .transport
-            .request_with_static_header(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                START_PATH,
-                body,
-                deadline,
-                MAX_START_RESPONSE_BYTES,
-                PeerAuthMode::ExactRequest,
-                (REMOTE_START_OWNERSHIP_HEADER, REMOTE_START_OWNERSHIP_V1),
-            )
-            .await?;
-        let started = decode_remote_start_response(response)?;
-        if request.retained_output_receiver != Some(1) && started.info.retained_output.is_some() {
-            return Err(PeerTransportError::InvalidResponse);
-        }
-        Ok(started)
     }
 
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn activate_remote(
         &self,
         owner_node_id: &str,
         request: &RemoteActivateRequest,
         deadline: tokio::time::Instant,
     ) -> Result<(), PeerTransportError> {
-        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
-        if body.len() > MAX_ACTIVATION_REQUEST_BYTES || tokio::time::Instant::now() >= deadline {
-            return Err(PeerTransportError::InvalidResponse);
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
         }
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        let response = self
-            .transport
-            .request(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                ACTIVATE_PATH,
-                body,
-                deadline,
-                4 * 1024,
-                PeerAuthMode::ExactRequest,
-            )
-            .await?;
-        if matches!(
-            response.status,
-            reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::ACCEPTED
-        ) {
-            Ok(())
-        } else if response.status == reqwest::StatusCode::REQUEST_TIMEOUT {
-            Err(PeerTransportError::TimedOut)
-        } else {
-            Err(PeerTransportError::InvalidResponse)
+        #[cfg(feature = "cluster")]
+        {
+            let body =
+                serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+            if body.len() > MAX_ACTIVATION_REQUEST_BYTES || tokio::time::Instant::now() >= deadline
+            {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            let response = self
+                .transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    ACTIVATE_PATH,
+                    body,
+                    deadline,
+                    4 * 1024,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await?;
+            if matches!(
+                response.status,
+                reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::ACCEPTED
+            ) {
+                Ok(())
+            } else if response.status == reqwest::StatusCode::REQUEST_TIMEOUT {
+                Err(PeerTransportError::TimedOut)
+            } else {
+                Err(PeerTransportError::InvalidResponse)
+            }
         }
     }
 
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn prepare_remote(
         &self,
         owner_node_id: &str,
         request: &RemotePrepareRequest,
         deadline: tokio::time::Instant,
     ) -> Result<(), PeerTransportError> {
-        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
-        if body.len() > MAX_CONTROL_REQUEST_BYTES || tokio::time::Instant::now() >= deadline {
-            return Err(PeerTransportError::InvalidResponse);
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
         }
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        let response = self
-            .transport
-            .request(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                PREPARE_PATH,
-                body,
-                deadline,
-                4 * 1024,
-                PeerAuthMode::ExactRequest,
-            )
-            .await?;
-        if response.status == reqwest::StatusCode::NO_CONTENT {
-            Ok(())
-        } else if response.status == reqwest::StatusCode::REQUEST_TIMEOUT {
-            Err(PeerTransportError::TimedOut)
-        } else {
-            Err(PeerTransportError::InvalidResponse)
+        #[cfg(feature = "cluster")]
+        {
+            let body =
+                serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+            if body.len() > MAX_CONTROL_REQUEST_BYTES || tokio::time::Instant::now() >= deadline {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            let response = self
+                .transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    PREPARE_PATH,
+                    body,
+                    deadline,
+                    4 * 1024,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await?;
+            if response.status == reqwest::StatusCode::NO_CONTENT {
+                Ok(())
+            } else if response.status == reqwest::StatusCode::REQUEST_TIMEOUT {
+                Err(PeerTransportError::TimedOut)
+            } else {
+                Err(PeerTransportError::InvalidResponse)
+            }
         }
     }
 
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn abort_remote(
         &self,
         owner_node_id: &str,
         request: &RemoteAbortRequest,
     ) -> Result<(), PeerTransportError> {
-        let deadline = deadline_after(ABORT_DEADLINE);
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
-        let mut response = self
-            .transport
-            .request(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                ABORT_PATH,
-                body,
-                deadline,
-                1_024,
-                PeerAuthMode::ExactRequest,
-            )
-            .await?;
-        // The original strict envelope had no `reason`. An old
-        // deny_unknown_fields endpoint rejects the new request before
-        // settlement, so retry the same exact/idempotent abort once with the
-        // legacy body. New peers consume the first request and preserve the
-        // honest release/supersession reason.
-        if let Some(body) = remote_abort_legacy_retry_body(request, response.status)? {
-            response = self
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
+        }
+        #[cfg(feature = "cluster")]
+        {
+            let deadline = deadline_after(ABORT_DEADLINE);
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            let body =
+                serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+            let mut response = self
                 .transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
                 .request(
                     owner_node_id,
                     &base,
@@ -3303,202 +3501,283 @@ impl MediaSessionCoordinator {
                     PeerAuthMode::ExactRequest,
                 )
                 .await?;
-        }
-        if response.status.is_success() {
-            Ok(())
-        } else {
-            Err(PeerTransportError::InvalidResponse)
+            // The original strict envelope had no `reason`. An old
+            // deny_unknown_fields endpoint rejects the new request before
+            // settlement, so retry the same exact/idempotent abort once with the
+            // legacy body. New peers consume the first request and preserve the
+            // honest release/supersession reason.
+            if let Some(body) = remote_abort_legacy_retry_body(request, response.status)? {
+                response = self
+                    .transport
+                    .as_ref()
+                    .ok_or(PeerTransportError::Unreachable)?
+                    .request(
+                        owner_node_id,
+                        &base,
+                        reqwest::Method::POST,
+                        ABORT_PATH,
+                        body,
+                        deadline,
+                        1_024,
+                        PeerAuthMode::ExactRequest,
+                    )
+                    .await?;
+            }
+            if response.status.is_success() {
+                Ok(())
+            } else {
+                Err(PeerTransportError::InvalidResponse)
+            }
         }
     }
 
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn relay(
         &self,
         owner_node_id: &str,
         request: &RelayRequest,
     ) -> Result<Response<Body>, PeerTransportError> {
-        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
-        if body.len() > MAX_CONTROL_REQUEST_BYTES {
-            return Err(PeerTransportError::InvalidResponse);
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
         }
-        let now = tokio::time::Instant::now();
-        let budget = request
-            .transport_budget_at(unix_ms())
-            .ok_or(PeerTransportError::TimedOut)?;
-        let deadline = now + budget;
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        let response = self
-            .transport
-            .request_stream(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                RELAY_PATH,
-                body,
-                deadline,
-                PeerAuthMode::ExactRequest,
-            )
-            .await?;
-        relay_response(response)
+        #[cfg(feature = "cluster")]
+        {
+            let body =
+                serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+            if body.len() > MAX_CONTROL_REQUEST_BYTES {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let now = tokio::time::Instant::now();
+            let budget = request
+                .transport_budget_at(unix_ms())
+                .ok_or(PeerTransportError::TimedOut)?;
+            let deadline = now + budget;
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            let response = self
+                .transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request_stream(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    RELAY_PATH,
+                    body,
+                    deadline,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await?;
+            relay_response(response)
+        }
     }
 
     /// Exact authenticated closure of an outer accepted driver. No request
     /// timeout or missing registry entry is interpreted as physical closure.
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn close_sharing_ingress(
         &self,
         ingress_node: &str,
         request: &crate::sharing_connection_custody::DriverCloseRequest,
     ) -> Result<crate::sharing_connection_custody::DriverClosureReceipt, PeerTransportError> {
-        use crate::sharing_connection_custody::{DriverClosureReceipt, CLOSE_PATH};
-        let remaining = request.deadline_unix_ms.saturating_sub(unix_ms());
-        if !request.driver.valid()
-            || !(1..=9_007_199_254_740_991).contains(&request.registration_sequence)
-            || request.expected_owner_epoch <= 0
-            || !matches!(request.principal_kind.as_str(), "source" | "receiver")
-            || request.incarnation_id.is_nil()
-            || !crate::sharing_connection_custody::owner_identity_valid(&request.owner_identity)
-            || !(1..=315_000).contains(&remaining)
+        #[cfg(not(feature = "cluster"))]
         {
-            return Err(PeerTransportError::InvalidResponse);
+            Err(PeerTransportError::Unreachable)
         }
-        let deadline = deadline_after(Duration::from_millis(
-            u64::try_from(remaining).map_err(|_| PeerTransportError::InvalidResponse)?,
-        ));
-        let base = self.peer_base(ingress_node, deadline).await?;
-        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
-        let response = self
-            .transport
-            .request(
-                ingress_node,
-                &base,
-                reqwest::Method::POST,
-                CLOSE_PATH,
-                body,
-                deadline,
-                2048,
-                PeerAuthMode::ExactRequestAndMemberResponse,
-            )
-            .await?;
-        if !response.status.is_success() {
-            return Err(PeerTransportError::InvalidResponse);
+        #[cfg(feature = "cluster")]
+        {
+            use crate::sharing_connection_custody::{DriverClosureReceipt, CLOSE_PATH};
+            let remaining = request.deadline_unix_ms.saturating_sub(unix_ms());
+            if !request.driver.valid()
+                || !(1..=9_007_199_254_740_991).contains(&request.registration_sequence)
+                || request.expected_owner_epoch <= 0
+                || !matches!(request.principal_kind.as_str(), "source" | "receiver")
+                || request.incarnation_id.is_nil()
+                || !crate::sharing_connection_custody::owner_identity_valid(&request.owner_identity)
+                || !(1..=315_000).contains(&remaining)
+            {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let deadline = deadline_after(Duration::from_millis(
+                u64::try_from(remaining).map_err(|_| PeerTransportError::InvalidResponse)?,
+            ));
+            let base = self.peer_base(ingress_node, deadline).await?;
+            let body =
+                serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+            let response = self
+                .transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request(
+                    ingress_node,
+                    &base,
+                    reqwest::Method::POST,
+                    CLOSE_PATH,
+                    body,
+                    deadline,
+                    2048,
+                    PeerAuthMode::ExactRequestAndMemberResponse,
+                )
+                .await?;
+            if !response.status.is_success() {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let receipt: DriverClosureReceipt = serde_json::from_slice(&response.body)
+                .map_err(|_| PeerTransportError::InvalidResponse)?;
+            if !receipt.matches(&request.driver) {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            Ok(receipt)
         }
-        let receipt: DriverClosureReceipt = serde_json::from_slice(&response.body)
-            .map_err(|_| PeerTransportError::InvalidResponse)?;
-        if !receipt.matches(&request.driver) {
-            return Err(PeerTransportError::InvalidResponse);
-        }
-        Ok(receipt)
     }
 
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn quality_schedule(
         &self,
         owner_node_id: &str,
         request: &crate::http::hls::QualityScheduleRelayRequest,
     ) -> Result<Response<Body>, PeerTransportError> {
-        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
-        if body.len() > crate::http::hls::QUALITY_SCHEDULE_MAX_BYTES {
-            return Err(PeerTransportError::InvalidResponse);
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
         }
-        let remaining = request
-            .deadline_unix_ms
-            .saturating_sub(unix_ms())
-            .min(12_000);
-        if remaining <= 0 {
-            return Err(PeerTransportError::TimedOut);
+        #[cfg(feature = "cluster")]
+        {
+            let body =
+                serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+            if body.len() > crate::http::hls::QUALITY_SCHEDULE_MAX_BYTES {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let remaining = request
+                .deadline_unix_ms
+                .saturating_sub(unix_ms())
+                .min(12_000);
+            if remaining <= 0 {
+                return Err(PeerTransportError::TimedOut);
+            }
+            let deadline = deadline_after(Duration::from_millis(remaining as u64));
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            let (response, retry_after) = self
+                .transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request_with_retry_after(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    crate::http::hls::QUALITY_SCHEDULE_PATH,
+                    body,
+                    deadline,
+                    crate::http::hls::QUALITY_SCHEDULE_MAX_RESPONSE_BYTES,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await?;
+            if response.status.is_success() {
+                serde_json::from_slice::<crate::vodserve::QualityScheduleResponse>(&response.body)
+                    .ok()
+                    .filter(|reply| reply.valid_for(&request.request))
+                    .ok_or(PeerTransportError::InvalidResponse)?;
+            }
+            relayed_owner_response(response.status.as_u16(), retry_after, response.body)
         }
-        let deadline = deadline_after(Duration::from_millis(remaining as u64));
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        let (response, retry_after) = self
-            .transport
-            .request_with_retry_after(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                crate::http::hls::QUALITY_SCHEDULE_PATH,
-                body,
-                deadline,
-                crate::http::hls::QUALITY_SCHEDULE_MAX_RESPONSE_BYTES,
-                PeerAuthMode::ExactRequest,
-            )
-            .await?;
-        if response.status.is_success() {
-            serde_json::from_slice::<crate::vodserve::QualityScheduleResponse>(&response.body)
-                .ok()
-                .filter(|reply| reply.valid_for(&request.request))
-                .ok_or(PeerTransportError::InvalidResponse)?;
-        }
-        relayed_owner_response(response.status.as_u16(), retry_after, response.body)
     }
 
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn quality_control(
         &self,
         owner_node_id: &str,
         request: &crate::http::hls::QualityControlRelayRequest,
     ) -> Result<QualityControlRelayOutcome, PeerTransportError> {
-        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
-        if body.len() > crate::http::hls::QUALITY_CONTROL_MAX_BYTES {
-            return Err(PeerTransportError::InvalidResponse);
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
         }
-        let budget =
-            crate::playback_control::inherited_exchange_budget(request.deadline_unix_ms, unix_ms())
-                .ok_or(PeerTransportError::TimedOut)?;
-        let deadline = deadline_after(budget);
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        let (response, retry_after) = self
-            .transport
-            .request_with_retry_after(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                crate::http::hls::QUALITY_CONTROL_PATH,
-                body,
-                deadline,
-                crate::http::hls::QUALITY_CONTROL_MAX_BYTES,
-                PeerAuthMode::ExactRequest,
+        #[cfg(feature = "cluster")]
+        {
+            let body =
+                serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+            if body.len() > crate::http::hls::QUALITY_CONTROL_MAX_BYTES {
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let budget = crate::playback_control::inherited_exchange_budget(
+                request.deadline_unix_ms,
+                unix_ms(),
             )
-            .await?;
-        classify_quality_control_relay(response, retry_after, &request.request)
+            .ok_or(PeerTransportError::TimedOut)?;
+            let deadline = deadline_after(budget);
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            let (response, retry_after) = self
+                .transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request_with_retry_after(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    crate::http::hls::QUALITY_CONTROL_PATH,
+                    body,
+                    deadline,
+                    crate::http::hls::QUALITY_CONTROL_MAX_BYTES,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await?;
+            classify_quality_control_relay(response, retry_after, &request.request)
+        }
     }
 
     /// Mutating playback control uses its own exact-auth endpoint. It must not
     /// inherit the generic relay's read authorization merely because the M1
     /// action happens to be `none`.
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn control(
         &self,
         owner_node_id: &str,
         request: &crate::playback_control::ControlRelayRequest,
     ) -> Result<Response<Body>, PeerTransportError> {
-        let mut relay_metric = crate::playback_control::RelayMetricGuard::new();
-        let body = serde_json::to_vec(request).map_err(|_| {
-            relay_metric.invalid_response();
-            PeerTransportError::InvalidResponse
-        })?;
-        if body.len() > crate::playback_control::MAX_RELAY_BYTES {
-            relay_metric.invalid_response();
-            return Err(PeerTransportError::InvalidResponse);
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err(PeerTransportError::Unreachable)
         }
-        let budget =
-            crate::playback_control::inherited_exchange_budget(request.deadline_unix_ms, unix_ms())
-                .ok_or(PeerTransportError::TimedOut)?;
-        let deadline = deadline_after(budget);
-        let base = self.peer_base(owner_node_id, deadline).await?;
-        let response = self
-            .transport
-            .request(
-                owner_node_id,
-                &base,
-                reqwest::Method::POST,
-                CONTROL_PATH,
-                body,
-                deadline,
-                crate::playback_control::MAX_RESPONSE_BYTES,
-                PeerAuthMode::ExactRequest,
+        #[cfg(feature = "cluster")]
+        {
+            let mut relay_metric = crate::playback_control::RelayMetricGuard::new();
+            let body = serde_json::to_vec(request).map_err(|_| {
+                relay_metric.invalid_response();
+                PeerTransportError::InvalidResponse
+            })?;
+            if body.len() > crate::playback_control::MAX_RELAY_BYTES {
+                relay_metric.invalid_response();
+                return Err(PeerTransportError::InvalidResponse);
+            }
+            let budget = crate::playback_control::inherited_exchange_budget(
+                request.deadline_unix_ms,
+                unix_ms(),
             )
-            .await?;
-        let response = validated_control_relay_response(response, request).inspect_err(|_| {
-            relay_metric.invalid_response();
-        })?;
-        relay_metric.valid_response();
-        Ok(response)
+            .ok_or(PeerTransportError::TimedOut)?;
+            let deadline = deadline_after(budget);
+            let base = self.peer_base(owner_node_id, deadline).await?;
+            let response = self
+                .transport
+                .as_ref()
+                .ok_or(PeerTransportError::Unreachable)?
+                .request(
+                    owner_node_id,
+                    &base,
+                    reqwest::Method::POST,
+                    CONTROL_PATH,
+                    body,
+                    deadline,
+                    crate::playback_control::MAX_RESPONSE_BYTES,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await?;
+            let response =
+                validated_control_relay_response(response, request).inspect_err(|_| {
+                    relay_metric.invalid_response();
+                })?;
+            relay_metric.valid_response();
+            Ok(response)
+        }
     }
 }
 
@@ -3552,6 +3831,7 @@ fn same_media_route(left: &MediaSessionRoute, right: &MediaSessionRoute) -> bool
         && left.state == right.state
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn remote_abort_legacy_retry_body(
     request: &RemoteAbortRequest,
     status: reqwest::StatusCode,
@@ -3571,11 +3851,32 @@ fn remote_abort_legacy_retry_body(
 
 /// What an owner answered a relayed quality-control exchange.
 pub(crate) enum QualityControlRelayOutcome {
+    #[cfg_attr(
+        not(feature = "cluster"),
+        allow(
+            dead_code,
+            reason = "native and replicated callers share this outcome contract; peer transport constructs this variant"
+        )
+    )]
     Reply(crate::http::hls::QualityControlResponse),
     /// The owner has no quality-control endpoint (an older build).
+    #[cfg_attr(
+        not(feature = "cluster"),
+        allow(
+            dead_code,
+            reason = "native and replicated callers share this outcome contract; peer transport constructs this variant"
+        )
+    )]
     Unsupported,
     /// The owner refused or deferred this exchange; its status, body and
     /// retry hint reach the client unchanged.
+    #[cfg_attr(
+        not(feature = "cluster"),
+        allow(
+            dead_code,
+            reason = "native and replicated callers share this outcome contract; peer transport constructs this variant"
+        )
+    )]
     Refused(Response<Body>),
 }
 
@@ -3587,6 +3888,7 @@ pub(crate) enum QualityControlRelayOutcome {
 /// refusals (409/410/425) and deferrals (429/503) pass through rather than
 /// collapsing into a 503 that loses the difference between "stop" and
 /// "retry".
+#[cfg(any(test, feature = "cluster"))]
 fn classify_quality_control_relay(
     response: PeerResponse,
     retry_after: Option<u32>,
@@ -3616,6 +3918,7 @@ fn classify_quality_control_relay(
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn quality_control_refusal(
     status: u16,
     retry_after: Option<u32>,
@@ -3636,6 +3939,7 @@ fn quality_control_refusal(
 /// One owner answer relayed to the client: its status and body, plus its
 /// retry hint. A deferral (429/503) always carries one, so a client that
 /// waits on the header never spins on an owner that omitted it.
+#[cfg(any(test, feature = "cluster"))]
 fn relayed_owner_response(
     status: u16,
     retry_after: Option<u32>,
@@ -3654,6 +3958,7 @@ fn relayed_owner_response(
         .map_err(|_| PeerTransportError::InvalidResponse)
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn validated_control_relay_response(
     response: PeerResponse,
     request: &crate::playback_control::ControlRelayRequest,
@@ -3913,6 +4218,7 @@ fn validate_route_resolution(
     Ok(resolution)
 }
 
+#[cfg(feature = "cluster")]
 fn relay_response(response: reqwest::Response) -> Result<Response<Body>, PeerTransportError> {
     relay_response_with_limits(
         response,
@@ -3921,6 +4227,7 @@ fn relay_response(response: reqwest::Response) -> Result<Response<Body>, PeerTra
     )
 }
 
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) fn relay_response_with_limits(
     response: reqwest::Response,
     max_lifetime: Duration,
@@ -5409,9 +5716,11 @@ pub(crate) async fn maintenance_loop(state: AppState) {
 /// cannot report a save made on another node (`SettingsChangeSource::Polled`,
 /// or a stopped Raft watch). With a live source a proof is held, on or off,
 /// until a change signal says it may be stale; see [`TakeoverGate`].
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_SETTINGS_REFRESH: Duration = Duration::from_secs(60);
 /// How long the loop sleeps between looks while either switch is off, which
 /// is the fleet default. Matches the watched drain's idle ceiling.
+#[cfg(any(test, feature = "cluster"))]
 const TAKEOVER_IDLE_TICK: Duration = plurx_core::store::watched_drain::IDLE_TICK_MAX;
 
 /// This node's takeover-switch writes: a generation that invalidates any
@@ -5428,6 +5737,7 @@ impl TakeoverSettingsSignal {
         self.wake.notify_one();
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
@@ -5441,6 +5751,7 @@ pub(crate) fn takeover_settings_changed() {
     TAKEOVER_SETTINGS.changed();
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn takeover_switches_on(media_pool: Option<&str>, takeover: Option<&str>) -> bool {
     media_pool == Some("1") && takeover == Some("1")
 }
@@ -5450,12 +5761,14 @@ fn takeover_switches_on(media_pool: Option<&str>, takeover: Option<&str>) -> boo
 /// this node's own replica holds them, which only says whether that
 /// authority read is owed.
 #[plurx_core::cluster::coordination::cluster_job_async_trait]
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) trait TakeoverSwitches: Send + Sync {
     async fn takeover_switches(&self) -> Result<bool, StoreError>;
     async fn takeover_switches_hint(&self) -> Result<bool, StoreError>;
 }
 
 #[plurx_core::cluster::coordination::cluster_job_async_trait]
+#[cfg(any(test, feature = "cluster"))]
 impl<T: Store + ?Sized> TakeoverSwitches for T {
     async fn takeover_switches(&self) -> Result<bool, StoreError> {
         let (media_pool, takeover) = self
@@ -5511,12 +5824,14 @@ impl<T: Store + ?Sized> TakeoverSwitches for T {
 ///
 /// Fail-closed as before: a failed read holds nothing, the tick is off, and
 /// the next tick reads again.
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) struct TakeoverGate {
     signal: Arc<TakeoverSettingsSignal>,
     changes: SettingsChangeSource,
     held: Option<HeldTakeoverSwitches>,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 struct HeldTakeoverSwitches {
     proof: Proved<bool>,
     /// The local write generation, taken before the read, so a write racing
@@ -5525,11 +5840,14 @@ struct HeldTakeoverSwitches {
     read_at: tokio::time::Instant,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl TakeoverGate {
+    #[cfg(feature = "cluster")]
     pub(crate) fn new(changes: SettingsChangeSource) -> Self {
         Self::with_signal(Arc::clone(&TAKEOVER_SETTINGS), changes)
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn with_signal(
         signal: Arc<TakeoverSettingsSignal>,
         changes: SettingsChangeSource,
@@ -5541,6 +5859,7 @@ impl TakeoverGate {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn enabled<S: TakeoverSwitches + ?Sized>(&mut self, store: &S) -> bool {
         let now = tokio::time::Instant::now();
         let generation = self.signal.generation();
@@ -5584,6 +5903,7 @@ impl TakeoverGate {
     /// The authority refused the inventory because a switch is off there:
     /// whatever was held is stale, so drop it and prove the switches again on
     /// the next tick, which then holds the "off" and sleeps the idle period.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn refused_by_authority(&mut self) {
         tracing::debug!(
             "media-session takeover refused: a takeover switch is off at the authority"
@@ -5606,6 +5926,7 @@ impl TakeoverGate {
     /// answer is stale is the generation's and the replica's call.
     /// `MissedTickBehavior::Delay` makes the tick after a long sleep fire at
     /// once, so a flip is acted on within one tick.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn wait_for_tick<S: TakeoverSwitches + ?Sized>(
         &mut self,
         interval: &mut tokio::time::Interval,
@@ -5630,6 +5951,7 @@ impl TakeoverGate {
 /// route skipped for its owner's clock cannot pin the keyset scan; `None`
 /// means the page was empty and the next tick starts a fresh pass.
 #[derive(Debug)]
+#[cfg(any(test, feature = "cluster"))]
 struct ExpiryScanPage {
     contestable: Vec<MediaSessionRoute>,
     cursor: Option<MediaSessionTakeoverCursor>,
@@ -5649,6 +5971,7 @@ struct ExpiryScanPage {
 /// `Ok(None)` is the authority's refusal: the inventory reads both takeover
 /// switches in its own statement and one of them is off there, whatever this
 /// node's gate held (see [`TakeoverGate::refused_by_authority`]).
+#[cfg(any(test, feature = "cluster"))]
 async fn clock_guarded_expiry_scan<Q, F>(
     clock: &ClusterClockGuard,
     query: Q,
@@ -5695,6 +6018,7 @@ where
     }))
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn takeover_loop(state: AppState) {
     let mut interval = tokio::time::interval(TAKEOVER_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -5711,7 +6035,7 @@ pub(crate) async fn takeover_loop(state: AppState) {
             scan_cursor = None;
             continue;
         }
-        let clock = state.membership.clock_guard();
+        let clock = state.cluster_clock_guard();
         let page = match clock_guarded_expiry_scan(&clock, |now_ms| {
             state
                 .store
@@ -5768,6 +6092,7 @@ pub(crate) async fn takeover_loop(state: AppState) {
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn takeover_claim_verdict(
     original: &MediaSessionRoute,
     claim: &MediaSessionTakeover,
@@ -5813,6 +6138,7 @@ fn takeover_claim_verdict(
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn takeover_reconciliation_remaining(
     expires_at_ms: i64,
     monotonic_expiry: tokio::time::Instant,
@@ -5824,6 +6150,7 @@ fn takeover_reconciliation_remaining(
     (!remaining.is_zero()).then_some(remaining)
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn takeover_reconciliation_deadline(
     expires_at_ms: i64,
     monotonic_expiry: tokio::time::Instant,
@@ -5833,6 +6160,7 @@ fn takeover_reconciliation_deadline(
     })
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn pause_takeover_reconciliation(
     expires_at_ms: i64,
     monotonic_expiry: tokio::time::Instant,
@@ -5844,6 +6172,7 @@ async fn pause_takeover_reconciliation(
     takeover_reconciliation_remaining(expires_at_ms, monotonic_expiry).is_some()
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn retain_takeover_settlement_until_expiry(
     expires_at_ms: i64,
     monotonic_expiry: tokio::time::Instant,
@@ -5853,6 +6182,7 @@ async fn retain_takeover_settlement_until_expiry(
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn stop_pending_takeover<W, A>(
     mut pending: PendingTakeoverSettlement<W, A>,
     reason: &'static str,
@@ -5868,6 +6198,7 @@ async fn stop_pending_takeover<W, A>(
 /// Submit the immutable claim once, then hand every ambiguous outcome to the
 /// exact replay/read reconciler. Keeping this boundary generic lets the
 /// cancellation contract be exercised without a real Store or worker.
+#[cfg(any(test, feature = "cluster"))]
 async fn settle_initial_takeover_claim<I, W, A>(
     io: &I,
     pending: PendingTakeoverSettlement<W, A>,
@@ -5925,6 +6256,7 @@ where
 /// our successor from a terminal, renewed, or competing generation. The
 /// proposed lease owns reconciliation; after proving the exact winner, this
 /// task renews from the still-provisional worker before adopting its public id.
+#[cfg(any(test, feature = "cluster"))]
 async fn reconcile_pending_takeover<I, W, A>(
     io: &I,
     pending: PendingTakeoverSettlement<W, A>,
@@ -6265,6 +6597,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "cluster"))]
 async fn supervise_takeover_settlement(
     state: AppState,
     original: MediaSessionRoute,
@@ -6406,6 +6739,7 @@ pub(crate) async fn abort_inherited_preparation_for_test(
     state.abort_inherited_preparation(route).await
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + TAKEOVER_DEADLINE;
     let mut metric = TakeoverMetricGuard::new();
@@ -6413,7 +6747,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         metric.outcome = TAKEOVER_SKIPPED;
         return Ok(());
     }
-    let clock = acquire_takeover_clock(&state.membership.clock_guard(), &route.owner_node_id)
+    let clock = acquire_takeover_clock(&state.cluster_clock_guard(), &route.owner_node_id)
         .map_err(|cause| {
             metric.outcome = TAKEOVER_SKIPPED;
             format!("media-session takeover clock refused: {cause:?}")
@@ -6630,6 +6964,7 @@ fn takeover_start_number(media_sequence: i64, next_epoch: i64) -> Option<i64> {
 /// dies during a fifteen-second copy segment has published a frontier well
 /// past what the client holds. Anything less than a full segment of overlap
 /// leaves media that no generation ever produces.
+#[cfg(any(test, feature = "cluster"))]
 fn takeover_resume(route: &MediaSessionRoute, kind: &SessionKind) -> (i64, i64) {
     let overlap_ms = resume_overlap_ms(Some(kind));
     let frontier_offset_ms = route
@@ -6648,6 +6983,7 @@ fn takeover_resume(route: &MediaSessionRoute, kind: &SessionKind) -> (i64, i64) 
 /// assume a replicated row implies a mount. A row that could not be read when
 /// the session started records an impossible `0/0` snapshot, so this is also
 /// what refuses a takeover whose original placement never saw the file.
+#[cfg(any(test, feature = "cluster"))]
 fn takeover_source_matches(envelope: &RemoteStartRequest, size: i64, mtime: i64) -> bool {
     size == envelope.source_size && mtime == envelope.source_mtime
 }

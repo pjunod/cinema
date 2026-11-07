@@ -125,6 +125,10 @@ impl TranscodeManager {
 }
 
 #[cfg(test)]
+#[path = "tests/native_source_actor.rs"]
+mod native_tests;
+
+#[cfg(all(test, feature = "cluster"))]
 #[path = "tests/source_actor.rs"]
 mod tests;
 

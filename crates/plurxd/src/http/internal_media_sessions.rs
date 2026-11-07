@@ -1,25 +1,35 @@
 //! Exact-auth worker endpoints for cluster-owned HLS sessions.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "cluster")]
+use std::time::Instant;
 
+#[cfg(feature = "cluster")]
 use axum::body::Bytes;
+#[cfg(feature = "cluster")]
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+#[cfg(feature = "cluster")]
 use axum::Json;
 
+#[cfg(feature = "cluster")]
 use super::peer_transport::exact_auth_from_headers;
 use crate::media_sessions::{
-    unix_ms, DurableRouteResolution, RelayRequest, RelayResource, RemoteAbortRequest,
-    RemoteActivateRequest, RemotePrepareRequest, RemoteStartRequest, RemoteStartResponse,
-    ABORT_PATH, ACTIVATE_PATH, CONTROL_PATH, PREPARE_PATH, RELAY_PATH,
-    REMOTE_ACTIVATION_CONFIRMATION_WINDOW, REMOTE_START_OWNERSHIP_HEADER,
-    REMOTE_START_OWNERSHIP_V1, START_DEADLINE, START_PATH,
+    unix_ms, RelayRequest, RelayResource, RemoteAbortRequest, REMOTE_START_OWNERSHIP_HEADER,
+    REMOTE_START_OWNERSHIP_V1,
+};
+#[cfg(feature = "cluster")]
+use crate::media_sessions::{
+    DurableRouteResolution, RemoteActivateRequest, RemotePrepareRequest, RemoteStartRequest,
+    RemoteStartResponse, ABORT_PATH, ACTIVATE_PATH, CONTROL_PATH, PREPARE_PATH, RELAY_PATH,
+    REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE, START_PATH,
 };
 use crate::state::AppState;
 
 pub(crate) enum RemoteStartError {
     Status(StatusCode),
+    #[cfg(feature = "cluster")]
     RestartDrain,
     ServingFence,
 }
@@ -34,6 +44,7 @@ impl IntoResponse for RemoteStartError {
     fn into_response(self) -> Response {
         match self {
             Self::Status(status) => status.into_response(),
+            #[cfg(feature = "cluster")]
             Self::RestartDrain => {
                 let mut response = (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -62,7 +73,9 @@ impl IntoResponse for RemoteStartError {
     }
 }
 
+#[cfg(feature = "cluster")]
 const REMOTE_ABORT_CAPACITY: usize = 128;
+#[cfg(feature = "cluster")]
 const REMOTE_ABORT_WAIT: Duration = Duration::from_secs(5);
 
 fn admit_remote_start_serving_authority(
@@ -93,27 +106,9 @@ fn remote_start_success_status(headers: &HeaderMap, created: bool) -> StatusCode
     }
 }
 
-pub(super) async fn pin_shared_session_before_deadline<F>(
-    deadline: tokio::time::Instant,
-    pin: F,
-) -> Result<bool, String>
-where
-    F: std::future::Future<Output = Result<bool, plurx_core::error::StoreError>>,
-{
-    tokio::time::timeout_at(deadline, pin)
-        .await
-        .map_err(|_| {
-            crate::transcode::start_infrastructure_error(
-                "shared cache pin exceeded the start deadline",
-            )
-        })?
-        .map_err(|error| {
-            crate::transcode::start_infrastructure_error(format!(
-                "pinning the shared cache session: {error}"
-            ))
-        })
-}
+pub(super) use super::hls::pin_shared_session_before_deadline;
 
+#[cfg(feature = "cluster")]
 async fn authorize(
     state: &AppState,
     headers: &HeaderMap,
@@ -123,6 +118,8 @@ async fn authorize(
     let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
         .authorize_internal_peer_request(&auth, "POST", path, body)
         .await
         .unwrap_or(false)
@@ -133,6 +130,7 @@ async fn authorize(
     }
 }
 
+#[cfg(feature = "cluster")]
 async fn authorize_read(
     state: &AppState,
     headers: &HeaderMap,
@@ -142,6 +140,8 @@ async fn authorize_read(
     let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
         .authorize_internal_peer_read_request(&auth, "POST", path, body)
         .await
         .unwrap_or(false)
@@ -152,6 +152,7 @@ async fn authorize_read(
     }
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn start(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -399,6 +400,7 @@ pub(crate) async fn start(
     Ok(output)
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn activate(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -499,6 +501,7 @@ pub(crate) async fn activate(
 /// waits for an activation; preparation must do the inverse: the predecessor
 /// owner reserves admission and the exact successor identity before a peer is
 /// allowed to allocate media resources.
+#[cfg(feature = "cluster")]
 pub(crate) async fn prepare(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -512,6 +515,7 @@ pub(crate) async fn prepare(
 
 /// Exact peer authentication stays at ingress; this owner operation rechecks
 /// the reserved durable route and seals private capture before its 204 receipt.
+#[cfg(feature = "cluster")]
 pub(crate) async fn prepare_authorized(state: AppState, body: Bytes) -> Response {
     let Some(request) = serde_json::from_slice::<RemotePrepareRequest>(&body)
         .ok()
@@ -613,6 +617,7 @@ pub(crate) async fn prepare_authorized(state: AppState, body: Bytes) -> Response
     }
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn abort(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -645,10 +650,12 @@ pub(crate) async fn abort(
     }
 }
 
+#[cfg(feature = "cluster")]
 fn remote_abort_request_is_valid(request: &RemoteAbortRequest) -> bool {
     request.is_valid()
 }
 
+#[cfg(feature = "cluster")]
 fn remote_abort_slots() -> std::sync::Arc<tokio::sync::Semaphore> {
     static SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
         std::sync::OnceLock::new();
@@ -659,6 +666,7 @@ fn remote_abort_slots() -> std::sync::Arc<tokio::sync::Semaphore> {
     )
 }
 
+#[cfg(feature = "cluster")]
 pub(super) async fn settle_remote_abort(state: AppState, request: RemoteAbortRequest) -> bool {
     let reason = remote_abort_reason(&request);
     let terminal = crate::vodserve::Terminal::from_control_reason(reason);
@@ -761,6 +769,7 @@ fn remote_abort_reason(request: &RemoteAbortRequest) -> &'static str {
     }
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn relay(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -869,6 +878,7 @@ fn post_classification_route_rejection(
 
 /// Cancellation discovery and mutation use the same exact-write peer auth as
 /// ordinary control, in a separate envelope unknown to legacy parsers.
+#[cfg(feature = "cluster")]
 pub(crate) async fn quality_control(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -910,6 +920,7 @@ pub(crate) async fn quality_control(
 /// Exact-write-authenticated control relay. The envelope repeats the durable
 /// owner tuple so a delayed peer request cannot mutate whichever owner happens
 /// to hold the public session id when it arrives.
+#[cfg(feature = "cluster")]
 pub(crate) async fn control(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -956,6 +967,7 @@ pub(crate) async fn control(
     }
 }
 
+#[cfg(feature = "cluster")]
 async fn control_inner(
     state: AppState,
     headers: HeaderMap,
@@ -1117,6 +1129,7 @@ pub(crate) async fn control_authorized(
     super::hls::control_local(&state, &route, request.control, request.deadline_unix_ms).await
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn quality_schedule(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1143,7 +1156,7 @@ pub(crate) async fn quality_schedule(
     .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 pub(crate) fn output_capture_test_state() -> AppState {
     super::tests::test_app_with_state().1
 }

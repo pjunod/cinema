@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Package one native, version-matched helper separately from serving artifacts."""
+import argparse
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import signal
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from validation.migration_helper_release import (EXECUTABLE, MAX_EXECUTABLE, TARGETS,
+    executable_digest, read_description, validate_description)
+
+
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def require_exclusive_parent_thread():
+    if threading.current_thread() is not threading.main_thread() or threading.active_count() != 1:
+        raise ValueError('helper requires the main thread and one exclusive parent thread')
+
+
+def require_default_sigchld():
+    # Ignored SIGCHLD can auto-reap an exited child and permit PID reuse.
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise ValueError('helper requires exclusive parent ownership and default SIGCHLD')
+
+
+def reap_owned_direct_child(child):
+    """No group signal: only this function's exclusively owned direct child.
+
+    A Popen returncode can lag waitpid after interruption. Anchor ownership with
+    waitpid itself; ECHILD or an already reaped child never authorizes a signal.
+    Default SIGCHLD keeps a child that exits after the live anchor unreaped until
+    this exclusive parent waits. Defer cancellation across anchor/signal/reap.
+    """
+    if child.returncode is not None:
+        return
+    require_exclusive_parent_thread()
+    deferred = signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, deferred)
+    try:
+        require_exclusive_parent_thread()
+        require_default_sigchld()
+        try:
+            observed, status = os.waitpid(child.pid, os.WNOHANG)
+        except ChildProcessError as error:
+            raise ValueError('helper child ownership is no longer provable; no signal sent') from error
+        if observed == child.pid:
+            child.returncode = os.waitstatus_to_exitcode(status)
+            return
+        if observed != 0:
+            raise ValueError('unexpected helper child wait identity; no signal sent')
+        require_exclusive_parent_thread()
+        os.kill(child.pid, signal.SIGKILL)
+        require_exclusive_parent_thread()
+        observed, status = os.waitpid(child.pid, 0)
+        if observed != child.pid:
+            raise ValueError('unexpected helper child reap identity')
+        child.returncode = os.waitstatus_to_exitcode(status)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def describe(binary, timeout=10):
+    """Drain both pipes under byte/time bounds; reap the owned session on failure."""
+    require_exclusive_parent_thread()
+    require_default_sigchld()
+    child = subprocess.Popen([str(binary), 'describe'], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    output = {child.stdout: bytearray(), child.stderr: bytearray()}
+    limits = {child.stdout: 65536, child.stderr: 16384}
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            for pipe in output:
+                os.set_blocking(pipe.fileno(), False)
+                selector.register(pipe, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError('helper describe exceeded time bound')
+                for key, _ in selector.select(min(remaining, 0.1)):
+                    block = os.read(key.fd, 65536)
+                    if not block:
+                        selector.unregister(key.fileobj)
+                        continue
+                    output[key.fileobj].extend(block)
+                    if len(output[key.fileobj]) > limits[key.fileobj]:
+                        raise ValueError('helper describe exceeded output bound')
+            # A child can close its pipes and remain alive. The same deadline applies.
+            try:
+                require_exclusive_parent_thread()
+                require_default_sigchld()
+                status = child.wait(timeout=max(0.001, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired as error:
+                raise ValueError('helper describe exceeded time bound') from error
+            if status:
+                raise ValueError(f'helper describe failed with status {status}')
+        return bytes(output[child.stdout])
+    finally:
+        try:
+            reap_owned_direct_child(child)
+        finally:
+            child.stdout.close()
+            child.stderr.close()
+
+
+def package(args):
+    if re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', args.version) is None:
+        raise ValueError('version must be a release version')
+    if any(re.fullmatch(r'[0-9a-f]{40}', value) is None for value in (args.commit, args.tree)):
+        raise ValueError('expected actual 40-hex source commit and Git tree')
+    if args.target not in TARGETS or not 0 <= args.source_date_epoch <= 0xffffffff:
+        raise ValueError('unsupported target or source timestamp')
+    args.output.mkdir(parents=True, exist_ok=True)
+    stem = f'{EXECUTABLE}-{args.version}-{args.target}'
+    bundle = args.output / (stem + '.tar.gz')
+    description = args.output / (stem + '.describe.json')
+    if any(path.exists() or path.is_symlink() for path in (bundle, description)):
+        raise ValueError('refusing to replace an existing helper release artifact')
+    with tempfile.TemporaryDirectory(prefix='.helper-package-', dir=args.output) as directory:
+        directory = Path(directory)
+        snapshot = directory / EXECUTABLE
+        descriptor = directory / 'describe.json'
+        archive = directory / 'helper.tar.gz'
+        fd = os.open(args.binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as source, snapshot.open('xb') as target:
+            details = os.fstat(source.fileno())
+            if not stat.S_ISREG(details.st_mode) or not details.st_mode & 0o111 or not 0 < details.st_size <= MAX_EXECUTABLE:
+                raise ValueError('helper input must be a bounded regular executable')
+            copied = 0
+            while block := source.read(65536):
+                copied += len(block)
+                if copied > MAX_EXECUTABLE:
+                    raise ValueError('helper executable grew beyond bound')
+                target.write(block)
+        snapshot.chmod(0o700)
+        executable_sha = digest(snapshot)
+        descriptor.write_bytes(describe(snapshot))
+        actual = validate_description(read_description(descriptor), args.commit, args.tree, args.target)
+        if digest(snapshot) != executable_sha:
+            raise ValueError('helper executable changed while describing itself')
+        with archive.open('xb') as raw, gzip.GzipFile(filename='', mode='wb', fileobj=raw,
+                mtime=args.source_date_epoch) as compressed:
+            with tarfile.open(mode='w', fileobj=compressed, format=tarfile.USTAR_FORMAT) as tar:
+                member = tarfile.TarInfo(EXECUTABLE)
+                member.mode = 0o755
+                member.size = snapshot.stat().st_size
+                member.mtime = args.source_date_epoch
+                member.uid = member.gid = 0
+                with snapshot.open('rb') as stream:
+                    tar.addfile(member, stream)
+        if executable_digest(archive) != executable_sha:
+            raise ValueError('packaged executable differs from described executable')
+        published = []
+        try:
+            for source, target in ((archive, bundle), (descriptor, description)):
+                os.link(source, target)
+                published.append((source, target))
+        except BaseException:
+            for source, target in published:
+                if os.path.samestat(source.stat(), target.stat()):
+                    target.unlink()
+            raise
+        return dict(build=actual['build'], executable_sha256=executable_sha,
+            bundle_sha256=digest(bundle), bundle_size=bundle.stat().st_size,
+            description_sha256=digest(description), description_size=description.stat().st_size)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--binary', type=Path, required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    for field in ('version', 'commit', 'tree', 'target'):
+        parser.add_argument('--' + field, required=True)
+    parser.add_argument('--source-date-epoch', type=int, required=True)
+    try:
+        print(json.dumps(package(parser.parse_args()), sort_keys=True))
+    except (ValueError, OSError, json.JSONDecodeError) as error:
+        parser.exit(1, str(error) + '\n')
+
+
+if __name__ == '__main__':
+    main()

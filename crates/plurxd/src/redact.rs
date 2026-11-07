@@ -6,6 +6,7 @@
 //! serves both, so a second caller cannot quietly grow a weaker one.
 
 /// The limit the cluster-operations surface has always applied.
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) const OPERATOR_TEXT_LIMIT: usize = 512;
 
 /// Replaces `value` wholesale if it looks like it carries a credential or a
@@ -42,6 +43,7 @@ pub(crate) fn redact_bounded(value: &str, limit: usize) -> String {
 
 /// The cluster-operations spelling: the same rule at the limit that surface has
 /// always used.
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) fn redact_operator_text(value: &str) -> String {
     redact_bounded(value, OPERATOR_TEXT_LIMIT)
 }

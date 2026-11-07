@@ -317,6 +317,7 @@ impl DirectPlays {
     /// A diagnostics-safe prefix. It deliberately does not sweep the whole
     /// map: the ordinary `list` path owns cleanup, while a peer request must
     /// not turn an unbounded household registry into unbounded work.
+    #[cfg(any(test, feature = "cluster"))]
     pub fn list_bounded(&self, limit: usize) -> Vec<Live> {
         let now = Instant::now();
         let Ok(live) = self.live.lock() else {

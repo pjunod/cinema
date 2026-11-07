@@ -1,11 +1,12 @@
 //! Content-addressed fragment-index blobs, source attestation, and peer hydration.
 
+#[cfg(feature = "cluster")]
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use plurx_core::cluster::membership::MembershipManager;
+use crate::cluster_capability::Membership as MembershipManager;
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::FragmentIndex;
 use plurx_core::store::{
@@ -16,11 +17,14 @@ use plurx_core::store::{
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+#[cfg(feature = "cluster")]
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 mod source_digest;
 
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) const PEER_PATH_PREFIX: &str = "/internal/media/fragment-index/";
+#[cfg(feature = "cluster")]
 const PEER_DEADLINE: Duration = Duration::from_secs(8);
 const HASH_CHUNK: usize = 256 * 1024;
 /// How far a whole-file digest reads between checkpoints a later attempt may
@@ -501,11 +505,13 @@ impl crate::playback_cache::CacheOwner for FragmentCacheOwner {
 }
 
 /// Keeps the common playback pin alive for a streamed peer response.
+#[cfg(feature = "cluster")]
 pub(crate) struct PinnedFragmentBlob {
     file: tokio::fs::File,
     _pin: Option<crate::playback_cache::CachePin>,
 }
 
+#[cfg(feature = "cluster")]
 impl tokio::io::AsyncRead for PinnedFragmentBlob {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
@@ -515,6 +521,7 @@ impl tokio::io::AsyncRead for PinnedFragmentBlob {
         std::pin::Pin::new(&mut self.file).poll_read(context, buffer)
     }
 }
+#[cfg(feature = "cluster")]
 impl tokio::io::AsyncSeek for PinnedFragmentBlob {
     fn start_seek(mut self: std::pin::Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
         std::pin::Pin::new(&mut self.file).start_seek(position)
@@ -657,6 +664,7 @@ pub(crate) async fn sweep_local_orphans(
 /// streamed to a peer. Cache publication uses rename, so seeking this handle
 /// back to zero keeps the response bound to the inode that was attested even
 /// if another generation is installed at the pathname concurrently.
+#[cfg(feature = "cluster")]
 pub(crate) async fn open_verified_local_blob(
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
@@ -1523,78 +1531,92 @@ async fn hydrate_inner(
             );
         }
     }
-    let Some(membership) = membership else {
-        return Ok(None);
-    };
-    let peers = membership
-        .media_peers()
-        .await
-        .map_err(|error| format!("listing fragment-index peers: {error}"))?
-        .into_iter()
-        .filter_map(|peer| {
-            peer.http_base
-                .map(|base| (peer.node_id, (base, peer.reachable)))
-        })
-        .filter(|(peer_node, (_, reachable))| peer_node != node_id && *reachable)
-        .collect::<HashMap<_, _>>();
-    let locations = store
-        .cluster_fragment_index_locations(&artifact.cache_key)
-        .await
-        .map_err(|error| error.to_string())?;
-    let transport = PeerTransport::new(membership.clone());
-    let path = format!("{PEER_PATH_PREFIX}{}", artifact.cache_key);
-    for location in locations {
-        let Some((base, _)) = peers.get(&location.node_id) else {
-            continue;
-        };
-        let deadline = tokio::time::Instant::now() + PEER_DEADLINE;
-        let response = transport
-            .request(
-                &location.node_id,
-                base,
-                reqwest::Method::GET,
-                &path,
-                Vec::new(),
-                deadline,
-                MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-                PeerAuthMode::ExactRequest,
-            )
-            .await;
-        let Ok(response) = response else { continue };
-        if response.status == reqwest::StatusCode::NOT_FOUND {
-            // Best-effort: this peer has already been excluded from the
-            // current hydration attempt; later repair retries stale cleanup.
-            crate::store_result::observe(
-                crate::store_result::Operation::ForgetMissingPeerIndex,
-                crate::store_result::Discard::BestEffort,
-                store
-                    .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
-                    .await,
-            );
-            continue;
-        }
-        if !response.status.is_success() {
-            continue;
-        }
-        if validate_blob(&response.body, artifact).is_err() {
-            // Best-effort: the invalid blob is never installed, and future
-            // reconciliation can remove this peer's stale location row.
-            crate::store_result::observe(
-                crate::store_result::Operation::ForgetCorruptPeerIndex,
-                crate::store_result::Discard::BestEffort,
-                store
-                    .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
-                    .await,
-            );
-            continue;
-        }
-        install_local_blob(root, artifact, &response.body).await?;
-        if publish {
-            publish_location(store, node_id, artifact).await?;
-        }
-        return decode_artifact(&response.body, artifact).map(Some);
+    #[cfg(not(feature = "cluster"))]
+    {
+        let _ = membership;
+        Ok(None)
     }
-    Ok(None)
+    #[cfg(feature = "cluster")]
+    {
+        let Some(membership) = membership else {
+            return Ok(None);
+        };
+        let peers = membership
+            .media_peers()
+            .await
+            .map_err(|error| format!("listing fragment-index peers: {error}"))?
+            .into_iter()
+            .filter_map(|peer| {
+                peer.http_base
+                    .map(|base| (peer.node_id, (base, peer.reachable)))
+            })
+            .filter(|(peer_node, (_, reachable))| peer_node != node_id && *reachable)
+            .collect::<HashMap<_, _>>();
+        let locations = store
+            .cluster_fragment_index_locations(&artifact.cache_key)
+            .await
+            .map_err(|error| error.to_string())?;
+        let transport = PeerTransport::new(membership.clone());
+        let path = format!("{PEER_PATH_PREFIX}{}", artifact.cache_key);
+        for location in locations {
+            let Some((base, _)) = peers.get(&location.node_id) else {
+                continue;
+            };
+            let deadline = tokio::time::Instant::now() + PEER_DEADLINE;
+            let response = transport
+                .request(
+                    &location.node_id,
+                    base,
+                    reqwest::Method::GET,
+                    &path,
+                    Vec::new(),
+                    deadline,
+                    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await;
+            let Ok(response) = response else { continue };
+            if response.status == reqwest::StatusCode::NOT_FOUND {
+                // Best-effort: this peer has already been excluded from the
+                // current hydration attempt; later repair retries stale cleanup.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ForgetMissingPeerIndex,
+                    crate::store_result::Discard::BestEffort,
+                    store
+                        .forget_cluster_fragment_index_location(
+                            &artifact.cache_key,
+                            &location.node_id,
+                        )
+                        .await,
+                );
+                continue;
+            }
+            if !response.status.is_success() {
+                continue;
+            }
+            if validate_blob(&response.body, artifact).is_err() {
+                // Best-effort: the invalid blob is never installed, and future
+                // reconciliation can remove this peer's stale location row.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ForgetCorruptPeerIndex,
+                    crate::store_result::Discard::BestEffort,
+                    store
+                        .forget_cluster_fragment_index_location(
+                            &artifact.cache_key,
+                            &location.node_id,
+                        )
+                        .await,
+                );
+                continue;
+            }
+            install_local_blob(root, artifact, &response.body).await?;
+            if publish {
+                publish_location(store, node_id, artifact).await?;
+            }
+            return decode_artifact(&response.body, artifact).map(Some);
+        }
+        Ok(None)
+    }
 }
 
 pub(crate) async fn publish_location(

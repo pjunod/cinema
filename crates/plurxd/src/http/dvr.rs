@@ -455,16 +455,21 @@ pub(crate) async fn overview(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<DvrOverview>, ApiError> {
+    #[cfg(feature = "cluster")]
     let owner = state
         .store
         .settings_snapshot()
         .await
         .ok()
         .map(|settings| LiveTvConfig::from_snapshot(&settings, &state.node_id).owner_node_id);
-    let peers = if state.cluster_advertisement && state.membership.is_replicated() {
+    #[cfg(feature = "cluster")]
+    let peers = if let Some(peer_activity) = state
+        .peer_activity
+        .as_ref()
+        .filter(|_| state.cluster_advertisement)
+    {
         match owner.filter(|owner| owner != &state.node_id) {
-            Some(owner) => state
-                .peer_activity
+            Some(owner) => peer_activity
                 .owner_snapshot(&owner)
                 .await
                 .ok()
@@ -477,6 +482,8 @@ pub(crate) async fn overview(
     } else {
         None
     };
+    #[cfg(not(feature = "cluster"))]
+    let peers: Option<super::internal_activity::SharedPeerActivity> = None;
     Ok(Json(
         collect_overview(&state, user.id, user.is_admin, peers.as_ref()).await,
     ))

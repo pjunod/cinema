@@ -129,6 +129,7 @@ class ReleaseTagValidationCase(unittest.TestCase):
                 env={
                     **environment,
                     "RELEASE_TAG": "v9.9.9",
+                    "DISTRIBUTION": "standalone",
                     "EVENT_NAME": "push",
                     "EVENT_REF": "refs/tags/v9.9.9",
                     "GITHUB_OUTPUT": str(outputs),
@@ -237,11 +238,11 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertNotIn("cache-to:", image)
         self.assertLess(
             image.index("Verify the pushed platform image"),
-            image.index("release-image-digest-${{ matrix.arch }}"),
+            image.index("release-image-digest-${{ env.DISTRIBUTION }}-${{ matrix.arch }}"),
         )
         self.assertLess(
-            image.index("release-image-digest-${{ matrix.arch }}"),
-            image.index("release-binary-receipt-${{ matrix.arch }}"),
+            image.index("release-image-digest-${{ env.DISTRIBUTION }}-${{ matrix.arch }}"),
+            image.index("release-binary-receipt-${{ env.DISTRIBUTION }}-${{ matrix.arch }}"),
         )
         binary_receipt = image.split(
             "- name: Retain the exact tagged binary receipt for one day", 1
@@ -255,7 +256,7 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertNotIn("manifest unknown|name unknown|not found", workflow)
         self.assertIn("group: publish-release-aliases", publish)
         self.assertIn("python3 -m validation.release_aliases", publish)
-        self.assertIn("verified-release-index-*", publish)
+        self.assertIn("verified-release-index-${{ env.DISTRIBUTION }}-*", publish)
         self.assertIn('test "$candidate_digest" = "$verified_amd64"', publish)
         self.assertIn('test "$published_amd64" = "$(cat digests/amd64)"', publish)
         self.assertIn('test "$published_arm64" = "$(cat digests/arm64)"', publish)
@@ -282,7 +283,7 @@ class ReleasePublicationContractCase(unittest.TestCase):
         reuse = workflow.split("\n  reuse:\n", 1)[1].split("\n  publish:\n", 1)[0]
         self.assertIn("version_exists == 'true'", reuse)
         self.assertIn("platform.architecture == $arch", reuse)
-        self.assertIn("verified-release-index-${{ matrix.arch }}", reuse)
+        self.assertIn("verified-release-index-${{ env.DISTRIBUTION }}-${{ matrix.arch }}", reuse)
         self.assertIn("{{.Os}}/{{.Architecture}}", reuse)
         self.assertIn('verified_ref="$REGISTRY_IMAGE@$index_digest"', reuse)
         self.assertIn('test "$current_digest" = "$index_digest"', reuse)
@@ -307,11 +308,7 @@ class ReleasePublicationContractCase(unittest.TestCase):
             "COPY --chmod=0755 release-bin/plurxd /usr/local/bin/plurxd",
             generated,
         )
-        self.assertIn(
-            "COPY --chmod=0755 release-bin/plurx-cluster-check "
-            "/usr/local/bin/plurx-cluster-check",
-            generated,
-        )
+        self.assertNotIn("release-bin/plurx-cluster-check", generated)
         # The runtime copies its private DV processing bundle from the stages
         # that build it, so those stay; the daemon's Rust build stage and the
         # bundle's own check stage do not.
@@ -478,16 +475,17 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         plain = render(source)
         self.assertNotIn("linux-dolby-package", plain)
 
-    def test_generator_derives_current_two_binary_runtime(self):
+    def test_generator_derives_current_standalone_runtime(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
-        self.assertEqual(required_binaries(source), BINARIES)
+        self.assertEqual(required_binaries(source), ("plurxd",))
         exporter = render_binary_export(source)
         self.assertIn("FROM scratch AS release-binaries", exporter)
         self.assertIn("RUN rustc -Vv > /rustc-version", exporter)
         self.assertEqual(exporter.count("ARG PLURX_BUILD_SHA"), 1)
-        for name in BINARIES:
+        for name in required_binaries(source):
             self.assertIn(f"COPY --from=build /{name} /{name}", exporter)
+        self.assertNotIn("plurx-cluster-check", exporter)
         self.assertNotIn("FROM debian:bookworm-slim", exporter)
         self.assertNotIn("dv-processing", exporter)
 
@@ -687,7 +685,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                     binary_names=BINARIES,
                 )
 
-    def package_a_candidate(self, fixture: Path) -> tuple[Path, Path, Path, str]:
+    def package_a_candidate(self, fixture: Path, distribution="standalone") -> tuple[Path, Path, Path, str]:
         """Build a source repository and package one candidate out of it."""
 
         source = fixture / "source"
@@ -747,11 +745,21 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                 "x86_64-unknown-linux-gnu",
                 commit,
                 commit,
+                distribution,
             ],
             check=True,
             env=environment,
         )
         return source, export, artifact, commit
+
+    def test_explicit_cluster_candidate_keeps_two_binaries_and_real_sdk_build(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source, export, artifact, commit = self.package_a_candidate(Path(raw), "cluster")
+            self.assertTrue((artifact / "plurx-cluster-check").is_file())
+            rendered = (source / "Dockerfile.release").read_text()
+            self.assertIn('tv.plurx.distribution="cluster"', rendered)
+            self.assertIn('release-bin/plurx-cluster-check', rendered)
+            self.assertNotIn('cargo build', rendered)
 
     def test_an_outer_hook_index_cannot_leak_into_the_packaging_fixture(self):
         """The suite runs from a hook, which exports the index being committed."""
@@ -781,10 +789,6 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                     "plurxd.sha256",
                     "plurxd.dwp",
                     "plurxd.dwp.sha256",
-                    "plurx-cluster-check",
-                    "plurx-cluster-check.sha256",
-                    "plurx-cluster-check.dwp",
-                    "plurx-cluster-check.dwp.sha256",
                 },
             )
             self.assertIn(

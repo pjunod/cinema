@@ -15,10 +15,11 @@ use crate::http::extract::AdminUser;
 use crate::state::AppState;
 use crate::state::JobManager;
 
+#[cfg(feature = "cluster")]
 pub(crate) mod cluster;
 pub(crate) mod native;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 use cluster::{backup_phase_before_deadline, wait_for_local_backup_apply, BACKUP_RESOURCE};
 
 pub(crate) struct BackupArtifact {
@@ -329,13 +330,18 @@ pub(crate) async fn create(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "cluster")]
     use plurx_core::cluster::coordination::{StoreCoordinator, UnclusteredJobAuthority};
+    #[cfg(feature = "cluster")]
     use plurx_core::cluster::membership::ClusterRole;
+    #[cfg(feature = "cluster")]
     use plurx_core::store::SqliteStore;
 
+    #[cfg(feature = "cluster")]
     use crate::job_lease::{acquire_cluster_job, AdmittedRoleJobAuthority};
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_waits_for_the_current_log_apply() {
         let mut samples = [(Some(1), Some(2)), (Some(2), Some(3)), (Some(3), Some(3))].into_iter();
         let start = tokio::time::Instant::now();
@@ -356,6 +362,7 @@ mod tests {
     /// by the leader before this replica has even received it, so a replica
     /// that has applied everything it holds is not yet at the cut.
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_waits_for_the_anchor_to_reach_this_replica() {
         let mut samples = [(Some(5), Some(5)), (Some(5), Some(7)), (Some(7), Some(7))].into_iter();
         let start = tokio::time::Instant::now();
@@ -373,6 +380,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_lag_cannot_refresh_the_original_deadline() {
         let start = tokio::time::Instant::now();
         let mut log = 2;
@@ -391,6 +399,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_stalled_metrics_read_is_bounded() {
         let start = tokio::time::Instant::now();
         let error = wait_for_local_backup_apply(start + Duration::from_millis(120), 0, || {
@@ -406,6 +415,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_metrics_error_is_not_retried() {
         let start = tokio::time::Instant::now();
         let mut reads = 0;
@@ -421,6 +431,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_phase_rejects_completion_at_the_original_deadline() {
         let start = tokio::time::Instant::now();
         let error = backup_phase_before_deadline(
@@ -437,6 +448,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_snapshot_trigger_inherits_the_spent_catchup_budget() {
         let start = tokio::time::Instant::now();
         let deadline = start + Duration::from_millis(120);
@@ -482,6 +494,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "cluster")]
     async fn backup_ticks_are_one_voter_only_and_a_learner_never_claims() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("lease store"));
         let first = StoreCoordinator::new(Arc::clone(&store), "backup-node-a".to_owned())

@@ -3052,7 +3052,7 @@ mod tests {
             "media-a".to_owned(),
             "test-cluster",
             "reader-node".to_owned(),
-            plurx_core::cluster::membership::MembershipManager::unavailable(),
+            None,
             Arc::clone(&fixture.state.store),
         );
         shared

@@ -5,6 +5,7 @@
 
 pub mod backup;
 pub(crate) mod durability;
+pub mod helper;
 pub mod identity;
 pub mod mode;
 pub mod native;
@@ -18,3 +19,6 @@ pub use native::{
 };
 
 pub mod ingress_quiescence;
+
+/// Read-only storage status without cluster SDK dependencies.
+pub mod status;

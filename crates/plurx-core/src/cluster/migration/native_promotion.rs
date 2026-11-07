@@ -126,6 +126,11 @@ pub async fn promote_native_storage(
     if root != lock.data_dir() {
         return Err(refused("a different directory owns the supplied lease"));
     }
+    if crate::storage::helper::pending(&root)?.is_some() {
+        return Err(refused(
+            "complete the pending standalone migration before cluster creation",
+        ));
+    }
     if !config.cluster.join_token_file.as_os_str().is_empty() {
         return Err(refused("cluster create cannot also join another cluster"));
     }

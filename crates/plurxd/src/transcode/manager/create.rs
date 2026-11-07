@@ -377,6 +377,7 @@ impl TranscodeManager {
     }
 
     /// Start a provisional make-before-break worker only from spare capacity.
+    #[cfg(feature = "cluster")]
     pub(crate) async fn create_cluster_session_for_receiver(
         &self,
         request: (&SessionRequest, Option<u8>, Option<&RetainedOutputFacts>),
@@ -503,6 +504,7 @@ impl TranscodeManager {
     /// creation. The takeover supervisor retains this guard while a child
     /// task performs cancellation-sensitive creation, so even a panic cannot
     /// reopen the player key before exact cleanup has been transferred.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn acquire_cluster_takeover_replacement(
         &self,
         req: &SessionRequest,
@@ -523,6 +525,7 @@ impl TranscodeManager {
     /// Create the takeover worker while the caller owns the already-acquired
     /// replacement guard. `takeover.provisional_session_id` is fixed before
     /// this call so a supervising task can reap an exact late registration.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn create_cluster_takeover_session_under_guard(
         &self,
         req: &SessionRequest,

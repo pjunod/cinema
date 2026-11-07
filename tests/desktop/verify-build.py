@@ -5,7 +5,7 @@ import importlib.machinery
 import importlib.util
 import json
 from pathlib import Path
-from common import check_build_metadata, run, write_json
+from common import check_build_asset_inventory, check_build_metadata, run, write_json
 
 p = argparse.ArgumentParser()
 p.add_argument("--candidate", required=True)
@@ -24,8 +24,8 @@ if run(["git", "-C", a.source, "rev-parse", "HEAD"]).stdout.strip() != a.candida
     raise RuntimeError("qualification source checkout differs from exact dispatched candidate")
 tree = run(["git", "-C", a.source, "rev-parse", "HEAD^{tree}"]).stdout.strip()
 assets = check_build_metadata(manifest, (a.metadata / "plurx-update-v1.json.sig").read_bytes(), a.candidate, tree, a.artifacts)
-actual = {p.name for p in a.artifacts.iterdir() if p.is_file()}
-if actual != set(assets) | {f"plurxd-{manifest['version']}-windows-x86_64.zip"}:
-    raise RuntimeError("downloaded build asset set is incomplete or includes unexpected members")
+check_build_asset_inventory(manifest, assets, a.artifacts)
+default_names = {artifact["name"] for artifact in manifest["artifacts"]}
 write_json(a.output, {"schema_version": 1, "scope": "immutable-dry-run-build-transport-provenance-not-production-update-authentication",
-    "candidate": a.candidate, "source_tree": tree, "version": manifest["version"], "native_assets": assets})
+    "candidate": a.candidate, "source_tree": tree, "version": manifest["version"], "native_assets": {name: row for name, row in assets.items() if name in default_names},
+    "migration_helper_assets": {name: row for name, row in assets.items() if name not in default_names}})

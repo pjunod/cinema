@@ -70,17 +70,27 @@ pub(super) async fn relay_if_remote(
             // This local lookup spends the original ingress budget. Missing,
             // stale or unavailable proof preserves the legacy envelope; it
             // never adds an HTTP negotiation request or a fresh deadline.
-            let proof_deadline = request_deadline.min(Instant::now() + Duration::from_millis(100));
-            tokio::time::timeout_at(
-                tokio::time::Instant::from_std(proof_deadline),
-                state
-                    .membership
-                    .media_relay_acquisition_supported(&route.owner_node_id),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or(false)
+            #[cfg(feature = "cluster")]
+            {
+                if let Some(membership) = state.membership.as_ref() {
+                    let proof_deadline =
+                        request_deadline.min(Instant::now() + Duration::from_millis(100));
+                    tokio::time::timeout_at(
+                        tokio::time::Instant::from_std(proof_deadline),
+                        membership.media_relay_acquisition_supported(&route.owner_node_id),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(feature = "cluster"))]
+            {
+                false
+            }
         } else {
             false
         };
@@ -187,6 +197,7 @@ pub(super) fn relay_status_requires_reclassification(status: StatusCode) -> bool
 
 /// Execute an authenticated relay on the owning worker without performing a
 /// second route lookup that could proxy back to the ingress node.
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Response {
     let Some(request_deadline) = inherited_resource_deadline(&request) else {
         return response_publication_timeout().into_response();
@@ -361,6 +372,7 @@ mod tests {
         ) -> usize {
             std::mem::size_of::<F>()
         }
+        #[cfg(feature = "cluster")]
         fn handler_size<F: std::future::Future>(
             _: impl FnOnce(State<AppState>, HeaderMap, Bytes) -> F,
         ) -> usize {
@@ -368,11 +380,13 @@ mod tests {
         }
         let ceiling = 128 * 1024;
         let dispatch = dispatch_size(relay_local);
+        #[cfg(feature = "cluster")]
         let handler = handler_size(crate::http::internal_media_sessions::relay);
         assert!(
             dispatch < ceiling,
             "relay dispatch frame is {dispatch} bytes"
         );
+        #[cfg(feature = "cluster")]
         assert!(
             handler < ceiling,
             "authenticated relay frame is {handler} bytes"

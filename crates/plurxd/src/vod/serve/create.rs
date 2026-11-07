@@ -2121,6 +2121,7 @@ impl ReservedSourceVodRendition {
 
 #[cfg(test)]
 impl AdmittedSourceVodRendition {
+    #[cfg(feature = "cluster")]
     pub(crate) async fn assert_no_demand_or_child(&self) {
         let rendition = &self.pending.prepared.attachment.rendition;
         assert!(rendition.readers.lock().await.is_empty());
@@ -2927,6 +2928,7 @@ impl VodServe {
 impl VodServe {
     /// Move only the fixture's actual last-media clock past the existing idle
     /// allowance, then run the unmodified production maintenance/reap path.
+    #[cfg(feature = "cluster")]
     pub(crate) async fn expire_source_viewer_for_actor_test(
         &self,
         session_id: &str,

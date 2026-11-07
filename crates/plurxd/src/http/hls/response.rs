@@ -114,6 +114,7 @@ pub(super) fn resource_deadline_unix_ms(deadline: Instant) -> Option<i64> {
     Some(now_unix_ms.saturating_add(remaining_ms))
 }
 
+#[cfg(any(test, feature = "cluster"))]
 pub(super) fn inherited_resource_deadline(request: &RelayRequest) -> Option<Instant> {
     let now = Instant::now();
     Some(now + request.owner_budget_at(unix_ms())?)

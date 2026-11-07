@@ -120,15 +120,20 @@ def check_build_artifacts(record):
     required = {"release-linux-amd64", "release-linux-arm64", "release-macos", "release-windows", "desktop-update-candidate"}
     if record.get("total_count", 0) > 100:
         raise ValueError("unexpected candidate artifact count; refuse an incomplete paginated inventory")
+    optional = {f"release-storage-helper-{target}" for target in (
+        "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin")}
     matches = {}
     for artifact in record.get("artifacts", []):
         name = artifact.get("name")
-        if name in required:
+        if isinstance(name, str) and name.startswith("release-storage-helper-") and name not in optional:
+            raise ValueError("unknown migration helper build target")
+        if name in required | optional:
             if name in matches or artifact.get("expired") is not False or artifact.get("size_in_bytes", 0) <= 0:
                 raise ValueError("duplicate, expired or empty candidate build artifact")
             matches[name] = {key: artifact[key] for key in ("id", "name", "size_in_bytes")}
-    if set(matches) != required:
-        raise ValueError("prior run is not a complete dry-run native build")
+    helper_names = set(matches) & optional
+    if set(matches) - optional != required or (helper_names and helper_names != optional):
+        raise ValueError("prior run lacks a complete native or optional helper build cohort")
     return list(matches.values())
 
 
@@ -146,4 +151,45 @@ def check_build_metadata(manifest, signature, candidate, tree, assets):
         if path.is_symlink() or not path.is_file() or path.stat().st_size != artifact["size"] or sha256(path) != artifact["sha256"]:
             raise ValueError("downloaded native artifact differs from the exact build's metadata")
         observed[name] = {"size": artifact["size"], "sha256": artifact["sha256"]}
+    if "migration_helpers" in manifest:
+        if manifest.get("schema_version") != 2:
+            raise ValueError("V1 build metadata cannot contain optional helpers")
+        from validation.migration_helper_release import from_description, validate_helpers
+        validate_helpers(manifest["migration_helpers"], manifest)
+        def digest(path):
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("helper transport member is not a regular file")
+            return {"size": path.stat().st_size, "sha256": sha256(path)}
+        for helper in manifest["migration_helpers"]:
+            target = helper["daemon_build"]["target"]
+            descriptor_name = f"plurx-storage-migrate-{manifest['version']}-{target}.describe.json"
+            descriptor = Path(assets) / descriptor_name
+            actual = from_description(descriptor, Path(assets), manifest, digest)
+            if actual != helper:
+                raise ValueError("downloaded helper archive/description differs from exact signed build metadata")
+            name = helper["artifact"]["name"]
+            if name in observed or descriptor_name in observed:
+                raise ValueError("duplicate default/helper build member")
+            observed[name] = digest(Path(assets) / name)
+            observed[descriptor_name] = digest(descriptor)
     return observed
+
+
+def check_build_asset_inventory(manifest, observed, directory):
+    """The nine managed assets plus exact established manual/helper transport.
+
+    Neither tray tarballs nor Windows nor SDK helpers become default managed
+    install components merely because the release transports them together.
+    """
+    version = manifest["version"]
+    manual = {f"plurxd-{version}-windows-x86_64.zip",
+              f"plurx-tray-{version}-linux-amd64.tar.gz",
+              f"plurx-tray-{version}-linux-arm64.tar.gz"}
+    actual = set()
+    for path in Path(directory).iterdir():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("unexpected nonregular build transport member")
+        actual.add(path.name)
+    if actual != set(observed) | manual:
+        raise ValueError("downloaded build asset set is incomplete or includes unexpected members")
+    return actual

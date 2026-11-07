@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::StoreError;
-use crate::store::{AUTH_SCHEMA_VERSION, SQLITE_SCHEMA_VERSION};
+#[cfg(test)]
+use crate::store::AUTH_SCHEMA_VERSION;
+use crate::store::SQLITE_SCHEMA_VERSION;
 
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -297,13 +299,8 @@ fn validate_schema_cohort(source: &Connection) -> Result<i64, StoreError> {
         [],
         |row| row.get(0),
     )?;
-    let guard = if version == crate::store::AUTH_SCHEMA_BASELINE_VERSION {
-        crate::store::sharing_source_schema::predecessor_layout_guard()
-    } else if version == AUTH_SCHEMA_VERSION {
-        crate::store::sharing_source_schema::installed_guard()
-    } else {
-        return Err(refusal("singleton conversion supports only the exact closed predecessor and current Source schema cohorts"));
-    };
+    let guard = crate::store::sharing_source_schema::migration_source_layout_guard(version)
+        .ok_or_else(|| refusal("singleton conversion supports only the exact closed predecessor and current Source schema cohorts"))?;
     let ready: bool = source.query_row(&format!("SELECT ({guard})"), [], |row| row.get(0))?;
     if !ready {
         return Err(refusal(

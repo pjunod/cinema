@@ -105,11 +105,19 @@ async fn actual_nonowner_b(
     .await;
     let mut worker_membership =
         super::super::shared_source_playback::SourceFixtureMembershipOwner::start(
-            fixture.state.membership.clone(),
+            fixture
+                .state
+                .membership
+                .clone()
+                .expect("actual voter membership"),
         );
     let mut worker_replication =
         super::super::shared_source_playback::SourceFixtureMembershipOwner::start_replication(
-            fixture.state.replication.clone(),
+            fixture
+                .state
+                .replication
+                .clone()
+                .expect("actual voter replication"),
         );
     let tls = Arc::new(
         LiveNodeTls::open(
@@ -181,6 +189,8 @@ async fn actual_nonowner_b(
     let token = fixture
         .state
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .issue_token_for_role(Duration::from_secs(120), ClusterRole::Voter)
         .await
         .expect("actual coordinator token");
@@ -215,17 +225,20 @@ async fn actual_nonowner_b(
     let mut ingress = super::super::source_actor_test_state();
     ingress.store = Arc::clone(&selected.store);
     ingress.node_id = selected.identity.node_id.clone();
-    ingress.membership = selected.membership_manager();
+    ingress.membership = Some(selected.membership_manager());
+    ingress.storage_mode = plurx_core::storage::mode::StorageMode::Cluster;
     ingress.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
         ingress.membership.clone(),
         Arc::clone(&ingress.store),
     );
-    ingress.clock_observer = observation
-        .observer()
-        .await
-        .expect("actual ingress clock observer");
+    ingress.clock_observer = Some(
+        observation
+            .observer()
+            .await
+            .expect("actual ingress clock observer"),
+    );
     ingress.catalogue = selected.catalogue_reader();
-    ingress.replication = selected.replication_monitor();
+    ingress.replication = Some(selected.replication_monitor());
     ingress.sharing = Arc::new(crate::sharing::SharingManager::new(
         Arc::clone(&selected.credential_key),
         config.storage.data_dir.clone(),
@@ -237,24 +250,35 @@ async fn actual_nonowner_b(
     ));
     let mut ingress_replication =
         super::super::shared_source_playback::SourceFixtureMembershipOwner::start_replication(
-            ingress.replication.clone(),
+            ingress
+                .replication
+                .clone()
+                .expect("actual voter replication"),
         );
     ingress
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .set_ingress_custody_boot(Some(ingress.sharing.accepted_drivers.boot_id()));
     ingress
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .publish_ingress_custody_boot()
         .await
         .expect("actual ingress boot");
     fixture
         .state
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .heartbeat()
         .await
         .expect("worker roster");
     ingress
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .heartbeat()
         .await
         .expect("ingress roster");
@@ -267,7 +291,7 @@ async fn actual_nonowner_b(
     // owned by the serving worker and all data traverses signed member HTTP.
     let mut ingress_membership =
         super::super::shared_source_playback::SourceFixtureMembershipOwner::start(
-            ingress.membership.clone(),
+            ingress.membership.clone().expect("actual voter membership"),
         );
     let ingress_server =
         ServerOwner::serve(Arc::clone(&observation), fixture_router(ingress.clone()));

@@ -22,10 +22,11 @@ async fn slow_test_handler() -> &'static str {
 }
 
 #[tokio::test]
+#[cfg(feature = "cluster")]
 async fn clock_route_refuses_household_and_forged_proofs_without_timing() {
     let (app, _) = test_app_with_state();
     for bearer in [None, Some("household-session")] {
-        let mut request = Request::builder().uri(internal_clock::PATH);
+        let mut request = Request::builder().uri("/_internal/v1/clock");
         if let Some(bearer) = bearer {
             request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
         }
@@ -34,7 +35,7 @@ async fn clock_route_refuses_household_and_forged_proofs_without_timing() {
             .oneshot(request.body(Body::empty()).expect("clock request"))
             .await
             .expect("clock route");
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!response
             .headers()
             .contains_key(peer_transport::RESPONSE_SIGNATURE_HEADER));
@@ -47,7 +48,7 @@ async fn clock_route_refuses_household_and_forged_proofs_without_timing() {
         assert!(!String::from_utf8_lossy(&body).contains("received_unix_ms"));
     }
     let request = Request::builder()
-        .uri(internal_clock::PATH)
+        .uri("/_internal/v1/clock")
         .header(peer_transport::NODE_HEADER, "peer")
         .header(peer_transport::TARGET_HEADER, "test-node")
         .header(peer_transport::TIMESTAMP_HEADER, "1")
@@ -59,7 +60,7 @@ async fn clock_route_refuses_household_and_forged_proofs_without_timing() {
         .body(Body::empty())
         .expect("forged clock request");
     let response = app.oneshot(request).await.expect("forged clock route");
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!response
         .headers()
         .contains_key(peer_transport::RESPONSE_SIGNATURE_HEADER));
@@ -79,6 +80,7 @@ async fn watch_write_handler(
     "ok"
 }
 
+#[cfg(feature = "cluster")]
 async fn recorded_store_handler() -> &'static str {
     for class in 0..3 {
         plurx_core::store::validation_time_http_store_operation(class).await;
@@ -1046,6 +1048,7 @@ async fn commit_index_header_offers_the_acknowledged_position_or_unknown() {
 }
 
 #[tokio::test]
+#[cfg(feature = "cluster")]
 async fn metrics_route_attribution_renders_fixed_labels_and_scoped_store_counts() {
     let (_, state) = test_app_with_state();
     let app = Router::new()
@@ -1108,11 +1111,14 @@ async fn metrics_route_attribution_renders_fixed_labels_and_scoped_store_counts(
     }
     assert_eq!(http_route_group("/unmatched"), 8);
 
-    assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Voter)), 1);
-    assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Learner)), 2);
-    assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Fenced)), 4);
-    assert_eq!(http_node_role(true, true, Err(())), 5);
-    assert_eq!(http_node_role(false, true, Err(())), 3);
+    #[cfg(feature = "cluster")]
+    {
+        assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Voter)), 1);
+        assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Learner)), 2);
+        assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Fenced)), 4);
+        assert_eq!(http_node_role(true, true, Err(())), 5);
+        assert_eq!(http_node_role(false, true, Err(())), 3);
+    }
 }
 
 #[tokio::test]
@@ -1126,7 +1132,7 @@ async fn registered_routes_reach_every_non_other_attribution_family() {
         (4, Method::GET, "/api/v1/search"),
         (5, Method::GET, "/api/v1/files/1/direct"),
         (6, Method::GET, "/api/v1/settings"),
-        (7, Method::GET, "/api/v1/cluster/status"),
+        (7, Method::GET, "/api/v1/cluster/jobs"),
     ] {
         let before = HTTP_ROUTE_METRICS.routes
             [group * HTTP_NODE_ROLES.len()..(group + 1) * HTTP_NODE_ROLES.len()]
@@ -1421,7 +1427,7 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         "/api/v1/files/8/hls/start",
         "/api/v1/hls/session/index.m3u8",
         crate::media_pool::SNAPSHOT_PATH,
-        internal_clock::PATH,
+        "/_internal/v1/clock",
     ] {
         assert!(learner_route_eligible(&Method::GET, path), "{path}");
     }
@@ -1505,7 +1511,7 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         // segment of media owned by another node goes through it.
         (Method::POST, crate::media_sessions::RELAY_PATH),
         (Method::POST, crate::shared_cache::CANARY_PATH),
-        (Method::POST, internal_auth_revocation::PATH),
+        (Method::POST, "/api/v1/internal/auth/cache-revocation"),
         // Peer hydration of a fragment index. `media_peers()` names
         // learners, so refusing this at the route matrix made the
         // directory point at a closed door.
@@ -1553,8 +1559,8 @@ fn maintenance_route_matrix_keeps_admin_and_existing_sessions_but_blocks_new_wor
         (Method::GET, "/api/v1/cluster/nodes"),
         (Method::GET, "/api/v1/cluster/status"),
         (Method::GET, "/api/v1/cluster/support-bundle"),
-        (Method::GET, cluster_operations::INTERNAL_PATH),
-        (Method::POST, internal_auth_revocation::PATH),
+        (Method::GET, "/api/v1/internal/cluster/operations-status"),
+        (Method::POST, "/api/v1/internal/auth/cache-revocation"),
         (Method::POST, "/api/v1/auth/login"),
         (Method::POST, "/api/v1/auth/logout"),
         // Read beside /me so a client signed in to a node under
@@ -2653,6 +2659,7 @@ async fn local_https_certificate_exports_only_loaded_public_chain_even_after_dis
 }
 
 #[tokio::test]
+#[cfg(feature = "cluster")]
 async fn local_https_admin_auth_survives_exact_learner_and_maintenance_admission() {
     let root = crate::test_tempdir().expect("tempdir");
     let state = local_https_state(root.path(), false);
@@ -2913,11 +2920,32 @@ fn get(uri: &str, token: Option<&str>) -> Request<Body> {
 }
 
 #[tokio::test]
+#[cfg(feature = "cluster")]
 async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknown() {
     use plurx_core::cluster::clock::PeerClockOffset;
-    let (app, state) = test_app_with_state();
+    let directory = tempfile::tempdir().expect("actual clock authority fixture");
+    let mut config = plurx_core::config::Config::default();
+    config.storage.data_dir = directory.path().join("data");
+    let ports: Vec<_> = (0..3)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned clock fixture port"))
+        .collect();
+    config.server.bind = ports[0].local_addr().expect("HTTP address");
+    config.cluster.raft_bind = ports[1].local_addr().expect("Raft address");
+    config.cluster.api_bind = ports[2].local_addr().expect("API address");
+    config.cluster.advertise_host = "localhost".into();
+    drop(ports);
+    let selected = crate::sharing_fixture_clock::select_applied_singleton(&config)
+        .await
+        .expect("real applied clock membership");
+    let mut state = test_state_without_router();
+    state.membership = Some(selected.membership_manager());
+    let app = router(state.clone());
     state.serving.validation_set_ready(true).await;
-    let clock = state.membership.clock_guard();
+    let clock = state
+        .membership
+        .as_ref()
+        .expect("actual clock membership")
+        .clock_guard();
     let publish = |offset_us| {
         let ticket = clock.roster(&["peer".to_owned()]);
         assert!(clock.publish(
@@ -3005,6 +3033,10 @@ async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknow
         evaluate_readiness(&state).await.ready,
         "new peer remains Unknown"
     );
+    selected
+        .shutdown()
+        .await
+        .expect("actual clock fixture drained");
 }
 
 #[tokio::test]
@@ -5461,6 +5493,7 @@ async fn scans_and_notifications_are_counted_by_what_asked_for_them() {
 }
 
 #[tokio::test]
+#[cfg(feature = "cluster")]
 async fn repeated_metrics_scrapes_do_not_record_store_operations() {
     let (app, _) = test_state();
     let before = plurx_core::store::prometheus_store_operations();
@@ -21118,4 +21151,41 @@ async fn sharing_http_local_name_is_admin_only_and_validates_before_network() {
         .0,
         StatusCode::BAD_REQUEST
     );
+}
+
+#[cfg(not(feature = "cluster"))]
+#[tokio::test]
+async fn standalone_http_omits_cluster_endpoints_and_keeps_native_readiness() {
+    let (app, state) = test_app_with_state();
+    assert!(!state.is_replicated());
+    assert!(!state.serving.is_quorum_managed());
+    assert_eq!(
+        call_text(&app, get("/readyz", None)).await.0,
+        StatusCode::OK
+    );
+    for (method, path) in [
+        (Method::GET, "/api/v1/cluster/status"),
+        (Method::GET, "/_internal/v1/clock"),
+        (Method::GET, "/_internal/v1/activity-snapshot"),
+        (Method::POST, "/internal/cluster/sharing/source/prepare"),
+        (Method::POST, "/internal/remote/v1/dispatch"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("unavailable cluster request"),
+            )
+            .await
+            .expect("actual native router");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/json",
+            "{path}"
+        );
+    }
 }

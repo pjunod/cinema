@@ -1,20 +1,24 @@
 # Cinema dependency boundaries — primitive entry and trusted authority ownership
 
-**Status:** open — Astra admits the primitive-only P3a slice; authority extraction remains blocked.
+**Status:** implementation draft — SDK-free packaging is built under the private
+Core co-owner; behavior/release qualification is pending. Primitive P3a remains
+a separate task; cross-crate authority extraction remains blocked.
 **Written:** 2026-11-04 · **Owner:** Codex · **Reviewer:** Astra.
 **Source:** runtime `5484d7986729ee942daf7fd83afa5555cf38edcd`.
 
 This decision refines P3/P4 of the [modular-build plan](CINEMA-MODULAR-BUILD-PLAN.md).
 A primitive-only first
 task changes no sealed representation, trusted factory or backend selection.
-Authority extraction has a separate strict entry gate and remains blocked until
-its actual ownership/API and downstream negative fixtures are complete.
+SDK-free packaging may retain Core as the current private authority/SQL owner.
+Cross-crate authority extraction has a separate strict entry gate and remains
+blocked until its ownership/API and downstream negative fixtures are complete.
 
 ## 1. Acyclic ownership
 
 The initial contracts crate contains only common values and checked validators.
 It cannot depend on Core, full Store, playback planning or Hiqlite. Canonical
-schema and identity owners then sit below authority; Store API consumes opaque
+schema and identity owners are future cross-crate targets below authority;
+Store API consumes opaque
 authority and owns its own checked row witnesses. SQLite and optional cluster
 adapters sit above Store API. The authority crate's optional replicated module
 may depend on the actual Hiqlite SDK but never on high-level MembershipManager
@@ -84,6 +88,57 @@ or inventing a synthetic resource. Coordinator's TTL-to-expiry orchestration
 and removed-owner marker/key helpers stay in Core. Preserve current error text,
 clock overflow behavior and all existing public constants/paths.
 
+## 2.1 P3b: SDK-free packaging under the current private co-owner
+
+P3a primitive extraction and P2c live assets/metadata can advance independently;
+neither is a prerequisite for the SDK-free delivery path. P2b measurements and
+the final before/after comparison retain their own acceptance obligations.
+
+After the checked runtime and P1 measurement/source baseline, a bounded
+packaging phase may make the actual cluster implementation optional while retaining all
+proof representations, credentials, private Backend, trusted factories, Store
+traits and generic SQL together in Core. Daemon composition and selected package
+recipes stop unconditionally selecting Hiqlite/WAL. No authority crate, public
+Backend or cross-crate witness factory is introduced by this phase.
+
+The draft implements this packaging cut with native SQLite as the daemon's
+default and an explicit `cluster` build feature. Actual cluster services are
+absent in native composition; local Source/Receiver ownership uses the genuine
+native factory and accepted-driver registry. The selected daemon/controller/
+tray graph omits Hiqlite/WAL/OpenRaft, while explicit cluster builds retain the
+actual SDK. This is graph evidence, not current runtime/release qualification.
+
+The separate `plurx-storage-migrate` executable calls Core's existing private
+converter. Managed selection is authenticated by optional signed V2 release
+metadata, the accepted installed ledger and immutable generation hashes;
+source installs use the explicit verified self-tuple CLI. Neither path
+introduces a public Backend, a new authority crate or a credential/proof mint.
+The [plan's evidence ledger](CINEMA-MODULAR-BUILD-PLAN.md#8-evidence-ledger--distinguish-implementation-from-acceptance)
+records focused helper/staging/close passes on distinct snapshots. Native
+Clippy, SDK compatibility, real FFmpeg HTTP/child-process and distribution
+qualification remain pending on the integrated candidate.
+
+Native Source and Receiver sharing remain supported. Receiver's existing
+privately constructed relay-read authority plus actual owner/local-registry
+checks admit its native `members=None` path; the uninhabited no-feature member
+type is not evidence that native Receiver lacks custody. Preserve these real
+checks and physical closure obligations. Do not cfg away sharing or replace
+membership/replication with a successful synthetic provider.
+
+Acceptance requires actual standalone and explicit-cluster composition tests:
+no native cluster listeners/quorum tasks; actual Source/Receiver ingress and
+closure; native restart/backup/restore; and real cluster membership, applied/
+clock authority, quorum-loss fencing/recovery and never-auto-downgrade behavior.
+Package-specific graphs run independently of workspace feature unification.
+Complete distribution omission and supported upgrades still need the unchanged
+P4 helper/root and packaging gates before shipping standalone becomes default.
+
+P3b is a build-selection boundary, not permission to move trusted minting or
+resource-binding ownership. Future identity/schema/authority/Store extraction
+remains blocked by sections 3–4. In particular the existing MediaSessionStore
+bridge used by Source publication and Receiver retirement remains part of the
+full cross-crate gate; do not publicize Backend or duplicate SQL to bypass it.
+
 ## 3. Authority extraction: concrete resources, private minting
 
 These proposed APIs describe required ownership, not an admitted implementation:
@@ -150,8 +205,10 @@ Before moving a proof or factory, resolve these against the actual source:
    installed on that Client. Proposed bind_local(Client) alone is insufficient
    unless the installed-hook identity is verified; prefer an owning factory
    if the SDK supplies no such observation.
-4. Specify Receiver parity using a real native custody capability. The current
-   no-feature uninhabited type is not acceptance evidence.
+4. Specify the extracted Receiver API and prove parity with the actual native
+   relay-read/local-registry custody path. Its `members=None` branch already
+   has real guards; the uninhabited replicated-member type alone proves neither
+   absence nor acceptance of native Receiver capability.
 5. Finish every trusted mint path's ownership/signature and dependency closure.
    Source, ingress, purpose and reduction proofs remain distinct; purpose-only
    evidence cannot authorize Source sessions.
@@ -165,17 +222,20 @@ not prove runtime verification. The feature-disabled authority graph must omit
 Hiqlite/WAL/OpenRaft.
 
 This decision permits no authority extraction while those obligations remain.
-Only the enumerated primitive-only P3a slice may precede that gate.
+Only the enumerated primitive P3a slice and P3b packaging under the unchanged
+private Core co-owner may precede that cross-crate extraction gate.
 
 ## 5. Astra review disposition
 
-Astra permits the enumerated primitive-only P3a slice and keeps P3c blocked.
-Before implementation, the canonical plan must explicitly narrow the early
-exception to these public value/error/DTO operations. The complete original
-authority gate remains mandatory before moving any proof representation,
-trusted factory, credential owner, SDK hook or backend-selection responsibility,
-regardless of its task's name. This decision records validator visibility and
-clock/constants/helper ownership explicitly; the canonical plan carries the
-same P3a-only exception. Contracts-only consumer and dependency checks run in
-isolation from workspace feature unification. No Rust extraction or runtime
-acceptance is established by this source review.
+Astra admitted the enumerated primitive-only P3a slice. The separate reviewed
+P3b packaging amendment retains private co-ownership; P3c remains blocked.
+P3a remains limited to the enumerated public value/error/DTO operations, with
+checked visibility and clock/constants/helper ownership. P3b adds only section
+2.1's SDK-free packaging while the private Core co-owner remains unchanged.
+The complete authority gate stays mandatory before moving a proof, trusted
+factory, credential owner, SDK hook or resource-binding/backend-selection
+authority across a crate boundary, regardless of task name. The canonical plan
+carries the same narrow P3a/P3b scope. Contracts-only dependency checks run in
+isolation from workspace feature unification. The later packaging/helper draft does not change these admission limits.
+No cross-crate authority extraction or final runtime/release acceptance is
+established by this source review.

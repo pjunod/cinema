@@ -1705,8 +1705,6 @@ fn retirement_is_atomic_against_a_consumer_attaching() {
 /// owner's ledger lease is valid, so stopping would only cut a hole.
 #[tokio::test]
 async fn a_transport_keeps_writing_through_a_loss_inside_the_grace() {
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
-
     let metrics = Arc::new(LiveTvMetrics::default());
     let delivered = Arc::new(AtomicU64::new(0));
     let left_writer = MemoryWriter::default();
@@ -1725,8 +1723,7 @@ async fn a_transport_keeps_writing_through_a_loss_inside_the_grace() {
         Arc::clone(&delivered),
         metrics,
     );
-    let fence =
-        crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+    let fence = crate::serving_fence::ServingFence::local();
     let serving = super::super::LiveTvAuthority::new(fence.authority());
     let generation = serving.admit().expect("serving generation");
     let transport = test_transport(
@@ -1761,8 +1758,6 @@ async fn a_transport_keeps_writing_through_a_loss_inside_the_grace() {
 
 #[tokio::test]
 async fn a_fenced_transport_cancels_every_sink_before_exiting() {
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
-
     let metrics = Arc::new(LiveTvMetrics::default());
     let delivered = Arc::new(AtomicU64::new(0));
     let left_writer = MemoryWriter::default();
@@ -1781,8 +1776,7 @@ async fn a_fenced_transport_cancels_every_sink_before_exiting() {
         Arc::clone(&delivered),
         metrics,
     );
-    let fence =
-        crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+    let fence = crate::serving_fence::ServingFence::local();
     let serving = super::super::LiveTvAuthority::new(fence.authority());
     let generation = serving.admit().expect("serving generation");
     let transport = test_transport(

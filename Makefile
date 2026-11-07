@@ -20,12 +20,41 @@ help: ## List available targets
 ## ---- day to day --------------------------------------------------------
 
 .PHONY: build
-build: ## Debug build of the whole workspace
-	$(CARGO) build --workspace
+build: standalone-graph-check ## Debug build of the standalone daemon
+	$(CARGO) build --locked --no-default-features -p plurxd
+
+.PHONY: standalone-graph-check build-cluster run-cluster build-workspace
+standalone-graph-check: ## Check all standalone shipping components and build dependencies
+	CARGO="$(CARGO_RAW)" scripts/check-standalone-graph
+
+build-cluster: ## Build the explicitly selected cluster daemon
+	$(CARGO) build --locked --no-default-features -p plurxd --features cluster
+
+run-cluster: ## Run the explicitly selected cluster daemon
+	$(CARGO) run --locked --no-default-features -p plurxd --features cluster
+
+build-workspace: ## Build every developer/cluster/helper tool intentionally
+	$(CARGO) build --locked --workspace
+
+.PHONY: build-migration-helper
+build-migration-helper: ## Build the separate version-matched migration helper (includes cluster SDKs)
+	@set -eu; helper_sha="$(BUILD_SHA)"; helper_tree="$(BUILD_TREE)"; \
+	  test "$${#helper_sha}" = 40 && test "$${#helper_tree}" = 40; \
+	  case "$$helper_sha$$helper_tree" in *[!0-9a-f]*) exit 1 ;; esac; \
+	  PLURX_BUILD_SHA="$$helper_sha" PLURX_BUILD_TREE="$$helper_tree" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" $(CARGO) build --locked --release -p plurx-storage-migrate
+
+# CARGO is one executable path for these recipes, not a shell command string.
+# Run compilation on non-voter capacity, or inside scripts/voter-build caps.
+.PHONY: build-daemon-dev build-daemon-dev-lld
+build-daemon-dev: ## Build the daemon with the system development linker
+	CARGO="$(CARGO)" scripts/build-daemon-dev --linker system
+
+build-daemon-dev-lld: ## Build the Linux GNU daemon with final-target LLD linking
+	CARGO="$(CARGO)" scripts/build-daemon-dev --linker lld
 
 .PHONY: run
 run: ## Run the server (http://localhost:32400)
-	$(CARGO) run -p plurxd
+	$(CARGO) run --locked --no-default-features -p plurxd
 
 .PHONY: fmt
 fmt: ## Auto-format all code
@@ -42,12 +71,12 @@ test-socket-permission-check: ## Verify unit tests may bind loopback mock-server
 		|| { echo >&2 "unit tests require permission to bind local loopback sockets; rerun outside the network-restricted sandbox or grant local-socket access"; exit 1; }
 
 unit: spike-lock-check test-socket-permission-check ## Run the fast Rust unit and SQLite contract lane
-	$(CARGO) test --workspace --exclude plurx-cluster-check --no-fail-fast
+	$(CARGO) test --workspace --exclude plurx-cluster-check --exclude plurx-storage-migrate --no-fail-fast
 	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
 
 # A focused core run must opt into the replicated-store implementation. The
-# workspace lane above gets it through feature unification from `plurxd`; a
-# bare `cargo test -p plurx-core --lib` does not.
+# standalone workspace lane excludes SDK tools and does not enable it; a
+# bare `cargo test -p plurx-core --lib` does not exercise replicated storage.
 unit-core: override CARGO := PLURX_EXPECT_TEST_COUNT_AT_LEAST=$${PLURX_EXPECT_TEST_COUNT_AT_LEAST:-1100} scripts/require-test-count $(CARGO_RAW)
 unit-core: ## Run plurx-core with replicated-store tests and enforce the count floor
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib
@@ -75,10 +104,10 @@ test-full: test-socket-permission-check ## Run every Rust test, including replic
 # dependency feature unification and rebuilds the already-tested daemon. The
 # exact filters still execute only the two resource-heavy restart regressions.
 vodencode-restart-check: ## Run resource-heavy real-FFmpeg restart regressions serially
-	$(CARGO) test --locked --workspace --exclude plurx-cluster-check \
+	$(CARGO) test --locked --workspace --exclude plurx-cluster-check --exclude plurx-storage-migrate \
 	  vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid \
 	  -- --exact --ignored --test-threads=1
-	$(CARGO) test --locked --workspace --exclude plurx-cluster-check \
+	$(CARGO) test --locked --workspace --exclude plurx-cluster-check --exclude plurx-storage-migrate \
 	  vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing \
 	  -- --exact --ignored --test-threads=1
 
@@ -92,8 +121,14 @@ fmt-check: ## Verify formatting without changing files
 # evidence. Compile every target so production and test-only code must remain
 # type-correct, but leave execution to focused local checks and the final
 # effort-to-main qualification run.
-.PHONY: effort-rust-check
-effort-rust-check: fmt-check spike-lock-check ## Compile every Rust target without running the test suite
+.PHONY: standalone-rust-check cluster-rust-check effort-rust-check
+standalone-rust-check: standalone-graph-check ## Compile native daemon targets without workspace feature unification
+	$(CARGO) check --locked --no-default-features -p plurxd --all-targets
+
+cluster-rust-check: ## Compile explicit cluster daemon targets without workspace feature inference
+	$(CARGO) check --locked --no-default-features -p plurxd --features cluster --all-targets
+
+effort-rust-check: fmt-check spike-lock-check standalone-rust-check cluster-rust-check ## Compile every Rust target without running the test suite
 	$(CARGO) check --workspace --locked --all-targets
 
 .PHONY: bans-check license-check lint
@@ -120,8 +155,8 @@ rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 # contracts. Cluster jobs own WAL, replicated Store, topology, and daemon
 # contracts. Explicit test features keep those processes out of this lane.
 .PHONY: ci-rust-gate
-ci-rust-gate: fmt-check spike-lock-check lint test-socket-permission-check ## CI Rust gate: format, Clippy, and fast workspace tests
-	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
+ci-rust-gate: fmt-check spike-lock-check standalone-rust-check cluster-rust-check lint test-socket-permission-check ## CI Rust gate: format, Clippy, and fast workspace tests
+	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --exclude plurx-storage-migrate --no-fail-fast
 	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
 
 # The real mount-namespace exercises for scratch aliasing and mount points
@@ -1676,6 +1711,7 @@ BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)
 # the same checkout, never from a SOURCE_DATE_EPOCH some other tool left
 # exported in the shell. A deliberate override is still
 # `make docker SOURCE_DATE_EPOCH=<seconds>`, which Make lets win.
+BUILD_TREE := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git rev-parse HEAD^{tree} 2>/dev/null))
 SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git log -1 --format=%ct 2>/dev/null))
 HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)
 
@@ -1697,15 +1733,22 @@ docker: ## Build the container image (amd64 + PLURX_LINUX_DOLBY_PACKAGE adds the
 	case "$$platform" in linux/amd64|linux/x86_64) arch=amd64 ;; linux/arm64|linux/aarch64) arch=arm64 ;; \
 	*) echo "Unsupported container platform $$platform" >&2; exit 1 ;; esac; \
 	if test "$$arch" = amd64 && test -n "$${PLURX_LINUX_DOLBY_PACKAGE:-}"; then \
-	  python3 scripts/build-linux-dolby-ffmpeg --step docker-build --root "$$(pwd)" --output "$$PLURX_LINUX_DOLBY_PACKAGE" --image plurx/plurxd:latest --plurx-build-ref "$(BUILD_REF)" --plurx-build-sha "$(BUILD_SHA)" --source-date-epoch "$(SOURCE_DATE_EPOCH)"; \
+	  python3 scripts/build-linux-dolby-ffmpeg --step docker-build --root "$$(pwd)" --output "$$PLURX_LINUX_DOLBY_PACKAGE" --image plurx/plurxd:latest --plurx-build-ref "$(BUILD_REF)" --plurx-build-sha "$(BUILD_SHA)" --plurx-build-tree "$(BUILD_TREE)" --source-date-epoch "$(SOURCE_DATE_EPOCH)"; \
 	else \
-	  docker build --target runtime --platform "linux/$$arch" --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .; \
+	  docker build --target runtime --platform "linux/$$arch" --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg PLURX_BUILD_TREE="$(BUILD_TREE)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .; \
 	fi
 
-.PHONY: container-smoke
-container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
+.PHONY: docker-cluster
+docker-cluster: ## Build the explicit cluster image with cluster diagnostics
+	docker build --target runtime-cluster --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg PLURX_BUILD_TREE="$(BUILD_TREE)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:cluster .
+
+.PHONY: container-smoke container-cluster-smoke
+container-smoke: docker ## Build and exercise standalone container stop/start
 	@scripts/container-smoke plurx/plurxd:latest
-	@scripts/container-restore-smoke plurx/plurxd:latest
+
+container-cluster-smoke: docker-cluster ## Exercise explicit cluster container backup and restore
+	@scripts/container-smoke plurx/plurxd:cluster
+	@scripts/container-restore-smoke plurx/plurxd:cluster
 
 # The Compose deploy, as one command that cannot forget the stamp.
 #
@@ -1779,7 +1822,7 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
 	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" PLURX_BUILD_TREE="$(BUILD_TREE)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe

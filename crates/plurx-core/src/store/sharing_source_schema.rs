@@ -11,9 +11,7 @@ pub(crate) use native_import::prepare_fresh_cluster_for_native_import;
 
 // Frozen installed Source family layout remains71; custody is an adjunct.
 pub(crate) const SOURCE_LAYOUT_VERSION: i64 = 71;
-#[cfg(feature = "hiqlite-store")]
 pub(crate) const SOURCE_SCHEMA_VERSION: i64 = 82;
-#[cfg(feature = "hiqlite-store")]
 pub(crate) const SOURCE_SCHEMA_PREDECESSOR: i64 = 81;
 /// Additive, wire-compatible dispatch assertion. Never retains successful rows.
 pub(crate) const DISPATCH_GUARD_SCHEMA: &str = "CREATE TABLE sharing_source_dispatch_guard (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CONSTRAINT plurx_source_layout_guard_v1 CHECK(passed=1)) STRICT";
@@ -25,7 +23,6 @@ pub(crate) fn dispatch_guard_shape() -> String {
     )
 }
 
-#[cfg(feature = "hiqlite-store")]
 pub(crate) const BOOT_INTENTS_SCHEMA: &str = "CREATE TABLE sharing_source_boot_intents (node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),raft_id INTEGER NOT NULL CHECK(raft_id>0),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),master_fingerprint TEXT NOT NULL CHECK(length(master_fingerprint)=64),membership_generation INTEGER NOT NULL CHECK(membership_generation>=0)) STRICT";
 pub(crate) const INSTALLATION_SCHEMA: &str = "CREATE TABLE sharing_source_schema_installation (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=71),master_fingerprint TEXT NOT NULL CHECK(length(master_fingerprint)=64),installed_at_ms INTEGER NOT NULL CHECK(installed_at_ms>0)) STRICT";
 pub(crate) const TRANSACTION_SCHEMA: &str = "CREATE TABLE sharing_source_schema_transaction_guard (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CHECK(passed=1)) STRICT";
@@ -235,7 +232,6 @@ fn exact_object(statement: &str) -> String {
         quote(statement)
     )
 }
-#[cfg(feature = "hiqlite-store")]
 pub(crate) fn boot_shape_guard() -> String {
     format!(
         "({}) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='sharing_source_boot_intents')",
@@ -253,7 +249,6 @@ pub(crate) fn boot_authority_guard(parameter: usize) -> String {
         boot_shape_guard()
     )
 }
-#[cfg(feature = "hiqlite-store")]
 fn installed_shape_guard_at(version: i64) -> String {
     format!(
         "({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION}) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",
@@ -264,7 +259,6 @@ fn installed_shape_guard_at(version: i64) -> String {
         sharing_source_sessions::schema_guard()
     )
 }
-#[cfg(feature = "hiqlite-store")]
 pub(crate) fn installed_shape_guard() -> String {
     format!(
         "({}) AND ({})",
@@ -278,7 +272,6 @@ pub(crate) fn installed_shape_guard() -> String {
 pub(crate) fn legacy_source_work_drained_guard() -> &'static str {
     "NOT EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE reservation_state='held') AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE principal_kind='sharing' AND state='starting') AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE principal_kind='sharing' AND state!='ended') AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE principal_kind='sharing')"
 }
-#[cfg(feature = "hiqlite-store")]
 pub(crate) fn installed_guard() -> String {
     format!(
         "({}) AND EXISTS(SELECT 1 FROM sharing_source_schema_transaction_guard WHERE singleton=1 AND passed=1) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE master_fingerprint NOT GLOB '*[^0-9a-f]*')",
@@ -355,10 +348,19 @@ fn legacy_object_guard() -> String {
         predicates.join(") AND (")
     )
 }
-#[cfg(feature = "hiqlite-store")]
 pub(crate) fn predecessor_layout_guard() -> String {
     predecessor_layout_guard_for(&format!("EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={SOURCE_SCHEMA_PREDECESSOR})"))
 }
+/// The exact closed recognizer used by singleton export and packaging cohort
+/// descriptors. This builds SQL only; it neither reads nor admits a source.
+pub(crate) fn migration_source_layout_guard(auth_version: i64) -> Option<String> {
+    match auth_version {
+        SOURCE_SCHEMA_PREDECESSOR => Some(predecessor_layout_guard()),
+        SOURCE_SCHEMA_VERSION => Some(installed_guard()),
+        _ => None,
+    }
+}
+
 pub(crate) fn native_predecessor_layout_guard() -> String {
     predecessor_layout_guard_for(
         "EXISTS(SELECT 1 FROM pragma_user_version WHERE user_version>=124)",

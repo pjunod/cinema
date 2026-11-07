@@ -10,6 +10,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Standalone build recipes omit the cluster SDK from the selected daemon,
+  controller and tray graph. Explicit cluster profiles keep their own images;
+  legacy data uses a separately authenticated migration helper or an explicit
+  verified-source migration command. Distribution qualification is in progress.
+
 - Standalone servers use native SQLite without Raft or quorum serving checks.
   Verified private singleton upgrades preserve current data, identities, sealed
   keys and local observations; clusters require explicit creation or joining.

@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+#[cfg(feature = "cluster")]
 use futures_util::{stream, StreamExt};
+#[cfg(feature = "cluster")]
 use plurx_core::cluster::membership::{ArtworkPeerAuth, MembershipManager};
 use plurx_core::domain::Item;
 use plurx_core::error::StoreError;
@@ -32,8 +34,11 @@ use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 mod worker;
 pub(crate) use worker::run as durable_artwork_loop;
 
+#[cfg(feature = "cluster")]
 const NODE_ID_HEADER: &str = "x-plurx-node-id";
+#[cfg(feature = "cluster")]
 const TIMESTAMP_HEADER: &str = "x-plurx-artwork-time";
+#[cfg(feature = "cluster")]
 const SIGNATURE_HEADER: &str = "x-plurx-artwork-signature";
 const MAX_ARTWORK_BYTES: u64 = plurx_core::metadata::MAX_ARTWORK_BYTES;
 const PEER_FETCH_CONCURRENCY: usize = 8;
@@ -44,14 +49,21 @@ const VERIFIED_ARTWORK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DERIVATIVE_CONCURRENCY: usize = 2;
 const DERIVATIVE_ADMISSION_WAIT: Duration = Duration::from_millis(500);
 const DERIVATIVE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(feature = "cluster")]
 const PEER_RACE_CONCURRENCY: usize = 3;
+#[cfg(feature = "cluster")]
 const PEER_RACE_DEADLINE: Duration = Duration::from_millis(3_250);
+#[cfg(feature = "cluster")]
 const SOURCE_REPAIRS_PER_PASS: usize = 4;
+#[cfg(any(test, feature = "cluster"))]
 const SOURCE_REPAIR_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
+#[cfg(feature = "cluster")]
 const SOURCE_REPAIR_LEASE: Duration = Duration::from_secs(5 * 60);
 const MATERIALIZE_INTERVAL: Duration = Duration::from_secs(60);
+#[cfg(any(test, feature = "cluster"))]
 const SOURCE_REPAIR_GRACE: Duration = Duration::from_secs(2 * 60);
 const ARTWORK_FETCH_TOTAL_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(feature = "cluster")]
 const MATERIALIZE_ITEM_PAGE: i64 = 256;
 const CONTENT_ORPHAN_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 const ORPHAN_SCAN_LIMIT: usize = 10_000;
@@ -159,16 +171,19 @@ async fn shared_opened_art(
         _request_owner: lease,
     }))
 }
+#[cfg(feature = "cluster")]
 struct SharedArtDownloadOwner {
     _lease: Arc<super::shared_artwork::ArtBodyLease>,
     _local: Option<tokio::sync::OwnedSemaphorePermit>,
     _peer: Option<tokio::sync::OwnedSemaphorePermit>,
     _workspace: tokio::sync::OwnedSemaphorePermit,
 }
+#[cfg(feature = "cluster")]
 struct SharedArtDownload {
     bytes: bytes::Bytes,
     _owner: Arc<SharedArtDownloadOwner>,
 }
+#[cfg(feature = "cluster")]
 impl AsRef<[u8]> for SharedArtDownload {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
@@ -176,6 +191,7 @@ impl AsRef<[u8]> for SharedArtDownload {
 }
 /// One collector at a time, preallocated to its charged object/sentinel cap.
 /// Only trusted current-cluster artwork URLs and node proofs reach this helper.
+#[cfg(feature = "cluster")]
 async fn shared_peer_snapshot(
     client: &reqwest::Client,
     url: reqwest::Url,
@@ -225,6 +241,7 @@ async fn shared_peer_snapshot(
         _owner: owner,
     })
 }
+#[cfg(feature = "cluster")]
 async fn shared_materialize_original(
     state: &AppState,
     selection: &plurx_core::store::sharing_catalogue_artwork::SourceArtSnapshot,
@@ -254,12 +271,14 @@ async fn shared_materialize_original(
         .no_proxy()
         .build()
         .map_err(|_| artwork_capacity_error())?;
-    let peers = state
-        .membership
+    let Some(membership) = state.membership.as_ref() else {
+        return Ok(false);
+    };
+    let peers = membership
         .reachable_peer_http_urls()
         .await
         .unwrap_or_default();
-    let Ok(auth) = state.membership.artwork_peer_auth(name) else {
+    let Ok(auth) = membership.artwork_peer_auth(name) else {
         return Ok(false);
     };
     let owner = Arc::new(SharedArtDownloadOwner {
@@ -648,6 +667,7 @@ pub async fn serve(
 /// This route is intentionally not user-authenticated. Its credential is a
 /// one-minute, filename-bound cluster proof, and verification also confirms
 /// that the signing node is still a reachable non-tombstoned member.
+#[cfg(feature = "cluster")]
 pub async fn serve_peer(
     State(state): State<AppState>,
     Path(filename): Path<String>,
@@ -658,6 +678,8 @@ pub async fn serve_peer(
     let auth = peer_auth_from_headers(&headers).ok_or(ApiError::Unauthorized)?;
     let verified = state
         .membership
+        .as_ref()
+        .ok_or(ApiError::Unauthorized)?
         .verify_artwork_peer_auth(safe_name, &auth)
         .await
         .map_err(|error| {
@@ -676,6 +698,7 @@ pub async fn serve_peer(
 /// membership: `verify_artwork_peer_auth` needs a consistent cluster read, so
 /// no unit test can get past the extractor above, and the rule that peers never
 /// serve derivatives would otherwise have no test at all.
+#[cfg(any(test, feature = "cluster"))]
 async fn serve_verified_peer_artwork(
     state: &AppState,
     safe_name: &str,
@@ -744,21 +767,11 @@ async fn serve_cluster_artwork_with_headers(
         Err(_) => {}
     }
 
-    let membership = state.membership.clone();
     let Some(bytes) = fetch_and_materialize(
         &state.artwork_fetch,
         &state.artwork_dir,
         safe_name,
-        move |client| async move {
-            let peers = match membership.reachable_peer_http_urls().await {
-                Ok(peers) => peers,
-                Err(error) => {
-                    tracing::warn!(code = error.code(), "cannot read artwork peer roster");
-                    return None;
-                }
-            };
-            fetch_peer_artwork(&client, &membership, &peers, safe_name).await
-        },
+        move |client| async move { fetch_cluster_artwork(state, &client, safe_name).await },
     )
     .await
     .map_err(|_| artwork_capacity_error())?
@@ -828,14 +841,12 @@ async fn serve_derivative(
                 return Err(artwork_capacity_error());
             }
             LocalArtworkRead::Missing => {
-                let membership = state.membership.clone();
                 match fetch_and_materialize(
                     &state.artwork_fetch,
                     &state.artwork_dir,
                     safe_name,
                     move |client| async move {
-                        let peers = membership.reachable_peer_http_urls().await.ok()?;
-                        fetch_peer_artwork(&client, &membership, &peers, safe_name).await
+                        fetch_cluster_artwork(state, &client, safe_name).await
                     },
                 )
                 .await
@@ -1191,6 +1202,8 @@ const ARTWORK_CAPACITY_CODE: &str = "artwork_response_capacity";
 #[derive(Clone, Copy, Debug)]
 enum ArtworkRoute {
     User = 0,
+    // Fixed metric route value shared with the cluster package.
+    #[cfg_attr(not(feature = "cluster"), allow(dead_code))]
     Peer = 1,
     Plex = 2,
 }
@@ -1539,6 +1552,7 @@ async fn read_bounded_local_artwork(
     .flatten()
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn valid_materialized_artwork(artwork_dir: &FsPath, filename: &str) -> bool {
     read_bounded_local_artwork(artwork_dir.join(filename))
         .await
@@ -1728,6 +1742,7 @@ fn artwork_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
+#[cfg(feature = "cluster")]
 async fn fetch_peer_artwork(
     client: &reqwest::Client,
     membership: &MembershipManager,
@@ -1738,6 +1753,7 @@ async fn fetch_peer_artwork(
     fetch_peer_artwork_with_auth(client, peers, filename, &auth).await
 }
 
+#[cfg(feature = "cluster")]
 async fn fetch_peer_artwork_with_auth(
     client: &reqwest::Client,
     peers: &[String],
@@ -1747,6 +1763,7 @@ async fn fetch_peer_artwork_with_auth(
     fetch_peer_artwork_checked(client, peers, filename, auth, None).await
 }
 
+#[cfg(feature = "cluster")]
 async fn fetch_peer_artwork_checked(
     client: &reqwest::Client,
     peers: &[String],
@@ -1843,6 +1860,7 @@ async fn fetch_peer_artwork_checked(
     .flatten()
 }
 
+#[cfg(feature = "cluster")]
 fn peer_auth_from_headers(headers: &HeaderMap) -> Option<ArtworkPeerAuth> {
     Some(ArtworkPeerAuth {
         node_id: headers.get(NODE_ID_HEADER)?.to_str().ok()?.to_owned(),
@@ -1851,6 +1869,7 @@ fn peer_auth_from_headers(headers: &HeaderMap) -> Option<ArtworkPeerAuth> {
     })
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn peer_artwork_url(peer: &str, filename: &str) -> Option<reqwest::Url> {
     let mut url = reqwest::Url::parse(peer).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -1883,6 +1902,8 @@ async fn install_artwork(
 
 #[derive(Clone, Debug)]
 struct ArtworkReference {
+    // Common reference identity; only cluster repair consumes the item ID.
+    #[cfg_attr(not(feature = "cluster"), allow(dead_code))]
     item_id: i64,
     filename: String,
 }
@@ -1931,12 +1952,14 @@ pub(crate) struct MaterializeReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "cluster"))]
 enum ArtworkPullOutcome {
     Copied,
     Missing,
     DeferredCapacity,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn artwork_pull_outcome(
     result: Result<Option<AdmittedArtworkBytes>, ArtworkCapacity>,
 ) -> ArtworkPullOutcome {
@@ -1947,6 +1970,7 @@ fn artwork_pull_outcome(
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn suppress_deferred_artwork_repairs(
     deferred_items: BTreeSet<i64>,
     unresolved_by_item: &mut BTreeMap<i64, Vec<String>>,
@@ -1958,6 +1982,7 @@ fn suppress_deferred_artwork_repairs(
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn retain_recent_artwork_repairs(repair_after: &mut HashMap<i64, Instant>, now: Instant) {
     // A due timestamp is the signal to run repair, not an expired cache entry.
     // Keep it through at least one full provider backoff window so paginated
@@ -1970,6 +1995,7 @@ fn retain_recent_artwork_repairs(repair_after: &mut HashMap<i64, Instant>, now: 
     });
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn due_artwork_repairs(
     unresolved_by_item: BTreeMap<i64, Vec<String>>,
     repair_after: &mut HashMap<i64, Instant>,
@@ -2598,6 +2624,7 @@ enum ArtworkReconciliation {
     /// Converge this node's own artwork directory: scan the references, pull
     /// missing files from peers, sweep orphans. Nothing here speaks for the
     /// cluster.
+    #[cfg_attr(not(feature = "cluster"), allow(dead_code))]
     LocalOnly,
     /// The above, plus the source/provider repair that takes the replicated
     /// artwork repair fence on the cluster's behalf.
@@ -2608,6 +2635,7 @@ enum ArtworkReconciliation {
 /// Peer copies are preferred; source/provider repair is a bounded fallback for
 /// the case where the last node holding a file disappeared before convergence,
 /// and it only runs under [`ArtworkReconciliation::Full`].
+#[cfg(feature = "cluster")]
 async fn materialize_once(
     state: &AppState,
     scope: ArtworkReconciliation,
@@ -2616,7 +2644,7 @@ async fn materialize_once(
     orphan_walker: &mut ArtworkOrphanWalker,
 ) -> Result<MaterializeReport, StoreError> {
     let orphans_removed = sweep_content_orphans(state, orphan_walker).await;
-    if !state.membership.is_replicated() {
+    if !state.is_replicated() {
         return Ok(MaterializeReport {
             orphans_removed,
             ..Default::default()
@@ -2666,7 +2694,11 @@ async fn materialize_once(
         return Ok(report);
     }
 
-    let peers = match state.membership.reachable_peer_http_urls().await {
+    let membership = state
+        .membership
+        .as_ref()
+        .ok_or_else(|| StoreError::Task("cluster artwork authority is unavailable".into()))?;
+    let peers = match membership.reachable_peer_http_urls().await {
         Ok(peers) => peers,
         Err(error) => {
             tracing::warn!(code = error.code(), "cannot read artwork peer roster");
@@ -2675,7 +2707,7 @@ async fn materialize_once(
     };
     let peers = Arc::new(peers);
     let mut pulls = stream::iter(missing.into_iter().map(|reference| {
-        let membership = state.membership.clone();
+        let membership = membership.clone();
         let peers = Arc::clone(&peers);
         let artwork_dir = state.artwork_dir.clone();
         let coordinator = Arc::clone(&state.artwork_fetch);
@@ -2770,8 +2802,7 @@ async fn materialize_once(
                 continue;
             }
         }
-        match state
-            .membership
+        match membership
             .claim_artwork_source_repair(item_id, SOURCE_REPAIR_LEASE)
             .await
         {
@@ -2789,10 +2820,7 @@ async fn materialize_once(
                         item_id,
                         "artwork source repair fence expired before work began"
                     );
-                    if let Err(error) = state
-                        .membership
-                        .retire_artwork_source_repair(&repair_fence)
-                        .await
+                    if let Err(error) = membership.retire_artwork_source_repair(&repair_fence).await
                     {
                         tracing::warn!(
                             item_id,
@@ -2810,11 +2838,7 @@ async fn materialize_once(
                         .refresh_item_artwork_fenced(item_id, &repair_fence),
                 )
                 .await;
-                match state
-                    .membership
-                    .retire_artwork_source_repair(&repair_fence)
-                    .await
-                {
+                match membership.retire_artwork_source_repair(&repair_fence).await {
                     Ok(true) => {}
                     Ok(false) => tracing::warn!(
                         item_id,
@@ -2870,6 +2894,7 @@ async fn materialize_once(
 /// What committed membership says about this node, as three answers rather
 /// than one collapsed boolean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "cluster"))]
 struct ArtworkMembershipView {
     /// A committed voter whose durable row is neither tombstoned nor fenced by
     /// an in-flight removal.
@@ -2882,6 +2907,7 @@ struct ArtworkMembershipView {
 
 /// What one reconciliation tick does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "cluster"))]
 enum ArtworkTick {
     Reconcile(ArtworkReconciliation),
     /// A membership change is fencing this node's durable row. Wait for it to
@@ -2899,6 +2925,7 @@ enum ArtworkTick {
 /// different states, and only the second one ends the loop. A learner is
 /// permanently in the first, and a learner promoted to voter has to start doing
 /// provider work on its next tick without a process restart.
+#[cfg(any(test, feature = "cluster"))]
 fn artwork_tick(view: ArtworkMembershipView) -> ArtworkTick {
     if view.active_voter {
         ArtworkTick::Reconcile(ArtworkReconciliation::Full)
@@ -2912,6 +2939,7 @@ fn artwork_tick(view: ArtworkMembershipView) -> ArtworkTick {
 }
 
 /// Read the three answers, asking only as many questions as the tick needs.
+#[cfg(feature = "cluster")]
 async fn observe_artwork_membership(
     membership: &plurx_core::cluster::membership::MembershipManager,
 ) -> Result<ArtworkMembershipView, plurx_core::cluster::membership::MembershipError> {
@@ -2942,8 +2970,9 @@ pub(crate) async fn materialize_loop(state: AppState) {
     let mut orphan_walker = ArtworkOrphanWalker::default();
     tokio::time::sleep(Duration::from_secs(2)).await;
     loop {
-        let scope = if state.membership.is_replicated() {
-            let tick = match observe_artwork_membership(&state.membership).await {
+        #[cfg(feature = "cluster")]
+        let scope = if let Some(membership) = state.membership.as_ref() {
+            let tick = match observe_artwork_membership(membership).await {
                 Ok(view) => artwork_tick(view),
                 Err(error) => {
                     tracing::warn!(
@@ -2971,6 +3000,8 @@ pub(crate) async fn materialize_loop(state: AppState) {
         } else {
             ArtworkReconciliation::Full
         };
+        #[cfg(not(feature = "cluster"))]
+        let scope = ArtworkReconciliation::Full;
         match materialize_once(
             &state,
             scope,
@@ -3222,21 +3253,15 @@ async fn jellyfin_artwork_pass(state: &AppState) -> bool {
         .await
         {
             LocalArtworkRead::Verified(bytes) => Some(bytes),
-            LocalArtworkRead::Missing => {
-                let membership = state.membership.clone();
-                fetch_and_materialize(
-                    &state.artwork_fetch,
-                    &state.artwork_dir,
-                    safe_name,
-                    move |client| async move {
-                        let peers = membership.reachable_peer_http_urls().await.ok()?;
-                        fetch_peer_artwork(&client, &membership, &peers, safe_name).await
-                    },
-                )
-                .await
-                .ok()
-                .flatten()
-            }
+            LocalArtworkRead::Missing => fetch_and_materialize(
+                &state.artwork_fetch,
+                &state.artwork_dir,
+                safe_name,
+                move |client| async move { fetch_cluster_artwork(state, &client, safe_name).await },
+            )
+            .await
+            .ok()
+            .flatten(),
             LocalArtworkRead::Corrupt(identity) => {
                 quarantine_corrupt_artwork(
                     &state.artwork_fetch,
@@ -3279,3 +3304,46 @@ async fn jellyfin_artwork_pass(state: &AppState) -> bool {
 
 #[cfg(test)]
 mod jellyfin_artwork_tests;
+
+async fn fetch_cluster_artwork(
+    state: &AppState,
+    client: &reqwest::Client,
+    name: &str,
+) -> Option<Vec<u8>> {
+    #[cfg(feature = "cluster")]
+    {
+        let membership = state.membership.as_ref()?;
+        let peers = membership.reachable_peer_http_urls().await.ok()?;
+        fetch_peer_artwork(client, membership, &peers, name).await
+    }
+    #[cfg(not(feature = "cluster"))]
+    {
+        let _ = (state, client, name);
+        None
+    }
+}
+
+#[cfg(not(feature = "cluster"))]
+async fn shared_materialize_original(
+    _state: &AppState,
+    _selection: &plurx_core::store::sharing_catalogue_artwork::SourceArtSnapshot,
+    _credential_hash: &str,
+    _name: &str,
+    _lease: Arc<super::shared_artwork::ArtBodyLease>,
+) -> Result<bool, ApiError> {
+    Ok(false)
+}
+
+#[cfg(not(feature = "cluster"))]
+async fn materialize_once(
+    state: &AppState,
+    _scope: ArtworkReconciliation,
+    _repair_after: &mut HashMap<i64, Instant>,
+    _item_cursor: &mut i64,
+    orphan_walker: &mut ArtworkOrphanWalker,
+) -> Result<MaterializeReport, StoreError> {
+    Ok(MaterializeReport {
+        orphans_removed: sweep_content_orphans(state, orphan_walker).await,
+        ..Default::default()
+    })
+}

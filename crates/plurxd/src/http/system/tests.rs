@@ -385,6 +385,7 @@ fn failed_peer_directory_is_visible_without_exposing_an_address() {
     assert!(!summary.contains("http"));
 }
 
+#[cfg(feature = "cluster")]
 #[test]
 fn snapshot_histogram_labels_are_derived_from_every_exported_bound() {
     let labels = DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS.map(prometheus_seconds_label);
@@ -397,6 +398,7 @@ fn snapshot_histogram_labels_are_derived_from_every_exported_bound() {
     );
 }
 
+#[cfg(feature = "cluster")]
 #[test]
 fn snapshot_storage_metrics_are_passive_fixed_label_and_unknown_is_absent() {
     let zero = plurx_core::cluster::migration::status::DbSnapshotHistogram {
@@ -729,6 +731,7 @@ fn the_queue_verdict_is_exposed_as_one_series_per_verdict_with_its_evidence() {
     }
 }
 
+#[cfg(feature = "cluster")]
 #[test]
 fn membership_exposition_reports_quorum_without_node_identity_labels() {
     use plurx_core::cluster::membership::{MembershipMetricsSample, PassiveMembershipMetricsView};
@@ -761,6 +764,7 @@ fn membership_exposition_reports_quorum_without_node_identity_labels() {
     assert!(!rendered.contains("hostname"));
 }
 
+#[cfg(feature = "cluster")]
 #[test]
 fn raft_exposition_is_fixed_and_privacy_safe() {
     use plurx_core::cluster::migration::status::{
