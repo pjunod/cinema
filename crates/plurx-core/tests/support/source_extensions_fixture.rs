@@ -75,6 +75,7 @@ pub(crate) fn validated_source_tail_drops(
     objects: &[(String, String, String)],
     counts: &[(String, i64)],
     dispatch: bool,
+    remove: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let expected = rusqlite::Connection::open_in_memory().expect("published source tail witness");
     expected.execute_batch(
@@ -109,7 +110,7 @@ pub(crate) fn validated_source_tail_drops(
     for kind in ["trigger", "view", "table"] {
         for (_, name, _) in objects
             .iter()
-            .filter(|(object_kind, _, _)| object_kind == kind)
+            .filter(|(object_kind, name, _)| object_kind == kind && remove(name))
         {
             statements.push(format!(
                 "DROP {} \"{}\";",
@@ -150,7 +151,7 @@ fn source_extension_rewind_plan(
             (name.clone(), count)
         })
         .collect::<Vec<_>>();
-    let mut statements = validated_source_tail_drops(&objects, &counts, version == 124);
+    let mut statements = validated_source_tail_drops(&objects, &counts, version == 124, |_| true);
     let marker: i64 = connection
         .query_row(
             "SELECT count(*) FROM background_source_schema WHERE singleton=1 AND version=1",

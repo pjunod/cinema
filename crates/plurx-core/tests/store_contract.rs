@@ -13046,23 +13046,11 @@ async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, St
         .collect()
 }
 
-/// A historical queue fixture cannot retain half of the independent managed
-/// extension after removing its background objects. Rewind only an empty,
-/// unactivated current extension, then let ordinary open reinstall it.
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn rewind_empty_managed_subtitle_extension(client: &Client) {
-    assert_unactivated_contract_baseline(client).await;
-    // These independently recognized current extensions must be validated
-    // before the queue teardown. Their drops join the one transaction below.
-    async fn extension_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
-        client
-            .query_consistent(sql.to_owned(), hiqlite::params!())
-            .await
-            .expect("extension shape inventory")
-            .iter_mut()
-            .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
-            .collect()
-    }
+async fn replicated_source_tail_drops(
+    client: &Client,
+    remove: impl Fn(&str) -> bool,
+) -> Vec<String> {
     use queue_fixture::source_extensions_fixture::{
         validated_source_tail_drops, SOURCE_TAIL_SHAPE,
     };
@@ -13093,7 +13081,27 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         source_counts.push((name.clone(), rows[0].value));
     }
     require_replicated_fixture_marker(client, "background_source_schema", 1).await;
-    let source_drops = validated_source_tail_drops(&source_shape, &source_counts, true);
+    validated_source_tail_drops(&source_shape, &source_counts, true, remove)
+}
+
+/// A historical queue fixture cannot retain half of the independent managed
+/// extension after removing its background objects. Rewind only an empty,
+/// unactivated current extension, then let ordinary open reinstall it.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn rewind_empty_managed_subtitle_extension(client: &Client) {
+    assert_unactivated_contract_baseline(client).await;
+    // These independently recognized current extensions must be validated
+    // before the queue teardown. Their drops join the one transaction below.
+    async fn extension_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
+        client
+            .query_consistent(sql.to_owned(), hiqlite::params!())
+            .await
+            .expect("extension shape inventory")
+            .iter_mut()
+            .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+            .collect()
+    }
+    let source_drops = replicated_source_tail_drops(client, |_| true).await;
     let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
     assert_eq!(
         handoff_shape,
@@ -18999,22 +19007,8 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 74 with the current durable tables, including the Library channel
-    // entities, media classifications, channel subject jobs and decisions,
-    // the three DVR tables, the scoped book file grants (SQLite v68), the
-    // replicated candidate-recovery memory (SQLite v96), and the three
-    // continuous-quality tables that travel with media sessions. A
-    // v14 source has no rows for newer tables — each one's `minimum_schema` is
-    // later — but every table is still reported, because the digest inventory
-    // is over what the import *plans*, not over what the source happened to
-    // hold. The subtitle-source ledgers are node-held facts about local files
-    // and are deliberately not imported, so they are not counted here.
-    // 77: main's replicated candidate recovery, plus Jellyfin compatibility's
-    // wire identities, compatibility logins and bounded negotiations
-    // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
-    // v102–v103).
-    // Plus the item ratings and per-person lists (SQLite v113).
-    // Plus the playback handoff codes and tokens (SQLite v115).
+    // The report covers the entire current import plan, including later families
+    // with no rows in v14. SQLite v122 added seven durable source-arbitration tables.
     let mut imported_tables = report
         .tables
         .iter()
@@ -19027,6 +19021,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "analysis_attempts",
             "analysis_lifecycle_counters",
             "analysis_requests",
+            "analysis_source_checkpoints",
             "api_keys",
             "background_artifact_repairs",
             "background_artwork_locations",
@@ -19042,6 +19037,10 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_library_requests",
             "background_predictions",
             "background_provider_budgets",
+            "background_source_custody",
+            "background_source_pauses",
+            "background_source_service_epochs",
+            "background_source_service_grants",
             "background_storage_domains",
             "background_transcode_artifacts",
             "cache_consumer_pins",
@@ -19060,6 +19059,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "dvr_rules",
             "file_grants",
             "files",
+            "foreground_source_owners",
             "items",
             "jellyfin_entity_ids",
             "jellyfin_login_tokens",
@@ -19088,6 +19088,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "media_sessions",
             "offline_package_leases",
             "offline_packages",
+            "playback_analysis_suspensions",
             "playback_handoffs",
             "playback_handoffs_tokens",
             "pretranscode_jobs",
