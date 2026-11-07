@@ -635,13 +635,14 @@ mod tests {
 
     #[test]
     fn output_job_owned_call_sites_are_the_audited_set() {
+        // Source-bound pixel, subtitle-offset and VTT probes use
+        // BoundedDiagnosticChild; its spawn remains registered by the launcher.
         let expected = BTreeMap::from([
-            ("ffmpeg.rs".to_owned(), 4),
+            ("ffmpeg.rs".to_owned(), 3),
             ("live_tv.rs".to_owned(), 1),
             ("live_tv/caption_probe.rs".to_owned(), 1),
             ("pipeprobe.rs".to_owned(), 2),
             ("subtitle_ride_along.rs".to_owned(), 1),
-            ("subtitles.rs".to_owned(), 2),
             ("transcode/media_origin.rs".to_owned(), 1),
         ]);
         let mut actual = BTreeMap::new();

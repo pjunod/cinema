@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Historical queue fixtures preserve managed receipts while rewinding the
+  published source and dispatch extensions, and source audits cover nested
+  replicated-store modules and their required authority reads.
+
 - Manual library scans and explicit refreshes get the next eligible shared
   read slot across job types. A scan finishing under a pressure check can
   release its reader and let the next scan start.

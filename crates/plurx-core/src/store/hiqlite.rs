@@ -3974,6 +3974,7 @@ impl HiqliteAuthStore {
                 "foreground source arbitration extension has incompatible shape".into(),
             ));
         }
+        // authority: reader admission requires the committed source-arbitration singleton.
         let marker=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",params!()).await?;
         Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
     }
