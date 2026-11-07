@@ -702,6 +702,35 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "maintain_jobs",
     "publish_transcode_job",
     "publish_fragment_job",
+    "advertise_library_turn",
+    "recent_job_completions",
+    "register_foreground_source",
+    "project_foreground_source",
+    "release_foreground_source",
+    "foreground_source_pressure",
+    "list_foreground_source_owners",
+    "resolve_foreground_source",
+    "activate_foreground_source_custody",
+    "abort_foreground_source_activation",
+    "mark_foreground_source_settled",
+    "settled_foreground_source_custody",
+    "activate_background_source_custody",
+    "abort_background_source_activation",
+    "mark_background_source_settled",
+    "settled_background_source_custody",
+    "resolve_background_source_custody",
+    "register_background_source_custody",
+    "claim_background_source_service",
+    "release_background_source_custody",
+    "close_read_attestation_source_lease",
+    "suspend_playback_analysis_interest",
+    "restore_playback_analysis_interest",
+    "background_source_may_continue",
+    "pause_background_source",
+    "resume_background_source",
+    "source_checkpoint_artifacts",
+    "checkpoint_analysis_source",
+    "checkpoint_job",
 ];
 const PRETRANSCODE_METHODS: &[&str] = &["pretranscode_job", "pretranscode_staging_jobs"];
 const OFFLINE_METHODS: &[&str] = &[
@@ -21061,7 +21090,9 @@ fn contract_inventory_matches_every_store_method() {
     // +5: source-revision title demand/readiness, binding, fenced publication
     // and same-node probe priority, explicitly listed in BACKGROUND_JOB_METHODS.
     // +3: source-fenced FEL verdict write, requalification and verdict counts.
-    assert_eq!(declared.len(), 517, "review the Store method count");
+    // 27 foreground/background source custody, service, and checkpoint methods,
+    // plus library turn readiness and recent job completions.
+    assert_eq!(declared.len(), 546, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
