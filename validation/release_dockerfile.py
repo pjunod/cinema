@@ -305,7 +305,7 @@ def required_binaries(source: str) -> tuple[str, ...]:
 
 
 def required_debug_binaries(source: str) -> tuple[str, ...]:
-    """Historical tags have no DWP; profile C must retain the whole binary set."""
+    """Historical unlabeled tags may omit DWP; explicit profiles retain every pair."""
     runtime = _runtime(source)
     binaries = required_binaries(source)
     debug = []
@@ -315,7 +315,11 @@ def required_debug_binaries(source: str) -> tuple[str, ...]:
             raise ValueError("tagged runtime copies packed debug more than once")
         if count:
             debug.append(name)
-    if debug and tuple(debug) != binaries:
+    explicit_profile = any(
+        f'LABEL tv.plurx.distribution="{profile}"' in runtime
+        for profile in ("standalone", "cluster")
+    )
+    if (debug or explicit_profile) and tuple(debug) != binaries:
         raise ValueError("tagged runtime must retain packed debug for every binary")
     return tuple(debug)
 

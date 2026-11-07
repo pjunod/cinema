@@ -1131,7 +1131,8 @@ assert.equal(context.ACT_TIMER, null);
                 stages[-1].group(0), r"(?i)^[ \t]*from[ \t]+runtime[ \t]+as[ \t]+\S+[ \t]*$"
             )
             self.assertEqual(dockerfile[stages[-1].end() :].strip(), "")
-        runtime = dockerfile[runtime_stage.end() :]
+        runtime_end = next(stage.start() for stage in stages if stage.start() > runtime_stage.end())
+        runtime = dockerfile[runtime_stage.end() : runtime_end]
         self.assertIn('ARG PLURX_BUILD_SHA=""', runtime)
         self.assertIn(
             'LABEL org.opencontainers.image.revision="${PLURX_BUILD_SHA}"', runtime
@@ -1139,7 +1140,14 @@ assert.equal(context.ACT_TIMER, null);
         healthcheck_instructions = list(
             re.finditer(r"(?im)^[ \t]*healthcheck\b", dockerfile)
         )
-        self.assertEqual(len(healthcheck_instructions), 1)
+        self.assertEqual(len(healthcheck_instructions), 2)
+        self.assertEqual(len(re.findall(r"(?im)^[ \t]*healthcheck\b", runtime)), 1)
+        cluster_runtime = re.search(
+            r"(?ims)^FROM runtime-assets AS runtime-cluster\n(.*?)(?=^FROM )", dockerfile
+        )
+        self.assertIsNotNone(cluster_runtime)
+        self.assertEqual(len(re.findall(r"(?im)^[ \t]*healthcheck\b", cluster_runtime.group(1))), 1)
+        self.assertIn('CMD ["plurxd", "healthcheck"]', cluster_runtime.group(1))
         self.assertGreater(healthcheck_instructions[0].start(), runtime_stage.end())
         healthcheck = re.search(
             r'(?im)^[ \t]*healthcheck[ \t]+--interval=(\S+)[ \t]+'
@@ -1301,11 +1309,15 @@ assert.equal(context.ACT_TIMER, null);
         actually passes the commit's time: the Docker context has no `.git`.
         """
         dockerfile = read("Dockerfile")
-        build_stage = dockerfile.split(" AS build\n", 1)[1].split("\nFROM ", 1)[0]
-        self.assertRegex(build_stage, r"(?m)^ARG SOURCE_DATE_EPOCH$")
-        self.assertLess(
-            build_stage.index("ARG SOURCE_DATE_EPOCH"), build_stage.index("cargo build")
-        )
+        build_source = dockerfile.split(" AS build-source\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertRegex(build_source, r"(?m)^ARG SOURCE_DATE_EPOCH$")
+        for profile in ("build", "build-cluster", "build-storage-migration-helper"):
+            with self.subTest(profile=profile):
+                self.assertIn(f"FROM build-source AS {profile}\n", dockerfile)
+                build_stage = dockerfile.split(f" AS {profile}\n", 1)[1].split("\nFROM ", 1)[0]
+                self.assertIn("cargo build", build_stage)
+                self.assertLess(dockerfile.index("ARG SOURCE_DATE_EPOCH"),
+                                dockerfile.index(f"FROM build-source AS {profile}\n"))
 
         makefile = read("Makefile")
         self.assertIn(
@@ -2879,7 +2891,10 @@ assert.equal(context.ACT_TIMER, null);
         # thing that used to notice was `cargo clippy --locked` in a different
         # job, twenty minutes in. Running it first costs under a second and
         # fails with the same message.
-        self.assertIn("ci-rust-gate: fmt-check spike-lock-check lint", gate)
+        self.assertIn("ci-rust-gate: fmt-check spike-lock-check standalone-rust-check cluster-rust-check lint", gate)
+        self.assertIn("--exclude plurx-storage-migrate", gate)
+        self.assertIn("$(CARGO) check --locked --no-default-features -p plurxd --all-targets", makefile)
+        self.assertIn("$(CARGO) check --locked --no-default-features -p plurxd --features cluster --all-targets", makefile)
         self.assertIn("spike-lock-check", makefile.split("\nunit:", 1)[1].split("\n\n", 1)[0])
         self.assertIn("run: make ci-rust-gate", workflow)
         self.assertIn("make fmt-check lint", lint)
@@ -4883,7 +4898,7 @@ assert.equal(context.ACT_TIMER, null);
                         elif name == "desktop_qualification":
                             expected_gate += " && needs.resolve.outputs.mode == 'qualification'"
                         elif name != "resolve":
-                            self.assertIn(name, {"linux", "macos_source_parser", "macos_build", "macos", "windows", "windows_smoke", "desktop_metadata"})
+                            self.assertIn(name, {"linux", "macos_source_parser", "macos_build", "macos", "windows", "windows_smoke", "desktop_metadata", "storage_helpers"})
                             expected_gate += " && needs.resolve.outputs.mode != 'qualification'"
                     self.assertEqual([expected_gate], conditions, f"{path}:{name}")
                     if path == ".github/workflows/github-release.yml" and name == "desktop_qualification":

@@ -425,6 +425,14 @@ class MacosReleaseSigningCase(unittest.TestCase):
             f"plurx-desktop-{version}-1.x86_64.rpm", f"plurx-desktop-{version}-1.aarch64.rpm",
             f"plurx-tray-{version}-linux-amd64.tar.gz", f"plurx-tray-{version}-linux-arm64.tar.gz",
             f"plurxd-{version}-macos-universal.tar.gz", f"plurxd-{version}-windows-x86_64.zip"]
+        # Helpers are separate release artifacts, outside the unchanged nine-asset
+        # managed desktop cohort. Every supported helper needs its archive and
+        # exact Describe sidecar even when an in-app feed is not advertised.
+        helpers = [f"plurx-storage-migrate-{version}-{target}.{suffix}"
+            for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+                           "x86_64-apple-darwin", "aarch64-apple-darwin"]
+            for suffix in ["tar.gz", "describe.json"]]
+        installers = native + helpers
         metadata = ["plurx-update-v1.json", "plurx-update-v1.json.sig"]
         # Exercise the actual shell asset validator; macOS hosts may lack GNU sha256sum.
         tools = self.root / "checksum-tools"
@@ -434,9 +442,19 @@ class MacosReleaseSigningCase(unittest.TestCase):
             checksum.write_text("#!" + sys.executable + "\nimport hashlib, pathlib, sys\n"
                 "for name in sys.argv[1:]: print(hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() + '  ' + name)\n")
             checksum.chmod(0o755)
-        cases = [(False, native, True), (False, native + metadata[:1], False),
-            (False, native + metadata, False), (False, native[:-2] + native[-1:], False),
-            (True, native, False), (True, native + metadata[:1], False), (True, native + metadata, True)]
+        cases = [(False, installers, True), (False, installers + metadata[:1], False),
+            (False, installers + metadata, False),
+            (False, native[:-2] + native[-1:] + helpers, False),
+            (True, installers, False), (True, installers + metadata[:1], False),
+            (True, installers + metadata, True), (False, native, False)]
+        for enabled in [False, True]:
+            feed = metadata if enabled else []
+            # A missing archive or missing Describe record refuses publication;
+            # neither the rest of the cohort nor signed metadata substitutes it.
+            cases += [(enabled, native + helpers[:index] + helpers[index + 1:] + feed, False)
+                      for index in range(len(helpers))]
+            cases.append((enabled, installers + feed +
+                [f"plurx-storage-migrate-{version}-unsupported-target.tar.gz"], False))
         for index, (enabled, files, success) in enumerate(cases):
             with self.subTest(enabled=enabled, files=files):
                 run = self.root / f"publisher-{index}"
