@@ -6,8 +6,9 @@ Add each document's row here in the same commit.
 
 | File | Answers | |
 |---|---|---|
-| [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's independent review of the plan; dispositions in the plan's §7. | done |
-| [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | The playback-start effort: rulings, target contract, every review finding mapped to a lane, Phase 1 repairs through the one-engine rebuild, reviews applied, single lane status. | open |
+| [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract for Opus: all nine lanes. | open |
+| [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
+| [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Playback-start effort: rulings, lanes, reviews, lane status. | open |
 | [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold first-playlist consumption and web Resume fault ownership: implementation, review, validation and merge ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs; review and acceptance. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |

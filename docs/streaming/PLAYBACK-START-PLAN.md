@@ -9,7 +9,7 @@
 
 1. Rolling-live copy and indexed-VOD copy become **one engine**; the first play produces the index.
 2. The fragment index is **keyed on the source and an output contract**, not on the engine binary; per-title fallback when serve-time verification fails.
-3. Processed Dolby Vision / HDR10-E is an **upgrade after the first frame**, never work before it, and the switch must be flawless (zero dropped frames, no audible seam, no reopen) before it leaves the Developer tab. **Mechanism pending Paul's word** (Astra B6): the plan's default is the M6 prepared replacement (a prepared successor replaces the player item), because no HLS client is known to switch variants across codec/`VIDEO-RANGE` natively mid-session; a bounded per-device feasibility spike for a native same-presentation switch is the alternative.
+3. Processed Dolby Vision / HDR10-E is an **upgrade after the first frame**, never work before it, and the switch must be flawless (zero dropped frames, no audible seam, no reopen) before it leaves the Developer tab. **Mechanism settled 2026-11-07: the M6 prepared replacement**, closing Astra's blocker 6; a native same-presentation variant switch is not pursued.
 4. Learners and idle voters **may index**: lab4 and lab6 preferred, media1 with yield, lab3 (learner) lowest priority.
 
 ## 1. Target contract (what PLAYBACK-START.md will say when the effort closes)
@@ -98,7 +98,7 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 ## 5. Routing
 
 - **Review:** this plan — Fable and Astra applied (§7). A1+B1 and E1 designs: Fable again before build.
-- **Build (Opus):** H2, C3, C1, D2, D1, G1 server, R1, A1, A2, B1, D3, E1, F1.
+- **Build contracts (Opus):** Phase 1 is written up in [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) (one document, all nine lanes). Phase 2+ (A1, A2, A3, B1, D3, E1, F1) get contracts after the A1+B1 design review.
 - **Build (Sonnet):** C2, G1 web, A3, H1.
 
 ## 6. Lane status
@@ -110,7 +110,7 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 | C3 | — | 3 | unclaimed | active 4,097/4,096; retired-digest queued 3,878; ready_24h 0 → |
 | C1 | — | 3 | unclaimed | claims/2.7 d 16 (media1); lab4/lab6 cannot claim → |
 | D2 | — | 3 | unclaimed | codeless 503s; create p99 → |
-| D1 | — | 3 | unclaimed (mechanism ruling pending) | DV vs non-DV cold TTFF; 20 switches/platform → |
+| D1 | — | 3 | unclaimed | DV vs non-DV cold TTFF; 20 switches/platform → |
 | G1 | — | 3 | unclaimed | — |
 | R1 | — | 3 | unclaimed | authority_fence won 16/18 → by cause |
 | H1 | — | 3 | unclaimed | — |
@@ -137,3 +137,4 @@ Each lane: root cause → change → anchors → tests → acceptance → size/t
 | 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Rev 1 written from the review; rulings 1–4 recorded. |
 | 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Fleet state read (queue wedged at cap; release-as-fence); Fable review applied (rev 2, not what #1401 merged — bridge propagation). |
 | 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Astra review applied; rev 3 is the first revision build agents may claim. |
+| 2026-11-07 | plan | claude-fable-5-1 / 01BCWLA2SJPLAmibeaz9L5xb | Ruling 3 mechanism settled (M6); Phase 1 build contracts written (QUEUE, CREATE). |
