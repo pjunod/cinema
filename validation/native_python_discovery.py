@@ -81,3 +81,50 @@ def source_cohort(record, text, kind, command, discovery, candidate):
     require(record['coverage'] == {'mode': 'python-discovery', 'ids': ids},
             'Native Python cohort differs from frozen source discovery')
     return ids, outer_counts(text, kind, run_id, len(ids))
+
+
+# These source-level controls parse supplied fixtures and do not invoke either
+# platform's native binaries. Extending this set requires reviewing the inputs
+# a body consumes before applying a Darwin result to the Linux preflight.
+MEASURED_PORTABLE_CASES = {
+    'test_retained_lane_commands.NativePythonTransitionCase.test_only_reviewed_whole_preflight_transition_preserves_node_scope',
+    'test_native_python_discovery.NativeDiscoveryCase.test_native_skips_remain_unnamed_and_nested_fixtures_do_not_supply_outcomes',
+    'test_native_python_discovery.NativeDiscoveryCase.test_refuses_misplaced_adopted_failed_or_ambiguous_discovery',
+    'test_native_python_discovery.NativeDiscoveryCase.test_historical_retained_input_or_changed_scope_cannot_claim_execution',
+    'test_native_python_discovery.NativeDiscoveryCase.test_native_continuation_runs_only_selected_exact_cases',
+}
+
+
+def measured_named(proof, record, raw, kind, universe, archive_digest):
+    """Read a clean, measured archive capture on the reviewed local toolchain."""
+    from validation.nonrust_unit_cohort import blob, python_rows
+    from validation import python_unit_receipts as receipts
+
+    origin = record['origin']
+    execution = origin['execution']
+    require(kind in {'operations', 'validation'} and origin['kind'] == 'attested-local'
+            and set(execution) == {'mode', 'kind', 'measured_python_binding'}
+            and record['coverage'] == {'mode': 'python-named'}
+            and type(record['exit_code']) is int and record['exit_code'] == 0,
+            'Unexpected measured Python evidence')
+    binding = receipts.bounded_json(blob(proof, execution['measured_python_binding']))
+    argv = binding['argv']
+    require(binding['source_commit'] == record['source_commit']
+            and binding['source_archive_sha256'] == archive_digest(record['source_commit'])
+            and all(binding[key] is True for key in ('source_clean_before', 'source_clean_after', 'source_stable'))
+            and binding['log_sha256'] == retention.digest(raw) and binding['exit_code'] == 0
+            and binding['platform'] == 'darwin' and binding['python_version'] == '3.12.14'
+            and binding['python_binary_sha256'] == '9d1335796350848c36dc2711a3298e096deebee18c85f1ab36edd8747fdf85eb'
+            and binding['node_version'] == 'v24.22.1'
+            and binding['node_binary_sha256'] == '8a7dd4c5cb35e6171dfbea7303650bc311f46971b06dd7e1c62e3f291cfd746c'
+            and isinstance(argv, list) and argv[:4] == [binding['python_executable'], '-m', 'unittest', '-v']
+            and origin['command'] == argv and len(argv) > 4,
+            'Python archive, command, measured source or runtime differs')
+    prefix = 'tests.' + kind + '.'
+    require(all(token.startswith(prefix) for token in argv[4:]), 'Measured Python selector outside suite')
+    ids = [token.removeprefix(prefix) for token in argv[4:]]
+    actual = python_rows(raw.decode(), kind, universe)
+    require(len(ids) == len(set(ids)) and set(actual) == set(ids) and set(ids) <= MEASURED_PORTABLE_CASES
+            and all(outcome == 'pass' for outcome in actual.values())
+            and re.search(r'^OK\s*\Z', raw.decode(), re.M), 'Measured native selections did not pass')
+    return actual

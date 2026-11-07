@@ -46,6 +46,9 @@ class NativeDiscoveryCase(unittest.TestCase):
     def test_native_continuation_runs_only_selected_exact_cases(self):
         from validation.native_python_execute import run_selection
 
+        import contextlib
+        import io
+
         ran = []
 
         class Fixture(unittest.TestCase):
@@ -58,7 +61,8 @@ class NativeDiscoveryCase(unittest.TestCase):
         tests = [Fixture('test_prior'), Fixture('test_prior_extra')]
         plan = {'inventory': sorted(test.id() for test in tests),
                 'uncovered': [tests[1].id()], 'prior_discovery': []}
-        run_selection(plan, tests)
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            run_selection(plan, tests)
         self.assertEqual(ran, [tests[1].id()])
         with self.assertRaises(ReceiptError):
             run_selection(plan, tests[1:])

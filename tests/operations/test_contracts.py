@@ -2343,6 +2343,7 @@ assert.equal(context.ACT_TIMER, null);
             "retained_units_attachment_id": "Private promotion PR evidence attachment ID",
             "retained_units_attachment_uuid": "Private promotion PR evidence attachment UUID",
             "workspace_rust_evidence": "Optional authenticated partial workspace test evidence descriptor",
+            "python_unit_evidence": "Authenticated prior preflight and reviewed Python source coverage",
             "promotion_pr": "Optional open same-repo effort/integration promotion PR to main",
             "promotion_head_sha": "Immutable promotion head SHA; dispatch on that head branch",
             "promotion_base_sha": "Immutable current main SHA already merged into the promotion head",

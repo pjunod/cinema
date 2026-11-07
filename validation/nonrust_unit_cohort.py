@@ -991,6 +991,17 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
             if mode == 'python-named':
                 counts = re.findall(r'^Ran (\d+) tests? in [0-9.]+s$', text, re.M)
                 receipts.require(counts == [str(capture['count'])], 'Finite original named count differs')
+        elif 'reviewed_observation' in execution:
+            from validation.native_python_observation import observed
+            actual = observed(proof, record, raw, kind, discovery)
+            if any(outcome == 'opaque-pass' for outcome in actual.values()):
+                opaque_sources.append({'sequence': sequence, 'source_commit': record['source_commit'],
+                                       'log_sha256': record['log']['sha256_ref'],
+                                       'membership_ids': sorted(set(actual) - invalid),
+                                       'runtime_named_outcomes': None})
+        elif 'measured_python_binding' in execution:
+            from validation.native_python_discovery import measured_named
+            actual = measured_named(proof, record, raw, kind, universe, archive_digest)
         elif execution.get('native_discovery') is True:
             from validation.native_python_discovery import source_cohort
             old_ids, counts = source_cohort(record, text, kind, item['invocation'], discovery, candidate)
