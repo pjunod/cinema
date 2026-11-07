@@ -6471,33 +6471,8 @@ impl JobManager {
         if let Err(error) = crate::source_custody::replay_local_settlements(&self.store).await {
             tracing::warn!(%error,"replaying local source settlement journal");
         }
-        match self.store.settled_background_source_custody().await {
-            Ok(receipts) => {
-                for receipt in receipts {
-                    if let Err(error) = self
-                        .store
-                        .release_background_source_custody(receipt, clock_ms())
-                        .await
-                    {
-                        tracing::warn!(%error,"replaying settled background source custody");
-                    }
-                }
-            }
-            Err(error) => tracing::warn!(%error,"reading settled background source custody"),
-        }
-        match self.store.settled_foreground_source_custody().await {
-            Ok(receipts) => {
-                for receipt in receipts {
-                    if let Err(error) = self
-                        .store
-                        .release_foreground_source(receipt, clock_ms())
-                        .await
-                    {
-                        tracing::warn!(%error,"replaying settled foreground source custody");
-                    }
-                }
-            }
-            Err(error) => tracing::warn!(%error,"reading settled foreground source custody"),
+        if let Err(error) = self.store.reap_settled_source_custody(clock_ms()).await {
+            tracing::warn!(%error, "replaying settled source custody");
         }
         crate::source_custody::source_pressure_changed().notify_waiters();
     }
