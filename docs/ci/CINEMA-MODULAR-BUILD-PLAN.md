@@ -1,8 +1,8 @@
 # Cinema modular builds — smaller dependency graphs and measured rebuilds
 
-**Status:** implementation draft — standalone SDK omission is proved for the
-selected graph; native/cluster behavior and release qualification are pending.
-P1 is merged; this packaging/helper candidate is not qualified or merged to main.
+**Status:** implemented — actual SDK-free before/after builds and cross-process
+AUTH81/AUTH82 migration pass. Remaining native checks and exact-head promotion
+are in progress through PR #1396; this candidate is not yet merged to main.
 **Written:** 2026-11-04 · **Owner:** Codex · **Reviewer:** Astra.
 **Review:** [Astra findings and dispositions](../reviews/CINEMA-MODULAR-BUILD-ASTRA-REVIEW.md).
 **Source baseline:** `f30dfbbc9237046a0f6a6f20d893044593f56600`.
@@ -536,3 +536,19 @@ each supported distribution, including new migration tooling.
 Record Astra's findings and individual dispositions with the review, then
 update this ledger and the backlog row in the same task changes. Retain the
 original before measurements and failures when adding after results.
+
+## 11. Integrated delivery evidence — 2026-11-07
+
+[Task PR #1396](http://forge.lan:3000/noirr/plurx/pulls/1396), commit
+`02ea8ed11d61f737f660a1f60d2f20223d8487c0`, includes main `8c654d37b5`.
+Normal hooks, all 15 paperwork checks and all three formal mappings pass.
+The [actual SDK-cut measurements](CINEMA-BUILD-MEASUREMENTS.md#4-actual-standalone-sdk-removal--2026-11-07)
+prove zero Hiqlite/WAL/OpenRaft units, 448 → 380 total units, and 13–14% shorter
+warm changed-source rebuilds. Cold-build gains remain unproven.
+
+CLI run `e3c20b408c784497ba2611d5f8f2d7c5` passes actual AUTH81/AUTH82 handoff,
+native reopen, preserved settings/IDs/telemetry, safe missing-key handling and
+wrapped credential decryption; five production child-owner fixtures also pass.
+Integrated packaging: 121 tests, one environment skip; one Python-3.15-incompatible
+fixture passes on Python 3.12 retry. Remaining native checks, task/main gates and
+qualification receipt are pending. Deeper extraction remains deferred.

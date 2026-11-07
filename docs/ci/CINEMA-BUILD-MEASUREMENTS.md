@@ -1,6 +1,6 @@
 # Cinema build measurements — reproducible developer comparisons
 
-**Status:** open — P1 merged; capped linker comparison complete with no useful gain; SDK-free before/after measurements pending.
+**Status:** open — P1 merged; capped linker comparison complete with no useful gain; SDK-free before/after measurements complete; runtime and promotion qualification pending.
 **Written:** 2026-11-04 · **Owner:** Codex.
 
 The [modular-build plan](CINEMA-MODULAR-BUILD-PLAN.md) owns the phases and
@@ -177,3 +177,60 @@ The retained, collected evidence bundle has SHA256
 `afdac15fec74d351313015f9f677eef9d478bad8e955aafedd82f43c4f1d0f09`;
 run ID `40f7dcfcc0f3405db8322d5509c7f554`. The scope recorded no OOM or
 OOM kill. The physical compiler was a non-voter with no external daemon load.
+
+## 4. Actual standalone SDK removal — 2026-11-07
+
+The before revision is current main `8c654d37b5ee3f1418fa3393662c671a6555455e`
+(tree `1a8ddcb00c2aaff287dd6eed45b6cc2153421ae2`); after is the integrated
+standalone candidate `02ea8ed11d61f737f660a1f60d2f20223d8487c0`
+(tree `5aad4a8a6010c4a6818d5bc0af0fdbdc32172a29`), containing that main.
+The unchanged product runner and existing exclusive compiler slot measured both
+with Rust/Cargo 1.97.1, four CPUs, 24 GiB, no swap, default dev debug level 2,
+no compiler-result cache and the same requalified extraction-only SDK.
+The two installed PCRE security patch updates were revalidated before either
+run; all other package identities and the SDK preparer remained unchanged.
+
+Both revisions ran exactly:
+
+```text
+cargo +1.97.1 build --locked --offline -p plurxd --message-format=json-render-diagnostics --timings -j4
+```
+
+The private orchestration reused the existing guard, leases, runner and sealed
+receipts. Its only recipe changes from the earlier linker experiment were
+direct Cargo and one system-linker variant, applied equally to both revisions.
+Changed-source artifact freshness and complete source restoration were checked.
+
+| Probe | Before samples (seconds) | After samples (seconds) | Before median | After median | Reduction |
+|---|---|---|---:|---:|---:|
+| noop | 0.215781, 0.216170, 0.215704 | 0.165457, 0.164635, 0.164240 | 0.215781 | 0.164635 | 23.7% |
+| asset | 17.783790, 17.622364, 17.652122 | 15.448159, 15.361606, 15.343836 | 17.652122 | 15.361606 | 13.0% |
+| leaf | 18.031873, 18.144088, 17.743023 | 15.375393, 15.554111, 15.566167 | 18.031873 | 15.554111 | 13.7% |
+| api | 27.979877, 26.948786, 26.839063 | 23.281637, 23.703074, 23.414733 | 26.948786 | 23.414733 | 13.1% |
+
+Actual Cargo artifact inventories contain **448 before / 380 after** units.
+Before includes Hiqlite, Hiqlite WAL/derive and OpenRaft/macros; after includes
+none. This proves omission in the measured daemon build. The separate shipping
+graph check additionally covers controller and tray across normal/build edges.
+
+These are warm incremental rebuild medians, not clean-build measurements.
+Warmups took 208.096292 s and 165.615445 s in the reused slot; its prior cache
+contents differ, so those values do not establish a cold-build improvement.
+Allocated mixed target/cache inventory grew from 70,630,109,184 to
+83,552,571,392 bytes while retaining both configurations, not a binary-size
+or standalone disk-footprint comparison. Release Thin LTO remains unchanged.
+
+Durable run IDs and sealed bundle identities:
+
+- Before `5872a61e8c6a4412b06144ff1147210e`, bundle SHA-256
+  `fb604e87e11f870c1d4eff2e8facd2f09bd1020a16c45024dec485ec236265e4`.
+  SSH stalled after successful remote completion. Recovery independently checked
+  the sealed manifest, exact source/tools, caps and successful terminal launcher
+  receipt; the failed transport log is preserved.
+- After `6767885a6929451d817fed7060ae6285`, bundle SHA-256
+  `de3e5e9964ef011f9b9fee108a16b3aee649ab7fabb159a6c3354f96263e0f0e`.
+
+Both retain full samples, Cargo events/timings, exact archives, tool identities,
+resource receipts and restored source inventories outside disposable caches.
+Runtime migration qualification and the main promotion receipt are separate
+acceptance evidence; these measurements alone do not qualify an upgrade.
