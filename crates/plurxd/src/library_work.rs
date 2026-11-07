@@ -168,7 +168,11 @@ impl JobManager {
         if ahead > 0 {
             if let Err(error) = self
                 .store
-                .set_scan_request_waiting_on(request_id, &format!("queue_position:{ahead}"), clock_ms())
+                .set_scan_request_waiting_on(
+                    request_id,
+                    &format!("queue_position:{ahead}"),
+                    clock_ms(),
+                )
                 .await
             {
                 tracing::warn!(%error, request_id, "recording the targeted queue position");
