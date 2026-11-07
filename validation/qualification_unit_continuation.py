@@ -153,7 +153,35 @@ def job_steps(workflow, job):
             for i, start in enumerate(starts)]
 
 
+# Run 6713 shipped conditional full/compile-only Rust steps. The complete
+# original workflow pins checkout, scope, all four job bodies and the branch
+# that invokes each Make recipe. Its event supplied no retained-unit inputs.
+ORIGINAL_RUST_6713_SOURCE = '65905cc9ae76d428374d5a383246ed1d7d12d5c2'
+ORIGINAL_RUST_6713_WORKFLOW = '34342f9bb8841f6b2b64f0aee490d78343df44421f5b33b56dff6b09de10f52d'
+ORIGINAL_RUST_6713_JOBS = {
+    'store_contract': (63624, 26546, 'failure'),
+    'wal': (63633, 26608, 'success'),
+    'topology': (63628, 26563, 'success'),
+    'transport': (63629, 26599, 'success'),
+}
+
+
+def original_conditional_rust_workflow(workflow, kind):
+    return (kind in ORIGINAL_RUST_6713_JOBS
+            and retention.digest(workflow.encode()) == ORIGINAL_RUST_6713_WORKFLOW)
+
+
+def require_original_conditional_rust_dispatch(source, inputs, run_id, job, kind):
+    receipts.require(source == ORIGINAL_RUST_6713_SOURCE and run_id == 6713
+                     and (job.get('id'), job.get('task_id'), job.get('status')) == ORIGINAL_RUST_6713_JOBS[kind]
+                     and inputs == {'promotion_pr': '1399', 'promotion_head_sha': source,
+                                    'promotion_base_sha': '8c654d37b5ee3f1418fa3393662c671a6555455e'},
+                     'Historical conditional Rust job lacks its exact unretained dispatch')
+
+
 def historical_command(workflow, kind):
+    if original_conditional_rust_workflow(workflow, kind):
+        return True
     job = {'store_contract': 'cluster_store_legacy', 'wal': 'cluster_wal',
            'android_jvm': 'android_jvm', 'topology':'cluster_topology',
            'transport':'cluster_transport_recovery_contracts'}.get(kind, 'preflight')
@@ -1641,6 +1669,9 @@ def authenticate(api, proof, document, repository, live_logs=None):
                                  and kind in {'validation', 'operations'} and jobs[0]['status'] == 'success',
                                  'Native discovery belongs to another command or unsuccessful job')
                 native_event(record['source_commit'], workflow.decode(), inputs)
+            elif original_conditional_rust_workflow(workflow.decode(), kind):
+                require_original_conditional_rust_dispatch(record['source_commit'], inputs,
+                                                       run_id, jobs[0], kind)
             else:
                 receipts.require(historical_command(workflow.decode(), kind),
                                  'Historical command executor differs')
