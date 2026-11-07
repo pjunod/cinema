@@ -23,7 +23,7 @@ RAW = (BEFORE.replace('$(CARGO)', 'cargo') + '\n'
 
 def fixture():
     return {'source_commit': 'a' * 40, 'exit_code': 0, 'origin': {
-        'kind': 'authenticated-ci', 'command': 'make cluster-wal-check',
+        'kind': 'authenticated-ci', 'identity': 'run:1/job:2', 'command': 'make cluster-wal-check',
         'execution': {'job_status': 'success', 'first_line': 5, 'historical_name': 'wal:2'}}}
 
 
