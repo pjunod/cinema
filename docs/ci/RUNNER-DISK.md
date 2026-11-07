@@ -17,15 +17,12 @@ placements; the fleet collector maps live host names through its private alias
 configuration. Keep the existing registration IDs and UUIDs when reconciling
 names.
 
-On `maca`, the release-image build uses `gha-maca-linux-arm-01` with
-`release-arm64`. CI packaging uses a separate Linux VM, `gha-maca-linux-arm-02`,
-with `ci-arm64`, one runner slot, four virtual CPUs, 8 GiB of RAM, 9 GiB of
-persistent swap and a 48 GiB sparse disk. The native release compiler reached
-6.9 GiB RSS during package qualification. Each guest has its own Docker engine
-and Forgejo registration. The package runner sets `PLURX_CI_BUILDKIT_MAX_GB=10`
-to bound reusable BuildKit state after each package job. The retired `gha-macb-linux-arm-01` registration
-remains in Forgejo for history. The active fleet roster assigns CI packaging to
-`gha-maca-linux-arm-02`.
+On `maca`, `gha-maca-linux-arm-01` serves `release-arm64`. CI packaging uses
+`gha-maca-linux-arm-02` with `ci-arm64`, one slot, four vCPUs, 8 GiB RAM,
+9 GiB persistent swap and a 48 GiB sparse disk. The native release compiler
+peaked at 6.9 GiB RSS. Each guest has its own Docker engine and registration.
+The CI guest sets `PLURX_CI_BUILDKIT_MAX_GB=10` to cap its reusable build
+cache. The retired `gha-macb-linux-arm-01` registration stays in Forgejo history.
 
 Keep `async-proof-owned` on the existing `gha-lab5-general-03` slot.
 The owning `codex/async-store-refinement` branch records its target-only
