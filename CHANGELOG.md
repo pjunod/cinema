@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- CI retains authenticated successful Android and Node command results when
+  their consumed sources are unchanged, preserving whole-command accounting.
+
 - Manual library scans and explicit refreshes get the next eligible shared
   read slot across job types. A scan finishing under a pressure check can
   release its reader and let the next scan start.

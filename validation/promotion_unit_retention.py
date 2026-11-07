@@ -23,6 +23,8 @@ PROTOCOL_PATHS = {
     '.github/workflows/ci.yml', 'validation/qualification.py',
     'validation/promotion_unit_retention.py',
     'tests/validation/test_promotion_unit_retention.py',
+    'validation/retained_lane_commands.py',
+    'tests/validation/test_retained_lane_commands.py',
     # Receipt adoption machinery decides what runs, not what a unit proves.
     'validation/main_preflight_adoption.py', 'validation/main_unit_receipts.py',
 }
@@ -362,7 +364,15 @@ def xctest_result_rows(raw):
     return rows
 
 
-def log_outcomes(log, format_name):
+def log_outcomes(log, format_name, *, source_commit=None, source=git_bytes):
+    if format_name in {'instrumentation-command', 'node-preflight', 'gradle-command'}:
+        from validation import retained_lane_commands as commands
+        if format_name == commands.DEVICE_FORMAT:
+            commands.device_summary(log)
+            return {'make android-instrumentation-run': 'pass'}
+        if format_name == commands.JVM_FORMAT:
+            return commands.jvm_outcomes(log)
+        return commands.web_outcomes(log, source_commit, source)
     if format_name == 'instrumentation-command-5172':
         return android_device_command_outcomes(log)
     outcomes = {}
@@ -577,13 +587,17 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                     r.require(re.search(r'--exact(?:\s|$)|--test-threads(?:=| )1(?:\s|$)',
                                         origin['command']),
                               'Split Rust outcomes require actual serial or exact execution')
-                if lane == 'web_preflight' or record['format'] == 'node-preflight-4954':
+                if (lane == 'web_preflight' and record['format'] != 'node-preflight') or record['format'] == 'node-preflight-4954':
                     from validation import retained_web_preflight as web
                     web.record_contract(lane, suite, record, frozen, raw_log, git_bytes, digest)
                 if record['format'] == 'instrumentation-command-5172':
                     r.require(document['version'] == 2, 'Android whole-command adoption requires exact candidate')
                     android_device_record_contract(lane, suite, record, frozen, source)
-                actual_outcomes = log_outcomes(raw_log, record['format'])
+                if record['format'] in {'instrumentation-command', 'node-preflight', 'gradle-command'}:
+                    from validation import retained_lane_commands as native
+                    r.require(frozen == candidate, 'Native command retention requires exact candidate')
+                    native.record_contract(lane, suite, record, frozen, raw_log, source)
+                actual_outcomes = log_outcomes(raw_log, record['format'], source_commit=prior, source=source)
                 extras = set(outcomes) - set(ids)
                 retired = None
                 if extras:
@@ -658,6 +672,16 @@ def validate(document, candidate, source=git_bytes, differences=changed):
             adopted[lane].update(accounting='whole-command-success', commands_passed=1,
                 reported_tests=78, named_body_outcomes=None, passed_body_count=None,
                 ignored_body_count=None)
+        native_records = [record for suite in suites for record in suite['records']
+                          if record['format'] in {'instrumentation-command', 'node-preflight', 'gradle-command'}]
+        if native_records:
+            adopted[lane].update(accounting='whole-command-success',
+                commands_passed=2 if lane == 'web_preflight' else 1,
+                named_body_outcomes=None, passed_body_count=None, ignored_body_count=None)
+            if lane == 'android_device':
+                from validation import retained_lane_commands as native
+                adopted[lane]['reported_tests'] = native.device_summary(
+                    decoded_log(shared_blob(document, native_records[0]['log'])))
         if lane_retired:
             adopted[lane]['retired_original_passes'] = lane_retired
     waiver = document['windows_waiver']
@@ -783,7 +807,7 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
     document = expanded_document(document) if objects is None else expanded_document(document, objects)
     from validation import qualification_unit_continuation as commands
     from validation.unit_evidence_objects import LiveLogs
-    runs, jobs_by_run = {}, {}
+    runs, jobs_by_run, native_scopes = {}, {}, set()
     live_logs = live_logs if live_logs is not None else LiveLogs()
     for lane, suites in document['lanes'].items():
         for suite in suites:
@@ -804,11 +828,20 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
                               and jobs[0]['status'] in {'success', 'failure'}
                               and type(jobs[0]['attempt']) is int and jobs[0]['attempt'] == 1,
                               'Actual CI unit execution identity mismatch')
-                    if lane == 'web_preflight':
+                    if lane == 'web_preflight' and record['format'] != 'node-preflight':
                         from validation import retained_web_preflight as web
                         web.authenticate(run_id, job_id, jobs[0], git_bytes)
                     if record['format'] == 'instrumentation-command-5172':
                         authenticate_android_device_command(run_id, job_id, jobs[0])
+                    if record['format'] in {'instrumentation-command', 'node-preflight', 'gradle-command'}:
+                        from validation import retained_lane_commands as native
+                        native.authenticate(actual_run, jobs[0], record, document)
+                        if run_id not in native_scopes:
+                            workflow = git_bytes(record['source_commit'], '.github/workflows/ci.yml')
+                            r.require(workflow is not None, 'Native command workflow source missing')
+                            commands.authenticate_scope(api, run_id, actual_run, workflow.decode(),
+                                document, record['source_commit'], repository)
+                            native_scopes.add(run_id)
                     raw_log = live_logs.get(api, run_id, job_id)
                     r.require(digest(raw_log) == shared_blob(document, record['log'])['sha256'],
                               'Authenticated CI log contradicts retained origin')
