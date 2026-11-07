@@ -4,6 +4,7 @@
 // exits before the parent opens the SAME persisted installation, so startup's
 // previous-owner-exit proof is real rather than a simulated runtime drop.
 const FINITE_RESTART_PHASE: &str = "PLURX_FINITE_SOFTWARE_RESTART_CHILD_ROOT";
+const FINITE_RESTART_UNSERVED: &str = "PLURX_FINITE_SOFTWARE_RESTART_UNSERVED";
 const FINITE_RESTART_TEST: &str =
     "vodserve::tests::ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart";
 
@@ -11,7 +12,11 @@ const FINITE_RESTART_TEST: &str =
 async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
     testfixtures::require_ffmpeg();
     if let Some(root) = std::env::var_os(FINITE_RESTART_PHASE) {
-        finite_restart_child(std::path::Path::new(&root)).await;
+        if std::env::var_os(FINITE_RESTART_UNSERVED).is_some() {
+            finite_restart_unserved_child(std::path::Path::new(&root)).await;
+        } else {
+            finite_restart_child(std::path::Path::new(&root), false).await;
+        }
         return;
     }
 
@@ -49,6 +54,19 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
         "first daemon process must exit successfully"
     );
 
+    // A second real daemon owns imported Files before any serving-map owner.
+    let status = tokio::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", FINITE_RESTART_TEST, "--nocapture"])
+        .env(FINITE_RESTART_PHASE, fixture.path())
+        .env(FINITE_RESTART_UNSERVED, "1")
+        .kill_on_drop(true)
+        .status()
+        .await
+        .expect("unserved import daemon");
+    assert!(
+        status.success(),
+        "unserved imported S exits through the real collector"
+    );
     let (config, selected, runtime) = finite_restart_open(fixture.path()).await;
     let initial = runtime.accounting().expect("recovered accounting");
     assert_eq!(initial.unknown_peak_producers, 0);
@@ -127,7 +145,15 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
         .shared
         .purge_if_dormant(&final_key, Duration::ZERO)
         .await;
+    serve
+        .shutdown_ordinary_finalizer(deadline)
+        .await
+        .expect("actual recovered collector shutdown");
     let final_snapshot = runtime.accounting().expect("final accounting");
+    assert!(
+        final_snapshot.finalization_support.is_none(),
+        "actual supportReleased"
+    );
     assert_eq!(final_snapshot.held, 0);
     assert_eq!(final_snapshot.used, Default::default());
     drop(serve);
@@ -139,7 +165,29 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
     drop(selected);
 }
 
-async fn finite_restart_child(root: &std::path::Path) {
+#[tokio::test]
+async fn ordinary_collector_retained_shutdown_drains_dormant_closing_envelope() {
+    testfixtures::require_ffmpeg();
+    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    std::fs::create_dir_all(&target).expect("repo-local fixture root");
+    let target = std::fs::canonicalize(target).expect("canonical native fixture ancestry");
+    let fixture = FiniteLifecycleFixtureRoot(
+        tempfile::Builder::new()
+            .prefix("finite-software-retained-closing-")
+            .tempdir_in(&target)
+            .expect("repo-local retained closing fixture"),
+    );
+    testfixtures::run(
+        std::process::Command::new(testfixtures::ffmpeg())
+            .args(["-v", "error", "-y", "-i"])
+            .arg(testfixtures::source_with_eac3_audio())
+            .args(["-t", "2", "-an", "-c:v", "copy"])
+            .arg(fixture.path().join("source.mkv")),
+    );
+    finite_restart_child(fixture.path(), true).await;
+}
+
+async fn finite_restart_child(root: &std::path::Path, dormant_closing: bool) {
     let source_path = root.join("source.mkv");
     let preliminary = media_file_at(source_path.clone(), 2_000);
     let source = crate::fragment_index_cluster::open_source_fence(&preliminary, None)
@@ -215,7 +263,10 @@ async fn finite_restart_child(root: &std::path::Path) {
     rendition.kick();
     loop {
         assert!(Instant::now() < deadline, "first finite segment timed out");
-        assert!(rendition.failure().is_none(), "first finite producer failed");
+        assert!(
+            rendition.failure().is_none(),
+            "first finite producer failed"
+        );
         if rendition
             .manifest
             .lock()
@@ -263,8 +314,196 @@ async fn finite_restart_child(root: &std::path::Path) {
             .end("finite-software-restart", Terminal::Deleted)
             .await
     );
+    let init_len = output
+        .file_len(plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile::Init)
+        .await
+        .expect("retained init inventory")
+        .expect("retained init");
+    let closed_reader = output
+        .prepare_reader(
+            plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile::Init,
+            0,
+            init_len,
+            4096,
+            deadline,
+        )
+        .await
+        .expect("real retained reader");
+    closed_reader
+        .close(deadline)
+        .await
+        .expect("actual reader native close");
+    let output_path = output.path().to_owned();
+    let inventory = finite_restart_inventory(&output_path);
+    std::fs::write(root.join("retained-inventory"), &inventory)
+        .expect("persist original inode evidence");
+    let before = runtime.accounting().expect("S plus actual support");
+    let support_bytes = before
+        .finalization_support
+        .expect("real initialized collector")
+        .requested_bytes;
+    let gate = serve
+        .shared
+        .rendition_build_gate(&rendition.key)
+        .expect("original S gate");
+    let held_gate = gate.clone().lock_owned().await;
+    let waiting = Arc::clone(&serve);
+    let observer = tokio::spawn(async move {
+        waiting
+            .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(90))
+            .await
+    });
+    wait_until(
+        "paid exit selector before serving removal",
+        Duration::from_secs(10),
+        || async {
+            serve
+                .shared
+                .ordinary_collector
+                .lock()
+                .expect("collector publication")
+                .as_ref()
+                .is_some_and(|client| client.retained_shutdown_key(&rendition.key))
+        },
+    )
+    .await;
+    observer.abort();
+    assert!(observer
+        .await
+        .expect_err("cancelled shutdown observer")
+        .is_cancelled());
+    assert_eq!(finite_restart_inventory(&output_path), inventory);
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("actual retained shutdown accounting")
+            .used,
+        before.used
+    );
+    assert!(runtime
+        .accounting()
+        .expect("actual retained shutdown accounting")
+        .finalization_support
+        .is_some());
+    drop(held_gate);
+    let retained_closing = if dormant_closing {
+        let producer = rendition
+            .dir
+            .finite_producer()
+            .expect("same retained producer");
+        let original_driver = producer
+            .original_driver_id_now_for_test()
+            .expect("original installed driver identity");
+        // The paid S selector is already captured. The actual pressure path
+        // transfers this dormant owner under its original, now-unlocked gate.
+        serve
+            .shared
+            .pressure_evict_finite_rendition(&rendition.key)
+            .await;
+        let closing = serve
+            .shared
+            .finite_closing
+            .lock()
+            .await
+            .get(&rendition.key)
+            .cloned()
+            .expect("actual dormant purge registered its original closing envelope");
+        assert!(!serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .contains_key(&rendition.key));
+        wait_until(
+            "same retained service joins driver and drains actual closing payload",
+            Duration::from_secs(10),
+            || async {
+                producer
+                    .original_driver_joined_for_test(original_driver)
+                    .await
+                    && closing.retained_payload_dropped_for_test().await
+                    && !serve
+                        .shared
+                        .finite_closing
+                        .lock()
+                        .await
+                        .contains_key(&rendition.key)
+            },
+        )
+        .await;
+        assert_eq!(
+            runtime
+                .accounting()
+                .expect("actual retained shutdown accounting")
+                .used,
+            before.used
+        );
+        assert_eq!(finite_restart_inventory(&output_path), inventory);
+        drop(producer);
+        Some(closing)
+    } else {
+        None
+    };
     drop(output);
     drop(rendition);
+    // Even a positively closed reader remains an application selector.
+    assert!(serve
+        .shutdown_ordinary_finalizer(Instant::now() + Duration::from_millis(100))
+        .await
+        .is_err());
+    assert!(runtime
+        .accounting()
+        .expect("actual retained shutdown accounting")
+        .finalization_support
+        .is_some());
+    assert!(
+        serve.shared.sessions.lock().await.is_empty(),
+        "actual terminal client payloads and slots dropped before S allocation wait"
+    );
+    assert_eq!(finite_restart_inventory(&output_path), inventory);
+    drop(closed_reader);
+    // Drop the actual empty envelope/header alias before isolating the final
+    // storage barrier to the one original unlocked gate Arc below.
+    drop(retained_closing);
+    // This actual gate Arc survives actor joins and blocks storage destruction.
+    let storage_alias_error = serve
+        .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(90))
+        .await
+        .expect_err("original unlocked gate alias must block final storage destruction");
+    assert!(
+        serve.shared.ordinary_collector.lock().expect("original collector publication lock").is_none(),
+        "final publication removed; shutdown error: {storage_alias_error}; closing entries: {}; sessions: {}",
+        serve.shared.finite_closing.lock().await.len(),
+        serve.shared.sessions.lock().await.len()
+    );
+    assert!(runtime
+        .accounting()
+        .expect("actual retained shutdown accounting")
+        .finalization_support
+        .is_some());
+    assert_eq!(finite_restart_inventory(&output_path), inventory);
+    drop(gate);
+    serve
+        .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(90))
+        .await
+        .expect("retry same final lifecycle root after original gate alias drops");
+    let parked = runtime.accounting().expect("parked retained S");
+    assert!(
+        parked.finalization_support.is_none(),
+        "actual supportReleased"
+    );
+    assert_eq!(parked.held, 1, "same durable S remains charged");
+    let mut expected = before.used;
+    expected.peak_memory_bytes -= support_bytes;
+    assert_eq!(
+        parked.used, expected,
+        "only independently paid support was released"
+    );
+    assert_eq!(
+        finite_restart_inventory(&output_path),
+        inventory,
+        "same files and inodes"
+    );
     drop(serve);
     drop(playback_cache);
     drop(store);
@@ -272,6 +511,124 @@ async fn finite_restart_child(root: &std::path::Path) {
     runtime.drain().expect("drain first custody worker");
     selected.shutdown().await.expect("shutdown first voter");
     drop(selected);
+}
+
+fn finite_restart_inventory(path: &std::path::Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let mut entries = std::fs::read_dir(path)
+        .expect("same retained directory")
+        .map(|entry| {
+            let entry = entry.expect("original retained directory entry");
+            let m = entry.metadata().expect("original retained entry metadata");
+            format!(
+                "{}:{}:{}:{}",
+                entry.file_name().to_string_lossy(),
+                m.dev(),
+                m.ino(),
+                m.len()
+            )
+        })
+        .collect::<Vec<_>>();
+    let m = std::fs::metadata(path).expect("original retained directory metadata");
+    entries.push(format!(".:{}:{}:{}", m.dev(), m.ino(), m.len()));
+    entries.sort();
+    entries.join("\n")
+}
+
+async fn finite_restart_unserved_child(root: &std::path::Path) {
+    let (config, selected, runtime) = finite_restart_open(root).await;
+    let key = std::fs::read_to_string(root.join("rendition-key"))
+        .expect("persisted original rendition key");
+    let dirs = crate::create_dirs_for_config_with_runtime(&config, Some(runtime.as_ref()))
+        .expect("recovery-aware managed directories for unserved import");
+    let serve = VodServe::new_cluster_with_runtime(
+        dirs.renditions.clone(),
+        dirs.runtime_cache,
+        Arc::clone(&selected.store),
+        selected.identity.node_id.clone(),
+        dirs.cache.join("cluster-index"),
+        None,
+        Some(Arc::clone(&runtime)),
+    );
+    serve
+        .initialize_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("actual unserved import collector startup");
+    assert!(
+        serve.shared.renditions.lock().await.is_empty(),
+        "imported S has no serving owner"
+    );
+    let before = runtime
+        .accounting()
+        .expect("actual retained shutdown accounting");
+    assert_eq!(before.held, 1);
+    let gate = serve
+        .shared
+        .rendition_build_gate(&key)
+        .expect("original unserved import gate");
+    let held = gate.lock_owned().await;
+    let waiting = Arc::clone(&serve);
+    let observer = tokio::spawn(async move {
+        waiting
+            .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(90))
+            .await
+    });
+    wait_until(
+        "unadopted import registered before map adoption",
+        Duration::from_secs(10),
+        || async {
+            serve
+                .shared
+                .ordinary_collector
+                .lock()
+                .expect("original unserved collector publication lock")
+                .as_ref()
+                .is_some_and(|client| client.retained_shutdown_key(&key))
+        },
+    )
+    .await;
+    observer.abort();
+    assert!(observer
+        .await
+        .expect_err("cancelled original unserved shutdown observer")
+        .is_cancelled());
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("actual retained shutdown accounting")
+            .held,
+        1
+    );
+    assert!(runtime
+        .accounting()
+        .expect("actual retained shutdown accounting")
+        .finalization_support
+        .is_some());
+    drop(held);
+    serve
+        .shutdown_ordinary_finalizer(Instant::now() + Duration::from_secs(90))
+        .await
+        .expect("same unadopted File pair and original pending adoption close in permanent SF");
+    let after = runtime
+        .accounting()
+        .expect("actual retained shutdown accounting");
+    assert!(after.finalization_support.is_none());
+    assert_eq!(after.held, 1);
+    assert_eq!(
+        finite_restart_inventory(&dirs.renditions.join(key)),
+        std::fs::read_to_string(root.join("retained-inventory"))
+            .expect("persisted original retained inode inventory")
+    );
+    drop(serve);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("unserved aliases dropped")
+        .drain()
+        .expect("drain original unserved custody worker");
+    selected
+        .shutdown()
+        .await
+        .expect("shutdown unserved import voter");
 }
 
 fn finite_restart_config(root: &std::path::Path) -> plurx_core::config::Config {
@@ -307,10 +664,33 @@ async fn finite_restart_open(
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("production pre-serving schema"));
-    let runtime = crate::resource_runtime::open_before_cleanup(&mut selected, &config)
-        .await
-        .expect("production custody startup")
-        .expect("Linux finite custody runtime");
+    let runtime = if std::env::var_os(FINITE_RESTART_UNSERVED).is_some() {
+        // Enter the actual startup boundary before reconciliation has installed
+        // a book/serving owner. The original queued Adopt is already retained.
+        let dirs = crate::configured_dirs(&config.storage);
+        let options = selected
+            .resource_custody_options(
+                config.storage.data_dir.clone(),
+                vec![
+                    dirs.transcode,
+                    dirs.artwork,
+                    dirs.cache,
+                    dirs.subs,
+                    dirs.runtime_cache,
+                    dirs.renditions.clone(),
+                ],
+                plurx_core::resource_custody::InstallationContext::Existing,
+            )
+            .expect("actual unserved custody startup options");
+        Arc::new(tokio::task::spawn_blocking(move ||
+            plurx_core::adaptive_resources::runtime::NodeResourceRuntime::open_with_rendition_root(options, dirs.renditions))
+            .await.expect("original unserved runtime startup task joined").expect("actual imported Files and original queued adoption"))
+    } else {
+        crate::resource_runtime::open_before_cleanup(&mut selected, &config)
+            .await
+            .expect("production custody startup")
+            .expect("Linux finite custody runtime")
+    };
     (config, selected, runtime)
 }
 
@@ -341,6 +721,10 @@ async fn finite_restart_attach(
         vec![dirs.renditions.clone()],
     );
     serve.register_playback_cache(&playback_cache);
+    serve
+        .initialize_ordinary_finalizer(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("real ordinary collector before finite admission");
     let manager = crate::transcode::TranscodeManager::new(
         Arc::clone(&store),
         dirs.transcode.clone(),

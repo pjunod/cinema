@@ -11,6 +11,8 @@ pub(super) mod native;
 pub(in crate::adaptive_resources::runtime) mod prefix_removal;
 #[cfg(unix)]
 pub(in crate::adaptive_resources::runtime) mod readers;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) mod retained_exit;
 #[cfg(unix)]
 pub(in crate::adaptive_resources::runtime) mod retirement;
 

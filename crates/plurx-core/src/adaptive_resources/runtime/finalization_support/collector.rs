@@ -2,6 +2,12 @@
 use super::super::finite_vod::{
     FiniteCloseIdentity, FiniteCloseTicket, FiniteCloseWorkspace, FiniteVodError,
 };
+#[cfg(target_os = "linux")]
+use super::super::finite_vod::{RetainedExitDone, RetainedExitIdentity};
+#[cfg(target_os = "linux")]
+use super::super::operations::bootstrap::retained_exit::NATIVE_EXIT_STORAGE_BYTES;
+#[cfg(target_os = "linux")]
+use super::super::operations::finite_retained_exit::RetainedExitRecord;
 use super::super::operations::{OperationError, OwnedPreparation};
 use super::*;
 use std::marker::PhantomData;
@@ -81,8 +87,22 @@ enum Phase {
     Reserved,
     Bound,
     Completed,
+    #[cfg(target_os = "linux")]
+    Parking,
+    #[cfg(target_os = "linux")]
+    Parked,
     Terminal,
     Unknown,
+}
+impl Phase {
+    fn service_drained(self) -> bool {
+        match self {
+            Self::Idle | Self::Terminal => true,
+            #[cfg(target_os = "linux")]
+            Self::Parked => true,
+            _ => false,
+        }
+    }
 }
 #[derive(Clone, Copy)]
 struct FixedKey {
@@ -114,10 +134,16 @@ struct Metadata {
     original: Option<OwnedPreparation>,
     identity: Option<FiniteCloseIdentity>,
     grant_attempted: bool,
+    #[cfg(target_os = "linux")]
+    exit_identity: Option<RetainedExitIdentity>,
+    #[cfg(target_os = "linux")]
+    exit_done: Option<RetainedExitDone>,
 }
 struct Record {
     meta: Mutex<Metadata>,
     ticket: tokio::sync::Mutex<Option<FiniteCloseTicket>>,
+    #[cfg(target_os = "linux")]
+    exit: tokio::sync::Mutex<Option<RetainedExitRecord>>,
     leases: AtomicUsize,
     dropping: AtomicUsize,
     close: AtomicBool,
@@ -226,6 +252,11 @@ impl OrdinaryPoolClient {
         meta.grant_attempted = false;
         meta.identity = None;
         meta.original = None;
+        #[cfg(target_os = "linux")]
+        {
+            meta.exit_identity = None;
+            meta.exit_done = None;
+        }
         record.close.store(false, Ordering::Release);
         record.registered.store(false, Ordering::Release);
         record.leases.store(1, Ordering::Release);
@@ -242,6 +273,175 @@ impl OrdinaryPoolClient {
             key: fixed,
         })
     }
+    /// Capture actual S custody into the already-paid fixed pool, including
+    /// imported S that has never appeared in a daemon serving map.
+    #[cfg(target_os = "linux")]
+    pub fn capture_retained_shutdown(&self) -> Result<(), FiniteVodError> {
+        if !self.control.admission_closed.load(Ordering::Acquire) {
+            return Err(finite_state());
+        }
+        let mut directory = self.directory.state.lock().map_err(|_| finite_state())?;
+        self.payload
+            .runtime
+            .visit_retained_shutdown(
+                |identity| {
+                    self.payload.records.iter().any(|record| {
+                        record.meta.lock().is_ok_and(|meta| {
+                            meta.exit_identity == Some(identity)
+                                && meta
+                                    .exit_done
+                                    .as_ref()
+                                    .is_some_and(|done| done.identity == identity)
+                        })
+                    })
+                },
+                |selection| self.capture_retained_selection(&mut directory, selection),
+            )
+            .map_err(Into::into)
+    }
+
+    // Each captured prefix and its completed original identity must survive a
+    // later census refusal. A terminal exit record is never a reusable slot
+    // during this irreversible shutdown.
+    #[cfg(target_os = "linux")]
+    fn capture_retained_selection(
+        &self,
+        directory: &mut gates::DirectoryState,
+        selection: super::super::finite_vod::RetainedExitSelection,
+    ) -> Result<(), OperationError> {
+        for record in &self.payload.records {
+            let meta = record.meta.lock().map_err(|_| OperationError::State)?;
+            if let Some(identity) = meta.exit_identity {
+                if identity.same_original(selection.identity) {
+                    if meta.exit_done.is_some() && identity != selection.identity {
+                        return Err(OperationError::State);
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        let mut candidate = None;
+        for (index, record) in self.payload.records.iter().enumerate() {
+            let mut meta = record.meta.lock().map_err(|_| OperationError::State)?;
+            if meta.phase == Phase::Bound
+                && meta.identity.is_some_and(|identity| {
+                    identity.ledger == selection.identity.ledger
+                        && identity.operation == selection.identity.operation
+                        && identity.role_index == selection.identity.role_index
+                })
+            {
+                candidate = Some((index, true));
+                break;
+            }
+            if candidate.is_none()
+                && meta.exit_identity.is_none()
+                && matches!(meta.phase, Phase::Idle | Phase::Terminal)
+                && meta.original.is_none()
+                && record.leases.load(Ordering::Acquire) == 0
+                && record.dropping.load(Ordering::Acquire) == 0
+                && (meta.key.is_some_and(|key| key.as_str() == selection.key())
+                    || Arc::get_mut(&mut meta.gate).is_some())
+            {
+                candidate = Some((index, false));
+            }
+        }
+        let (index, bound) = candidate.ok_or(OperationError::State)?;
+        let record = &self.payload.records[index];
+        let mut exit = record.exit.try_lock().map_err(|_| OperationError::State)?;
+        let mut ticket = record
+            .ticket
+            .try_lock()
+            .map_err(|_| OperationError::State)?;
+        if exit.is_some() || ticket.is_some() {
+            return Err(OperationError::State);
+        }
+        let mut meta = record.meta.lock().map_err(|_| OperationError::State)?;
+        if !bound {
+            let fixed = FixedKey::new(selection.key()).map_err(|_| OperationError::State)?;
+            let same_key = meta.key.is_some_and(|key| key.as_str() == selection.key());
+            if !same_key {
+                if let Some(original) = directory
+                    .legacy
+                    .get(selection.key())
+                    .and_then(std::sync::Weak::upgrade)
+                {
+                    meta.gate = original;
+                }
+            }
+            directory.legacy.remove(selection.key());
+            meta.key = Some(fixed);
+            meta.generation = meta
+                .generation
+                .checked_add(1)
+                .ok_or(OperationError::State)?;
+        }
+        meta.phase = Phase::Parking;
+        meta.exit_identity = Some(selection.identity);
+        meta.exit_done = None;
+        *exit = Some(RetainedExitRecord::new(selection));
+        // No synthetic finite/native terminal and no R reservation.
+        *ticket = None;
+        Ok(())
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::adaptive_resources::runtime) fn capture_retained_selection_fixture(
+        &self,
+        selection: super::super::finite_vod::RetainedExitSelection,
+    ) -> Result<(), OperationError> {
+        let mut directory = self
+            .directory
+            .state
+            .lock()
+            .map_err(|_| OperationError::State)?;
+        self.capture_retained_selection(&mut directory, selection)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn request_retained_shutdown(&self) {
+        for record in &self.payload.records {
+            if record
+                .meta
+                .lock()
+                .is_ok_and(|meta| meta.phase == Phase::Parking)
+            {
+                record.close.store(true, Ordering::Release);
+                record.changed.notify_waiters();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn retained_shutdown_key(&self, key: &str) -> bool {
+        self.payload.records.iter().any(|record| {
+            record.meta.lock().is_ok_and(|meta| {
+                meta.exit_identity.is_some()
+                    && meta.key.is_some_and(|stored| stored.as_str() == key)
+            })
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn wait_retained_shutdown(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<(), FiniteVodError> {
+        for record in &self.payload.records {
+            loop {
+                let changed = record.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if record.meta.lock().map_err(|_| finite_state())?.phase != Phase::Parking {
+                    break;
+                }
+                tokio::time::timeout_at(deadline.into(), changed)
+                    .await
+                    .map_err(|_| finite_state())?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn seal_admissions(&self) {
         self.control.admission_closed.store(true, Ordering::Release);
     }
@@ -530,7 +730,16 @@ impl CoreServicePort {
                     record.changed.notify_waiters();
                     continue;
                 }
-                if record.close.load(Ordering::Acquire) && meta.phase == Phase::Bound {
+                if record.close.load(Ordering::Acquire) && {
+                    #[cfg(target_os = "linux")]
+                    {
+                        matches!(meta.phase, Phase::Bound | Phase::Parking)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        meta.phase == Phase::Bound
+                    }
+                } {
                     if record
                         .leases
                         .try_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
@@ -550,15 +759,70 @@ impl CoreServicePort {
                         },
                     });
                 }
-                if self.control.stop.load(Ordering::Acquire)
-                    && matches!(meta.phase, Phase::Idle | Phase::Terminal)
-                {
+                if self.control.stop.load(Ordering::Acquire) && meta.phase.service_drained() {
                     return None;
                 }
             }
             tokio::select! { _ = changed => (), _ = control_changed => () }
         }
     }
+    #[cfg(target_os = "linux")]
+    pub fn is_retained_shutdown(&self, work: &OrdinaryCloseWork) -> Result<bool, AdmissionRefusal> {
+        let meta = self.payload.records[self.index]
+            .meta
+            .lock()
+            .map_err(|_| AdmissionRefusal::Unavailable)?;
+        self.check(work, &meta)?;
+        Ok(meta.phase == Phase::Parking)
+    }
+
+    /// Runs in the SAME permanent service and behind its SAME original gate.
+    /// The record retains native progress and its original join across waits.
+    #[cfg(target_os = "linux")]
+    pub async fn finish_retained_shutdown(
+        &self,
+        work: &OrdinaryCloseWork,
+        deadline: std::time::Instant,
+    ) -> Result<(), FiniteVodError> {
+        let record = &self.payload.records[self.index];
+        let mut held = record.exit.lock().await;
+        {
+            let meta = record.meta.lock().map_err(|_| finite_state())?;
+            self.check(work, &meta).map_err(|_| finite_state())?;
+            if meta.phase != Phase::Parking {
+                return Err(finite_state());
+            }
+        }
+        let proof = self
+            .payload
+            .runtime
+            .finish_retained_shutdown(held.as_mut().ok_or_else(finite_state)?, deadline)
+            .await?;
+        let original = {
+            let mut meta = record.meta.lock().map_err(|_| finite_state())?;
+            if meta
+                .exit_identity
+                .is_none_or(|identity| !identity.same_original(proof.identity))
+                || held
+                    .as_ref()
+                    .and_then(|record| record.selection.as_ref())
+                    .is_none_or(|selection| selection.identity != proof.identity)
+            {
+                return Err(finite_state());
+            }
+            meta.exit_identity = Some(proof.identity);
+            meta.exit_done = Some(proof.into_done());
+            meta.phase = Phase::Parked;
+            meta.original.take()
+        };
+        // Consume the local exit proof and only the pool's preparation alias.
+        // The original S/census owner remains in the runtime book unchanged.
+        held.take();
+        drop(original);
+        record.changed.notify_waiters();
+        Ok(())
+    }
+
     pub fn mark_abandon_registered(
         &self,
         work: &OrdinaryCloseWork,
@@ -733,11 +997,21 @@ impl<F> StoredPayload for ConcreteStorage<F> {
             let Ok(meta) = record.meta.get_mut() else {
                 return false;
             };
-            if !matches!(meta.phase, Phase::Idle | Phase::Terminal)
+            if !meta.phase.service_drained()
                 || meta.original.is_some()
                 || record.leases.load(Ordering::Acquire) != 0
                 || record.dropping.load(Ordering::Acquire) != 0
                 || record.ticket.get_mut().is_some()
+                || {
+                    #[cfg(target_os = "linux")]
+                    {
+                        record.exit.get_mut().is_some()
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        false
+                    }
+                }
             {
                 return false;
             }
@@ -754,7 +1028,17 @@ impl<F> StoredPayload for ConcreteStorage<F> {
             .checked_add(std::mem::size_of::<OriginalGate>())?
             .checked_add(128)?
             .checked_add(std::mem::size_of::<F>())?
-            .checked_add(DAEMON_CLOSING_ENVELOPE_BYTES)?;
+            .checked_add(DAEMON_CLOSING_ENVELOPE_BYTES)?
+            .checked_add({
+                #[cfg(target_os = "linux")]
+                {
+                    NATIVE_EXIT_STORAGE_BYTES
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    0
+                }
+            })?;
         per_record
             .checked_mul(N)?
             .checked_add(std::mem::size_of::<F>())?
@@ -812,12 +1096,14 @@ async fn run_collector<F: Future<Output = ()>>(
     })
     .await;
     let drained = payload.records.iter().all(|record| {
-        record.meta.lock().is_ok_and(|meta| {
-            matches!(meta.phase, Phase::Idle | Phase::Terminal) && meta.original.is_none()
-        }) && record
-            .ticket
-            .try_lock()
-            .is_ok_and(|ticket| ticket.is_none())
+        record
+            .meta
+            .lock()
+            .is_ok_and(|meta| meta.phase.service_drained() && meta.original.is_none())
+            && record
+                .ticket
+                .try_lock()
+                .is_ok_and(|ticket| ticket.is_none())
     });
     if control.stop.load(Ordering::Acquire) && !control.failed.load(Ordering::Acquire) && drained {
         failure.armed = false;
@@ -990,8 +1276,14 @@ impl OrdinaryFinalizerLifecycle {
                             original: None,
                             identity: None,
                             grant_attempted: false,
+                            #[cfg(target_os = "linux")]
+                            exit_identity: None,
+                            #[cfg(target_os = "linux")]
+                            exit_done: None,
                         }),
                         ticket: tokio::sync::Mutex::new(None),
+                        #[cfg(target_os = "linux")]
+                        exit: tokio::sync::Mutex::new(None),
                         leases: AtomicUsize::new(0),
                         dropping: AtomicUsize::new(0),
                         close: AtomicBool::new(false),
@@ -1048,6 +1340,9 @@ impl OrdinaryFinalizerLifecycle {
         }
     }
     pub async fn shutdown(&mut self, deadline: std::time::Instant) -> Result<(), AdmissionRefusal> {
+        if self.lease.as_ref().is_some_and(|lease| !lease.armed) {
+            return Ok(());
+        }
         let control = self
             .control
             .as_ref()

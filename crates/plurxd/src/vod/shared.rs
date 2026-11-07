@@ -86,6 +86,27 @@ pub(super) struct FiniteClosingOwner {
 
 #[cfg(all(target_os = "linux", test, feature = "cluster-integration-tests"))]
 impl FiniteClosingOwner {
+    pub(super) async fn retained_payload_dropped_for_test(&self) -> bool {
+        let rich = self.rich.lock().await.is_none();
+        let output = self.output.lock().await.is_none();
+        let producer = self.producer.lock().await.is_none();
+        let ticket = self.ticket.lock().await.is_none();
+        rich && output
+            && producer
+            && ticket
+            && self
+                .cache_grant
+                .lock()
+                .expect("original retained cache grant lock")
+                .is_none()
+            && self
+                .compatibility
+                .lock()
+                .expect("original retained compatibility lock")
+                .is_none()
+            && !self.known_closed.load(Acquire)
+    }
+
     pub(super) async fn hold_registration_for_test(
         &self,
     ) -> tokio::sync::MutexGuard<'_, Option<Arc<Rendition>>> {
@@ -2643,6 +2664,92 @@ impl Shared {
         port: &plurx_core::adaptive_resources::runtime::ordinary_finite_collector::CoreServicePort,
         work: &plurx_core::adaptive_resources::runtime::ordinary_finite_collector::OrdinaryCloseWork,
     ) -> Result<(), String> {
+        if port
+            .is_retained_shutdown(work)
+            .map_err(|error| format!("retained exit disposition: {error:?}"))?
+        {
+            let gate = port
+                .gate(work)
+                .map_err(|error| format!("original retained exit gate: {error:?}"))?;
+            let _gate = gate.lock_owned().await;
+            // A dormant purge may already have moved this same S out of the
+            // serving map into its original closing envelope. Those aliases
+            // must die before core seals and waits for application release.
+            // The paid core exit record, rather than this daemon envelope,
+            // keeps the original S selection and retry progress throughout.
+            let closing = self.finite_closing.lock().await.get(work.key()).cloned();
+            if let Some(closing) = closing {
+                if !closing.cleanup_ready.load(Acquire) {
+                    return Err("original retained builder still owns its close arm".into());
+                }
+                if closing.ticket.lock().await.is_some() {
+                    return Err("retained exit cannot consume a native retirement ticket".into());
+                }
+                let producer = closing.producer.lock().await.as_ref().cloned();
+                if let Some(producer) = producer.as_ref() {
+                    producer
+                        .join_installed_driver()
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    // This exact work is already durable S. Settle only its
+                    // original R-to-S compatibility/cache disposition, never
+                    // manufacture a NativeCloseComplete or refund S.
+                    if let Some(compatibility) = producer.take_compatibility() {
+                        compatibility.known_retired();
+                    }
+                    if let Some(grant) = producer.take_cache_grant() {
+                        grant.retained();
+                    }
+                }
+                drop(producer);
+                if let Some(rendition) = closing.rich.lock().await.take() {
+                    rendition.closed.store(true, Release);
+                    rendition.kick();
+                    drop(rendition);
+                }
+                closing.producer.lock().await.take();
+                closing.output.lock().await.take();
+                if let Some(compatibility) = closing
+                    .compatibility
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    compatibility.known_retired();
+                }
+                if let Some(grant) = closing
+                    .cache_grant
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    grant.retained();
+                }
+                let (removed, empty_backing) = {
+                    let mut closings = self.finite_closing.lock().await;
+                    let removed = if closings
+                        .get(work.key())
+                        .is_some_and(|current| FiniteClosingRef::ptr_eq(current, &closing))
+                    {
+                        closings.remove_entry(work.key())
+                    } else {
+                        None
+                    };
+                    let backing = closings.is_empty().then(|| std::mem::take(&mut *closings));
+                    (removed, backing)
+                };
+                // The outer FiniteClosingRef drop fence covers the actual
+                // payload and Arc header destruction while support is paid.
+                // This disposition deliberately leaves known_closed false.
+                drop(removed);
+                drop(empty_backing);
+                drop(closing);
+            }
+            return port
+                .finish_retained_shutdown(work, Instant::now() + Duration::from_secs(30))
+                .await
+                .map_err(|error| error.to_string());
+        }
         let key = work.key();
         let closing = self.finite_closing.lock().await.get(key).cloned();
         let deadline = Instant::now() + Duration::from_secs(30);

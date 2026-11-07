@@ -42,7 +42,31 @@ impl VodServe {
         let Some(root) = self.ordinary_finalizer.as_ref() else {
             return Ok(());
         };
+        // Publication is removed only for final destruction. The lifecycle
+        // still owns the original lease/client if that observation is cancelled.
+        if self
+            .shared
+            .ordinary_collector
+            .lock()
+            .expect("ordinary collector publication")
+            .is_none()
+        {
+            return root
+                .lock()
+                .await
+                .shutdown(deadline)
+                .await
+                .map_err(|error| format!("resuming ordinary finalizer close: {error:?}"));
+        }
         self.shared.ordinary_collector_draining.store(true, Release);
+        let runtime = self
+            .shared
+            .resource_runtime
+            .as_ref()
+            .ok_or("ordinary finalizer has no runtime")?;
+        runtime
+            .begin_finite_shutdown_exit()
+            .map_err(|error| error.to_string())?;
         {
             let lifecycle = root.lock().await;
             lifecycle.begin_drain();
@@ -65,6 +89,88 @@ impl VodServe {
                 .await
                 .map_err(|_| "ordinary session shutdown deadline elapsed")?;
         }
+        // Terminal replay records still own their original finite client
+        // slots after reader detach. At process exit their actual payloads
+        // must be destroyed before S waits for its allocation partition.
+        // Join each original cleanup first; cancellation leaves that same
+        // session and cleanup discoverable for the next shutdown observer.
+        loop {
+            let next = self
+                .shared
+                .sessions
+                .lock()
+                .await
+                .iter()
+                .next()
+                .map(|(id, session)| {
+                    (
+                        id.clone(),
+                        session.terminal_cleanup.clone(),
+                        session.finite_session_slot.clone(),
+                    )
+                });
+            let Some((id, cleanup, session_slot)) = next else {
+                break;
+            };
+            let cleanup = cleanup.ok_or("terminal shutdown session has no original cleanup")?;
+            tokio::time::timeout_at(deadline.into(), cleanup.wait())
+                .await
+                .map_err(|_| "original terminal session cleanup deadline elapsed")?;
+            let (removed, empty_backing) = {
+                let mut sessions = self.shared.sessions.lock().await;
+                let removed = if sessions.get(&id).is_some_and(|session| {
+                    session.tombstone.is_some()
+                        && session
+                            .terminal_cleanup
+                            .as_ref()
+                            .is_some_and(|current| Arc::ptr_eq(current, &cleanup))
+                }) {
+                    sessions.remove_entry(&id)
+                } else {
+                    return Err("original terminal shutdown session changed".into());
+                };
+                let backing = sessions.is_empty().then(|| std::mem::take(&mut *sessions));
+                (removed, backing)
+            };
+            drop(removed);
+            drop(empty_backing);
+            drop(cleanup);
+            drop(id);
+            // Keep the original session allowance until the temporary key
+            // and cleanup aliases above have also been fully destroyed.
+            drop(session_slot);
+        }
+        // Install original opaque S selectors in the paid fixed pool BEFORE
+        // any serving-map removal. Cancellation leaves retry custody there.
+        let client = self
+            .shared
+            .ordinary_collector
+            .lock()
+            .expect("ordinary collector publication")
+            .clone()
+            .ok_or("ordinary finalizer is unavailable during drain")?;
+        client
+            .capture_retained_shutdown()
+            .map_err(|error| error.to_string())?;
+        loop {
+            let next = self
+                .shared
+                .renditions
+                .lock()
+                .await
+                .keys()
+                .find(|key| client.retained_shutdown_key(key))
+                .cloned();
+            let Some(key) = next else {
+                break;
+            };
+            self.shared.detach_retained_shutdown(&key, deadline).await?;
+        }
+        client.request_retained_shutdown();
+        client
+            .wait_retained_shutdown(deadline)
+            .await
+            .map_err(|error| error.to_string())?;
         loop {
             let next = self.shared.renditions.lock().await.keys().next().cloned();
             let Some(key) = next else {
@@ -103,6 +209,17 @@ impl VodServe {
             std::mem::take(&mut *map)
         };
         drop(empty_backing);
+        // Recheck actual runtime custody after ordinary R close progressed.
+        // Capacity exhaustion or an uncertain adoption keeps support held.
+        client
+            .capture_retained_shutdown()
+            .map_err(|error| error.to_string())?;
+        client.request_retained_shutdown();
+        client
+            .wait_retained_shutdown(deadline)
+            .await
+            .map_err(|error| error.to_string())?;
+        drop(client);
         // No generic legacy cleanup is hidden by the global directory seal.
         self.shared
             .ordinary_collector
@@ -118,6 +235,48 @@ impl VodServe {
 }
 
 impl Shared {
+    /// Only process-exit detach: the paid collector already owns the exact S
+    /// selector. Preserve its durable assets, census, and original charge.
+    async fn detach_retained_shutdown(
+        self: &Arc<Self>,
+        key: &str,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let gate = self
+            .rendition_build_gate(key)
+            .map_err(|error| error.to_string())?;
+        let _guard = tokio::time::timeout_at(deadline.into(), gate.lock_owned())
+            .await
+            .map_err(|_| "original retained shutdown gate is still held")?;
+        let rendition = self.renditions.lock().await.get(key).cloned();
+        let Some(rendition) = rendition else {
+            return Ok(());
+        };
+        if let Some(producer) = rendition.dir.finite_producer() {
+            producer
+                .join_installed_driver()
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let removed = {
+            let mut renditions = self.renditions.lock().await;
+            if renditions
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, &rendition))
+            {
+                renditions.remove(key)
+            } else {
+                None
+            }
+        };
+        rendition.closed.store(true, Release);
+        rendition.kick();
+        self.pool.close(key);
+        drop(removed);
+        drop(rendition);
+        Ok(())
+    }
+
     pub(super) fn reserve_collector_slot(&self, key: &str) -> Result<Option<OrdinarySlot>, String> {
         let refusal =
             |message: String| crate::transcode::vod_refusal_error("vod_family_capacity", message);

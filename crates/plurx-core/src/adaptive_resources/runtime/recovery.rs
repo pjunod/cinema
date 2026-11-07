@@ -22,7 +22,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 /// The runtime integration owner must retain it through serving/cleanup.
 pub(crate) struct ImportedRetainedS {
     claim: RetainedSImportClaim,
-    directories: Mutex<Option<(File, File)>>,
+    pub(super) directories: Mutex<Option<(File, File)>>,
 }
 
 impl ImportedRetainedS {
@@ -256,6 +256,68 @@ pub(super) struct RecoveryAdoption {
     preparation: Option<super::operations::OwnedPreparation>,
 }
 impl RecoveryAdoption {
+    pub(super) fn exit_sequence(&self) -> Option<i64> {
+        self.acknowledged
+            .then(|| self.handle.as_ref().map(|(_, sequence)| *sequence))
+            .flatten()
+    }
+
+    /// Observe only the already submitted original operation. No submit/retry
+    /// branch is reachable from shutdown, even after error/cancellation.
+    pub(super) async fn resolve_for_exit(
+        &mut self,
+        runtime: &NodeResourceRuntime,
+        owner: &Arc<ImportedRetainedS>,
+    ) -> Result<i64, RuntimeOpenError> {
+        // submit moved the original proof into the queued journal command;
+        // it must never be reconstructed or required to reappear here. Match
+        // the actual still-registered native owner and original command IDs.
+        if self.obligation_id != owner.claim.obligation_id()
+            || self.previous_owner_id != owner.claim.old_owner_id()
+            || runtime
+                .recovered_s
+                .lock()
+                .map_err(|_| unavailable())?
+                .get(&self.obligation_id)
+                .is_none_or(|saved| !Arc::ptr_eq(saved, owner))
+        {
+            return Err(unavailable());
+        }
+        self.resolve(runtime).await?;
+        let (handle, sequence) = self.handle.as_ref().ok_or_else(unavailable)?;
+        let authority = handle.recovery_authority().ok_or_else(unavailable)?;
+        let Some(Ok(crate::resource_custody::OperationResult::RecoveredSAdoption(ack))) =
+            self.result.as_ref()
+        else {
+            return Err(unavailable());
+        };
+        // The returned tuple keeps the original S mutation sequence used by
+        // recovered runtime roles. The independent holder append has its own
+        // journal sequence: match it to this SAME original Adopt's retained
+        // acknowledgment, never to the historical S mutation coordinate.
+        if *sequence != owner.claim.sequence()
+            || ack.operation_id != self.operation_id
+            || ack.obligation_id != self.obligation_id
+            || ack.previous_owner_id != self.previous_owner_id
+            || ack.current_owner_id != runtime.owner.owner_id
+            || ack.sequence <= 0
+            || authority.obligation_id() != owner.claim.obligation_id()
+            || authority.adoption_operation_id() != self.operation_id
+            || authority.adoption_sequence() != ack.sequence
+            || authority.previous_owner_id() != self.previous_owner_id
+            || authority.current_owner_id() != runtime.owner.owner_id
+            || authority.binding()
+                != *runtime
+                    .recovered_bindings
+                    .get(&owner.claim.obligation_id())
+                    .ok_or_else(unavailable)?
+            || authority.state_head() != owner.claim.current_head()
+        {
+            return Err(unavailable());
+        }
+        Ok(*sequence)
+    }
+
     fn submit(
         &mut self,
         journal: &CustodyJournal,

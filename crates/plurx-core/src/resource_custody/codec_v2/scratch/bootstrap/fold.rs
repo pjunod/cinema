@@ -64,6 +64,11 @@ impl BootstrapFold {
     pub(crate) fn member_id(&self) -> Id {
         self.member
     }
+    /// Borrow actual state for allocation preflights; callers clone only after funding.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn state_ref(&self) -> (&ScratchStateV2, &BootstrapStateV1) {
+        (&self.output.state, &self.bootstrap)
+    }
     pub(crate) fn state(&self) -> ScratchStateV3 {
         ScratchStateV3 {
             version: 3,
