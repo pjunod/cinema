@@ -2936,6 +2936,12 @@ assert.equal(context.ACT_TIMER, null);
             all("scripts/require-test-count" in command for command in wal_commands),
             "every cluster WAL command must retain the nonzero test-count guard",
         )
+        wal_daemon_commands = [command for command in wal_commands if "-p plurxd " in command]
+        self.assertEqual(len(wal_daemon_commands), 75)
+        self.assertTrue(
+            all("--features cluster" in command for command in wal_daemon_commands),
+            "every cluster WAL daemon command must explicitly select the cluster profile",
+        )
         hiqlite_snapshot_tests = (
             "raw_write_frame_stays_idle_after_transport_recovers_until_an_explicit_flush",
             "deadline_less_retry_serializes_its_effective_fallback_stall_boundary",
@@ -3122,7 +3128,7 @@ assert.equal(context.ACT_TIMER, null);
             matching = [command for command in wal_commands if test_name in command]
             self.assertEqual(len(matching), 1, test_name)
             command = matching[0]
-            self.assertIn("cargo test --locked -p plurxd --bin plurxd", command)
+            self.assertIn("cargo test --locked -p plurxd --features cluster --bin plurxd", command)
             self.assertIn("-- --exact", command)
 
         core_snapshot_tests = (

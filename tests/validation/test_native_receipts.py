@@ -310,6 +310,29 @@ class NativeCaseReceiptTests(unittest.TestCase):
                         re.escape(changed_path) + '$'):
                     native.case_input_compatibility('original', 'current')
 
+    def test_prior_makefile_boundary_cannot_supply_current_case_receipts(self):
+        root = Path(__file__).resolve().parents[2]
+        specs = native.FAMILY_SPECS['tv_navigation']
+        source = {path: (root / path).read_bytes() for path in specs}
+        prior_makefile = source['Makefile'].replace(
+            b'-p plurxd --features cluster --bin plurxd \\\n',
+            b'-p plurxd --bin plurxd \\\n')
+        self.assertEqual(hashlib.sha256(prior_makefile).hexdigest(),
+                         '7e12d06f8372e36a851f58ad5846f303b00cf87bca13717193dafd2a23068443')
+        tree = ''.join('100644 blob ' + 'a' * 40 + '\t' + path + '\0' for path in specs)
+        for previous_sources in [('original',), ('original', 'current')]:
+            def show(command, timeout):
+                commit, path = command[2].split(':', 1)
+                return prior_makefile if path == 'Makefile' and commit in previous_sources else source[path]
+
+            with self.subTest(previous_sources=previous_sources), \
+                    patch.object(native, 'regular_inputs'), \
+                    patch.object(native, 'git', return_value=tree), \
+                    patch.object(native.subprocess, 'check_output', side_effect=show), \
+                    self.assertRaisesRegex(ReceiptError,
+                                           '^Unreviewed native build specification: Makefile$'):
+                native.case_input_compatibility('original', 'current')
+
     def receipt(self):
         selected = ['Suite/testOne', 'Suite/testTwo']
         return {'schema': 2, 'source_sha': 'a' * 40, 'source_dirty': False,

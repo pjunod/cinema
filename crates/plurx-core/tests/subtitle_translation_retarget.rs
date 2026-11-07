@@ -1,4 +1,6 @@
 //! Producer reassignment uses the real writer, preserving root Stop and cached read authority.
+#[path = "support/historical_sqlite.rs"]
+mod historical_sqlite;
 use plurx_core::store::{
     background_jobs::BackgroundJobStore,
     subtitle_translation::{SourceRevision, TranslationProfile},
@@ -205,7 +207,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .expect("current fixture checkpoint"),
-        121
+        124
     );
     let witness = rusqlite::Connection::open_in_memory().expect("published managed witness");
     witness.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE VIEW background_job_required_resources AS SELECT 1;").expect("closed witness dependencies");
@@ -228,15 +230,42 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
             "../src/store/subtitle_managed_resources_v3.sql"
         ))
         .expect("published managed v3");
-    let expected_v3 = fixture_schema_rows(&witness, MANAGED_SHAPE);
-    assert_eq!(fixture_schema_rows(&conn, MANAGED_SHAPE), expected_v3);
+    witness
+        .execute_batch(include_str!(
+            "../src/store/subtitle_managed_resources_v4.sql"
+        ))
+        .expect("published managed v4");
+    let expected_v4 = fixture_schema_rows(&witness, MANAGED_SHAPE);
+    witness
+        .execute_batch(include_str!(
+            "../src/store/subtitle_translation_retarget.sql"
+        ))
+        .expect("published retarget translation");
+    witness
+        .execute_batch(include_str!(
+            "../src/store/subtitle_translation_continuity.sql"
+        ))
+        .expect("published continuity translation");
+    assert_eq!(
+        canonical_fixture_rows(fixture_schema_rows(&conn, TRANSLATION_SHAPE)),
+        canonical_fixture_rows(fixture_schema_rows(&witness, TRANSLATION_SHAPE))
+    );
+    let later = historical_sqlite::validated_post_v121_rewind(&conn, 124);
+    let retained_continuity: i64 = conn.query_row(
+        "SELECT (SELECT count(*) FROM subtitle_translation_range_continuities) +
+                (SELECT count(*) FROM subtitle_translation_demands WHERE continuity_id IS NOT NULL)",
+        [], |row| row.get(0)
+    ).expect("inventory retained continuity before constructing v117");
+    assert_eq!(retained_continuity, 0);
+
+    assert_eq!(fixture_schema_rows(&conn, MANAGED_SHAPE), expected_v4);
     assert_eq!(
         conn.query_row(
-            "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=3",
+            "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=4",
             [],
             |row| row.get::<_, i64>(0)
         )
-        .expect("managed v3 marker"),
+        .expect("managed v4 marker"),
         1
     );
     assert_eq!(
@@ -268,7 +297,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
         );
         restore.push(blocks[0]);
     }
-    conn.execute_batch("SAVEPOINT recognized_retarget_fixture; DROP VIEW background_job_required_resources; DROP TABLE subtitle_managed_schema;").expect("start exact owned fixture rewind");
+    conn.execute_batch(&format!("SAVEPOINT recognized_retarget_fixture; {later} DROP VIEW background_job_required_resources; DROP TABLE subtitle_managed_schema;")).expect("start exact owned fixture rewind");
     conn.execute_batch(&restore.join(";\n"))
         .expect("restore only published v1 view and marker");
     conn.execute_batch("DROP TRIGGER subtitle_translation_mutate; DROP TRIGGER subtitle_translation_capture_continuity; DROP TRIGGER subtitle_translation_retire_continuity; DROP TRIGGER subtitle_translation_revoke_continuity; DROP TABLE subtitle_translation_range_continuities; ALTER TABLE subtitle_translation_demands DROP COLUMN continuity_id;")
@@ -288,6 +317,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
         canonical_fixture_rows(fixture_schema_rows(&conn, TRANSLATION_SHAPE)),
         expected_legacy
     );
+    assert!(historical_sqlite::validated_post_v121_rewind(&conn, 117).is_empty());
     conn.pragma_update(None, "user_version", 117)
         .expect("published ordinal");
     conn.execute_batch("RELEASE recognized_retarget_fixture;")
@@ -298,7 +328,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
     assert_eq!(store_epoch(&reopened, &id).await, "1");
     let current =
         rusqlite::Connection::open(dir.path().join("store.db")).expect("upgraded fixture");
-    assert_eq!(fixture_schema_rows(&current, MANAGED_SHAPE), expected_v3);
+    assert_eq!(fixture_schema_rows(&current, MANAGED_SHAPE), expected_v4);
     assert_eq!(
         current
             .query_row(
@@ -306,8 +336,8 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
                 [],
                 |row| row.get::<_, i64>(0)
             )
-            .expect("upgraded v3 marker"),
-        3
+            .expect("upgraded v4 marker"),
+        4
     );
     assert_eq!(current.query_row("SELECT receipt_json FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'", [], |row| row.get::<_, String>(0)).expect("retained managed model receipt"), "{}");
     assert_eq!(

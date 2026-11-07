@@ -594,6 +594,7 @@ paths = [
   "crates/plurx-core/src/cluster/migration/**",
   "crates/plurx-core/src/store/schema_lineage.rs",
   "crates/plurx-core/tests/schema_lineage_upgrade.rs",
+  "crates/plurx-core/tests/support/historical_sqlite.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
   # These native Store slices also participate in import/backup and backend parity.

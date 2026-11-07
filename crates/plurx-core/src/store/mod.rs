@@ -495,6 +495,34 @@ pub const MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA: &str =
 /// Current-schema orchestration around the unchanged frozen ownership layout.
 /// Execute every statement atomically; unrelated watch triggers stay installed.
 pub fn media_session_principal_rebuild_schema() -> String {
+    // The v122 interest trigger reads media_session_requests while attached to
+    // background_job_commands. SQLite validates it during each table rename.
+    let interest = sharing_source_schema::restore_interest_trigger();
+    let declaration = interest
+        .trim_end_matches(';')
+        .replace("CREATE TRIGGER IF NOT EXISTS", "CREATE TRIGGER")
+        .replace('\'', "''");
+    format!(
+        "CREATE TABLE media_session_principal_dependency_guard(exact INTEGER NOT NULL CHECK(exact=1));
+-- next statement
+INSERT INTO media_session_principal_dependency_guard SELECT EXISTS(
+    SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='playback_analysis_restore_effects'
+    AND tbl_name='background_job_commands' AND sql='{declaration}');
+-- next statement
+DROP TABLE media_session_principal_dependency_guard;
+-- next statement
+DROP TRIGGER playback_analysis_restore_effects;
+-- next statement
+{}
+-- next statement
+{interest}",
+        media_session_principal_rebuild_after_external_detach()
+    )
+}
+
+/// Source installers capture and detach the exact interest trigger, along
+/// with any audited membership triggers, before applying this inner layout.
+fn media_session_principal_rebuild_after_external_detach() -> String {
     let separator = "\n-- next statement\n";
     let dependencies = jellyfin_watch::session_dependency_triggers().collect::<Vec<_>>();
     let mut statements = dependencies

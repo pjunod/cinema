@@ -1922,6 +1922,39 @@ mod tests {
                     .expect("never missing-row proof");
                 assert!(after.state.is_sealed());
                 assert!(!after.state.contains_driver(&late));
+                if pooled {
+                    assert_eq!(after.state.open().count(), 1);
+                    assert!(!after.state.settled());
+                    // Core registered only model metadata, not an HTTP driver.
+                    // Close that exact model slot before the later retirement
+                    // matrix; this ACK exercises SQL fencing, not a physical
+                    // driver-closure receipt or Source settlement evidence.
+                    let confirmation =
+                        crate::auth::hash_token("metadata-only native ingress closure");
+                    assert_eq!(
+                        store
+                            .acknowledge_receiver_ingress(
+                                &route,
+                                &after,
+                                &registration,
+                                &confirmation,
+                            )
+                            .await
+                            .expect("exact model ingress closure"),
+                        crate::sharing_ingress_custody::CustodyMutation::Applied
+                    );
+                    let closed = store
+                        .receiver_ingress_snapshot(&route)
+                        .await
+                        .expect("model closure readback")
+                        .expect("closure fence retained");
+                    assert!(closed.state.is_sealed());
+                    assert_eq!(closed.state.open().count(), 0);
+                    assert!(closed.state.settled());
+                    assert!(closed
+                        .state
+                        .registration_fenced_after_closure(&registration));
+                }
                 let mut stale = route.clone();
                 stale.owner_epoch += 1;
                 assert!(store

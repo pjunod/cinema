@@ -1,6 +1,11 @@
 //! Domain-test fixtures backed by the common queue. These helpers create
 //! owned artifacts for cache/offline/history contracts; queue ownership itself
 //! is tested directly through BackgroundJobStore with full JobTokens.
+#[path = "historical_sqlite.rs"]
+mod historical_sqlite;
+use historical_sqlite::{
+    install_source_arbitration_fixture, require_fixture_marker, validated_post_v121_rewind,
+};
 use plurx_core::cluster::coordination::Lease;
 use plurx_core::domain::{NewPretranscodeJob, PretranscodeJob, PretranscodeWorkerCapabilities};
 use plurx_core::error::StoreError;
@@ -686,21 +691,6 @@ pub(crate) fn validated_empty_translation_rewind(
     drops
 }
 
-fn require_fixture_marker(connection: &rusqlite::Connection, table: &str, version: i64) {
-    let counts: (i64, i64) = connection
-        .query_row(
-            &format!("SELECT count(*),COALESCE(sum(singleton=1 AND version=?1),0) FROM {table}"),
-            [version],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("fixture marker inventory");
-    assert_eq!(
-        counts,
-        (1, 1),
-        "one exact published marker required for {table}"
-    );
-}
-
 #[allow(dead_code)]
 pub(crate) const HANDOFF_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'playback_handoffs*' OR tbl_name GLOB 'playback_handoffs*') AND sql IS NOT NULL ORDER BY name";
 
@@ -1146,6 +1136,7 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         let path = directory.path().join("current.db");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
         let connection = rusqlite::Connection::open(path).expect("owned fixture");
+        prepare_v121_fixture(&connection);
         if managed_version < 3 {
             // Reconstruct the exact published predecessor, never edit a marker
             // to impersonate managed v1/v2 while retaining the current v3 view.
@@ -1223,7 +1214,7 @@ pub(crate) const MANAGED_FIXTURE_DATA_SQL: &str = "SELECT (SELECT count(*) FROM 
 
 fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
     assert!(
-        matches!(version, 1..=3),
+        matches!(version, 1..=4),
         "only published managed fixture versions are recognized"
     );
     let expected = rusqlite::Connection::open_in_memory().expect("closed managed metadata witness");
@@ -1238,12 +1229,19 @@ fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
             ))
             .expect("published managed v2 objects");
     }
-    if version == 3 {
+    if version >= 3 {
         expected
             .execute_batch(include_str!(
                 "../../src/store/subtitle_managed_resources_v3.sql"
             ))
             .expect("published managed v3 objects");
+    }
+    if version == 4 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_managed_resources_v4.sql"
+            ))
+            .expect("published managed v4 objects");
     }
     expected
 }
@@ -1261,7 +1259,7 @@ fn managed_fixture_rows(connection: &rusqlite::Connection) -> Vec<(String, Strin
         .collect::<Result<Vec<_>, _>>()
         .expect("complete managed shape")
 }
-/// Historical v1/v2 and current v3 each require their own exact DDL and marker.
+/// Every published managed generation requires its own exact DDL and marker.
 /// This pure plan cannot discard accepted work or silently repair schema drift.
 pub(crate) fn validated_empty_managed_rewind(
     shape: &[(String, String)],
@@ -1481,12 +1479,34 @@ pub(crate) fn validated_empty_current_tail_rewind(
         .collect()
 }
 
-/// Read-only plan for the exact empty v119/v1, v120/v2 or v121/v3 fixture tail.
+// The tests below need a real v121 predecessor before constructing older
+// managed layouts. Preserve the ordinary rewind's exact v4 and empty checks.
+fn prepare_v121_fixture(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("current fixture version");
+    assert_eq!(version, 124);
+    let drops = validated_post_v121_rewind(connection, version);
+    require_fixture_marker(connection, "subtitle_managed_schema", 4);
+    let data: i64 = connection
+        .query_row(MANAGED_FIXTURE_DATA_SQL, [], |row| row.get(0))
+        .expect("managed fixture inventory");
+    validated_empty_managed_rewind(&managed_fixture_rows(connection), 4, data);
+    let v3 = include_str!("../../src/store/subtitle_managed_resources_v3.sql");
+    connection
+        .execute_batch(&format!(
+            "SAVEPOINT predecessor; {drops} {v3} PRAGMA user_version=121; RELEASE predecessor;"
+        ))
+        .expect("build exact empty v121 predecessor");
+}
+
+/// Read-only plan for the published v119–v124 fixture tails and managed markers.
 /// This recognizes published layouts, not arbitrary later schema versions.
 fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, i64) {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture version");
+    let post_v121 = validated_post_v121_rewind(connection, version);
     let actual = current_tail_fixture_rows(connection);
     if version <= 115 {
         assert!(
@@ -1514,7 +1534,8 @@ fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, 
     let expected_managed_version = match version {
         119 => 1,
         120 => 2,
-        121 => 3,
+        121 | 122 => 3,
+        123 | 124 => 4,
         _ => panic!("only exact published fixture tails may be rewound"),
     };
     // Validate DDL before using any table identity in the read-only inventory.
@@ -1582,7 +1603,7 @@ fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, 
         .query_row(MANAGED_FIXTURE_DATA_SQL, [], |row| row.get(0))
         .expect("current managed data");
     validated_empty_managed_rewind(&managed_fixture_rows(connection), marker, managed);
-    (format!("{};", drops.join(";")), 115)
+    (format!("{post_v121}{};", drops.join(";")), 115)
 }
 
 pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connection) {
@@ -1619,7 +1640,7 @@ pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connec
     assert!(
         matches!(
             (schema_version, marker),
-            (111..=119, 1) | (120, 2) | (121, 3)
+            (111..=119, 1) | (120, 2) | (121..=122, 3) | (123..=124, 4)
         ),
         "managed marker must match its published SQLite schema version"
     );
@@ -1680,11 +1701,27 @@ fn complete_fixture_snapshot(connection: &rusqlite::Connection) -> String {
 
 #[test]
 fn current_fixture_rewind_accepts_exact_empty_v120_with_foreign_keys() {
-    for version in [120, 121] {
+    for version in [120, 121, 122, 123, 124] {
         let dir = tempfile::tempdir().expect("current fixture");
         let path = dir.path().join("store.sqlite");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture schema"));
         let connection = rusqlite::Connection::open(path).expect("fixture connection");
+        if version < 124 {
+            prepare_v121_fixture(&connection);
+            if version >= 122 {
+                install_source_arbitration_fixture(&connection);
+            }
+            if version == 123 {
+                connection
+                    .execute_batch(include_str!(
+                        "../../src/store/subtitle_managed_resources_v4.sql"
+                    ))
+                    .expect("published managed v4 fixture");
+            }
+            connection
+                .pragma_update(None, "user_version", version)
+                .expect("published fixture ordinal");
+        }
         if version == 120 {
             // Build the published predecessor from its exact migration bytes,
             // rather than relabelling current v3 DDL as a v120 fixture.
@@ -1693,9 +1730,6 @@ fn current_fixture_rewind_accepts_exact_empty_v120_with_foreign_keys() {
                     "../../src/store/subtitle_managed_resources_v2.sql"
                 ))
                 .expect("published v120 managed v2 fixture");
-            connection
-                .pragma_update(None, "user_version", version)
-                .expect("published predecessor ordinal");
         }
         connection
             .execute_batch("PRAGMA foreign_keys=ON;")
@@ -1705,6 +1739,7 @@ fn current_fixture_rewind_accepts_exact_empty_v120_with_foreign_keys() {
             "SELECT count(*) FROM sqlite_master WHERE name GLOB 'subtitle_translation_*' OR name GLOB 'subtitle_text_translation_*' OR name GLOB 'shared_caption_*' OR name GLOB 'subtitle_managed_*' OR name='subtitle_model_receipts'",
             [], |row| row.get(0)).expect("removed fixture inventory");
         assert_eq!(remaining, 0);
+        assert!(validated_post_v121_rewind(&connection, 121).is_empty());
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
@@ -1736,6 +1771,10 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
         "managed-marker",
         "wrong-managed-marker",
         "missing-index",
+        "native-identity",
+        "native-census",
+        "source-grant",
+        "source-index",
         "translation-trigger",
         "managed-view",
         "extra-object",
@@ -1764,7 +1803,7 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
             .execute_batch("PRAGMA foreign_keys=OFF;")
             .expect("prepare hostile retained fixture rows");
         let sql = match damage {
-            "future-version" => "PRAGMA user_version=122;",
+            "future-version" => "PRAGMA user_version=125;",
             "v120-managed-v3" => "PRAGMA user_version=120;",
             "v121-managed-v2" => include_str!("../../src/store/subtitle_managed_resources_v2.sql"),
             "unsupported-tail-version" => "PRAGMA user_version=119;",
@@ -1775,6 +1814,10 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
             "wrong-caption-marker" => "PRAGMA ignore_check_constraints=ON; UPDATE shared_caption_schema SET version=2; PRAGMA ignore_check_constraints=OFF;",
             "wrong-managed-marker" => "PRAGMA ignore_check_constraints=ON; UPDATE subtitle_managed_schema SET version=1; PRAGMA ignore_check_constraints=OFF;",
             "missing-index" => "DROP INDEX shared_caption_read_expiry;",
+            "native-identity" => "INSERT INTO storage_identity VALUES(1,'instance','node','generation');",
+            "native-census" => "INSERT INTO sharing_local_census VALUES('node','00000000-0000-0000-0000-000000000000',1,1);",
+            "source-grant" => "INSERT INTO background_source_service_epochs VALUES('source_io',1,1);",
+            "source-index" => "CREATE INDEX unexpected_census_index ON sharing_local_census(generation);",
             "translation-trigger" => "DROP TRIGGER subtitle_translation_mutate; CREATE TRIGGER subtitle_translation_mutate AFTER INSERT ON subtitle_translation_commands BEGIN SELECT 1; END;",
             "managed-view" => "DROP VIEW background_job_required_resources; CREATE VIEW background_job_required_resources AS SELECT 1;",
             "extra-object" => "CREATE TABLE subtitle_text_translation_unknown(value TEXT);",

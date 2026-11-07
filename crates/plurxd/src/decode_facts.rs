@@ -5485,14 +5485,17 @@ async fn collect_platform(
         offset: source_offset,
     };
     if let Some(seed) = seed {
-        let facts = refine_scan_type(
+        // Refinement nests another bounded process collector (including IDET).
+        // Keep its state behind one pointer before composing this platform
+        // future, for the same ordinary-stack bound as the outer collector.
+        let facts = Box::pin(refine_scan_type(
             probe,
             source_fd,
             seed.facts?,
             launch_deadline,
             cancelled,
             work,
-        )
+        ))
         .await?;
         drop(restore_offset);
         drop(offset_permit);
@@ -5527,10 +5530,15 @@ async fn collect_platform(
             selected_stream,
         );
         let facts = if projection == ProbeProjection::Decoder {
-            Ok(
-                refine_scan_type(probe, source_fd, facts?, launch_deadline, cancelled, work)
-                    .await?,
-            )
+            Ok(Box::pin(refine_scan_type(
+                probe,
+                source_fd,
+                facts?,
+                launch_deadline,
+                cancelled,
+                work,
+            ))
+            .await?)
         } else {
             facts
         };
@@ -5690,7 +5698,15 @@ async fn collect_platform(
     }
     let mut facts = facts?;
     if projection == ProbeProjection::Decoder {
-        facts = refine_scan_type(probe, source_fd, facts, launch_deadline, cancelled, work).await?;
+        facts = Box::pin(refine_scan_type(
+            probe,
+            source_fd,
+            facts,
+            launch_deadline,
+            cancelled,
+            work,
+        ))
+        .await?;
     }
     // Every descriptor-reading child has now been reaped. Restore the shared
     // open-file offset and release the producer lane before the authoritative

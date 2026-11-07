@@ -451,7 +451,7 @@ pub(crate) fn native_installed_guard() -> String {
 /// Frozen statement order preserves child authority rows and then seeds the
 /// allocator before order-maintenance triggers can observe ordinary inserts.
 pub(crate) fn layout_statements() -> Vec<String> {
-    let mut statements = super::media_session_principal_rebuild_schema()
+    let mut statements = super::media_session_principal_rebuild_after_external_detach()
         .split("-- next statement\n")
         .map(|part| {
             part.lines()

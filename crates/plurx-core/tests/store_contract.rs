@@ -644,6 +644,39 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "join_artifact_viewer",
     "analysis_preparation_observation",
     "source_io_holders",
+    // Source service ownership added these BackgroundJobStore methods in
+    // dac9e2c7e without updating this name inventory. Their implementation
+    // delegates to background_jobs_resources' fenced custody/arbitration
+    // helpers; this inventory retains every declared trait entry point.
+    "register_foreground_source",
+    "project_foreground_source",
+    "release_foreground_source",
+    "foreground_source_pressure",
+    "list_foreground_source_owners",
+    "resolve_foreground_source",
+    "activate_foreground_source_custody",
+    "abort_foreground_source_activation",
+    "mark_foreground_source_settled",
+    "settled_foreground_source_custody",
+    "activate_background_source_custody",
+    "abort_background_source_activation",
+    "mark_background_source_settled",
+    "settled_background_source_custody",
+    "resolve_background_source_custody",
+    "register_background_source_custody",
+    "claim_background_source_service",
+    "release_background_source_custody",
+    "close_read_attestation_source_lease",
+    "suspend_playback_analysis_interest",
+    "restore_playback_analysis_interest",
+    "background_source_may_continue",
+    "pause_background_source",
+    "resume_background_source",
+    // Retained-artifact enumeration and exact-owner checkpoint publication
+    // are separate methods on that same trait, not new Store supertraits.
+    "source_checkpoint_artifacts",
+    "checkpoint_analysis_source",
+    "checkpoint_job",
     "sync_predictions",
     "embedding_for",
     "publish_embedding_job",
@@ -12789,6 +12822,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
         Vec<String>,
         Vec<String>,
         Vec<String>,
+        Vec<String>,
     ) {
         async fn rows(client: &Client, sql: &str) -> Vec<String> {
             client
@@ -12800,6 +12834,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
                 .collect()
         }
         (replicated_schema_marker(client).await,
+         rows(client, "SELECT json_array(resource_key,epoch_id,allocated_bytes) AS payload FROM background_source_service_epochs ORDER BY resource_key,epoch_id").await,
          rows(client, "SELECT json_object('name',name,'type',type,'sql',sql) AS payload FROM sqlite_master ORDER BY name,type,sql").await,
          rows(client, "SELECT json_array(node_id,model_id,profile_id,receipt_json) AS payload FROM subtitle_translation_capabilities ORDER BY node_id,model_id,profile_id").await,
          rows(client, "SELECT json_array(node_id,model_id,receipt_json) AS payload FROM subtitle_model_receipts ORDER BY node_id,model_id").await,
@@ -12814,6 +12849,8 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
         "translation-data",
         "translation-shape",
         "managed-data",
+        "source-data",
+        "source-index",
         "managed-marker",
         "managed-shape",
         "translation-marker",
@@ -12830,7 +12867,9 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,3)".to_owned()),
+            "source-data" => ("INSERT INTO background_source_service_epochs VALUES('source_io',42,7)".to_owned(), "DELETE FROM background_source_service_epochs WHERE resource_key='source_io' AND epoch_id=42".to_owned()),
+            "source-index" => ("CREATE INDEX fixture_unknown_source_index ON background_source_service_epochs(epoch_id)".to_owned(), "DROP INDEX fixture_unknown_source_index".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,4)".to_owned()),
             "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
             "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
             "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
@@ -12922,6 +12961,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
         .await
         .expect("unrelated retained row");
     let queries = [
+        SOURCE_ARBITRATION_FIXTURE_SHAPE,
         queue_fixture::CURRENT_TAIL_FIXTURE_SHAPE_SQL,
         queue_fixture::TRANSLATION_FIXTURE_SHAPE_SQL,
         queue_fixture::MANAGED_FIXTURE_SHAPE_SQL,
@@ -12962,7 +13002,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
             "bootstrap exact published shape"
         );
     }
-    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 3).await;
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
     require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
     for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
         require_replicated_fixture_marker(&client, marker, 1).await;
@@ -13010,6 +13050,60 @@ async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, St
         .iter_mut()
         .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
         .collect()
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+const SOURCE_ARBITRATION_FIXTURE_SHAPE: &str =
+    "WITH owned(pattern) AS (VALUES ('foreground_source_*'), ('background_source_*'),
+        ('source_io_occupancy*'), ('analysis_source_checkpoint*'), ('playback_analysis_*'))
+     SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND
+        EXISTS(SELECT 1 FROM owned WHERE name GLOB pattern OR tbl_name GLOB pattern)
+     ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 WHEN 'index' THEN 2 ELSE 3 END,name";
+
+/// Both backends install the same source-arbitration declarations. Classify
+/// the whole extension before an older queue fixture drops its parent tables.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn empty_source_arbitration_fixture_drops(client: &Client) -> Vec<String> {
+    static PUBLISHED: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    let expected = PUBLISHED.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("owned SQLite schema witness");
+        let path = dir.path().join("published.sqlite");
+        drop(SqliteStore::open(&path).expect("published SQLite source arbitration"));
+        let connection = rusqlite::Connection::open(path).expect("schema witness");
+        let mut statement = connection
+            .prepare(SOURCE_ARBITRATION_FIXTURE_SHAPE)
+            .expect("source arbitration query");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("source arbitration inventory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("published source arbitration objects")
+    });
+    assert_eq!(
+        &replicated_fixture_shape(client, SOURCE_ARBITRATION_FIXTURE_SHAPE).await,
+        expected
+    );
+    require_replicated_fixture_marker(client, "background_source_schema", 1).await;
+    let mut drops = Vec::new();
+    for (name, definition) in expected {
+        let kind = definition
+            .split_whitespace()
+            .nth(1)
+            .expect("published object type");
+        if kind == "TABLE" && name != "background_source_schema" {
+            let count: Vec<I64Value> = client
+                .query_consistent_map(
+                    format!("SELECT count(*) AS value FROM {name}"),
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("retained source-arbitration rows");
+            assert_eq!(count.len(), 1);
+            assert_eq!(count[0].value, 0, "refuse retained rows in {name}");
+        }
+        drops.push(format!("DROP {kind} {name}"));
+    }
+    drops
 }
 
 /// A historical queue fixture cannot retain half of the independent managed
@@ -13083,7 +13177,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     require_replicated_fixture_marker(client, "dv_title_jobs_schema", 1).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
-    require_replicated_fixture_marker(client, "subtitle_managed_schema", 3).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 4).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
@@ -13119,7 +13213,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=3) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=4) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -13151,7 +13245,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     );
     let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
     let managed_drops =
-        queue_fixture::validated_empty_managed_rewind(&managed_shape, 3, managed_data_count);
+        queue_fixture::validated_empty_managed_rewind(&managed_shape, 4, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -13191,8 +13285,10 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let mut statements: Vec<_> = tail_drops
+    let mut statements: Vec<_> = empty_source_arbitration_fixture_drops(client)
+        .await
         .into_iter()
+        .chain(tail_drops)
         .chain(handoff_drops)
         .chain(title_drops)
         .chain(annotations_drops)
@@ -13756,7 +13852,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 3",
+             WHERE singleton = 1 AND version = 4",
             1,
         ),
         (
@@ -13782,11 +13878,11 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 3).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(3),
-            "{round}: exact current managed v3 view, marker and guards",
+            queue_fixture::managed_fixture_shape(4),
+            "{round}: exact current managed v4 view, marker and guards",
         );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
@@ -17260,7 +17356,7 @@ mod managed_bootstrap_regressions {
             ),
             (
                 "DELETE FROM subtitle_managed_schema",
-                "INSERT INTO subtitle_managed_schema VALUES(1,3)".into(),
+                "INSERT INTO subtitle_managed_schema VALUES(1,4)".into(),
                 "marker missing",
             ),
         ]
@@ -21089,7 +21185,9 @@ fn contract_inventory_matches_every_store_method() {
     // +5: source-revision title demand/readiness, binding, fenced publication
     // and same-node probe priority, explicitly listed in BACKGROUND_JOB_METHODS.
     // +3: source-fenced FEL verdict write, requalification and verdict counts.
-    assert_eq!(declared.len(), 517, "review the Store method count");
+    // +27: source service's 24 custody/arbitration methods and three retained
+    // checkpoint methods, explicitly listed in BACKGROUND_JOB_METHODS above.
+    assert_eq!(declared.len(), 544, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
