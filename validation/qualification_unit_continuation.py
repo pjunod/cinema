@@ -1267,6 +1267,9 @@ def bound_execution(record, item, raw, source_commands=historical_canonical, *, 
     lines = raw.splitlines()
     first = witness['first_line']
     receipts.require(type(first) is int and 0 < first <= len(lines), 'Invalid command anchor')
+    if witness['mode'] == 'archived-store-native':
+        from validation import store_native_capture
+        return store_native_capture.bound(record, item, raw, proof)
     if witness['mode'] == 'original-effort-native':
         return original_effort_native(record, item, raw, proof)
     if witness['mode'] == 'original-serial-rotation':
