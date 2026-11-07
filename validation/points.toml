@@ -596,6 +596,11 @@ paths = [
   "crates/plurx-core/tests/schema_lineage_upgrade.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
+  # These native Store slices also participate in import/backup and backend parity.
+  "crates/plurx-core/src/store/sqlite/lifecycle.rs",
+  "crates/plurx-core/src/store/sqlite/lifecycle/**",
+  "crates/plurx-core/src/store/sqlite/native_backup.rs",
+  "crates/plurx-core/src/store/sqlite/native_sharing.rs",
   # K-05 section 3.9: poisoned-connection recovery and the boot integrity
   # check that refuses a corrupt database before migration touches it.
   "crates/plurx-core/src/store/sqlite/housekeeping.rs",
