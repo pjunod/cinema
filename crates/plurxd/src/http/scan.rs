@@ -477,7 +477,9 @@ pub async fn request_status(
     if !key.0.allows(scopes::STATUS_READ)
         && state.jobs.scan_request_creator(&id).await? != Some(key.0.id)
     {
-        // Another key's request, or one from before keys were recorded.
+        // Another key's request, one from before keys were recorded, or no
+        // such request: all 403 for a key without `status:read`, so a scan
+        // key cannot probe which request ids exist (review #1407, 12).
         return Err(ApiError::Forbidden);
     }
     match state.jobs.scan_request(&id).await {
