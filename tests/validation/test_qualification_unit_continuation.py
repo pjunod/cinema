@@ -812,6 +812,24 @@ class CompleteCommandUnitCase(unittest.TestCase):
                 argv=json.loads(raw.splitlines()[0].removeprefix('COMMAND '));record['origin']['command']=shlex.join(argv)
             with self.assertRaises(receipts.ReceiptError):self.validate(proof)
 
+    def test_archived_store_requires_the_reviewed_source_and_exact_executor_manifest(self):
+        from validation import store_native_capture as captures
+        record = fixture()['commands'][0]['records'][0]
+        item = {'name': 'store_contract:1'}
+        source = captures.FIRST_SOURCE
+        record['source_commit'] = source
+        record['origin']['execution'] = {
+            'mode': 'archived-store-native', 'first_line': 1, 'capture': captures.CAPTURES[source],
+        }
+        replacement = log('{"different":"executor"}')
+        with self.assertRaisesRegex(receipts.ReceiptError, 'manifest changed'):
+            q.bound_execution(record, item, 'COMMAND []', proof={'logs': {
+                captures.CAPTURES[source]: replacement,
+            }})
+        record['source_commit'] = CANDIDATE
+        with self.assertRaisesRegex(receipts.ReceiptError, 'Unknown archived Store'):
+            q.bound_execution(record, item, 'COMMAND []', proof={'logs': {}})
+
     def test_native_argv_must_be_the_preserved_fingerprint_binary(self):
         for key,value in [('binary_path','/different/store_contract-deadbeef'),('fingerprint_path','/owned/.fingerprint/plurx-core-ffffffff/test-integration-test-store_contract.json')]:
             proof=fixture();proof['commands'][0]['records'][0]['origin']['execution'][key]=value
