@@ -402,6 +402,11 @@ impl JobManager {
                     }
                 }
             }
+            if full.is_empty() && !groups.is_empty() {
+                // A targeted pass is under way: whatever its requests were
+                // waiting on (the fence, a place in the queue) is over.
+                crate::background_jobs::note_targeted_wait(self.store.as_ref(), job_id, "").await;
+            }
             if !full.is_empty() {
                 #[cfg(test)]
                 crate::background_jobs::faults::worker::at(
@@ -1601,8 +1606,9 @@ mod tests {
             request_record(store.as_ref(), "full-running").await.state,
             "succeeded"
         );
-        // The yield deferred the job by the shared driver's five seconds.
-        tokio::time::timeout(Duration::from_secs(30), async {
+        // A fence refusal defers a targeted job by a quarter second, not by
+        // the shared driver's five (review #1405, finding 4).
+        tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 jobs.work_library_queue(&transcode, None).await;
                 if request_record(store.as_ref(), "targeted-fenced")
@@ -1703,5 +1709,67 @@ mod tests {
             "pending"
         );
         drop(held);
+    }
+
+    /// The targeted job keeps the `library_scan` kind and is told apart by its
+    /// payload generation, so a claimer must run only the generations it
+    /// knows: a `library_scan` row from a newer release is left queued, never
+    /// run as a full scan or failed (review #1405, condition ii).
+    #[tokio::test]
+    async fn claim_library_leaves_an_unknown_library_scan_generation_queued() {
+        use plurx_core::store::background_jobs::{EnqueueJob, JobRequest};
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Future".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let now_ms = clock_ms();
+        let EnqueueOutcome::Accepted { job_id, .. } = store
+            .enqueue_job(EnqueueJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                payload: JobPayload::LibraryScan {
+                    library_id: library.id,
+                    generation: "library-future-v9".into(),
+                },
+                dedupe_key: format!("library:future:{}", library.id),
+                priority: 3,
+                not_before_ms: now_ms,
+                now_ms,
+                request: JobRequest {
+                    scope: "test".into(),
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    request_digest: "f".repeat(64),
+                    consumer_kind: "test".into(),
+                    consumer_ref: library.id.to_string(),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue a future generation")
+        else {
+            panic!("the future-generation row must be queued")
+        };
+        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+        let transcode = transcode_for(Arc::clone(&store), &root.path().join("transcode"));
+        assert!(
+            !jobs.work_library_queue(&transcode, None).await,
+            "an unknown generation is not claimed"
+        );
+        let job = store
+            .background_job(&job_id)
+            .await
+            .expect("read job")
+            .expect("retained");
+        assert_eq!(job.state, JobState::Queued);
+        assert_eq!(job.failed_attempts, 0);
+        assert!(job.token.is_none());
     }
 }
