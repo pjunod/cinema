@@ -2,8 +2,11 @@
 //! rather than constructing a native Store in isolation.
 use super::*;
 use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+#[cfg(feature = "cluster")]
+use plurx_core::storage::mode::publish_record;
 use plurx_core::storage::mode::MANIFEST_FILENAME;
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 
 struct OccupiedClusterPorts {
     _raft: TcpListener,
@@ -28,8 +31,19 @@ fn configuration(root: &Path, preference: Option<StorageMode>) -> (Config, Occup
     )
 }
 
+async fn select_for_test(config: &Config) -> Result<RuntimeStore, StoreError> {
+    #[cfg(feature = "cluster")]
+    {
+        select(config, None).await
+    }
+    #[cfg(not(feature = "cluster"))]
+    {
+        select(config).await
+    }
+}
+
 async fn open_native(config: &Config) -> RuntimeStore {
-    tokio::time::timeout(std::time::Duration::from_secs(30), select(config, None))
+    tokio::time::timeout(std::time::Duration::from_secs(30), select_for_test(config))
         .await
         .expect("native startup does not wait for cluster admission")
         .expect("native daemon storage")
@@ -52,6 +66,7 @@ fn assert_no_cluster_artifacts(root: &Path) {
     }
 }
 
+#[cfg(feature = "cluster")]
 #[test]
 fn cluster_restart_preflight_uses_committed_schema_before_source_preparation() {
     use plurx_core::cluster::migration::ActivationMarker;
@@ -123,11 +138,11 @@ async fn standalone_default_and_explicit_sqlite_start_with_cluster_ports_unavail
         assert_eq!(manifest.database, Path::new("plurx.db"));
         assert!(directory.path().join("plurx.db").is_file());
         let services = runtime.services(&config).expect("native service adapters");
-        let proof = services.replication.metrics_handle().snapshot();
-        assert!(!proof.local_source);
-        assert!(!proof.watermark_source);
-        assert!(proof.sample.is_none());
-        assert!(proof.watermark.is_none());
+        #[cfg(feature = "cluster")]
+        {
+            assert!(services.replication.is_none());
+            assert!(services.membership.is_none());
+        }
         let serving = crate::serving_fence::ServingFence::local();
         assert!(serving.is_ready());
         assert!(!serving.is_quorum_managed());
@@ -168,7 +183,20 @@ async fn standalone_default_and_explicit_sqlite_start_with_cluster_ports_unavail
         );
         assert!(artifact.manifest.get("raft_cut").is_none());
         assert_no_cluster_artifacts(directory.path());
+        let retained_store = runtime.store();
         runtime.shutdown().await.expect("native shutdown");
+        assert!(
+            retained_store.get_setting("shutdown.closed").await.is_err(),
+            "runtime shutdown closes actual SQL access through retained handles"
+        );
+        assert!(retained_store
+            .put_setting("shutdown.closed", "must refuse")
+            .await
+            .is_err());
+        runtime
+            .shutdown()
+            .await
+            .expect("repeated native close is idempotent");
         assert!(
             admitted.write_guard(1001, 1, 2, 3).is_err(),
             "shutdown revokes existing local admissions"
@@ -282,14 +310,14 @@ async fn standalone_committed_mode_cannot_be_changed_by_a_cluster_preference() {
     drop(runtime);
     config.storage.mode = Some(StorageMode::Cluster);
     assert!(
-        select(&config, None).await.is_err(),
+        select_for_test(&config).await.is_err(),
         "editing a preference cannot replace committed native authority"
     );
     assert_no_cluster_artifacts(directory.path());
     config.storage.mode = None;
     config.cluster.join_token_file = directory.path().join("explicit-join-token");
     assert!(
-        select(&config, None).await.is_err(),
+        select_for_test(&config).await.is_err(),
         "join intent cannot overwrite native authority"
     );
     assert_no_cluster_artifacts(directory.path());
@@ -325,11 +353,11 @@ async fn standalone_missing_corrupt_or_mismatched_manifest_refuses_without_fallb
     let original = std::fs::read(&path).expect("original manifest");
     std::fs::remove_file(&path).expect("simulate lost manifest");
     assert!(
-        select(&config, None).await.is_err(),
+        select_for_test(&config).await.is_err(),
         "bound native data must not be treated as a fresh legacy directory"
     );
     std::fs::write(&path, b"{not-a-manifest").expect("simulate corrupt manifest");
-    assert!(select(&config, None).await.is_err());
+    assert!(select_for_test(&config).await.is_err());
     let actual: serde_json::Value = serde_json::from_slice(&original).expect("actual manifest");
     for (field, value) in [
         ("version", serde_json::json!(999)),
@@ -348,7 +376,7 @@ async fn standalone_missing_corrupt_or_mismatched_manifest_refuses_without_fallb
         )
         .expect("publish simulated fault");
         assert!(
-            select(&config, None).await.is_err(),
+            select_for_test(&config).await.is_err(),
             "{field} mismatch cannot select another database"
         );
         assert_no_cluster_artifacts(directory.path());
@@ -381,7 +409,7 @@ async fn lost_native_manifest_cannot_be_bypassed_by_cluster_configuration() {
     drop(runtime);
     std::fs::remove_file(directory.path().join(MANIFEST_FILENAME)).expect("lost manifest fixture");
     config.storage.mode = Some(StorageMode::Cluster);
-    assert!(select(&config, None).await.is_err());
+    assert!(select_for_test(&config).await.is_err());
     assert_no_cluster_artifacts(directory.path());
     let database = rusqlite::Connection::open_with_flags(
         directory.path().join("plurx.db"),
@@ -396,4 +424,35 @@ async fn lost_native_manifest_cannot_be_bypassed_by_cluster_configuration() {
         )
         .expect("accepted data retained");
     assert_eq!(value, "preserve");
+}
+
+/// Missing optional migration tooling must never make the old SQLite copy
+/// current authority. Check the exact on-disk bytes before any writer opens.
+#[cfg(not(feature = "cluster"))]
+#[tokio::test]
+async fn standalone_legacy_markers_refuse_before_retained_sqlite_or_keys_are_opened() {
+    for marker in [
+        "hiqlite",
+        "hiqlite.incoming",
+        "hiqlite-activated.json",
+        "membership.json",
+    ] {
+        let root = tempfile::tempdir().expect("legacy root");
+        let retained = b"retained predecessor is not current authority";
+        std::fs::write(root.path().join("plurx.db"), retained).expect("retained predecessor");
+        if marker.starts_with("hiqlite") && !marker.ends_with(".json") {
+            std::fs::create_dir(root.path().join(marker)).expect("legacy directory");
+        } else {
+            std::fs::write(root.path().join(marker), b"{}").expect("legacy marker");
+        }
+        let (config, _ports) = configuration(root.path(), None);
+        assert!(select_for_test(&config).await.is_err());
+        assert_eq!(
+            std::fs::read(root.path().join("plurx.db")).expect("predecessor intact"),
+            retained
+        );
+        assert!(!root.path().join(MANIFEST_FILENAME).exists());
+        assert!(!config.credential_key_path().exists());
+        assert!(!root.path().join("node.id").exists());
+    }
 }

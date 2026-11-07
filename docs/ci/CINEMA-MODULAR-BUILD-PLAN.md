@@ -1,6 +1,8 @@
 # Cinema modular builds — smaller dependency graphs and measured rebuilds
 
-**Status:** open — Astra reviewed; all six findings addressed; P1 measurement started.
+**Status:** implementation draft — standalone SDK omission is proved for the
+selected graph; native/cluster behavior and release qualification are pending.
+P1 is merged; this packaging/helper candidate is not qualified or merged to main.
 **Written:** 2026-11-04 · **Owner:** Codex · **Reviewer:** Astra.
 **Review:** [Astra findings and dispositions](../reviews/CINEMA-MODULAR-BUILD-ASTRA-REVIEW.md).
 **Source baseline:** `f30dfbbc9237046a0f6a6f20d893044593f56600`.
@@ -30,8 +32,13 @@ The runtime prerequisite began at `f30dfbbc9`: native SQLite selection,
 verified singleton conversion, native backup/restore and explicit promotion.
 Reviewed corrections at `5484d7986` passed effort gate 6468 and merged through
 PR #1379 into `effort/standalone-sqlite` as `fa5ed825a`. Dependent task branches
-include that actual effort base before their own gates. Release qualification
-and the final Hiqlite-free build remain open.
+include that actual effort base before their own gates. The current implementation makes the standalone selected graph SDK-free;
+release qualification and final integrated acceptance remain open.
+
+The [measurement ledger](CINEMA-BUILD-MEASUREMENTS.md#3-primary-capped-linker-comparison--2026-11-04)
+records the completed capped linker comparison. It showed no useful gain;
+the experimental linker change is not selected for promotion. The SDK-free
+packaging milestone remains the delivery path.
 
 ## 2. Contracts — package boundaries cannot change data or authority
 
@@ -65,14 +72,15 @@ whole daemon `AppState`. They must not depend back on the daemon. Keep closely
 coupled Hiqlite storage and cluster runtime together initially; separate them
 only after reverse imports have been removed. Avoid one crate per source file.
 
-Re-verify these baseline anchors at implementation time:
+The source-baseline audit identified these boundaries. Re-verify them for
+each future extraction; the draft packaging cut does not move their owners:
 
 | Boundary | Existing coupling | Required treatment |
 |---|---|---|
-| Daemon packaging | [daemon manifest](../../crates/plurxd/Cargo.toml) directly selects `hiqlite-store`, Hiqlite and its WAL | Optional cluster adapter; package-specific standalone invocation |
+| Daemon packaging | [daemon manifest](../../crates/plurxd/Cargo.toml) now selects the existing optional SDK only through explicit `cluster`; native is the candidate default | Preserve independent package/target graph checks and complete distribution omission gates |
 | Store contracts | [Store module](../../crates/plurx-core/src/store/mod.rs) imports leases from cluster coordination; catalogue reader carries concrete replicated state | Neutral values and injected read capability |
 | Trusted Source authority | [Source authority](../../crates/plurx-core/src/sharing_source_sessions.rs) has sealed implementations | Preserve trusted construction and actual local/replicated validation; do not expose a public grant constructor |
-| Receiver custody | [receiver delivery](../../crates/plurx-core/src/sharing_receiver_delivery.rs) aliases concrete membership or an uninhabited no-feature type | Real native custody capability without a synthetic voter |
+| Receiver custody | [receiver delivery](../../crates/plurx-core/src/sharing_receiver_delivery.rs) has a private relay-read proof; ingress uses actual local-registry checks with no member roster | Preserve real native Source/Receiver sharing; the member type alone is not a native capability test |
 | Optional inference | [daemon manifest](../../crates/plurxd/Cargo.toml) unconditionally includes Candle/tokenizers | Own dependency subtree in an optional search adapter |
 | Web iteration | [web provider](../../crates/plurxd/src/http/web.rs) embeds shell and assets in the daemon | Development provider independent of Rust rebuilding; embedded release contract retained |
 
@@ -83,17 +91,23 @@ is not an acceptable authority design.
 
 ### 2.2 Packaging is explicit; saved state is preserved
 
-The standalone build becomes the default daemon recipe. A cluster recipe opts
-into `plurx-cluster` at the composition root, rather than scattering new flags
-through application logic. The eventual commands are intended to be:
+The candidate's default Cargo/Make daemon build selects native SQLite. The
+existing Core `hiqlite-store` implementation remains under its private owner;
+the daemon selects it only through its explicit `cluster` build feature. This
+is compile/package selection, not a saved-settings switch. Current recipes are:
 
 ```bash
-make build-standalone       # no cluster dependency in the selected graph
-make build-cluster         # deliberately includes replicated capabilities
-make test-standalone-graph # rejects Hiqlite, its WAL and OpenRaft
+make build                  # native daemon; runs the standalone graph check
+make build-cluster          # explicitly includes replicated capabilities
+make standalone-graph-check # checks daemon, controller and optional tray
+make build-migration-helper # separate SDK-bearing migration executable
 ```
 
-Milestone 4 must add these real targets; they are not runnable acceptance yet.
+These recipes are implemented in the draft. The standalone selected graph for
+`plurxd`, `plurx-desktop-control` and `plurx-tray`, including normal/build edges,
+contains no Hiqlite, Hiqlite WAL or OpenRaft. This graph result is not runtime
+or whole-distribution release acceptance. P3b/P4 retain the final native/cluster
+behavior, helper, packaging and supported-upgrade gates before shipping.
 Inspect the resolved production graph for the selected package/target, not
 merely `Cargo.lock`: a workspace lockfile may legitimately contain cluster
 packages. The gate covers the complete distribution closure described below.
@@ -122,11 +136,16 @@ an opportunity to drop a platform.
 | Explicit cluster distributions | Same supported release platforms | Cluster daemon and explicitly declared cluster-check tooling | Raft is intentional; real cluster acceptance applies |
 | Migration/update helper bundle | Platform matching the installation | Version-matched migration executable and exact compatibility manifest | Cluster dependencies allowed only in this separately identified update artifact |
 
-The current Docker recipe also builds and ships `plurx-cluster-check`. Remove
-it from the standalone build and image stages; do not merely hide its command.
-Keep it in the explicit cluster/tool distribution. Fresh standalone archives,
-images and installation roots must not contain the migration helper or cluster
-checker. Updaters acquire the migration bundle only for an identified need.
+The draft [Docker recipe](../../Dockerfile) separates native runtime/binary
+exports from `build-cluster`/`runtime-cluster`; only the explicit cluster image
+contains `plurx-cluster-check`. Its separate `storage-migration-helper` export
+is absent from the default runtime. Publication uses distinct
+`plurxd-standalone` and `plurxd-cluster` registry repositories and checks the
+selected distribution label; fleet publication explicitly selects cluster.
+These recipe changes still require release qualification. Fresh standalone
+archives, images and installation roots must contain neither cluster checker
+nor migration helper. Updaters fetch the helper only for legacy data or an
+explicit transition.
 
 Resolve each declared Cargo root separately with its actual features and target,
 including normal/build dependencies and host-side procedural macros. Reject
@@ -158,6 +177,34 @@ before opening a native writer if the required helper is unavailable or wrong.
 Never reopen the retained pre-activation database as current data. Explicit
 create/join likewise uses the cluster distribution or managed helper; changing
 a config preference cannot replace the storage authority transaction.
+
+The draft adds only the thin [migration executable](../../crates/plurx-storage-migrate/Cargo.toml).
+It calls the existing private Core conversion owner; it does not extract the
+credential, schema, Backend or authority factories into new crates. Release
+packaging builds four separate thin-target bundles: GNU x86_64/aarch64 and
+Darwin x86_64/aarch64. Each bounded native `describe` output accompanies an
+archive containing exactly one regular `plurx-storage-migrate` executable.
+The signer independently checks the description, archive and executable hashes.
+
+The [signed feed generator](../../scripts/create-desktop-update-manifest)
+preserves the V1 nine-asset managed cohort. Explicit helper descriptors produce
+V2 optional helper metadata, binding source commit/tree, target, protocol,
+recognized cohorts, output formats and converter/archive/executable hashes.
+The existing Ed25519 root and accepted-release ledger authenticate managed
+selection; a digest sidecar or version string cannot authorize code. The
+[controller](../../crates/plurx-desktop-control/src/migration_helper.rs) stages
+immutable generations and holds a shared cleanup lease through actual helper
+execution. Pending `storage-migration.json` fences a new update or helper
+activation so an interrupted operation retains its original tuple.
+
+Source/external installs without an accepted signed installation record use
+an explicit operator-selected source helper, rather than unsigned automatic
+discovery. Build it from the verified matching source, establish its actual
+commit/tree/executable SHA-256, then use `migrate-private --config ...
+--expected-commit ... --expected-tree ... --expected-executable-sha256 ...`.
+That command verifies its actual self tuple and uses the same Core root-lock,
+conversion, receipt and drain checks. It does not create release trust. The
+managed and source CLI child-process acceptance tests remain pending.
 
 The P4 entry design fixes a compatibility tuple, rather than matching the
 product version string alone:
@@ -212,10 +259,13 @@ credited as its acceptance.
 
 ### 2.5 Authority ownership and capability parity are entry gates
 
-Before authority-bearing extraction changes code, record a source-backed
-ownership/API decision. The sole early exception is the primitive-only P3a
-slice below; it moves no authority representation or trusted factory. A small
-`plurx-authority` package owns the sealed trait, private proof representations,
+Before cross-crate authority-bearing extraction changes code, record a
+source-backed ownership/API decision. Two narrow preceding phases are distinct:
+primitive P3a below, and P3b SDK-free packaging under Core's unchanged private
+co-owner. P3b makes existing cluster compilation/composition optional; it moves
+no proof, credential owner, private Backend, trusted factory or SQL owner into
+a public cross-crate adapter. The future extraction target remains a small
+`plurx-authority` package that owns the sealed trait, private proof representations,
 revocation state and trusted local/replicated implementations. Backend-neutral
 Store/domain contracts may consume its opaque proofs; the authority package
 must not depend on the daemon or the full Store API. The native implementation
@@ -236,11 +286,15 @@ with backend-owned forwarding implementations; never duplicate the SQL.
 
 The P3 constructor/API decision must therefore refine the initial sketch into
 an acyclic primitive-contracts → canonical-schema → authority → Store-API
-layering before extracting adapters. One integrator owns central manifests,
+layering before extracting those owners/adapters across crates. P3b need not
+perform that extraction to omit the SDK from its selected native graph. One
+integrator owns central manifests,
 core re-exports and the heavily shared Store module. These tasks land serially;
 their ownership overlaps and does not qualify for the disjoint-file exception.
-Native Receiver custody also needs a real capability/parity fixture: its current
-no-feature uninhabited type cannot establish standalone sharing acceptance.
+Native Receiver custody needs an actual capability/parity fixture preserving
+the existing privately issued relay-read proof, local registry and guarded
+`members=None` path. Its uninhabited replicated-member type alone establishes
+neither absence nor acceptance of native custody.
 
 This is an ownership sketch, not an approved constructor API. P3c entry requires
 actual proposed signatures, the dependency-cycle check, identification of every
@@ -248,8 +302,12 @@ trusted minting path, and downstream compile-fail fixtures proving callers
 cannot implement the sealed authority or construct/modify its proofs. Real-store
 revocation, stale native boot and lost replicated-authority tests accompany it.
 Do not proceed if the sketch can only compile by exposing an unchecked mint.
-The complete gate applies before moving any proof, trusted factory, credential
-owner, SDK hook or backend-selection responsibility, regardless of task name.
+The complete cross-crate gate applies before moving any proof, trusted factory,
+credential owner, SDK hook or resource-binding/backend-selection authority to
+a new owner, regardless of task name. P3b changes which current implementation
+is compiled/instantiated while retaining those private owners. MediaSessionStore
+and its Source publication/Receiver retirement dependencies remain a full
+cross-crate gate; P3b does not approve a new public Backend bridge.
 
 The [boundary decision](CINEMA-CONTRACTS-BOUNDARIES.md) records Astra's admission
 of only the first primitive slice: StoreError with its SQLite conversion,
@@ -262,6 +320,24 @@ formats, and proves a contracts-only consumer/dependency graph in isolation.
 Identity/authority extraction remains blocked on that decision's unresolved
 startup, credential, SDK-hook, Receiver and downstream proof obligations.
 
+P3b follows the checked runtime and P1 source baseline as a reviewed SDK-free
+packaging phase. The draft daemon now selects the existing optional Hiqlite/WAL
+implementation only through its explicit cluster profile. Keep private authority, Store
+traits/generic SQL and credential factories co-owned in Core. Actual native
+Source/Receiver remote-user sharing remains supported. No cfg-away feature,
+fake roster, successful unavailable membership or dummy replication provider
+can satisfy the capability cut. Actual native and explicit-cluster binaries
+must pass separate composition/graph and behavior tests, including native
+local-registry Receiver ingress and physical closure plus real cluster quorum
+loss/recovery. P3b is neither a full Core compilation split nor accepted timings.
+
+A native-only candidate may precede the helper, but a legacy replicated root
+must then refuse before opening a native writer. P4's separate compatibility,
+root handoff, crash, supported-upgrade and complete distribution gates remain
+mandatory before replacing the shipping default. Future cross-crate P3c
+identity/schema/authority/adaptor extraction remains blocked and may follow
+P3b/P4; compiling cluster out does not require first extracting authority.
+
 Every timing pair includes a capability manifest. Equal-capability optimization
 and intentionally smaller packages are separate result categories. The initial
 standalone/runtime baseline preserves local playback and supported remote-user
@@ -273,6 +349,10 @@ Retain stored data/models/settings; install/re-enable tests prove continuity.
 No reduction in shipped behavior earns an equal-capability speedup claim.
 
 ## 3. Measurement — compare identical work and retain failures
+
+P3a primitive extraction and P2c live assets/metadata can advance independently;
+neither is a prerequisite for the SDK-free delivery path. P2b measurements and
+the final before/after comparison retain their own acceptance obligations.
 
 Use the existing isolated non-voter compiler slot with pinned Rust 1.97.1.
 Send source archives only, without Git history or credentials. No uncapped
@@ -350,8 +430,10 @@ compilations for development UI edits independently of release timings.
 | P2a — source/cache freshness | Docker fallback and reusable source staging helper/tests | Same-size/mtime mutation, deletion, rename, vendored input, crash, concurrent owner, interrupted staging and stale-output cases pass; measured before/after |
 | P2b — developer linking/profile | Developer recipe/config and relevant docs | Benchmark existing versus candidate linker on supported Linux target; keep backtraces/native dependencies; no release-profile reduction; measured decision |
 | P2c — UI and build metadata | Web asset provider/loader, thin metadata boundary and tests | Development CSS/JS edit needs no Rust build; bounded path/asset allowlist and content hashes correct; embedded release byte parity; precise truthful build identity |
-| P3 — neutral contracts | Store/domain/error/lease/catalogue and authority interfaces | P3 ownership/API entry gate accepted; downstream compile-fail checks; both native/replicated contracts and proof/custody tests pass; no cycles |
-| P4 — optional cluster and migration | SQLite/cluster/schema crates, composition, migration tool, packaging | P4 helper-protocol entry gate accepted; whole-distribution graphs/package allowlists exclude forbidden artifacts; two-launcher/helper crash and compatibility tests; native/cluster parity pass |
+| P3a — primitive contracts | Only enumerated error/value/DTO slice and compatibility facades | Existing primitive-only gate, isolated downstream type/visibility/wire/graph checks |
+| P3b — SDK-free packaging | Optional current cluster implementation/composition; private authority, Backend, factories and SQL stay co-owned in Core | Actual native/cluster capability-cut tests and independent selected graphs; real native Source/Receiver sharing; no fake membership or public mint |
+| P4 — migration and shipping recipes | Separate version-matched migration helper, composition and distribution packaging | Unchanged helper/root entry, whole-distribution graph/package, two-launcher/crash/compatibility, supported upgrade and native/cluster parity gates |
+| P3c — future cross-crate authority extraction | Identity/schema/authority/Store/adaptor owners after P3b, optionally after P4 | Full concrete ownership/API gate and downstream/runtime proof/custody tests; MediaSessionStore closure resolved; no public unchecked Backend or cycles |
 | P5 — cohesive capability libraries | Playback/library libraries first, then optional inference and supported feature packages | No reverse dependency on daemon; feature/data parity; independent focused builds; graph and timing comparison per extraction |
 | P6 — final qualification/promotion | Freeze effort, integrate current main, final receipts and PR | Final source/package graphs, full affected suites, representative migration, actual Mac playback/suspend and supported Linux acceptance, before/after build report, green main promotion gate |
 
@@ -376,8 +458,10 @@ after a dependency lands and run the affected checks again.
 | Verified source/cache reuse | Measurement | Source staging helper/tests and Docker fallback |
 | Developer linker/profile | Measurement | Explicit developer build recipe and measured report |
 | Development assets/metadata | Measurement | Web/provider and build-identity files/tests |
-| Neutral contracts | Prior integrated effort | Shared contracts and relevant native/cluster consumers |
-| Optional cluster/migration | Contracts | Backend crates, helper/updater, composition and packaging |
+| Primitive contracts P3a | Prior integrated effort | Enumerated primitive contracts and compatibility facades |
+| SDK-free packaging P3b | Checked runtime and P1 source baseline; P3a and P2c independent | Core/daemon manifests and private module/composition boundaries; graph and real capability-cut fixtures |
+| Migration/shipping P4 | SDK-free candidate plus accepted helper/root design | Separate migration helper/updater, composition and shipping recipes |
+| Future cross-crate P3c | Full ownership/API entry independently accepted | Identity/schema/authority/Store/adaptor closure; no preemptive movement under packaging task |
 | Capability extractions | Relevant boundary PR | One cohesive subsystem per PR |
 | Effort promotion to main | All accepted task PRs | Frozen current-main candidate and qualification receipt |
 
@@ -442,8 +526,12 @@ each supported distribution, including new migration tooling.
 |---|---|---|
 | P0 | Plan draft based on `f30dfbbc9`; source/dependency and historical timing audit | Astra confirmed all four findings and two clarifications addressed; P1/P2 allowed in order; no build improvement implemented |
 | P1 | Fixed `cf095b203` / `e1ce9af4ce` source; three samples per case, preserved raw reports, actual source restoration and Cargo artifact events | Baseline collected; guarded runner belongs to its own task PR |
-| P2b diagnostic measurement | Equal-capability system/LLD Cargo commands; all 450 observed units have identical features/profiles | Initial median edit reductions: CSS 58%, daemon 56%, small API 35%; all ranges/outliers retained. The initial VM-only isolation check missed its host daemon. Repeat both variants through voter-build caps before recipe acceptance; no cold/release/Mac claim |
-| P3–P6 | Primitive-only entry admitted; authority obligations remain explicit and unresolved | Open; standalone dependency omission is not yet achieved |
+| P2b historical diagnostic measurement | Equal-capability system/LLD Cargo commands; all 450 observed units had identical features/profiles | Historical diagnostic only: initial apparent reductions and failed isolation evidence are retained in the measurement ledger. The completed capped primary comparison found no useful gain; LLD is not selected. No cold/release/Mac claim |
+| P3b/P4 draft | Native default/explicit cluster composition, separate registry namespaces, optional signed four-target helper and verified-source CLI implemented; selected native daemon/controller/tray graph has no Hiqlite/WAL/OpenRaft | Graph omission established only for those selected roots; current integrated Clippy, SDK compatibility, real FFmpeg HTTP/CLI-child behavior and release qualification remain pending |
+| Core helper regressions | Tree `470952445623eba336ec3d61a1f1d39db694caa2`; run `1f93ad65ebb149eb84307e6bb9a49306`; 16 passing tests including real AUTH81/AUTH82 private singleton data | Focused primary execution on that snapshot; not current candidate or cross-process upgrade qualification |
+| Signed staging regressions | Tree `31f1b3e488e1c0bb7a47d8d2117218756b4b9434`; run `762075cc9e6b4134859683f846ad476f`; seven passing tests | Actual signed capsules, closed archive/hash checks and cleanup leases on that snapshot; not release or daemon/helper child-process acceptance |
+| SQLite close regressions | Tree `888cb4f00d801b162089f28ff6b058c03f67cbfe`; run `20261104-225421-26b4a24c`; three passing tests | ARM execution of concrete native close/ownership checks; no Windows/macOS qualification claim |
+| P3a/P3c | Primitive-only entry admitted separately; full identity/schema/authority/Store extraction remains subject to the existing ownership and downstream negative-test gates | Future separate work; this candidate introduces no contracts/authority/backend crate extraction |
 
 Record Astra's findings and individual dispositions with the review, then
 update this ledger and the backlog row in the same task changes. Retain the

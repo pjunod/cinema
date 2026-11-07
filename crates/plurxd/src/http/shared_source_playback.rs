@@ -12,9 +12,11 @@ pub(crate) mod forwarding;
 use forwarding::{AuthenticationHeaders, SourceHeaders};
 #[path = "shared_source_ingress.rs"]
 mod ingress;
+use ingress::resolve_forward_route;
+#[cfg(feature = "cluster")]
 use ingress::{
     apply_forward_custody, execute_forward_unassigned_cleanup, prepare_forward_start,
-    resolve_forward_route, source_forward_locality, validate_retained_forward,
+    source_forward_locality, validate_retained_forward,
 };
 
 #[path = "shared_source_direct.rs"]
@@ -1213,6 +1215,7 @@ pub(crate) async fn settle_ingress_custody(
 ) -> Result<(), ApiError> {
     ingress::retire_custody_with_mode(state, assignment, deadline, mode).await
 }
+#[cfg(feature = "cluster")]
 pub(crate) fn internal_forwarding_router() -> axum::Router<crate::state::AppState> {
     axum::Router::new()
         .route(
@@ -1316,6 +1319,7 @@ impl SourceReadJobGate {
         }
         Ok(())
     }
+    #[cfg(feature = "cluster")]
     pub(crate) fn release(&self) {
         *self.released.lock().expect("read gate") = true;
         self.release.notify_all();
@@ -2166,7 +2170,7 @@ pub(in crate::http) fn viewer_hash<H: AuthenticationHeaders + ?Sized>(
     Ok(value.to_owned())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 async fn fixture_start(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
     headers: HeaderMap,
@@ -2231,9 +2235,9 @@ async fn fixture_start(
             .unwrap_or("Source refused actual fixture HTTP request"),
     ))
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 pub(super) struct SourceFixtureMembershipOwner(tokio::task::JoinHandle<()>);
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 impl SourceFixtureMembershipOwner {
     pub(super) fn start(membership: plurx_core::cluster::membership::MembershipManager) -> Self {
         Self(tokio::spawn(membership.heartbeat_loop()))
@@ -2255,13 +2259,13 @@ impl SourceFixtureMembershipOwner {
         assert!(stopped.is_err_and(|error| error.is_cancelled()));
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 impl Drop for SourceFixtureMembershipOwner {
     fn drop(&mut self) {
         self.0.abort();
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 pub(crate) struct RealSourceStartFixture {
     pub state: std::sync::Arc<crate::state::AppState>,
     pub reference: SourcePlaybackTarget,
@@ -2276,7 +2280,7 @@ pub(crate) struct RealSourceStartFixture {
     _directory: tempfile::TempDir,
     _fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 impl RealSourceStartFixture {
     /// Diagnostic count of Source media sessions still holding a slot. Row
     /// presence is not physical evidence; the B End receipt is.
@@ -2298,14 +2302,14 @@ impl RealSourceStartFixture {
         count.parse().expect("decimal count")
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 struct SourceFixtureInvitation {
     identity: plurx_core::sharing::SharingIdentity,
     id: Uuid,
     secret: plurx_core::secrets::Secret,
     expires_at_ms: i64,
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 impl RealSourceStartFixture {
     /// Encode the actual invitation that produced this grant with the caller's
     /// real runtime TLS endpoint. This grants no alternate approval or readiness.
@@ -2343,7 +2347,7 @@ impl RealSourceStartFixture {
 }
 /// PGS display sets from the fuzz corpus's real `mkpgs` capture, retimed to
 /// show one bitmap from `start_ms` to `end_ms`.
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 fn source_fixture_pgs(start_ms: u32, end_ms: u32) -> Vec<u8> {
     let fixture = include_bytes!("../../../../fuzz/corpus/inspect_sup/mkpgs-1920x1080.sup");
     let mut sup = Vec::new();
@@ -2366,12 +2370,12 @@ fn source_fixture_pgs(start_ms: u32, end_ms: u32) -> Vec<u8> {
     }
     sup
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 pub(crate) fn real_source_start_fixture(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
     real_source_start_fixture_with(SourceFixtureMode::Copy, None)
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 #[derive(Clone, Copy)]
 pub(crate) enum SourceFixtureMode {
     Copy,
@@ -2396,7 +2400,7 @@ pub(crate) enum SourceFixtureMode {
     /// The Encoded fixture scanned as Dolby Vision: refused before a claim.
     DolbyVisionEncoded,
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 pub(crate) fn real_source_start_fixture_with(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
@@ -2407,7 +2411,7 @@ pub(crate) fn real_source_start_fixture_with(
         build_real_source_start_fixture(mode, recipient_server_id, None, fixture_body_budget).await
     })
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 pub(crate) fn real_source_start_fixture_with_budget(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
@@ -2420,7 +2424,7 @@ pub(crate) fn real_source_start_fixture_with_budget(
         fixture_body_budget,
     ))
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 fn real_source_start_fixture_at(
     listener: tokio::net::TcpListener,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
@@ -2432,7 +2436,7 @@ fn real_source_start_fixture_at(
         fixture_body_budget,
     ))
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 async fn build_real_source_start_fixture(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
@@ -2490,19 +2494,24 @@ async fn build_real_source_start_fixture(
     let mut state = Arc::new(crate::http::source_actor_test_state());
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
     state_mut.store = Arc::clone(&selected.store);
-    state_mut.membership = selected.membership_manager();
+    state_mut.membership = Some(selected.membership_manager());
     state_mut.storage_mode = plurx_core::storage::mode::StorageMode::Cluster;
-    state_mut.clock_observer = if let Some(clock) = &startup_clock {
+    state_mut.clock_observer = Some(if let Some(clock) = &startup_clock {
         clock
             .observer()
             .await
             .expect("actual startup clock observer")
     } else {
-        crate::clock_offset::ClockObserver::new(state_mut.membership.clone())
-    };
+        crate::clock_offset::ClockObserver::new(
+            state_mut
+                .membership
+                .clone()
+                .expect("actual voter membership"),
+        )
+    });
     state_mut.node_id = selected.identity.node_id.clone();
     state_mut.catalogue = selected.catalogue_reader();
-    state_mut.replication = selected.replication_monitor();
+    state_mut.replication = Some(selected.replication_monitor());
     state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
         state_mut.membership.clone(),
         Arc::clone(&state_mut.store),
@@ -2515,16 +2524,23 @@ async fn build_real_source_start_fixture(
     state_mut.node_id = selected.identity.node_id.clone();
     state_mut
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
     state_mut
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .publish_ingress_custody_boot()
         .await
         .expect("actual registry boot publication before admission");
 
-    let replication_owner =
-        SourceFixtureMembershipOwner::start_replication(state.replication.clone());
-    let membership_owner = SourceFixtureMembershipOwner::start(state.membership.clone());
+    let replication_owner = SourceFixtureMembershipOwner::start_replication(
+        state.replication.clone().expect("actual voter replication"),
+    );
+    let membership_owner = SourceFixtureMembershipOwner::start(
+        state.membership.clone().expect("actual voter membership"),
+    );
     let store = Arc::clone(&state.store);
     store
         .put_setting(keys::SW_POOL_THREADS, "4")
@@ -2947,13 +2963,18 @@ async fn build_real_source_start_fixture(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 #[path = "sharing_source_adapter_tests.rs"]
 mod actor_adapter_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 #[path = "shared_source_forwarding_tests.rs"]
 mod actual_forwarding_tests;
+
+#[cfg(not(feature = "cluster"))]
+pub(crate) fn internal_forwarding_router() -> axum::Router<crate::state::AppState> {
+    axum::Router::new()
+}

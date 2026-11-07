@@ -1,5 +1,6 @@
 // Actual committed-member relay: the ingress has a different subtitle cache
 // and no copy of the owner's session. No peer body or membership is mocked.
+#[cfg(feature = "cluster")]
 mod cached_owner_delivery_tests {
     use super::*;
     use futures_util::FutureExt;
@@ -63,9 +64,9 @@ mod cached_owner_delivery_tests {
         add_http_text_subtitle(&mut owner, &session).await;
         owner.mark_started().await;
         owner.state.node_id = selected.identity.node_id.clone();
-        owner.state.membership = leader.clone();
+        owner.state.membership = Some(leader.clone());
         owner.state.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
-            leader.clone(),
+            Some(leader.clone()),
             Arc::clone(&owner.store),
         );
         // Admit the ingress through the same learner protocol, clock proof,
@@ -181,7 +182,7 @@ mod cached_owner_delivery_tests {
         .await;
         let mut ingress = ingress_fixture.state.clone();
         ingress.node_id = learner_id;
-        ingress.membership = learner;
+        ingress.membership = Some(learner);
         ingress.store = Arc::clone(&owner.store);
         ingress.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
             ingress.membership.clone(),
@@ -243,11 +244,15 @@ mod cached_owner_delivery_tests {
                         .expect("actual owner readiness heartbeat");
                     ingress
                         .membership
+                        .as_ref()
+                        .expect("actual voter membership")
                         .heartbeat()
                         .await
                         .expect("actual finalized ingress heartbeat");
                     let peers = ingress
                         .membership
+                        .as_ref()
+                        .expect("actual voter membership")
                         .media_peers()
                         .await
                         .expect("actual committed media directory");
@@ -267,13 +272,16 @@ mod cached_owner_delivery_tests {
             .await
             .expect("actual sampled owner becomes eligible before relay");
             let clock = super::super::super::peer_transport::PeerTransport::new(
-                ingress.membership.clone(),
+                ingress.membership.clone().expect("actual voter membership"),
             )
             .clock_request(&owner.state.node_id, &source_config.cluster.join_url)
             .await
             .expect("signed clock service survives relay installation");
             assert_eq!(clock.status, reqwest::StatusCode::OK);
-            assert!(clock.clock_timing.is_some(), "actual four-stamp clock timing");
+            assert!(
+                clock.clock_timing.is_some(),
+                "actual four-stamp clock timing"
+            );
             let timing: super::super::super::internal_clock::ClockResponse =
                 serde_json::from_slice(&clock.body).expect("actual signed clock response");
             assert_eq!(timing.node_id, owner.state.node_id);

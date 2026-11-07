@@ -11,6 +11,7 @@ impl TranscodeManager {
             .await
     }
     #[cfg(test)]
+    #[cfg(feature = "cluster")]
     pub(crate) fn test_hold_source_software_capacity(&self) -> Option<crate::admission::SwPermit> {
         self.admissions
             .try_admit_software(4, 4, crate::admission::Priority::Live)

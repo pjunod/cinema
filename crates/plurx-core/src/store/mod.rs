@@ -426,6 +426,7 @@ impl CacheAdminMutationClaim {
 /// Nullable with no default on purpose: a row that predates the backfill and a
 /// record that genuinely reported zero have to stay distinguishable, or the
 /// fallback to parsing the display label can never know when to stop.
+#[cfg(any(test, feature = "hiqlite-store"))]
 const FILES_DOLBY_VISION_COLUMNS: &[&str] = &[
     "ALTER TABLE files ADD COLUMN dv_profile INTEGER",
     "ALTER TABLE files ADD COLUMN dv_level INTEGER",
@@ -462,6 +463,7 @@ const FILES_FIELD_ORDER_COLUMN: &str = "ALTER TABLE files ADD COLUMN field_order
 /// Source luminance facts used by the CPU tone-map recipe. Nullable values
 /// distinguish unknown rows from a completed probe whose `luminance_source`
 /// is `none`.
+#[cfg(any(test, feature = "hiqlite-store"))]
 pub(crate) const FILES_LUMINANCE_COLUMNS: &[&str] = &[
     "ALTER TABLE files ADD COLUMN max_cll INTEGER",
     "ALTER TABLE files ADD COLUMN max_fall INTEGER",
@@ -559,18 +561,23 @@ pub(crate) const MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA: &str = "ALTER TABLE media_
 /// `recovery_pending`, then the current owner freezes its alternate. Re-homing
 /// either consumed state moves to `rehome_pending` and clears both node-local
 /// recipe references, but can never return the budget to `primary`.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const OFFLINE_CLAIM_GENERATION_SCHEMA: &str = "ALTER TABLE offline_packages
         ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0
         CHECK (claim_generation >= 0)";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const OFFLINE_RECOVERY_STATE_SCHEMA: &str = "ALTER TABLE offline_packages
         ADD COLUMN decoder_recovery_state TEXT NOT NULL DEFAULT 'primary'
         CHECK (decoder_recovery_state IN
             ('primary', 'recovery_pending', 'rehome_pending', 'alternate'))";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const OFFLINE_ALTERNATE_RECIPE_SCHEMA: &str = "ALTER TABLE offline_packages
         ADD COLUMN alternate_recipe_hash TEXT";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const CACHE_PUBLICATION_GENERATION_SCHEMA: &str = "ALTER TABLE transcode_cache_locations
         ADD COLUMN publication_generation INTEGER NOT NULL DEFAULT 0
         CHECK (publication_generation >= 0)";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const CACHE_PUBLICATION_GENERATION_GUARD_SCHEMA: &str =
     "CREATE TRIGGER cache_publication_generation_guard
     BEFORE UPDATE OF complete, bytes, manifest_digest, relative_dir, storage_id,
@@ -586,6 +593,7 @@ pub(crate) const CACHE_PUBLICATION_GENERATION_GUARD_SCHEMA: &str =
     BEGIN
         SELECT RAISE(ABORT, 'cache publication requires a current-generation writer');
     END";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const OFFLINE_CLAIM_LIFECYCLE_GUARD_SCHEMA: &str =
     "CREATE TRIGGER offline_claim_lifecycle_guard
     BEFORE UPDATE OF state, claim_generation ON offline_packages
@@ -602,6 +610,7 @@ pub(crate) const OFFLINE_CLAIM_LIFECYCLE_GUARD_SCHEMA: &str =
     BEGIN
         SELECT RAISE(ABORT, 'invalid offline claim lifecycle transition');
     END";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const OFFLINE_RECOVERY_GUARD_SCHEMA: &str = "CREATE TRIGGER offline_recovery_guard
     BEFORE UPDATE OF recipe_hash, decoder_recovery_state, alternate_recipe_hash
     ON offline_packages
@@ -970,14 +979,17 @@ pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA: &str = concat!(
 );
 
 /// The column on its own, for the replicated migration's first statement.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_REVISION_COLUMN: &str =
     pointer_desired_revision_column!();
 
 /// The insert-path trigger on its own.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER: &str =
     pointer_desired_fence_insert_trigger!();
 
 /// The update-path trigger on its own.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER: &str =
     pointer_desired_fence_update_trigger!();
 
@@ -1057,9 +1069,11 @@ macro_rules! media_session_drain_ownership_fence_trigger {
 }
 
 /// The drain deadline column, for the replicated migration's first statement.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_COLUMN: &str = media_session_drain_deadline_column!();
 
 /// The ownership fence on its own, for the replicated migration and install.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const MEDIA_SESSION_DRAIN_OWNERSHIP_FENCE_TRIGGER: &str =
     media_session_drain_ownership_fence_trigger!();
 
@@ -5984,6 +5998,7 @@ impl HttpStoreOperationCounts {
         std::time::Duration::from_nanos(self.store_nanos.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    #[cfg(feature = "hiqlite-store")]
     fn record(&self, class_index: usize, elapsed: std::time::Duration) {
         use std::sync::atomic::Ordering;
 
@@ -6020,6 +6035,7 @@ pub fn scope_http_store_operations<T>(
     HTTP_STORE_OPERATION_COUNTS.scope(counts, Box::pin(future))
 }
 
+#[cfg(feature = "hiqlite-store")]
 pub(super) fn record_http_store_operation(class_index: usize, elapsed: std::time::Duration) {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index, elapsed));
 }

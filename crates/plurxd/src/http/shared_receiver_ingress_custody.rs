@@ -211,13 +211,13 @@ pub(super) async fn register_owner(
     #[cfg(test)]
     eprintln!(
         "B Register stage=members begin replicated={}",
-        state.membership.is_replicated()
+        state.is_replicated()
     );
     tracing::debug!(target: "plurx::sharing", stage = "members", "receiver ingress registration progress");
-    let members = if state.membership.is_replicated() {
+    #[cfg(feature = "cluster")]
+    let members = if let Some(membership) = state.membership.as_ref() {
         Some(
-            state
-                .membership
+            membership
                 .observe_ingress_custody_members()
                 .await
                 .map_err(|_error| {
@@ -236,6 +236,8 @@ pub(super) async fn register_owner(
     } else {
         None
     };
+    #[cfg(not(feature = "cluster"))]
+    let members: Option<plurx_core::sharing_receiver_delivery::IngressCustodyMembers> = None;
     let registration = ingress
         .registration
         .as_ref()

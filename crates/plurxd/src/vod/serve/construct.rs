@@ -392,7 +392,7 @@ impl VodServe {
         store: Arc<dyn Store>,
         node_id: String,
         cluster_index_root: PathBuf,
-        membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        membership: Option<crate::cluster_capability::Membership>,
     ) -> Arc<VodServe> {
         let runtime_cache = cluster_index_root
             .parent()
@@ -414,7 +414,7 @@ impl VodServe {
         store: Arc<dyn Store>,
         node_id: String,
         cluster_index_root: PathBuf,
-        membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        membership: Option<crate::cluster_capability::Membership>,
     ) -> Arc<VodServe> {
         Self::new_configured(
             base,
@@ -432,7 +432,7 @@ impl VodServe {
         store: Arc<dyn Store>,
         cluster_node_id: Option<String>,
         cluster_index_root: Option<PathBuf>,
-        cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        cluster_membership: Option<crate::cluster_capability::Membership>,
     ) -> Arc<VodServe> {
         let mut encoded_generation_scanner = EncodedGenerationScanner::new(base.clone());
         let obsolete_encoded_generations = encoded_generation_scanner.discover(

@@ -100,6 +100,7 @@ fn test_http_timeouts() -> HttpTimeouts {
 /// Real pending listener boundary and in-place transfer, not proof that
 /// a learner has completed clock observation or voter promotion.
 #[tokio::test]
+#[cfg(feature = "cluster")]
 async fn k06_clock_only_socket_denies_application_and_transfers_existing_keepalive() {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     async fn request(stream: &mut BufReader<tokio::net::TcpStream>, path: &str) -> String {
@@ -209,6 +210,7 @@ async fn k06_clock_only_socket_denies_application_and_transfers_existing_keepali
 /// server is starting — typed JSON for clients, a self-reloading page for
 /// browsers — and never that the route does not exist.
 #[tokio::test]
+#[cfg(feature = "cluster")]
 async fn pending_socket_answers_starting_not_not_found() {
     use axum::http::{header, Request, StatusCode};
     let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2401,8 +2403,11 @@ async fn maintenance_commands_refuse_an_unmigrated_data_directory() {
         .await
         .expect_err("refresh must refuse legacy SQLite");
     let message = format!("{refresh:#}");
+    #[cfg(feature = "cluster")]
+    assert!(message.contains("committed cluster authority"), "{message}");
+    #[cfg(not(feature = "cluster"))]
     assert!(
-        message.contains("only `plurxd run` may import"),
+        message.contains("legacy or clustered maintenance requires"),
         "{message}"
     );
     assert!(!tmp.path().join("hiqlite.incoming").exists());
@@ -2418,6 +2423,75 @@ async fn maintenance_commands_refuse_an_unmigrated_data_directory() {
         "original-password",
         &user.password_hash
     ));
+}
+
+/// A published native generation remains fenced until the launcher validates
+/// the pending operation. Exercise the maintenance command's actual writer
+/// selection in the interval between those two durable publications.
+#[tokio::test]
+async fn native_maintenance_refuses_published_generation_with_pending_helper() {
+    use plurx_core::storage::{helper, mode::StorageManifest, NativeDirectoryLock};
+
+    let directory = crate::test_tempdir().expect("native data root");
+    let root = directory.path();
+    let mut config = config_in(root);
+    let native = plurx_core::storage::open_native_store(&config)
+        .await
+        .expect("actual native generation");
+    let manifest = StorageManifest::read(root)
+        .expect("manifest read")
+        .expect("native manifest");
+    native.sqlite.close().await.expect("close native fixture");
+    drop(native);
+
+    let lease = NativeDirectoryLock::acquire(root)
+        .await
+        .expect("fixture root ownership");
+    std::fs::remove_file(root.join(plurx_core::storage::mode::MANIFEST_FILENAME))
+        .expect("stage pre-publication metadata");
+    std::fs::create_dir(root.join("hiqlite")).expect("legacy marker directory");
+    std::fs::write(
+        root.join("hiqlite/activation.json"),
+        br#"{"replicated_schema_version":81}"#,
+    )
+    .expect("legacy metadata fixture");
+    let build = helper::HelperBuild {
+        commit: "a".repeat(40),
+        tree: "b".repeat(40),
+        target: "x86_64-unknown-linux-gnu".into(),
+    };
+    let request = helper::prepare(
+        &config,
+        &lease,
+        helper::HelperBinding {
+            daemon: build.clone(),
+            helper: helper::describe(build).expect("compiled description"),
+            executable_sha256: "c".repeat(64),
+            bundle_sha256: "d".repeat(64),
+        },
+    )
+    .expect("durable pending request");
+    manifest
+        .publish(root)
+        .expect("publish the real native generation before helper completion");
+    drop(lease);
+
+    let error = refresh_metadata(&mut config, None)
+        .await
+        .expect_err("pending result fences maintenance");
+    assert!(
+        format!("{error:#}").contains("finish the pending storage migration"),
+        "{error:#}"
+    );
+    let _lease = NativeDirectoryLock::try_acquire(root).expect("refused command released the root");
+    assert_eq!(
+        helper::pending(root).expect("intent retained"),
+        Some(request)
+    );
+    assert_eq!(
+        StorageManifest::read(root).expect("manifest retained"),
+        Some(manifest)
+    );
 }
 
 async fn add_library(
@@ -2564,8 +2638,10 @@ fn booted_state(dir: &std::path::Path) -> AppState {
             },
             String::new(),
         ),
-        plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-        plurx_core::cluster::membership::MembershipManager::unavailable(),
+        #[cfg(feature = "cluster")]
+        None,
+        #[cfg(feature = "cluster")]
+        None,
         catalogue,
         store,
         create_dirs(dir).expect("dirs"),
@@ -2604,8 +2680,10 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
             source_activation_at_boot: None,
             store: handle.store,
             catalogue,
-            replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-            membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+            #[cfg(feature = "cluster")]
+            replication: None,
+            #[cfg(feature = "cluster")]
+            membership: None,
             identity: handle.identity.into(),
             credential_key: handle.credential_key,
             storage_mode: plurx_core::storage::mode::StorageMode::Sqlite,
@@ -2648,7 +2726,11 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
 
 #[tokio::test]
 async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
-    for observed in [false, true] {
+    #[cfg(feature = "cluster")]
+    let cases = [false, true];
+    #[cfg(not(feature = "cluster"))]
+    let cases = [false];
+    for observed in cases {
         let root = crate::test_tempdir().expect("tempdir");
         let state = booted_state(root.path());
         let progress = state.progress.clone();
@@ -2664,6 +2746,7 @@ async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
         let tls_address = reservation.local_addr().expect("TLS address");
         drop(reservation);
         let mut plain_socket = Some(plain_socket);
+        #[cfg(feature = "cluster")]
         let observer = if observed {
             drop(plain_socket.take());
             let owner = Arc::new(StartupObservationHttp::new(plain_address));
@@ -2693,10 +2776,16 @@ async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
         };
         // Reacquire only for the ordinary owner; the observation owner keeps
         // its original socket and changes the router in place.
+        #[cfg(feature = "cluster")]
         let ordinary = if observer.is_none() {
             plain_socket.take()
         } else {
             None
+        };
+        #[cfg(not(feature = "cluster"))]
+        let ordinary = {
+            let _ = observed;
+            plain_socket.take()
         };
         let mut config = config_in(root.path());
         config.server.https.enabled = true;
@@ -2719,6 +2808,7 @@ async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
             let _ = stopped.await;
             listener_stop.cancel();
         };
+        #[cfg(feature = "cluster")]
         let server = if let Some(owner) = observer {
             tokio::spawn(serve_observed(
                 owner,
@@ -2740,6 +2830,16 @@ async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
                 shutdown,
             ))
         };
+        #[cfg(not(feature = "cluster"))]
+        let server = tokio::spawn(serve(
+            ordinary.expect("ordinary listener"),
+            app,
+            JellyfinStandardListener::default(),
+            tls,
+            progress,
+            None,
+            shutdown,
+        ));
         let client = reqwest::Client::builder()
             .no_proxy()
             .add_root_certificate(root_cert)
@@ -3479,8 +3579,10 @@ async fn boot_serve_and_drain_in_runtime(
             source_activation_at_boot: None,
             store: handle.store,
             catalogue,
-            replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-            membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+            #[cfg(feature = "cluster")]
+            replication: None,
+            #[cfg(feature = "cluster")]
+            membership: None,
             identity: handle.identity.into(),
             credential_key: handle.credential_key,
             storage_mode: plurx_core::storage::mode::StorageMode::Sqlite,
@@ -4693,6 +4795,7 @@ async fn sharing_tls_command_refuses_to_replace_an_existing_node_key() {
     );
 }
 
+#[cfg(feature = "cluster")]
 #[test]
 fn cluster_and_wal_commands_keep_credentials_and_mutation_out_of_argv() {
     let cluster = Cli::try_parse_from([

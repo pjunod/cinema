@@ -5472,7 +5472,7 @@ pub(in crate::http) async fn prime_live_prepared_session(
         )
         .unwrap_or(i64::MAX),
     );
-    let pinned = super::super::internal_media_sessions::pin_shared_session_before_deadline(
+    let pinned = super::pin_shared_session_before_deadline(
         deadline,
         state.transcode.pin_shared_session(
             &info.session_id,

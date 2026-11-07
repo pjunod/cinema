@@ -9,10 +9,12 @@ use crate::error::StoreError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const RESET_LEGACY: &str = "UPDATE analysis_requests SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL, fence = fence + 1 WHERE component = 'subtitle_source' AND state IN ('running','submitted');";
 
 pub(crate) const RECONCILE_SCHEMA: &str = include_str!("background_jobs_subtitle_reconcile.sql");
 
+#[cfg(any(test, feature = "hiqlite-store"))]
 pub(crate) const SCHEMA: &str = include_str!("background_jobs_subtitle.sql");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

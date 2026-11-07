@@ -141,7 +141,7 @@ class MacosSourceToolchainTests(unittest.TestCase):
         with mock.patch.object(runtime.platform, "system", return_value="Darwin"), \
                 mock.patch.object(runtime.platform, "machine", return_value="arm64"), \
                 mock.patch.object(runtime.shutil, "which", return_value="/usr/bin/swift"), \
-                mock.patch.object(runtime, "output", side_effect=[COMMIT, ""]), \
+                mock.patch.object(runtime, "output", side_effect=[COMMIT, "a" * 40, ""]), \
                 mock.patch.object(runtime, "ensure_rust_toolchain", return_value=self.rustc) as ensure, \
                 mock.patch.dict(os.environ, {"PATH": "/opt/homebrew/bin:/usr/bin"}), \
                 mock.patch.object(runtime, "run", side_effect=RuntimeError("stop before actual build")) as run:
@@ -149,9 +149,10 @@ class MacosSourceToolchainTests(unittest.TestCase):
                 runtime.build(args)
         ensure.assert_called_once_with()
         self.assertEqual(run.call_args.args[0], [
-            self.rustc.parent / "cargo", "build", "--locked", "--release", "-p", "plurx-desktop-control", "--bins",
+            self.root / "scripts/check-standalone-graph",
         ])
         env = run.call_args.kwargs["env"]
+        self.assertEqual(env["CARGO"], str(self.rustc.parent / "cargo"))
         self.assertEqual(env["RUSTC"], str(self.rustc))
         self.assertEqual(env["PATH"], f"{self.rustc.parent}:/opt/homebrew/bin:/usr/bin")
 
@@ -204,6 +205,19 @@ class MacosSourceRuntimeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "regular"):
                     runtime.verify_identity(binary, COMMIT)
                 invocation.assert_not_called()
+
+    def test_source_packager_refuses_arbitrary_prebuilt_binary_argument(self):
+        with tempfile.TemporaryDirectory() as work:
+            work = Path(work)
+            marker = work / "executed"
+            binary = work / "plurxd"
+            binary.write_text("#!/bin/sh\ntouch " + str(marker) + "\n")
+            binary.chmod(0o755)
+            result = subprocess.run([sys.executable, SCRIPT, "--output", work / "runtime", "--binary", binary], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unrecognized arguments", result.stderr)
+            self.assertFalse(marker.exists())
+            self.assertFalse((work / "runtime").exists())
 
     def test_pinned_media_extraction_refuses_traversal_and_links(self):
         with tempfile.TemporaryDirectory() as work:
@@ -368,6 +382,15 @@ exit 113
         result = self.install("--prefix", str(self.root / "prefix"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--server-only for custom service prefixes", result.stderr)
+        self.assertEqual(self.calls(), "")
+
+    def test_native_source_install_refuses_prebuilt_before_service_mutation(self):
+        binary = self.root / "prebuilt-plurxd"
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o755)
+        result = self.install("--binary", str(binary))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rebuild the exact standalone daemon", result.stderr)
         self.assertEqual(self.calls(), "")
 
     def test_source_installer_dry_run_does_not_build_or_bootstrap(self):

@@ -575,6 +575,6 @@ pub(super) async fn direct_bytes(
     .await)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 #[path = "shared_source_direct_tests.rs"]
 mod tests;

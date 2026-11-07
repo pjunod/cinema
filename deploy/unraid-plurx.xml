@@ -4,8 +4,8 @@
      Unraid Docker UI ("Add Container" → paste this template). -->
 <Container version="2">
   <Name>plurx</Name>
-  <Repository>forge.lan:3000/noirr/plurxd:main</Repository>
-  <Registry>http://forge.lan:3000/noirr/-/packages/container/plurxd/main</Registry>
+  <Repository>forge.lan:3000/noirr/plurxd-standalone:latest</Repository>
+  <Registry>http://forge.lan:3000/noirr/-/packages/container/plurxd-standalone/latest</Registry>
   <!-- Host networking is required for Bonjour multicast. A bridge can expose
        TCP 32400 but cannot publish _plurx._tcp to iPhone/iPad/Apple TV. -->
   <Network>host</Network>

@@ -8,6 +8,12 @@ pub(crate) fn spawn_background_loops(state: &AppState, background_shutdown: &Can
         return;
     }
 
+    let Some(membership) = state.membership.clone() else {
+        return;
+    };
+    let Some(replication) = state.replication.clone() else {
+        return;
+    };
     tokio::spawn(crate::clock_offset::run(
         state.clone(),
         background_shutdown.clone(),
@@ -29,7 +35,6 @@ pub(crate) fn spawn_background_loops(state: &AppState, background_shutdown: &Can
         state.clone(),
         background_shutdown.clone(),
     ));
-    let replication = state.replication.clone();
     tokio::spawn(replication.passive_metrics_loop(background_shutdown.clone().cancelled_owned()));
     tokio::spawn(
         state
@@ -37,10 +42,10 @@ pub(crate) fn spawn_background_loops(state: &AppState, background_shutdown: &Can
             .clone()
             .monitor_loop(background_shutdown.clone()),
     );
-    state.membership.register_media_relay_acquisition();
-    tokio::spawn(state.membership.clone().heartbeat_loop());
+    membership.register_media_relay_acquisition();
+    tokio::spawn(membership.clone().heartbeat_loop());
 
     tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
 
-    tokio::spawn(state.membership.clone().offline_source_probe_loop());
+    tokio::spawn(membership.offline_source_probe_loop());
 }

@@ -10,24 +10,34 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::cluster_capability::Membership as MembershipManager;
 use plurx_core::cluster::coordination::LeaseClaim;
-use plurx_core::cluster::membership::MembershipManager;
+#[cfg(any(test, feature = "cluster"))]
 use plurx_core::domain::CacheStorageMember;
 use plurx_core::fs_secure::SecureDirectory;
 use plurx_core::store::Store;
+#[cfg(any(test, feature = "cluster"))]
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "cluster")]
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 pub(crate) const CANARY_PATH: &str = "/api/v1/internal/media/shared-cache-canary";
+#[cfg(feature = "cluster")]
 pub(crate) const MAX_CANARY_REQUEST_BYTES: usize = 1_024;
+#[cfg(feature = "cluster")]
 pub(crate) const MAX_CANARY_RESPONSE_BYTES: usize = 512;
+#[cfg(any(test, feature = "cluster"))]
 const CANARY_DIRECTORY: &str = ".plurx-canary";
+#[cfg(any(test, feature = "cluster"))]
 const CANARY_BYTES: u64 = 128;
+#[cfg(feature = "cluster")]
 const PROBE_DEADLINE: Duration = Duration::from_secs(3);
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(any(test, feature = "cluster"))]
 const CANARY_ORPHAN_AGE: Duration = Duration::from_secs(30);
+#[cfg(any(test, feature = "cluster"))]
 const CANARY_SWEEP_LIMIT: usize = 64;
 const GC_INTERVAL: Duration = Duration::from_secs(60);
 const GC_LEASE_MS: i64 = 30_000;
@@ -41,6 +51,7 @@ const MOUNT_PUBLICATION_CONCURRENCY: usize = 2;
 
 #[derive(Clone, Debug)]
 struct SharedConfig {
+    #[cfg(any(test, feature = "cluster"))]
     configured_root: PathBuf,
     storage_id: String,
 }
@@ -68,13 +79,16 @@ pub(crate) struct SharedCacheCoordinator {
     #[cfg(test)]
     publication_commit_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     node_id: String,
-    membership: MembershipManager,
-    transport: PeerTransport,
+    #[cfg(feature = "cluster")]
+    membership: Option<MembershipManager>,
+    #[cfg(feature = "cluster")]
+    transport: Option<PeerTransport>,
     store: Arc<dyn Store>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) struct CanaryRequest {
     pub storage_id: String,
     pub canary_name: String,
@@ -83,6 +97,7 @@ pub(crate) struct CanaryRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) struct CanaryResponse {
     pub storage_id: String,
     pub response_name: String,
@@ -95,12 +110,15 @@ impl SharedCacheCoordinator {
         shared_id: String,
         cluster_id: &str,
         node_id: String,
-        membership: MembershipManager,
+        membership: Option<MembershipManager>,
         store: Arc<dyn Store>,
     ) -> Arc<Self> {
+        #[cfg(not(feature = "cluster"))]
+        let _ = membership;
         let config =
             (!configured_root.as_os_str().is_empty() && !shared_id.is_empty()).then(|| {
                 SharedConfig {
+                    #[cfg(any(test, feature = "cluster"))]
                     configured_root,
                     storage_id: storage_id(cluster_id, &shared_id),
                 }
@@ -123,7 +141,11 @@ impl SharedCacheCoordinator {
             #[cfg(test)]
             publication_commit_pause: Arc::new(std::sync::Mutex::new(None)),
             node_id,
-            transport: PeerTransport::new(membership.clone()),
+            #[cfg(feature = "cluster")]
+            transport: membership
+                .as_ref()
+                .map(|member| PeerTransport::new(member.clone())),
+            #[cfg(feature = "cluster")]
             membership,
             store,
         })
@@ -255,6 +277,7 @@ impl SharedCacheCoordinator {
             .await
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     async fn publish_verified_root(
         &self,
         path: PathBuf,
@@ -386,80 +409,96 @@ impl SharedCacheCoordinator {
     }
 
     async fn verify_once_inner(&self) -> Result<(), String> {
-        let attempted_generation = self.loss_generation.load(Ordering::Acquire);
-        let config = self
-            .config
-            .as_ref()
-            .ok_or_else(|| "shared cache is not configured".to_owned())?;
-        let (path, identity, canaries) = prepare_canary_directory(&config.configured_root).await?;
-        let voter_count = self
-            .membership
-            .activity_voter_count()
-            .await
-            .map_err(|error| error.to_string())?;
-        let peers = self
-            .membership
-            .activity_peers()
-            .await
-            .map_err(|error| error.to_string())?;
-        // `activity_peers` returns the other VOTERS: it excludes this node and
-        // filters to voters. The voters this node can see therefore number
-        // `peers.len()` plus itself only when it is one. Adding the 1
-        // unconditionally made this `n != n + 1` on a learner, so the canary
-        // refused before it ran and the shared cache root was never published
-        // there — the same arithmetic that made `remote_rollout_ready`
-        // unsatisfiable on a learner.
-        let local_is_voter = self
-            .membership
-            .local_node_is_committed_voter()
-            .await
-            .map_err(|error| error.to_string())?;
-        if peers.len().saturating_add(usize::from(local_is_voter)) != voter_count {
-            return Err("the complete voter directory is not available".to_owned());
+        #[cfg(not(feature = "cluster"))]
+        {
+            Err("shared cache requires an explicitly configured cluster".to_owned())
         }
-        // No peer to probe is the honest condition for the local-only canary.
-        // Testing `voter_count == 1` said the same thing only for a voter.
-        if peers.is_empty() {
-            let name = canary_name("single");
-            let bytes = random_canary_bytes();
-            canaries
-                .atomic_write_child(&name, &bytes)
+        #[cfg(feature = "cluster")]
+        {
+            let membership = self
+                .membership
+                .as_ref()
+                .ok_or_else(|| "no cluster membership is configured".to_owned())?;
+
+            let attempted_generation = self.loss_generation.load(Ordering::Acquire);
+            let config = self
+                .config
+                .as_ref()
+                .ok_or_else(|| "shared cache is not configured".to_owned())?;
+            let (path, identity, canaries) =
+                prepare_canary_directory(&config.configured_root).await?;
+            let voter_count = membership
+                .activity_voter_count()
                 .await
                 .map_err(|error| error.to_string())?;
-            let observed = canaries
-                .read_bounded_child(&name, CANARY_BYTES)
+            let peers = membership
+                .activity_peers()
                 .await
                 .map_err(|error| error.to_string())?;
-            let _ = canaries.unlink_child(&name).await;
-            if observed != bytes {
-                return Err("single-voter canary changed while read".to_owned());
+            // `activity_peers` returns the other VOTERS: it excludes this node and
+            // filters to voters. The voters this node can see therefore number
+            // `peers.len()` plus itself only when it is one. Adding the 1
+            // unconditionally made this `n != n + 1` on a learner, so the canary
+            // refused before it ran and the shared cache root was never published
+            // there — the same arithmetic that made `remote_rollout_ready`
+            // unsatisfiable on a learner.
+            let local_is_voter = membership
+                .local_node_is_committed_voter()
+                .await
+                .map_err(|error| error.to_string())?;
+            if peers.len().saturating_add(usize::from(local_is_voter)) != voter_count {
+                return Err("the complete voter directory is not available".to_owned());
             }
-        } else {
-            let mut proofs = Vec::with_capacity(peers.len());
-            for peer in &peers {
-                if !peer.reachable {
-                    return Err(format!(
-                        "shared-cache peer {} is not reachable",
-                        peer.node_id
+            // No peer to probe is the honest condition for the local-only canary.
+            // Testing `voter_count == 1` said the same thing only for a voter.
+            if peers.is_empty() {
+                let name = canary_name("single");
+                let bytes = random_canary_bytes();
+                canaries
+                    .atomic_write_child(&name, &bytes)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let observed = canaries
+                    .read_bounded_child(&name, CANARY_BYTES)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let _ = canaries.unlink_child(&name).await;
+                if observed != bytes {
+                    return Err("single-voter canary changed while read".to_owned());
+                }
+            } else {
+                let mut proofs = Vec::with_capacity(peers.len());
+                for peer in &peers {
+                    if !peer.reachable {
+                        return Err(format!(
+                            "shared-cache peer {} is not reachable",
+                            peer.node_id
+                        ));
+                    }
+                    let base = peer.http_base.as_deref().ok_or_else(|| {
+                        format!("shared-cache peer {} has no HTTP base", peer.node_id)
+                    })?;
+                    proofs.push(self.verify_peer(
+                        &config.storage_id,
+                        &canaries,
+                        &peer.node_id,
+                        base,
                     ));
                 }
-                let base = peer.http_base.as_deref().ok_or_else(|| {
-                    format!("shared-cache peer {} has no HTTP base", peer.node_id)
-                })?;
-                proofs.push(self.verify_peer(&config.storage_id, &canaries, &peer.node_id, base));
+                // Every voter has the same bounded proof deadline. Running the
+                // independent canaries together keeps admission latency bounded
+                // by the slowest voter rather than multiplying it by cluster
+                // size.
+                for proof in futures_util::future::join_all(proofs).await {
+                    proof?;
+                }
             }
-            // Every voter has the same bounded proof deadline. Running the
-            // independent canaries together keeps admission latency bounded
-            // by the slowest voter rather than multiplying it by cluster
-            // size.
-            for proof in futures_util::future::join_all(proofs).await {
-                proof?;
-            }
+            self.publish_verified_root(path, identity, attempted_generation)
+                .await
         }
-        self.publish_verified_root(path, identity, attempted_generation)
-            .await
     }
 
+    #[cfg(feature = "cluster")]
     async fn verify_peer(
         &self,
         storage_id: &str,
@@ -482,6 +521,8 @@ impl SharedCacheCoordinator {
         let deadline = tokio::time::Instant::now() + PROBE_DEADLINE;
         let response = self
             .transport
+            .as_ref()
+            .ok_or_else(|| "no cluster transport is configured".to_owned())?
             .request(
                 peer_node_id,
                 peer_base,
@@ -519,6 +560,7 @@ impl SharedCacheCoordinator {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn answer_canary(
         &self,
         request: &CanaryRequest,
@@ -531,6 +573,7 @@ impl SharedCacheCoordinator {
         .await
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     async fn answer_canary_inner(&self, request: &CanaryRequest) -> Result<CanaryResponse, String> {
         let config = self
             .config
@@ -1314,6 +1357,7 @@ fn storage_id(cluster_id: &str, shared_id: &str) -> String {
     format!("shared:{}", hex::encode(hasher.finalize()))
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn prepare_canary_directory(
     root: &Path,
 ) -> Result<
@@ -1349,6 +1393,7 @@ async fn prepare_canary_directory(
     Ok((canonical, identity, canaries))
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn sweep_canary_orphans(
     directory_path: &Path,
     directory: &SecureDirectory,
@@ -1387,10 +1432,12 @@ async fn sweep_canary_orphans(
     Ok(())
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn canary_name(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn safe_canary_name(value: &str, prefix: &str) -> bool {
     value
         .strip_prefix(prefix)
@@ -1400,6 +1447,7 @@ fn safe_canary_name(value: &str, prefix: &str) -> bool {
         })
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn random_canary_bytes() -> Vec<u8> {
     format!(
         "{}{}",
@@ -1409,6 +1457,7 @@ fn random_canary_bytes() -> Vec<u8> {
     .into_bytes()
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -1464,7 +1513,7 @@ mod tests {
             shared_id.to_owned(),
             "test-cluster",
             node_id.to_owned(),
-            MembershipManager::unavailable(),
+            None,
             store,
         )
     }

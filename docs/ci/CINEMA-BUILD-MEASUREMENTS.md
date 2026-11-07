@@ -1,6 +1,6 @@
 # Cinema build measurements — reproducible developer comparisons
 
-**Status:** open — diagnostic baseline collected; guarded runner reviewed and tested; capped recipe measurements pending.
+**Status:** open — P1 merged; capped linker comparison complete with no useful gain; SDK-free before/after measurements pending.
 **Written:** 2026-11-04 · **Owner:** Codex.
 
 The [modular-build plan](CINEMA-MODULAR-BUILD-PLAN.md) owns the phases and
@@ -140,3 +140,40 @@ retains changed source when descendant drainage is uncertain. Its SHA-256 is
 All 27 focused tests pass on macOS and Linux. This corrects cleanup safety;
 it does not qualify new performance measurements. A fresh exact-head effort
 gate remains required, and the final dependency-omission milestone stays open.
+
+## 3. Primary capped linker comparison — 2026-11-04
+
+P1 landed through PR #1384 (`6545218ef`). A paired experiment on exact
+commit `cbc9cc75885f6cc94307d37394b0493e0d24f33b`, tree
+`523511a2a395f3829ae2479af1c3c099005fddf4`, compared the unchanged default Cargo recipe
+and an explicit final-daemon-only Clang/LLD recipe. Both used Rust 1.97.1, the same owned warm target,
+four CPUs, 24 GiB memory, zero swap, and the unchanged default dev profile
+(full debug information). Each recipe warmed up before three samples per case.
+
+| Rebuild case | Default median, range (seconds) | Explicit LLD median, range (seconds) |
+|---|---:|---:|
+| No change | 0.216, 0.215–0.266 | 0.266, 0.266–0.316 |
+| Embedded asset | 17.454, 17.444–17.856 | 17.730, 17.641–17.790 |
+| Daemon leaf | 17.726, 17.712–17.837 | 17.713, 17.699–17.843 |
+| Core API | 27.668, 27.425–27.968 | 27.652, 27.553–28.121 |
+
+All measured samples, in execution order (seconds):
+
+| Case | Default samples | Explicit LLD samples |
+|---|---|---|
+| noop | 0.266, 0.216, 0.215 | 0.316, 0.266, 0.266 |
+| asset | 17.856, 17.444, 17.454 | 17.641, 17.790, 17.730 |
+| leaf | 17.726, 17.712, 17.837 | 17.713, 17.843, 17.699 |
+| api | 27.968, 27.668, 27.425 | 28.121, 27.652, 27.553 |
+
+There is no demonstrated useful linker gain in this experiment. Do not promote
+the experimental linker recipe as an improvement. Keep the normal recipe and
+measure the actual standalone dependency cut against this baseline. This is an
+incremental comparison; it supplies no clean-build or SDK-removal result.
+
+Both runs completed and restored the identical source inventory
+`0b3100cc1856ac92035fbe10ff3392111dca25cc241aac1fa6b579e325273e35`.
+The retained, collected evidence bundle has SHA256
+`afdac15fec74d351313015f9f677eef9d478bad8e955aafedd82f43c4f1d0f09`;
+run ID `40f7dcfcc0f3405db8322d5509c7f554`. The scope recorded no OOM or
+OOM kill. The physical compiler was a non-voter with no external daemon load.

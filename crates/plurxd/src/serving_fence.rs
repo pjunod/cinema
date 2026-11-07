@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "cluster")]
 #[path = "serving_fence/quorum.rs"]
 mod quorum;
 
@@ -30,6 +31,7 @@ pub(crate) struct RestartDrainStatus {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum PlannedOutageFenceOwner {
     Restart,
+    #[cfg(any(test, feature = "cluster"))]
     Maintenance,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     DesktopShutdown,
@@ -45,6 +47,7 @@ impl PlannedOutageFenceToken {
     pub(crate) fn identity(self) -> String {
         let owner = match self.owner {
             PlannedOutageFenceOwner::Restart => "restart",
+            #[cfg(any(test, feature = "cluster"))]
             PlannedOutageFenceOwner::Maintenance => "maintenance",
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             PlannedOutageFenceOwner::DesktopShutdown => "desktop-shutdown",
@@ -145,6 +148,7 @@ impl AuthorityWord {
     /// Set `ready` to `desired`, bumping the generation when that is a loss.
     /// Returns the value now published, or `None` when `ready` already was
     /// `desired`.
+    #[cfg(any(test, feature = "cluster"))]
     fn publish(&self, desired: bool) -> Option<AuthorityWordValue> {
         let mut published = None;
         let _ = self
@@ -556,13 +560,17 @@ pub(crate) struct ServingHttpPolicy {
 /// Backend-neutral readiness boundary. Diagnostics remain with the provider
 /// so common admission never imports a backend proof or snapshot type.
 pub(crate) trait ServingReadinessSource: Send + Sync {
+    #[cfg(any(test, feature = "cluster"))]
     fn ready(&self, previously_ready: bool) -> bool;
+    #[cfg(any(test, feature = "cluster"))]
     fn loss_observed(&self, _next_generation: u64) {}
+    #[cfg(any(test, feature = "cluster"))]
     fn published(&self, _ready: bool) {}
 }
 
 #[derive(Clone)]
 pub(crate) struct ServingFence {
+    #[cfg(any(test, feature = "cluster"))]
     readiness_source: Option<Arc<dyn ServingReadinessSource>>,
     provider_managed: Arc<AtomicBool>,
     word: AuthorityWord,
@@ -588,6 +596,7 @@ impl ServingFence {
         };
         let (state, _) = tokio::sync::watch::channel(initial);
         Self {
+            #[cfg(any(test, feature = "cluster"))]
             readiness_source: source,
             provider_managed: Arc::new(AtomicBool::new(managed)),
             word: AuthorityWord::new(ready),
@@ -772,6 +781,7 @@ impl ServingFence {
     /// Cleanup created by an already-admitted owner may wait behind that one
     /// owner. External requests use the fail-fast acquire above, so this queue
     /// has at most the cleanup belonging to the accepted operation.
+    #[cfg(feature = "cluster")]
     pub(crate) async fn planned_outage_cleanup_guard(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.restart_drain.operation_gate)
             .lock_owned()
@@ -835,6 +845,7 @@ impl ServingFence {
         true
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn begin_maintenance_preparation_until(
         &self,
         expires_at_unix_ms: u64,
@@ -895,6 +906,7 @@ impl ServingFence {
     /// definitive response. This synchronous latch is safe to set from a
     /// guard's `Drop` before its asynchronous cleanup task can be scheduled.
     /// Only a confirmed exact release clears it.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn retain_planned_outage_preparation_until_cancelled(
         &self,
         token: PlannedOutageFenceToken,
@@ -910,6 +922,7 @@ impl ServingFence {
     /// Own the direct restart-cancellation request independently of the exact
     /// preparation it observed. The operation gate prevents a successor from
     /// beginning before this token is resolved.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn retain_restart_cancellation(&self) -> PlannedOutageFenceToken {
         let generation = self
             .restart_drain
@@ -941,6 +954,7 @@ impl ServingFence {
     /// no successor of the same owner can be admitted while this set is
     /// drained. Tokens belonging to the other planned-outage lifecycle remain
     /// authoritative.
+    #[cfg(any(test, feature = "cluster"))]
     fn resolve_planned_outage_owner_releases(&self, owner: PlannedOutageFenceOwner) {
         self.restart_drain
             .unresolved_releases
@@ -1002,6 +1016,7 @@ impl ServingFence {
     /// only owner allowed to clear a non-exact restart generation, and callers
     /// hold `planned_outage_operation_guard` across the complete operation so
     /// a successor cannot appear between replicated deletion and this step.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn cancel_current_restart_preparation(
         &self,
         cancellation: PlannedOutageFenceToken,
@@ -1030,6 +1045,7 @@ impl ServingFence {
     /// Clear the durable maintenance row's local timed owner after the target
     /// has proved it is safe to resume. The caller holds the operation gate,
     /// so this cannot race a new local preparation.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn cancel_current_maintenance_preparation(
         &self,
         active_sessions: usize,
@@ -1091,6 +1107,7 @@ impl ServingFence {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     async fn publish(&self, desired: bool) {
         if self.word.load().ready == desired {
             return;
@@ -1118,6 +1135,7 @@ impl ServingFence {
 
 /// What the poll should do with the proof it is holding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "cluster"))]
 enum Retain {
     /// Capture the eligible proof this node is serving under now, replacing
     /// whatever was held. A new eligible proof is always preferred.
@@ -1129,6 +1147,7 @@ enum Retain {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "cluster"))]
 struct AuthorityOutcome {
     ready: bool,
     retain: Retain,
@@ -1160,6 +1179,7 @@ struct AuthorityOutcome {
 /// returning on a retained proof would resume service on grounds this node
 /// had already declared insufficient. Recovery is a live confirmation's job,
 /// and only a live confirmation's.
+#[cfg(any(test, feature = "cluster"))]
 fn decide_authority(
     unmanaged: bool,
     authority_is_current: bool,
@@ -1186,6 +1206,7 @@ fn decide_authority(
 }
 
 impl ServingFence {
+    #[cfg(any(test, feature = "cluster"))]
     async fn refresh(&self) {
         let previous = self.is_ready();
         let desired = self
@@ -1218,6 +1239,7 @@ impl ServingFence {
         self.publish(ready).await;
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn monitor_loop(self, shutdown: tokio_util::sync::CancellationToken) {
         if self.readiness_source.is_none() {
             return;
@@ -1275,17 +1297,21 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
 }
 
+#[cfg(any(test, feature = "cluster"))]
 struct PendingLossTransition {
     pending: Arc<AtomicU64>,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl PendingLossTransition {
+    #[cfg(any(test, feature = "cluster"))]
     fn new(pending: Arc<AtomicU64>) -> Self {
         pending.fetch_add(1, Ordering::AcqRel);
         Self { pending }
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl Drop for PendingLossTransition {
     fn drop(&mut self) {
         self.pending.fetch_sub(1, Ordering::AcqRel);

@@ -1166,10 +1166,7 @@ mod tests {
             Arc::clone(&store),
             transcode,
             "test-node".into(),
-            crate::serving_fence::ServingFence::new(
-                plurx_core::cluster::migration::status::ReplicationMonitor::sqlite()
-                    .metrics_handle(),
-            ),
+            crate::serving_fence::ServingFence::local(),
         );
         Fixture {
             manager,
@@ -1213,10 +1210,7 @@ mod tests {
             Arc::clone(&fixture.store),
             transcode,
             "test-node".into(),
-            crate::serving_fence::ServingFence::new(
-                plurx_core::cluster::migration::status::ReplicationMonitor::sqlite()
-                    .metrics_handle(),
-            ),
+            crate::serving_fence::ServingFence::local(),
         );
         fixture
     }

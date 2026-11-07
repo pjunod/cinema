@@ -789,7 +789,7 @@ def main():
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--deadline-seconds", type=int, default=600)
     parser.add_argument("--image", default="plurx/plurxd:latest")
-    for argument in ["PLURX_BUILD_REF", "PLURX_BUILD_SHA", "SOURCE_DATE_EPOCH"]:
+    for argument in ["PLURX_BUILD_REF", "PLURX_BUILD_SHA", "PLURX_BUILD_TREE", "SOURCE_DATE_EPOCH"]:
         parser.add_argument("--" + argument.lower().replace("_", "-"), default="")
     args = parser.parse_args()
     if args.recorded_build_recipe is not None and args.step != "assemble":
@@ -807,7 +807,7 @@ def main():
         else:
             import subprocess
             build_arguments = []
-            for argument in ["PLURX_BUILD_REF", "PLURX_BUILD_SHA", "SOURCE_DATE_EPOCH"]:
+            for argument in ["PLURX_BUILD_REF", "PLURX_BUILD_SHA", "PLURX_BUILD_TREE", "SOURCE_DATE_EPOCH"]:
                 build_arguments.extend(["--build-arg", argument + "=" + getattr(args, argument.lower())])
             subprocess.run(["docker", "buildx", "build", "--load", *build_arguments, "--platform", "linux/amd64",
                 "--build-context", "linux-dolby-package=" + str(args.output.resolve(strict=True)),

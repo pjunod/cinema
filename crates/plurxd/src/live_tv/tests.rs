@@ -159,10 +159,7 @@ fn live_tv_authority_under_test() -> (
     LiveTvAuthority,
     tokio::task::JoinHandle<()>,
 ) {
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
-
-    let fence =
-        crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+    let fence = crate::serving_fence::ServingFence::local();
     let authority = LiveTvAuthority::new(fence.authority());
     let task = tokio::spawn(authority.clone().serving_fence_loop(fence.subscribe()));
     (fence, authority, task)
@@ -308,11 +305,8 @@ async fn live_tv_running_work_ends_when_the_fence_closes_during_a_loss() {
 /// one that outlasts it: kept and answered retryably first, ended after.
 #[tokio::test]
 async fn a_loss_inside_the_grace_keeps_the_session_and_refuses_requests_retryably() {
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
-
     let root = crate::test_tempdir().expect("scratch root");
-    let fence =
-        crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+    let fence = crate::serving_fence::ServingFence::local();
     let manager = test_manager_with(root.path(), SystemInfo::default(), fence.authority());
     seed_test_config(&manager).await;
     let session = test_session(root.path().join("live-tv-serving-grace"), 1);

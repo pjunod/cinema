@@ -1,19 +1,20 @@
 //! Node-local incident projection: positive attribution, bounded memory, no control.
-use crate::{
-    http::{
-        extract::AuthUser,
-        peer_transport::{deadline_after, PeerAuthMode, PeerTransport},
-    },
-    state::AppState,
-};
+#[cfg(feature = "cluster")]
+use crate::http::peer_transport::{deadline_after, PeerAuthMode, PeerTransport};
+use crate::{http::extract::AuthUser, state::AppState};
+#[cfg(feature = "cluster")]
+use axum::http::HeaderMap;
+#[cfg(any(test, feature = "cluster"))]
+use axum::http::Method;
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Path, State},
-    http::{header, HeaderMap, Method, StatusCode},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+#[cfg(feature = "cluster")]
 use futures_util::{stream, StreamExt};
 use plurx_core::{
     diagnostics::{strict_json, Component, Event, VERSION},
@@ -365,7 +366,7 @@ fn private(value: impl IntoResponse) -> Response {
     r
 }
 pub(crate) fn router() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         .without_v07_checks()
         .route("/api/v1/diagnostics/capabilities", get(capabilities))
         .route("/api/v1/diagnostics/snapshots", post(create))
@@ -373,9 +374,12 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/v1/diagnostics/snapshots/{id}",
             get(read).delete(erase),
         )
-        .route(PEER_PATH, post(peer))
-        .layer(DefaultBodyLimit::max(16 * 1024))
+        .layer(DefaultBodyLimit::max(16 * 1024));
+    #[cfg(feature = "cluster")]
+    let router = router.route(PEER_PATH, post(peer));
+    router
 }
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) fn eligible(method: &Method, path: &str) -> bool {
     (method == Method::GET && path == "/api/v1/diagnostics/capabilities")
         || (path == "/api/v1/diagnostics/snapshots" && method == Method::POST)
@@ -527,61 +531,72 @@ async fn collect(
         .cloned()
         .collect::<BTreeSet<_>>();
     let omitted = nodes.len() > 8;
-    let peers = state.membership.activity_peers().await.unwrap_or_default();
-    let transport = PeerTransport::new(state.membership.clone());
-    let requests: Vec<_> = remote
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(index, node)| {
-            let peer = peers.iter().find(|p| p.node_id == node).cloned();
-            let transport = transport.clone();
-            let scope = scope.clone();
-            async move {
-                let peer = peer?;
-                let base = peer.http_base?;
-                let bytes = serde_json::to_vec(&scope).ok()?;
-                let answer = transport
-                    .request(
-                        &peer.node_id,
-                        &base,
-                        reqwest::Method::POST,
-                        PEER_PATH,
-                        bytes,
-                        deadline_after(Duration::from_secs(2)),
-                        192 * 1024,
-                        PeerAuthMode::ExactRequestAndMemberResponse,
-                    )
-                    .await
-                    .ok()?;
-                if !answer.status.is_success() {
-                    return None;
+    #[cfg(not(feature = "cluster"))]
+    let missing = remote.len();
+    #[cfg(feature = "cluster")]
+    let missing = {
+        let membership = state.membership.as_ref();
+        let peers = match membership {
+            Some(membership) => membership.activity_peers().await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let transport = membership.map(|membership| PeerTransport::new(membership.clone()));
+        let requests: Vec<_> = remote
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, node)| {
+                let peer = peers.iter().find(|p| p.node_id == node).cloned();
+                let transport = transport.clone();
+                let scope = scope.clone();
+                async move {
+                    let transport = transport?;
+                    let peer = peer?;
+                    let base = peer.http_base?;
+                    let bytes = serde_json::to_vec(&scope).ok()?;
+                    let answer = transport
+                        .request(
+                            &peer.node_id,
+                            &base,
+                            reqwest::Method::POST,
+                            PEER_PATH,
+                            bytes,
+                            deadline_after(Duration::from_secs(2)),
+                            192 * 1024,
+                            PeerAuthMode::ExactRequestAndMemberResponse,
+                        )
+                        .await
+                        .ok()?;
+                    if !answer.status.is_success() {
+                        return None;
+                    }
+                    let value = strict_json(&answer.body, 192 * 1024).ok()?;
+                    let mut projection: Projection = serde_json::from_value(value).ok()?;
+                    if projection.version != VERSION || projection.events.len() > 2000 {
+                        return None;
+                    }
+                    for event in &mut projection.events {
+                        event.validate().ok()?;
+                        event
+                            .facts
+                            .insert("node".into(), format!("node-{}", index + 2).into());
+                    }
+                    Some(projection)
                 }
-                let value = strict_json(&answer.body, 192 * 1024).ok()?;
-                let mut projection: Projection = serde_json::from_value(value).ok()?;
-                if projection.version != VERSION || projection.events.len() > 2000 {
-                    return None;
-                }
-                for event in &mut projection.events {
-                    event.validate().ok()?;
-                    event
-                        .facts
-                        .insert("node".into(), format!("node-{}", index + 2).into());
-                }
-                Some(projection)
+            })
+            .collect();
+        let futures = stream::iter(requests).buffer_unordered(4);
+        futures_util::pin_mut!(futures);
+        let mut missing = 0;
+        while let Some(peer) = futures.next().await {
+            if let Some(peer) = peer {
+                result.events.extend(peer.events);
+            } else {
+                missing += 1;
             }
-        })
-        .collect();
-    let futures = stream::iter(requests).buffer_unordered(4);
-    futures_util::pin_mut!(futures);
-    let mut missing = 0;
-    while let Some(peer) = futures.next().await {
-        if let Some(peer) = peer {
-            result.events.extend(peer.events);
-        } else {
-            missing += 1;
         }
-    }
+        missing
+    };
     if missing > 0 || omitted {
         result.state = "partial".into();
         result.components.push(Component {
@@ -712,6 +727,7 @@ async fn erase(
         .remove(&id);
     Ok(private(StatusCode::NO_CONTENT))
 }
+#[cfg(feature = "cluster")]
 async fn peer(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -749,6 +765,8 @@ async fn peer(
     let payload = crate::http::peer_transport::signed_response_payload(200, &bytes);
     let signature = state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::UNAUTHORIZED)?
         .sign_internal_peer_response(&auth.node_id, &auth.nonce, PEER_PATH, &payload)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let mut response = private(bytes);

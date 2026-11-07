@@ -41,6 +41,7 @@ impl ArtBodyLease {
             OBJECT_KIB * if derivative { 2 } else { 1 },
         )
     }
+    #[cfg(feature = "cluster")]
     pub(super) fn source_collection_workspace(
     ) -> Result<OwnedSemaphorePermit, super::error::ApiError> {
         SOURCE_BYTES

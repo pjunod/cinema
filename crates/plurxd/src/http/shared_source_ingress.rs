@@ -1,8 +1,7 @@
 //! Actual Source owner adapters. Transport observations never become factory authority.
-use super::forwarding::{
-    CustodyAction, CustodyReply, ForwardAuthority, ForwardCustody, ForwardIngress, ForwardRoute,
-    FreshAuthority,
-};
+#[cfg(feature = "cluster")]
+use super::forwarding::{CustodyAction, CustodyReply, ForwardCustody, ForwardIngress};
+use super::forwarding::{ForwardAuthority, ForwardRoute, FreshAuthority};
 use super::*;
 use plurx_core::{
     playback_principal::PlaybackPrincipal, sharing_ingress_custody::IngressRegistration,
@@ -126,6 +125,7 @@ pub(super) fn actual_assignment(entry: &SourceStartEntry) -> Option<SourceDispat
         _ => None,
     }
 }
+#[cfg(feature = "cluster")]
 fn retained(
     state: &crate::state::AppState,
     wire: &ForwardAuthority,
@@ -171,6 +171,7 @@ fn retained(
     }
     Err(unavailable())
 }
+#[cfg(feature = "cluster")]
 fn authority(
     state: &crate::state::AppState,
     entry: &SourceStartEntry,
@@ -404,6 +405,7 @@ pub(super) async fn resolve_forward_route(
         request_id: input.request_id,
     })))
 }
+#[cfg(feature = "cluster")]
 pub(super) async fn prepare_forward_start(
     state: &crate::state::AppState,
     wire: &FreshAuthority,
@@ -452,6 +454,7 @@ pub(super) async fn prepare_forward_start(
     }
     Ok(authority(state, &entry, &value, &hash))
 }
+#[cfg(feature = "cluster")]
 fn registration(ingress: &ForwardIngress) -> Result<IngressRegistration, ApiError> {
     Ok(IngressRegistration {
         node_id: ingress.node_id.clone(),
@@ -462,6 +465,7 @@ fn registration(ingress: &ForwardIngress) -> Result<IngressRegistration, ApiErro
         closed_confirmation: None,
     })
 }
+#[cfg(feature = "cluster")]
 pub(super) async fn validate_retained_forward(
     state: &crate::state::AppState,
     wire: &ForwardAuthority,
@@ -502,6 +506,7 @@ pub(super) async fn validate_retained_forward(
     }
     Ok(())
 }
+#[cfg(feature = "cluster")]
 pub(super) async fn apply_forward_custody(
     state: &crate::state::AppState,
     wire: &ForwardAuthority,
@@ -562,6 +567,7 @@ pub(super) async fn apply_forward_custody(
         SourceCustodyWrite::Refused => CustodyReply::Unresolved,
     })
 }
+#[cfg(feature = "cluster")]
 pub(super) async fn execute_forward_unassigned_cleanup(
     state: &crate::state::AppState,
     wire: &FreshAuthority,

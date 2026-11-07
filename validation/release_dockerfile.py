@@ -80,6 +80,44 @@ def _stages(source: str) -> tuple[_Stage, ...]:
     )
 
 
+def select_distribution(source: str, distribution: str = "standalone") -> str:
+    """Select an explicit tagged profile without modifying its source tree.
+
+    The existing renderer consumes canonical build/runtime names. Only stage
+    names and references are mapped; copied bytes and Cargo commands remain
+    those of the selected immutable source profile.
+    """
+    if distribution == "standalone":
+        exported = render_binary_export(source)
+        runtime = render(source)
+        if (required_binaries(source) != ("plurxd",)
+                or 'LABEL tv.plurx.distribution="standalone"' not in runtime
+                or "scripts/check-standalone-graph" not in exported
+                or "--no-default-features -p plurxd" not in exported
+                or "--features cluster" in exported):
+            raise ValueError("tagged Dockerfile lacks an explicit standalone profile and graph guard")
+        return source
+    if distribution != "cluster":
+        raise ValueError("unsupported release distribution")
+    stages = _stages(source)
+    for name in ("build-cluster", "runtime-cluster"):
+        if sum((stage.name or "").lower() == name for stage in stages) != 1:
+            raise ValueError("tagged Dockerfile lacks one explicit " + name + " stage")
+    names = {"build": "build-standalone", "runtime": "runtime-standalone",
+             "build-cluster": "build", "runtime-cluster": "runtime"}
+    def declaration(match: re.Match[str]) -> str:
+        text = match.group(0)
+        for group in (2, 1):
+            value = match.group(group)
+            if value is not None and value.lower() in names:
+                start, end = match.start(group) - match.start(), match.end(group) - match.start()
+                text = text[:start] + names[value.lower()] + text[end:]
+        return text
+    selected = _FROM.sub(declaration, source)
+    selected = _COPY_FROM.sub(lambda match: "--from=" + names.get(match.group(1).lower(), match.group(1)), selected)
+    return selected
+
+
 def _copy_sources(text: str) -> list[str]:
     """Stage or image names that `text` copies or mounts from."""
 
@@ -396,12 +434,15 @@ def main() -> int:
     mode.add_argument("--list-binaries", action="store_true")
     mode.add_argument("--list-debug-binaries", action="store_true")
     mode.add_argument("--binary-export", action="store_true")
+    parser.add_argument("--distribution", choices=("standalone", "cluster"))
     parser.add_argument("--runtime-image")
     parser.add_argument("--linux-dolby-package", action="store_true")
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path, nargs="?")
     args = parser.parse_args()
     source = args.source.read_text(encoding="utf-8")
+    if args.distribution is not None:
+        source = select_distribution(source, args.distribution)
     if args.linux_dolby_package and (args.binary_export or args.list_binaries or args.list_debug_binaries):
         parser.error("--linux-dolby-package is only valid when rendering packaging")
     if args.runtime_image and (args.binary_export or args.list_binaries or args.list_debug_binaries):

@@ -1,0 +1,40 @@
+#!/bin/sh
+# Check every Rust component shipped by the standalone/native distributions.
+# Normal AND build edges count; migration/cluster tools are separate artifacts.
+set -eu
+target=all
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --target) [ "$#" -ge 2 ] || { echo 'missing --target value' >&2; exit 2; }; target=$2; shift 2 ;;
+        --help) echo 'Usage: scripts/check-standalone-graph [--target all|RUST_TARGET]'; exit 0 ;;
+        *) echo "unknown standalone graph argument: $1" >&2; exit 2 ;;
+    esac
+done
+case "$target" in ''|*[!a-zA-Z0-9_.-]*) echo 'invalid Cargo graph target' >&2; exit 2 ;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+report=$(mktemp "${TMPDIR:-/tmp}/plurx-standalone-graph.XXXXXX")
+trap 'rm -f "$report"' EXIT HUP INT TERM
+cd "$root"
+"${CARGO:-cargo}" tree --locked --no-default-features --target "$target" \
+    --edges normal,build --prefix none --format '{p}' \
+    -p plurxd -p plurx-desktop-control -p plurx-tray > "$report"
+awk '
+    /^$/ || /^\[build-dependencies\]$/ { next }
+    {
+        if ($1 !~ /^[A-Za-z0-9_-]+$/ || $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+/) {
+            print "unrecognized Cargo dependency record: " $0 > "/dev/stderr"; failed = 1; next
+        }
+        name = tolower($1)
+        if (name ~ /^(hiqlite|openraft)/ || name == "plurx-cluster-check" || name == "plurx-storage-migrate") {
+            print "standalone distribution contains a cluster dependency: " $0 > "/dev/stderr"; failed = 1
+        }
+        roots[$1] = 1
+    }
+    END {
+        if (!("plurxd" in roots) || !("plurx-desktop-control" in roots) || !("plurx-tray" in roots)) {
+            print "standalone graph omitted a shipping component" > "/dev/stderr"; failed = 1
+        }
+        if (failed) exit 1
+        print "Standalone graph: daemon, controller and optional tray normal/build edges contain no cluster SDKs."
+    }
+' "$report"

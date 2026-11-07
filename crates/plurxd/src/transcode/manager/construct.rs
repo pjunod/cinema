@@ -342,7 +342,7 @@ impl TranscodeManager {
         rendition_cache: PathBuf,
         ffmpeg_build: String,
         node_id: String,
-        cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        cluster_membership: Option<crate::cluster_capability::Membership>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
         self.macos_video_probe =
@@ -415,8 +415,9 @@ impl TranscodeManager {
             &self.runtime_cache,
         )
         .on_node(self.cache_location().map(|(_, node_id)| node_id));
+        #[cfg(feature = "cluster")]
         let access = match &self.subtitle_membership {
-            Some(membership) => access.with_membership(membership.clone()),
+            Some(membership) => access.with_membership(Some(membership.clone())),
             None => access,
         };
         match &self.subtitle_jobs {

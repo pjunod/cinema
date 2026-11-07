@@ -9,14 +9,17 @@
 //! disagrees with what it holds. A save on this node reaches its reader
 //! through that reader's own local signal.
 
+#[cfg(any(test, feature = "cluster"))]
 use std::future::Future;
 
+#[cfg(any(test, feature = "cluster"))]
 use plurx_core::error::StoreError;
 
 /// Adapter-owned change observation. Cloning must create an independent
 /// observation cursor; consuming one reader's notification cannot consume it
 /// for another reader.
 #[async_trait::async_trait]
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) trait SettingsChangeObserver: Send + Sync {
     fn clone_observer(&self) -> Box<dyn SettingsChangeObserver>;
     fn applied_index(&self) -> Option<u64>;
@@ -24,6 +27,7 @@ pub(crate) trait SettingsChangeObserver: Send + Sync {
     async fn changed(&mut self) -> bool;
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl Clone for Box<dyn SettingsChangeObserver> {
     fn clone(&self) -> Self {
         self.clone_observer()
@@ -44,9 +48,11 @@ pub(crate) enum SettingsChangeSource {
     LocalOnly,
     /// A replicated store whose Raft log is applied in another process: no
     /// change signal reaches this one, so the observer reads every interval.
+    #[cfg(any(test, feature = "cluster"))]
     Polled,
     /// This node's in-process Raft watch: a write anywhere in the cluster
     /// moves the applied index once this replica applies it.
+    #[cfg(any(test, feature = "cluster"))]
     Applied(Box<dyn SettingsChangeObserver>),
     /// An applied index a test moves by hand.
     #[cfg(test)]
@@ -54,9 +60,23 @@ pub(crate) enum SettingsChangeSource {
 }
 
 impl SettingsChangeSource {
+    pub(crate) fn requires_polling(&self) -> bool {
+        #[cfg(any(test, feature = "cluster"))]
+        {
+            matches!(self, Self::Polled)
+        }
+        #[cfg(not(any(test, feature = "cluster")))]
+        {
+            false
+        }
+    }
+
     pub(crate) fn applied_index(&self) -> Option<u64> {
         match self {
-            Self::LocalOnly | Self::Polled => None,
+            Self::LocalOnly => None,
+            #[cfg(any(test, feature = "cluster"))]
+            Self::Polled => None,
+            #[cfg(any(test, feature = "cluster"))]
             Self::Applied(observer) => observer.applied_index(),
             #[cfg(test)]
             Self::Test(applied) => Some(*applied.borrow()),
@@ -69,7 +89,9 @@ impl SettingsChangeSource {
     pub(crate) fn live(&self) -> bool {
         match self {
             Self::LocalOnly => true,
+            #[cfg(any(test, feature = "cluster"))]
             Self::Polled => false,
+            #[cfg(any(test, feature = "cluster"))]
             Self::Applied(observer) => observer.live(),
             #[cfg(test)]
             Self::Test(applied) => applied.has_changed().is_ok(),
@@ -79,7 +101,10 @@ impl SettingsChangeSource {
     /// The next observation; `false` once the source can report none.
     pub(crate) async fn changed(&mut self) -> bool {
         match self {
-            Self::LocalOnly | Self::Polled => std::future::pending().await,
+            Self::LocalOnly => std::future::pending().await,
+            #[cfg(any(test, feature = "cluster"))]
+            Self::Polled => std::future::pending().await,
+            #[cfg(any(test, feature = "cluster"))]
             Self::Applied(observer) => observer.changed().await,
             #[cfg(test)]
             Self::Test(applied) => applied.changed().await.is_ok(),
@@ -92,6 +117,7 @@ impl SettingsChangeSource {
     /// membership snapshot); one that leaves the applied index where it was
     /// cannot have changed a setting, so it does not end the wait. With
     /// nothing held there is no index to move past, and this never returns.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn applied_past<T>(&mut self, held: Option<&Proved<T>>) {
         let Some(held) = held else {
             return std::future::pending().await;
@@ -107,6 +133,7 @@ impl SettingsChangeSource {
     /// is taken before the read because the read covers every entry applied
     /// before it; an entry applied during the read moves the index past the
     /// mark and costs one hint look, never a missed change.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn mark(&self) -> ProofMark {
         ProofMark(self.applied_index())
     }
@@ -124,6 +151,7 @@ impl SettingsChangeSource {
     /// while; that costs a re-read, never a stale answer. It cannot agree
     /// with a value it has not applied yet without its index moving again
     /// once it does.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn confirms<T, F, Fut>(&self, held: &mut Proved<T>, hint: F) -> bool
     where
         T: PartialEq,
@@ -154,10 +182,13 @@ impl SettingsChangeSource {
 /// The applied index a consistent read started at; see
 /// [`SettingsChangeSource::mark`].
 #[derive(Clone, Copy, Debug)]
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) struct ProofMark(Option<u64>);
 
+#[cfg(any(test, feature = "cluster"))]
 impl ProofMark {
     /// The value the read returned, held as of this mark.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn proved<T>(self, value: T) -> Proved<T> {
         Proved {
             value,
@@ -168,6 +199,7 @@ impl ProofMark {
 
 /// A value one consistent read proved, and the applied index it covered.
 #[derive(Debug)]
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) struct Proved<T> {
     pub(crate) value: T,
     applied: Option<u64>,

@@ -4,20 +4,30 @@
 //! not authorize it, and its peer addresses and authority never enter a
 //! public response. The aggregation/UI remains in `system.rs`.
 
+#[cfg(feature = "cluster")]
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(feature = "cluster")]
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(feature = "cluster")]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "cluster")]
 use axum::extract::State;
+#[cfg(feature = "cluster")]
 use axum::http::header::CACHE_CONTROL;
+#[cfg(feature = "cluster")]
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
+#[cfg(feature = "cluster")]
 use axum::Json;
+#[cfg(feature = "cluster")]
 use futures_util::{stream, StreamExt};
+#[cfg(feature = "cluster")]
 use plurx_core::cluster::membership::{ActivityPeer, ActivityPeerAuth, MembershipError};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "cluster")]
 use super::peer_transport::{
     deadline_after, PeerAuthMode, PeerTransport, PeerTransportError, NODE_HEADER, SIGNATURE_HEADER,
     TARGET_HEADER, TIMESTAMP_HEADER,
@@ -26,23 +36,36 @@ use crate::state::AppState;
 
 pub const PATH: &str = "/_internal/v1/activity-snapshot";
 #[allow(dead_code)] // aggregation child #326 calls the pre-wired client
+#[cfg(feature = "cluster")]
 pub const TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(feature = "cluster")]
 const ACTIVITY_SNAPSHOT_REUSE: Duration = Duration::from_secs(1);
+#[cfg(feature = "cluster")]
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 // Four rows, including worst-case six-byte JSON escapes for every bounded
 // string, fit this reservation even when deliveries saturate the response.
+#[cfg(feature = "cluster")]
 const LIVE_TV_RESPONSE_RESERVE_BYTES: usize = 24 * 1024;
+#[cfg(feature = "cluster")]
 const DVR_RESPONSE_RESERVE_BYTES: usize = 64 * 1024;
+#[cfg(feature = "cluster")]
 const WORKER_RESPONSE_RESERVE_BYTES: usize = 64 * 1024;
 // A saturated delivery list must not erase every analysis row from a peer's
 // Activity snapshot. Reserve one quarter of the shared wire budget whenever
 // progress exists; unused space remains available when it does not.
+#[cfg(feature = "cluster")]
 const ANALYSIS_RESPONSE_RESERVE_BYTES: usize = MAX_RESPONSE_BYTES / 4;
+#[cfg(feature = "cluster")]
 const MAX_DELIVERIES: usize = 512;
+#[cfg(feature = "cluster")]
 const MAX_ANALYSIS_PROGRESS: usize = 64;
+#[cfg(feature = "cluster")]
 const MAX_NODE_ID_BYTES: usize = 256;
+#[cfg(feature = "cluster")]
 const MAX_USER_BYTES: usize = 256;
+#[cfg(feature = "cluster")]
 const MAX_TITLE_BYTES: usize = 2 * 1024;
+#[cfg(feature = "cluster")]
 const PEER_CONCURRENCY: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -86,7 +109,7 @@ pub struct ActivityWorkers {
 
 pub(super) async fn local_workers(state: &AppState) -> ActivityWorkers {
     let runtime = state.transcode.media_node_runtime().await;
-    let accepting_work = state.serving.is_ready() && !state.membership.local_maintenance_active();
+    let accepting_work = state.serving.is_ready() && !state.local_maintenance_active();
     let children = plurx_core::process::priority::running();
     let heavy_in_use = usize::from(state.transcode.background_worker_in_use());
     ActivityWorkers {
@@ -149,6 +172,7 @@ pub enum PeerActivityOutcome {
 
 pub type SharedPeerActivity = Arc<[(String, PeerActivityOutcome)]>;
 
+#[cfg(feature = "cluster")]
 fn age_dvr_observations(
     mut outcome: PeerActivityOutcome,
     elapsed: Duration,
@@ -180,6 +204,7 @@ fn age_dvr_observations(
 /// outcome without any is byte-identical before and after. Asking first is
 /// what lets the cache hand out the allocation the single-flight gate exists
 /// to share instead of deep-cloning every peer's whole snapshot per reader.
+#[cfg(feature = "cluster")]
 fn carries_dvr_observations(entry: &(String, PeerActivityOutcome)) -> bool {
     match &entry.1 {
         PeerActivityOutcome::Answered(snapshot) => {
@@ -197,6 +222,7 @@ fn carries_dvr_observations(entry: &(String, PeerActivityOutcome)) -> bool {
 }
 
 #[derive(Default)]
+#[cfg(feature = "cluster")]
 struct PeerActivityReadGate {
     last_started: Option<tokio::time::Instant>,
     completed: Option<(tokio::time::Instant, SharedPeerActivity)>,
@@ -205,10 +231,12 @@ struct PeerActivityReadGate {
 static ACTIVITY_AGGREGATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static ACTIVITY_PEER_OUTCOMES: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
+#[cfg(feature = "cluster")]
 fn record_aggregation(path: usize) {
     ACTIVITY_AGGREGATIONS[path].fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(feature = "cluster")]
 fn record_peer_outcome(outcome: &PeerActivityOutcome) {
     let slot = match outcome {
         PeerActivityOutcome::Answered(_) => 0,
@@ -266,6 +294,7 @@ pub fn prometheus_cluster_activity() -> String {
 
 #[allow(dead_code)] // wired now so #326 does not need state/main territory
 #[derive(Clone)]
+#[cfg(feature = "cluster")]
 pub struct PeerActivityClient {
     membership: plurx_core::cluster::membership::MembershipManager,
     transport: PeerTransport,
@@ -275,6 +304,7 @@ pub struct PeerActivityClient {
 }
 
 #[allow(dead_code)]
+#[cfg(feature = "cluster")]
 impl PeerActivityClient {
     #[must_use]
     pub fn new(membership: plurx_core::cluster::membership::MembershipManager) -> Self {
@@ -381,6 +411,7 @@ impl PeerActivityClient {
     }
 }
 
+#[cfg(feature = "cluster")]
 async fn fetch_peer_activity(
     client: PeerActivityClient,
     peer: ActivityPeer,
@@ -397,6 +428,7 @@ async fn fetch_peer_activity(
     age_dvr_observations(outcome, started.elapsed())
 }
 
+#[cfg(feature = "cluster")]
 async fn shared_peer_activity<R, RFut, T, F, Fut>(
     gate: &tokio::sync::Mutex<PeerActivityReadGate>,
     resolve: R,
@@ -445,6 +477,7 @@ where
     Ok(snapshot)
 }
 
+#[cfg(feature = "cluster")]
 async fn read_snapshot_response(
     response: reqwest::Response,
     deadline: tokio::time::Instant,
@@ -464,6 +497,7 @@ async fn read_snapshot_response(
     }
 }
 
+#[cfg(feature = "cluster")]
 fn classify_snapshot_response(
     status: StatusCode,
     body: &[u8],
@@ -478,6 +512,7 @@ fn classify_snapshot_response(
     }
 }
 
+#[cfg(feature = "cluster")]
 async fn collect_peer_outcomes<F, Fut>(
     peers: Vec<ActivityPeer>,
     deadline: tokio::time::Instant,
@@ -504,6 +539,7 @@ where
     outcomes
 }
 
+#[cfg(feature = "cluster")]
 pub async fn snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -511,6 +547,8 @@ pub async fn snapshot(
     let auth = peer_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::UNAUTHORIZED)?
         .authorize_activity_request(&auth)
         .await
         .unwrap_or(false)
@@ -523,12 +561,14 @@ pub async fn snapshot(
     ))
 }
 
+#[cfg(feature = "cluster")]
 fn snapshot_response_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     headers
 }
 
+#[cfg(feature = "cluster")]
 fn peer_auth_from_headers(headers: &HeaderMap) -> Option<ActivityPeerAuth> {
     Some(ActivityPeerAuth {
         node_id: headers.get(NODE_HEADER)?.to_str().ok()?.to_owned(),
@@ -539,10 +579,12 @@ fn peer_auth_from_headers(headers: &HeaderMap) -> Option<ActivityPeerAuth> {
 }
 
 #[cfg(test)]
+#[cfg(feature = "cluster")]
 fn activity_url(base: &str) -> Option<reqwest::Url> {
     super::peer_transport::peer_url(base, PATH)
 }
 
+#[cfg(feature = "cluster")]
 fn decode_snapshot(body: &[u8], expected_node_id: &str) -> PeerActivityOutcome {
     let Ok(snapshot) = serde_json::from_slice::<ActivitySnapshot>(body) else {
         return PeerActivityOutcome::InvalidResponse;
@@ -553,6 +595,7 @@ fn decode_snapshot(body: &[u8], expected_node_id: &str) -> PeerActivityOutcome {
     PeerActivityOutcome::Answered(snapshot)
 }
 
+#[cfg(feature = "cluster")]
 fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> bool {
     snapshot.node_id == expected_node_id
         && !snapshot.node_id.is_empty()
@@ -647,6 +690,7 @@ fn bounded_text(value: String, max_bytes: usize) -> String {
     value[..boundary].to_owned()
 }
 
+#[cfg(feature = "cluster")]
 async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
     let transcodes = state
         .transcode
@@ -790,6 +834,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
 }
 
 #[derive(Debug)]
+#[cfg(feature = "cluster")]
 enum ActivityCandidate {
     Transcode(crate::transcode::DeliveryCandidate),
     Vod(Box<crate::vodserve::VodDeliveryInfo>),
@@ -797,6 +842,7 @@ enum ActivityCandidate {
     Direct(crate::delivery::Live),
 }
 
+#[cfg(feature = "cluster")]
 impl ActivityCandidate {
     fn ordering_key(&self) -> (i64, &'static str, &str) {
         match self {
@@ -808,6 +854,7 @@ impl ActivityCandidate {
     }
 }
 
+#[cfg(feature = "cluster")]
 fn activity_candidates_bounded(
     transcodes: Vec<crate::transcode::DeliveryCandidate>,
     vod: Vec<crate::vodserve::VodDeliveryInfo>,
@@ -838,6 +885,7 @@ fn activity_candidates_bounded(
     candidates
 }
 
+#[cfg(feature = "cluster")]
 async fn candidate_titles<F, Fut>(
     candidates: &[ActivityCandidate],
     fetch: F,
@@ -865,6 +913,7 @@ where
 /// Keep the producer and consumer on the same exact wire budget. Serializing
 /// each candidate accounts for JSON escaping without repeatedly encoding the
 /// whole response, and preserves the newest-first ordering above.
+#[cfg(feature = "cluster")]
 fn bounded_snapshot(
     node_id: String,
     deliveries: Vec<ActivityDelivery>,
@@ -927,6 +976,7 @@ fn bounded_snapshot(
     snapshot
 }
 
+#[cfg(feature = "cluster")]
 fn attach_dvr_snapshot(
     snapshot: &mut ActivitySnapshot,
     source: crate::live_tv::dvr::DvrObservationSnapshot,
@@ -972,6 +1022,7 @@ fn attach_dvr_snapshot(
 }
 
 #[allow(dead_code)]
+#[cfg(feature = "cluster")]
 fn unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -980,7 +1031,7 @@ fn unix_ms() -> i64 {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -1075,12 +1126,10 @@ mod tests {
     #[tokio::test]
     async fn sqlite_peer_directory_is_local_only() {
         let (_, state) = crate::http::tests::test_app_with_state();
-        assert!(state
-            .peer_activity
-            .snapshots()
-            .await
-            .expect("SQLite has an empty peer directory")
-            .is_empty());
+        assert!(
+            state.peer_activity.is_none(),
+            "native SQLite has no peer service"
+        );
     }
 
     #[tokio::test]

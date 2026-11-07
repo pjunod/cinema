@@ -6,7 +6,7 @@
 # context and rustup honours it -- so this digest is the system-library
 # pin, nothing more. `scripts/image-base-drift` prints this digest beside
 # the current upstream one; the weekly Rust dependency audit runs it.
-FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
+FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build-source
 # `.git` is not in the build context (see .dockerignore), so the build script
 # can't derive the commit itself — CI passes it in, e.g.
 #   docker build --build-arg PLURX_BUILD_REF="$(git describe --tags --always --dirty)"
@@ -16,6 +16,8 @@ ARG PLURX_BUILD_REF=""
 ENV PLURX_BUILD_REF=${PLURX_BUILD_REF}
 ARG PLURX_BUILD_SHA=""
 ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}
+ARG PLURX_BUILD_TREE=""
+ENV PLURX_BUILD_TREE=${PLURX_BUILD_TREE}
 # The commit's committer time, so two builds of one commit stamp the same
 # `built_at` into plurxd (crates/plurxd/build_support/source_date.rs) and
 # BuildKit writes the same image timestamps. Every caller derives it:
@@ -26,6 +28,7 @@ ARG SOURCE_DATE_EPOCH
 ARG TARGETARCH
 WORKDIR /src
 COPY . .
+FROM build-source AS build
 # The target dirs below are cache mounts that outlive any one checkout, and
 # cargo decides a path crate is fresh from file mtimes, not contents. A node
 # that builds several commits can therefore end up linking plurxd against a
@@ -35,13 +38,24 @@ COPY . .
 # cache registry dependencies only.
 RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=plurx-target-plurxd-${TARGETARCH},sharing=locked,target=/src/target-plurxd \
+    find crates vendor -type f -exec touch {} + \
+    && scripts/check-standalone-graph \
+    && CARGO_TARGET_DIR=/src/target-plurxd cargo build --locked --release --no-default-features -p plurxd \
+    && cp target-plurxd/release/plurxd /plurxd \
+    && cp target-plurxd/release/plurxd.dwp /plurxd.dwp
+
+# Explicit cluster profile. This stage is unreachable from native runtime,
+# binary export and default-runtime; its SDK tools never enter standalone.
+FROM build-source AS build-cluster
+RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=plurx-target-plurxd-cluster-${TARGETARCH},sharing=locked,target=/src/target-plurxd-cluster \
     --mount=type=cache,id=plurx-target-cluster-check-${TARGETARCH},sharing=locked,target=/src/target-cluster-check \
     find crates vendor -type f -exec touch {} + \
-    && ! cargo tree --locked -p plurxd -e features \
-        | grep -q 'cluster-read-cost-validation' \
-    && CARGO_TARGET_DIR=/src/target-plurxd cargo build --locked --release -p plurxd \
-    && cp target-plurxd/release/plurxd /plurxd \
-    && cp target-plurxd/release/plurxd.dwp /plurxd.dwp \
+    && cargo tree --locked --no-default-features -p plurxd --features cluster -e features > /tmp/plurx-cluster-features \
+    && awk '/cluster-read-cost-validation/ { forbidden = 1 } END { exit forbidden ? 1 : 0 }' /tmp/plurx-cluster-features \
+    && CARGO_TARGET_DIR=/src/target-plurxd-cluster cargo build --locked --release --no-default-features -p plurxd --features cluster \
+    && cp target-plurxd-cluster/release/plurxd /plurxd \
+    && cp target-plurxd-cluster/release/plurxd.dwp /plurxd.dwp \
     && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check.dwp /plurx-cluster-check.dwp
@@ -347,6 +361,7 @@ ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}
 # Docker build args are stage-scoped, and a label inherited only by the build
 # stage would leave the shipped runtime unverifiable.
 LABEL org.opencontainers.image.revision="${PLURX_BUILD_SHA}"
+LABEL tv.plurx.distribution="standalone"
 # Apache-2.0 sec. 4(a)/4(d) and the OFL both condition redistribution on the
 # license text and notices travelling with the work. The web UI is compiled
 # into the binary, fonts and all, so an image carrying only /plurxd
@@ -364,11 +379,6 @@ COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/
 COPY licenses/ /usr/share/doc/plurx/licenses/
 COPY --from=build /plurxd /usr/local/bin/plurxd
 COPY --from=build /plurxd.dwp /usr/local/bin/plurxd.dwp
-# Stopped-node recovery and cluster validation tooling. The WAL inspector is
-# read-only, refuses a live lock, and lets an operator diagnose the same image
-# that produced the on-disk state without installing Rust on the host.
-COPY --from=build /plurx-cluster-check /usr/local/bin/plurx-cluster-check
-COPY --from=build /plurx-cluster-check.dwp /usr/local/bin/plurx-cluster-check.dwp
 
 # NVIDIA Container Toolkit must also mount the video encode/decode libraries.
 # This default covers direct Docker users; GPU device access is still runtime
@@ -389,7 +399,7 @@ EXPOSE 32400
 VOLUME ["/var/lib/plurx"]
 USER plurx
 
-# The default replicated startup may spend 45s reaching Hiqlite health, 45s
+# Explicit cluster startup may spend 45s reaching Hiqlite health, 45s
 # awaiting admission, then a 1,200s snapshot transfer plus a 120s final install
 # and 45s reaching its quorum watermark. Twenty-five minutes covers that 1,455s
 # budget with margin while still exposing a broken build promptly. Compose can
@@ -473,6 +483,82 @@ RUN cut -c67- /usr/lib/jellyfin-ffmpeg/provenance/system-elf-sha256.txt \
         > /usr/share/doc/plurx/media-runtime-packages.txt \
     && rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache
 USER plurx
+
+FROM runtime-assets AS runtime-cluster
+ARG PLURX_BUILD_SHA=""
+ARG PLURX_MEDIA_RUNTIME_DIGEST=""
+ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}
+# The fleet rollout inspects this label on the pulled image ID before it trusts
+# checkout-owned deployment policy. Redeclare the build arg in this final stage:
+# Docker build args are stage-scoped, and a label inherited only by the build
+# stage would leave the shipped runtime unverifiable.
+LABEL org.opencontainers.image.revision="${PLURX_BUILD_SHA}"
+LABEL tv.plurx.distribution="cluster"
+# Apache-2.0 sec. 4(a)/4(d) and the OFL both condition redistribution on the
+# license text and notices travelling with the work. The web UI is compiled
+# into the binary, fonts and all, so an image carrying only /plurxd
+# distributes those components with no notices attached.
+#
+# These copy from the BUILD CONTEXT rather than from the build stage, and
+# that is load bearing: validation/release_dockerfile.py rewrites the runtime
+# stage for release and rejects any build-stage copy it does not recognise as
+# a known binary artifact -- it matches on the literal token, so even naming
+# that form in a comment here fails the rewrite. A context copy passes
+# through untouched, and the release build's context (release-source) is a
+# full repo checkout, so these paths resolve there too.
+# tests/operations/test_release_publication.py holds both halves of that.
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/
+COPY licenses/ /usr/share/doc/plurx/licenses/
+COPY --from=build-cluster /plurxd /usr/local/bin/plurxd
+COPY --from=build-cluster /plurxd.dwp /usr/local/bin/plurxd.dwp
+COPY --from=build-cluster /plurx-cluster-check /usr/local/bin/plurx-cluster-check
+COPY --from=build-cluster /plurx-cluster-check.dwp /usr/local/bin/plurx-cluster-check.dwp
+
+# NVIDIA Container Toolkit must also mount the video encode/decode libraries.
+# This default covers direct Docker users; GPU device access is still runtime
+# configuration, supplied automatically by make docker-up on local Linux.
+# Default to jellyfin-ffmpeg (recent GPUs need its driver stack); override
+# either var to point elsewhere. It's a superset of system ffmpeg, so this is
+# safe on hardware that the distro build would also handle.
+ENV PLURX_BIND=0.0.0.0:32400 \
+    PLURX_DATA_DIR=/var/lib/plurx \
+    PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
+    PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe \
+    PLURX_BOUND_FFPROBE=/usr/local/lib/plurx/ffprobe \
+    PLURX_DOVI_TOOL=/usr/local/bin/dovi_tool \
+    PLURX_MKVMERGE=/usr/bin/mkvmerge \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility,graphics
+
+EXPOSE 32400
+VOLUME ["/var/lib/plurx"]
+USER plurx
+
+# Explicit cluster startup may spend 45s reaching Hiqlite health, 45s
+# awaiting admission, then a 1,200s snapshot transfer plus a 120s final install
+# and 45s reaching its quorum watermark. Twenty-five minutes covers that 1,455s
+# budget with margin while still exposing a broken build promptly. Compose can
+# lengthen the grace when an operator lengthens either snapshot stage; a
+# successful probe ends startup grace immediately and later failures use the
+# normal retry cadence.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=25m \
+    CMD ["plurxd", "healthcheck"]
+
+ENTRYPOINT ["plurxd"]
+CMD ["run"]
+
+# Separately exported optional legacy converter; never copied into either
+# ordinary runtime. Missing authenticated source provenance cannot create an
+# apparently version-matched helper artifact.
+FROM build-source AS build-storage-migration-helper
+RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=plurx-target-storage-helper-${TARGETARCH},sharing=locked,target=/src/target-storage-helper \
+    test "${#PLURX_BUILD_SHA}" = 40 && test "${#PLURX_BUILD_TREE}" = 40 \
+    && case "$PLURX_BUILD_SHA$PLURX_BUILD_TREE" in *[!0-9a-f]*) exit 1 ;; esac \
+    && find crates vendor -type f -exec touch {} + \
+    && CARGO_TARGET_DIR=/src/target-storage-helper cargo build --locked --release -p plurx-storage-migrate \
+    && cp target-storage-helper/release/plurx-storage-migrate /plurx-storage-migrate
+FROM scratch AS storage-migration-helper
+COPY --from=build-storage-migration-helper /plurx-storage-migrate /plurx-storage-migrate
 
 # Preserve the incumbent default Docker target. make docker selects
 # runtime-dolby-amd64 only when PLURX_LINUX_DOLBY_PACKAGE is supplied on amd64.

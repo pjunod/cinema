@@ -1,4 +1,3 @@
-
 /// The cleanup holds the player's replacement gate until it settles,
 /// and it settles only after it has aborted the worker and settled the
 /// request claim (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8; #573 review
@@ -276,10 +275,7 @@ async fn started_session_cleanup_shipped_shape() {
 
 #[tokio::test]
 async fn durable_activation_commit_cannot_straddle_serving_loss() {
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
-
-    let fence =
-        crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+    let fence = crate::serving_fence::ServingFence::local();
     let authority = fence.authority();
     let generation = authority.admit().expect("initial authority");
     let entered = Arc::new(tokio::sync::Barrier::new(2));
@@ -3353,7 +3349,12 @@ async fn terminal_failure_discards_the_unpolled_part_of_a_storage_batch() {
 fn continuous_family_capacity_is_retryable_after_bounded_admission() {
     let error = crate::transcode::vod_refusal_error("vod_family_capacity", "family still busy");
     match session_start_error(42, error) {
-        ApiError::TypedRetry { status, code, retry_after_seconds, .. } => {
+        ApiError::TypedRetry {
+            status,
+            code,
+            retry_after_seconds,
+            ..
+        } => {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(code, "transcode_capacity_pending");
             assert!(retry_after_seconds > 0);
@@ -3368,46 +3369,123 @@ async fn served_acquisition_hint_changes_only_response_and_keeps_owner_fence() {
     let fixture = HlsDeliveryFixture::publish(dir.path(), "acquisition-rolling-unused").await;
     let session = "acquisition-vod-http";
     let owner = install_vod_http_session(&fixture, dir.path(), session).await;
-    let baseline = fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("playlist");
+    let baseline = fixture
+        .state
+        .transcode
+        .vod_playlist(session)
+        .await
+        .expect("publication")
+        .result
+        .expect("playlist");
     let response = playlist(
-        State(fixture.state.clone()), AxPath(session.to_owned()),
-        Query(PlaylistQuery { acquisition_start_ms: Some(296_065), ..Default::default() }),
+        State(fixture.state.clone()),
+        AxPath(session.to_owned()),
+        Query(PlaylistQuery {
+            acquisition_start_ms: Some(296_065),
+            ..Default::default()
+        }),
         HeaderMap::new(),
-    ).await.expect("served hint");
+    )
+    .await
+    .expect("served hint");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     assert!(response.headers().get(header::ETAG).is_none());
-    let body = axum::body::to_bytes(response.into_body(), 1_048_576).await.expect("playlist body");
+    let body = axum::body::to_bytes(response.into_body(), 1_048_576)
+        .await
+        .expect("playlist body");
     let text = std::str::from_utf8(&body).expect("playlist text");
     let hint = "#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n";
     assert_eq!(text.matches("#EXT-X-START:").count(), 1);
     assert_eq!(text.replace(hint, "").as_bytes(), baseline);
-    assert_eq!(fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("baseline"), baseline);
-    assert!(fixture.state.transcode.stop_session(session, "deleted").await);
-    assert!(complete_buffered_response_before(
-        &fixture.state, session, &owner,
-        crate::transcode::MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
-        true, playlist_response(body.to_vec()), Instant::now() + Duration::from_secs(2),
-    ).await.is_err(), "old owner cannot publish fresh-query bytes after stop");
+    assert_eq!(
+        fixture
+            .state
+            .transcode
+            .vod_playlist(session)
+            .await
+            .expect("publication")
+            .result
+            .expect("baseline"),
+        baseline
+    );
+    assert!(
+        fixture
+            .state
+            .transcode
+            .stop_session(session, "deleted")
+            .await
+    );
+    assert!(
+        complete_buffered_response_before(
+            &fixture.state,
+            session,
+            &owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "playlist",
+                Some("index.m3u8")
+            ),
+            true,
+            playlist_response(body.to_vec()),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .is_err(),
+        "old owner cannot publish fresh-query bytes after stop"
+    );
 }
 
 #[tokio::test]
 async fn negotiated_relay_uses_owner_local_acquisition_and_preserves_cached_manifest() {
-    let dir=crate::test_tempdir().expect("VOD HTTP directory");
-    let fixture=HlsDeliveryFixture::publish(dir.path(),"relay-acquisition-unused").await;
-    let session="relay-acquisition-vod";
-    install_vod_http_session(&fixture,dir.path(),session).await;
-    let baseline=fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("baseline");
-    let response=relay_local(&fixture.state,RelayRequest {
-        session_id:session.to_owned(),resource:RelayResource::Playlist { native:None,subtitle:None,acquisition_start_ms:Some(296_065) },
-        deadline_unix_ms:resource_deadline_unix_ms(Instant::now()+Duration::from_secs(5)).expect("deadline"),headers:RelayHeaders::default(),
-    }).await;
-    assert_eq!(response.status(),StatusCode::OK);
-    let bytes=axum::body::to_bytes(response.into_body(),1_048_576).await.expect("body");
-    let text=std::str::from_utf8(&bytes).expect("playlist");
+    let dir = crate::test_tempdir().expect("VOD HTTP directory");
+    let fixture = HlsDeliveryFixture::publish(dir.path(), "relay-acquisition-unused").await;
+    let session = "relay-acquisition-vod";
+    install_vod_http_session(&fixture, dir.path(), session).await;
+    let baseline = fixture
+        .state
+        .transcode
+        .vod_playlist(session)
+        .await
+        .expect("publication")
+        .result
+        .expect("baseline");
+    let response = relay_local(
+        &fixture.state,
+        RelayRequest {
+            session_id: session.to_owned(),
+            resource: RelayResource::Playlist {
+                native: None,
+                subtitle: None,
+                acquisition_start_ms: Some(296_065),
+            },
+            deadline_unix_ms: resource_deadline_unix_ms(Instant::now() + Duration::from_secs(5))
+                .expect("deadline"),
+            headers: RelayHeaders::default(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1_048_576)
+        .await
+        .expect("body");
+    let text = std::str::from_utf8(&bytes).expect("playlist");
     assert!(text.contains("#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n"));
-    assert_eq!(text.replace("#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n","").as_bytes(),baseline);
-    assert_eq!(fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("unchanged"),baseline);
+    assert_eq!(
+        text.replace("#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n", "")
+            .as_bytes(),
+        baseline
+    );
+    assert_eq!(
+        fixture
+            .state
+            .transcode
+            .vod_playlist(session)
+            .await
+            .expect("publication")
+            .result
+            .expect("unchanged"),
+        baseline
+    );
 }
 
 /// M2 truthfulness: the reconstructed 8.1 claims "FEL used" only from the
@@ -3430,8 +3508,17 @@ fn reconstructed_p81_claims_fel_only_from_processing_truth_and_its_fallback_says
             .expect("FEL row for a P7 FEL source")
     };
     // No plan or receipt fact: the P7 FEL source alone must not light FEL.
-    let unknown = session_enhancement(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8),
-        None, None, None, None).expect("DV source");
+    let unknown = session_enhancement(
+        Some(&file),
+        &reconstructed,
+        OutputGrade::Hdr10,
+        Some(8),
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("DV source");
     assert!(!fel_row(&unknown).active, "{:?}", unknown);
     let generation = "00000000-0000-4000-8000-0000000000a1";
     let report = |fel: bool| {
@@ -3449,15 +3536,37 @@ fn reconstructed_p81_claims_fel_only_from_processing_truth_and_its_fallback_says
         .expect("a reconstructed 8.1 report")
     };
     // The served-window receipt outranks the plan in both directions.
-    let receipt_no = session_enhancement(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8),
-        Some(true), Some(&report(false)), None, None).expect("DV source");
+    let receipt_no = session_enhancement(
+        Some(&file),
+        &reconstructed,
+        OutputGrade::Hdr10,
+        Some(8),
+        Some(true),
+        Some(&report(false)),
+        None,
+        None,
+    )
+    .expect("DV source");
     assert!(!fel_row(&receipt_no).active);
-    let receipt_yes = session_enhancement(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8),
-        Some(true), Some(&report(true)), None, None).expect("DV source");
+    let receipt_yes = session_enhancement(
+        Some(&file),
+        &reconstructed,
+        OutputGrade::Hdr10,
+        Some(8),
+        Some(true),
+        Some(&report(true)),
+        None,
+        None,
+    )
+    .expect("DV source");
     assert!(fel_row(&receipt_yes).active);
     assert_eq!(
         receipt_yes.active,
-        [EnhancementBadge::Fel, EnhancementBadge::Rpu, EnhancementBadge::Dyn]
+        [
+            EnhancementBadge::Fel,
+            EnhancementBadge::Rpu,
+            EnhancementBadge::Dyn
+        ]
     );
     // The busy-slot decline reaches the converted fallback's FEL row.
     let converted = crate::transcode::SessionKind::Copy {
@@ -3491,8 +3600,17 @@ fn reconstructed_p81_claims_fel_only_from_processing_truth_and_its_fallback_says
                 .expect_err("second live reconstruction")
         })
     };
-    let fallback = session_enhancement(Some(&file), &converted, OutputGrade::Hdr10, None, None,
-        None, None, Some(&busy)).expect("DV source");
+    let fallback = session_enhancement(
+        Some(&file),
+        &converted,
+        OutputGrade::Hdr10,
+        None,
+        None,
+        None,
+        None,
+        Some(&busy),
+    )
+    .expect("DV source");
     let row = fel_row(&fallback);
     assert!(!row.active);
     assert!(row.text.contains(&busy), "{}", row.text);
@@ -3524,7 +3642,12 @@ fn a_reconstructed_profile81_copy_is_described_as_reconstructed() {
         (Some("dolby_vision"), Some(8))
     );
     assert_eq!(
-        session_delivered_processing_shape(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8)),
+        session_delivered_processing_shape(
+            Some(&file),
+            &reconstructed,
+            OutputGrade::Hdr10,
+            Some(8)
+        ),
         (Some("dolby_vision"), Some(8))
     );
     let shown = session_enhancement(
@@ -3540,10 +3663,23 @@ fn a_reconstructed_profile81_copy_is_described_as_reconstructed() {
     .expect("a Dolby Vision source");
     assert_eq!(
         shown.active,
-        [EnhancementBadge::Fel, EnhancementBadge::Rpu, EnhancementBadge::Dyn]
+        [
+            EnhancementBadge::Fel,
+            EnhancementBadge::Rpu,
+            EnhancementBadge::Dyn
+        ]
     );
-    let projected_legacy = session_enhancement(Some(&file), &converted, OutputGrade::Hdr10,
-        Some(8), Some(true), None, None, None).expect("owner-projected completed legacy carrier");
+    let projected_legacy = session_enhancement(
+        Some(&file),
+        &converted,
+        OutputGrade::Hdr10,
+        Some(8),
+        Some(true),
+        None,
+        None,
+        None,
+    )
+    .expect("owner-projected completed legacy carrier");
     assert_eq!(projected_legacy.active, shown.active);
     // The plain conversion still says why the FEL is unused.
     let plain = session_enhancement(
@@ -3566,9 +3702,17 @@ fn the_enhancement_follows_the_selected_plan_before_any_report() {
     use plurx_core::transcode::OutputGrade;
     let file = dolby_vision_p7_file();
     let rung = crate::transcode::SessionKind::Transcode { height: 2160 };
-    let planned =
-        session_enhancement(Some(&file), &rung, OutputGrade::Hdr10, None, Some(true), None, None, None)
-            .expect("a Dolby Vision source");
+    let planned = session_enhancement(
+        Some(&file),
+        &rung,
+        OutputGrade::Hdr10,
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+    )
+    .expect("a Dolby Vision source");
     assert!(planned.requires_effective_processing);
     assert!(planned
         .details
@@ -3578,19 +3722,40 @@ fn the_enhancement_follows_the_selected_plan_before_any_report() {
         .details
         .iter()
         .any(|detail| detail.badge == EnhancementBadge::Fel && detail.active));
-    let base = session_enhancement(Some(&file), &rung, OutputGrade::Hdr10, None, None, None, None, None)
-        .expect("a Dolby Vision source");
+    let base = session_enhancement(
+        Some(&file),
+        &rung,
+        OutputGrade::Hdr10,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("a Dolby Vision source");
     assert!(base.active.is_empty() && !base.requires_effective_processing);
     // No settings snapshot (a prepared successor): never claims the setting is off.
-    assert!(base.details.iter().all(|detail| !detail.text.contains("Settings")));
+    assert!(base
+        .details
+        .iter()
+        .all(|detail| !detail.text.contains("Settings")));
     let native = crate::transcode::SessionKind::Copy {
         convert_dolby_vision: false,
         dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: true,
     };
-    let kept = session_enhancement(Some(&file), &native, OutputGrade::Sdr, None, None, None, None, None)
-        .expect("a Dolby Vision source");
+    let kept = session_enhancement(
+        Some(&file),
+        &native,
+        OutputGrade::Sdr,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("a Dolby Vision source");
     assert_eq!(kept.active, [EnhancementBadge::Dyn]);
 }
 
@@ -3603,7 +3768,10 @@ fn source_telemetry_is_explicit_retained_and_independent_of_transport() {
     }))
     .expect("deserialize legacy request without source telemetry");
     let legacy = legacy.into_request(17, 720);
-    assert_eq!(legacy.source_telemetry, None, "transport is not a film-observation claim");
+    assert_eq!(
+        legacy.source_telemetry, None,
+        "transport is not a film-observation claim"
+    );
     let modern: CreateSession = serde_json::from_value(serde_json::json!({
         "playback_id": "legacy",
         "source_telemetry": "film-v1",
@@ -3614,15 +3782,23 @@ fn source_telemetry_is_explicit_retained_and_independent_of_transport() {
     assert_eq!(modern.transport, None);
     let encoded = serde_json::to_value(&modern).expect("serialize source telemetry request");
     assert_eq!(encoded["source_telemetry"], "film-v1");
-    let replay: SessionRequest = serde_json::from_value(encoded)
-        .expect("deserialize encoded source telemetry request");
+    let replay: SessionRequest =
+        serde_json::from_value(encoded).expect("deserialize encoded source telemetry request");
     assert_eq!(replay.source_telemetry, modern.source_telemetry);
     let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
-    assert_eq!(legacy.durable_intent_fingerprint(&principal), modern.durable_intent_fingerprint(&principal), "source service metadata is not media identity");
+    assert_eq!(
+        legacy.durable_intent_fingerprint(&principal),
+        modern.durable_intent_fingerprint(&principal),
+        "source service metadata is not media identity"
+    );
     let unknown: CreateSession = serde_json::from_value(serde_json::json!({
         "playback_id": "future",
         "source_telemetry": "future-v2",
     }))
     .expect("deserialize unknown optional source telemetry request");
-    assert_eq!(unknown.into_request(17, 720).source_telemetry, None, "an unknown optional service declaration retains legacy playback");
+    assert_eq!(
+        unknown.into_request(17, 720).source_telemetry,
+        None,
+        "an unknown optional service declaration retains legacy playback"
+    );
 }

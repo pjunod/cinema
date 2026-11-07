@@ -476,6 +476,7 @@ async fn local_projection_prunes_age_and_prefers_important_events_under_pressure
     f.finish().await;
 }
 
+#[cfg(feature = "cluster")]
 #[tokio::test]
 async fn peer_snapshot_refuses_unsigned_requests_before_exposing_local_history() {
     let f = Fixture::new().await;

@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::error::StoreError;
 
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const DV_CONVERSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS dv_conversions (
     file_id        INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
     state          TEXT NOT NULL,
@@ -28,10 +29,12 @@ pub(crate) const DV_CONVERSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS dv_co
                          OR recovery_guard_id IS NOT NULL)
 ) STRICT";
 
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const DV_CONVERSIONS_QUEUE_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS dv_conversions_queue
         ON dv_conversions(state, queued_at_ms, file_id)";
 
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const DV_CONVERSIONS_RECOVERY_GUARD_INDEX: &str =
     "CREATE UNIQUE INDEX IF NOT EXISTS dv_conversions_recovery_guard
         ON dv_conversions(recovery_guard_id) WHERE recovery_guard_id IS NOT NULL";
@@ -185,6 +188,7 @@ macro_rules! dv_queue_admission_provenance_trigger {
     };
 }
 
+#[cfg(any(test, feature = "hiqlite-store"))]
 pub(crate) const DV_QUEUE_ADMISSION_TRIGGER: &str =
     dv_queue_admission_provenance_trigger!("IF NOT EXISTS ");
 
@@ -207,6 +211,7 @@ pub(crate) const DV_REQUEST_PROVENANCE_COLUMN: &str =
 /// catalogue row. `guard_id`, not `file_id`, is the durable identity: SQLite
 /// may reuse a deleted integer row id, and a new file must never make an old
 /// recovery guard look attached again.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const DV_RECOVERY_GUARDS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS dv_recovery_guards (
     guard_id       TEXT PRIMARY KEY,
     file_id        INTEGER NOT NULL,
@@ -219,6 +224,7 @@ pub(crate) const DV_RECOVERY_GUARDS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS d
     updated_at_ms  INTEGER NOT NULL
 ) STRICT";
 
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const DV_RECOVERY_GUARDS_FILE_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS dv_recovery_guards_file
         ON dv_recovery_guards(file_id, guard_id)";
@@ -228,6 +234,7 @@ pub(crate) const DV_RECOVERY_GUARDS_FILE_INDEX: &str =
 /// Bootstrap is deliberately idempotent, but a migration marker must never
 /// advance across a pre-existing object whose shape this binary did not
 /// create. Keeping the migration strings separate preserves both properties.
+#[cfg(any(test, feature = "hiqlite-store"))]
 pub(crate) const DV_CONVERSIONS_MIGRATION_SCHEMA: &str = "CREATE TABLE dv_conversions (
     file_id        INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
     state          TEXT NOT NULL,
@@ -240,18 +247,22 @@ pub(crate) const DV_CONVERSIONS_MIGRATION_SCHEMA: &str = "CREATE TABLE dv_conver
     finished_at_ms INTEGER
 ) STRICT";
 
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const DV_CONVERSIONS_MIGRATION_QUEUE_INDEX: &str = "CREATE INDEX dv_conversions_queue
         ON dv_conversions(state, queued_at_ms, file_id)";
 
+#[cfg(any(test, feature = "hiqlite-store"))]
 pub(crate) const DV_RECOVERY_GUARDS_MIGRATION_COLUMN: &str =
     "ALTER TABLE dv_conversions ADD COLUMN recovery_guard_id TEXT CHECK
          (state != 'committed' OR original_path IS NOT NULL
           OR recovery_guard_id IS NOT NULL)";
 
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const DV_RECOVERY_GUARDS_MIGRATION_LINK_INDEX: &str =
     "CREATE UNIQUE INDEX dv_conversions_recovery_guard
         ON dv_conversions(recovery_guard_id) WHERE recovery_guard_id IS NOT NULL";
 
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const DV_RECOVERY_GUARDS_MIGRATION_SCHEMA: &str = "CREATE TABLE dv_recovery_guards (
     guard_id       TEXT PRIMARY KEY,
     file_id        INTEGER NOT NULL,
@@ -264,6 +275,7 @@ pub(crate) const DV_RECOVERY_GUARDS_MIGRATION_SCHEMA: &str = "CREATE TABLE dv_re
     updated_at_ms  INTEGER NOT NULL
 ) STRICT";
 
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const DV_RECOVERY_GUARDS_MIGRATION_FILE_INDEX: &str =
     "CREATE INDEX dv_recovery_guards_file
         ON dv_recovery_guards(file_id, guard_id)";

@@ -80,6 +80,8 @@ impl CacheAdminMembershipExclusion {
     fn prepare(state: &AppState, operation_guard: RevocationAdmission) -> Result<Self, ApiError> {
         let lease = state
             .membership
+            .as_ref()
+            .ok_or_else(propagation_error)?
             .is_replicated()
             .then(|| {
                 MembershipManager::prepare_cache_admin_revocation_claim(
@@ -92,7 +94,11 @@ impl CacheAdminMembershipExclusion {
         Ok(Self {
             lease,
             operation_guard: Some(operation_guard),
-            membership: state.membership.clone(),
+            membership: state
+                .membership
+                .as_ref()
+                .ok_or_else(propagation_error)?
+                .clone(),
             shutdown: state.shutdown.clone(),
             release_runtime: tokio::runtime::Handle::current(),
         })
@@ -227,10 +233,11 @@ struct Request {
 /// clearing them while the Store commit outcome is unknown would be unsafe.
 pub(crate) struct ClusterCacheRevocation {
     local: Option<CacheOnlyAdminRevocation>,
-    membership_exclusion: CacheAdminMembershipExclusion,
+    native: Option<super::native_auth_revocation::NativeCacheRevocation>,
+    membership_exclusion: Option<CacheAdminMembershipExclusion>,
     operation_id: String,
     peers: Vec<ActivityPeer>,
-    transport: PeerTransport,
+    transport: Option<PeerTransport>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -247,11 +254,13 @@ impl ClusterCacheRevocation {
     pub(crate) async fn activate_if_ready(
         state: &AppState,
     ) -> Result<CacheAdminRevocationActivation, ApiError> {
-        if !state.membership.is_replicated() {
+        if !state.is_replicated() {
             return Ok(CacheAdminRevocationActivation::Pending);
         }
         if state
             .membership
+            .as_ref()
+            .ok_or_else(propagation_error)?
             .cache_admin_revocation_activated_locally()
             .await
             .map_err(|_| propagation_error())?
@@ -260,6 +269,8 @@ impl ClusterCacheRevocation {
         }
         if !state
             .membership
+            .as_ref()
+            .ok_or_else(propagation_error)?
             .cache_admin_revocation_activation_ready()
             .await
             .map_err(|_| propagation_error())?
@@ -280,6 +291,21 @@ impl ClusterCacheRevocation {
     }
 
     pub(crate) async fn begin_digest(state: &AppState, digest: &str) -> Result<Self, ApiError> {
+        if !state.is_replicated() {
+            return Ok(Self {
+                native: Some(
+                    super::native_auth_revocation::NativeCacheRevocation::begin_digest(
+                        state, digest,
+                    )
+                    .await?,
+                ),
+                local: None,
+                membership_exclusion: None,
+                operation_id: String::new(),
+                peers: Vec::new(),
+                transport: None,
+            });
+        }
         let operation_guard = state
             .cache_only_admin_proofs
             .acquire_revocation_operation()
@@ -301,6 +327,21 @@ impl ClusterCacheRevocation {
     }
 
     pub(crate) async fn begin_user(state: &AppState, user_id: i64) -> Result<Self, ApiError> {
+        if !state.is_replicated() {
+            return Ok(Self {
+                native: Some(
+                    super::native_auth_revocation::NativeCacheRevocation::begin_user(
+                        state, user_id,
+                    )
+                    .await?,
+                ),
+                local: None,
+                membership_exclusion: None,
+                operation_id: String::new(),
+                peers: Vec::new(),
+                transport: None,
+            });
+        }
         let operation_guard = state
             .cache_only_admin_proofs
             .acquire_revocation_operation()
@@ -318,12 +359,22 @@ impl ClusterCacheRevocation {
         let mut membership_exclusion =
             CacheAdminMembershipExclusion::prepare(state, operation_guard)?;
         membership_exclusion.commit().await?;
-        let transport = PeerTransport::new(state.membership.clone());
+        let transport = PeerTransport::new(
+            state
+                .membership
+                .as_ref()
+                .ok_or_else(propagation_error)?
+                .clone(),
+        );
         // The wire operation ID is the exact replicated claim. A peer only
         // acknowledges Begin after this same row is visible in its local
         // applied SQL, causally ordering any later absence after the acquire.
         let operation_id = membership_exclusion.operation_id();
-        let membership = state.membership.clone();
+        let membership = state
+            .membership
+            .as_ref()
+            .ok_or_else(propagation_error)?
+            .clone();
         let claim_id = operation_id.clone();
         if wait_for_exact_local_claim_with(&state.shutdown, move || {
             let membership = membership.clone();
@@ -377,11 +428,12 @@ impl ClusterCacheRevocation {
                 // consecutive committed-roster reads has acknowledged Begin.
                 local.arm_ambiguity();
                 return Ok(Self {
+                    native: None,
                     local: Some(local),
-                    membership_exclusion,
+                    membership_exclusion: Some(membership_exclusion),
                     operation_id,
                     peers: roster.peers(),
-                    transport,
+                    transport: Some(transport),
                 });
             }
         }
@@ -394,12 +446,16 @@ impl ClusterCacheRevocation {
     /// roster with the begin roster gives concurrently added members the final
     /// global invalidation before the API reports success.
     pub(crate) async fn finish(mut self, state: &AppState) -> Result<(), ApiError> {
+        if let Some(native) = self.native.take() {
+            return native.finish(state).await;
+        }
+        let transport = self.transport.as_ref().ok_or_else(propagation_error)?;
         let deadline = deadline_after(FANOUT_TIMEOUT);
         let current = match peer_directory(state, &self.operation_id, deadline).await {
             Ok(peers) => peers,
             Err(error) => {
                 let _ = fanout(
-                    &self.transport,
+                    transport,
                     &self.peers,
                     &self.request(Phase::End),
                     deadline_after(FANOUT_TIMEOUT),
@@ -421,7 +477,7 @@ impl ClusterCacheRevocation {
         let peers = merge_peers(self.peers.iter().chain(current.iter()));
         if !revocation_peer_count_is_bounded(peers.len()) {
             let _ = fanout(
-                &self.transport,
+                transport,
                 &self.peers,
                 &self.request(Phase::End),
                 deadline_after(FANOUT_TIMEOUT),
@@ -434,20 +490,18 @@ impl ClusterCacheRevocation {
         // pre-Store stability barrier; it closes authority immediately if a
         // membership commit raced the Store call itself.
         if !late.is_empty() {
-            fanout(
-                &self.transport,
-                &late,
-                &self.request(Phase::Begin),
-                deadline,
-            )
-            .await?;
+            fanout(transport, &late, &self.request(Phase::Begin), deadline).await?;
         }
-        fanout(&self.transport, &peers, &self.request(Phase::End), deadline).await?;
+        fanout(transport, &peers, &self.request(Phase::End), deadline).await?;
         // Membership remains excluded until the committed Store mutation has
         // completed and every fenced member has cleared its cached proof. An
         // exact release failure leaves both this lease and the local ambiguity
         // fence armed for bounded fail-closed cleanup.
-        self.membership_exclusion.release().await?;
+        self.membership_exclusion
+            .as_mut()
+            .ok_or_else(propagation_error)?
+            .release()
+            .await?;
         self.local
             .take()
             .expect("cluster cache revocation owns its local fence")
@@ -459,7 +513,12 @@ impl ClusterCacheRevocation {
     /// Exact Store predicate for the credential mutation inside this guard.
     /// Standalone SQLite has no membership writer and therefore returns None.
     pub(crate) fn mutation_claim(&self) -> Option<&CacheAdminMutationClaim> {
-        self.membership_exclusion.mutation_claim()
+        if let Some(native) = self.native.as_ref() {
+            return native.mutation_claim();
+        }
+        self.membership_exclusion
+            .as_ref()
+            .and_then(CacheAdminMembershipExclusion::mutation_claim)
     }
 
     fn request(&self, phase: Phase) -> Request {
@@ -479,7 +538,7 @@ pub(crate) async fn cache_admin_revocation_activation_loop(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
-    if !state.membership.is_replicated() {
+    if !state.is_replicated() {
         return;
     }
     cache_admin_revocation_activation_loop_with(shutdown, move || {
@@ -492,7 +551,13 @@ pub(crate) async fn cache_admin_revocation_activation_loop(
                 // route answering 401 to a valid session — which reaches them
                 // as a login page, and reaches nobody as a cause.
                 Err(error) => Err(
-                    match state.membership.cache_admin_exclusion_blockers().await {
+                    match state
+                        .membership
+                        .as_ref()
+                        .ok_or_else(|| "cluster membership is unavailable".to_owned())?
+                        .cache_admin_exclusion_blockers()
+                        .await
+                    {
                         Ok(blockers) if !blockers.is_empty() => {
                             format!("{error:?}; blocked by: {}", blockers.join(", "))
                         }
@@ -594,7 +659,11 @@ async fn peer_directory(
 ) -> Result<Vec<ActivityPeer>, ApiError> {
     let peers = tokio::time::timeout_at(
         deadline,
-        state.membership.cache_admin_revocation_peers(claim_id),
+        state
+            .membership
+            .as_ref()
+            .ok_or_else(propagation_error)?
+            .cache_admin_revocation_peers(claim_id),
     )
     .await
     .map_err(|_| propagation_error())?
@@ -669,9 +738,12 @@ pub(crate) async fn receive(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response<Body>, StatusCode> {
-    let auth = exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    if !state
+    let membership = state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let auth = exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    if !membership
         .authorize_internal_peer_request(&auth, "POST", PATH, &body)
         .await
         .unwrap_or(false)
@@ -680,14 +752,14 @@ pub(crate) async fn receive(
     }
     let request: Request = serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     validate(&request)?;
-    let membership = state.membership.clone();
+    let claim_membership = membership.clone();
     let claim_id = request.operation_id.clone();
     apply_and_wait_for_local_claim_with(
         &state.cache_only_admin_proofs,
         &request,
         &state.shutdown,
         move || {
-            let membership = membership.clone();
+            let membership = claim_membership.clone();
             let claim_id = claim_id.clone();
             async move {
                 membership
@@ -704,8 +776,7 @@ pub(crate) async fn receive(
     // exact status/body so a relay cannot forge or replay Begin/End success.
     let payload =
         super::peer_transport::signed_response_payload(StatusCode::NO_CONTENT.as_u16(), &[]);
-    let signature = state
-        .membership
+    let signature = membership
         .sign_internal_peer_response(&auth.node_id, &auth.nonce, PATH, &payload)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Response::builder()
@@ -911,7 +982,7 @@ mod tests {
         assert!(
             finish.find("self.request(Phase::End)").expect("peer end")
                 < finish
-                    .rfind("self.membership_exclusion.release().await?")
+                    .rfind("self.membership_exclusion.as_mut().ok_or_else(propagation_error)?.release().await?")
                     .expect("replicated exclusion release")
         );
         let drop_owner = source

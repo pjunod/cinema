@@ -1,9 +1,11 @@
 [workspace]
 resolver = "2"
+default-members = ["crates/plurxd"]
 members = [
     "crates/plurx-desktop-control",
     "crates/plurx-tray",
     "crates/plurx-core",
+    "crates/plurx-storage-migrate",
     "crates/plurx-cluster-check",
     "crates/plurx-compat-plex",
     "crates/plurx-compat-jellyfin",
@@ -41,8 +43,8 @@ tower-http = { version = "0.6", features = ["trace"] }
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync", "process", "io-util", "fs"] }
 async-trait = "0.1"
-# Storage. M2 selects one-voter Hiqlite after a verified SQLite import; the
-# retained SQLite database is the pre-membership rollback source.
+# Native SQLite is the default. The cluster SDK and WAL are selected only by
+# the explicit cluster profile or the separately packaged legacy migrator.
 rusqlite = { version = "0.40", features = ["backup", "bundled"] }
 hiqlite = { version = "=0.14.0", default-features = false, features = ["auto-heal", "macros", "sqlite"] }
 hiqlite-wal = { version = "=0.14.0" }

@@ -103,6 +103,7 @@ pub(crate) struct QualityControlResponse {
     pub pending_identity: Option<QualityIntentIdentity>,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl QualityControlResponse {
     pub(crate) fn valid_for(&self, request: &QualityControlRequest) -> bool {
         self.version == 1

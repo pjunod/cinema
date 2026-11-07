@@ -1,7 +1,20 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-05 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
+
+## 2026-11-05 · Standalone compilation and legacy migration packaging
+
+Codex/root is qualifying the implemented native-default/explicit-cluster build
+cut. The selected standalone daemon/controller/tray graph has no cluster SDK;
+legacy migration uses a separate signed helper or an explicit verified-source
+CLI. Focused helper, signed-staging and SQLite-close regressions passed on
+distinct snapshots. Current Clippy/SDK compatibility, real FFmpeg HTTP/CLI-child
+and release qualification remain pending; this draft is not merged to main.
+Private authority, schema and credential owners remain in Core. The
+[canonical plan and evidence ledger](docs/ci/CINEMA-MODULAR-BUILD-PLAN.md) records
+the remaining gates and separate future extraction work.
+
 
 ## 2026-11-03 · Playback publication and Resume overlay
 

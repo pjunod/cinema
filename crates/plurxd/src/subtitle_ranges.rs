@@ -5,22 +5,29 @@
 use std::path::Path;
 use std::time::Duration;
 
+#[cfg(feature = "cluster")]
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use plurx_core::domain::MediaFile;
+#[cfg(any(test, feature = "cluster"))]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "cluster")]
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "cluster")]
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 use crate::subtitle_source::StoreAccess;
 
 pub(crate) const PATH: &str = "/internal/media/subtitle-range";
+#[cfg(feature = "cluster")]
 pub(crate) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 const MAX_VTT: u64 = 8 * 1024 * 1024;
 const PEER_BUDGET: Duration = Duration::from_secs(30);
+#[cfg(feature = "cluster")]
 pub(crate) const WORK_BUDGET: Duration = Duration::from_secs(25);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) struct Request {
     pub file_id: i64,
     pub size: i64,
@@ -33,6 +40,7 @@ pub(crate) struct Request {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "cluster")]
 pub(crate) struct Answer {
     pub request: Request,
     pub vtt: String,
@@ -52,7 +60,9 @@ pub(crate) fn indexed_text(file: &MediaFile, ordinal: i64) -> bool {
         })
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl Request {
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn matches(&self, file: &MediaFile) -> bool {
         self.file_id == file.id
             && self.size == file.size
@@ -68,6 +78,7 @@ impl Request {
             && indexed_text(file, self.ordinal)
     }
 
+    #[cfg(feature = "cluster")]
     fn same(&self, other: &Self) -> bool {
         self.file_id == other.file_id
             && self.size == other.size
@@ -200,6 +211,7 @@ where
     current
 }
 
+#[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
 async fn prefetch(
     access: &StoreAccess,
     dir: &Path,
@@ -208,97 +220,105 @@ async fn prefetch(
     anchor: i64,
     span: i64,
 ) -> Result<(), String> {
-    let Some(membership) = access.membership() else {
-        return Ok(());
-    };
-    let node_id = access.node_id().unwrap_or_default();
-    let peers = tokio::time::timeout(Duration::from_secs(2), membership.media_peers()).await;
-    let peers: Vec<_> = peers
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|peer| peer.reachable && peer.node_id != node_id && peer.http_base.is_some())
-        .take(2)
-        .collect();
-    if peers.is_empty() {
-        return Ok(());
+    #[cfg(not(feature = "cluster"))]
+    {
+        Ok(())
     }
-    let attested =
-        crate::fragment_index_cluster::attest_source(node_id, file, None, &|_| {}).await?;
-    let digest = attested.observation.source_sha256.clone();
-    let transport = PeerTransport::new(membership.clone());
-    let mut ahead = FuturesUnordered::new();
-    for (offset, peer) in peers.into_iter().enumerate() {
-        let next = anchor.saturating_add(span.saturating_mul(offset as i64 + 1));
-        if file
-            .duration_ms
-            .is_none_or(|duration| next >= duration / 1000)
-        {
-            continue;
-        }
-        if crate::subtitles::read_cached_window(dir, file, ordinal, next, span)
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            continue;
-        }
-        let request = Request {
-            file_id: file.id,
-            size: file.size,
-            mtime: file.mtime,
-            ordinal,
-            anchor: next,
-            span,
-            attestation: digest.clone(),
+    #[cfg(feature = "cluster")]
+    {
+        let Some(membership) = access.membership() else {
+            return Ok(());
         };
-        let transport = transport.clone();
-        ahead.push(async move {
-            let body = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
-            let response = transport
-                .request(
-                    &peer.node_id,
-                    peer.http_base.as_deref().unwrap_or_default(),
-                    reqwest::Method::POST,
-                    PATH,
-                    body,
-                    tokio::time::Instant::now() + PEER_BUDGET,
-                    MAX_RESPONSE,
-                    PeerAuthMode::ExactRequestAndMemberResponse,
-                )
-                .await
-                .map_err(|_| "subtitle peer unavailable".to_owned())?;
-            if !response.status.is_success() {
-                return Err("subtitle peer refused range".to_owned());
-            }
-            let answer: Answer =
-                serde_json::from_slice(&response.body).map_err(|e| e.to_string())?;
-            if !request.same(&answer.request)
-                || answer.sha256 != hex::encode(Sha256::digest(answer.vtt.as_bytes()))
-                || !valid_vtt(&answer.vtt, request.anchor, request.span)
-            {
-                return Err("subtitle peer returned a different range".to_owned());
-            }
-            Ok((request.anchor, answer.vtt))
-        });
-    }
-    while let Some(result) = ahead.next().await {
-        if let Ok((next, vtt)) = result {
-            verify_source(file, &attested).await?;
-            publish(dir, file, ordinal, next, span, vtt.as_bytes()).await?;
-            tracing::info!(
-                file_id = file.id,
-                ordinal,
-                anchor = next,
-                "peer subtitle playback range cached"
-            );
+        let node_id = access.node_id().unwrap_or_default();
+        let peers = tokio::time::timeout(Duration::from_secs(2), membership.media_peers()).await;
+        let peers: Vec<_> = peers
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|peer| peer.reachable && peer.node_id != node_id && peer.http_base.is_some())
+            .take(2)
+            .collect();
+        if peers.is_empty() {
+            return Ok(());
         }
+        let attested =
+            crate::fragment_index_cluster::attest_source(node_id, file, None, &|_| {}).await?;
+        let digest = attested.observation.source_sha256.clone();
+        let transport = PeerTransport::new(membership.clone());
+        let mut ahead = FuturesUnordered::new();
+        for (offset, peer) in peers.into_iter().enumerate() {
+            let next = anchor.saturating_add(span.saturating_mul(offset as i64 + 1));
+            if file
+                .duration_ms
+                .is_none_or(|duration| next >= duration / 1000)
+            {
+                continue;
+            }
+            if crate::subtitles::read_cached_window(dir, file, ordinal, next, span)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
+            let request = Request {
+                file_id: file.id,
+                size: file.size,
+                mtime: file.mtime,
+                ordinal,
+                anchor: next,
+                span,
+                attestation: digest.clone(),
+            };
+            let transport = transport.clone();
+            ahead.push(async move {
+                let body = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+                let response = transport
+                    .request(
+                        &peer.node_id,
+                        peer.http_base.as_deref().unwrap_or_default(),
+                        reqwest::Method::POST,
+                        PATH,
+                        body,
+                        tokio::time::Instant::now() + PEER_BUDGET,
+                        MAX_RESPONSE,
+                        PeerAuthMode::ExactRequestAndMemberResponse,
+                    )
+                    .await
+                    .map_err(|_| "subtitle peer unavailable".to_owned())?;
+                if !response.status.is_success() {
+                    return Err("subtitle peer refused range".to_owned());
+                }
+                let answer: Answer =
+                    serde_json::from_slice(&response.body).map_err(|e| e.to_string())?;
+                if !request.same(&answer.request)
+                    || answer.sha256 != hex::encode(Sha256::digest(answer.vtt.as_bytes()))
+                    || !valid_vtt(&answer.vtt, request.anchor, request.span)
+                {
+                    return Err("subtitle peer returned a different range".to_owned());
+                }
+                Ok((request.anchor, answer.vtt))
+            });
+        }
+        while let Some(result) = ahead.next().await {
+            if let Ok((next, vtt)) = result {
+                verify_source(file, &attested).await?;
+                publish(dir, file, ordinal, next, span, vtt.as_bytes()).await?;
+                tracing::info!(
+                    file_id = file.id,
+                    ordinal,
+                    anchor = next,
+                    "peer subtitle playback range cached"
+                );
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn verify_source(
     file: &MediaFile,
     attested: &crate::fragment_index_cluster::AttestedSource,
@@ -315,6 +335,7 @@ async fn verify_source(
     Ok(())
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn verify_requested_source(
     request: &Request,
     attested: &crate::fragment_index_cluster::AttestedSource,
@@ -327,6 +348,7 @@ fn verify_requested_source(
 
 /// Peer execution opens only the library's stored path, never a caller path.
 /// The returned bytes are bound to the sampled digest and exact range.
+#[cfg(feature = "cluster")]
 pub(crate) async fn execute(
     state: &crate::state::AppState,
     request: Request,
@@ -376,7 +398,9 @@ pub(crate) async fn execute(
     })
 }
 
+#[cfg(feature = "cluster")]
 struct Temp(std::path::PathBuf);
+#[cfg(feature = "cluster")]
 impl Drop for Temp {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
@@ -489,10 +513,14 @@ fn cue_timestamp(raw: &str) -> Option<f64> {
     Some(hours as f64 * 3600.0 + minutes as f64 * 60.0 + seconds)
 }
 
+#[cfg(any(test, feature = "cluster"))]
 static CLAIMS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
+#[cfg(any(test, feature = "cluster"))]
 struct RangeClaim(String);
+#[cfg(any(test, feature = "cluster"))]
 impl RangeClaim {
+    #[cfg(any(test, feature = "cluster"))]
     fn acquire(request: &Request) -> Result<Self, String> {
         let key = serde_json::to_string(request).map_err(|e| e.to_string())?;
         let mut claims = CLAIMS
@@ -504,6 +532,7 @@ impl RangeClaim {
         Ok(Self(key))
     }
 }
+#[cfg(any(test, feature = "cluster"))]
 impl Drop for RangeClaim {
     fn drop(&mut self) {
         CLAIMS

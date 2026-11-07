@@ -387,6 +387,8 @@ fn signed_bytes_response(
     let payload = super::peer_transport::signed_response_payload(status.as_u16(), &body);
     let signature = state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
         .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Response::builder()
@@ -407,6 +409,8 @@ async fn authorize(
     let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
         .authorize_internal_peer_read_request(&auth, "POST", path, body)
         .await
         .unwrap_or(false)
@@ -430,6 +434,8 @@ async fn authorize_voter(
     }
     if state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
         .authorize_internal_peer_voter_request(&auth, "POST", path, body)
         .await
         .unwrap_or(false)

@@ -5,6 +5,46 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+## Optional cluster composition and SQLite close — scoped review on 2026-11-04
+
+Astra independently compared the candidate with effort `6545218`. The workspace
+selects the daemon by default and adds a separate migration executable. The
+Hiqlite and Tokio package versions pinned by these mappings are identical.
+The feature condition on `source_arbitration_objects` selects an installer and
+test helper. The underlying queue SQL, custody resolution and native schema
+still use the audited definitions.
+
+`AppState` selects `LocalJobAuthority` from native storage mode. Cluster mode
+requires the selected membership manager. The feature condition on the
+maintenance-only `AdmittedRoleJobAuthority` confines the persisted learner
+refusal to builds that can open the cluster. Worker admission still reaches
+`acquire_cluster_job_with_policy`, including the Store claim and domain lease.
+The reviewed `run_scan`, `run_targeted`, scheduler, background worker,
+`admit_fragment`, lease renewal, publisher and settlement anchors preserve
+their prior control flow. Transcode construction supplies optional membership
+only for peer access. Startup still registers the selected authoritative Store
+and replays source recovery against the selected node ID before worker launch.
+
+SQLite now admits a worker permit before it schedules blocking SQL. Shutdown
+closes admission, drains the actual workers and explicitly closes reader and
+writer connections. `with_fenced_conn` retains its transaction-time lease,
+extension and publication predicates. The existing model covers work with an
+open Store. Physical close, backup drainage, helper process lifetime, startup
+conversion, and shutdown completion require their own runtime evidence.
+
+Maintenance now checks pending helper intent while holding the actual native
+root before opening the writer. Replicated maintenance validates the committed
+cluster manifest against the existing node ID and activation marker, and refuses
+pending conversion before connecting. The integration fixture publishes the
+validated binding for its actual selected voter before signaling readiness.
+Its formal-publication module reference retains the same meaning.
+
+The durable and progress mappings refresh 17 and 12 existing whole-file rows.
+Worker refinement refreshes 20 references to `job_lease.rs` and the containing
+correspondence digest. The historical design-time source anchors and earlier
+native and recovery audits remain available below. This review establishes
+source correspondence for the existing models and adds no fairness premise.
+
 ## Native and recovery integration — scoped review on 2026-11-04
 
 Astra independently reviewed effort `10f9b3fd5209895f668aceb624f4fd617999e797`

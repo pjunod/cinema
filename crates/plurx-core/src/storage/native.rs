@@ -137,23 +137,16 @@ impl NativeDirectoryLock {
     pub(crate) fn from_locked_file(file: File, data_dir: PathBuf) -> Result<Self, StoreError> {
         let data_dir = std::fs::canonicalize(&data_dir)
             .map_err(|error| io("resolving locked directory", &data_dir, error))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let descriptor = file
-                .metadata()
-                .map_err(|error| io("reading lock descriptor", &data_dir, error))?;
-            let path = std::fs::symlink_metadata(data_dir.join(DIRECTORY_LOCK_FILENAME))
-                .map_err(|error| io("reading lock path", &data_dir, error))?;
-            if !path.is_file()
-                || path.file_type().is_symlink()
-                || descriptor.dev() != path.dev()
-                || descriptor.ino() != path.ino()
-            {
-                return Err(StoreError::Identity(
-                    "foreign storage lock descriptor".to_owned(),
-                ));
-            }
+        let descriptor = crate::fs_secure::std_file_identity(&file)
+            .map_err(|error| io("reading lock descriptor", &data_dir, error))?;
+        let path = crate::fs_secure::regular_file_identity_nofollow_blocking(
+            &data_dir.join(DIRECTORY_LOCK_FILENAME),
+        )
+        .map_err(|error| io("reading lock path", &data_dir, error))?;
+        if !descriptor.same_inode(path) {
+            return Err(StoreError::Identity(
+                "foreign storage lock descriptor".to_owned(),
+            ));
         }
         Ok(Self {
             _file: Arc::new(file),

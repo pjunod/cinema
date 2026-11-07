@@ -1,10 +1,11 @@
 //! Bounded, authenticated owner summaries; missing peers fence all routing.
-use super::super::{
-    wire::{Dispatch, Proof, Request},
-    INTERNAL_PATH,
-};
+use super::super::wire::{Dispatch, Proof, Request};
+#[cfg(feature = "cluster")]
+use super::super::INTERNAL_PATH;
 use super::*;
+#[cfg(feature = "cluster")]
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
+#[cfg(feature = "cluster")]
 use futures_util::{stream, StreamExt};
 use plurx_core::remote_control::{Target, Version as RemoteVersion};
 use serde::Deserialize;
@@ -49,14 +50,6 @@ fn parse(bytes: &[u8], node: &str) -> Result<Vec<Snapshot>, ApiError> {
     Ok(reply.sessions)
 }
 async fn inner(state: &AppState, user: i64, digest: &str) -> Result<Vec<Snapshot>, ApiError> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let peers = tokio::time::timeout_at(deadline, state.membership.operations_peers())
-        .await
-        .map_err(|_| fail(503, "unavailable"))?
-        .map_err(|_| fail(503, "unavailable"))?;
-    if peers.len() > 64 {
-        return Err(fail(503, "unavailable"));
-    }
     let dispatch = Dispatch {
         version: RemoteVersion::V1,
         user_id: user,
@@ -74,41 +67,54 @@ async fn inner(state: &AppState, user: i64, digest: &str) -> Result<Vec<Snapshot
     if status != 200 {
         return Err(fail(503, "unavailable"));
     }
-    let mut all = parse(
+    let all = parse(
         &serde_json::to_vec(&local).map_err(|_| fail(503, "unavailable"))?,
         &state.node_id,
     )?;
-    let body = serde_json::to_vec(&dispatch).map_err(|_| fail(503, "unavailable"))?;
-    let transport = PeerTransport::new(state.membership.clone());
-    let replies = stream::iter(peers.into_iter().map(|peer| {
-        let transport = transport.clone();
-        let body = body.clone();
-        async move {
-            let base = peer.http_base.ok_or_else(|| fail(503, "unavailable"))?;
-            let reply = transport
-                .request(
-                    &peer.node_id,
-                    &base,
-                    reqwest::Method::POST,
-                    INTERNAL_PATH,
-                    body,
-                    deadline,
-                    64 * 1024,
-                    PeerAuthMode::ExactRequestAndMemberResponse,
-                )
-                .await
-                .map_err(|_| fail(503, "unavailable"))?;
-            if !reply.status.is_success() {
-                return Err(fail(503, "unavailable"));
-            }
-            parse(&reply.body, &peer.node_id)
+    #[cfg(feature = "cluster")]
+    let mut all = all;
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let peers = tokio::time::timeout_at(deadline, membership.operations_peers())
+            .await
+            .map_err(|_| fail(503, "unavailable"))?
+            .map_err(|_| fail(503, "unavailable"))?;
+        if peers.len() > 64 {
+            return Err(fail(503, "unavailable"));
         }
-    }))
-    .buffer_unordered(4)
-    .collect::<Vec<_>>()
-    .await;
-    for rows in replies {
-        all.extend(rows?);
+        let body = serde_json::to_vec(&dispatch).map_err(|_| fail(503, "unavailable"))?;
+        let transport = PeerTransport::new(membership.clone());
+        let replies = stream::iter(peers.into_iter().map(|peer| {
+            let transport = transport.clone();
+            let body = body.clone();
+            async move {
+                let base = peer.http_base.ok_or_else(|| fail(503, "unavailable"))?;
+                let reply = transport
+                    .request(
+                        &peer.node_id,
+                        &base,
+                        reqwest::Method::POST,
+                        INTERNAL_PATH,
+                        body,
+                        deadline,
+                        64 * 1024,
+                        PeerAuthMode::ExactRequestAndMemberResponse,
+                    )
+                    .await
+                    .map_err(|_| fail(503, "unavailable"))?;
+                if !reply.status.is_success() {
+                    return Err(fail(503, "unavailable"));
+                }
+                parse(&reply.body, &peer.node_id)
+            }
+        }))
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+        for rows in replies {
+            all.extend(rows?);
+        }
     }
     Ok(all)
 }

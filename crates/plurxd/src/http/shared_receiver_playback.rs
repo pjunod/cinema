@@ -29,11 +29,17 @@ pub(crate) mod forwarding;
 mod ingress_custody;
 #[path = "shared_receiver_successor.rs"]
 mod successor;
+#[cfg(feature = "cluster")]
 use direct::receiver_direct_actor;
+#[cfg(any(test, feature = "cluster"))]
+use ingress_custody::validate_owner;
+#[cfg(feature = "cluster")]
+use ingress_custody::{ack_owner, register_owner};
 use ingress_custody::{
-    ack_owner, receiver_forward_admit, receiver_forward_cleanup_tuple,
-    receiver_forward_reconcile_cleanup, register_owner, validate_forward_ingress, validate_owner,
+    receiver_forward_admit, receiver_forward_cleanup_tuple, receiver_forward_reconcile_cleanup,
+    validate_forward_ingress,
 };
+#[cfg(feature = "cluster")]
 pub(crate) fn internal_forwarding_router() -> axum::Router<AppState> {
     forwarding::internal_router()
 }
@@ -3042,4 +3048,9 @@ pub(super) async fn test_actual_lease_commit_read_overlap(state: &AppState, sess
         .expect("finite actual owner proof after writeback")
         .expect("exact retained owner proof");
     assert!(Arc::ptr_eq(&actual_owner.0, &actor.0));
+}
+
+#[cfg(not(feature = "cluster"))]
+pub(crate) fn internal_forwarding_router() -> axum::Router<crate::state::AppState> {
+    axum::Router::new()
 }

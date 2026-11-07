@@ -2,8 +2,8 @@
 """Prepare a complete native macOS source runtime without changing an installation.
 
 This local, ad-hoc signed package is deliberately distinct from a verified
-GitHub release. Offline --binary still requires Rust and Swift for the tray
-and controllers. Missing Rust build tools are installed as needed; package
+GitHub release. The daemon, controllers and tray are built from this exact
+checkout; arbitrary prebuilt daemons are not source-runtime inputs. Missing Rust build tools are installed as needed; package
 output stays under the checkout's target directory.
 """
 import argparse
@@ -228,23 +228,26 @@ def build(args):
     if not destination.resolve().is_relative_to(target.resolve()) or destination.exists() or destination.is_symlink():
         raise ValueError("--output must be a new directory under this checkout's target/")
     source_commit = output(["git", "-C", ROOT, "rev-parse", "HEAD"])
+    source_tree = output(["git", "-C", ROOT, "rev-parse", "HEAD^{tree}"])
+    if re.fullmatch(r"[0-9a-f]{40}", source_tree) is None:
+        raise ValueError("source runtime requires an exact committed source tree")
     if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
         raise ValueError("source runtime requires an exact committed checkout")
     if output(["git", "-C", ROOT, "status", "--porcelain", "--untracked-files=no"]):
         raise ValueError("commit tracked source changes before building an exact source runtime")
     if not shutil.which("swift"):
-        raise ValueError("source tray installation requires Swift/Xcode command line tools, including with --binary")
+        raise ValueError("source tray installation requires Swift/Xcode command line tools")
     rustc = ensure_rust_toolchain()
     env = {**os.environ, "PATH": str(rustc.parent) + os.pathsep + os.environ.get("PATH", ""),
-           "RUSTC": str(rustc), "PLURX_BUILD_SHA": source_commit}
+           "RUSTC": str(rustc), "PLURX_BUILD_SHA": source_commit, "PLURX_BUILD_TREE": source_tree}
     cargo = rustc.parent / "cargo"
-    run([cargo, "build", "--locked", "--release", "-p", "plurx-desktop-control", "--bins"], cwd=ROOT, env=env)
+    run([ROOT / "scripts/check-standalone-graph"], cwd=ROOT, env={**env, "CARGO": str(cargo)})
+    run([cargo, "build", "--locked", "--release", "--no-default-features", "-p", "plurx-desktop-control", "--bins"], cwd=ROOT, env=env)
     build_target = Path(os.environ.get("CARGO_TARGET_DIR", target))
     if not build_target.is_absolute():
         build_target = ROOT / build_target
-    binary = args.binary.absolute() if args.binary else build_target / "release/plurxd"
-    if not args.binary:
-        run([cargo, "build", "--locked", "--release", "-p", "plurxd"], cwd=ROOT, env=env)
+    binary = build_target / "release/plurxd"
+    run([cargo, "build", "--locked", "--release", "--no-default-features", "-p", "plurxd"], cwd=ROOT, env=env)
     verify_identity(binary, source_commit)
     version = re.search(r'^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', (ROOT / "Cargo.toml").read_text(), re.M).group(1)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -313,7 +316,6 @@ def build(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--binary", type=Path)
     parser.add_argument("--ffmpeg-archive", type=Path)
     parser.add_argument("--ffmpeg-package", type=Path, help="verified patched Jellyfin package with Metal, Vulkan/libplacebo, fonts and parser; otherwise reuse a complete cached/installed package")
     parser.add_argument("--source-parser", type=Path)

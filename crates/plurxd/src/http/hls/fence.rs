@@ -288,11 +288,9 @@ mod tests {
     /// the handler authorized against, and the node that answered it.
     #[tokio::test]
     async fn a_failed_hls_session_response_logs_code_generation_owner_and_relay() {
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
         let buffer = Arc::new(crate::logbuf::LogBuffer::new(16));
         let _capture = crate::logbuf::capture_for_test(&buffer);
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         fence.validation_set_ready(false).await;
         let route = hls_session_route("GET", "/api/v1/hls/{session}/{segment}").expect("route");
         let response =

@@ -77,29 +77,7 @@ pub(crate) fn validate_manifest(
     config: &Config,
     manifest: &plurx_core::storage::mode::StorageManifest,
 ) -> Result<(), StoreError> {
-    use std::io::Read;
-    let marker: plurx_core::cluster::migration::ActivationMarker = read_record(
-        &config.storage.data_dir.join("hiqlite/activation.json"),
-    )?
-    .ok_or_else(|| {
-        StoreError::Migration("cluster authority is missing its activation marker".to_owned())
-    })?;
-    let mut node = String::new();
-    plurx_core::fs_secure::open_read_nofollow_blocking(&config.storage.data_dir.join("node.id"))
-        .and_then(|file| file.take(4097).read_to_string(&mut node))
-        .map_err(|error| {
-            StoreError::Migration(format!("reading cluster node identity: {error}"))
-        })?;
-    if node.len() > 4096
-        || node.trim() != manifest.node_id
-        || marker.cluster_id != manifest.instance_id
-        || marker.replicated_schema_version < manifest.schema_version
-    {
-        return Err(StoreError::Migration(
-            "cluster manifest does not match its committed directory identity".to_owned(),
-        ));
-    }
-    Ok(())
+    plurx_core::cluster::migration::validate_cluster_storage_manifest(config, manifest)
 }
 
 pub(crate) fn services(
@@ -113,8 +91,8 @@ pub(crate) fn services(
     let snapshot_timeout = Duration::from_secs(config.cluster.snapshot_transfer_timeout_secs)
         .saturating_add(Duration::from_secs(45));
     Ok(ServiceAdapters {
-        replication: selected.replication_monitor(),
-        membership: selected.membership_manager(),
+        replication: Some(selected.replication_monitor()),
+        membership: Some(selected.membership_manager()),
         settings_changes,
         backup: crate::backup::cluster::ClusterBackupProvider::new(
             client,
@@ -154,24 +132,21 @@ pub(crate) async fn prepare_source_authority(
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     if state.storage_mode == plurx_core::storage::mode::StorageMode::Cluster {
-        state
+        let membership = state
             .membership
-            .set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
-        state
-            .membership
+            .as_ref()
+            .context("cluster runtime has no actual membership service")?;
+        membership.set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
+        membership
             .publish_ingress_custody_boot()
             .await
             .context("publishing actual accepted-driver custody boot")?;
-        state
-            .membership
+        membership
             .prepare_purpose_master(purpose_master)
             .await
             .context("qualifying coordinated sharing purpose master")?;
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            state.membership.coordinate_purpose_keys(),
-        )
-        .await
+        match tokio::time::timeout(Duration::from_secs(5), membership.coordinate_purpose_keys())
+            .await
         {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {

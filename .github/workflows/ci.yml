@@ -1809,9 +1809,10 @@ jobs:
       - name: Derive the binary-only Bookworm build
         id: binary-build
         run: |
-          python3 -m validation.release_dockerfile --binary-export \
+          python3 -m validation.release_dockerfile --distribution standalone --binary-export \
             Dockerfile Dockerfile.binaries
           echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+          echo "source_tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
       - name: Compile and export the exact candidate binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -1823,6 +1824,7 @@ jobs:
           build-args: |
             PLURX_BUILD_REF=${{ github.sha }}
             PLURX_BUILD_SHA=${{ github.sha }}
+            PLURX_BUILD_TREE=${{ steps.binary-build.outputs.source_tree }}
             SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}
           cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-compile-{0}', matrix.arch) || '' }}
           cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=package-compile-{0}', matrix.arch) || '' }}
@@ -1830,8 +1832,8 @@ jobs:
         run: |
           scripts/release-package-candidate \
             . . binary-export release-bin \
-            "${{ matrix.target }}" "$GITHUB_SHA" "$GITHUB_SHA"
-          for name in plurxd plurx-cluster-check; do
+            "${{ matrix.target }}" "$GITHUB_SHA" "$GITHUB_SHA" standalone
+          for name in plurxd; do
             max_glibc=$(readelf --version-info "release-bin/$name" \
               | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
               | sort -V | tail -1)
@@ -1882,14 +1884,35 @@ jobs:
           version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
             | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
           test "$(docker run --rm --platform "linux/$ARCH" "$IMAGE" --version)" = "plurxd $version ($GITHUB_SHA)"
+          docker run --rm --platform "linux/$ARCH" --entrypoint /bin/sh "$IMAGE" -ec \
+            'test ! -e /usr/local/bin/plurx-cluster-check; test ! -e /usr/local/bin/plurx-storage-migrate'
+          scripts/container-smoke "$IMAGE"
+      - name: Build the explicitly selected cluster profile
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime-cluster
+          push: false
+          load: true
+          platforms: linux/${{ matrix.arch }}
+          tags: plurx/plurxd:ci-${{ matrix.arch }}-cluster
+          build-args: |
+            PLURX_BUILD_REF=${{ github.sha }}
+            PLURX_BUILD_SHA=${{ github.sha }}
+            PLURX_BUILD_TREE=${{ steps.binary-build.outputs.source_tree }}
+            SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-cluster-{0}', matrix.arch) || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=min,scope=package-cluster-{0}', matrix.arch) || '' }}
+      - name: Back up the explicit cluster image and restore it into a fresh container
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}-cluster
+        run: |
           test "$(docker run --rm --platform "linux/$ARCH" \
             --entrypoint /usr/local/bin/plurx-cluster-check \
             "$IMAGE" build-identity)" = "$GITHUB_SHA"
-          scripts/container-smoke "$IMAGE"
-      - name: Back up the running image and restore it into a fresh container
-        env:
-          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}
-        run: scripts/container-restore-smoke "$IMAGE"
+          scripts/container-restore-smoke "$IMAGE"
       - name: Retain the exact package receipt
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
@@ -1906,7 +1929,6 @@ jobs:
           name: package-smoke-binaries-${{ matrix.arch }}
           path: |
             release-bin/plurxd
-            release-bin/plurx-cluster-check
             release-bin/*.dwp
             release-bin/build-manifest.json
             release-bin/*.sha256
@@ -1920,7 +1942,6 @@ jobs:
           name: package-smoke-binaries-${{ matrix.arch }}
           path: |
             release-bin/plurxd
-            release-bin/plurx-cluster-check
             release-bin/*.dwp
             release-bin/build-manifest.json
             release-bin/*.sha256
@@ -1936,15 +1957,20 @@ jobs:
   # per-platform smoke, and alias publication to the manually recoverable release
   # workflow. A cancelled tag run can therefore be recovered without moving it.
   publish:
-    name: publish image (local registry)
+    name: publish ${{ matrix.distribution }} image (local registry)
     needs: [scope, check, package_smoke]
     if: >-
       startsWith(github.ref, 'refs/tags/v') && inputs.promotion_pr == '' &&
       inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
       needs.scope.outputs.qualification != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        distribution: [standalone, cluster]
     uses: ./.github/workflows/publish-release.yml
     with:
       release_tag: ${{ github.ref_name }}
+      distribution: ${{ matrix.distribution }}
 
   # Only an operator's manual dispatch on main may publish a sha- image.
   # Merging allocates no runtime sweep or image build (P-01 option (a)); the

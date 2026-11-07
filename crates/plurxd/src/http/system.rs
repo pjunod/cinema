@@ -9,8 +9,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use plurx_core::auth;
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 use plurx_core::cluster::migration::status::DbSnapshotHistogram;
+#[cfg(feature = "cluster")]
 use plurx_core::cluster::migration::status::{
     DbSnapshotMetricsSnapshot, DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS,
 };
@@ -286,7 +287,7 @@ pub struct SystemDto {
     /// proxy collapsed distinct clients onto one throttle address.
     pub login_proxy_advisory: bool,
     /// Backend and watch-state convergence, projected without membership data.
-    pub replication: plurx_core::cluster::migration::status::ReplicationStatus,
+    pub replication: plurx_core::storage::status::ReplicationStatus,
     /// Hardware encoder slots in use, and the cap
     /// (`transcode.max_hw_sessions`). Reported as a pair because either number
     /// alone is unreadable: a start refused while this says 0 of 2 is a very
@@ -415,7 +416,21 @@ pub async fn system_info(
     let last = requests.last();
     let (by_trigger, notifications) = state.jobs.metrics().snapshot();
     let (hw_in_use, hw_max) = state.transcode.hardware_slots().await;
-    let replication = state.replication.status().await;
+    let local_status = || {
+        let checked_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .min(i64::MAX as u64) as i64;
+        plurx_core::storage::status::ReplicationStatus::standalone(checked_at)
+    };
+    #[cfg(feature = "cluster")]
+    let replication = match state.replication.as_ref() {
+        Some(replication) => replication.status().await,
+        None => local_status(),
+    };
+    #[cfg(not(feature = "cluster"))]
+    let replication = local_status();
     let hwaccel_requested = state
         .store
         .get_setting(&crate::state::node_hwaccel_key(&state.node_id))
@@ -4526,7 +4541,10 @@ pub async fn update_settings(
         // Apply on this node now; every other node picks the replicated value
         // up on its next enforcement look after it applies the save
         // (`clock_offset::follow_stored_enforcement`).
-        state.membership.clock_guard().set_enforced(enabled);
+        #[cfg(feature = "cluster")]
+        if let Some(membership) = state.membership.as_ref() {
+            membership.clock_guard().set_enforced(enabled);
+        }
     }
     if let Some(mode) = &req.sub_mode {
         // Normalize through the parser so only valid modes are stored.
@@ -4754,7 +4772,11 @@ pub struct Activity {
 /// whole page into an error.
 enum PeerActivityRead {
     LocalOnly,
+    // Pure reporting outcomes remain shared with aggregation tests. Only an
+    // actual cluster directory can construct these observations in production.
+    #[cfg_attr(not(feature = "cluster"), allow(dead_code))]
     Peers(SharedPeerActivity),
+    #[cfg_attr(not(feature = "cluster"), allow(dead_code))]
     DirectoryUnavailable,
 }
 
@@ -4837,27 +4859,37 @@ pub(super) async fn node_hostnames(state: &AppState, permitted: bool) -> BTreeMa
     if !permitted {
         return BTreeMap::new();
     }
-    match state.membership.node_hostnames().await {
-        Ok(hostnames) => hostnames,
-        Err(error) => {
-            tracing::warn!(?error, "roster machine names unavailable");
-            BTreeMap::new()
-        }
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref() {
+        return match membership.node_hostnames().await {
+            Ok(hostnames) => hostnames,
+            Err(error) => {
+                tracing::warn!(?error, "roster machine names unavailable");
+                BTreeMap::new()
+            }
+        };
     }
+    let _ = state;
+    BTreeMap::new()
 }
 
 async fn peer_activity(state: &AppState) -> PeerActivityRead {
-    // `advertise_host` is the explicit first step toward peer membership.
-    // Keeping this guard outside `snapshots()` means the overwhelmingly common
-    // SQLite and never-joined paths do not even read the peer directory.
-    if !state.cluster_advertisement || !state.membership.is_replicated() {
+    if !state.cluster_advertisement || !state.is_replicated() {
         return PeerActivityRead::LocalOnly;
     }
-    match state.peer_activity.snapshots().await {
-        Ok(peers) if peers.is_empty() => PeerActivityRead::LocalOnly,
-        Ok(peers) => PeerActivityRead::Peers(peers),
-        Err(_) => PeerActivityRead::DirectoryUnavailable,
+    #[cfg(feature = "cluster")]
+    {
+        let Some(activity) = state.peer_activity.as_ref() else {
+            return PeerActivityRead::DirectoryUnavailable;
+        };
+        match activity.snapshots().await {
+            Ok(peers) if peers.is_empty() => PeerActivityRead::LocalOnly,
+            Ok(peers) => PeerActivityRead::Peers(peers),
+            Err(_) => PeerActivityRead::DirectoryUnavailable,
+        }
     }
+    #[cfg(not(feature = "cluster"))]
+    PeerActivityRead::LocalOnly
 }
 
 fn peer_status(outcome: &PeerActivityOutcome) -> &'static str {
@@ -5134,7 +5166,7 @@ pub async fn activity(
     _user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Activity>>, ApiError> {
-    if !state.cluster_advertisement || !state.membership.is_replicated() {
+    if !state.cluster_advertisement || !state.is_replicated() {
         return Ok(Json(local_activity(&state).await?));
     }
 
@@ -5565,7 +5597,7 @@ pub async fn activity_detail(
     // The roster's machine names ride in the same wave rather than following
     // it. This page polls every few seconds; a name read that waits for the
     // peer fan-out to finish would add its latency to every poll for nothing.
-    let replicated = state.cluster_advertisement && state.membership.is_replicated();
+    let replicated = state.cluster_advertisement && state.is_replicated();
     let ((sessions, deliveries), peers, hostnames) = if replicated {
         let (local, peers, hostnames) = tokio::join!(
             deliveries(&state),
@@ -5854,7 +5886,8 @@ pub async fn stop_offline_package(
 /// the handler cannot reach `AppState::store` through this type.
 #[derive(Clone)]
 pub(crate) struct MetricsState {
-    clock: Arc<plurx_core::cluster::clock::ClusterClockGuard>,
+    #[cfg(feature = "cluster")]
+    clock: Option<Arc<plurx_core::cluster::clock::ClusterClockGuard>>,
     started_at: Instant,
     transcode: crate::transcode::TranscodeMetrics,
     integration: Arc<IntegrationMetrics>,
@@ -5862,8 +5895,10 @@ pub(crate) struct MetricsState {
     analysis: Arc<crate::state::AnalysisRuntimeMetrics>,
     node_id: String,
     store_metrics: StoreMetricsCache,
-    passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
-    passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
+    #[cfg(feature = "cluster")]
+    passive_raft: Option<plurx_core::cluster::migration::status::PassiveRaftMetrics>,
+    #[cfg(feature = "cluster")]
+    passive_membership: Option<plurx_core::cluster::membership::PassiveMembershipMetrics>,
     blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
     live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
@@ -5876,7 +5911,11 @@ pub(crate) struct MetricsState {
 impl FromRef<AppState> for MetricsState {
     fn from_ref(state: &AppState) -> Self {
         Self {
-            clock: state.membership.clock_guard(),
+            #[cfg(feature = "cluster")]
+            clock: state
+                .membership
+                .as_ref()
+                .map(|membership| membership.clock_guard()),
             started_at: state.started_at,
             transcode: state.transcode.metrics_handle(),
             integration: state.jobs.metrics_handle(),
@@ -5884,8 +5923,16 @@ impl FromRef<AppState> for MetricsState {
             analysis: state.jobs.analysis_metrics_handle(),
             node_id: state.node_id.clone(),
             store_metrics: state.store_metrics.clone(),
-            passive_raft: state.replication.metrics_handle(),
-            passive_membership: state.membership.metrics_handle(),
+            #[cfg(feature = "cluster")]
+            passive_raft: state
+                .replication
+                .as_ref()
+                .map(|replication| replication.metrics_handle()),
+            #[cfg(feature = "cluster")]
+            passive_membership: state
+                .membership
+                .as_ref()
+                .map(|membership| membership.metrics_handle()),
             // Taken per request, which `FromRef` is, so it addresses the pool
             // this node is actually serving from.
             blocked_gets: state.transcode.blocked_get_metrics_handle(),
@@ -5899,6 +5946,7 @@ impl FromRef<AppState> for MetricsState {
     }
 }
 
+#[cfg(feature = "cluster")]
 fn render_passive_membership_metrics(
     view: plurx_core::cluster::membership::PassiveMembershipMetricsView,
 ) -> String {
@@ -5956,6 +6004,7 @@ fn render_passive_membership_metrics(
     out
 }
 
+#[cfg(feature = "cluster")]
 fn render_passive_raft_metrics(
     view: plurx_core::cluster::migration::status::PassiveRaftMetricsView,
 ) -> String {
@@ -6054,6 +6103,7 @@ fn render_passive_raft_metrics(
     out
 }
 
+#[cfg(feature = "cluster")]
 fn render_snapshot_metrics(out: &mut String, snapshot: DbSnapshotMetricsSnapshot) {
     if let Some(required) = snapshot.required_storage_bytes {
         out.push_str(&format!(
@@ -6099,6 +6149,7 @@ fn render_snapshot_metrics(out: &mut String, snapshot: DbSnapshotMetricsSnapshot
     }
 }
 
+#[cfg(feature = "cluster")]
 fn prometheus_seconds_label(nanos: u64) -> String {
     let whole = nanos / 1_000_000_000;
     let remainder = nanos % 1_000_000_000;
@@ -6335,8 +6386,51 @@ pub(crate) async fn metrics(
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
-    let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot());
-    let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
+    #[cfg(feature = "cluster")]
+    let (
+        raft_metrics,
+        membership_metrics,
+        clock_metrics,
+        authority_metrics,
+        store_operation_metrics,
+    ) = (
+        state
+            .passive_raft
+            .as_ref()
+            .map(|metrics| render_passive_raft_metrics(metrics.snapshot()))
+            .unwrap_or_default(),
+        state
+            .passive_membership
+            .as_ref()
+            .map(|metrics| render_passive_membership_metrics(metrics.snapshot()))
+            .unwrap_or_default(),
+        state
+            .clock
+            .as_ref()
+            .map(|clock| clock.prometheus())
+            .unwrap_or_default(),
+        if state.passive_membership.is_some() {
+            plurx_core::cluster::membership::prometheus_cluster_job_authority()
+                + &plurx_core::cluster::membership::prometheus_cluster_activity_authority()
+        } else {
+            String::new()
+        },
+        plurx_core::store::prometheus_store_operations(),
+    );
+    #[cfg(not(feature = "cluster"))]
+    let (
+        raft_metrics,
+        membership_metrics,
+        clock_metrics,
+        authority_metrics,
+        store_operation_metrics,
+    ) = (
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+    );
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
@@ -6347,7 +6441,7 @@ pub(crate) async fn metrics(
         // Every child by priority class (plan P-02 §3.2): what this node's
         // hardware is being spent on, and whether the kernel honoured it.
         plurx_core::process::priority::prometheus(),
-        plurx_core::store::prometheus_store_operations(),
+        store_operation_metrics,
         plurx_core::store::prometheus_sqlite_health(),
         crate::store_result::prometheus(),
         plurx_core::scan::prometheus_scan_walk(),
@@ -6356,8 +6450,8 @@ pub(crate) async fn metrics(
         // only when this process declined the cluster's singleton work because
         // it could not read committed membership — a state nothing else in
         // this exposition would show.
-        plurx_core::cluster::membership::prometheus_cluster_job_authority(),
-        plurx_core::cluster::membership::prometheus_cluster_activity_authority(),
+        authority_metrics,
+        "",
         super::internal_activity::prometheus_cluster_activity(),
         super::prometheus_handler_deadlines(),
         crate::ffmpeg::engine_attestation_prometheus(),
@@ -6366,7 +6460,7 @@ pub(crate) async fn metrics(
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus() + &super::browse::detail_projection_prometheus(),
-        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &state.clock.prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &clock_metrics,
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();

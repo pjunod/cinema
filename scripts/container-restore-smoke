@@ -13,7 +13,7 @@
 # arguments and the container over stdin.
 set -eu
 
-image="${1:-plurx/plurxd:latest}"
+image="${1:-plurx/plurxd:cluster}"
 source_name="plurx-restore-source-$$"
 restored_name="plurx-restore-target-$$"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/plurx-restore-smoke.XXXXXX")"
@@ -119,11 +119,16 @@ printf '{"name":"%s","kind":"movies","paths":["/var/lib/plurx/media/movies"]}' \
   "$library_name" | secret_file library.json
 
 start_instance() {
+  # A cluster-capable build still defaults to native storage. This drill
+  # explicitly selects a disposable cluster rather than relying on that old
+  # accidental one-voter bootstrap policy.
+  printf '[storage]\nmode = "cluster"\n' > "$2/restore-smoke.toml"
+  chmod 0644 "$2/restore-smoke.toml"
   docker create \
     --name "$1" \
     --publish 127.0.0.1:0:32400 \
     --volume "$2:/var/lib/plurx" \
-    "$image" >/dev/null
+    "$image" --config /var/lib/plurx/restore-smoke.toml run >/dev/null
   docker start "$1" >/dev/null
 }
 
