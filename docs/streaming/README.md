@@ -6,7 +6,8 @@ Add each document's row here in the same commit.
 
 | File | Answers | |
 |---|---|---|
-| [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | The implementation plan and single lane status for the playback-start effort from the 2026-11-07 review: rulings, target contract, traceability from every review finding to a lane, Phase 1 repairs through the one-engine/first-play-index rebuild, routing and execution log. | open |
+| [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Which playback-start lanes need changes before build? | open |
+| [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Playback-start rulings, target contract, review-to-lane mapping, build sequence, lane status and execution log. | open |
 | [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold first-playlist consumption and web Resume fault ownership: implementation, review, validation and merge ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs; review and acceptance. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
