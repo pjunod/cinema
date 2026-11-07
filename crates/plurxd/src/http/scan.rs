@@ -72,6 +72,12 @@ pub struct ScanRequestBody {
     /// whatever its size and mtime say, and reported per file.
     #[serde(default)]
     pub expected_files: Option<Vec<ExpectedFileBody>>,
+    /// Connection test (contract v2 §5.3): with this set and `path` absent,
+    /// answer which of these library roots plurx can see. Each must be a
+    /// configured root or lie under one; anything else is listed under
+    /// `outside_roots` and never `stat`ed.
+    #[serde(default)]
+    pub probe_paths: Option<Vec<String>>,
     #[serde(default)]
     pub ids: Option<Ids>,
     /// `movie` | `episode` | `season` | `book`. Advisory: the library's own kind
@@ -122,6 +128,11 @@ pub async fn scan(
     // needs to rule in or out.
     state.jobs.metrics().count_notification();
 
+    if body.path.is_none() {
+        if let Some(probe) = body.probe_paths.as_deref() {
+            return probe_paths(&state, probe).await;
+        }
+    }
     let Some(raw_path) = body.path.clone() else {
         return Err(ApiError::Typed {
             status: StatusCode::BAD_REQUEST,
@@ -327,6 +338,47 @@ async fn answer(
         )
             .into_response()),
     }
+}
+
+/// The most paths one connection test may name.
+pub const MAX_PROBE_PATHS: usize = 64;
+
+/// `probe_paths`: which of the caller's library roots plurx can see. A path
+/// is looked at only when it is a configured root or lexically under one —
+/// a scan key must not become a way to `stat` arbitrary host paths.
+async fn probe_paths(state: &AppState, probe: &[String]) -> Result<Response, ApiError> {
+    if probe.is_empty() || probe.len() > MAX_PROBE_PATHS {
+        return Err(ApiError::BadRequest(format!(
+            "`probe_paths` must name 1..={MAX_PROBE_PATHS} paths"
+        )));
+    }
+    let libraries = state.store.list_libraries().await?;
+    let probe = probe.to_vec();
+    let answer = tokio::task::spawn_blocking(move || {
+        let (mut visible, mut missing, mut outside) = (Vec::new(), Vec::new(), Vec::new());
+        for raw in probe {
+            let path = std::path::Path::new(&raw);
+            if !path.is_absolute() || containment::lexical_root(&libraries, path).is_none() {
+                outside.push(raw);
+                continue;
+            }
+            match containment::classify_path(&libraries, path) {
+                PathClass::Inside { .. } => visible.push(raw),
+                PathClass::Unreadable { .. } => missing.push(raw),
+                // A symlink out of its root.
+                PathClass::Outside { .. } => outside.push(raw),
+            }
+        }
+        serde_json::json!({
+            "roots": containment::configured_roots(&libraries),
+            "visible": visible,
+            "missing": missing,
+            "outside_roots": outside,
+        })
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("probe_paths: {error}")))?;
+    Ok((StatusCode::OK, Json(answer)).into_response())
 }
 
 /// The error prefix a request failed by an unreadable root records.

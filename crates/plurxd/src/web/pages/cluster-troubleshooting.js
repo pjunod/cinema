@@ -375,6 +375,17 @@ async function saveLibDrawer(id,btn){
     invalidateLibs(); LIB_DRAWER=null; toast("Library saved"); viewSettings();
   }catch(e){ if(err) err.textContent=e.message; btn.disabled=false; }
 }
+async function enableReconcile(id,btn){
+  // One click from Never to the six-hourly reconcile, keeping the library's
+  // refresh interval; the schedule endpoint never starts a scan by itself.
+  const ref=Number((document.getElementById(`sched-ref-${id}`)||{}).value||0);
+  const err=document.getElementById("ele-"+id); if(err) err.textContent="";
+  btn.disabled=true;
+  try{
+    await api(`/libraries/${id}/schedule`,{method:"PUT",body:{scan_interval_mins:360,refresh_interval_mins:ref}});
+    invalidateLibs(); toast("Scans every 6 hours"); viewSettings();
+  }catch(e){ if(err) err.textContent=e.message; btn.disabled=false; }
+}
 async function scanAll(){
   const libs=(SETTINGS_DATA&&SETTINGS_DATA.libs)||[]; if(!libs.length) return;
   await Promise.all(libs.map(l=>api(`/libraries/${l.id}/scan`,{method:"POST"}).catch(()=>{})));
