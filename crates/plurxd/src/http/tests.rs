@@ -4470,7 +4470,9 @@ async fn a_request_during_a_running_scan_is_queued_and_still_answered() {
     let (app, state) = test_app_with_state();
     let _worker = scan_worker(&state);
     let admin = setup_admin(&app).await;
-    let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
+    // `scan:trigger` alone: following the 202 reads the request this key
+    // created, which contract v2 allows without `status:read`.
+    let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
 
     let dir = crate::test_tempdir().expect("tmp");
     let movie = dir.path().join("Heat (1995)");
@@ -21429,4 +21431,76 @@ async fn wait_ms_returns_200_with_per_file_report_when_the_worker_finishes_in_ti
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["files"][0]["state"], "missing", "{body}");
+}
+
+/// Contract v2 §4.2: the key that created a request may read it back with
+/// `scan:trigger` alone, and the record says what it is waiting on and
+/// carries the per-file report; another `scan:trigger` key gets 403, and a
+/// `status:read` key still reads every request.
+#[tokio::test]
+async fn the_creating_scan_key_reads_its_own_request_and_another_scan_key_gets_403() {
+    let (app, state) = test_app_with_state();
+    // No worker: the request stays queued while it is read.
+    let admin = setup_admin(&app).await;
+    let creator = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let stranger = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let reader = scan_key(&app, &admin, json!(["status:read"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let movie = dir.path().join("Heat (1995)");
+    std::fs::create_dir_all(&movie).expect("mkdir");
+    std::fs::write(movie.join("Heat (1995).mkv"), b"x").expect("write");
+    v2_library(&app, &admin, dir.path()).await;
+
+    let (status, queued) = call(
+        &app,
+        post("/api/v1/scan", Some(&creator), json!({ "path": movie })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+    let id = queued["request_id"]
+        .as_str()
+        .expect("request id")
+        .to_owned();
+    let uri = format!("/api/v1/scan/requests/{id}");
+
+    let (status, own) = call(&app, get(&uri, Some(&creator))).await;
+    assert_eq!(status, StatusCode::OK, "{own}");
+    assert_eq!(own["request_id"], id.as_str());
+    assert_eq!(own["status"], "queued");
+    assert_eq!(own["waiting_on"], "", "nothing has claimed it yet: {own}");
+    assert_eq!(
+        own["files"],
+        json!([]),
+        "a v2 record always carries files: {own}"
+    );
+
+    let (status, _) = call(&app, get(&uri, Some(&stranger))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "another key's request");
+    let (status, read) = call(&app, get(&uri, Some(&reader))).await;
+    assert_eq!(status, StatusCode::OK, "status:read reads every request");
+    assert_eq!(read["request_id"], id.as_str());
+    let (status, _) = call(&app, get(&uri, Some(&admin))).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a user token is the wrong kind"
+    );
+
+    // The library's own scan was created by no key: status:read only.
+    let full = state
+        .jobs
+        .scan_requests()
+        .await
+        .into_iter()
+        .find(|record| record.path.is_empty())
+        .expect("the library's initial scan");
+    let full_uri = format!("/api/v1/scan/requests/{}", full.request_id);
+    let (status, _) = call(&app, get(&full_uri, Some(&creator))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, record) = call(&app, get(&full_uri, Some(&reader))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        record.get("files").is_none(),
+        "no sidecar, no files: {record}"
+    );
 }

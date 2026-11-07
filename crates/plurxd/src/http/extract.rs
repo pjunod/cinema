@@ -588,6 +588,24 @@ impl ScopedKey {
     /// `last_used_at` is refreshed at most once per minute on successful
     /// checks. It remains a useful activity signal without turning every
     /// request into a replicated write.
+    /// Extract a key and require at least one of `scopes`; the handler then
+    /// decides what each scope may see.
+    pub async fn require_any(
+        parts: &mut Parts,
+        state: &AppState,
+        scopes: &[&'static str],
+    ) -> Result<ScopedKey, ApiError> {
+        let mut forbidden = None;
+        for scope in scopes {
+            match Self::require(parts, state, scope).await {
+                Ok(key) => return Ok(key),
+                Err(ApiError::Forbidden) => forbidden = Some(ApiError::Forbidden),
+                Err(other) => return Err(other),
+            }
+        }
+        Err(forbidden.unwrap_or(ApiError::Forbidden))
+    }
+
     pub async fn require(
         parts: &mut Parts,
         state: &AppState,

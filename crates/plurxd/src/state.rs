@@ -2837,6 +2837,20 @@ pub struct ScanRequestRecord {
     pub items: Option<Vec<PlacedFile>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// A machine-readable failure: `path_unreadable` when the library root
+    /// could not be read at scan time, so the caller retries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
+    /// Contract v2: what a queued request is waiting on (`full_scan:<lib>`,
+    /// `heavy_lane:<holder>`, `root_unreadable:<path>`, `queue_position:<n>`),
+    /// empty when nothing is in its way. Present only on v2 requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<String>,
+    /// Contract v2: the per-file report for the request's `expected_files`.
+    /// Present only on v2 requests, so a caller can tell "no file placed"
+    /// from "this plurx does not report files".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<plurx_core::store::scan_request_v2::PlacedReport>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
