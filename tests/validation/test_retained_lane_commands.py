@@ -240,3 +240,25 @@ class NativeWorkflowScopeCase(unittest.TestCase):
                     return native.scoped_workflow(reader(commit, '.github/workflows/ci.yml'), 'android_device')
                 with patch.object(retention, 'android_device_inputs', side_effect=inputs):
                     native.record_contract(lane, suite, record, CANDIDATE, raw, revised)
+
+
+class NativePythonTransitionCase(unittest.TestCase):
+    def test_only_reviewed_whole_preflight_transition_preserves_node_scope(self):
+        before = native.scoped_workflow(WORKFLOW.encode(), 'preflight')[-1]
+        changed = WORKFLOW.replace('      promotion_pr:', native.PYTHON_DESCRIPTOR_INPUT + '      promotion_pr:')
+        changed = changed.replace('      - uses: setup-node@pinned',
+            '      - name: Prepare scoped Python selection\n        run: prepare-exact\n      - uses: setup-node@pinned')
+        after = native.scoped_workflow(changed.encode(), 'preflight')[-1]
+        digests = (native.retention_digest(before), native.retention_digest(after))
+        with patch.object(native, 'NODE_PREFLIGHT_TRANSITION', digests):
+            self.assertEqual(native.scoped_workflow(WORKFLOW.encode(), 'preflight'),
+                             native.scoped_workflow(changed.encode(), 'preflight'))
+            for old, new in (('prepare-exact', 'arbitrary-command'),
+                             ('setup-node@pinned', 'setup-node@untrusted'),
+                             ('runs-on: general', 'runs-on: other')):
+                with self.subTest(change=old):
+                    self.assertNotEqual(native.scoped_workflow(WORKFLOW.encode(), 'preflight'),
+                        native.scoped_workflow(changed.replace(old, new).encode(), 'preflight'))
+            ambiguous = changed.replace('      promotion_pr:', native.PYTHON_DESCRIPTOR_INPUT + '      promotion_pr:')
+            with self.assertRaises(ReceiptError):
+                native.scoped_workflow(ambiguous.encode(), 'preflight')

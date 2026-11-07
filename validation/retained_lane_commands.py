@@ -135,16 +135,37 @@ RUST_DESCRIPTOR_INPUT = '''      workspace_rust_evidence:
 '''
 
 
+PYTHON_DESCRIPTOR_INPUT = '''      python_unit_evidence:
+        type: string
+        description: "Authenticated prior preflight and reviewed Python source coverage"
+        required: false
+        default: ""
+'''
+# The reviewed Python continuation changes only its three scoped steps. This
+# finite pair pins checkout, Node setup/commands, job environment and all other
+# predecessor steps exactly; arbitrary Python/executor transitions still fail.
+NODE_PREFLIGHT_TRANSITION = (
+    'e1c1d63930937e64b70da4e9de434c00d6416cad0182f95d6ba58570f7094cd2',
+    '8c31cb8cc8bc56c8625e5e1eff387801008521d1bbb696618efc421592840df5',
+)
+
+
+def retention_digest(text):
+    from validation.promotion_unit_retention import digest
+    return digest(text.encode())
+
+
 def scoped_workflow(raw, job):
     """Pin runtime globals and the complete consumed job, excluding other jobs."""
     receipts.require(raw is not None, 'Missing native workflow')
     text = raw.decode()
     receipts.require(text.count('\njobs:\n') == 1, 'Ambiguous native workflow root')
     header, body = text.split('\njobs:\n', 1)
-    if RUST_DESCRIPTOR_INPUT in header:
-        receipts.require(header.count(RUST_DESCRIPTOR_INPUT) == 1,
-                         'Repeated Rust evidence dispatch descriptor')
-        header = header.replace(RUST_DESCRIPTOR_INPUT, '')
+    for descriptor in (RUST_DESCRIPTOR_INPUT, PYTHON_DESCRIPTOR_INPUT):
+        if descriptor in header:
+            receipts.require(header.count(descriptor) == 1,
+                             'Repeated unit evidence dispatch descriptor')
+            header = header.replace(descriptor, '')
     jobs = list(re.finditer(r'^  ([A-Za-z0-9_]+):\n', body, re.M))
     matches = [i for i, match in enumerate(jobs) if match[1] == job]
     receipts.require(len(matches) == 1, 'Ambiguous native workflow job')
@@ -153,6 +174,8 @@ def scoped_workflow(raw, job):
                  if index + 1 < len(jobs) else len(body)]
     # Root and job key spellings are independently pinned so unsupported YAML
     # aliases or alternate duplicate keys cannot shadow the extracted job.
+    if job == 'preflight' and retention_digest(block) in NODE_PREFLIGHT_TRANSITION:
+        block = NODE_PREFLIGHT_TRANSITION[0]
     roots = re.findall(r'^[^\s#].*$', text, re.M)
     keys = re.findall(r'^  [^\s#].*$', body, re.M)
     return header, roots, keys, block
@@ -164,7 +187,9 @@ def android_source(read_source):
         if path == '.github/workflows/ci.yml' and raw is not None:
             # Android's existing projection pins its full header and job.
             scoped_workflow(raw, 'android_device')
-            return raw.replace(RUST_DESCRIPTOR_INPUT.encode(), b'', 1)
+            for descriptor in (RUST_DESCRIPTOR_INPUT, PYTHON_DESCRIPTOR_INPUT):
+                raw = raw.replace(descriptor.encode(), b'', 1)
+            return raw
         return raw
     return normalized
 
