@@ -1156,10 +1156,11 @@ mount point, `ENOTCONN`, `EIO`, or the path missing beneath it — is a transien
 |---|---|
 | 200 `{"status":"scanned", "request_id", "report", "items", "files", …}` | The request finished — within `wait_ms`, or before the handler re-read it, or it is a replay of a finished `request_key` |
 | 202 `{"status":"queued", "request_id", …}` | Durably accepted for an eligible cluster worker. Requests survive process restart; same-path requests share a scan while retaining each caller’s hints and result |
-| 200 `{"roots", "visible", "missing", "outside_roots"}` | `probe_paths` with no `path`: which roots plurx can see. Only a configured root or a path under one is `stat`ed; anything else is `outside_roots`. Nothing is scanned or queued |
-| 400 | Relative path, nonpositive `series.tmdb`, invalid `book` fields, a malformed `request_key` or `expected_files`, or `{"code":"path_required"}` (neither `path` nor `probe_paths`) |
+| 200 `{"roots", "visible", "missing", "outside_roots"}` | `probe_paths` with no `path`: which roots plurx can see. Only a configured root or a path under one is looked at; a symlink beneath the root is found with `lstat` and listed as `outside_roots` without being followed; anything else is `outside_roots`. Nothing is scanned or queued |
+| 400 | Relative path, nonpositive `series.tmdb`, invalid `book` fields, a malformed `request_key` or `expected_files`, `{"code":"path_required"}` (neither `path` nor `probe_paths`), or `{"code":"probe_paths_with_path"}` (both) |
+| 500 `{"code":"scan_failed", "status":"failed", "request_id", "error"}` | The request (or the finished request a replayed `request_key` names) failed for a reason other than an unreadable root; the same `request_id` the record carries |
 | 422 `path_outside_roots` | Path under no library root — permanent |
-| 503 `path_unreadable` | Path under a root that cannot be read now — retry after 60 s. Also the answer when a waited-for request failed because its root dropped mid-scan |
+| 503 `path_unreadable` | Path under a root that cannot be read now — retry after 60 s. Also the answer when a waited-for or replayed request failed because its root dropped mid-scan; then it also carries `request_id` and `status: failed` |
 | 503 (`error` only) | The durable queue refused the request (full, or the same request is cancelling) |
 
 **The targeted job.** Targeted requests run as their own job, dedupe key
@@ -1168,11 +1169,18 @@ claimed first among library work and with a probe admission — no heavy-lane
 permit, so a busy GPU or a running title scan never delays it, and playback
 does not preempt it. It takes the same per-library mutation fence
 (`scan:library:{id}`) as a full scan, so the two never run at once: beside a
-running full scan the request waits with `waiting_on: full_scan:<library>` and
-runs within one idle poll of the fence being released (no preemption). Fragment
+running full scan (or metadata refresh) the request waits with `waiting_on:
+full_scan:<library>`; its retry is due a quarter second after the refusal, and
+the holder's release wakes the releasing node's library loop, which claims it
+at once — any other node within its next idle poll (no preemption). Fragment
 index, Dolby Vision title scan and cache work for what it places still queue on
 the heavy lane. The job keeps the `library_scan` kind with its own payload
-generation, so older nodes in a rolling upgrade decode it and leave it alone.
+generation (`library-targeted-v1`; whole-library work is `library-work-v1`),
+so older nodes in a rolling upgrade decode it and leave it alone — and any
+logic keyed on the `library_scan` kind must check the generation too. One
+consequence of its priority: on a node that keeps receiving imports, a
+scheduled full scan of the same library can stay queued behind them; the
+contract allows it.
 
 The id hints ride *on* the queued request so the drained job applies them
 later; an endpoint that applied them itself would drop them for every request
@@ -1185,17 +1193,18 @@ path-mapping mistake still proves the caller reached plurx with a working key;
 a `probe_paths` test counts there too and never as a scan.
 
 `GET /api/v1/scan/requests/{id}` returns the record. A `status:read` key reads
-any request; a `scan:trigger` key reads the requests it created (403 for any
-other). `status` is `queued` · `running` · `done` · `failed`; `report` and
+any request; a `scan:trigger` key reads the requests it created and gets 403
+for any other id — including one that does not exist, so a scan key cannot
+probe which requests exist. `status` is `queued` · `running` · `done` · `failed`; `report` and
 `items` appear at `done`, `error` on failure (with `code: "path_unreadable"`
 when the root dropped mid-scan). A request made through this route also carries
-`waiting_on` — `full_scan:<library>` while a full scan or refresh holds the
-library's fence, `root_unreadable:<path>` while the claiming node cannot read a
-root, empty once it runs (the contract also reserves `heavy_lane:<holder>` and
-`queue_position:<n>`; neither is produced, because the targeted job takes no
-heavy admission and runs every pending request of its library in one turn) —
-and `files`, the per-file report above; their absence means a request from
-before contract v2.
+`waiting_on` — `full_scan:<library>` while a full scan or a metadata refresh
+holds the library's fence, `root_unreadable:<path>` while the claiming node
+cannot read a root, `queue_position:<n>` when it joined a targeted pass already
+running with `n` requests ahead of it, empty once its turn starts (the
+contract's `heavy_lane:<holder>` is never produced: the targeted job takes no
+heavy admission) — and `files`, the per-file report above; their absence means
+a request from before contract v2.
 Request receipts and results persist for seven days. The recent list is bounded
 to 256 records; an older record can still be read by ID until its receipt
 expires. A library admits at most 256 pending requests; overload is an explicit

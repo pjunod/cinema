@@ -84,6 +84,8 @@ bump may break compatibility and a **patch** bump never does.
 - Targeted scan requests run as their own job, claimed ahead of a pending full
   scan with a probe admission (no heavy-lane permit) and never concurrently
   with a running one; Activity shows what a waiting one is waiting on.
+- Activity labels a targeted library job "targeted scan" rather than "library
+  scan".
 - New libraries scan every six hours by default. Existing libraries keep their
   schedule; a library at Never shows what that costs and offers a one-click
   "Enable 6-hourly reconcile".

@@ -241,8 +241,9 @@ Poll `GET /api/v1/scan/requests/{id}` for `queued | running | done | failed`.
 The key that created the request may read it with `scan:trigger` alone
 (another `scan:trigger` key gets 403; a `status:read` key reads any request).
 While queued the record says what it waits on in `waiting_on` —
-`full_scan:<library>` while a full scan holds the library, or
-`root_unreadable:<path>` — and once done it carries `files`. A failed record
+`full_scan:<library>` while a full scan or refresh holds the library,
+`root_unreadable:<path>`, or `queue_position:<n>` behind a running pass — and
+once done it carries `files`. A failed record
 whose root dropped mid-scan carries `code: "path_unreadable"`; treat it as
 retryable. Silently losing a request would leave a season half-indexed, so a
 busy plurx queues rather than refusing.
@@ -254,7 +255,8 @@ claimed ahead of a *pending* full scan and with a probe admission — `stat` and
 viewer never delays it. It never runs beside a *running* full scan: both take
 the library's mutation fence, so the full scan's reconcile cannot prune what
 the targeted scan just inserted; the request waits (`waiting_on:
-full_scan:<library>`) and runs within one idle poll of the fence's release.
+full_scan:<library>`) and is claimed as soon as the fence is released — at
+once on the releasing node, within an idle poll on any other.
 Fragment index, Dolby Vision and cache work for the new item stay on the
 heavy lane as before. Settings → **Activity** lists the waiting job with its
 `waiting_on` and a Cancel.
