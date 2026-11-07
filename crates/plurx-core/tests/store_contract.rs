@@ -37,10 +37,10 @@ mod jellyfin_login;
 mod jellyfin_play;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
-#[path = "store_contract/scan_request_v2.rs"]
-mod scan_request_v2;
 #[path = "store_contract/remote.rs"]
 mod remote;
+#[path = "store_contract/scan_request_v2.rs"]
+mod scan_request_v2;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/session_principals.rs"]
 mod session_principals;
