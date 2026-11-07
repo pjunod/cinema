@@ -609,15 +609,13 @@ mod live_fixture;
 mod tests;
 
 fn internal_router() -> axum::Router<AppState> {
+    // Merging even an empty router combines Axum's path-check policy. Keep the
+    // remote family compatible with the root's literal Plex colon segments.
+    let router = axum::Router::new().without_v07_checks();
     #[cfg(feature = "cluster")]
-    {
-        axum::Router::new().route(
-            INTERNAL_PATH,
-            axum::routing::post(internal).layer(axum::extract::DefaultBodyLimit::max(68 * 1024)),
-        )
-    }
-    #[cfg(not(feature = "cluster"))]
-    {
-        axum::Router::new()
-    }
+    let router = router.route(
+        INTERNAL_PATH,
+        axum::routing::post(internal).layer(axum::extract::DefaultBodyLimit::max(68 * 1024)),
+    );
+    router
 }

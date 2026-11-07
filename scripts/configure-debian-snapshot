@@ -15,8 +15,14 @@ sed \
     -e "s|http://deb.debian.org/debian|mirror+file:$apt_dir/plurx-debian.mirrors|g" \
     "$apt_dir/sources.list.d/debian.sources" > "$apt_dir/sources.list.d/debian.sources.tmp"
 mv "$apt_dir/sources.list.d/debian.sources.tmp" "$apt_dir/sources.list.d/debian.sources"
+# APT's mirror transport clears its shared request metadata after a mirrorlist
+# completes. With both archives pipelined, the second InRelease can lose its
+# Target-Type=index filter and incorrectly select the live deb-only mirror.
+# One queued acquisition preserves that filter for each archive; package-file
+# requests still retain the ordinary-mirror-first, exact-hash fallback order.
 cat > "$apt_dir/apt.conf.d/99plurx-snapshot" <<'EOF'
 Acquire::Check-Valid-Until "false";
 Acquire::Retries "5";
+Acquire::Max-Pipeline-Depth "1";
 Acquire::http::Timeout "30";
 EOF

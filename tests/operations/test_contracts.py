@@ -636,15 +636,17 @@ assert.equal(context.ACT_TIMER, null);
         contract = runpy.run_path(
             str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_port_contract"
         )
-        ports = contract["free_ports"](0, 4)
+        # Keep the historical regression name live; the native fixture now
+        # owns only HTTP/Jellyfin and must not configure cluster listeners.
+        ports = contract["free_ports"](0, 2)
 
-        self.assertEqual(len(ports), 4)
-        self.assertEqual(len(set(ports)), 4)
+        self.assertEqual(len(ports), 2)
+        self.assertEqual(len(set(ports)), 2)
         self.assertTrue(all(port > 0 for port in ports))
-        self.assertIn("self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports", script)
+        self.assertIn("self.port, self.jellyfin_port = free_ports(args.port, 2)", script)
         self.assertIn('jellyfin_port = {self.jellyfin_port}', script)
-        self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
-        self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
+        self.assertNotIn("self.raft_port", script)
+        self.assertNotIn("self.api_port", script)
 
     def test_ui_baseline_releases_players_and_narrowly_retries_root_attachment(self):
         script = read("scripts/ui-baseline")

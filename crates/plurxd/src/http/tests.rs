@@ -16,6 +16,19 @@ mod playback_handoffs;
 mod public_copy_wire;
 mod subtitle_generation;
 
+#[test]
+fn optional_remote_routes_preserve_literal_plex_colon_segments() {
+    // This is the same composition boundary as the shipping root router. An
+    // ordinary internal fragment re-enables Axum checks and panics here.
+    let _: Router<AppState> = Router::new()
+        .without_v07_checks()
+        .merge(remote::router())
+        .route(
+            "/:/timeline",
+            axum::routing::get(|| async { StatusCode::NO_CONTENT }),
+        );
+}
+
 async fn slow_test_handler() -> &'static str {
     tokio::time::sleep(Duration::from_millis(40)).await;
     "ok"

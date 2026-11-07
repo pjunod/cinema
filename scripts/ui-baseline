@@ -129,6 +129,7 @@ touch the portable tier; that is what makes the portable tier committable:
 
 import argparse
 import calendar
+import contextlib
 import hashlib
 import json
 import os
@@ -136,6 +137,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 from urllib.parse import urlparse
 import sqlite3
 import subprocess
@@ -166,21 +168,6 @@ FROZEN_EPOCH = calendar.timegm(time.strptime("2025-06-15T12:00:00", "%Y-%m-%dT%H
 # different string on screen every run.
 SEED_USER = "baseline"
 SEED_PASSWORD = "baseline-password"
-
-# The M2 activation seam this harness has to cross rather than avoid. A clean
-# `plurxd run` imports SQLite into a one-voter Hiqlite target and selects it;
-# afterwards `<data>/plurx.db` is only the rollback source, so freezing it would
-# rewrite rows nothing renders. `after-quiescence` aborts an activation attempt
-# after its marker is fsynced and before any incoming target exists, which buys
-# the one SQLite recovery boot `seed()` and `freeze_database()` need. See
-# docs/cluster/CLUSTERING-PLAN.md §4 and `select_daemon_store`.
-ACTIVATION_FAILPOINT_ENV = "PLURX_CLUSTER_ACTIVATION_FAILPOINT"
-ACTIVATION_FAILPOINT = "after-quiescence"
-# `ActivationFailpoint::crash_if` exits with this. Requiring it is what keeps a
-# renamed or deleted failpoint loud: without the check the deliberate boot would
-# quietly become an ordinary activating boot and the drift would resurface as an
-# unexplained golden diff rather than as a harness failure.
-ACTIVATION_CRASH_EXIT = 86
 
 # The fixture corpus. Tiny on purpose: nothing on screen cares how big the
 # picture is, and CI pays for every encode. Durations differ per title so the
@@ -545,7 +532,7 @@ def free_ports(preferred, count):
 
     Holding every socket until the set is complete prevents a concurrent
     Forgejo job (or the kernel's ephemeral allocator) from handing the same
-    port back for the daemon's HTTP, Raft, cluster API and Jellyfin listeners.
+    port back for the fixture's HTTP and Jellyfin listeners.
     """
     reservations = []
     try:
@@ -714,10 +701,9 @@ class SelfHost:
         self.media_dir = Path(args.out).resolve() / "media"
         self.config = self.root / "plurx.toml"
         self.log = self.root / "plurxd.log"
-        # The same four ports stay in the config across all three deliberate
-        # boots. Shared runners may own the cluster defaults or Jellyfin 8096;
-        # readiness must describe this fixture's own real listeners.
-        self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports(args.port, 4)
+        # Standalone opens only HTTP and Jellyfin. Reserve this fixture's real
+        # listeners without configuring or starting any cluster services.
+        self.port, self.jellyfin_port = free_ports(args.port, 2)
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.proc = None
         self.token = None
@@ -733,8 +719,8 @@ class SelfHost:
         # A binary merely existing says nothing about whether it contains this
         # tree's embedded HTML. Cargo's incremental no-op is cheap; serving a
         # stale binary can bless the exact pre-change UI as the new golden.
-        print("BUILD   cargo build -p plurxd", flush=True)
-        subprocess.run(["cargo", "build", "-p", "plurxd"], cwd=ROOT, check=True)
+        print("BUILD   cargo build --locked --no-default-features -p plurxd", flush=True)
+        subprocess.run(["cargo", "build", "--locked", "--no-default-features", "-p", "plurxd"], cwd=ROOT, check=True)
         return path
 
     def spawn(self):
@@ -745,12 +731,9 @@ class SelfHost:
             [str(self.server_bin()), "--config", str(self.config), "run"],
             cwd=ROOT, stdout=handle, stderr=handle, stdin=subprocess.DEVNULL,
             start_new_session=True,
-            # The failpoint is cleared explicitly rather than merely left unset:
-            # `ActivationFailpoint::configured` treats empty as absent, and an
-            # operator who exported it in their own shell would otherwise abort
-            # every boot here — including the capture boot, which must activate.
+            # Do not inherit an operator's legacy activation test injection.
             env={**os.environ, "PLURX_LOG": "info", "TZ": "UTC",
-                 ACTIVATION_FAILPOINT_ENV: "",
+                 "PLURX_CLUSTER_ACTIVATION_FAILPOINT": "",
                  "PLURX_JELLYFIN_PORT": str(self.jellyfin_port)},
         )
         deadline = time.time() + 60
@@ -765,15 +748,22 @@ class SelfHost:
                 time.sleep(0.2)
         raise Fail(f"plurxd never became healthy; see {self.log}")
 
-    def stop(self):
-        if not self.proc or self.proc.poll() is not None:
+    def stop(self, *, require_clean=False):
+        if not self.proc:
+            if require_clean:
+                raise Fail("fixture cannot freeze before its seed daemon has stopped cleanly")
             return
-        self.proc.send_signal(signal.SIGTERM)
-        try:
-            self.proc.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait(timeout=10)
+        if self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGTERM)
+            try:
+                self.proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=10)
+                if require_clean:
+                    raise Fail(f"seed daemon required a forced stop; refusing to freeze; see {self.log}")
+        if require_clean and self.proc.returncode != 0:
+            raise Fail(f"seed daemon exited {self.proc.returncode}; refusing to freeze; see {self.log}")
 
     def start(self):
         generate_media(self.media_dir, self.args.ffmpeg)
@@ -787,17 +777,10 @@ class SelfHost:
             "# Written by scripts/ui-baseline --self-host. Throwaway.\n"
             f'[server]\nname = "plurx"\nbind = "127.0.0.1:{self.port}"\n'
             f'jellyfin_port = {self.jellyfin_port}\n\n'
-            f'[cluster]\nraft_bind = "127.0.0.1:{self.raft_port}"\n'
-            f'api_bind = "127.0.0.1:{self.api_port}"\n\n'
-            f'[storage]\ndata_dir = "{self.data_dir}"\n'
+            f'[storage]\nmode = "sqlite"\ndata_dir = "{self.data_dir}"\n'
         )
-        # Three boots, not two, and the extra one is deliberate. Boot 1 aborts an
-        # activation attempt on purpose; boot 2 is the single SQLite recovery
-        # boot that attempt buys, and is the one that seeds and gets frozen;
-        # boot 3 finds a clean directory, imports the frozen fixture into a fresh
-        # one-voter target and serves the captures from it. So the browser
-        # photographs the app *after* a real M2 activation rather than beside it.
-        self.spend_activation_recovery_boot()
+        # Initialize native SQLite through the normal daemon, seed through its
+        # public APIs, stop cleanly, then freeze that same bound native database.
         self.spawn()
         self.seed()
         # Restart *after* seeding, and after the timestamps are rewritten. The
@@ -805,7 +788,7 @@ class SelfHost:
         # the scan finished, and Settings and Activity both render it as
         # "· just now" / "· 2m ago" — a stopwatch running against the capture.
         # A fresh process has no such memory, and reads the frozen database.
-        self.stop()
+        self.stop(require_clean=True)
         self.freeze_database()
         probe_log_offset = self.log.stat().st_size
         self.spawn()
@@ -840,54 +823,6 @@ class SelfHost:
             raise Fail("capture fixture Jellyfin listener did not bind its reserved port: "
                        + json.dumps(ports, sort_keys=True))
 
-    def spend_activation_recovery_boot(self):
-        """Abort one activation attempt so the next boot stays on SQLite.
-
-        `select_daemon_store` writes an fsynced attempt marker before it creates
-        any incoming target; the `after-quiescence` failpoint exits immediately
-        after that write. The next ordinary boot sees the marker, clears it, and
-        returns the unchanged legacy store — exactly one recovery boot, which is
-        the boot `seed()` and `freeze_database()` require.
-
-        This is the code's own documented recovery path rather than a bypass:
-        nothing here forges directory state, and no boot is exempted from
-        activation. Boot 3 finds the directory clean and activates for real.
-        """
-        print(f"BOOT    deliberate {ACTIVATION_FAILPOINT} abort "
-              "(buys the SQLite recovery boot that seeds and freezes)", flush=True)
-        try:
-            with open(self.log, "a") as handle:
-                result = subprocess.run(
-                    [str(self.server_bin()), "--config", str(self.config), "run"],
-                    cwd=ROOT, stdout=handle, stderr=handle, stdin=subprocess.DEVNULL,
-                    env={**os.environ, "PLURX_LOG": "info", "TZ": "UTC",
-                         ACTIVATION_FAILPOINT_ENV: ACTIVATION_FAILPOINT},
-                    timeout=300,
-                )
-        except subprocess.TimeoutExpired:
-            # It served instead of aborting, so the failpoint is gone rather
-            # than renamed — a renamed one is rejected and exits non-zero. Same
-            # cause as the exit-code branch below, different symptom.
-            raise Fail(
-                f"the deliberate {ACTIVATION_FAILPOINT} abort never exited: the daemon "
-                f"served instead, so {ACTIVATION_FAILPOINT_ENV} no longer aborts "
-                f"activation and this harness has no SQLite recovery boot to seed. "
-                f"See {self.log}"
-            )
-        # Loud on purpose. If the failpoint is renamed or removed this boot
-        # becomes an ordinary activating one, the seed lands in Hiqlite,
-        # freeze_database() rewrites a file nothing reads, and the run comes back
-        # as a pile of unexplained golden differences that look like a UI
-        # regression. Failing here names the actual cause instead.
-        if result.returncode != ACTIVATION_CRASH_EXIT:
-            raise Fail(
-                f"the deliberate {ACTIVATION_FAILPOINT} abort exited "
-                f"{result.returncode}, expected {ACTIVATION_CRASH_EXIT}: this harness "
-                f"needs one SQLite recovery boot to seed and freeze. If "
-                f"{ACTIVATION_FAILPOINT_ENV} or its exit code changed, update this "
-                f"sequence — do not regenerate the golden. See {self.log}"
-            )
-
     def seed(self):
         self.token = api(self.base_url, "/setup", method="POST",
                          body={"username": SEED_USER, "password": SEED_PASSWORD})["token"]
@@ -902,7 +837,7 @@ class SelfHost:
         api(self.base_url, "/settings", self.token, "PUT",
             {"vod_index_mins": 0, "cinema_remote_control": True})
         # Auto selects VideoToolbox on some Macs and Software on Linux. Pin a
-        # real node-scoped choice, then apply it at the existing recovery boot;
+        # real node-scoped choice, then apply it at the ordinary native restart;
         # the browser still renders the unmodified settings/readiness APIs.
         # This seed is reached only by --self-host, never a live --base-url.
         pin_fixture_software_encoder(self.base_url, self.token)
@@ -961,6 +896,61 @@ class SelfHost:
                     {"position_ms": 4900, "duration_ms": 5000})
         self.libs = libs
 
+    @contextlib.contextmanager
+    def frozen_native_database(self):
+        """Own the stopped native root before opening its bound database for writes."""
+        if self.proc is not None and self.proc.poll() is None:
+            raise Fail("refusing to freeze a running fixture daemon")
+        try:
+            import fcntl
+            root = self.data_dir.resolve(strict=True)
+            if root != self.data_dir or self.data_dir.is_symlink():
+                raise Fail("fixture storage root must be its canonical directory")
+            lock_path = root / ".plurxd.lock"
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except (ImportError, OSError) as error:
+            raise Fail(f"cannot acquire native fixture root: {error}") from error
+        try:
+            identity = os.fstat(descriptor)
+            if not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1:
+                raise Fail("fixture root lock must be one regular file")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise Fail("native fixture storage root is busy; refusing to freeze") from error
+            manifest_path = root / "storage-mode.json"
+            source = root / "plurx.db"
+            for path in [manifest_path, source]:
+                metadata = path.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                    raise Fail(f"native fixture file is not canonical: {path}")
+            manifest = json.loads(manifest_path.read_text())
+            expected = {"version", "mode", "database", "instance_id", "node_id", "generation", "schema_version"}
+            if (not isinstance(manifest, dict) or set(manifest) != expected
+                    or type(manifest["version"]) is not int or manifest["version"] != 1
+                    or manifest["mode"] != "sqlite" or manifest["database"] != "plurx.db"):
+                raise Fail("capture fixture must use a bound canonical native SQLite database")
+            if any((root / name).exists() for name in
+                   ["storage-transition.json", "native-adoption.json", "storage-migration.json"]):
+                raise Fail("native fixture has an unfinished storage operation")
+            db = sqlite3.connect(source.as_uri() + "?mode=rw", uri=True)
+            try:
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                binding = db.execute("SELECT instance_id,node_id,generation FROM storage_identity WHERE singleton=1").fetchone()
+                instance = db.execute("SELECT value FROM settings WHERE key='instance.id'").fetchone()
+                if (type(manifest["schema_version"]) is not int or manifest["schema_version"] < 1
+                        or version < manifest["schema_version"]
+                        or binding != tuple(manifest[key] for key in ["instance_id", "node_id", "generation"])
+                        or instance != (manifest["instance_id"],)):
+                    raise Fail("native fixture manifest/database identity or schema mismatch")
+                yield db
+            finally:
+                db.close()
+        except (OSError, ValueError, sqlite3.Error) as error:
+            raise Fail(f"cannot freeze the native fixture database: {error}") from error
+        finally:
+            os.close(descriptor)
+
     def freeze_database(self):
         """Rewrite every stored instant to a constant, backwards from FROZEN_EPOCH.
 
@@ -972,24 +962,10 @@ class SelfHost:
         filesystem property, and a tie in added_at would let two runs sort
         "Recently added" differently.
         """
-        source = self.data_dir / "plurx.db"
-        db = sqlite3.connect(source)
-        try:
-            # The one check that catches this class of bug directly, and it
-            # depends on neither log text nor the failpoint's name: if the seed
-            # boot activated instead of recovering, the seeded rows went to the
-            # replicated target and this file is the empty schema `plurx.db`
-            # ensure_sqlite_source() created. Freezing it would then succeed
-            # silently while pinning nothing the browser renders.
+        with self.frozen_native_database() as db:
             seeded = db.execute("SELECT COUNT(*) FROM items").fetchone()[0]
             if not seeded:
-                raise Fail(
-                    f"{source} holds no items after seeding: the seed boot wrote to an "
-                    "activated replicated store rather than the SQLite recovery store, "
-                    "so freezing it would rewrite rows nothing renders. Check that the "
-                    f"deliberate {ACTIVATION_FAILPOINT} abort still consumes exactly one "
-                    f"recovery boot; see {self.log}"
-                )
+                raise Fail("bound native fixture database holds no items after HTTP seeding; refusing to freeze")
             base = FROZEN_EPOCH - 3 * 86400
             rows = list(db.execute(
                 "SELECT id FROM items ORDER BY title, season_number, episode_number, id"))
@@ -1006,8 +982,6 @@ class SelfHost:
             db.execute("UPDATE libraries SET created_at = ?, last_scan_at = ?",
                        (FROZEN_EPOCH - 30 * 86400, base))
             db.commit()
-        finally:
-            db.close()
 
     def discover(self):
         self.routes = discover_routes(self.base_url, self.token, self.args,
