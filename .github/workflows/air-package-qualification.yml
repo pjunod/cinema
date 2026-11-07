@@ -1,5 +1,6 @@
 name: Native package runner qualification
 on:
+  workflow_dispatch:
   push:
     branches: [codex/qualify-air-package-20261107]
 jobs:
