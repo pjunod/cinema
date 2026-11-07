@@ -25,14 +25,23 @@ async fn a_library_and_its_scan_interval_are_one_write_on_every_backend() {
             .await
             .expect("explicit never");
         assert_eq!(never.scan_interval_mins, 0, "{backend}");
-        let existing = store.create_library(&new("Existing")).await.expect("old path");
-        assert_eq!(existing.scan_interval_mins, 0, "the column default is untouched: {backend}");
+        let existing = store
+            .create_library(&new("Existing"))
+            .await
+            .expect("old path");
+        assert_eq!(
+            existing.scan_interval_mins, 0,
+            "the column default is untouched: {backend}"
+        );
         let edited = store
             .update_library(existing.id, &new("Existing renamed"))
             .await
             .expect("edit")
             .expect("library");
-        assert_eq!(edited.scan_interval_mins, 0, "an edit never opts in: {backend}");
+        assert_eq!(
+            edited.scan_interval_mins, 0,
+            "an edit never opts in: {backend}"
+        );
         let listed = store.list_libraries().await.expect("list");
         let interval = |id: i64| {
             listed
@@ -42,7 +51,11 @@ async fn a_library_and_its_scan_interval_are_one_write_on_every_backend() {
                 .scan_interval_mins
         };
         assert_eq!(
-            (interval(scheduled.id), interval(never.id), interval(existing.id)),
+            (
+                interval(scheduled.id),
+                interval(never.id),
+                interval(existing.id)
+            ),
             (360, 0, 0),
             "{backend}"
         );
@@ -51,7 +64,10 @@ async fn a_library_and_its_scan_interval_are_one_write_on_every_backend() {
             .create_library_with_scan_interval(&new("Scheduled"), DEFAULT_SCAN_INTERVAL_MINS)
             .await
             .is_err());
-        assert_eq!(store.list_libraries().await.expect("list").len(), listed.len());
+        assert_eq!(
+            store.list_libraries().await.expect("list").len(),
+            listed.len()
+        );
     })
     .await;
 }

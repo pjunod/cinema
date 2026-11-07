@@ -21764,7 +21764,11 @@ async fn probe_paths_never_follow_a_symlink_and_refuse_a_path_beside_them() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["visible"], json!([]), "{body}");
-    assert_eq!(body["outside_roots"].as_array().map(Vec::len), Some(2), "{body}");
+    assert_eq!(
+        body["outside_roots"].as_array().map(Vec::len),
+        Some(2),
+        "{body}"
+    );
     let (status, body) = call(
         &app,
         post(
