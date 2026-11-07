@@ -622,9 +622,12 @@ def historical_recipe(record,kind):
         workflow = retention.git_bytes(record['source_commit'], '.github/workflows/ci.yml')
         receipts.require(workflow is not None and historical_command(workflow.decode(), kind),
                          'Native topology workflow tail requires reviewed executor source')
-        # This compiler step follows the unit Make invocation in the same
-        # authenticated workflow step. It is a boundary, never unit coverage.
-        recipes.append('$(CARGO) clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings')
+        # The source Make wrapper follows its unit target with this nonunit
+        # target. Its first actual command bounds the last unit's output.
+        tail = make_commands(text.decode(), 'cluster-harness-nonunit-check')
+        receipts.require(tail and tail[0] == '$(CARGO) run --locked -p plurx-cluster-check -- check',
+                         'Native topology nonunit boundary changed')
+        recipes.append(tail[0])
     return recipes
 
 
