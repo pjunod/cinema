@@ -120,6 +120,24 @@ pub(super) async fn enqueue<T: QueueSql>(
     store: &T,
     input: NewLibraryWork,
 ) -> Result<EnqueueOutcome, StoreError> {
+    enqueue_with(store, input, None).await
+}
+
+/// `seed` carries the contract v2 sidecar into the admission transaction
+/// (`scan_request_v2.sql`); it is refused for anything but targeted work.
+pub(super) async fn enqueue_with<T: QueueSql>(
+    store: &T,
+    input: NewLibraryWork,
+    seed: Option<super::scan_request_v2::ScanRequestV2Seed>,
+) -> Result<EnqueueOutcome, StoreError> {
+    if let Some(seed) = seed.as_ref() {
+        seed.validate()?;
+        if !matches!(input.input, LibraryWorkInput::Targeted { .. }) {
+            return Err(StoreError::Task(
+                "only targeted library work carries a scan request sidecar".into(),
+            ));
+        }
+    }
     let refresh = matches!(input.input, LibraryWorkInput::Full { refresh: true, .. });
     let priority = match input.input {
         LibraryWorkInput::Full {
@@ -175,6 +193,10 @@ pub(super) async fn enqueue<T: QueueSql>(
     let mut body = enqueue_body(store, &request).await?;
     body["library_request"] =
         serde_json::from_str(&input_json).map_err(|error| StoreError::Task(error.to_string()))?;
+    if let Some(seed) = seed {
+        body["scan_request_v2"] =
+            serde_json::to_value(&seed).map_err(|error| StoreError::Task(error.to_string()))?;
+    }
     let rows = store
         .queue_sql(ENQUEUE_SQL.into(), encode(&body)?, true, true)
         .await?;

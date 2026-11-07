@@ -455,9 +455,14 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // Playback handoff codes and tokens are durable account state.
     assert!(names.contains(&"playback_handoffs"));
     assert!(names.contains(&"playback_handoffs_tokens"));
+    // The contract v2 scan request sidecar is durable request state; its
+    // schema marker is installed locally, like the annotations marker.
+    assert!(names.contains(&"background_scan_request_v2"));
+    assert!(!names.contains(&"background_scan_request_v2_schema"));
     // 95 with the three item-annotation tables (SQLite v113), 97 with the
-    // two playback handoff tables (SQLite v115).
-    assert_eq!(names.len(), 97, "review every imported durable table");
+    // two playback handoff tables (SQLite v115), 98 with the scan request
+    // sidecar (SQLite v124).
+    assert_eq!(names.len(), 98, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
@@ -1041,6 +1046,7 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 "background_predictions" => 79,
                 "background_embeddings" => 80,
                 "background_artifact_repairs" => 82,
+                "background_scan_request_v2" => 124,
                 _ => 71,
             };
             assert_eq!(table.minimum_schema, introduced, "{}", table.name);

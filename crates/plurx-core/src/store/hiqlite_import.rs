@@ -2041,6 +2041,25 @@ const TABLES: &[TablePlan] = &[
         sealed_columns: &[],
         parent_first: false,
     },
+    // Contract v2 sidecar of targeted requests; retired with its request.
+    TablePlan {
+        name: "background_scan_request_v2",
+        columns: &[
+            "request_id",
+            "key_id",
+            "request_key",
+            "expected_files_json",
+            "waiting_on",
+            "files_json",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "request_id",
+        minimum_schema: super::scan_request_v2::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
     TablePlan {
         name: "job_leases",
         columns: &[

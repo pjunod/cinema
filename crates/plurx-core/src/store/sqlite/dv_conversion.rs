@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 77] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 78] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1745,6 +1745,9 @@ mod tests {
             // accepted artifact work still refuses and v111 reconstructs v1.
             "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2))",
             "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=3))",
+            // v124: the shared queue helper drops every background_* object,
+            // the scan request sidecar and its marker among them.
+            "CREATE TABLE IF NOT EXISTS background_scan_request_v2_schema",
         ];
 
         assert!(
