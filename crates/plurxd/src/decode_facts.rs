@@ -4994,7 +4994,9 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut retained = Vec::with_capacity(limit.min(8 * 1024));
-    let mut scratch = [0_u8; 8 * 1024];
+    // Both pipe readers remain live across awaits in the probe and idet
+    // supervisors. Keep their buffers out of those nested futures.
+    let mut scratch = vec![0_u8; 8 * 1024];
     let mut overflow = false;
     loop {
         let count = reader
