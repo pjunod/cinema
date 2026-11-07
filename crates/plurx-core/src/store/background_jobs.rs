@@ -2432,6 +2432,7 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         token: super::background_jobs_resources::ForegroundSourceToken,
     ) -> Result<bool, StoreError>;
+    async fn reap_settled_source_custody(&self, now_ms: i64) -> Result<(), StoreError>;
     async fn settled_foreground_source_custody(
         &self,
     ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
@@ -4371,6 +4372,9 @@ LIMIT 1
         token: super::background_jobs_resources::ForegroundSourceToken,
     ) -> Result<bool, StoreError> {
         super::background_jobs_resources::mark_foreground_settled(self, token).await
+    }
+    async fn reap_settled_source_custody(&self, now_ms: i64) -> Result<(), StoreError> {
+        super::background_jobs_resources::reap_settled_source_custody(self, now_ms).await
     }
     async fn settled_foreground_source_custody(
         &self,

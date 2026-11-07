@@ -14,6 +14,16 @@ source mapping**, not an automatic refinement proof. Source hashes in
 that set complete or that the abstractions are correct.
 
 
+## Source custody replay on 2026-11-07
+
+Against `cc2ca1338`, scheduler upkeep now rechecks settlement proof and
+the exact owner's current authority inside the cleanup transaction. This
+preserves newly registered readers through activation and lets a renewed
+background job retain its pending registration. The resource-mapping and
+selected claim, renewal, binding and fenced-publication anchors keep their
+existing transitions. Physical source activation and settlement are runtime
+obligations outside this finite model.
+
 ## Queue observation source review on 2026-11-07
 
 Compared with `4ddbf1229`, the shared queue adds read-only counts of recent
