@@ -273,10 +273,3 @@ host = "maca"
 os = "Linux"
 arch = "ARM64"
 labels = ["lab", "ubuntu-26.04", "ci-arm64"]
-
-[[runners]]
-name = "gha-macb-linux-arm-01"
-host = "macb"
-os = "Linux"
-arch = "ARM64"
-labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "primary"]
