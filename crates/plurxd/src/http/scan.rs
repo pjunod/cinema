@@ -128,10 +128,17 @@ pub async fn scan(
     // needs to rule in or out.
     state.jobs.metrics().count_notification();
 
-    if body.path.is_none() {
-        if let Some(probe) = body.probe_paths.as_deref() {
-            return probe_paths(&state, probe).await;
+    if let Some(probe) = body.probe_paths.as_deref() {
+        if body.path.is_some() {
+            // A connection test and a scan are different requests; guessing
+            // which one the caller meant would silently drop the other.
+            return Err(ApiError::Typed {
+                status: StatusCode::BAD_REQUEST,
+                code: "probe_paths_with_path",
+                message: "`probe_paths` is a connection test and takes no `path`".into(),
+            });
         }
+        return probe_paths(&state, probe).await;
     }
     let Some(raw_path) = body.path.clone() else {
         return Err(ApiError::Typed {
@@ -375,9 +382,27 @@ async fn probe_paths(state: &AppState, probe: &[String]) -> Result<Response, Api
         let (mut visible, mut missing, mut outside) = (Vec::new(), Vec::new(), Vec::new());
         for raw in probe {
             let path = std::path::Path::new(&raw);
-            if !path.is_absolute() || containment::lexical_root(&libraries, path).is_none() {
+            let Some((_, root)) = path
+                .is_absolute()
+                .then(|| containment::lexical_root(&libraries, path))
+                .flatten()
+            else {
                 outside.push(raw);
                 continue;
+            };
+            // Resolving the path would follow a symlink beneath the root to
+            // wherever it points before containment could refuse it: `lstat`
+            // each component under the root first and never follow one.
+            match containment::symlink_below_root(&root, path) {
+                Ok(true) => {
+                    outside.push(raw);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    missing.push(raw);
+                    continue;
+                }
             }
             match containment::classify_path(&libraries, path) {
                 PathClass::Inside { .. } => visible.push(raw),

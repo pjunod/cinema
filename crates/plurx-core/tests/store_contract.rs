@@ -37,6 +37,8 @@ mod jellyfin_login;
 mod jellyfin_play;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
+#[path = "store_contract/library_schedule.rs"]
+mod library_schedule;
 #[path = "store_contract/scan_request_v2.rs"]
 mod scan_request_v2;
 #[path = "store_contract/remote.rs"]
