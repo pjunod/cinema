@@ -128,10 +128,17 @@ pub async fn scan(
     // needs to rule in or out.
     state.jobs.metrics().count_notification();
 
-    if body.path.is_none() {
-        if let Some(probe) = body.probe_paths.as_deref() {
-            return probe_paths(&state, probe).await;
+    if let Some(probe) = body.probe_paths.as_deref() {
+        if body.path.is_some() {
+            // A connection test and a scan are different requests; guessing
+            // which one the caller meant would silently drop the other.
+            return Err(ApiError::Typed {
+                status: StatusCode::BAD_REQUEST,
+                code: "probe_paths_with_path",
+                message: "`probe_paths` is a connection test and takes no `path`".into(),
+            });
         }
+        return probe_paths(&state, probe).await;
     }
     let Some(raw_path) = body.path.clone() else {
         return Err(ApiError::Typed {
@@ -314,17 +321,34 @@ async fn answer(
             )
                 .into_response())
         }
+        // A finished failure answers with the request it is — the same
+        // `request_id`, `status` and `error` the GET record carries — so a
+        // replayed `request_key` returns its result (contract v2 §5.1) and
+        // the caller can tell a transient root from any other failure.
         "failed" => {
             let error = record.error.unwrap_or_default();
             if error.starts_with(PATH_UNREADABLE) {
                 // The share dropped between admission and the scan.
-                return Ok(path_unreadable(
+                return Ok(path_unreadable_for(
                     &record.path,
                     std::path::Path::new(""),
                     &error,
+                    Some(&record.request_id),
                 ));
             }
-            Err(ApiError::Internal(error))
+            let mut detail = serde_json::Map::new();
+            detail.insert("status".into(), serde_json::json!("failed"));
+            detail.insert("request_id".into(), serde_json::json!(record.request_id));
+            detail.insert("error".into(), serde_json::json!(error));
+            if let Some(correlation_id) = correlation_id {
+                detail.insert("correlation_id".into(), serde_json::json!(correlation_id));
+            }
+            Err(ApiError::TypedDetail {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "scan_failed",
+                message: "the scan request failed; see `error`".into(),
+                detail,
+            })
         }
         // Busy: queued rather than dropped. 202 with an id to poll, because
         // silently losing the request would leave a season half-indexed.
@@ -358,9 +382,27 @@ async fn probe_paths(state: &AppState, probe: &[String]) -> Result<Response, Api
         let (mut visible, mut missing, mut outside) = (Vec::new(), Vec::new(), Vec::new());
         for raw in probe {
             let path = std::path::Path::new(&raw);
-            if !path.is_absolute() || containment::lexical_root(&libraries, path).is_none() {
+            let Some((_, root)) = path
+                .is_absolute()
+                .then(|| containment::lexical_root(&libraries, path))
+                .flatten()
+            else {
                 outside.push(raw);
                 continue;
+            };
+            // Resolving the path would follow a symlink beneath the root to
+            // wherever it points before containment could refuse it: `lstat`
+            // each component under the root first and never follow one.
+            match containment::symlink_below_root(&root, path) {
+                Ok(true) => {
+                    outside.push(raw);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    missing.push(raw);
+                    continue;
+                }
             }
             match containment::classify_path(&libraries, path) {
                 PathClass::Inside { .. } => visible.push(raw),
@@ -401,6 +443,17 @@ fn outside_roots(path: &str, roots: Vec<String>) -> ApiError {
 /// cannot be read right now (an unmounted share, `ENOTCONN`, `EIO`), so the
 /// same request succeeds once it is back.
 fn path_unreadable(path: &str, root: &std::path::Path, error: &str) -> Response {
+    path_unreadable_for(path, root, error, None)
+}
+
+/// [`path_unreadable`] for a request that was admitted and then failed: the
+/// body also names it, as `status: failed` with its `request_id`.
+fn path_unreadable_for(
+    path: &str,
+    root: &std::path::Path,
+    error: &str,
+    request_id: Option<&str>,
+) -> Response {
     let mut body = serde_json::json!({
         "code": PATH_UNREADABLE,
         "error": format!("library root could not be read: {error}"),
@@ -409,6 +462,10 @@ fn path_unreadable(path: &str, root: &std::path::Path, error: &str) -> Response 
     });
     if !root.as_os_str().is_empty() {
         body["root"] = serde_json::json!(root.display().to_string());
+    }
+    if let Some(request_id) = request_id {
+        body["request_id"] = serde_json::json!(request_id);
+        body["status"] = serde_json::json!("failed");
     }
     let mut response = (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
     response.headers_mut().insert(
@@ -497,7 +554,9 @@ pub async fn request_status(
     if !key.0.allows(scopes::STATUS_READ)
         && state.jobs.scan_request_creator(&id).await? != Some(key.0.id)
     {
-        // Another key's request, or one from before keys were recorded.
+        // Another key's request, one from before keys were recorded, or no
+        // such request: all 403 for a key without `status:read`, so a scan
+        // key cannot probe which request ids exist (review #1407, 12).
         return Err(ApiError::Forbidden);
     }
     match state.jobs.scan_request(&id).await {

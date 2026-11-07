@@ -109,9 +109,17 @@ impl JobManager {
             now_ms: clock_ms(),
         };
         match self.store.enqueue_library_work_v2(input, seed).await {
-            Ok(outcome) => self
-                .admission_outcome(outcome)
-                .map(|_| ScanAdmission::Admitted(req.id)),
+            Ok(outcome) => {
+                let running_job = match &outcome {
+                    EnqueueOutcome::Accepted { job_id, .. } => Some(job_id.clone()),
+                    _ => None,
+                };
+                self.admission_outcome(outcome)?;
+                if let Some(job_id) = running_job {
+                    self.note_queue_position(&job_id, &req.id).await;
+                }
+                Ok(ScanAdmission::Admitted(req.id))
+            }
             Err(error) => {
                 if !request_key.is_empty() {
                     if let Some(existing) =
@@ -121,6 +129,49 @@ impl JobManager {
                     }
                 }
                 Err(TargetError::Store(error))
+            }
+        }
+    }
+
+    /// A request that joins a targeted job already running waits for that
+    /// pass to reach it: record `queue_position:<n>`, the pending requests
+    /// ahead of it (contract v2 §5.1). The pass clears it when it starts
+    /// the next turn. Advisory, like every `waiting_on`.
+    async fn note_queue_position(&self, job_id: &str, request_id: &str) {
+        let running = matches!(
+            self.store.background_job(job_id).await,
+            Ok(Some(job)) if job.state == JobState::Running
+        );
+        if !running {
+            return;
+        }
+        let pending = match self
+            .store
+            .library_work_requests(LibraryWorkQuery {
+                job_id: Some(job_id.to_owned()),
+                pending_only: true,
+                limit: MAX_PENDING_PER_LIBRARY,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, job_id, "reading the targeted queue position");
+                return;
+            }
+        };
+        let ahead = pending
+            .iter()
+            .take_while(|record| record.request_id != request_id)
+            .count();
+        if ahead > 0 {
+            if let Err(error) = self
+                .store
+                .set_scan_request_waiting_on(request_id, &format!("queue_position:{ahead}"), clock_ms())
+                .await
+            {
+                tracing::warn!(%error, request_id, "recording the targeted queue position");
             }
         }
     }
@@ -149,6 +200,9 @@ impl JobManager {
                 () = tokio::time::sleep((deadline - now).min(Duration::from_millis(500))) => {}
             }
         };
+        // The signal is per request id, not per waiter: a second handler
+        // waiting on the same request loses it here and falls back to the
+        // bounded re-read above, which is still correct (review #1406, 10).
         self.forget_scan_waiter(request_id);
         record
     }
@@ -417,6 +471,11 @@ impl JobManager {
                         ));
                     }
                 }
+            }
+            if full.is_empty() && !groups.is_empty() {
+                // A targeted pass is under way: whatever its requests were
+                // waiting on (the fence, a place in the queue) is over.
+                crate::background_jobs::note_targeted_wait(self.store.as_ref(), job_id, "").await;
             }
             if !full.is_empty() {
                 #[cfg(test)]
@@ -1633,8 +1692,9 @@ mod tests {
             request_record(store.as_ref(), "full-running").await.state,
             "succeeded"
         );
-        // The yield deferred the job by the shared driver's five seconds.
-        tokio::time::timeout(Duration::from_secs(30), async {
+        // A fence refusal defers a targeted job by a quarter second, not by
+        // the shared driver's five (review #1405, finding 4).
+        tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 jobs.work_library_queue(&transcode, None).await;
                 if request_record(store.as_ref(), "targeted-fenced")
@@ -1735,5 +1795,67 @@ mod tests {
             "pending"
         );
         drop(held);
+    }
+
+    /// The targeted job keeps the `library_scan` kind and is told apart by its
+    /// payload generation, so a claimer must run only the generations it
+    /// knows: a `library_scan` row from a newer release is left queued, never
+    /// run as a full scan or failed (review #1405, condition ii).
+    #[tokio::test]
+    async fn claim_library_leaves_an_unknown_library_scan_generation_queued() {
+        use plurx_core::store::background_jobs::{EnqueueJob, JobRequest};
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Future".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let now_ms = clock_ms();
+        let EnqueueOutcome::Accepted { job_id, .. } = store
+            .enqueue_job(EnqueueJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                payload: JobPayload::LibraryScan {
+                    library_id: library.id,
+                    generation: "library-future-v9".into(),
+                },
+                dedupe_key: format!("library:future:{}", library.id),
+                priority: 3,
+                not_before_ms: now_ms,
+                now_ms,
+                request: JobRequest {
+                    scope: "test".into(),
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    request_digest: "f".repeat(64),
+                    consumer_kind: "test".into(),
+                    consumer_ref: library.id.to_string(),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue a future generation")
+        else {
+            panic!("the future-generation row must be queued")
+        };
+        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+        let transcode = transcode_for(Arc::clone(&store), &root.path().join("transcode"));
+        assert!(
+            !jobs.work_library_queue(&transcode, None).await,
+            "an unknown generation is not claimed"
+        );
+        let job = store
+            .background_job(&job_id)
+            .await
+            .expect("read job")
+            .expect("retained");
+        assert_eq!(job.state, JobState::Queued);
+        assert_eq!(job.failed_attempts, 0);
+        assert!(job.token.is_none());
     }
 }

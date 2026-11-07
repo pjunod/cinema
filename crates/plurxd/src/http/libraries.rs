@@ -32,7 +32,7 @@ pub struct LibraryInput {
 /// never arrived is found by the next sweep rather than never (contract v2
 /// §5.2). Existing libraries keep what they have — `0` stays `0` — and
 /// Settings offers each a one-click opt-in.
-pub const DEFAULT_SCAN_INTERVAL_MINS: i64 = 360;
+pub use plurx_core::domain::DEFAULT_SCAN_INTERVAL_MINS;
 /// A floor rather than a free-for-all: scanning a real library every minute
 /// is a NAS denial-of-service with a schedule attached, and the loop only
 /// ticks once a minute anyway. 0 (off) stays exactly 0.
@@ -103,29 +103,19 @@ pub async fn create(
         .unwrap_or(DEFAULT_SCAN_INTERVAL_MINS);
     check_interval("scan_interval_mins", scan_interval_mins)?;
     let new = input.validate()?;
-    let library = state.store.create_library(&new).await.map_err(|e| {
-        // A duplicate name is the common user error worth surfacing clearly.
-        if e.to_string().contains("UNIQUE") {
-            ApiError::Conflict(format!("a library named `{}` already exists", new.name))
-        } else {
-            ApiError::from(e)
-        }
-    })?;
-    // The column default stays 0 so no upgrade path can touch an existing
-    // library; a new one gets its schedule here.
-    let library = if library.scan_interval_mins == scan_interval_mins {
-        library
-    } else {
-        state
-            .store
-            .set_library_schedule(
-                library.id,
-                scan_interval_mins,
-                library.refresh_interval_mins,
-            )
-            .await?
-            .ok_or(ApiError::NotFound("library"))?
-    };
+    // One write: the library and its schedule, on both backends.
+    let library = state
+        .store
+        .create_library_with_scan_interval(&new, scan_interval_mins)
+        .await
+        .map_err(|e| {
+            // A duplicate name is the common user error worth surfacing clearly.
+            if e.to_string().contains("UNIQUE") {
+                ApiError::Conflict(format!("a library named `{}` already exists", new.name))
+            } else {
+                ApiError::from(e)
+            }
+        })?;
     state.jobs.trigger_scan(library.id).await;
     Ok(Json(library.into()))
 }
