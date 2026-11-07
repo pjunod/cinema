@@ -795,6 +795,20 @@ impl MediaPool {
             })
     }
 
+    /// Every peer this ingress holds a fresh advertisement for, with the
+    /// reason it could answer no offer (`None` = eligible owner). A peer
+    /// absent here has no fresh, exact-protocol snapshot.
+    pub(crate) async fn placement_owner_reasons(&self) -> BTreeMap<String, Option<&'static str>> {
+        let now = tokio::time::Instant::now();
+        self.snapshots
+            .read()
+            .await
+            .iter()
+            .filter(|(_, cached)| now <= cached.expires_at)
+            .map(|(node_id, cached)| (node_id.clone(), placement_refusal(&cached.snapshot)))
+            .collect()
+    }
+
     /// Cache one peer advertisement as the poll loop would.
     #[cfg(test)]
     pub(crate) async fn cache_snapshot_for_test(&self, snapshot: MediaNodeSnapshot) {
@@ -2166,9 +2180,24 @@ fn requested_tracks_exist(
         })
 }
 
+/// The request-independent half of [`snapshot_can_answer`]: why this
+/// advertisement could answer no offer at all, or `None` when it is an
+/// eligible owner. The cluster panel shows it per node; placement itself
+/// still evaluates each request.
+pub(crate) fn placement_refusal(snapshot: &MediaNodeSnapshot) -> Option<&'static str> {
+    if snapshot.protocol_version != PROTOCOL_VERSION {
+        Some("protocol_mismatch")
+    } else if snapshot.egress_pressure == PressureBand::Unavailable {
+        Some("egress_unavailable")
+    } else if snapshot.encoders.is_empty() {
+        Some("no_encoder")
+    } else {
+        None
+    }
+}
+
 fn snapshot_can_answer(snapshot: &MediaNodeSnapshot, request: &MediaOfferRequest) -> bool {
-    snapshot.protocol_version == PROTOCOL_VERSION
-        && snapshot.egress_pressure != PressureBand::Unavailable
+    placement_refusal(snapshot).is_none()
         && snapshot.encoders.iter().any(|capability| {
             capability.max_target_height >= request.target_height
                 && capability

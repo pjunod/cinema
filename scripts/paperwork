@@ -89,6 +89,13 @@ TEST_RULES: tuple[tuple[str, str, str], ...] = (
         "fix the syntax error the failure names",
     ),
     (
+        "test_media_pool_wire",
+        "the media-pool wire changes only with a protocol bump and a rollout note",
+        "a strict (deny_unknown_fields) envelope change, or a removed/retyped lenient field, needs "
+        "a PROTOCOL_VERSION bump in crates/plurxd/src/media_pool.rs and a dated `protocol <N>` line "
+        "under \"Rolling upgrades\" in docs/OPERATIONS.md; a new lenient field needs #[serde(default)]",
+    ),
+    (
         "test_doc_size_budget",
         "docs stay under 40 KB, and the shrink-only list only shrinks",
         "split the doc or move detail to a sibling doc; never add to the allowlist",
@@ -247,12 +254,16 @@ def check_mobile_versions(base: str, merge_target: str) -> Result:
     )
 
 
-def check_tests() -> list[Result]:
+def check_tests(base: str) -> list[Result]:
     start = time.monotonic()
     names = [module for module, _, _ in TEST_RULES]
     code, out = run(
         [sys.executable, "-m", "unittest", "-q", *names],
-        env={"PYTHONPATH": os.pathsep.join(filter(None, [str(ROOT / "tests" / "operations"), str(ROOT), os.environ.get("PYTHONPATH", "")]))},
+        env={
+            "PYTHONPATH": os.pathsep.join(filter(None, [str(ROOT / "tests" / "operations"), str(ROOT), os.environ.get("PYTHONPATH", "")])),
+            # Rules that compare against the merge base read it from here.
+            "PLURX_VALIDATION_BASE": base,
+        },
     )
     elapsed = time.monotonic() - start
     if code == 0:
@@ -355,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         check_catalog(),
         check_regression_fields(base, body, title),
         check_mobile_versions(base, args.counter_target or args.merge_target),
-        *check_tests(),
+        *check_tests(base),
     ]
     web = check_web(paths)
     if web is not None:

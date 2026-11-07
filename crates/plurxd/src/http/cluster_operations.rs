@@ -60,6 +60,13 @@ pub(crate) struct ClusterNodeOperationsStatus {
     pub build: String,
     pub protocol_min: i64,
     pub protocol_max: i64,
+    /// The media-pool placement protocol this node speaks
+    /// (`media_pool::PROTOCOL_VERSION`). Distinct from the authentication
+    /// range above: placement requires an exact match, so an operator reads
+    /// build, this and placement eligibility independently during a rolling
+    /// upgrade. Absent from a node that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_protocol: Option<i64>,
     pub process: ProcessStatus,
     pub serving: ReadinessEvaluation,
     pub raft: RaftStatus,
@@ -201,6 +208,23 @@ pub(crate) struct ClusterNodeObservation {
     /// outside `status` so a closed public listener cannot hide recovery.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<SnapshotTransportStatus>,
+    /// Whether the answering ingress would place media on this node now,
+    /// read from its media-pool snapshot cache. Filled only by the panel's
+    /// aggregate; never by the peer itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementOwnerView>,
+}
+
+/// One ingress's placement view of one node. The three facts placement
+/// compares independently — build (reported), protocol (exact match
+/// required) and eligibility (a fresh, bounded snapshot that can answer) —
+/// are shown side by side so a skewed rolling upgrade is visible rather than
+/// inferred from missing offers.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct PlacementOwnerView {
+    pub eligible_owner: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -280,13 +304,54 @@ where
 pub(crate) async fn collect_aggregate(
     state: &AppState,
 ) -> Result<ClusterOperationsAggregate, ApiError> {
-    collect_aggregate_with_cached_sources(
+    let mut aggregate = collect_aggregate_with_cached_sources(
         &state.node_id,
         || state.membership_status_cache.fresh(),
         || local_snapshot(state),
         || state.peer_status_cache.fresh(),
     )
-    .await
+    .await?;
+    let local = crate::media_pool::local_snapshot(state).await;
+    let peers = state.media_pool.placement_owner_reasons().await;
+    annotate_placement(&mut aggregate, &state.node_id, &local, &peers);
+    Ok(aggregate)
+}
+
+/// Placement eligibility per node, from the ingress's own cache: the local
+/// node from its live snapshot, a peer from its cached advertisement. A peer
+/// with no cached snapshot is ineligible, and the reason says whether its
+/// self-reported media protocol differs from ours — the cache only ever
+/// holds exact-protocol snapshots, so a skewed peer is simply absent there.
+fn annotate_placement(
+    aggregate: &mut ClusterOperationsAggregate,
+    local_node_id: &str,
+    local: &crate::media_pool::MediaNodeSnapshot,
+    peers: &BTreeMap<String, Option<&'static str>>,
+) {
+    let local_protocol = crate::media_pool::PROTOCOL_VERSION;
+    for node in &mut aggregate.nodes {
+        let node_id = node.membership.node_id.as_str();
+        let reason = if node_id == local_node_id {
+            crate::media_pool::placement_refusal(local).map(str::to_owned)
+        } else {
+            match peers.get(node_id) {
+                Some(reason) => reason.map(str::to_owned),
+                None => Some(
+                    match node.status.as_ref().map(|status| status.media_protocol) {
+                        Some(Some(protocol)) if protocol != local_protocol => {
+                            format!("protocol_mismatch:{protocol}")
+                        }
+                        Some(None) => "protocol_unreported".to_owned(),
+                        _ => "no_fresh_snapshot".to_owned(),
+                    },
+                ),
+            }
+        };
+        node.placement = Some(PlacementOwnerView {
+            eligible_owner: reason.is_none(),
+            reason,
+        });
+    }
 }
 
 /// Safety-changing operations re-read committed membership and make fresh,
@@ -1187,6 +1252,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
         build: crate::version::BUILD.to_owned(),
         protocol_min: plurx_core::store::AUTH_PROTOCOL_MIN,
         protocol_max: plurx_core::store::AUTH_PROTOCOL_MAX,
+        media_protocol: Some(crate::media_pool::PROTOCOL_VERSION),
         process: ProcessStatus { live: true },
         serving: operations_readiness(state),
         raft: RaftStatus {
@@ -1990,6 +2056,7 @@ where
             error_class,
             status,
             transport,
+            placement: None,
         });
     }
     rows
