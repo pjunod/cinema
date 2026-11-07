@@ -1,7 +1,7 @@
 //! Native SQLite bootstrap. No consensus client, membership or vote is created.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -92,8 +92,25 @@ impl NativeDirectoryLock {
         match file.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
+                // The kernel lock remains the authority. The bounded PID
+                // record only distinguishes a genuine double start from an
+                // in-process retained handle in the operator's diagnostic.
+                let recorded = file.rewind().ok().and_then(|()| {
+                    let mut text = String::new();
+                    Read::take(&mut file, 128).read_to_string(&mut text).ok()?;
+                    text.trim().parse::<u32>().ok().filter(|pid| *pid != 0)
+                });
+                let owner = match recorded {
+                    Some(pid) if pid == std::process::id() => format!(
+                        "still locked inside this plurxd process (recorded pid {pid})"
+                    ),
+                    Some(pid) => format!(
+                        "another plurxd process already owns the data directory (recorded pid {pid})"
+                    ),
+                    None => "lock holder not recorded".to_owned(),
+                };
                 return Err(StoreError::Identity(format!(
-                    "native storage directory is busy: {}",
+                    "native storage directory is busy: {owner}: {}",
                     data_dir.display()
                 )));
             }
@@ -462,6 +479,20 @@ mod tests {
         assert!(result.is_err());
         assert!(!directory.path().join(DATABASE_FILENAME).exists());
         assert!(!directory.path().join("credentials.key").exists());
+    }
+
+    #[test]
+    fn a_retained_native_lock_names_this_process_without_inventing_another_daemon() {
+        let directory = tempfile::tempdir().expect("directory");
+        let _owner = NativeDirectoryLock::try_acquire(directory.path()).expect("owner");
+        let error = NativeDirectoryLock::try_acquire(directory.path())
+            .err()
+            .expect("same-process contender must be refused");
+        assert!(super::is_lock_busy(&error));
+        assert!(error
+            .to_string()
+            .contains("still locked inside this plurxd process"));
+        assert!(!error.to_string().contains("another plurxd process"));
     }
 
     #[tokio::test]
