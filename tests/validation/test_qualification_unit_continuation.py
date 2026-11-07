@@ -822,10 +822,10 @@ class NativeTopologyWorkflowTailCase(unittest.TestCase):
     def test_native_topology_tail_requires_reviewed_workflow_and_stays_outside_unit_coverage(self):
         record = {'source_commit': 'a' * 40, 'origin': {'kind': 'authenticated-ci'}}
         recipe = ['$(CARGO) test --locked -p plurx-cluster-check final --lib -- --exact']
-        with patch.object(q.retention, 'git_bytes', return_value=b'cluster-harness-unit-check: ## reviewed\n'), patch.object(q, 'make_commands', return_value=list(recipe)), patch.object(q, 'historical_command', return_value=True):
+        with patch.object(q.retention, 'git_bytes', return_value=b'cluster-harness-unit-check: ## reviewed\n'), patch.object(q, 'make_commands', side_effect=lambda text, target: list(recipe) if target == 'cluster-harness-unit-check' else ['$(CARGO) run --locked -p plurx-cluster-check -- check']), patch.object(q, 'historical_command', return_value=True):
             actual = q.historical_recipe(record, 'topology')
             self.assertEqual(actual[:-1], recipe)
-            self.assertEqual(actual[-1], '$(CARGO) clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings')
+            self.assertEqual(actual[-1], '$(CARGO) run --locked -p plurx-cluster-check -- check')
         with patch.object(q.retention, 'git_bytes', return_value=b'cluster-harness-unit-check: ## unknown\n'), patch.object(q, 'make_commands', return_value=list(recipe)), patch.object(q, 'historical_command', return_value=False):
             with self.assertRaises(receipts.ReceiptError):
                 q.historical_recipe(record, 'topology')
