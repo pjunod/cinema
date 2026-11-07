@@ -597,7 +597,13 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                     from validation import retained_lane_commands as native
                     r.require(frozen == candidate, 'Native command retention requires exact candidate')
                     native.record_contract(lane, suite, record, frozen, raw_log, source)
-                actual_outcomes = log_outcomes(raw_log, record['format'], source_commit=prior, source=source)
+                if record['format'] == 'xctest-full-job-6713':
+                    from validation import retained_apple_job as apple_job
+                    r.require(frozen == candidate, 'Apple job retention requires exact candidate')
+                    apple_job.require_same_execution(frozen, paths, source)
+                    actual_outcomes = apple_job.outcomes(lane, suite, record, raw_log)
+                else:
+                    actual_outcomes = log_outcomes(raw_log, record['format'], source_commit=prior, source=source)
                 extras = set(outcomes) - set(ids)
                 retired = None
                 if extras:
@@ -833,15 +839,19 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
                         web.authenticate(run_id, job_id, jobs[0], git_bytes)
                     if record['format'] == 'instrumentation-command-5172':
                         authenticate_android_device_command(run_id, job_id, jobs[0])
+                    if record['format'] == 'xctest-full-job-6713':
+                        from validation import retained_apple_job as apple_job
+                        apple_job.authenticate(actual_run, jobs[0], document)
                     if record['format'] in {'instrumentation-command', 'node-preflight', 'gradle-command'}:
                         from validation import retained_lane_commands as native
                         native.authenticate(actual_run, jobs[0], record, document)
-                        if run_id not in native_scopes:
-                            workflow = git_bytes(record['source_commit'], '.github/workflows/ci.yml')
-                            r.require(workflow is not None, 'Native command workflow source missing')
-                            commands.authenticate_scope(api, run_id, actual_run, workflow.decode(),
-                                document, record['source_commit'], repository)
-                            native_scopes.add(run_id)
+                    if (record['format'] in {'instrumentation-command', 'node-preflight', 'gradle-command', 'xctest-full-job-6713'}
+                            and run_id not in native_scopes):
+                        workflow = git_bytes(record['source_commit'], '.github/workflows/ci.yml')
+                        r.require(workflow is not None, 'Native command workflow source missing')
+                        commands.authenticate_scope(api, run_id, actual_run, workflow.decode(),
+                            document, record['source_commit'], repository)
+                        native_scopes.add(run_id)
                     raw_log = live_logs.get(api, run_id, job_id)
                     r.require(digest(raw_log) == shared_blob(document, record['log'])['sha256'],
                               'Authenticated CI log contradicts retained origin')
