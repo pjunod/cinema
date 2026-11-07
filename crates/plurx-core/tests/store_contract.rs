@@ -37,6 +37,8 @@ mod jellyfin_login;
 mod jellyfin_play;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
+#[path = "store_contract/scan_request_v2.rs"]
+mod scan_request_v2;
 #[path = "store_contract/remote.rs"]
 mod remote;
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -13036,6 +13038,10 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         "exact handoff shape required before inventory"
     );
     require_replicated_fixture_marker(client, "playback_handoffs_schema", 1).await;
+    // The contract v2 scan request sidecar is a background_* extension: the
+    // queue teardown below drops it and ordinary open reinstalls it, so it
+    // must be the exact published one going in.
+    require_replicated_fixture_marker(client, "background_scan_request_v2_schema", 1).await;
     let mut handoff_counts = Vec::new();
     for (name, sql) in &handoff_shape {
         if sql.starts_with("CREATE TABLE") {
@@ -18976,6 +18982,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_library_requests",
             "background_predictions",
             "background_provider_budgets",
+            "background_scan_request_v2",
             "background_storage_domains",
             "background_transcode_artifacts",
             "cache_consumer_pins",
