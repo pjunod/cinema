@@ -21504,3 +21504,46 @@ async fn the_creating_scan_key_reads_its_own_request_and_another_scan_key_gets_4
         "no sidecar, no files: {record}"
     );
 }
+
+/// Review #1406 (finding 8): a replayed `request_key` whose request has
+/// failed answers with that request — its `request_id`, `status: failed` and
+/// `error`, under a typed code — not a bare 500.
+#[tokio::test]
+async fn a_replayed_failed_request_answers_with_its_request() {
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let movie = dir.path().join("Heat (1995)");
+    std::fs::create_dir_all(&movie).expect("mkdir");
+    std::fs::write(movie.join("Heat (1995).mkv"), b"x").expect("write");
+    v2_library(&app, &admin, dir.path()).await;
+    let body = json!({ "path": movie, "request_key": "t-8-ddd/1/d0/1" });
+    let (status, queued) = call(&app, post("/api/v1/scan", Some(&key), body.clone())).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+    let id = queued["request_id"].as_str().expect("request id").to_owned();
+
+    // The library goes away before a worker reaches the request, which then
+    // fails with "library no longer exists".
+    let library = state.store.list_libraries().await.expect("libraries")[0].id;
+    let (status, _) = call(
+        &app,
+        delete_req(&format!("/api/v1/libraries/{library}"), Some(&admin)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let _worker = scan_worker(&state);
+    for _ in 0..600 {
+        let (_, rec) = call(&app, get(&format!("/api/v1/scan/requests/{id}"), Some(&key))).await;
+        if rec["status"] == "failed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let (status, replay) = call(&app, post("/api/v1/scan", Some(&key), body)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{replay}");
+    assert_eq!(replay["code"], "scan_failed");
+    assert_eq!(replay["status"], "failed");
+    assert_eq!(replay["request_id"], id.as_str(), "the same request");
+    assert!(replay["error"].as_str().is_some_and(|error| !error.is_empty()), "{replay}");
+}
