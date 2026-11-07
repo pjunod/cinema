@@ -87,6 +87,7 @@ def source_cohort(record, text, kind, command, discovery, candidate):
 # platform's native binaries. Extending this set requires reviewing the inputs
 # a body consumes before applying a Darwin result to the Linux preflight.
 MEASURED_PORTABLE_CASES = {
+    'test_qualification_unit_continuation.NativeTopologyWorkflowTailCase.test_native_topology_tail_requires_reviewed_workflow_and_stays_outside_unit_coverage',
     'test_native_wal_openraft.NativeWalOpenraftCase.test_native_source_recipe_keeps_actual_unprinted_outcome_scope',
     'test_native_wal_openraft.NativeWalOpenraftCase.test_rejects_unbound_origin_neighbor_target_or_partial_terminal',
     'test_native_wal_openraft.NativeWalOpenraftCase.test_preceding_command_cannot_absorb_the_unprinted_openraft_result',
