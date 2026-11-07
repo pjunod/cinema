@@ -109,9 +109,17 @@ impl JobManager {
             now_ms: clock_ms(),
         };
         match self.store.enqueue_library_work_v2(input, seed).await {
-            Ok(outcome) => self
-                .admission_outcome(outcome)
-                .map(|_| ScanAdmission::Admitted(req.id)),
+            Ok(outcome) => {
+                let running_job = match &outcome {
+                    EnqueueOutcome::Accepted { job_id, .. } => Some(job_id.clone()),
+                    _ => None,
+                };
+                self.admission_outcome(outcome)?;
+                if let Some(job_id) = running_job {
+                    self.note_queue_position(&job_id, &req.id).await;
+                }
+                Ok(ScanAdmission::Admitted(req.id))
+            }
             Err(error) => {
                 if !request_key.is_empty() {
                     if let Some(existing) =
@@ -121,6 +129,49 @@ impl JobManager {
                     }
                 }
                 Err(TargetError::Store(error))
+            }
+        }
+    }
+
+    /// A request that joins a targeted job already running waits for that
+    /// pass to reach it: record `queue_position:<n>`, the pending requests
+    /// ahead of it (contract v2 §5.1). The pass clears it when it starts
+    /// the next turn. Advisory, like every `waiting_on`.
+    async fn note_queue_position(&self, job_id: &str, request_id: &str) {
+        let running = matches!(
+            self.store.background_job(job_id).await,
+            Ok(Some(job)) if job.state == JobState::Running
+        );
+        if !running {
+            return;
+        }
+        let pending = match self
+            .store
+            .library_work_requests(LibraryWorkQuery {
+                job_id: Some(job_id.to_owned()),
+                pending_only: true,
+                limit: MAX_PENDING_PER_LIBRARY,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, job_id, "reading the targeted queue position");
+                return;
+            }
+        };
+        let ahead = pending
+            .iter()
+            .take_while(|record| record.request_id != request_id)
+            .count();
+        if ahead > 0 {
+            if let Err(error) = self
+                .store
+                .set_scan_request_waiting_on(request_id, &format!("queue_position:{ahead}"), clock_ms())
+                .await
+            {
+                tracing::warn!(%error, request_id, "recording the targeted queue position");
             }
         }
     }
@@ -149,6 +200,9 @@ impl JobManager {
                 () = tokio::time::sleep((deadline - now).min(Duration::from_millis(500))) => {}
             }
         };
+        // The signal is per request id, not per waiter: a second handler
+        // waiting on the same request loses it here and falls back to the
+        // bounded re-read above, which is still correct (review #1406, 10).
         self.forget_scan_waiter(request_id);
         record
     }
