@@ -753,14 +753,25 @@ fn subsequent_plurxd_run_reopens_the_completed_replicated_target() {
         .output()
         .expect("run competing daemon");
     assert!(!contender.status.success());
-    // The genuine double-start, and the only condition entitled to this text.
-    // Since #374 the contender waits out a departing owner before refusing, so
-    // it reaches this only because `first` is still running and still holding
-    // the lock. It must name that live process rather than blame its own.
+    // The first daemon still holds the lock. Windows also denies the contender
+    // read access to the recorded PID through its separately opened handle.
     let refusal = String::from_utf8_lossy(&contender.stderr);
     assert!(
-        refusal.contains("another plurxd process already owns the data directory"),
+        refusal.contains("native storage directory is busy:"),
+        "{refusal}"
+    );
+    #[cfg(unix)]
+    assert!(
+        refusal.contains(&format!(
+            "another plurxd process already owns the data directory (recorded pid {})",
+            first.0.id()
+        )),
         "a second live daemon must still be refused as one: {refusal}"
+    );
+    #[cfg(windows)]
+    assert!(
+        refusal.contains("native storage directory is busy: lock holder not recorded:"),
+        "{refusal}"
     );
     assert!(
         !refusal.contains("still locked inside this plurxd process"),

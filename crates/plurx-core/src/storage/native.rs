@@ -489,10 +489,15 @@ mod tests {
             .err()
             .expect("same-process contender must be refused");
         assert!(super::is_lock_busy(&error));
-        assert!(error
-            .to_string()
-            .contains("still locked inside this plurxd process"));
-        assert!(!error.to_string().contains("another plurxd process"));
+        let refusal = error.to_string();
+        assert!(!refusal.contains("another plurxd process"));
+        #[cfg(unix)]
+        assert!(refusal.contains(&format!(
+            "still locked inside this plurxd process (recorded pid {})",
+            std::process::id()
+        )));
+        #[cfg(windows)]
+        assert!(refusal.contains("native storage directory is busy: lock holder not recorded:"));
     }
 
     #[tokio::test]
