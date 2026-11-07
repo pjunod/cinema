@@ -1750,6 +1750,24 @@ impl Session {
         &self,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<crate::playback_control::RollingTerminalCause, String> {
+        if let Some(release) = self.control.projected_release() {
+            // A release or operator stop already committed this generation's
+            // terminal synchronously. Observe the cause the actor committed
+            // first instead of racing it with an End that can only lose. Any
+            // command imports the projection, so the snapshot carries it; an
+            // unavailable actor (or a passed deadline) leaves the projected
+            // release as the first retirement.
+            let snapshot = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.control.snapshot())
+                    .await
+                    .ok()
+                    .flatten(),
+                None => self.control.snapshot().await,
+            };
+            return Ok(snapshot
+                .and_then(|snapshot| snapshot.terminal)
+                .unwrap_or(release));
+        }
         let outcome = match deadline {
             Some(deadline) => match self.control.end_before(deadline.into_std()).await {
                 Ok(outcome) => Ok(outcome),
@@ -1785,6 +1803,23 @@ impl Session {
         // actor response admission. The actor imports the shared retirement
         // bit as typed AuthorityFence before applying its next queued command.
         self.control.fence_unavailable();
+    }
+
+    /// Retire this generation because its viewer released it or an operator
+    /// stopped it. Same synchronous producer transition as the authority
+    /// fence, with its own typed cause; the first retirement keeps its cause.
+    pub(super) fn project_release(&self, cause: crate::playback_control::RollingTerminalCause) {
+        self.control.release_unavailable(cause);
+    }
+
+    /// Project a durable terminal intent onto this generation: a client
+    /// release or operator stop with its own cause, anything else as the
+    /// authority fence it is.
+    pub(super) fn project_terminal_intent(&self, terminal: crate::vodserve::Terminal) {
+        match crate::playback_control::RollingTerminalCause::release_for(terminal) {
+            Some(cause) => self.project_release(cause),
+            None => self.project_authority_fence(),
+        }
     }
 
     pub(super) async fn settle_authority_fence(&self) {

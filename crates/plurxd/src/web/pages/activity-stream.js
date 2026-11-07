@@ -41,8 +41,8 @@ function activityStreamState(session){
     if(o.control_demand!=="hold"&&o.render_state!=="rendering")return {cls:"wait",label:"Client waiting",why:o.producer_hold?`producer held · ${o.producer_hold}`:""};
   }
   // `lease_state` is "active" for a live lease and "unavailable" for a legacy
-  // viewer with no actor at all; only the three terminal verdicts are news.
-  const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",pause_expired:"pause expired",authority_fenced:"authority fenced"})[session.lease_state];
+  // viewer with no actor at all; only the terminal verdicts are news.
+  const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",pause_expired:"pause expired",authority_fenced:"authority fenced",released:"released",stopped:"stopped"})[session.lease_state];
   if(terminal) return {cls:"bad",label:`Lease ${terminal}`};
   const hold=!session.suspended?""
     :({demand:"viewer has enough",time:"reserve full",bytes:"per-stream byte limit",

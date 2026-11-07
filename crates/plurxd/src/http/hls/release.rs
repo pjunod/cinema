@@ -170,7 +170,7 @@ pub(super) async fn release_session(
     // projects that exact durable winner.
     state
         .transcode
-        .begin_session_publication_fence(&session)
+        .begin_session_release_fence(&session, terminal)
         .await;
     state
         .hls_route_hooks
