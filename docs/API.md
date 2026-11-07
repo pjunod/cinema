@@ -2886,7 +2886,7 @@ The preparation status read requires an authenticated viewer; every other route 
 | GET | `/api/v1/analysis/jobs/{id}` | One job's exact durable state and attempt history |
 | DELETE | `/api/v1/analysis/jobs/{id}` | Cooperative cancellation |
 | POST | `/api/v1/analysis/jobs/{id}/retry` | Creates a successor for one terminal job |
-| POST | `/api/v1/analysis/reopen` | Bulk reopen; **dry-run by default** |
+| POST | `/api/v1/analysis/reopen` | Bulk reopen; **dry-run by default**; optional `last_error_code` (one of the bounded `plurx_analysis_queue_failed_by_code` codes) selects one cause |
 | POST | `/api/v1/analysis/reconcile` | Preview and replace obsolete unfinished requests; **dry-run by default** |
 | PUT | `/api/v1/files/{id}/timeline-annotations/{kind}` | Writes a durable manual boundary |
 | DELETE | `/api/v1/files/{id}/timeline-annotations/{kind}` | Discards it, with explicit confirmation |

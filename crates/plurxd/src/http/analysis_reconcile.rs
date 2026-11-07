@@ -278,3 +278,169 @@ mod tests {
         );
     }
 }
+
+/// The background pass, driven through the same Store and fixtures.
+#[cfg(test)]
+mod background_pass_tests {
+    use super::*;
+    use crate::background_jobs::analysis_reconcile::{
+        reconcile_retired_against, ReconcileContext, ReconcileReport,
+    };
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::store::{AnalysisRequest, NewAnalysisRequest};
+    use std::collections::BTreeMap;
+
+    async fn fixture_file(state: &AppState, name: &str) -> i64 {
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: format!("Reconcile {name}"),
+                kind: LibraryKind::Movies,
+                paths: vec![format!("/missing-reconcile-{name}").into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: format!("Reconcile {name}"),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        state
+            .store
+            .upsert_file(
+                item,
+                &format!("/missing-reconcile-{name}/movie.mkv"),
+                100,
+                1,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("file")
+    }
+
+    async fn queued(state: &AppState, name: &str, engine: &str, target: &str) -> AnalysisRequest {
+        let file_id = fixture_file(state, name).await;
+        state
+            .store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: format!("reconcile-{name}"),
+                file_id,
+                source_size: 100,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: engine.into(),
+                video_identity: "selected-video".into(),
+                requested_generation: format!("{name}-generation"),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: target.into(),
+                not_before_ms: 1,
+                created_at_ms: 1,
+            })
+            .await
+            .expect("enqueue")
+    }
+
+    /// Two digests queued, only one target fresh: exactly the rows whose
+    /// target reports a different engine are replaced; a current row and a
+    /// row whose target is unreported stay as they are.
+    #[tokio::test]
+    async fn the_background_pass_retires_only_rows_whose_own_target_reports_a_new_engine() {
+        let (_, state) = crate::http::tests::test_app_with_state();
+        let (live, old) = ("a".repeat(64), "b".repeat(64));
+        let local = state.node_id.clone();
+        let retired = queued(&state, "retired", &old, &local).await;
+        let current = queued(&state, "current", &live, &local).await;
+        let unfresh = queued(&state, "unfresh", &old, "silent-peer").await;
+        let engines = BTreeMap::from([(local.clone(), live.clone())]);
+        let ctx = ReconcileContext::of_state(&state);
+        let mut cursor = String::new();
+        let report = reconcile_retired_against(ctx, &engines, &mut cursor, 400, false)
+            .await
+            .expect("pass");
+        assert_eq!(
+            (
+                report.retired,
+                report.replaced,
+                report.skipped_unfresh,
+                report.wrapped
+            ),
+            (1, 1, 1, true)
+        );
+        assert!(cursor.is_empty(), "a wrapped pass starts over next time");
+        let after = |id: &str| {
+            let state = state.clone();
+            let id = id.to_owned();
+            async move {
+                state
+                    .store
+                    .analysis_request(&id)
+                    .await
+                    .expect("read")
+                    .expect("row")
+            }
+        };
+        let predecessor = after(&retired.request_id).await;
+        assert_eq!(predecessor.state, "cancelled");
+        assert_eq!(predecessor.last_error_code, "request_reconciled");
+        assert_eq!(after(&current.request_id).await.state, "queued");
+        assert_eq!(after(&unfresh.request_id).await.state, "queued");
+        let page = state
+            .store
+            .analysis_reconciliation_page("", 100)
+            .await
+            .expect("page");
+        let successor = page
+            .iter()
+            .find(|row| row.file_id == retired.file_id && row.state == "queued")
+            .expect("a queued successor under the live engine");
+        assert_eq!(successor.pipeline_version, live);
+        assert_eq!(successor.target_node_id, local);
+
+        // A second pass finds nothing left to retire; a learner's pass
+        // ignores rows that name another node.
+        let again = reconcile_retired_against(ctx, &engines, &mut cursor, 400, true)
+            .await
+            .expect("pass");
+        assert_eq!((again.retired, again.replaced), (0, 0));
+    }
+
+    /// No inventory, no retirement: an empty map is unknown, not "every
+    /// engine retired".
+    #[tokio::test]
+    async fn an_empty_inventory_retires_nothing() {
+        let (_, state) = crate::http::tests::test_app_with_state();
+        let row = queued(&state, "empty", &"b".repeat(64), &state.node_id.clone()).await;
+        let mut cursor = String::new();
+        let report = reconcile_retired_against(
+            ReconcileContext::of_state(&state),
+            &BTreeMap::new(),
+            &mut cursor,
+            400,
+            false,
+        )
+        .await
+        .expect("pass");
+        assert_eq!(report, ReconcileReport::default());
+        assert_eq!(
+            state
+                .store
+                .analysis_request(&row.request_id)
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "queued"
+        );
+    }
+}

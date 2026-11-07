@@ -576,13 +576,15 @@ impl ClusterFragmentIndexStore for SqliteStore {
             Ok(())
         }).await
     }
-    async fn enqueue_analysis_request(
+    async fn enqueue_analysis_request_with(
         &self,
         request: &NewAnalysisRequest,
+        live_engines: Option<&[String]>,
     ) -> Result<AnalysisRequest, StoreError> {
         if !valid_request(request) {
             return Err(StoreError::Task("invalid analysis request".to_owned()));
         }
+        let live = super::super::live_engines_param(live_engines);
         let request = request.clone();
         let semantic_fingerprint = crate::segplan::argv_fingerprint(&[
             "timeline-annotations".to_owned(),
@@ -628,10 +630,20 @@ impl ClusterFragmentIndexStore for SqliteStore {
                       AND json_extract(prediction.request_json,'$.component') = ?5
                       AND json_extract(prediction.request_json,'$.pipeline_version') = ?6
                       AND json_extract(prediction.request_json,'$.target_node_id') = ?12))
-                    AND (SELECT COUNT(*) FROM analysis_requests
+                    -- Runnable work holds the ceiling; a fragment-index row
+                    -- under an engine no live worker runs (?18) is backlog
+                    -- and holds only the hard bound (?19 x the ceiling).
+                    -- ?18 NULL: unknown, every active row counts.
+                    AND ?16 + CASE WHEN ?9 = 'foreground' AND ?10 = 'playback'
+                                   THEN ?17 ELSE 0 END
+                      > (SELECT COUNT(*) FROM analysis_requests
+                          WHERE state IN ('queued', 'running', 'submitted')
+                            AND (?18 IS NULL OR component <> 'fragment_index'
+                              OR pipeline_version IN (SELECT value FROM json_each(?18))))
+                    AND ?16 * ?19 + CASE WHEN ?9 = 'foreground' AND ?10 = 'playback'
+                                        THEN ?17 ELSE 0 END
+                      > (SELECT COUNT(*) FROM analysis_requests
                           WHERE state IN ('queued', 'running', 'submitted'))
-                        < ?16 + CASE WHEN ?9 = 'foreground' AND ?10 = 'playback'
-                                     THEN ?17 ELSE 0 END
                     AND (?11 = 0 OR ?5 <> 'fragment_index' OR NOT EXISTS (
                       SELECT 1 FROM analysis_requests legacy
                        WHERE legacy.file_id = ?2 AND legacy.source_size = ?3
@@ -678,6 +690,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     request.created_at_ms,
                     MAX_ANALYSIS_REQUESTS,
                     super::super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM,
+                    live,
+                    super::super::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR,
                 ],
             )?;
             if request.force_rebuild {
@@ -1480,10 +1494,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
     async fn reopenable_analysis_requests(
         &self,
         component: Option<&str>,
+        error_code: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AnalysisRequest>, StoreError> {
         let limit = limit.clamp(1, MAX_LIST_ROWS);
         let component = component.map(str::to_owned);
+        let error_code = error_code.map(str::to_owned);
         self.with_read(move |conn| {
             let mut statement = conn.prepare(&format!(
                 // Numbered to match the replicated twin, which must bind
@@ -1492,6 +1508,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                   WHERE terminal.state IN ('failed', 'cancelled')
                     AND terminal.force_rebuild = 0
                     AND (?1 IS NULL OR terminal.component = ?1)
+                    AND (?2 IS NULL OR terminal.last_error_code = ?2)
                     AND NOT EXISTS (
                       SELECT 1 FROM analysis_requests successor
                        WHERE successor.file_id = terminal.file_id
@@ -1502,9 +1519,10 @@ impl ClusterFragmentIndexStore for SqliteStore {
                          AND successor.video_identity = terminal.video_identity
                          AND successor.target_node_id = terminal.target_node_id
                          AND successor.state IN ('queued','running','submitted','ready'))
-                  ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT ?2"
+                  ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT ?3"
             ))?;
-            let rows = statement.query_map(params![component, limit], request_from_row)?;
+            let rows =
+                statement.query_map(params![component, error_code, limit], request_from_row)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
         .await

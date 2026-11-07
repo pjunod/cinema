@@ -202,9 +202,10 @@ function analysisQueueBreakdown(health){
   const oldest=health.oldest_queued_at_ms?fmtAgo(Math.floor(health.oldest_queued_at_ms/1000)):"none";
   const codes=(health.failed_by_code||[]).slice().sort((a,b)=>b.count-a.count);
   const failed=codes.length
-    ? `<table class="analysis-failed-codes"><thead><tr><th>Failed by code</th><th>Rows</th></tr></thead><tbody>${codes.map(row=>{
+    ? `<table class="analysis-failed-codes"><thead><tr><th>Failed by code</th><th>Rows</th><th></th></tr></thead><tbody>${codes.map(row=>{
         const info=analysisErrorInfo(row.code);
-        return `<tr><td title="${esc(row.code)}">${esc(info&&info.title?info.title:row.code)}</td><td>${esc(String(row.count))}</td></tr>`;
+        const reopen=row.code==="other"?"":`<button class="ghost sm" onclick='reopenFailedByCode(${esc(JSON.stringify(row.code))},this)'>Reopen…</button>`;
+        return `<tr><td title="${esc(row.code)}">${esc(info&&info.title?info.title:row.code)}</td><td>${esc(String(row.count))}</td><td>${reopen}</td></tr>`;
       }).join("")}</tbody></table>`
     : "";
   return `<p class="analysis-queue-split">Eligible ${esc(String(health.eligible||0))} · waiting ${esc(String(health.waiting||0))} · incompatible engine ${esc(String(health.incompatible||0))} · oldest queued ${esc(oldest)}</p>${failed}`;
@@ -575,6 +576,25 @@ async function reopenFailedAnalysis(btn){
     const created=(done.results||[]).filter(row=>row.status==="created").length;
     const skipped=(done.results||[]).length-created;
     toast(`${created} repair ${created===1?'generation':'generations'} queued${skipped?`, ${skipped} changed or already existed`:""}`);
+    await renderAnalysis(PAGE_RENDER_GENERATION,true);
+  }catch(error){ toast(error.message||"Couldn’t reopen analysis"); }
+  finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
+}
+// Reopen one failure cause in bulk: dry run first for the count, then the
+// same call for real. Codes the operator cannot act on (`other`) get no button.
+async function reopenFailedByCode(code,btn){
+  const label=btn&&btn.textContent;
+  if(btn){btn.disabled=true;btn.textContent="Checking…";}
+  try{
+    const body={limit:500,last_error_code:code};
+    const preview=await api("/analysis/reopen",{method:"POST",body:{...body,dry_run:true}});
+    const rows=preview.reopened||0, files=preview.files||0;
+    if(!rows){ toast("Nothing with that error is reopenable"); return; }
+    const more=preview.scan_truncated||preview.stopped_at_headroom?" There is more waiting than one run can take; run it again afterwards.":"";
+    if(!confirm(`Reopen ${rows} failed analysis ${rows===1?'item':'items'} across ${files} ${files===1?'file':'files'}?${more}`)) return;
+    if(btn) btn.textContent="Reopening…";
+    const done=await api("/analysis/reopen",{method:"POST",body:{...body,dry_run:false}});
+    toast(`${done.reopened||0} reopened${done.skipped_unavailable?`, ${done.skipped_unavailable} changed or already had a successor`:""}`);
     await renderAnalysis(PAGE_RENDER_GENERATION,true);
   }catch(error){ toast(error.message||"Couldn’t reopen analysis"); }
   finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }

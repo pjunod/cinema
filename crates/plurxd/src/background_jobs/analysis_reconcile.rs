@@ -5,13 +5,42 @@
 
 use std::collections::BTreeMap;
 
-use plurx_core::store::{AnalysisRequest, NewAnalysisRequest};
+use plurx_core::cluster::membership::MembershipManager;
+use plurx_core::store::{AnalysisRequest, NewAnalysisRequest, Store};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::http::error::ApiError;
-use crate::http::internal_activity::PeerActivityOutcome;
+use crate::http::internal_activity::{PeerActivityClient, PeerActivityOutcome};
 use crate::state::AppState;
+
+/// What reconciliation reads: the Store, this node's id, and — on a
+/// replicated node — the peer activity inventory that carries each worker's
+/// engine digest. The admin handler builds it from `AppState`; the
+/// fragment-index worker from its `JobManager`.
+#[derive(Clone, Copy)]
+pub(crate) struct ReconcileContext<'a> {
+    pub(crate) store: &'a dyn Store,
+    pub(crate) node_id: &'a str,
+    pub(crate) membership: Option<&'a MembershipManager>,
+    pub(crate) peers: Option<&'a PeerActivityClient>,
+}
+
+impl<'a> ReconcileContext<'a> {
+    pub(crate) fn of_state(state: &'a AppState) -> Self {
+        Self {
+            store: &*state.store,
+            node_id: &state.node_id,
+            membership: Some(&state.membership),
+            peers: Some(&state.peer_activity),
+        }
+    }
+}
+
+/// The candidate reason the background reconciler acts on: the request's
+/// target node reports, fresh, a different engine digest than the one the
+/// request names. Source and target changes stay with the operator's page.
+pub(crate) const RETIRED_ENGINE_REASON: &str = "engine_changed";
 
 #[derive(Serialize)]
 pub(crate) struct Candidate {
@@ -32,15 +61,60 @@ pub(crate) struct Candidate {
 /// reported one inside the last 30 seconds. A node absent here retires
 /// nothing: an unreported or stale worker is not evidence of a new engine.
 pub(crate) async fn engines(state: &AppState) -> Result<BTreeMap<String, String>, ApiError> {
+    engines_in(ReconcileContext::of_state(state)).await
+}
+
+/// The live engine set as last read, for callers that must not wait on a
+/// peer fan-out (an enqueue on the playback path). Every successful
+/// inventory read refreshes it; older than [`LIVE_ENGINES_TTL`] it is
+/// unknown.
+static LIVE_ENGINES: std::sync::RwLock<Option<(std::time::Instant, Vec<String>)>> =
+    std::sync::RwLock::new(None);
+const LIVE_ENGINES_TTL: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// The distinct engine digests some live worker ran at the last inventory
+/// read, or `None` when there has been none recently. Feeds the enqueue cap
+/// (`enqueue_analysis_request_with`), which treats `None` as "count every
+/// active row".
+pub(crate) fn live_engines_snapshot() -> Option<Vec<String>> {
+    let guard = LIVE_ENGINES.read().ok()?;
+    let (at, digests) = guard.as_ref()?;
+    (at.elapsed() <= LIVE_ENGINES_TTL && !digests.is_empty()).then(|| digests.clone())
+}
+
+fn publish_live_engines(engines: &BTreeMap<String, String>) {
+    let digests = engines
+        .values()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Ok(mut guard) = LIVE_ENGINES.write() {
+        *guard = Some((std::time::Instant::now(), digests));
+    }
+}
+
+pub(crate) async fn engines_in(
+    ctx: ReconcileContext<'_>,
+) -> Result<BTreeMap<String, String>, ApiError> {
+    let engines = read_engines(ctx).await?;
+    publish_live_engines(&engines);
+    Ok(engines)
+}
+
+async fn read_engines(ctx: ReconcileContext<'_>) -> Result<BTreeMap<String, String>, ApiError> {
     let mut engines = BTreeMap::new();
     if crate::ffmpeg::fragment_index_engine_is_current().await {
         engines.insert(
-            state.node_id.clone(),
+            ctx.node_id.to_owned(),
             crate::ffmpeg::fragment_index_engine_digest().await,
         );
     }
-    if state.membership.is_replicated() {
-        let peers = state.peer_activity.snapshots().await.map_err(|_| {
+    if let (Some(membership), Some(peers)) = (ctx.membership, ctx.peers) {
+        if !membership.is_replicated() {
+            return Ok(engines);
+        }
+        let peers = peers.snapshots().await.map_err(|_| {
             ApiError::Conflict("Worker inventory is unavailable; try again.".into())
         })?;
         let now = crate::state::clock_ms();
@@ -69,6 +143,15 @@ pub(crate) async fn candidate(
     engines: &BTreeMap<String, String>,
     reassign: bool,
 ) -> Result<Candidate, ApiError> {
+    candidate_in(ReconcileContext::of_state(state), old, engines, reassign).await
+}
+
+pub(crate) async fn candidate_in(
+    ctx: ReconcileContext<'_>,
+    old: &AnalysisRequest,
+    engines: &BTreeMap<String, String>,
+    reassign: bool,
+) -> Result<Candidate, ApiError> {
     let mut row = Candidate {
         request_id: old.request_id.clone(),
         candidate_id: String::new(),
@@ -92,17 +175,17 @@ pub(crate) async fn candidate(
         row.reason = "producer_owned";
         return Ok(row);
     }
-    let Some(file) = state.store.get_file(old.file_id).await? else {
+    let Some(file) = ctx.store.get_file(old.file_id).await? else {
         row.reason = "source_missing";
         return Ok(row);
     };
-    if let Some(item) = state.store.get_item(file.item_id).await? {
+    if let Some(item) = ctx.store.get_item(file.item_id).await? {
         row.title = item.title;
     }
     let engine = if let Some(engine) = engines.get(&old.target_node_id) {
         engine
     } else if reassign {
-        let Some(engine) = engines.get(&state.node_id) else {
+        let Some(engine) = engines.get(ctx.node_id) else {
             row.reason = "worker_unknown";
             return Ok(row);
         };
@@ -119,7 +202,7 @@ pub(crate) async fn candidate(
             row.reason = "source_unavailable";
             return Ok(row);
         }
-        row.replacement_node_id.clone_from(&state.node_id);
+        ctx.node_id.clone_into(&mut row.replacement_node_id);
         engine
     } else {
         row.reason = "worker_unknown";
@@ -186,7 +269,7 @@ pub(crate) async fn candidate(
         created_at_ms: 0,
     });
     if old.force_rebuild {
-        if let Some(occupied) = state
+        if let Some(occupied) = ctx
             .store
             .analysis_reconciliation_forced_slot(
                 row.replacement.as_ref().expect("replacement derived above"),
@@ -202,4 +285,129 @@ pub(crate) async fn candidate(
     }
     row.eligible = true;
     Ok(row)
+}
+
+const RECONCILE_PAGE: i64 = 100;
+
+/// Requests the background reconciler replaced, by candidate reason.
+static RECONCILED_ENGINE_CHANGED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn prometheus() -> String {
+    format!(
+        "# HELP plurx_analysis_reconciled_total Pre-worker analysis requests the fragment-index worker replaced onto a live engine, by reason.\n\
+         # TYPE plurx_analysis_reconciled_total counter\n\
+         plurx_analysis_reconciled_total{{reason=\"{RETIRED_ENGINE_REASON}\"}} {}\n",
+        RECONCILED_ENGINE_CHANGED.load(std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// What one background reconciliation pass did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReconcileReport {
+    /// Active rows read this pass (bounded by the pass limit).
+    pub(crate) scanned: usize,
+    /// Queued pre-worker rows whose target reports a different engine.
+    pub(crate) retired: usize,
+    /// Of those, the ones whose successor this pass committed. A retired row
+    /// not replaced lost a race to another reconciler, or is held by a live
+    /// playback waiter until that waiter's deadline.
+    pub(crate) replaced: usize,
+    /// Rows whose target has no fresh engine report: nothing is retired on
+    /// the absence of evidence.
+    pub(crate) skipped_unfresh: usize,
+    /// The cursor reached the end of the table and starts over next pass.
+    pub(crate) wrapped: bool,
+}
+
+/// One bounded pass of the retired-engine half of reconciliation.
+///
+/// The root cause it removes: a request names the engine digest of the node
+/// that asked, and the claim filters on an exact digest, so after a deploy
+/// changes the engine every queued request under the old digest is
+/// unclaimable by anyone, forever — it is never charged an attempt, so the
+/// attempt sweep never retires it, and it counts against the active cap.
+/// Replacement goes through the same `candidate` decision and the same
+/// atomic insert-then-cancel the operator's page uses, so a row is retired
+/// only when its own target says, freshly, that it runs something else.
+///
+/// `cursor` persists across passes so a large table is walked, not re-read
+/// from its first page; `own_targets_only` keeps a learner to the rows that
+/// name it.
+pub(crate) async fn reconcile_retired(
+    ctx: ReconcileContext<'_>,
+    cursor: &mut String,
+    limit: usize,
+    own_targets_only: bool,
+) -> Result<ReconcileReport, ApiError> {
+    let engines = engines_in(ctx).await?;
+    reconcile_retired_against(ctx, &engines, cursor, limit, own_targets_only).await
+}
+
+/// [`reconcile_retired`] against an inventory already read.
+pub(crate) async fn reconcile_retired_against(
+    ctx: ReconcileContext<'_>,
+    engines: &BTreeMap<String, String>,
+    cursor: &mut String,
+    limit: usize,
+    own_targets_only: bool,
+) -> Result<ReconcileReport, ApiError> {
+    let mut report = ReconcileReport::default();
+    if engines.is_empty() {
+        return Ok(report);
+    }
+    while report.scanned < limit {
+        let page = ctx
+            .store
+            .analysis_reconciliation_page(cursor, RECONCILE_PAGE)
+            .await?;
+        let full = page.len() == RECONCILE_PAGE as usize;
+        match page.last() {
+            Some(last) => last.request_id.clone_into(cursor),
+            None => cursor.clear(),
+        }
+        for old in &page {
+            report.scanned += 1;
+            // Cheap filters first: only queued, unowned fragment-index rows
+            // can be candidates, and a row whose target runs its digest is
+            // current. Neither needs a Store read.
+            if (own_targets_only && old.target_node_id != ctx.node_id)
+                || old.state != "queued"
+                || old.component != "fragment_index"
+                || !old.result_cache_key.is_empty()
+                || old.cancel_requested
+            {
+                continue;
+            }
+            match engines.get(&old.target_node_id) {
+                None => {
+                    report.skipped_unfresh += 1;
+                    continue;
+                }
+                Some(engine) if engine == &old.pipeline_version => continue,
+                Some(_) => {}
+            }
+            let candidate = candidate_in(ctx, old, engines, false).await?;
+            if candidate.reason != RETIRED_ENGINE_REASON || !candidate.eligible {
+                continue;
+            }
+            report.retired += 1;
+            if let Some(replacement) = candidate.replacement {
+                if ctx
+                    .store
+                    .reconcile_analysis_request(old, &replacement, crate::state::clock_ms())
+                    .await?
+                {
+                    report.replaced += 1;
+                    RECONCILED_ENGINE_CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        if !full {
+            cursor.clear();
+            report.wrapped = true;
+            break;
+        }
+    }
+    Ok(report)
 }

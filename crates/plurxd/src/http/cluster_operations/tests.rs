@@ -2451,13 +2451,20 @@ fn placement_test_snapshot(node_id: &str) -> crate::media_pool::MediaNodeSnapsho
 fn placement_view_names_each_node_and_why_it_cannot_own() {
     let membership = test_membership("node-1", 4);
     let mut nodes = test_observations(&membership);
-    nodes[2].status.as_mut().unwrap().media_protocol =
-        Some(crate::media_pool::PROTOCOL_VERSION - 1);
-    nodes[2].status.as_mut().unwrap().build = "old-build".to_owned();
+    nodes[2]
+        .status
+        .as_mut()
+        .expect("placement fixture")
+        .media_protocol = Some(crate::media_pool::PROTOCOL_VERSION - 1);
+    nodes[2].status.as_mut().expect("placement fixture").build = "old-build".to_owned();
     // An old peer predates the field entirely.
     let old: ClusterNodeOperationsStatus = {
-        let mut value = serde_json::to_value(nodes[3].status.as_ref().unwrap()).unwrap();
-        value.as_object_mut().unwrap().remove("media_protocol");
+        let mut value = serde_json::to_value(nodes[3].status.as_ref().expect("placement fixture"))
+            .expect("placement fixture");
+        value
+            .as_object_mut()
+            .expect("placement fixture")
+            .remove("media_protocol");
         serde_json::from_value(value).expect("a status without media_protocol still parses")
     };
     assert_eq!(old.media_protocol, None);
@@ -2488,12 +2495,18 @@ fn placement_view_names_each_node_and_why_it_cannot_own() {
     assert!(views[1].eligible_owner);
     assert_eq!(
         views[2].reason.as_deref(),
-        Some(format!("protocol_mismatch:{}", crate::media_pool::PROTOCOL_VERSION - 1).as_str())
+        Some(
+            format!(
+                "protocol_mismatch:{}",
+                crate::media_pool::PROTOCOL_VERSION - 1
+            )
+            .as_str()
+        )
     );
     assert!(!views[2].eligible_owner);
     assert_eq!(views[3].reason.as_deref(), Some("protocol_unreported"));
 
-    let json = serde_json::to_value(&aggregate).unwrap();
+    let json = serde_json::to_value(&aggregate).expect("placement fixture");
     assert_eq!(json["nodes"][0]["placement"]["eligible_owner"], true);
     assert_eq!(
         json["nodes"][0]["status"]["media_protocol"],
@@ -2517,7 +2530,10 @@ fn local_placement_view_reports_an_unavailable_egress() {
     let mut local = placement_test_snapshot("node-1");
     local.egress_pressure = crate::media_pool::PressureBand::Unavailable;
     annotate_placement(&mut aggregate, "node-1", &local, &BTreeMap::new());
-    let view = aggregate.nodes[0].placement.clone().unwrap();
+    let view = aggregate.nodes[0]
+        .placement
+        .clone()
+        .expect("placement fixture");
     assert!(!view.eligible_owner);
     assert_eq!(view.reason.as_deref(), Some("egress_unavailable"));
 }

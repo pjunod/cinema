@@ -175,7 +175,11 @@ fn too_few_claims_to_be_sure_is_not_healthy_either() {
 }
 
 /// The pre-worker half of the queue, which the jobs-table inputs never see.
-fn with_requests(base: AnalysisQueueHealth, waiting: i64, incompatible: i64) -> AnalysisQueueHealth {
+fn with_requests(
+    base: AnalysisQueueHealth,
+    waiting: i64,
+    incompatible: i64,
+) -> AnalysisQueueHealth {
     AnalysisQueueHealth {
         waiting,
         incompatible,
@@ -244,7 +248,11 @@ fn eligible_is_due_jobs_plus_compatible_requests_and_claimable_is_its_alias() {
     assert_eq!(health.eligible, 4 + 9);
     assert_eq!(health.claimable, health.eligible);
     assert_eq!(
-        (health.waiting, health.incompatible, health.oldest_queued_at_ms),
+        (
+            health.waiting,
+            health.incompatible,
+            health.oldest_queued_at_ms
+        ),
         (7, 8, 10)
     );
 }

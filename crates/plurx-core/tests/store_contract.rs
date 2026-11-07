@@ -25964,15 +25964,35 @@ async fn pre_worker_requests_are_split_by_live_engine_and_counted_once() {
         }
 
         let split = store
-            .prometheus_store_snapshot_with("split-node", NOW_SECS, Some(&[live.clone()]))
+            .prometheus_store_snapshot_with(
+                "split-node",
+                NOW_SECS,
+                Some(std::slice::from_ref(&live)),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: split snapshot: {error}"))
             .analysis;
-        assert_eq!(split.health.eligible, 1, "{backend}: one due request runs on a live engine");
-        assert_eq!(split.health.claimable, 1, "{backend}: claimable is eligible");
-        assert_eq!(split.health.incompatible, 1, "{backend}: one due request is stranded");
-        assert_eq!(split.health.waiting, 1, "{backend}: one request is inside its wait");
-        assert_eq!(split.health.oldest_queued_at_ms, NOW_MS - 120_000, "{backend}");
+        assert_eq!(
+            split.health.eligible, 1,
+            "{backend}: one due request runs on a live engine"
+        );
+        assert_eq!(
+            split.health.claimable, 1,
+            "{backend}: claimable is eligible"
+        );
+        assert_eq!(
+            split.health.incompatible, 1,
+            "{backend}: one due request is stranded"
+        );
+        assert_eq!(
+            split.health.waiting, 1,
+            "{backend}: one request is inside its wait"
+        );
+        assert_eq!(
+            split.health.oldest_queued_at_ms,
+            NOW_MS - 120_000,
+            "{backend}"
+        );
         let queued = split.queue_depth
             [analysis_queue_slot("fragment_index", "queued", "normal", "background")];
         let retry_wait = split.queue_depth
@@ -25982,7 +26002,10 @@ async fn pre_worker_requests_are_split_by_live_engine_and_counted_once() {
             split.health.eligible + split.health.incompatible,
             "{backend}: the gauge's due rows are the health's due rows"
         );
-        assert_eq!(retry_wait, split.health.waiting, "{backend}: the same delayed rows");
+        assert_eq!(
+            retry_wait, split.health.waiting,
+            "{backend}: the same delayed rows"
+        );
         assert_eq!(
             split.queue_oldest_age_seconds
                 [analysis_queue_slot("fragment_index", "queued", "normal", "background")],
@@ -26002,7 +26025,11 @@ async fn pre_worker_requests_are_split_by_live_engine_and_counted_once() {
             .unwrap_or_else(|error| panic!("{backend}: unknown snapshot: {error}"))
             .analysis
             .health;
-        assert_eq!((unknown.eligible, unknown.incompatible), (2, 0), "{backend}");
+        assert_eq!(
+            (unknown.eligible, unknown.incompatible),
+            (2, 0),
+            "{backend}"
+        );
     })
     .await;
 }

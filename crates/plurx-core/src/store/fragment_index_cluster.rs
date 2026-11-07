@@ -1779,6 +1779,11 @@ pub struct AnalysisHistoryPage {
 /// other producer needs to be able to enqueue into at all.
 pub const MAX_ACTIVE_ANALYSIS_REQUESTS: i64 = 4_096;
 
+/// The hard bound on *all* active analysis requests, runnable or not, as a
+/// multiple of [`MAX_ACTIVE_ANALYSIS_REQUESTS`]: stranded backlog may not
+/// grow the table without limit while it waits to be reconciled.
+pub const ANALYSIS_BACKLOG_BOUND_FACTOR: i64 = 4;
+
 /// Room above [`MAX_ACTIVE_ANALYSIS_REQUESTS`] that only a viewer's own
 /// request may use: copy preparation (`priority = foreground`,
 /// `trigger = playback`) and a viewer's subtitle source (`foreground`). Background discovery that filled the queue to the ceiling refused
@@ -1976,6 +1981,23 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     async fn enqueue_analysis_request(
         &self,
         request: &NewAnalysisRequest,
+    ) -> Result<AnalysisRequest, StoreError> {
+        self.enqueue_analysis_request_with(request, None).await
+    }
+
+    /// [`Self::enqueue_analysis_request`] with the cap measured against
+    /// *runnable* work. `live_engines` is the set of fragment-index engine
+    /// digests some live worker runs; an active `fragment_index` row under
+    /// any other digest is backlog nobody can claim and does not hold the
+    /// [`MAX_ACTIVE_ANALYSIS_REQUESTS`] ceiling against new runnable work —
+    /// on 2026-11-07 3,878 such rows held it at 4,097/4,096 and refused every
+    /// background enqueue. All active rows stay bounded by
+    /// [`ANALYSIS_BACKLOG_BOUND_FACTOR`] times the ceiling. `None` (inventory
+    /// unknown) counts every active row, as before.
+    async fn enqueue_analysis_request_with(
+        &self,
+        request: &NewAnalysisRequest,
+        live_engines: Option<&[String]>,
     ) -> Result<AnalysisRequest, StoreError>;
 
     async fn claim_analysis_request(
@@ -2141,9 +2163,15 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ///
     /// Rows are ordered oldest-terminal first, so paging through a backlog
     /// makes progress rather than re-offering the same head.
+    ///
+    /// `error_code` narrows the selection to terminal rows whose
+    /// `last_error_code` is exactly that code, so an operator can put back one
+    /// cause (say, `pipeline_version_unavailable` after a deploy) without the
+    /// rest.
     async fn reopenable_analysis_requests(
         &self,
         component: Option<&str>,
+        error_code: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AnalysisRequest>, StoreError>;
 

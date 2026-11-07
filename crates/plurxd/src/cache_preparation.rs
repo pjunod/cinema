@@ -167,7 +167,8 @@ impl JobManager {
             // crashes here another pass drains the same outbox; a retired
             // intent cannot pass either backend's insert predicate.
             for request in self.store.pending_predictions(clock_ms()).await? {
-                match self.store.enqueue_analysis_request(&request).await {
+                let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
+                match self.store.enqueue_analysis_request_with(&request, live.as_deref()).await {
                     Ok(_) => {},
                     Err(error) => tracing::debug!(%error, file = request.file_id, component = request.component, "prediction outbox deferred"),
                 }

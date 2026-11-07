@@ -479,8 +479,7 @@ impl StoreMetricsCache {
                             .analysis_last_ready_at_ms
                             .load(Ordering::Relaxed),
                         waiting: self.inner.analysis_request_health[0].load(Ordering::Relaxed),
-                        incompatible: self.inner.analysis_request_health[1]
-                            .load(Ordering::Relaxed),
+                        incompatible: self.inner.analysis_request_health[1].load(Ordering::Relaxed),
                         eligible: self.inner.analysis_request_health[2].load(Ordering::Relaxed),
                         oldest_queued_at_ms: self.inner.analysis_request_health[3]
                             .load(Ordering::Relaxed),
@@ -1184,6 +1183,8 @@ impl AppState {
         // registry can distinguish active tuner scratch from restart debris.
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
+        let peer_activity =
+            crate::http::internal_activity::PeerActivityClient::new(membership.clone());
         let jobs = Arc::new(
             JobManager::new_with_scan_prune_percent(
                 Arc::clone(&store),
@@ -1197,7 +1198,8 @@ impl AppState {
                     .then(|| data_dir.join("source-attestation-checkpoints")),
             )
             .with_dv_disk_capabilities(system.dv_disk.clone())
-            .with_membership(membership.clone()),
+            .with_membership(membership.clone())
+            .with_peer_activity(peer_activity.clone()),
         );
         let sharing = Arc::new(crate::sharing::SharingManager::new(
             Arc::clone(&credential_key),
@@ -1351,9 +1353,7 @@ impl AppState {
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             replication,
-            peer_activity: crate::http::internal_activity::PeerActivityClient::new(
-                membership.clone(),
-            ),
+            peer_activity,
             peer_status_cache: Default::default(),
             membership_status_cache: Default::default(),
             serving,
@@ -1786,6 +1786,12 @@ pub struct JobManager {
     /// Throttle bounded, replicated analysis-history pruning so an idle queue
     /// does not produce a Raft write on every scheduler tick.
     last_analysis_prune_ms: AtomicI64,
+    /// The peer activity inventory (shared with `AppState`'s client, so one
+    /// fan-out serves both) that carries each worker's engine digest.
+    peer_activity: Option<crate::http::internal_activity::PeerActivityClient>,
+    /// Where the retired-engine reconciler resumes, and when it last ran.
+    analysis_reconcile_cursor: tokio::sync::Mutex<String>,
+    last_analysis_reconcile_ms: AtomicI64,
     /// High-frequency worker progress is deliberately node-local. Replicating
     /// every fragment would turn one long media read into sustained Raft load;
     /// the bounded peer Activity snapshot carries these rows to an ingress.
@@ -3279,36 +3285,40 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
         None => base,
     };
     let now = clock_ms();
+    let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
     let request = store
-        .enqueue_analysis_request(&NewAnalysisRequest {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            file_id: file.id,
-            source_size: file.size,
-            source_mtime: file.mtime,
-            component: "fragment_index".to_owned(),
-            requested_generation,
-            pipeline_version,
-            video_identity,
-            // A viewer waiting on this preparation makes it foreground work:
-            // the row says so, and the queue's playback headroom admits it
-            // even when background discovery has filled the active ceiling.
-            priority: if viewer.is_some() {
-                "foreground"
-            } else {
-                "normal"
-            }
-            .to_owned(),
-            trigger: if viewer.is_some() {
-                "playback"
-            } else {
-                "background"
-            }
-            .to_owned(),
-            force_rebuild: false,
-            target_node_id: node_id.to_owned(),
-            not_before_ms: now,
-            created_at_ms: now,
-        })
+        .enqueue_analysis_request_with(
+            &NewAnalysisRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                component: "fragment_index".to_owned(),
+                requested_generation,
+                pipeline_version,
+                video_identity,
+                // A viewer waiting on this preparation makes it foreground work:
+                // the row says so, and the queue's playback headroom admits it
+                // even when background discovery has filled the active ceiling.
+                priority: if viewer.is_some() {
+                    "foreground"
+                } else {
+                    "normal"
+                }
+                .to_owned(),
+                trigger: if viewer.is_some() {
+                    "playback"
+                } else {
+                    "background"
+                }
+                .to_owned(),
+                force_rebuild: false,
+                target_node_id: node_id.to_owned(),
+                not_before_ms: now,
+                created_at_ms: now,
+            },
+            live.as_deref(),
+        )
         .await?;
     if let Some(viewer) = viewer {
         store
@@ -3820,6 +3830,9 @@ impl JobManager {
             dv_disk_working: std::sync::atomic::AtomicBool::new(false),
             dv_disk_capabilities: crate::dv_disk::DvDiskCapabilities::default(),
             last_analysis_prune_ms: AtomicI64::new(0),
+            peer_activity: None,
+            analysis_reconcile_cursor: tokio::sync::Mutex::new(String::new()),
+            last_analysis_reconcile_ms: AtomicI64::new(0),
             analysis_progress: std::sync::Mutex::new(HashMap::new()),
             analysis_progress_epoch: AtomicU64::new(0),
             analysis_metrics: Arc::new(AnalysisRuntimeMetrics::default()),
@@ -3851,6 +3864,69 @@ impl JobManager {
     ) -> Self {
         self.membership = Some(membership);
         self
+    }
+
+    fn with_peer_activity(
+        mut self,
+        peers: crate::http::internal_activity::PeerActivityClient,
+    ) -> Self {
+        self.peer_activity = Some(peers);
+        self
+    }
+
+    /// One bounded pass of the retired-engine reconciler
+    /// (`background_jobs::analysis_reconcile::reconcile_retired`), at most
+    /// every 30 s — the engine-report freshness window — unless the last
+    /// pass replaced something, in which case the next runs straight away so
+    /// a deploy's stranded cohort clears in minutes. A voter walks every
+    /// row; a learner only the rows that name it.
+    pub(crate) async fn reconcile_retired_analysis_requests(
+        &self,
+        limit: usize,
+        own_targets_only: bool,
+    ) -> crate::background_jobs::analysis_reconcile::ReconcileReport {
+        const RECONCILE_INTERVAL_MS: i64 = 30_000;
+        let now = clock_ms();
+        let last = self.last_analysis_reconcile_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < RECONCILE_INTERVAL_MS {
+            return Default::default();
+        }
+        let Ok(mut cursor) = self.analysis_reconcile_cursor.try_lock() else {
+            return Default::default();
+        };
+        let ctx = crate::background_jobs::analysis_reconcile::ReconcileContext {
+            store: &*self.store,
+            node_id: self.coordinator.node_id(),
+            membership: self.membership.as_ref(),
+            peers: self.peer_activity.as_ref(),
+        };
+        let report = match crate::background_jobs::analysis_reconcile::reconcile_retired(
+            ctx,
+            &mut cursor,
+            limit,
+            own_targets_only,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::warn!(?error, "reconciling retired-engine analysis requests");
+                Default::default()
+            }
+        };
+        self.last_analysis_reconcile_ms
+            .store(if report.replaced > 0 { 0 } else { now }, Ordering::Relaxed);
+        if report.retired > 0 || report.skipped_unfresh > 0 {
+            tracing::info!(
+                scanned = report.scanned,
+                retired = report.retired,
+                replaced = report.replaced,
+                skipped_unfresh = report.skipped_unfresh,
+                wrapped = report.wrapped,
+                "analysis reconciliation pass"
+            );
+        }
+        report
     }
 
     fn with_dv_disk_capabilities(
@@ -5088,28 +5164,32 @@ impl JobManager {
             video_identity,
             force_rebuild,
         );
+        let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
         let request = self
             .store
-            .enqueue_analysis_request(&NewAnalysisRequest {
-                request_id: request_id.clone(),
-                file_id: file.id,
-                source_size: file.size,
-                source_mtime: file.mtime,
-                component: component.to_owned(),
-                pipeline_version,
-                video_identity: video_identity.to_owned(),
-                requested_generation,
-                priority: if force_rebuild { "forced" } else { "normal" }.to_owned(),
-                trigger: trigger.to_owned(),
-                force_rebuild,
-                target_node_id: if component == "skip_markers" {
-                    String::new()
-                } else {
-                    self.coordinator.node_id().to_owned()
+            .enqueue_analysis_request_with(
+                &NewAnalysisRequest {
+                    request_id: request_id.clone(),
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    component: component.to_owned(),
+                    pipeline_version,
+                    video_identity: video_identity.to_owned(),
+                    requested_generation,
+                    priority: if force_rebuild { "forced" } else { "normal" }.to_owned(),
+                    trigger: trigger.to_owned(),
+                    force_rebuild,
+                    target_node_id: if component == "skip_markers" {
+                        String::new()
+                    } else {
+                        self.coordinator.node_id().to_owned()
+                    },
+                    not_before_ms: now,
+                    created_at_ms: now,
                 },
-                not_before_ms: now,
-                created_at_ms: now,
-            })
+                live.as_deref(),
+            )
             .await?;
         let joined = request.request_id != request_id;
         Ok((request, joined))
@@ -9407,6 +9487,11 @@ impl JobManager {
                     tracing::warn!(%error, "pruning analysis request history");
                 }
             }
+        }
+        if fragment_engine_current {
+            const RECONCILE_ROWS_PER_PASS: usize = 400;
+            self.reconcile_retired_analysis_requests(RECONCILE_ROWS_PER_PASS, !may_produce)
+                .await;
         }
         if !fragment_engine_current {
             drop(_guard);

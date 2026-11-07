@@ -830,6 +830,9 @@ pub struct AnalysisReopenParams {
     limit: Option<i64>,
     /// Restrict to one component (`fragment_index`, `skip_markers`, …).
     component: Option<String>,
+    /// Restrict to terminal rows whose last error is exactly this code; one
+    /// of the bounded codes `plurx_analysis_queue_failed_by_code` reports.
+    last_error_code: Option<String>,
     repair_revision: Option<String>,
     cursor: Option<String>,
     candidates: Option<Vec<plurx_core::store::AnalysisIndexRepairCandidate>>,
@@ -938,6 +941,18 @@ pub async fn reopen(
         if !matches!(component, "fragment_index" | "skip_markers") {
             return Err(ApiError::BadRequest(
                 "invalid analysis component".to_owned(),
+            ));
+        }
+    }
+    if let Some(code) = params.last_error_code.as_deref() {
+        if code == "other" || !plurx_core::store::ANALYSIS_FAILURE_CODES.contains(&code) {
+            return Err(ApiError::BadRequest(
+                "unknown analysis error code".to_owned(),
+            ));
+        }
+        if params.repair_revision.is_some() {
+            return Err(ApiError::BadRequest(
+                "the repair mode selects by revision, not by error code".to_owned(),
             ));
         }
     }
@@ -1101,7 +1116,11 @@ pub async fn reopen(
         .max(0);
     let candidates = state
         .store
-        .reopenable_analysis_requests(params.component.as_deref(), ANALYSIS_REOPEN_SCAN_LIMIT)
+        .reopenable_analysis_requests(
+            params.component.as_deref(),
+            params.last_error_code.as_deref(),
+            ANALYSIS_REOPEN_SCAN_LIMIT,
+        )
         .await?;
     let considered = candidates.len() as u64;
 

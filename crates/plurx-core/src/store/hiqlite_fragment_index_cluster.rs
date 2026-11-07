@@ -1982,13 +1982,15 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         self.execute("DELETE FROM subtitle_source_publications WHERE file_id=$1 AND source_size=$2 AND source_mtime=$3 AND node_id=$4 AND ordinal=$5 AND format=$6", params!(file_id,source_size,source_mtime,node_id,ordinal,format)).await?;
         Ok(())
     }
-    async fn enqueue_analysis_request(
+    async fn enqueue_analysis_request_with(
         &self,
         request: &NewAnalysisRequest,
+        live_engines: Option<&[String]>,
     ) -> Result<AnalysisRequest, StoreError> {
         if !valid_request(request) {
             return Err(StoreError::Task("invalid analysis request".to_owned()));
         }
+        let live = super::live_engines_param(live_engines);
         let semantic_fingerprint = crate::segplan::argv_fingerprint(&[
             "timeline-annotations".to_owned(),
             request.pipeline_version.clone(),
@@ -2032,10 +2034,20 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       AND json_extract(prediction.request_json,'$.component') = $5
                       AND json_extract(prediction.request_json,'$.pipeline_version') = $6
                       AND json_extract(prediction.request_json,'$.target_node_id') = $12))
-                    AND (SELECT COUNT(*) FROM analysis_requests
-                      WHERE state IN ('queued', 'running', 'submitted'))
-                    < $16 + CASE WHEN $9 = 'foreground' AND $10 = 'playback'
-                                 THEN $17 ELSE 0 END
+                    -- See the SQLite twin: runnable work holds the ceiling,
+                    -- stranded fragment-index backlog only the hard bound.
+                    -- Written ceiling-first so $16/$17 bind before $18/$19
+                    -- (`validate_parameter_order`).
+                    AND $16 + CASE WHEN $9 = 'foreground' AND $10 = 'playback'
+                                   THEN $17 ELSE 0 END
+                      > (SELECT COUNT(*) FROM analysis_requests
+                          WHERE state IN ('queued', 'running', 'submitted')
+                            AND ($18 IS NULL OR component <> 'fragment_index'
+                              OR pipeline_version IN (SELECT value FROM json_each($18))))
+                    AND $16 * $19 + CASE WHEN $9 = 'foreground' AND $10 = 'playback'
+                                        THEN $17 ELSE 0 END
+                      > (SELECT COUNT(*) FROM analysis_requests
+                          WHERE state IN ('queued', 'running', 'submitted'))
                 AND ($11 = 0 OR $5 <> 'fragment_index' OR NOT EXISTS (
                   SELECT 1 FROM analysis_requests legacy
                    WHERE legacy.file_id = $2 AND legacy.source_size = $3
@@ -2078,7 +2090,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         request.not_before_ms,
                         request.created_at_ms,
                         MAX_ANALYSIS_REQUESTS,
-                        super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM
+                        super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM,
+                        live,
+                        super::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR
                     ),
                 ),
                 (
@@ -2911,10 +2925,12 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
     async fn reopenable_analysis_requests(
         &self,
         component: Option<&str>,
+        error_code: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AnalysisRequest>, StoreError> {
         let limit = limit.clamp(1, MAX_LIST_ROWS);
         let component = component.map(str::to_owned);
+        let error_code = error_code.map(str::to_owned);
         Ok(self
             .client()
             .query_consistent_map::<RequestRow, _>(
@@ -2930,6 +2946,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE terminal.state IN ('failed', 'cancelled')
                         AND terminal.force_rebuild = 0
                         AND ($1 IS NULL OR terminal.component = $1)
+                    AND ($2 IS NULL OR terminal.last_error_code = $2)
                         AND NOT EXISTS (
                           SELECT 1 FROM analysis_requests successor
                            WHERE successor.file_id = terminal.file_id
@@ -2940,9 +2957,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                              AND successor.video_identity = terminal.video_identity
                              AND successor.target_node_id = terminal.target_node_id
                              AND successor.state IN ('queued','running','submitted','ready'))
-                      ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT $2"
+                      ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT $3"
                 ),
-                params!(component, limit),
+                params!(component, error_code, limit),
             )
             .await?
             .into_iter()

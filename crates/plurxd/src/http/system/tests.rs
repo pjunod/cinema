@@ -1771,26 +1771,38 @@ fn failed_by_code_is_one_bounded_series_per_code_the_page_explains() {
         errors: 0,
         queue_health: None,
     });
-    assert!(rendered
-        .contains("plurx_analysis_queue_failed_by_code{code=\"pipeline_version_unavailable\"} 150\n"));
+    assert!(rendered.contains(
+        "plurx_analysis_queue_failed_by_code{code=\"pipeline_version_unavailable\"} 150\n"
+    ));
     assert!(rendered.contains("plurx_analysis_queue_failed_by_code{code=\"other\"} 2\n"));
     assert_eq!(
-        rendered.matches("plurx_analysis_queue_failed_by_code{").count(),
+        rendered
+            .matches("plurx_analysis_queue_failed_by_code{")
+            .count(),
         plurx_core::store::ANALYSIS_FAILURE_CODE_SLOTS
     );
     // The label set is the page's: every bounded code but `other` is one
     // `analysisErrorInfo` explains, and every code it explains is bounded.
     let page = include_str!("../../web/pages/analysis.js");
-    let start = page.find("function analysisErrorInfo(").expect("analysisErrorInfo");
+    let start = page
+        .find("function analysisErrorInfo(")
+        .expect("analysisErrorInfo");
     let body = &page[start..start + page[start..].find("\n}\n").expect("end")];
     let explained: Vec<&str> = body
         .lines()
-        .filter_map(|line| line.strip_prefix("    ")?.split_once(":[").map(|(code, _)| code))
+        .filter_map(|line| {
+            line.strip_prefix("    ")?
+                .split_once(":[")
+                .map(|(code, _)| code)
+        })
         .collect();
     let bounded: Vec<&str> = plurx_core::store::ANALYSIS_FAILURE_CODES
         .iter()
         .copied()
         .filter(|code| *code != "other")
         .collect();
-    assert_eq!(explained, bounded, "analysis.js and ANALYSIS_FAILURE_CODES must agree");
+    assert_eq!(
+        explained, bounded,
+        "analysis.js and ANALYSIS_FAILURE_CODES must agree"
+    );
 }
