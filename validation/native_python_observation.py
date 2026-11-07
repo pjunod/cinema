@@ -13,6 +13,7 @@ from validation import python_unit_receipts as receipts
 
 # Complete, independently reviewed binding objects, not arbitrary writer input.
 REVIEWED = {
+    '83b08b2f4ffd7264dff398af9d9d23c050b5273fe37be2ece880c74704c0cbd3',  # historical Rust workflow selection
     'cf12f8dbb5e1a532d3c0ebc112d2fe45100a08d6e64084b9b7081854d1872ba0',  # Store original
     '17fdcaaf5cf710d6964f1bc028c109a15eb004ded620df54f0ec4f00fa81fc9e',  # Apple original
     '2248101c1b065e446b69546883afd7f01a36b0faa168958c2a66c2fd5e0c8fb0',  # integrated paperwork
