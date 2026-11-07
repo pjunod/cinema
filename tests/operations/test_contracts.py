@@ -2342,6 +2342,7 @@ assert.equal(context.ACT_TIMER, null);
             "retained_units_sha256": "Authenticated digest-addressed retained unit proof; no suite replay",
             "retained_units_attachment_id": "Private promotion PR evidence attachment ID",
             "retained_units_attachment_uuid": "Private promotion PR evidence attachment UUID",
+            "workspace_rust_evidence": "Optional authenticated partial workspace test evidence descriptor",
             "promotion_pr": "Optional open same-repo effort/integration promotion PR to main",
             "promotion_head_sha": "Immutable promotion head SHA; dispatch on that head branch",
             "promotion_base_sha": "Immutable current main SHA already merged into the promotion head",
@@ -3338,7 +3339,7 @@ assert.equal(context.ACT_TIMER, null);
         job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
         header = job.split("    steps:\n", 1)[0]
         self.assertIn(
-            "    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]\n",
+            "    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]\n",
             header,
         )
         self.assertIn(
@@ -3360,18 +3361,11 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("codegen-units", job)
         self.assertNotIn("CARGO_PROFILE_", job)
         self.assertNotIn("continue-on-error", job)
-        carriers = [
-            (name, labels) for name, labels in rostered_runners()
-            if "unit-memory-16g" in labels
-        ]
-        # Only the existing capacity-one registration owns this resident budget.
-        # A second carrier requires a separately reviewed host admission.
-        self.assertEqual([name for name, _ in carriers], ["gha-media1-general-01"])
-        for name, labels in carriers:
-            self.assertIn("unit-memory-12g", labels, "retain existing consumers")
-            self.assertFalse(
-                {"general", "high-cpu", "ci-store", "ci-topology"} & labels, name
-            )
+        fleet = runner_fleet()
+        carriers = [row for row in fleet["runners"] if "ci-topology" in row["labels"]]
+        self.assertEqual(len(carriers), 1, "the complete suite has one native build slot")
+        self.assertIn("baremetal", carriers[0]["labels"])
+        self.assertNotIn(carriers[0]["host"], fleet["voter_hosts"])
 
     def test_web_layout_budget_covers_cold_build_and_all_browser_stages(self):
         job = workflow_job_blocks(".github/workflows/ci.yml")["web_layout"]
@@ -4525,7 +4519,7 @@ assert.equal(context.ACT_TIMER, null);
                 elif path == ".github/workflows/release-readiness.yml" and name == "release-check":
                     expected = local("Linux", "X64", "lab", "unit-memory-16g")
                 elif path == ".github/workflows/ci.yml" and name == "check":
-                    expected = local("Linux", "X64", "lab", "unit-memory-16g")
+                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
                 elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
                     # The pinned private CI image supplies shipped FFmpeg 8;
                     # host trust labels remain unchanged, without a FFmpeg-6

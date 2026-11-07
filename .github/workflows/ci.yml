@@ -23,6 +23,11 @@ on:
         description: "Private promotion PR evidence attachment UUID"
         required: false
         default: ""
+      workspace_rust_evidence:
+        type: string
+        description: "Optional authenticated partial workspace test evidence descriptor"
+        required: false
+        default: ""
       promotion_pr:
         type: string
         description: "Optional open same-repo effort/integration promotion PR to main"
@@ -408,7 +413,8 @@ jobs:
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true'
-    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]
+    # The 16-GiB unit container shares a capacity-one build slot on a nonvoter.
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     # Private, smoke-tested CI target; never expose the management credential.
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
@@ -482,6 +488,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
@@ -496,7 +503,16 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: rust-gate
+      - name: Authenticate historical workspace Rust outcomes
+        id: workspace-continuation
+        if: inputs.workspace_rust_evidence != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
+          WORKSPACE_RUST_EVIDENCE: ${{ inputs.workspace_rust_evidence }}
+        run: python3 -m validation.workspace_rust_continuation
       - name: Verify source recovery ownership in the root Linux unit container
+        if: steps.workspace-continuation.outputs.root_retained != 'true'
         run: |
           # This container is already the root-capable pinned Linux unit
           # surface. Exercise real UID/GID handoff instead of counting the
@@ -504,7 +520,11 @@ jobs:
           python3 -c 'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"'
           python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v
       - name: Run format, Clippy, unit, and SQLite contracts
+        if: inputs.workspace_rust_evidence == ''
         run: make ci-rust-gate
+      - name: Compile the full workspace and execute missing Rust outcomes
+        if: inputs.workspace_rust_evidence != ''
+        run: python3 -m validation.workspace_rust_execute
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
