@@ -149,6 +149,37 @@ impl CleanupCell {
                         if fact.outcome == NativeOutcomeV1::Completed
                             && fact.closed_copy_ids.as_slice() == exact_ids.as_slice())))
     }
+    /// Local process exit is not a durable asset Observe or a retained asset
+    /// settlement. Only the dedicated exit owner can use this acknowledgement;
+    /// its unchanged asset head remains charged for the next daemon to import.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn acknowledge_retained_exit(
+        &mut self,
+        root: &RootCell,
+    ) -> Result<(), OperationError> {
+        if self.acknowledged || self.failed_join || self.pending.is_some() || !self.launched {
+            return Err(invalid());
+        }
+        let CleanupAction::CloseHandles { exact_ids } = &self.action else {
+            return Err(invalid());
+        };
+        let result = self.result.as_ref().ok_or_else(invalid)?;
+        if !root.no_original_handles()
+            || !result.directories.is_empty()
+            || result.unknown_close.is_some()
+            || &result.known_closed != exact_ids
+            || !matches!(&result.fact, Some(CleanupFact::Bootstrap(fact))
+                if fact.outcome == NativeOutcomeV1::Completed
+                    && fact.closed_copy_ids.as_slice() == exact_ids.as_slice()
+                    && fact.child_effect == ChildEffect::None
+                    && fact.inventory == InventoryCertainty::Exact)
+        {
+            return Err(invalid());
+        }
+        self.acknowledged = true;
+        Ok(())
+    }
+
     fn new(action: CleanupAction, observed: Vec<DirectoryObservedV1>) -> Self {
         Self {
             action,
@@ -736,5 +767,46 @@ mod tests {
         assert_eq!(result.known_closed, vec![copy]);
         assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
         assert!(result.directories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retained_exit_ack_refuses_partial_failed_or_stale_original_close_results() {
+        // Exercise the verifier against results from actual original close(2)
+        // calls. Corrupting a result can only test refusal, never create native
+        // closure authority or a ledger/refund acceptance receipt.
+        let (mut root, enter) = RootCell::launch(domain(), id(), id()).unwrap();
+        drop(enter);
+        root.join().await.unwrap();
+        for failure in 0..5 {
+            let temp = fixture();
+            let directory = File::open(temp.path()).unwrap();
+            let copy = id();
+            let observed = observed(&directory, copy, domain());
+            let mut cell =
+                CleanupCell::close_retained(std::slice::from_ref(&observed), &[copy]).unwrap();
+            cell.result = Some(run(
+                cell.action.clone(),
+                vec![observed],
+                BTreeMap::from([(copy, directory)]),
+            ));
+            cell.launched = true;
+            match failure {
+                0 => cell.result.as_mut().unwrap().known_closed.clear(),
+                1 => cell.result.as_mut().unwrap().unknown_close = Some(copy),
+                2 => cell.failed_join = true,
+                3 => cell.result.as_mut().unwrap().fact = None,
+                4 => cell.result.as_mut().unwrap().known_closed = vec![id()],
+                _ => unreachable!(),
+            }
+            assert!(cell.acknowledge_retained_exit(&root).is_err());
+            assert!(
+                !cell.acknowledged,
+                "partial/failed/stale result cannot mint exit proof"
+            );
+            assert!(
+                cell.result.is_some(),
+                "same original result retained for diagnosis"
+            );
+        }
     }
 }

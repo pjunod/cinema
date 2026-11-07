@@ -29,6 +29,8 @@ pub(in crate::adaptive_resources::runtime) mod copy_vod;
 pub(in crate::adaptive_resources::runtime) mod direct_source;
 #[cfg(unix)]
 pub(in crate::adaptive_resources::runtime) mod finite_cancel;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) mod finite_retained_exit;
 #[cfg(unix)]
 pub(super) mod finite_retirement;
 #[cfg(unix)]
@@ -1864,10 +1866,10 @@ impl NodeResourceRuntime {
     }
 
     #[cfg_attr(
-        not(test),
-        expect(
+        not(any(test, target_os = "linux")),
+        allow(
             dead_code,
-            reason = "Graceful adaptive admission drain is not yet connected to the daemon; current production drain consumes the runtime at shutdown."
+            reason = "Final daemon finite drain currently has a Linux native exit adapter."
         )
     )]
     pub(crate) fn begin_drain(&self) -> Result<(), OperationError> {

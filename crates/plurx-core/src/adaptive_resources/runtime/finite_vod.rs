@@ -437,6 +437,109 @@ impl FiniteCloseCompleted {
     }
 }
 
+/// Consuming proof of local retained-handle closure for final daemon exit.
+/// This is neither native asset retirement nor a ledger/census refund receipt.
+#[cfg(target_os = "linux")]
+pub struct RetainedExitReady {
+    pub(in crate::adaptive_resources::runtime) identity: RetainedExitIdentity,
+}
+
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) struct RetainedExitDone {
+    pub identity: RetainedExitIdentity,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedExitReady {
+    pub(in crate::adaptive_resources::runtime) fn into_done(self) -> RetainedExitDone {
+        RetainedExitDone {
+            identity: self.identity,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::adaptive_resources::runtime) struct RetainedExitIdentity {
+    pub ledger: u64,
+    pub obligation: Uuid,
+    pub operation: Uuid,
+    pub role_index: usize,
+    pub sequence: i64,
+    pub native_member: Uuid,
+    pub native_head_operation: Uuid,
+    pub native_head_revision: u64,
+    pub binding: crate::adaptive_resources::ReservationBinding,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedExitIdentity {
+    pub(in crate::adaptive_resources::runtime) fn same_original(self, other: Self) -> bool {
+        self.ledger == other.ledger
+            && self.obligation == other.obligation
+            && self.operation == other.operation
+            && self.role_index == other.role_index
+            && self.binding == other.binding
+            && self.native_member == other.native_member
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) enum RetainedExitOriginal {
+    Book {
+        preparation: OwnedPreparation,
+        index: usize,
+        member: Uuid,
+    },
+    Imported {
+        owner: Arc<super::recovery::ImportedRetainedS>,
+    },
+}
+
+/// A bounded snapshot of actual original runtime custody. Keys are copied
+/// inline only after the snapshot-capacity preflight; no wire DTO constructs it.
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) struct RetainedExitSelection {
+    pub identity: RetainedExitIdentity,
+    pub original: RetainedExitOriginal,
+    key: [u8; 255],
+    key_len: u8,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedExitSelection {
+    pub(in crate::adaptive_resources::runtime) fn new(
+        identity: RetainedExitIdentity,
+        original: RetainedExitOriginal,
+        key: &str,
+    ) -> Result<Self, FiniteVodError> {
+        if key.is_empty() || key.len() > 255 {
+            return Err(invalid());
+        }
+        let mut fixed = [0u8; 255];
+        fixed[..key.len()].copy_from_slice(key.as_bytes());
+        Ok(Self {
+            identity,
+            original,
+            key: fixed,
+            key_len: key.len() as u8,
+        })
+    }
+    pub(in crate::adaptive_resources::runtime) fn key(&self) -> &str {
+        std::str::from_utf8(&self.key[..usize::from(self.key_len)])
+            .expect("original UTF-8 retained key")
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl NodeResourceRuntime {
+    /// One-way final-daemon barrier, not an observer deadline or a trial gate.
+    /// Existing original cleanup remains permitted; fresh native entry refuses.
+    pub fn begin_finite_shutdown_exit(&self) -> Result<(), FiniteVodError> {
+        self.begin_drain().map_err(Into::into)
+    }
+}
+
 /// Original finite close selection. The runtime book keeps the native proof,
 /// durable operation and complete charge if this selector or waiter drops.
 /// It is deliberately separate from an output or producer application alias.

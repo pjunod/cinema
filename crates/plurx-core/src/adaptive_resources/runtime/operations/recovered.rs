@@ -195,6 +195,13 @@ impl NodeResourceRuntime {
             id,
             state: state.clone(),
         };
+        // Serialize the sole File take/install with the irreversible exit
+        // snapshot. A registered placeholder is not evidence that import Files
+        // have moved; shutdown may select that still-unadopted owner.
+        let book = self.operations.lock().map_err(|_| OperationError::State)?;
+        if book.draining {
+            return Err(OperationError::State);
+        }
         let mut bundle = state.try_lock().map_err(|_| OperationError::State)?;
         if bundle.id != id || bundle.roles.len() != 1 {
             return Err(OperationError::State);

@@ -840,3 +840,297 @@ async fn conserving_retirement_keeps_original_census_identity_through_final_clos
     assert!(after.epoch() > before.epoch());
     fixture.finish(retained).await;
 }
+
+#[tokio::test]
+async fn positively_closed_finite_reader_keeps_application_guard_until_selector_drop() {
+    let fixture = OriginalOutput::produced().await;
+    fixture.freeze().await;
+    let retained = fixture
+        .owner
+        .retire_output(deadline())
+        .await
+        .expect("original S commit");
+    let reader = fixture.reader(fixture.init_len).await;
+    reader
+        .close(deadline())
+        .await
+        .expect("actual native reader close");
+    let mut ticket = retained
+        .prepare_eviction(deadline())
+        .await
+        .expect("original close ticket");
+    let OriginalOutput {
+        runtime,
+        owner,
+        preparation,
+        output,
+        root,
+        ..
+    } = fixture;
+    drop((retained, output, owner, preparation));
+    assert!(
+        ticket
+            .wait_application_release(Instant::now() + Duration::from_millis(50))
+            .await
+            .is_err(),
+        "positive native close is not destruction of the reader selector"
+    );
+    assert_eq!(runtime.accounting().unwrap().held, 1);
+    drop(reader);
+    ticket
+        .wait_application_release(deadline())
+        .await
+        .expect("actual last selector destroyed");
+    ticket
+        .finish_retirement_in(&mut FiniteCloseWorkspace::new(), deadline())
+        .await
+        .expect("original native/application terminal");
+    assert!(ticket.into_completed().is_ok());
+    assert_eq!(runtime.accounting().unwrap().held, 0);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("original aliases gone")
+        .drain()
+        .unwrap();
+    drop(root);
+}
+
+async fn retained_exit_service(
+    port: crate::adaptive_resources::runtime::ordinary_finite_collector::CoreServicePort,
+    _: Arc<()>,
+) {
+    while let Some(work) = port.wait_work().await {
+        assert!(port.is_retained_shutdown(&work).unwrap());
+        let gate = port.gate(&work).unwrap();
+        let _guard = gate.lock_owned().await;
+        port.finish_retained_shutdown(&work, deadline())
+            .await
+            .expect("same paid retained exit");
+    }
+}
+
+#[tokio::test]
+async fn retained_shutdown_full_fixed_pool_refuses_then_retries_without_truncating_s() {
+    use crate::adaptive_resources::runtime::ordinary_finite_collector::{
+        BuildGateDirectory, OrdinaryFinalizerLifecycle, ORDINARY_COLLECTOR_SLOTS,
+    };
+    let fixture = OriginalOutput::produced().await;
+    fixture.freeze().await;
+    let retained = fixture
+        .owner
+        .retire_output(deadline())
+        .await
+        .expect("original S commit");
+    let mut lifecycle = OrdinaryFinalizerLifecycle::new(BuildGateDirectory::default());
+    let client = lifecycle
+        .start(
+            &fixture.runtime,
+            Arc::new(()),
+            retained_exit_service,
+            deadline(),
+        )
+        .await
+        .expect("real independently paid fixed pool");
+    let mut slots = Vec::new();
+    for index in 0..ORDINARY_COLLECTOR_SLOTS {
+        slots.push(client.reserve(&format!("occupied-{index}")).unwrap());
+    }
+    lifecycle.begin_drain();
+    fixture.runtime.begin_finite_shutdown_exit().unwrap();
+    let before = fixture.runtime.accounting().unwrap();
+    assert!(
+        client.capture_retained_shutdown().is_err(),
+        "all 256 paid slots occupied"
+    );
+    assert_eq!(fixture.runtime.accounting().unwrap().used, before.used);
+    assert!(fixture
+        .runtime
+        .accounting()
+        .unwrap()
+        .finalization_support
+        .is_some());
+    for slot in slots.drain(..) {
+        slot.cancel_unbound().unwrap();
+    }
+    client
+        .capture_retained_shutdown()
+        .expect("same S captured after actual slots release");
+    let OriginalOutput {
+        runtime,
+        owner,
+        preparation,
+        output,
+        root,
+        ..
+    } = fixture;
+    drop((retained, output, owner, preparation));
+    client.request_retained_shutdown();
+    client
+        .wait_retained_shutdown(deadline())
+        .await
+        .expect("actual local S handle closure");
+    client
+        .capture_retained_shutdown()
+        .expect("same consumed S exit proof deduplicates");
+    drop(client);
+    lifecycle
+        .shutdown(deadline())
+        .await
+        .expect("actual fixed storage/header destruction");
+    assert!(runtime.accounting().unwrap().finalization_support.is_none());
+    assert_eq!(runtime.accounting().unwrap().held, 1, "S remains charged");
+    drop(lifecycle);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("pool aliases gone")
+        .drain()
+        .unwrap();
+    drop(root);
+}
+
+#[tokio::test]
+async fn retained_shutdown_stale_binding_cannot_close_original_s() {
+    use crate::adaptive_resources::runtime::operations::finite_retained_exit::RetainedExitRecord;
+    let fixture = OriginalOutput::produced().await;
+    fixture.freeze().await;
+    let retained = fixture.owner.retire_output(deadline()).await.unwrap();
+    fixture.runtime.begin_finite_shutdown_exit().unwrap();
+    let mut selected = None;
+    fixture
+        .runtime
+        .visit_retained_shutdown(
+            |_| false,
+            |selection| {
+                selected = Some(selection);
+                Ok(())
+            },
+        )
+        .unwrap();
+    let mut selection = selected.expect("actual S selection");
+    let before = fixture.runtime.accounting().unwrap();
+    selection.identity.binding.reservation = selection
+        .identity
+        .binding
+        .reservation
+        .checked_add(1)
+        .unwrap();
+    let mut record = RetainedExitRecord::new(selection);
+    assert!(fixture
+        .runtime
+        .finish_retained_shutdown(&mut record, deadline())
+        .await
+        .is_err());
+    assert_eq!(fixture.runtime.accounting().unwrap().used, before.used);
+    drop(record);
+    fixture.finish(retained).await;
+}
+
+async fn retained_exit_service_after_actual_work_drop(
+    port: crate::adaptive_resources::runtime::ordinary_finite_collector::CoreServicePort,
+    settled: Arc<tokio::sync::Notify>,
+) {
+    while let Some(work) = port.wait_work().await {
+        assert!(port.is_retained_shutdown(&work).unwrap());
+        let guard = port.gate(&work).unwrap().lock_owned().await;
+        port.finish_retained_shutdown(&work, deadline())
+            .await
+            .unwrap();
+        drop(guard);
+        drop(work);
+        settled.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn retained_shutdown_partial_capture_refusal_keeps_completed_original_exit() {
+    use crate::adaptive_resources::runtime::ordinary_finite_collector::{
+        BuildGateDirectory, OrdinaryFinalizerLifecycle, ORDINARY_COLLECTOR_SLOTS,
+    };
+    let fixture = OriginalOutput::produced().await;
+    fixture.freeze().await;
+    let retained = fixture.owner.retire_output(deadline()).await.unwrap();
+    let settled = Arc::new(tokio::sync::Notify::new());
+    let mut lifecycle = OrdinaryFinalizerLifecycle::new(BuildGateDirectory::default());
+    let client = lifecycle
+        .start(
+            &fixture.runtime,
+            Arc::clone(&settled),
+            retained_exit_service_after_actual_work_drop,
+            deadline(),
+        )
+        .await
+        .unwrap();
+    let mut occupied = Vec::new();
+    for index in 0..ORDINARY_COLLECTOR_SLOTS - 1 {
+        occupied.push(client.reserve(&format!("prefix-occupied-{index}")).unwrap());
+    }
+    lifecycle.begin_drain();
+    fixture.runtime.begin_finite_shutdown_exit().unwrap();
+    let mut later = None;
+    fixture
+        .runtime
+        .visit_retained_shutdown(
+            |_| false,
+            |selection| {
+                later = Some(selection);
+                Ok(())
+            },
+        )
+        .unwrap();
+    let mut later = later.unwrap();
+    // A later, different binding is a negative census candidate only. It must
+    // never acquire native-close authority or displace the real completed S.
+    later.identity.binding.reservation = later.identity.binding.reservation.checked_add(1).unwrap();
+    client
+        .capture_retained_shutdown()
+        .expect("first actual S occupies final free record");
+    let OriginalOutput {
+        runtime,
+        owner,
+        preparation,
+        output,
+        root,
+        ..
+    } = fixture;
+    drop((retained, output, owner, preparation));
+    client.request_retained_shutdown();
+    tokio::time::timeout(Duration::from_secs(5), settled.notified())
+        .await
+        .expect("actual S close, gate and work selectors dropped");
+    client.wait_retained_shutdown(deadline()).await.unwrap();
+    let before = runtime.accounting().unwrap();
+    assert!(
+        client.capture_retained_selection_fixture(later).is_err(),
+        "a completed S exit is not a free record for a later candidate"
+    );
+    assert_eq!(runtime.accounting().unwrap().used, before.used);
+    assert_eq!(runtime.accounting().unwrap().held, 1);
+    client
+        .capture_retained_shutdown()
+        .expect("first completed identity survives prefix refusal");
+    occupied.pop().unwrap().cancel_unbound().unwrap();
+    client
+        .capture_retained_shutdown()
+        .expect("retry deduplicates original closed S after room returns");
+    for slot in occupied {
+        slot.cancel_unbound().unwrap();
+    }
+    drop(client);
+    lifecycle
+        .shutdown(deadline())
+        .await
+        .expect("original actor and actual pool storage close");
+    assert!(runtime.accounting().unwrap().finalization_support.is_none());
+    assert_eq!(
+        runtime.accounting().unwrap().held,
+        1,
+        "durable S remains charged"
+    );
+    drop(lifecycle);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("all original pool aliases destroyed")
+        .drain()
+        .unwrap();
+    drop(root);
+}

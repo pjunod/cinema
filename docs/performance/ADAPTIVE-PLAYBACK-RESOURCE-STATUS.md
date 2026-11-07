@@ -1,14 +1,14 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation active · updated 2026-11-04. Codex has
-resumed Claude's adaptive effort #1248. The effort remains a draft; no release
-qualification or deployment is claimed.
+**Status:** open · implementation active · updated 2026-11-07.
+Effort #1248 remains draft; release qualification and deployment are open.
 
 [Plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) ·
 [finite delivery](ADAPTIVE-PLAYBACK-DELIVERY.md) ·
 [policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) · [containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md) ·
 [support ADR](ADAPTIVE-PLAYBACK-FINALIZATION-SUPPORT.md) ·
-[ordinary collector](ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md).
+[ordinary collector](ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md) ·
+[retained exit](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md).
 
 ## Current continuation — source-bound task qualification
 

@@ -32,6 +32,9 @@ pub struct FiniteReader {
     index: usize,
     lease: Uuid,
     control: Arc<ReaderControl>,
+    // Last: an explicitly closed reader is still an actual application
+    // selection until its runtime/preparation/control fields are destroyed.
+    _app_guard: Arc<super::super::super::finite_lifetime::FiniteAppGuard>,
 }
 impl Drop for FiniteReader {
     fn drop(&mut self) {
@@ -119,7 +122,9 @@ pub(in crate::adaptive_resources::runtime::operations) fn retained_reader_struct
         .checked_add(std::mem::size_of::<tokio::sync::Notify>())?
         .checked_add(2 * std::mem::size_of::<usize>())?;
     let recycled = native::readers::recycled_structural_bytes()?;
-    map.checked_add(count.checked_mul(control.checked_add(recycled)?)?)
+    let selector_guard =
+        std::mem::size_of::<Arc<super::super::super::finite_lifetime::FiniteAppGuard>>();
+    map.checked_add(count.checked_mul(control.checked_add(recycled)?.checked_add(selector_guard)?)?)
 }
 impl ReaderEntry {
     pub(super) fn retained_metadata_bytes(&self) -> Result<usize, OperationError> {
@@ -364,6 +369,15 @@ impl NodeResourceRuntime {
         if role.refunded || role.transition.is_some() {
             return Err(OperationError::State);
         }
+        // Serialize registration with the original application's seal before
+        // allocating or publishing any reader/native entry. Failure below
+        // destroys only this same guard; no untracked selection can escape.
+        let app_guard = role
+            .finite_app
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .new_guard()
+            .ok_or(OperationError::State)?;
         let bootstrap = role
             .bootstrap
             .get_mut(&member)
@@ -453,6 +467,7 @@ impl NodeResourceRuntime {
             index,
             lease: io.uuid(),
             control,
+            _app_guard: app_guard,
         })
     }
 
