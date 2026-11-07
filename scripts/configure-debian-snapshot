@@ -1,0 +1,22 @@
+#!/bin/sh
+# Keep signed snapshot indexes; regular mirrors may serve only package files.
+set -eu
+snapshot=${1:?usage: configure-debian-snapshot TIMESTAMP [APT_DIRECTORY]}
+apt_dir=${2:-/etc/apt}
+mkdir -p "$apt_dir/apt.conf.d"
+for archive in debian debian-security; do
+    # type:deb excludes the moving mirror from all index/Release requests.
+    printf 'http://deb.debian.org/%s/\tpriority:1 type:deb\nhttp://snapshot.debian.org/archive/%s/%s/\tpriority:2\nhttp://snapshot-cloudflare.debian.org/archive/%s/%s/\tpriority:3\n' \
+        "$archive" "$archive" "$snapshot" "$archive" "$snapshot" \
+        > "$apt_dir/plurx-$archive.mirrors"
+done
+sed \
+    -e "s|http://deb.debian.org/debian-security|mirror+file:$apt_dir/plurx-debian-security.mirrors|g" \
+    -e "s|http://deb.debian.org/debian|mirror+file:$apt_dir/plurx-debian.mirrors|g" \
+    "$apt_dir/sources.list.d/debian.sources" > "$apt_dir/sources.list.d/debian.sources.tmp"
+mv "$apt_dir/sources.list.d/debian.sources.tmp" "$apt_dir/sources.list.d/debian.sources"
+cat > "$apt_dir/apt.conf.d/99plurx-snapshot" <<'EOF'
+Acquire::Check-Valid-Until "false";
+Acquire::Retries "5";
+Acquire::http::Timeout "30";
+EOF
