@@ -50,26 +50,42 @@ async fn scan_request_sidecar_round_trips_and_key_is_unique_on_every_backend() {
             .await
             .expect("library");
         let first = targeted(library.id, "/tv/Show/Season 1");
-        assert!(matches!(
-            store
-                .enqueue_library_work_v2(first.clone(), seed(7, "t-1/0/abc/1"))
-                .await
-                .expect("first admission"),
-            EnqueueOutcome::Accepted { .. }
-        ), "{backend}");
+        assert!(
+            matches!(
+                store
+                    .enqueue_library_work_v2(first.clone(), seed(7, "t-1/0/abc/1"))
+                    .await
+                    .expect("first admission"),
+                EnqueueOutcome::Accepted { .. }
+            ),
+            "{backend}"
+        );
         let row = store
             .scan_request_v2(&first.request_id)
             .await
             .expect("read")
             .expect("written in the admission");
-        assert_eq!((row.key_id, row.request_key.as_str()), (7, "t-1/0/abc/1"), "{backend}");
+        assert_eq!(
+            (row.key_id, row.request_key.as_str()),
+            (7, "t-1/0/abc/1"),
+            "{backend}"
+        );
         assert_eq!(row.expected_files, seed(7, "").expected_files, "{backend}");
         assert_eq!(
-            store.scan_request_by_key(7, "t-1/0/abc/1").await.expect("lookup"),
+            store
+                .scan_request_by_key(7, "t-1/0/abc/1")
+                .await
+                .expect("lookup"),
             Some(first.request_id.clone()),
             "{backend}"
         );
-        assert_eq!(store.scan_request_by_key(8, "t-1/0/abc/1").await.expect("lookup"), None);
+        assert_eq!(
+            store
+                .scan_request_by_key(8, "t-1/0/abc/1")
+                .await
+                .expect("lookup"),
+            None
+        );
 
         assert!(store
             .set_scan_request_waiting_on(&first.request_id, "full_scan:TV", 2_000)
@@ -117,20 +133,32 @@ async fn scan_request_sidecar_round_trips_and_key_is_unique_on_every_backend() {
 
         // A concurrent identical request loses the whole admission.
         let duplicate = targeted(library.id, "/tv/Show/Season 1");
-        assert!(store
-            .enqueue_library_work_v2(duplicate.clone(), seed(7, "t-1/0/abc/1"))
-            .await
-            .is_err(), "{backend}");
-        assert!(store
-            .library_work_requests(LibraryWorkQuery {
-                request_id: Some(duplicate.request_id.clone()),
-                limit: 1,
-                ..Default::default()
-            })
-            .await
-            .expect("list")
-            .is_empty(), "{backend}");
-        assert_eq!(store.scan_request_v2(&duplicate.request_id).await.expect("read"), None);
+        assert!(
+            store
+                .enqueue_library_work_v2(duplicate.clone(), seed(7, "t-1/0/abc/1"))
+                .await
+                .is_err(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .library_work_requests(LibraryWorkQuery {
+                    request_id: Some(duplicate.request_id.clone()),
+                    limit: 1,
+                    ..Default::default()
+                })
+                .await
+                .expect("list")
+                .is_empty(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .scan_request_v2(&duplicate.request_id)
+                .await
+                .expect("read"),
+            None
+        );
 
         for (key_id, request_key) in [(7, "t-1/0/abc/2"), (8, "t-1/0/abc/1"), (7, ""), (7, "")] {
             let next = targeted(library.id, "/tv/Show/Season 1");
