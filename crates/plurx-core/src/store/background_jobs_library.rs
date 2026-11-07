@@ -18,6 +18,18 @@ pub(crate) const SCHEMA: &str = include_str!("background_jobs_library.sql");
 pub const SQLITE_INTRODUCED_SCHEMA: i64 = 73;
 pub const MAX_LIBRARY_REQUESTS: usize = 256;
 pub const MAX_LIBRARY_RESULT_BYTES: usize = 64 * 1024;
+/// The executable generation of whole-library work (scheduled, startup and
+/// manual scans and metadata refreshes), dedupe key `library:scan:{id}` /
+/// `library:metadata:{id}`.
+pub const LIBRARY_WORK_GENERATION: &str = "library-work-v1";
+/// Targeted requests are their own job, `library:targeted:{id}` (contract v2
+/// §5.1): claimed with a probe admission, ahead of a pending full scan, and
+/// serialised against a running one by the same `scan:library:{id}` lease.
+/// It keeps the `library_scan` kind so the fence binding, the provider and
+/// source-I/O reservations and every older node's decoder accept the row; an
+/// older node does not claim it, because its claimer runs only
+/// [`LIBRARY_WORK_GENERATION`].
+pub const LIBRARY_TARGETED_GENERATION: &str = "library-targeted-v1";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -139,7 +151,11 @@ pub(super) async fn enqueue_with<T: QueueSql>(
         }
     }
     let refresh = matches!(input.input, LibraryWorkInput::Full { refresh: true, .. });
+    let targeted = matches!(input.input, LibraryWorkInput::Targeted { .. });
+    // Higher is claimed first. A targeted request is a file someone just
+    // imported and may be about to watch: it outranks every pending full scan.
     let priority = match input.input {
+        LibraryWorkInput::Targeted { .. } => 3,
         LibraryWorkInput::Full {
             trigger: LibraryTrigger::Scheduled,
             ..
@@ -148,14 +164,19 @@ pub(super) async fn enqueue_with<T: QueueSql>(
             trigger: LibraryTrigger::Startup,
             ..
         } => 1,
-        _ => 2,
+        LibraryWorkInput::Full { .. } => 2,
     };
     let input_json = encode(&input.input)?;
     if input_json.len() > 16 * 1024 {
         return Err(StoreError::Task("library request exceeds 16 KiB".into()));
     }
     let digest = hex::encode(Sha256::digest(format!("{}:{input_json}", input.library_id)));
-    let generation = "library-work-v1".to_owned();
+    let generation = if targeted {
+        LIBRARY_TARGETED_GENERATION
+    } else {
+        LIBRARY_WORK_GENERATION
+    }
+    .to_owned();
     let payload = if refresh {
         JobPayload::MetadataRefresh {
             library_id: input.library_id,
@@ -172,7 +193,13 @@ pub(super) async fn enqueue_with<T: QueueSql>(
         payload,
         dedupe_key: format!(
             "library:{}:{}",
-            if refresh { "metadata" } else { "scan" },
+            if targeted {
+                "targeted"
+            } else if refresh {
+                "metadata"
+            } else {
+                "scan"
+            },
             input.library_id
         ),
         priority,

@@ -2636,6 +2636,9 @@ pub(crate) async fn claim_library(
     use plurx_core::store::background_jobs::{
         CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
     };
+    use plurx_core::store::background_jobs_library::{
+        LIBRARY_TARGETED_GENERATION, LIBRARY_WORK_GENERATION,
+    };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
     if !authority.may_run_cluster_jobs().await {
@@ -2657,7 +2660,7 @@ pub(crate) async fn claim_library(
                 continue;
             };
             let kind = payload.kind();
-            let library_id = match payload {
+            let (library_id, targeted) = match payload {
                 JobPayload::LibraryScan {
                     library_id,
                     generation,
@@ -2665,7 +2668,11 @@ pub(crate) async fn claim_library(
                 | JobPayload::MetadataRefresh {
                     library_id,
                     generation,
-                } if generation == "library-work-v1" => library_id,
+                } if generation == LIBRARY_WORK_GENERATION => (library_id, false),
+                JobPayload::LibraryScan {
+                    library_id,
+                    generation,
+                } if generation == LIBRARY_TARGETED_GENERATION => (library_id, true),
                 _ => continue,
             };
             if library_filter.is_some_and(|wanted| wanted != library_id) {
@@ -2680,13 +2687,16 @@ pub(crate) async fn claim_library(
                     "This node observed no library roots; waiting for a compatible worker."
                         .to_owned()
                 });
+            let mut unreadable = None;
             for path in library.iter().flat_map(|library| &library.paths) {
                 if let Err(error) = tokio::fs::read_dir(path).await {
                     problem = Some(format!("This node could not read library root {}: {error}. Waiting for a compatible worker.", path.display()));
+                    unreadable = Some(path.clone());
                     break;
                 }
             }
             let readable = problem.is_none();
+            let unreadable_root = if targeted { unreadable.clone() } else { None };
             readiness.record(
                 library_id,
                 library
@@ -2695,10 +2705,25 @@ pub(crate) async fn claim_library(
                 problem,
             );
             if !readable {
+                if let Some(root) = unreadable_root {
+                    note_targeted_wait(
+                        store.as_ref(),
+                        &candidate.id,
+                        &format!("root_unreadable:{}", root.display()),
+                    )
+                    .await;
+                }
                 continue;
             }
-            let Some(admission) = transcode.admit_fragment().await else {
-                return Ok(None);
+            // A targeted request runs under a probe admission: it is never
+            // refused because the heavy lane is busy (contract v2 §5.1).
+            let admission = if targeted {
+                crate::transcode::FragmentAdmission::probe_only()
+            } else {
+                let Some(admission) = transcode.admit_fragment().await else {
+                    return Ok(None);
+                };
+                admission
             };
             if !authority.may_run_cluster_jobs().await {
                 return Ok(None);
@@ -2741,6 +2766,25 @@ pub(crate) async fn claim_library(
         }
     }
     Ok(None)
+}
+
+/// Record, on every pending request of a targeted library job, what it is
+/// waiting on. Advisory: the request record is still the authority, so a
+/// failed write is logged and the claim decision stands.
+pub(crate) async fn note_targeted_wait(store: &dyn Store, job_id: &str, waiting_on: &str) {
+    let now_ms = match unix_ms() {
+        Ok(now_ms) => now_ms,
+        Err(error) => {
+            tracing::warn!(%error, job_id, "no clock for targeted waiting_on");
+            return;
+        }
+    };
+    if let Err(error) = store
+        .set_library_job_waiting_on(job_id, waiting_on, now_ms)
+        .await
+    {
+        tracing::warn!(%error, job_id, waiting_on, "recording targeted waiting_on");
+    }
 }
 
 /// The caller holds physical admission through execution and cleanup.

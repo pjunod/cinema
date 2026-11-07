@@ -1715,6 +1715,10 @@ pub struct JobManager {
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
     /// Wake durable library consumers promptly after local admission.
     library_wake: tokio::sync::Notify,
+    /// Per-request completion signals for a `POST /scan` that waits
+    /// (`wait_ms`). Local only: a request finished by another node is found
+    /// by the waiter's own re-read of the durable record.
+    scan_waiters: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     library_readiness: crate::background_jobs::LibraryReadiness,
     /// Shared with TranscodeManager when attached; standalone managers have
     /// no other encoder pool. Foreground subtitles reserve one CPU thread.
@@ -3764,6 +3768,7 @@ impl JobManager {
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             library_wake: tokio::sync::Notify::new(),
+            scan_waiters: std::sync::Mutex::new(HashMap::new()),
             library_readiness: Default::default(),
             subtitle_admissions: std::sync::Mutex::new(crate::admission::Admissions::new()),
             metrics: Arc::new(IntegrationMetrics::default()),
@@ -5446,8 +5451,15 @@ impl JobManager {
     async fn run_targeted(
         &self,
         requests: &[ScanRequest],
+        expected: &[plurx_core::store::scan_request_v2::ExpectedFile],
         publisher: &PublicationStore<'_>,
-    ) -> Result<TargetedScan, TargetError> {
+    ) -> Result<
+        (
+            TargetedScan,
+            Vec<plurx_core::store::scan_request_v2::PlacedReport>,
+        ),
+        TargetError,
+    > {
         library_work::check_active()?;
         let req = requests.first().ok_or_else(|| {
             TargetError::Store(StoreError::Task(
@@ -5474,7 +5486,19 @@ impl JobManager {
             waiters = requests.len(),
             "targeted scan requested"
         );
-        let mut out = scan::scan_path_with_publication(publisher, &library, &req.path).await?;
+        // Files the caller says it just placed are probed whatever their
+        // size and whole-second mtime say (contract v2 §5.1).
+        let force_probe = library_work::canonical_expected(expected).await;
+        let (mut out, detail) = scan::scan_path_targeted(
+            publisher,
+            &library,
+            &req.path,
+            &scan::TargetedOptions {
+                force_probe: force_probe.values().cloned().collect(),
+            },
+        )
+        .await?;
+        let files = library_work::placed_reports(expected, &force_probe, &out, &detail).await;
         self.note_fresh_index_files(out.items.iter().map(|placed| placed.file_id).collect());
         for request in requests {
             library_work::check_active()?;
@@ -5554,7 +5578,7 @@ impl JobManager {
             "targeted scan enriched what it placed"
         );
         library_work::check_active()?;
-        Ok(out)
+        Ok((out, files))
     }
 
     /// Which item ids a targeted scan should enrich, given what it placed.

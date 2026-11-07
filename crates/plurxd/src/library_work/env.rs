@@ -53,6 +53,15 @@ where
     .await
 }
 
+/// Whether a claimed library job is a contract v2 targeted job.
+pub(super) fn is_targeted(job: &plurx_core::store::background_jobs::BackgroundJob) -> bool {
+    matches!(
+        job.supported_payload(),
+        Ok(JobPayload::LibraryScan { generation, .. })
+            if generation == plurx_core::store::background_jobs_library::LIBRARY_TARGETED_GENERATION
+    )
+}
+
 pub(super) struct TokioEnvironment<'a> {
     // Rust drops fields in declaration order, so the order below IS the release
     // order when this environment is dropped without the driver finishing
@@ -235,14 +244,30 @@ impl Environment for TokioEnvironment<'_> {
                         true
                     }
                     result => {
+                        if let Err(error) = result {
+                            tracing::warn!(library_id = self.library_id, %error, "library domain lease unavailable");
+                        }
+                        if is_targeted(&self.job) {
+                            // Another worker holds the library's mutation
+                            // fence — a full scan or refresh. A targeted job
+                            // never runs beside it (its reconcile would prune
+                            // what this one inserts), so it yields and says so.
+                            let name = match self.manager.store.get_library(self.library_id).await {
+                                Ok(Some(library)) => library.name,
+                                _ => self.library_id.to_string(),
+                            };
+                            crate::background_jobs::note_targeted_wait(
+                                self.manager.store.as_ref(),
+                                &self.job.id,
+                                &format!("full_scan:{name}"),
+                            )
+                            .await;
+                        }
                         #[cfg(test)]
                         crate::background_jobs::faults::worker::at(
                             crate::background_jobs::faults::worker::Point::DomainUnavailable,
                         )
                         .await;
-                        if let Err(error) = result {
-                            tracing::warn!(library_id = self.library_id, %error, "library domain lease unavailable");
-                        }
                         false
                     }
                 };
@@ -264,6 +289,15 @@ impl Environment for TokioEnvironment<'_> {
                     .await
                 {
                     Ok(true) => {
+                        if is_targeted(&self.job) {
+                            // Running now: nothing is in its way any more.
+                            crate::background_jobs::note_targeted_wait(
+                                self.manager.store.as_ref(),
+                                &self.job.id,
+                                "",
+                            )
+                            .await;
+                        }
                         #[cfg(test)]
                         crate::background_jobs::faults::worker::at(
                             crate::background_jobs::faults::worker::Point::Bound,

@@ -5,6 +5,7 @@ use plurx_core::store::background_jobs_library::{
     LibraryTrigger, LibraryWorkInput, LibraryWorkQuery, LibraryWorkRecord, LibraryWorkResult,
     NewLibraryWork, MAX_LIBRARY_RESULT_BYTES,
 };
+use plurx_core::store::scan_request_v2::{ExpectedFile, PlacedReport};
 #[path = "library_work/env.rs"]
 mod env;
 #[path = "library_work/probe_input.rs"]
@@ -370,8 +371,40 @@ impl JobManager {
                     .iter()
                     .map(|(_, request)| request.clone())
                     .collect();
-                let result = match self.run_targeted(&group, publisher).await {
-                    Ok(scan) => LibraryWorkResult::Completed { scan },
+                // Contract v2 sidecars: the files each request expects. A
+                // request admitted by an older node has none.
+                let mut sidecars = Vec::new();
+                for (id, _) in &requests {
+                    if let Some(row) = self.store.scan_request_v2(id).await? {
+                        sidecars.push(row);
+                    }
+                }
+                let mut expected: Vec<ExpectedFile> = Vec::new();
+                for file in sidecars.iter().flat_map(|row| &row.expected_files) {
+                    if !expected.iter().any(|known| known.path == file.path) {
+                        expected.push(file.clone());
+                    }
+                }
+                let result = match self.run_targeted(&group, &expected, publisher).await {
+                    Ok((scan, files)) => {
+                        // Written before the completion, so a caller that
+                        // reads `done` also reads its per-file report.
+                        for row in &sidecars {
+                            let own: Vec<_> = files
+                                .iter()
+                                .filter(|file| {
+                                    row.expected_files
+                                        .iter()
+                                        .any(|expected| expected.path == file.path())
+                                })
+                                .cloned()
+                                .collect();
+                            self.store
+                                .set_scan_request_files(&row.request_id, &own, clock_ms())
+                                .await?;
+                        }
+                        LibraryWorkResult::Completed { scan }
+                    }
                     Err(error @ TargetError::OutsideRoots { .. }) => LibraryWorkResult::Failed {
                         error: error.to_string(),
                     },
@@ -419,13 +452,14 @@ impl JobManager {
         .await;
         let reply = fence.complete_library(publisher, id.clone(), result).await;
         if matches!(reply, Ok(true)) {
+            self.notify_scan_waiter(&id);
             return Ok(());
         }
         // A lost completion acknowledgement must not rerun a published result.
         let current = self
             .store
             .library_work_requests(LibraryWorkQuery {
-                request_id: Some(id),
+                request_id: Some(id.clone()),
                 limit: 1,
                 ..Default::default()
             })
@@ -439,12 +473,110 @@ impl JobManager {
             .first()
             .is_some_and(|record| record.state != "pending")
         {
+            self.notify_scan_waiter(&id);
             return Ok(());
         }
         Err(reply
             .err()
             .unwrap_or_else(|| StoreError::Task("library completion lost its owner".into())))
     }
+}
+
+impl JobManager {
+    /// The completion signal a waiting `POST /scan` holds for `request_id`.
+    pub(crate) fn scan_waiter(&self, request_id: &str) -> Arc<tokio::sync::Notify> {
+        let mut waiters = self
+            .scan_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(waiters.entry(request_id.to_owned()).or_default())
+    }
+
+    /// The waiting handler is done with its signal.
+    pub(crate) fn forget_scan_waiter(&self, request_id: &str) {
+        self.scan_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(request_id);
+    }
+
+    fn notify_scan_waiter(&self, request_id: &str) {
+        let waiter = self
+            .scan_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(request_id)
+            .cloned();
+        if let Some(waiter) = waiter {
+            waiter.notify_waiters();
+            waiter.notify_one();
+        }
+    }
+}
+
+/// Each expected path and its canonical form; a path that cannot be
+/// canonicalized (it is not there, or a parent is unreadable) is absent.
+pub(super) async fn canonical_expected(expected: &[ExpectedFile]) -> BTreeMap<String, PathBuf> {
+    let mut canonical = BTreeMap::new();
+    for file in expected {
+        if let Ok(path) = tokio::fs::canonicalize(&file.path).await {
+            canonical.insert(file.path.clone(), path);
+        }
+    }
+    canonical
+}
+
+/// The per-file report for every expected file (contract v2 §4.2, §5.1):
+/// `placed` with the file as plurx just read it — its size and its mtime in
+/// nanoseconds from a fresh `stat`, never the whole-second catalogue value —
+/// `skipped` with the reason, or `missing`.
+pub(super) async fn placed_reports(
+    expected: &[ExpectedFile],
+    canonical: &BTreeMap<String, PathBuf>,
+    scan: &TargetedScan,
+    detail: &plurx_core::scan::TargetedDetail,
+) -> Vec<PlacedReport> {
+    let mut reports = Vec::with_capacity(expected.len());
+    for file in expected {
+        let path = file.path.clone();
+        let Some(real) = canonical.get(&file.path) else {
+            reports.push(PlacedReport::Missing { path });
+            continue;
+        };
+        let real_str = real.to_string_lossy().into_owned();
+        if let Some(placed) = scan.items.iter().find(|placed| placed.path == real_str) {
+            match tokio::fs::metadata(real).await {
+                Ok(meta) => reports.push(PlacedReport::Placed {
+                    path,
+                    item_id: placed.item_id,
+                    file_id: placed.file_id,
+                    bytes: i64::try_from(meta.len()).unwrap_or(i64::MAX),
+                    mtime_ns: meta
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .and_then(|elapsed| i64::try_from(elapsed.as_nanos()).ok())
+                        .unwrap_or(0),
+                }),
+                Err(_) => reports.push(PlacedReport::Missing { path }),
+            }
+            continue;
+        }
+        let reason = if let Some(reason) = detail.skipped.get(&real_str) {
+            reason.clone()
+        } else if !real.starts_with(&detail.canonical_target) {
+            format!(
+                "not under the requested path `{}`",
+                detail.canonical_target.display()
+            )
+        } else if !detail.candidates.contains(&real_str) {
+            "not a media file this library indexes".to_owned()
+        } else {
+            "could not be read; see the scan report".to_owned()
+        };
+        reports.push(PlacedReport::Skipped { path, reason });
+    }
+    reports
 }
 
 pub(super) fn check_active() -> Result<(), StoreError> {
@@ -1183,5 +1315,306 @@ mod tests {
             env::select_next(&queue, &domain, &mut work, &mut pressure).await,
             Selected::QueueLoss
         );
+    }
+
+    async fn enqueue_targeted(
+        store: &dyn Store,
+        library_id: i64,
+        request_id: &str,
+        path: &std::path::Path,
+        expected: &[&std::path::Path],
+    ) {
+        let expected_files = expected
+            .iter()
+            .map(|path| {
+                let meta = std::fs::metadata(path).expect("expected fixture file");
+                plurx_core::store::scan_request_v2::ExpectedFile {
+                    path: path.display().to_string(),
+                    bytes: meta.len() as i64,
+                    mtime_ns: meta
+                        .modified()
+                        .expect("mtime")
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("after epoch")
+                        .as_nanos() as i64,
+                }
+            })
+            .collect();
+        assert!(matches!(
+            store
+                .enqueue_library_work_v2(
+                    NewLibraryWork {
+                        request_id: request_id.into(),
+                        library_id,
+                        input: LibraryWorkInput::Targeted {
+                            path: path.to_path_buf(),
+                            ids: None,
+                            book: None,
+                            correlation_id: Some(format!("t-{request_id}")),
+                            source: Some("test".into()),
+                        },
+                        now_ms: clock_ms(),
+                    },
+                    plurx_core::store::scan_request_v2::ScanRequestV2Seed {
+                        key_id: 1,
+                        request_key: String::new(),
+                        expected_files,
+                    },
+                )
+                .await
+                .expect("enqueue targeted library request"),
+            EnqueueOutcome::Accepted { .. }
+        ));
+    }
+
+    fn media_file(dir: &std::path::Path, title: &str) -> PathBuf {
+        let folder = dir.join(title);
+        std::fs::create_dir_all(&folder).expect("movie folder");
+        let file = folder.join(format!("{title}.mkv"));
+        std::fs::write(&file, b"not really matroska").expect("movie file");
+        file
+    }
+
+    /// Contract v2 §5.1: a targeted request is its own job. Behind a
+    /// *pending* full scan of a 1,000-file library it is claimed first; beside
+    /// a *running* full scan it waits on the library's mutation fence with
+    /// `waiting_on = full_scan:<library>`, runs once the fence is released,
+    /// and what it inserted survives the next full scan's reconciliation.
+    #[tokio::test]
+    async fn targeted_job_runs_ahead_of_pending_full_scan_and_waits_for_running_one() {
+        // A pending full scan of a 1,000-file library does not delay it.
+        {
+            let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+            let root = crate::test_tempdir().expect("root");
+            for index in 0..1_000 {
+                std::fs::write(
+                    root.path().join(format!("Film {index} (2001).mkv")),
+                    b"fixture",
+                )
+                .expect("fixture file");
+            }
+            let library = store
+                .create_library(&NewLibrary {
+                    name: "Thousand".into(),
+                    kind: LibraryKind::Movies,
+                    paths: vec![root.path().to_path_buf()],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            enqueue_full(store.as_ref(), library.id, "full-pending", false).await;
+            let new = media_file(root.path(), "New Film (2020)");
+            enqueue_targeted(
+                store.as_ref(),
+                library.id,
+                "targeted-ahead",
+                new.parent().expect("folder"),
+                &[&new],
+            )
+            .await;
+            let targeted_job = request_record(store.as_ref(), "targeted-ahead")
+                .await
+                .job_id;
+            let full_job = request_record(store.as_ref(), "full-pending").await.job_id;
+            assert_ne!(targeted_job, full_job, "targeted work is its own job");
+            let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+            let transcode = transcode_for(Arc::clone(&store), &root.path().join("transcode"));
+            assert!(jobs.work_library_queue(&transcode, None).await);
+            assert_eq!(
+                request_record(store.as_ref(), "targeted-ahead").await.state,
+                "succeeded",
+                "the targeted job is claimed before the pending full scan"
+            );
+            assert_eq!(
+                request_record(store.as_ref(), "full-pending").await.state,
+                "pending"
+            );
+            let sidecar = store
+                .scan_request_v2("targeted-ahead")
+                .await
+                .expect("sidecar")
+                .expect("v2 request");
+            assert!(
+                matches!(sidecar.files.as_slice(),
+                    [plurx_core::store::scan_request_v2::PlacedReport::Placed { path, .. }]
+                        if *path == new.display().to_string()),
+                "{:?}",
+                sidecar.files
+            );
+        }
+
+        // Beside a running full scan it waits on the fence, then runs.
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        media_file(root.path(), "Old Film (1999)");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Fenced".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        enqueue_full(store.as_ref(), library.id, "full-running", false).await;
+        let full_jobs =
+            JobManager::test_new_for_node(Arc::clone(&store), root.path().join("artwork-w1"), "w1");
+        let full_transcode = transcode_for(Arc::clone(&store), &root.path().join("transcode-w1"));
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (full, _, resume_full) = spawn_worker(
+            "w1",
+            full_jobs,
+            full_transcode,
+            tx,
+            Some(WorkerPoint::BeforeScan),
+            false,
+            0,
+        );
+        next_worker_event(&mut events, "w1", WorkerPoint::BeforeScan).await;
+
+        let new = media_file(root.path(), "Just Imported (2024)");
+        enqueue_targeted(
+            store.as_ref(),
+            library.id,
+            "targeted-fenced",
+            new.parent().expect("folder"),
+            &[&new],
+        )
+        .await;
+        let jobs =
+            JobManager::test_new_for_node(Arc::clone(&store), root.path().join("artwork-w2"), "w2");
+        let transcode = transcode_for(Arc::clone(&store), &root.path().join("transcode-w2"));
+        assert!(
+            jobs.work_library_queue(&transcode, None).await,
+            "the targeted job is claimed and yields at the fence"
+        );
+        assert_eq!(
+            request_record(store.as_ref(), "targeted-fenced")
+                .await
+                .state,
+            "pending",
+            "never concurrent with a running full scan"
+        );
+        assert_eq!(
+            store
+                .scan_request_v2("targeted-fenced")
+                .await
+                .expect("sidecar")
+                .expect("v2 request")
+                .waiting_on,
+            "full_scan:Fenced"
+        );
+
+        resume_full
+            .expect("full scan barrier")
+            .send(())
+            .expect("resume full scan");
+        assert!(full.await.expect("full scan worker joined").0);
+        assert_eq!(
+            request_record(store.as_ref(), "full-running").await.state,
+            "succeeded"
+        );
+        // The yield deferred the job by the shared driver's five seconds.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                jobs.work_library_queue(&transcode, None).await;
+                if request_record(store.as_ref(), "targeted-fenced")
+                    .await
+                    .state
+                    != "pending"
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await
+        .expect("targeted job ran once the fence was released");
+        let record = request_record(store.as_ref(), "targeted-fenced").await;
+        assert_eq!(record.state, "succeeded");
+        let sidecar = store
+            .scan_request_v2("targeted-fenced")
+            .await
+            .expect("sidecar")
+            .expect("v2 request");
+        assert_eq!(sidecar.waiting_on, "", "a running request waits on nothing");
+        let placed = new.canonicalize().expect("canonical");
+        assert!(store
+            .get_file_by_path(&placed.to_string_lossy())
+            .await
+            .expect("file lookup")
+            .is_some());
+
+        // The next full scan's known-minus-seen reconciliation keeps it.
+        enqueue_full(store.as_ref(), library.id, "full-after", false).await;
+        assert!(jobs.work_library_queue(&transcode, None).await);
+        assert_eq!(
+            request_record(store.as_ref(), "full-after").await.state,
+            "succeeded"
+        );
+        assert!(store
+            .get_file_by_path(&placed.to_string_lossy())
+            .await
+            .expect("file lookup")
+            .is_some());
+    }
+
+    /// Contract v2 §5.1: the targeted job claims with a probe admission. With
+    /// every heavy-lane permit held, a full scan is not claimed at all, and a
+    /// targeted request still completes well inside fifteen seconds.
+    #[tokio::test]
+    async fn targeted_job_claims_without_heavy_admission() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Saturated".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+        let transcode = transcode_for(Arc::clone(&store), &root.path().join("transcode"));
+        let mut held = Vec::new();
+        while let Some(admission) = transcode.admit_fragment().await {
+            held.push(admission);
+        }
+        assert!(!held.is_empty(), "the fixture holds the heavy lane");
+
+        enqueue_full(store.as_ref(), library.id, "full-saturated", false).await;
+        assert!(
+            !jobs.work_library_queue(&transcode, None).await,
+            "a full scan needs heavy admission"
+        );
+        let new = media_file(root.path(), "Saturated Night (2023)");
+        enqueue_targeted(
+            store.as_ref(),
+            library.id,
+            "targeted-saturated",
+            new.parent().expect("folder"),
+            &[&new],
+        )
+        .await;
+        let started = std::time::Instant::now();
+        assert!(tokio::time::timeout(
+            Duration::from_secs(15),
+            jobs.work_library_queue(&transcode, None)
+        )
+        .await
+        .expect("targeted claim does not wait for the heavy lane"));
+        assert!(started.elapsed() < Duration::from_secs(15));
+        assert_eq!(
+            request_record(store.as_ref(), "targeted-saturated")
+                .await
+                .state,
+            "succeeded"
+        );
+        assert_eq!(
+            request_record(store.as_ref(), "full-saturated").await.state,
+            "pending"
+        );
+        drop(held);
     }
 }
