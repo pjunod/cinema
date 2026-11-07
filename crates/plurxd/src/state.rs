@@ -245,6 +245,10 @@ struct StoreMetricsAtomics {
     analysis_claimable: AtomicI64,
     analysis_running_past_lease: AtomicI64,
     analysis_last_ready_at_ms: AtomicI64,
+    /// `[waiting, incompatible, eligible, oldest_queued_at_ms]` of the
+    /// pre-worker request half of the queue health.
+    analysis_request_health: [AtomicI64; 4],
+    analysis_failed_by_code: [AtomicI64; plurx_core::store::ANALYSIS_FAILURE_CODE_SLOTS],
     /// The cumulative counters as this process first saw them. The store's own
     /// are cumulative since the schema landed, and a queue that built 12,000
     /// artifacts last month and nothing since looks identical to a healthy one
@@ -293,6 +297,8 @@ impl Default for StoreMetricsAtomics {
             analysis_claimable: AtomicI64::new(0),
             analysis_running_past_lease: AtomicI64::new(0),
             analysis_last_ready_at_ms: AtomicI64::new(0),
+            analysis_request_health: std::array::from_fn(|_| AtomicI64::new(0)),
+            analysis_failed_by_code: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_baseline_claims: AtomicI64::new(0),
             analysis_baseline_lease_losses: AtomicI64::new(0),
             analysis_baseline_seen: AtomicBool::new(false),
@@ -453,6 +459,9 @@ impl StoreMetricsCache {
                     marker_counts: std::array::from_fn(|slot| {
                         self.inner.analysis_marker_counts[slot].load(Ordering::Relaxed)
                     }),
+                    failed_by_code: std::array::from_fn(|slot| {
+                        self.inner.analysis_failed_by_code[slot].load(Ordering::Relaxed)
+                    }),
                     health: plurx_core::store::AnalysisQueueHealth {
                         ready_24h: self.inner.analysis_ready_24h.load(Ordering::Relaxed),
                         attempt_limit_24h: self
@@ -468,6 +477,12 @@ impl StoreMetricsCache {
                         last_ready_at_ms: self
                             .inner
                             .analysis_last_ready_at_ms
+                            .load(Ordering::Relaxed),
+                        waiting: self.inner.analysis_request_health[0].load(Ordering::Relaxed),
+                        incompatible: self.inner.analysis_request_health[1]
+                            .load(Ordering::Relaxed),
+                        eligible: self.inner.analysis_request_health[2].load(Ordering::Relaxed),
+                        oldest_queued_at_ms: self.inner.analysis_request_health[3]
                             .load(Ordering::Relaxed),
                     },
                 },
@@ -656,6 +671,22 @@ impl StoreMetricsCache {
         self.inner
             .analysis_last_ready_at_ms
             .store(health.last_ready_at_ms, Ordering::Relaxed);
+        for (target, value) in self.inner.analysis_request_health.iter().zip([
+            health.waiting,
+            health.incompatible,
+            health.eligible,
+            health.oldest_queued_at_ms,
+        ]) {
+            target.store(value, Ordering::Relaxed);
+        }
+        for (target, value) in self
+            .inner
+            .analysis_failed_by_code
+            .iter()
+            .zip(sample.analysis.failed_by_code)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
         let claims = lifecycle_total(&sample.analysis, "claim");
         let losses = lifecycle_total(&sample.analysis, "lease_loss");
         // Re-anchor when a counter has gone backwards as well as on the first
@@ -1391,9 +1422,23 @@ impl AppState {
             .unwrap_or_default()
             .as_secs()
             .min(i64::MAX as u64) as i64;
+        // Due pre-worker requests split into eligible and incompatible
+        // against the engines live workers run now. An empty or unreadable
+        // inventory is unknown, not "nobody can run anything".
+        let live = crate::background_jobs::analysis_reconcile::engines(self)
+            .await
+            .ok()
+            .filter(|engines| !engines.is_empty())
+            .map(|engines| {
+                engines
+                    .into_values()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            });
         match self
             .store
-            .prometheus_store_snapshot(&self.node_id, now)
+            .prometheus_store_snapshot_with(&self.node_id, now, live.as_deref())
             .await
         {
             Ok(snapshot) => {

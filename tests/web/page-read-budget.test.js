@@ -2156,6 +2156,25 @@ test("A dead queue says which half of the outage it is in", () => {
   assert.match(line({health:{...base,claimed_24h:1}}),/1 job picked up/);
 });
 
+test("A stranded cohort under a retired engine is named, and the queue is split", () => {
+  // 3,878 requests under engine digests no node ran read `idle` on the fleet:
+  // the verdict only counted the jobs table. The dead line has to say it is
+  // the engine, not a missing worker, and the breakdown has to show the split.
+  const line=new Function("esc","fmtAgo",
+    `${shippedSource("analysisVerdictLine")}\nreturn analysisVerdictLine;`)(String,()=>"2 days ago");
+  const base={verdict:"dead",ready_24h:0,attempt_limit_24h:0,claimed_24h:0,claimable:0,
+    running_past_lease:0,last_ready_at_ms:1,claims_since_start:0,lease_losses_since_start:0,
+    eligible:0,waiting:0,incompatible:3878,oldest_queued_at_ms:1};
+  assert.match(line({health:base}),/3878 requests queued under an index engine no node runs/);
+  const breakdown=new Function("esc","fmtAgo",
+    `${shippedSource("analysisErrorInfo")}\n${shippedSource("analysisQueueBreakdown")}\nreturn analysisQueueBreakdown;`)(String,()=>"3 days ago");
+  const html=breakdown({...base,eligible:2,waiting:5,failed_by_code:[
+    {code:"attempt_limit",count:7},{code:"pipeline_version_unavailable",count:150},{code:"other",count:1}]});
+  assert.match(html,/Eligible 2 · waiting 5 · incompatible engine 3878 · oldest queued 3 days ago/);
+  assert.ok(html.indexOf("Indexing engine retired")<html.indexOf("Retry limit reached"),"largest code first");
+  assert.equal(breakdown({verdict:"idle"}),"");
+});
+
 test("No queue verdict claims to describe one node", () => {
   // The jobs table is replicated and records no observer, so every node
   // renders the same sentence. Saying "this node" would send an operator to

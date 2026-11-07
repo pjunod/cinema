@@ -680,6 +680,10 @@ fn the_queue_verdict_is_exposed_as_one_series_per_verdict_with_its_evidence() {
         claimable: 1_118,
         running_past_lease: 11,
         last_ready_at_ms: 1_700_000_000_000,
+        eligible: 1_118,
+        waiting: 7,
+        incompatible: 3_878,
+        ..Default::default()
     };
     let rendered = render_store_metrics(StoreMetricsView {
         sample: Some(plurx_core::store::PrometheusStoreSnapshot::default()),
@@ -713,6 +717,9 @@ fn the_queue_verdict_is_exposed_as_one_series_per_verdict_with_its_evidence() {
         "plurx_analysis_queue_claimed_24h 396\n",
         "plurx_analysis_queue_claimable 1118\n",
         "plurx_analysis_queue_running_past_lease 11\n",
+        "plurx_analysis_queue_eligible 1118\n",
+        "plurx_analysis_queue_waiting 7\n",
+        "plurx_analysis_queue_incompatible 3878\n",
         "plurx_analysis_queue_claims_since_start 412\n",
         "plurx_analysis_queue_lease_losses_since_start 398\n",
     ] {
@@ -1744,4 +1751,46 @@ fn playback_event_reader_caps_the_requested_row_count() {
         .limit,
         2_000
     );
+}
+
+#[test]
+fn failed_by_code_is_one_bounded_series_per_code_the_page_explains() {
+    let mut sample = plurx_core::store::PrometheusStoreSnapshot::default();
+    let slot = |code: &str| {
+        plurx_core::store::ANALYSIS_FAILURE_CODES
+            .iter()
+            .position(|value| *value == code)
+            .expect("bounded code")
+    };
+    sample.analysis.failed_by_code[slot("pipeline_version_unavailable")] = 150;
+    sample.analysis.failed_by_code[slot("other")] = 2;
+    let rendered = render_store_metrics(StoreMetricsView {
+        sample: Some(sample),
+        age_seconds: Some(4),
+        valid: true,
+        errors: 0,
+        queue_health: None,
+    });
+    assert!(rendered
+        .contains("plurx_analysis_queue_failed_by_code{code=\"pipeline_version_unavailable\"} 150\n"));
+    assert!(rendered.contains("plurx_analysis_queue_failed_by_code{code=\"other\"} 2\n"));
+    assert_eq!(
+        rendered.matches("plurx_analysis_queue_failed_by_code{").count(),
+        plurx_core::store::ANALYSIS_FAILURE_CODE_SLOTS
+    );
+    // The label set is the page's: every bounded code but `other` is one
+    // `analysisErrorInfo` explains, and every code it explains is bounded.
+    let page = include_str!("../../web/pages/analysis.js");
+    let start = page.find("function analysisErrorInfo(").expect("analysisErrorInfo");
+    let body = &page[start..start + page[start..].find("\n}\n").expect("end")];
+    let explained: Vec<&str> = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("    ")?.split_once(":[").map(|(code, _)| code))
+        .collect();
+    let bounded: Vec<&str> = plurx_core::store::ANALYSIS_FAILURE_CODES
+        .iter()
+        .copied()
+        .filter(|code| *code != "other")
+        .collect();
+    assert_eq!(explained, bounded, "analysis.js and ANALYSIS_FAILURE_CODES must agree");
 }

@@ -6273,6 +6273,12 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
              # TYPE plurx_analysis_queue_claimable gauge\n\
              # HELP plurx_analysis_queue_running_past_lease Fragment-index jobs sitting running past a lease nobody renewed.\n\
              # TYPE plurx_analysis_queue_running_past_lease gauge\n\
+             # HELP plurx_analysis_queue_eligible Due fragment-index work some live engine can claim now (queued jobs plus compatible pre-worker requests).\n\
+             # TYPE plurx_analysis_queue_eligible gauge\n\
+             # HELP plurx_analysis_queue_waiting Pre-worker fragment-index requests still inside their retry wait.\n\
+             # TYPE plurx_analysis_queue_waiting gauge\n\
+             # HELP plurx_analysis_queue_incompatible Due pre-worker fragment-index requests under an engine digest no live worker runs.\n\
+             # TYPE plurx_analysis_queue_incompatible gauge\n\
              # HELP plurx_analysis_queue_claims_since_start Claims this process has watched, since it started. Shared with skip-marker work.\n\
              # TYPE plurx_analysis_queue_claims_since_start gauge\n\
              # HELP plurx_analysis_queue_lease_losses_since_start Lost leases this process has watched, since it started.\n\
@@ -6284,6 +6290,9 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
              plurx_analysis_queue_claimed_24h {}\n\
              plurx_analysis_queue_claimable {}\n\
              plurx_analysis_queue_running_past_lease {}\n\
+             plurx_analysis_queue_eligible {}\n\
+             plurx_analysis_queue_waiting {}\n\
+             plurx_analysis_queue_incompatible {}\n\
              plurx_analysis_queue_claims_since_start {}\n\
              plurx_analysis_queue_lease_losses_since_start {}\n",
             report.health.ready_24h,
@@ -6291,8 +6300,21 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
             report.health.claimed_24h,
             report.health.claimable,
             report.health.running_past_lease,
+            report.health.eligible,
+            report.health.waiting,
+            report.health.incompatible,
             report.claims_since_start,
             report.lease_losses_since_start,
+        ));
+    }
+    out.push_str(
+        "# HELP plurx_analysis_queue_failed_by_code Failed analysis rows by last error code (bounded; unlisted codes count as other).\n\
+         # TYPE plurx_analysis_queue_failed_by_code gauge\n",
+    );
+    for (slot, code) in plurx_core::store::ANALYSIS_FAILURE_CODES.iter().enumerate() {
+        out.push_str(&format!(
+            "plurx_analysis_queue_failed_by_code{{code=\"{code}\"}} {}\n",
+            analysis.failed_by_code[slot]
         ));
     }
     out.push_str(

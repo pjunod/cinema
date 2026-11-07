@@ -25591,8 +25591,12 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry metrics worker: {error}")));
+        // `now` is Unix seconds and the retry wait ends at 14 ms, so only a
+        // sample taken at second 0 is still inside it. Before the units fix
+        // the depth gauge compared milliseconds to seconds and filed every
+        // queued row as `retry_wait`.
         let retrying = store
-            .prometheus_store_snapshot("analysis-node", 13)
+            .prometheus_store_snapshot("analysis-node", 0)
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry metrics: {error}"));
         assert_eq!(
@@ -25912,6 +25916,93 @@ async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
                 .unwrap_or(false),
             "{backend}: a stale fence must not settle a job"
         );
+    })
+    .await;
+}
+
+/// The pre-worker half of the queue health and the depth gauge read the same
+/// rows: due requests split into eligible and incompatible by the live engine
+/// set, delayed ones are `waiting`, and the gauge files them as `queued` and
+/// `retry_wait` with real ages. On 2026-11-07 the fleet held 3,878 due
+/// requests under retired digests and read `idle`, and the gauge filed every
+/// queued row as `retry_wait` with age 0 (milliseconds compared to seconds).
+#[tokio::test]
+async fn pre_worker_requests_are_split_by_live_engine_and_counted_once() {
+    for_each_backend(|store, backend| async move {
+        const NOW_MS: i64 = 1_700_000_000_000;
+        const NOW_SECS: i64 = NOW_MS / 1_000;
+        let live = "a".repeat(64);
+        let retired = "b".repeat(64);
+        let mut seeded = Vec::new();
+        for (name, engine, not_before_ms) in [
+            ("due-live", &live, NOW_MS - 60_000),
+            ("due-retired", &retired, NOW_MS - 60_000),
+            ("waiting-live", &live, NOW_MS + 60_000),
+        ] {
+            let (_, file_id) = seed_file(&store, &format!("split-{name}")).await;
+            let request = NewAnalysisRequest {
+                request_id: format!("split-{name}"),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: engine.clone(),
+                video_identity: String::new(),
+                requested_generation: format!("split-{name}-generation"),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: "split-node".to_owned(),
+                not_before_ms,
+                created_at_ms: NOW_MS - 120_000,
+            };
+            store
+                .enqueue_analysis_request(&request)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {name}: {error}"));
+            seeded.push(request);
+        }
+
+        let split = store
+            .prometheus_store_snapshot_with("split-node", NOW_SECS, Some(&[live.clone()]))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: split snapshot: {error}"))
+            .analysis;
+        assert_eq!(split.health.eligible, 1, "{backend}: one due request runs on a live engine");
+        assert_eq!(split.health.claimable, 1, "{backend}: claimable is eligible");
+        assert_eq!(split.health.incompatible, 1, "{backend}: one due request is stranded");
+        assert_eq!(split.health.waiting, 1, "{backend}: one request is inside its wait");
+        assert_eq!(split.health.oldest_queued_at_ms, NOW_MS - 120_000, "{backend}");
+        let queued = split.queue_depth
+            [analysis_queue_slot("fragment_index", "queued", "normal", "background")];
+        let retry_wait = split.queue_depth
+            [analysis_queue_slot("fragment_index", "retry_wait", "normal", "background")];
+        assert_eq!(
+            queued,
+            split.health.eligible + split.health.incompatible,
+            "{backend}: the gauge's due rows are the health's due rows"
+        );
+        assert_eq!(retry_wait, split.health.waiting, "{backend}: the same delayed rows");
+        assert_eq!(
+            split.queue_oldest_age_seconds
+                [analysis_queue_slot("fragment_index", "queued", "normal", "background")],
+            120,
+            "{backend}: ages are seconds of real time"
+        );
+        assert_eq!(
+            plurx_core::store::analysis_queue_verdict(split.health, 0, 0, 0),
+            plurx_core::store::AnalysisQueueVerdict::Degraded,
+            "{backend}: a backlog is not idle"
+        );
+
+        // An unknown live set strands nothing: every due request is eligible.
+        let unknown = store
+            .prometheus_store_snapshot("split-node", NOW_SECS)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unknown snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!((unknown.eligible, unknown.incompatible), (2, 0), "{backend}");
     })
     .await;
 }

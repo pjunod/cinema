@@ -1718,6 +1718,7 @@ fn metrics_sample(value: i64) -> PrometheusStoreSnapshot {
             queue_oldest_age_seconds: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
             lifecycle_counts: [value; plurx_core::store::ANALYSIS_LIFECYCLE_METRIC_SLOTS],
             marker_counts: [value; plurx_core::store::ANALYSIS_MARKER_METRIC_SLOTS],
+            failed_by_code: [value; plurx_core::store::ANALYSIS_FAILURE_CODE_SLOTS],
             health: plurx_core::store::AnalysisQueueHealth {
                 ready_24h: value,
                 attempt_limit_24h: value,
@@ -1725,6 +1726,10 @@ fn metrics_sample(value: i64) -> PrometheusStoreSnapshot {
                 claimable: value,
                 running_past_lease: value,
                 last_ready_at_ms: value,
+                waiting: value,
+                incompatible: value,
+                eligible: value,
+                oldest_queued_at_ms: value,
             },
         },
     }
