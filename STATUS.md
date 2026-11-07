@@ -3,6 +3,10 @@
 **Updated:** 2026-11-07 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+## 2026-11-07 · Playback start: one engine, index by first play, one clock
+
+Owner Claude (claude-fable-5-1, session 01BCWLA2SJPLAmibeaz9L5xb). [End-to-end review](docs/reviews/CINEMA-END-TO-END-REVIEW-2026-11-07.md) merged as #1400; [plan and lane status](docs/streaming/PLAYBACK-START-PLAN.md). On the fleet most starts fall to the rolling engine for `vod_index_pending` (18 of 29 since the last deploy) because the fragment-index queue is starved (13.6k published, 7.7k failed, 3.9k retry-wait, 16 claims in 2.7 days) and engine-keyed; the 16 s first-publication gate is the slow start. Paul ruled 2026-11-07: one copy engine with the first play building the index; source-keyed index; processed DV as an upgrade after the first frame; learners and idle voters index. Plan revision 3 (Fable adversarial review and Astra independent review applied) is the first revision build agents may claim; Phase 1 order H2 → C2 → C3 → C1 → D2 → G1 → R1/H1 → D1 on `effort/playback-start`; the processed-DV switch mechanism is the M6 prepared replacement (Paul, 2026-11-07). Phase 1 build contract: [PLAYBACK-START-BUILD.md](docs/streaming/PLAYBACK-START-BUILD.md). Nothing deployed.
+
 ## 2026-11-05 · Standalone compilation and legacy migration packaging
 
 Native SQLite standalone, its SDK-free build graph and separate bound migration helper pass all nine focused qualification steps. Actual AUTH81/AUTH82 CLI migration preserves data and credentials; native FFmpeg HTTP, revocation and SQL close pass. Warm rebuilds improve 13–14%. [Task PR #1396](http://forge.lan:3000/noirr/plurx/pulls/1396) merged after gate 6532; main promotion and its qualification receipt are recorded in the [canonical ledger](docs/ci/CINEMA-MODULAR-BUILD-PLAN.md). Further extraction is deferred.
