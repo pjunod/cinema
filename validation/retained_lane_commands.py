@@ -16,8 +16,7 @@ WEB_COMMAND = '\n'.join('node ' + path for path in WEB_SCRIPTS)
 WEB_INPUTS = (*WEB_SCRIPTS, 'tests/web/shell-source.js', 'scripts/player-contract-table',
               'tests/playback/player-input-contract.json', 'tests/playback/playback-info-fields.json',
               'tests/playback/playback-surface-contract.json',
-              'docs/clients/PLAYER-INPUT-CONTRACT.md', 'docs/clients/PLAYBACK-SURFACE-CONTRACT.md',
-              '.github/workflows/ci.yml')
+              'docs/clients/PLAYER-INPUT-CONTRACT.md', 'docs/clients/PLAYBACK-SURFACE-CONTRACT.md')
 
 
 SPECS = {
@@ -126,6 +125,50 @@ def tree_id(commit, path):
                                    text=True).strip()
 
 
+# This optional descriptor affects only the independently authenticated Rust
+# continuation. Every other dispatch control remains part of the native scope.
+RUST_DESCRIPTOR_INPUT = '''      workspace_rust_evidence:
+        type: string
+        description: "Optional authenticated partial workspace test evidence descriptor"
+        required: false
+        default: ""
+'''
+
+
+def scoped_workflow(raw, job):
+    """Pin runtime globals and the complete consumed job, excluding other jobs."""
+    receipts.require(raw is not None, 'Missing native workflow')
+    text = raw.decode()
+    receipts.require(text.count('\njobs:\n') == 1, 'Ambiguous native workflow root')
+    header, body = text.split('\njobs:\n', 1)
+    if RUST_DESCRIPTOR_INPUT in header:
+        receipts.require(header.count(RUST_DESCRIPTOR_INPUT) == 1,
+                         'Repeated Rust evidence dispatch descriptor')
+        header = header.replace(RUST_DESCRIPTOR_INPUT, '')
+    jobs = list(re.finditer(r'^  ([A-Za-z0-9_]+):\n', body, re.M))
+    matches = [i for i, match in enumerate(jobs) if match[1] == job]
+    receipts.require(len(matches) == 1, 'Ambiguous native workflow job')
+    index = matches[0]
+    block = body[jobs[index].start():jobs[index + 1].start()
+                 if index + 1 < len(jobs) else len(body)]
+    # Root and job key spellings are independently pinned so unsupported YAML
+    # aliases or alternate duplicate keys cannot shadow the extracted job.
+    roots = re.findall(r'^[^\s#].*$', text, re.M)
+    keys = re.findall(r'^  [^\s#].*$', body, re.M)
+    return header, roots, keys, block
+
+
+def android_source(read_source):
+    def normalized(commit, path):
+        raw = read_source(commit, path)
+        if path == '.github/workflows/ci.yml' and raw is not None:
+            # Android's existing projection pins its full header and job.
+            scoped_workflow(raw, 'android_device')
+            return raw.replace(RUST_DESCRIPTOR_INPUT.encode(), b'', 1)
+        return raw
+    return normalized
+
+
 def record_contract(lane, suite, record, candidate, raw, read_source):
     from validation import promotion_unit_retention as retention
     device = record['format'] == DEVICE_FORMAT
@@ -142,8 +185,8 @@ def record_contract(lane, suite, record, candidate, raw, read_source):
                      'Native whole-command scope, source or chronology differs')
     prior = record['source_commit']
     if device or jvm:
-        receipts.require(retention.android_device_inputs(read_source, prior)
-                         == retention.android_device_inputs(read_source, candidate),
+        receipts.require(retention.android_device_inputs(android_source(read_source), prior)
+                         == retention.android_device_inputs(android_source(read_source), candidate),
                          'Native instrumentation command consumed inputs changed')
         if jvm:
             for path in ('tests/contracts', 'tests/playback', 'tests/sharing',
@@ -151,8 +194,10 @@ def record_contract(lane, suite, record, candidate, raw, read_source):
                 receipts.require(tree_id(prior, path) == tree_id(candidate, path),
                                  'Native Gradle consumed fixture tree changed: ' + path)
         workflow_raw = read_source(prior, '.github/workflows/ci.yml')
-        receipts.require(workflow_raw == read_source(candidate, '.github/workflows/ci.yml'),
-                         'Native Android workflow changed')
+        job = 'android_jvm' if jvm else 'android_device'
+        receipts.require(scoped_workflow(workflow_raw, job)
+                         == scoped_workflow(read_source(candidate, '.github/workflows/ci.yml'), job),
+                         'Native Android consumed workflow changed')
         workflow = workflow_raw.decode()
         receipts.require(len(re.findall(r'^ +' + re.escape(command) + r'$', workflow, re.M)) == (2 if device else 1),
                          'Native Android workflow command differs')
@@ -168,7 +213,11 @@ def record_contract(lane, suite, record, candidate, raw, read_source):
         receipts.require(tree_id(prior, 'crates/plurxd/src/web')
                          == tree_id(candidate, 'crates/plurxd/src/web'),
                          'Node preflight consumed web source changed')
-        workflow = read_source(prior, '.github/workflows/ci.yml').decode()
+        workflow_raw = read_source(prior, '.github/workflows/ci.yml')
+        receipts.require(scoped_workflow(workflow_raw, 'preflight')
+                         == scoped_workflow(read_source(candidate, '.github/workflows/ci.yml'), 'preflight'),
+                         'Native Node consumed workflow changed')
+        workflow = workflow_raw.decode()
         receipts.require(all(workflow.count('            node ' + path + '\n') == 1 for path in WEB_SCRIPTS),
                          'Native Node workflow commands differ')
         web_outcomes(raw, prior, read_source)

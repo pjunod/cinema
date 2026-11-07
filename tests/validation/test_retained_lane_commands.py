@@ -34,7 +34,40 @@ ok 1 - native contract
 ⭐ Run Post cleanup
 🏁  Job succeeded
 '''
-WORKFLOW = ('            ' + native.DEVICE_COMMAND + '\n') * 2 + '            ' + native.JVM_COMMAND + '\n' + ''.join('            node ' + path + '\n' for path in native.WEB_SCRIPTS)
+WORKFLOW = ('''name: ci
+on:
+  workflow_dispatch:
+    inputs:
+      promotion_pr:
+        type: string
+env:
+  CARGO_TERM_COLOR: always
+concurrency:
+  group: ci-${{ github.ref }}
+jobs:
+  preflight:
+    runs-on: general
+    steps:
+      - uses: setup-node@pinned
+        with:
+          node-version: "22.23.4"
+      - run: |
+''' + ''.join('            node ' + path + '\n' for path in native.WEB_SCRIPTS)
+    + '''  android_jvm:
+    runs-on: general
+    steps:
+      - run: |
+''' + '            ' + native.JVM_COMMAND + '\n'
+    + '''  android_device:
+    runs-on: emulator
+    steps:
+      - run: |
+''' + ('            ' + native.DEVICE_COMMAND + '\n') * 2
+    + '''  rust:
+    runs-on: general
+    steps:
+      - run: make ci-rust-gate
+''')
 
 
 def source(commit, path):
@@ -105,7 +138,7 @@ class NativeCommandCase(unittest.TestCase):
                 with self.subTest(format=fmt, field=field), self.assertRaises(ReceiptError):
                     native.record_contract(lane, suite, altered, CANDIDATE, raw, source)
             changed = lambda commit, path: b'changed' if commit == CANDIDATE and path == '.github/workflows/ci.yml' else source(commit, path)
-            with self.subTest(format=fmt), patch.object(retention, 'android_device_inputs', return_value={'input': 'same'}), self.assertRaises(ReceiptError):
+            with self.subTest(format=fmt), patch.object(retention, 'android_device_inputs', return_value={'input': 'same'}), patch.object(native, 'tree_id', return_value='same'), self.assertRaises(ReceiptError):
                 native.record_contract(lane, suite, record, CANDIDATE, raw, changed)
         raw, lane, suite, record = fixture(native.WEB_FORMAT)
         with patch.object(native, 'tree_id', side_effect=['old', 'new']), self.assertRaises(ReceiptError):
@@ -164,3 +197,46 @@ class NativeCommandCase(unittest.TestCase):
             tree = lambda commit, path: 'new' if commit == CANDIDATE and path == changed else 'same'
             with self.subTest(path=changed), patch.object(retention, 'android_device_inputs', return_value={'input': 'same'}), patch.object(native, 'tree_id', side_effect=tree), self.assertRaises(ReceiptError):
                 native.record_contract(lane, suite, record, CANDIDATE, raw, source)
+
+
+class NativeWorkflowScopeCase(unittest.TestCase):
+    def test_unrelated_rust_job_and_exact_descriptor_preserve_native_scopes(self):
+        changed = WORKFLOW.replace('      promotion_pr:', native.RUST_DESCRIPTOR_INPUT + '      promotion_pr:')
+        changed = changed.replace('run: make ci-rust-gate', 'run: python3 -m validation.workspace_rust_execute')
+        for job in ('preflight', 'android_jvm', 'android_device'):
+            with self.subTest(job=job):
+                self.assertEqual(native.scoped_workflow(WORKFLOW.encode(), job),
+                                 native.scoped_workflow(changed.encode(), job))
+        self.assertEqual(native.android_source(lambda commit, path: changed.encode())('x', '.github/workflows/ci.yml'),
+                         changed.replace(native.RUST_DESCRIPTOR_INPUT, '').encode())
+
+    def test_consumed_executor_globals_or_unrecognized_descriptor_remain_bound(self):
+        for job, old, new in (('preflight', 'setup-node@pinned', 'setup-node@untrusted'),
+                              ('android_jvm', native.JVM_COMMAND, 'echo skipped'),
+                              ('android_device', 'runs-on: emulator', 'runs-on: other'),
+                              ('preflight', 'CARGO_TERM_COLOR: always', 'CARGO_TERM_COLOR: never'),
+                              ('preflight', 'promotion_pr:', 'other_input:')):
+            with self.subTest(job=job, change=old):
+                self.assertNotEqual(native.scoped_workflow(WORKFLOW.encode(), job),
+                                    native.scoped_workflow(WORKFLOW.replace(old, new).encode(), job))
+        unknown = native.RUST_DESCRIPTOR_INPUT.replace('required: false', 'required: true')
+        changed = WORKFLOW.replace('      promotion_pr:', unknown + '      promotion_pr:')
+        self.assertNotEqual(native.scoped_workflow(WORKFLOW.encode(), 'preflight'),
+                            native.scoped_workflow(changed.encode(), 'preflight'))
+
+    def test_real_native_contract_keeps_pass_after_unrelated_rust_changes(self):
+        changed = WORKFLOW.replace('      promotion_pr:', native.RUST_DESCRIPTOR_INPUT + '      promotion_pr:')
+        changed = changed.replace('run: make ci-rust-gate', 'run: python3 -m validation.workspace_rust_execute')
+        def revised(commit, path):
+            if commit == CANDIDATE and path == '.github/workflows/ci.yml':
+                return changed.encode()
+            return source(commit, path)
+        for fmt in native.FORMATS:
+            raw, lane, suite, record = fixture(fmt)
+            with self.subTest(format=fmt), patch.object(retention, 'android_device_tree', return_value='same'), patch.object(native, 'tree_id', return_value='same'):
+                # A valid Make recipe is unnecessary here: pin the returned
+                # projection while exercising the actual normalized reader.
+                def inputs(reader, commit):
+                    return native.scoped_workflow(reader(commit, '.github/workflows/ci.yml'), 'android_device')
+                with patch.object(retention, 'android_device_inputs', side_effect=inputs):
+                    native.record_contract(lane, suite, record, CANDIDATE, raw, revised)
