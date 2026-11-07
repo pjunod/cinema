@@ -1237,7 +1237,7 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
 
 /// Rewind only an exact empty managed extension in an owned historical fixture.
 #[path = "source_extensions_fixture.rs"]
-mod source_extensions_fixture;
+pub(crate) mod source_extensions_fixture;
 #[allow(dead_code)]
 pub(crate) const MANAGED_FIXTURE_SHAPE_SQL: &str =
     source_extensions_fixture::MANAGED_FIXTURE_SHAPE_SQL;

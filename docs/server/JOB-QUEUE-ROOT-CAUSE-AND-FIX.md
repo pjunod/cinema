@@ -12,13 +12,11 @@ work. It is the canonical ledger for backlog project P42.
 
 ## November 7 recovery and release status
 
-The replicated job history shows nine accepted Movies scan requests coalesced into one library scan, which completed at 18:19:41 UTC. The TV scan completed at 18:19:43 UTC. Three queued metadata refreshes had scheduled origins. A request arriving for an existing library job creates a waiter on that job, so the number of clicks can exceed the number of queue rows.
+Nine manual Movies requests joined one library scan, which completed at 18:19:41 UTC. TV completed at 18:19:43 UTC. Three remaining metadata refreshes had scheduled origins. Each accepted request retains a waiter on its shared job.
 
-The November 4 investigation below records the abandoned reader that blocked source claims. Later observations also traced a retained reader to a completed subtitle job. An independent failure occurred at scan completion. The publisher held the job-fence lock while waiting for the scan to finish, and the source-pressure check needed that same lock before it could finish. The repaired check uses the immutable claim identity and verifies its current authority in the Store. During recovery the active Dolby Vision title scan finished its existing pass.
+A completed subtitle job retained a reader. A second failure at library completion held the job-fence lock while a source-pressure check waited for it. The repair verifies the immutable claim identity in the Store. The active Dolby Vision scan finished its pass.
 
-A refused claim produces no running attempt. A retained reader can therefore block scans while Running is empty, and a growing queue alone does not identify which user request is overdue. The incident changes show the original worker and blocking job in both Activity views, expose the recovery condition to monitoring, and flag a pending manual scan after its request and retry delay have both been due for five minutes. Activity counts retained successful and failed attempts finished in the past five minutes, per minute for the cluster and each worker. [Activity API](../API.md#56-activity)
-
-The integrated scheduler gives a ready manual scan or explicit refresh the next eligible shared source turn across job types. It preserves an active reader and foreground playback, and reserves bounded turns for aged maintenance. Main qualification, installation and an observed handoff on the installed build are pending. Broader queue controls and the remaining P42 work are tracked below. [Source-custody recovery ledger](SOURCE-CUSTODY-RECOVERY.md)
+Refused claims create no running attempts. The incident changes identify the blocking reader in both Activity views and monitoring, flag manual library requests after five eligible minutes, and report five-minute successful and failed attempts per minute for the cluster and each worker. Ready manual requests get the next eligible source turn across job types, subject to playback and bounded maintenance service. Main qualification and installed handoff are pending. [Activity API](../API.md#56-activity) · [Recovery ledger](SOURCE-CUSTODY-RECOVERY.md)
 
 ## 1. The immediate failure is an abandoned shared reader
 
