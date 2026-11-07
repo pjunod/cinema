@@ -1612,8 +1612,16 @@ def authenticate(api, proof, document, repository, live_logs=None):
                              and inputs['promotion_head_sha'] == record['source_commit'],
                              'Historical commands did not run on this main-bound effort')
             workflow = retention.git_bytes(record['source_commit'], '.github/workflows/ci.yml')
-            receipts.require(workflow is not None and historical_command(workflow.decode(), kind),
-                             'Historical command executor differs')
+            receipts.require(workflow is not None, 'Historical workflow unavailable')
+            if execution.get('native_discovery') is True:
+                from validation.native_python_discovery import native_event
+                receipts.require(item.get('protocol') == 'source-cohort-v1'
+                                 and kind in {'validation', 'operations'} and jobs[0]['status'] == 'success',
+                                 'Native discovery belongs to another command or unsuccessful job')
+                native_event(record['source_commit'], workflow.decode(), inputs)
+            else:
+                receipts.require(historical_command(workflow.decode(), kind),
+                                 'Historical command executor differs')
             key=(run_id,record['source_commit'])
             if key not in scopes:
                 authenticate_scope(api,run_id,run,workflow.decode(),document,record['source_commit'],repository)
