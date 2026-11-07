@@ -337,3 +337,7 @@ finite model to caption continuity, playback deadlines or remote-worker
 liveness. Model/configuration bytes, fairness premises and historical
 receipts retain their identities. Offline mapping validation is distinct
 from runtime tests, TLC qualification and a refinement proof.
+
+## November 7 library dispatch and source release
+
+Library discovery now polls during an active scan. Source pressure checks read the original physical claim identity without locking the publisher whose pending write the driver must poll. Current Store authority and the local monotonic deadline still govern source use. The release regression holds a committed acknowledgement pending during a pressure check, then observes the next real scan complete.

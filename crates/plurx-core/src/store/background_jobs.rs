@@ -2301,6 +2301,14 @@ pub trait BackgroundJobStore: Send + Sync {
         mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
         now_ms: i64,
     ) -> Result<bool, StoreError>;
+    async fn advertise_library_turn(
+        &self,
+        job_id: &str,
+        revision: i64,
+        node: &str,
+        roots: &[std::path::PathBuf],
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     async fn enqueue_library_work(
         &self,
         request: NewLibraryWork,
@@ -3060,6 +3068,16 @@ LIMIT 1
         now_ms: i64,
     ) -> Result<bool, StoreError> {
         super::background_jobs_resources::replace(self, mappings, now_ms).await
+    }
+    async fn advertise_library_turn(
+        &self,
+        job_id: &str,
+        revision: i64,
+        node: &str,
+        roots: &[std::path::PathBuf],
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_job_turns::advertise(self, job_id, revision, node, roots, now_ms).await
     }
     async fn enqueue_library_work(
         &self,

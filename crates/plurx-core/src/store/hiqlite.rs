@@ -5,6 +5,8 @@
 //! [`Store`](super::Store) until M2 imports existing state and activates this
 //! backend; backend completeness alone is not permission to skip that gate.
 
+mod dispatch_turns;
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
@@ -2052,6 +2054,7 @@ impl HiqliteAuthStore {
         store.install_library_annotations_schema(None).await?;
         store.install_dv_title_jobs_schema(None).await?;
         store.install_playback_handoffs_schema(None).await?;
+        store.install_dispatch_turns(None).await?;
         Ok(store)
     }
 
@@ -2243,7 +2246,8 @@ impl HiqliteAuthStore {
                     self.install_shared_caption_schema(admission).await?;
                     self.install_library_annotations_schema(admission).await?;
                     self.install_dv_title_jobs_schema(admission).await?;
-                    return self.install_playback_handoffs_schema(admission).await;
+                    self.install_playback_handoffs_schema(admission).await?;
+                    return self.install_dispatch_turns(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;

@@ -206,6 +206,36 @@ impl JobManager {
         statuses
     }
 
+    pub(super) async fn drive_library_queue(
+        self: &Arc<Self>,
+        transcode: &TranscodeManager,
+    ) -> bool {
+        let refresh_successors = async {
+            loop {
+                tokio::select! {
+                    () = self.library_wake.notified() => {},
+                    () = tokio::time::sleep(Duration::from_secs(3)) => {},
+                }
+                if let Err(error) = crate::background_jobs::advertise_library_successors(
+                    self.store.as_ref(),
+                    self.job_authority.as_ref(),
+                    transcode,
+                    self.coordinator.node_id(),
+                    &self.library_readiness,
+                )
+                .await
+                {
+                    tracing::warn!(%error,"refreshing ready library scans");
+                }
+            }
+        };
+        tokio::select! {
+            biased;
+            done = self.work_library_queue(transcode, None) => done,
+            () = refresh_successors => unreachable!("discovery runs until the worker returns"),
+        }
+    }
+
     pub(super) async fn work_library_queue(
         self: &Arc<Self>,
         transcode: &TranscodeManager,
@@ -966,6 +996,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn library_worker_releases_source_after_pressure_during_completion_acknowledgement() {
+        let (store, _root, jobs, transcode) = queued_library("first-scan").await;
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (worker, _, resume) = spawn_worker(
+            "library",
+            Arc::clone(&jobs),
+            Arc::clone(&transcode),
+            tx,
+            Some(WorkerPoint::CompletionCommitted),
+            false,
+            0,
+        );
+        next_worker_event(&mut events, "library", WorkerPoint::CompletionCommitted).await;
+        let first = request_record(store.as_ref(), "first-scan").await;
+        assert_eq!(first.state, "succeeded");
+        // The database has committed success, but the producer still holds
+        // its publication mutex until it consumes the reply.
+        next_worker_event(&mut events, "library", WorkerPoint::SourcePermissionCheck).await;
+        resume
+            .expect("completion barrier")
+            .send(())
+            .expect("deliver completion reply");
+        tokio::time::timeout(Duration::from_secs(3), worker)
+            .await
+            .expect("a completed scan must release its source custody")
+            .expect("library worker joins");
+        enqueue_full(store.as_ref(), first.library_id, "next-scan", false).await;
+        assert!(jobs.work_library_queue(&transcode, None).await);
+        assert_eq!(
+            request_record(store.as_ref(), "next-scan").await.state,
+            "succeeded"
+        );
+    }
+
+    #[tokio::test]
     async fn library_worker_reconciles_lost_completion_acknowledgement() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let root = crate::test_tempdir().expect("root");
@@ -1100,6 +1165,88 @@ mod tests {
             !transcode.background_worker_in_use(),
             "admission is released with the environment"
         );
+    }
+
+    #[tokio::test]
+    async fn readable_manual_scan_requests_a_turn_while_maintenance_owns_the_worker() {
+        let (_store, _root, jobs, transcode) = queued_library("busy-manual").await;
+        let running = transcode
+            .admit_fragment()
+            .await
+            .expect("running maintenance");
+        assert!(!jobs.work_library_queue(&transcode, None).await);
+        assert!(jobs.library_readiness.poll_interval() <= Duration::from_secs(1));
+        assert!(
+            transcode.fragment_worker_idle(&running),
+            "maintenance retains physical custody"
+        );
+        drop(running);
+        assert!(
+            jobs.work_library_queue(&transcode, None).await,
+            "same manual request runs after release"
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_library_worker_renews_its_next_manual_scan_before_release() {
+        let root = crate::test_tempdir().expect("root");
+        let db = root.path().join("queue.sqlite");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&db).expect("store"));
+        let media = root.path().join("media");
+        std::fs::create_dir(&media).expect("media directory");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        enqueue_full(store.as_ref(), library.id, "first", false).await;
+        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+        let transcode = transcode_for(Arc::clone(&store), root.path());
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (scope, resume) = worker_scope("only-reader", tx, Some(WorkerPoint::BeforeScan), false);
+        let driver = tokio::spawn({
+            let jobs = Arc::clone(&jobs);
+            async move {
+                crate::background_jobs::faults::worker::run(scope, async {
+                    jobs.drive_library_queue(&transcode).await
+                })
+                .await
+            }
+        });
+        next_worker_event(&mut events, "only-reader", WorkerPoint::BeforeScan).await;
+        enqueue_full(store.as_ref(), library.id, "next", true).await;
+        let next = request_record(store.as_ref(), "next").await.job_id;
+        jobs.library_wake.notify_one();
+        let read =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("observation");
+        tokio::time::timeout(Duration::from_secs(12), async {
+            let mut first = None;
+            loop {
+                let until: Option<i64> = read
+                    .query_row(
+                        "SELECT max(expires_at_ms) FROM dispatch_turn_ready WHERE job_id=?1",
+                        [&next],
+                        |row| row.get(0),
+                    )
+                    .expect("turn expiry");
+                if let Some(until) = until {
+                    if first.is_some_and(|old| until > old) {
+                        break;
+                    }
+                    first = Some(until);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("second request advertised and renewed while the first is still running");
+        resume.expect("resume").send(()).expect("release scan");
+        assert!(driver.await.expect("driver joined"));
     }
 
     /// A panic that unwinds through a worker drops its environment while

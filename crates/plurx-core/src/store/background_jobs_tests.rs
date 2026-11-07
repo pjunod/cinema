@@ -76,10 +76,55 @@ async fn background_job_claim_resource_lookup_does_not_scan_settled_history() {
             [&request.id],
         )
         .expect("retained history");
-    let attempt = claim(&request.id, 0, 1_001);
+    use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use super::LibraryStore;
+    use crate::domain::{LibraryKind, NewLibrary};
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Scan".into(),
+            paths: vec!["/scan".into()],
+            kind: LibraryKind::Movies,
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_library_work(NewLibraryWork {
+            request_id: "manual".into(),
+            library_id: library.id,
+            input: LibraryWorkInput::Full {
+                refresh: false,
+                trigger: LibraryTrigger::Manual,
+            },
+            now_ms: 1000,
+        })
+        .await
+        .expect("manual scan")
+    else {
+        panic!("expected new scan")
+    };
+    assert!(store
+        .advertise_library_turn(&job_id, 0, "node-a", &library.paths, 1001)
+        .await
+        .expect("advertise"));
     let mut statement = connection
         .prepare(&format!("{CLAIM_SQL} RETURNING {JOB_JSON}"))
         .expect("claim statement");
+    let attempt = claim(&request.id, 0, 1_002);
+    let body = serde_json::to_string(&attempt).expect("claim body");
+    assert!(statement
+        .query([body])
+        .expect("competing claim")
+        .next()
+        .expect("result")
+        .is_none());
+    let steps = statement.reset_status(rusqlite::StatementStatus::FullscanStep);
+    assert!(
+        steps < 512,
+        "contending with a manual scan read unrelated history: {steps} steps"
+    );
+
+    let attempt = claim(&request.id, 0, 8_002);
     let body = serde_json::to_string(&attempt).expect("claim body");
     let rows = statement
         .query_map([body], |row| row.get::<_, String>(0))
@@ -1857,4 +1902,140 @@ async fn artifact_job_source_registration_is_not_required_during_foreground_star
             .expect("invalid owner remains distinct"),
         BackgroundSourceRegistration::LostOwnership
     ));
+}
+
+#[tokio::test]
+async fn advertised_manual_scan_wins_cross_type_claim_and_expiry_releases_the_turn() {
+    use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use super::LibraryStore;
+    use crate::domain::{LibraryKind, NewLibrary};
+    let store = SqliteStore::open_in_memory().expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Movies".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/movies".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let enqueue_scan = |trigger| NewLibraryWork {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        library_id: library.id,
+        input: LibraryWorkInput::Full {
+            refresh: false,
+            trigger,
+        },
+        now_ms: 1000,
+    };
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_library_work(enqueue_scan(LibraryTrigger::Scheduled))
+        .await
+        .expect("scheduled scan")
+    else {
+        panic!("not admitted")
+    };
+    assert!(!store
+        .advertise_library_turn(&job_id, 0, "node-a", &library.paths, 1001)
+        .await
+        .expect("scheduled intent"));
+    store
+        .enqueue_library_work(enqueue_scan(LibraryTrigger::Manual))
+        .await
+        .expect("manual joined scheduled");
+    let page = store
+        .list_jobs(JobQuery {
+            node_id: None,
+            state: None,
+            kind: None,
+            after_id: None,
+            limit: 16,
+        })
+        .await
+        .expect("page");
+    let revision = page
+        .jobs
+        .iter()
+        .find(|j| j.id == job_id)
+        .expect("joined scan is queued")
+        .revision;
+    let ordinary = enqueue(1000);
+    store.enqueue_job(ordinary.clone()).await.expect("fragment");
+    assert!(!store
+        .advertise_library_turn(&job_id, revision, "node-a", &["/old-root".into()], 1001)
+        .await
+        .expect("changed roots"));
+    assert!(store
+        .advertise_library_turn(&job_id, revision, "node-a", &library.paths, 1001)
+        .await
+        .expect("verified scan"));
+    assert!(matches!(
+        store
+            .claim_job(claim(&ordinary.id, 0, 1002))
+            .await
+            .expect("racing fragment"),
+        ClaimOutcome::Contended
+    ));
+    // A real playback consumer keeps the protected lane while the manual scan waits.
+    let mut viewer = enqueue(1000);
+    viewer.dedupe_key = "viewer".into();
+    viewer.request.scope = "playback-artifact".into();
+    viewer.request.consumer_kind = "playback_fragment".into();
+    viewer.request.target_node_id = Some("node-a".into());
+    viewer.request.deadline_ms = Some(60_000);
+    store.enqueue_job(viewer.clone()).await.expect("viewer");
+    claimed(&store, claim(&viewer.id, 0, 1003)).await;
+    // The reporting voter vanished. Its expired signal cannot idle the free ordinary slot.
+    let fragment = claimed(&store, claim(&ordinary.id, 0, 8001)).await;
+    assert!(store
+        .advertise_library_turn(&job_id, revision, "node-b", &library.paths, 8002)
+        .await
+        .expect("live peer"));
+    let mut manual = claim(&job_id, revision, 8003);
+    manual.kind = JobKind::LibraryScan;
+    assert!(matches!(
+        store
+            .claim_job(manual.clone())
+            .await
+            .expect("preserve live reader"),
+        ClaimOutcome::Contended
+    ));
+    store
+        .settle_job(SettleJob {
+            token: fragment.token.expect("owner"),
+            settlement: JobSettlement::Yield {
+                error_code: None,
+                checkpoint: None,
+                not_before_ms: 8004,
+            },
+            now_ms: 8004,
+        })
+        .await
+        .expect("safe boundary");
+    let next = store
+        .list_jobs(JobQuery {
+            node_id: None,
+            state: None,
+            kind: Some(JobKind::FragmentIndexBuild),
+            after_id: None,
+            limit: 16,
+        })
+        .await
+        .expect("next");
+    let retry = next
+        .jobs
+        .iter()
+        .find(|j| j.id == ordinary.id)
+        .expect("yielded fragment is queued");
+    assert!(matches!(
+        store
+            .claim_job(claim(&ordinary.id, retry.revision, 8005))
+            .await
+            .expect("racing retry"),
+        ClaimOutcome::Contended
+    ));
+    manual.node_id = "node-b".into();
+    manual.now_ms = 8005;
+    manual.dispatched_at_ms = 8005;
+    claimed(&store, manual).await;
 }
