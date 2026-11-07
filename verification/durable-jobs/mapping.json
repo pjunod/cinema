@@ -241,13 +241,13 @@
       },
       {
         "anchor": "pub(super) const REPLICATED_STORE_TIMEOUT: &str = \"replicated store operation timed out\";",
-        "sha256": "0c2f4923301624e7499cafbd536015faf621b7cc00e295cffff5dd76bf7806d3",
+        "sha256": "2303b5688307e69ab34d009936a80f9bcb93196849b7dae17066c75ffd7f265f",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "M2 Hiqlite replicated timeout classification"
       },
       {
         "anchor": "                        super::background_jobs::RETENTION_SCHEMA",
-        "sha256": "0c2f4923301624e7499cafbd536015faf621b7cc00e295cffff5dd76bf7806d3",
+        "sha256": "2303b5688307e69ab34d009936a80f9bcb93196849b7dae17066c75ffd7f265f",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585"
       },
@@ -451,7 +451,7 @@
       },
       {
         "anchor": "#[path = \"store_contract/formal_publication.rs\"]\nmod formal_publication;",
-        "sha256": "3180331a593a48de81efd8dc102f021ef4e6305df5a2731d21b6d815e1ba0915",
+        "sha256": "167fb56e1461df16388606992add9b5db63e3d05389145e72259f0f293c2a47b",
         "source": "crates/plurx-core/tests/store_contract.rs",
         "table": "M2 conformance parent module registration"
       },

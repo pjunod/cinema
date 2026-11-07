@@ -713,6 +713,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "activate_foreground_source_custody",
     "abort_foreground_source_activation",
     "mark_foreground_source_settled",
+    "reap_settled_source_custody",
     "settled_foreground_source_custody",
     "activate_background_source_custody",
     "abort_background_source_activation",
@@ -21092,7 +21093,8 @@ fn contract_inventory_matches_every_store_method() {
     // +3: source-fenced FEL verdict write, requalification and verdict counts.
     // 27 foreground/background source custody, service, and checkpoint methods,
     // plus library turn readiness and recent job completions.
-    assert_eq!(declared.len(), 546, "review the Store method count");
+    // The recovery sweep checks current authority and settlement in the writer.
+    assert_eq!(declared.len(), 547, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

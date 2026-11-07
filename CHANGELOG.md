@@ -12,6 +12,9 @@ bump may break compatibility and a **patch** bump never does.
 
 - CI retains authenticated successful Android and Node command results when
   their consumed sources are unchanged, preserving whole-command accounting.
+- Historical queue fixtures preserve managed receipts while rewinding the
+  published source and dispatch extensions, and source audits cover nested
+  replicated-store modules and their required authority reads.
 
 - Manual library scans and explicit refreshes get the next eligible shared
   read slot across job types. A scan finishing under a pressure check can
