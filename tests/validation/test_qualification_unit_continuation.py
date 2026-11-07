@@ -812,6 +812,20 @@ class CompleteCommandUnitCase(unittest.TestCase):
                 argv=json.loads(raw.splitlines()[0].removeprefix('COMMAND '));record['origin']['command']=shlex.join(argv)
             with self.assertRaises(receipts.ReceiptError):self.validate(proof)
 
+    def test_original_conditional_rust_jobs_require_the_unretained_dispatch(self):
+        source = q.ORIGINAL_RUST_6713_SOURCE
+        inputs = {'promotion_pr': '1399', 'promotion_head_sha': source,
+                  'promotion_base_sha': '8c654d37b5ee3f1418fa3393662c671a6555455e'}
+        for kind, (job_id, task_id, status) in q.ORIGINAL_RUST_6713_JOBS.items():
+            job = {'id': job_id, 'task_id': task_id, 'status': status}
+            q.require_original_conditional_rust_dispatch(source, inputs, 6713, job, kind)
+            with self.subTest(kind=kind), self.assertRaises(receipts.ReceiptError):
+                q.require_original_conditional_rust_dispatch(
+                    source, {**inputs, 'retained_units_sha256': 'a' * 64}, 6713, job, kind)
+            with self.assertRaises(receipts.ReceiptError):
+                q.require_original_conditional_rust_dispatch(
+                    source, inputs, 6713, {**job, 'task_id': 1}, kind)
+
     def test_archived_store_requires_the_reviewed_source_and_exact_executor_manifest(self):
         from validation import store_native_capture as captures
         record = fixture()['commands'][0]['records'][0]
