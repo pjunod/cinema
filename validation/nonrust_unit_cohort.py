@@ -1001,7 +1001,7 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                                        'runtime_named_outcomes': None})
         elif 'measured_python_binding' in execution:
             from validation.native_python_discovery import measured_named
-            actual = measured_named(proof, record, raw, kind, universe, archive_digest)
+            actual = measured_named(proof, record, raw, kind, universe, archive_digest, discovery)
         elif execution.get('native_discovery') is True:
             from validation.native_python_discovery import source_cohort
             old_ids, counts = source_cohort(record, text, kind, item['invocation'], discovery, candidate)

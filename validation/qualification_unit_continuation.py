@@ -617,7 +617,15 @@ def historical_recipe(record,kind):
             'topology':'cluster-harness-check','transport':'cluster-transport-recovery-contracts'}[kind]
     if kind=='topology' and b'cluster-harness-unit-check: ##' in text:
         target='cluster-harness-unit-check'
-    return make_commands(text.decode(),target)
+    recipes = make_commands(text.decode(),target)
+    if kind == 'topology' and record.get('origin', {}).get('kind') == 'authenticated-ci':
+        workflow = retention.git_bytes(record['source_commit'], '.github/workflows/ci.yml')
+        receipts.require(workflow is not None and historical_command(workflow.decode(), kind),
+                         'Native topology workflow tail requires reviewed executor source')
+        # This compiler step follows the unit Make invocation in the same
+        # authenticated workflow step. It is a boundary, never unit coverage.
+        recipes.append('$(CARGO) clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings')
+    return recipes
 
 
 def display_tokens(command,kind):

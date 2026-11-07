@@ -99,7 +99,7 @@ MEASURED_PORTABLE_CASES = {
 }
 
 
-def measured_named(proof, record, raw, kind, universe, archive_digest):
+def measured_named(proof, record, raw, kind, universe, archive_digest, discovery):
     """Read a clean, measured archive capture on the reviewed local toolchain."""
     from validation.nonrust_unit_cohort import blob, python_rows
     from validation import python_unit_receipts as receipts
@@ -126,7 +126,13 @@ def measured_named(proof, record, raw, kind, universe, archive_digest):
             'Python archive, command, measured source or runtime differs')
     prefix = 'tests.' + kind + '.'
     require(all(token.startswith(prefix) for token in argv[4:]), 'Measured Python selector outside suite')
-    ids = [token.removeprefix(prefix) for token in argv[4:]]
+    selectors = [token.removeprefix(prefix) for token in argv[4:]]
+    original = discovery(record['source_commit'], kind)
+    ids = []
+    for selector in selectors:
+        selected = [test for test in original if test == selector or test.rpartition('.')[0] == selector]
+        require(selected, 'Unknown measured method or test class')
+        ids.extend(selected)
     actual = python_rows(raw.decode(), kind, universe)
     passed = all(outcome == 'pass' for outcome in actual.values())
     terminal = r'^OK\s*\Z' if passed else r'^FAILED \((?:errors|failures)=[1-9]\d*(?:, (?:errors|failures)=[1-9]\d*)?\)\s*\Z'
