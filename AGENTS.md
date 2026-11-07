@@ -60,6 +60,11 @@ every push. Forgejo runs it as the first job of every pull request, drafts
 included, and nothing else starts until it passes, so skipping it only costs
 you the wait. [docs/ci/PAPERWORK.md](docs/ci/PAPERWORK.md) lists the rules.
 
+A start-path change — anything under `crates/plurxd/src/http/hls/`,
+`transcode/`, `vod/`, `playstart.rs`, or the client players — cites in its
+pull request a before reading from `/metrics` and names the after reading it
+expects, so the next reader can compare the fleet against the claim.
+
 ## Where the documents are
 
 [docs/README.md](docs/README.md) is a short router: the reference documents
