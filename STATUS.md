@@ -3,6 +3,11 @@
 **Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+## 2026-11-07 · Pipeline contract v2 (cinema slice)
+
+Owner Claude (claude-opus-5-5, session 01BCWL9z). Curator→plurx scan seam per [the contract](docs/features/PIPELINE-CONTRACT.md) §4–§6. M0 (this entry, the contract copy, index and backlog rows, the `INTEGRATION.md` banner and its two corrections) goes to `main` as a docs-only task PR. M5 builds on `effort/pipeline-v2` as six task PRs `claude/pipeline-v2-m5-<task>`: T1 request sidecar store, T2 `library_targeted` job kind, T3 handler (`request_key`, `wait_ms`, `expected_files`, typed outcomes), T4 creating-key status read, T5 `probe_paths` and scan-interval default, T6 Jobs panel and docs. Not deployed.
+- **Decision for Paul:** existing libraries at `scan_interval_mins = 0` are preserved; Settings offers a one-click opt-in to six-hourly and states what "Never" costs. New libraries default to 360 minutes.
+
 ## 2026-11-03 · Playback publication and Resume overlay
 
 Codex/root is repairing initial playlist consumption accounting and destination-owned web wait retirement. [Live implementation, review and merge status](docs/streaming/PLAYBACK-PUBLICATION-OVERLAY-STATUS.md).
