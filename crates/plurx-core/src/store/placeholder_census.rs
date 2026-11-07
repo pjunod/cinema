@@ -33,6 +33,10 @@ use super::hiqlite::validate_sql;
 pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ("hiqlite.rs", include_str!("hiqlite.rs")),
     (
+        "hiqlite/dispatch_turns.rs",
+        include_str!("hiqlite/dispatch_turns.rs"),
+    ),
+    (
         "hiqlite_annotations.rs",
         include_str!("hiqlite_annotations.rs"),
     ),
@@ -2185,11 +2189,29 @@ fn every_replicated_placeholder_is_introduced_in_order() {
 #[test]
 fn the_census_covers_every_slice_exactly_once() {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
-    let mut present = std::fs::read_dir(&directory)
-        .expect("the store module directory is readable from the source tree")
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.starts_with("hiqlite") && name.ends_with(".rs"))
+    let mut paths = std::fs::read_dir(&directory)
+        .expect("replicated source directory")
+        .map(|entry| entry.expect("replicated source entry").path())
+        .filter(|path| {
+            path.is_file()
+                && path.extension().is_some_and(|extension| extension == "rs")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("hiqlite"))
+        })
+        .collect::<Vec<_>>();
+    paths.extend(source_inventory::production_files(
+        &directory.join("hiqlite"),
+        &[&directory.join("hiqlite.rs")],
+    ));
+    let mut present = paths
+        .into_iter()
+        .map(|path| {
+            path.strip_prefix(&directory)
+                .expect("replicated source file")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
         .collect::<Vec<_>>();
     present.sort();
     let mut censused = STORE_SOURCES

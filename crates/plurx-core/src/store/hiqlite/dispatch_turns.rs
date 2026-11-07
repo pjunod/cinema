@@ -49,10 +49,9 @@ impl HiqliteAuthStore {
         &self,
         expected: &[(String, String)],
     ) -> Result<bool, StoreError> {
-        // authority: installation and its lost-ack reconciliation need a current
-        // committed catalog before admitting new writers to the shared queue.
         let installed = self
             .client()
+            // authority: installation and lost-ack reconciliation require the committed dispatch catalog.
             .query_consistent_map::<RemoteShapeRow, _>(CATALOG, params!())
             .await?;
         installed_matches(&installed, expected)
