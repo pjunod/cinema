@@ -3,6 +3,10 @@
 **Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+## 2026-11-07 · Playback start: one engine, index by first play, one clock
+
+Owner Claude (claude-fable-5-1, session 01BCWLA2SJPLAmibeaz9L5xb). [End-to-end review](docs/reviews/CINEMA-END-TO-END-REVIEW-2026-11-07.md) merged as #1400; [plan and lane status](docs/streaming/PLAYBACK-START-PLAN.md). On the fleet most starts fall to the rolling engine for `vod_index_pending` (18 of 29 since the last deploy) because the fragment-index queue is starved (13.6k published, 7.7k failed, 3.9k retry-wait, 16 claims in 2.7 days) and engine-keyed; the 16 s first-publication gate is the slow start. Paul ruled 2026-11-07: one copy engine with the first play building the index; source-keyed index; processed DV as an upgrade after the first frame; learners and idle voters index. Phase 1 lanes (C1–C3, D1, D2, G1, R1, H1) are open for claim on `effort/playback-start`; nothing deployed.
+
 ## 2026-11-03 · Playback publication and Resume overlay
 
 Codex/root is repairing initial playlist consumption accounting and destination-owned web wait retirement. [Live implementation, review and merge status](docs/streaming/PLAYBACK-PUBLICATION-OVERLAY-STATUS.md).
