@@ -13,6 +13,9 @@ from validation import python_unit_receipts as receipts
 
 # Complete, independently reviewed binding objects, not arbitrary writer input.
 REVIEWED = {
+    'cf12f8dbb5e1a532d3c0ebc112d2fe45100a08d6e64084b9b7081854d1872ba0',  # Store original
+    '17fdcaaf5cf710d6964f1bc028c109a15eb004ded620df54f0ec4f00fa81fc9e',  # Apple original
+    '2248101c1b065e446b69546883afd7f01a36b0faa168958c2a66c2fd5e0c8fb0',  # integrated paperwork
     'f70c4716844ad5849583bf4314fbcaf3ee6f9df8426b35fc814610e8f91d0bab',  # test_retained_lane_commands, 3 source members
     'a157fc4d28a2d05e1d18c448c137003ca22e29647298b54b0261bace7e22dc89',  # test_retained_lane_commands, 1 source members
     'cbfbfe60203e81f54dd38ff4a02a86a91755995d6b46a010b3e1f89ee1354a09',  # test_retained_lane_commands, 3 source members
@@ -66,6 +69,17 @@ def observed(proof, record, raw, kind, discovery):
         receipts.require(all(names.count(name) == 1 and not any(row[0] == name and row[1] != 'ok'
                              for row in rows) for name in ids), 'Literal passing named row unavailable')
         return {name: 'pass' for name in ids}
+    if witness['output_mode'] == 'paperwork-selected':
+        # The pinned script runs all four modules in one native subprocess
+        # and suppresses its per-test output. Keep its aggregate granularity.
+        guards = ('every doc under docs/ has an index row, and no reference names a missing docs/ path',
+                  'docs stay under 40 KB, and the shrink-only list only shrinks',
+                  'doc **Status:** headers make only possible lifecycle claims',
+                  'STATUS.md stays short and indexes the sections moved out of it')
+        receipts.require(all(text.splitlines().count('[ ok ] ' + guard) == 1 for guard in guards)
+                         and re.search(r'^paperwork: 14/14 ok in [0-9.]+s .*$', text, re.M)
+                         and ids == set(witness['selected_ids']), 'Original paperwork guards did not complete')
+        return {name: 'opaque-pass' for name in ids}
     receipts.require(witness['output_mode'] == 'opaque-selected'
                      and re.findall(r'^Ran (\d+) tests? in [0-9.]+s\n\n([^\n]+)$', text, re.M)
                      == [(str(len(witness['selected_ids'])), 'OK')]

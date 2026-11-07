@@ -87,6 +87,10 @@ def source_cohort(record, text, kind, command, discovery, candidate):
 # platform's native binaries. Extending this set requires reviewing the inputs
 # a body consumes before applying a Darwin result to the Linux preflight.
 MEASURED_PORTABLE_CASES = {
+    'test_native_wal_openraft.NativeWalOpenraftCase.test_native_source_recipe_keeps_actual_unprinted_outcome_scope',
+    'test_native_wal_openraft.NativeWalOpenraftCase.test_rejects_unbound_origin_neighbor_target_or_partial_terminal',
+    'test_native_wal_openraft.NativeWalOpenraftCase.test_preceding_command_cannot_absorb_the_unprinted_openraft_result',
+    'test_native_wal_openraft.NativeWalOpenraftCase.test_echoed_next_command_keeps_the_existing_boundary_path',
     'test_retained_lane_commands.NativePythonTransitionCase.test_only_reviewed_whole_preflight_transition_preserves_node_scope',
     'test_native_python_discovery.NativeDiscoveryCase.test_native_skips_remain_unnamed_and_nested_fixtures_do_not_supply_outcomes',
     'test_native_python_discovery.NativeDiscoveryCase.test_refuses_misplaced_adopted_failed_or_ambiguous_discovery',
@@ -105,14 +109,14 @@ def measured_named(proof, record, raw, kind, universe, archive_digest):
     require(kind in {'operations', 'validation'} and origin['kind'] == 'attested-local'
             and set(execution) == {'mode', 'kind', 'measured_python_binding'}
             and record['coverage'] == {'mode': 'python-named'}
-            and type(record['exit_code']) is int and record['exit_code'] == 0,
+            and type(record['exit_code']) is int and record['exit_code'] in (0, 1),
             'Unexpected measured Python evidence')
     binding = receipts.bounded_json(blob(proof, execution['measured_python_binding']))
     argv = binding['argv']
     require(binding['source_commit'] == record['source_commit']
             and binding['source_archive_sha256'] == archive_digest(record['source_commit'])
             and all(binding[key] is True for key in ('source_clean_before', 'source_clean_after', 'source_stable'))
-            and binding['log_sha256'] == retention.digest(raw) and binding['exit_code'] == 0
+            and binding['log_sha256'] == retention.digest(raw) and binding['exit_code'] == record['exit_code']
             and binding['platform'] == 'darwin' and binding['python_version'] == '3.12.14'
             and binding['python_binary_sha256'] == '9d1335796350848c36dc2711a3298e096deebee18c85f1ab36edd8747fdf85eb'
             and binding['node_version'] == 'v24.22.1'
@@ -124,7 +128,9 @@ def measured_named(proof, record, raw, kind, universe, archive_digest):
     require(all(token.startswith(prefix) for token in argv[4:]), 'Measured Python selector outside suite')
     ids = [token.removeprefix(prefix) for token in argv[4:]]
     actual = python_rows(raw.decode(), kind, universe)
+    passed = all(outcome == 'pass' for outcome in actual.values())
+    terminal = r'^OK\s*\Z' if passed else r'^FAILED \((?:errors|failures)=[1-9]\d*(?:, (?:errors|failures)=[1-9]\d*)?\)\s*\Z'
     require(len(ids) == len(set(ids)) and set(actual) == set(ids) and set(ids) <= MEASURED_PORTABLE_CASES
-            and all(outcome == 'pass' for outcome in actual.values())
-            and re.search(r'^OK\s*\Z', raw.decode(), re.M), 'Measured native selections did not pass')
+            and passed == (record['exit_code'] == 0) and re.search(terminal, raw.decode(), re.M),
+            'Measured Python selectors, terminal or disposition differ')
     return actual
