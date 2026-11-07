@@ -1,0 +1,204 @@
+//! Whether a path a caller names belongs to a library, decided in an order
+//! that keeps "not ours" apart from "ours, but unreadable right now"
+//! (pipeline contract v2 §5.1).
+//!
+//! Containment is decided **lexically first**: the request path, with `.` and
+//! `..` resolved and no symlink followed, against the configured roots. Only
+//! then does the filesystem get a say, and what it can say is limited to
+//! "readable" or "not readable now": an unmounted share, `ENOTCONN`, `EIO`,
+//! `ESTALE` or a path that is missing under a root we know is transient. The
+//! one filesystem answer that is permanent is a symlink that resolves outside
+//! its root — the same escape the canonical check always refused.
+use std::path::{Component, Path, PathBuf};
+
+use crate::domain::Library;
+
+/// The verdict for one path.
+#[derive(Debug)]
+pub enum PathClass<'a> {
+    /// Under no configured root, or a symlink out of the one it is under.
+    /// Permanent: retrying cannot change it.
+    Outside { roots: Vec<String> },
+    /// Under `root` lexically, but the root or the path cannot be resolved
+    /// right now. Transient.
+    Unreadable { root: PathBuf, error: String },
+    /// Under `root`, and it resolves there.
+    Inside {
+        library: &'a Library,
+        root: PathBuf,
+        canonical: PathBuf,
+    },
+}
+
+/// `path` made absolute against nothing — it must already be absolute — with
+/// `.` dropped and `..` applied, never following a symlink.
+pub fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Every configured root, for the self-explaining 422.
+pub fn configured_roots(libraries: &[Library]) -> Vec<String> {
+    libraries
+        .iter()
+        .flat_map(|library| library.paths.iter().map(|root| root.display().to_string()))
+        .collect()
+}
+
+/// The library and configured root that lexically contain `path`; the
+/// longest root wins, so `/media/kids` beats `/media`.
+pub fn lexical_root<'a>(libraries: &'a [Library], path: &Path) -> Option<(&'a Library, PathBuf)> {
+    let path = lexical(path);
+    libraries
+        .iter()
+        .flat_map(|library| {
+            library
+                .paths
+                .iter()
+                .map(move |root| (library, lexical(root)))
+        })
+        // Component-wise: `/data` must not contain `/database`.
+        .filter(|(_, root)| path.starts_with(root))
+        .max_by_key(|(_, root)| root.components().count())
+}
+
+/// Classify `path` against `libraries`. Blocking: it may `stat` the root and
+/// the path, so async callers run it on a blocking thread.
+pub fn classify_path<'a>(libraries: &'a [Library], path: &Path) -> PathClass<'a> {
+    let Some((library, root)) = lexical_root(libraries, path) else {
+        return PathClass::Outside {
+            roots: configured_roots(libraries),
+        };
+    };
+    let canonical_root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error) => {
+            return PathClass::Unreadable {
+                root,
+                error: error.to_string(),
+            }
+        }
+    };
+    // A mount point that exists but holds nothing (the share is not
+    // mounted over it) canonicalizes; reading it is what tells.
+    if let Err(error) = std::fs::read_dir(&canonical_root) {
+        return PathClass::Unreadable {
+            root,
+            error: error.to_string(),
+        };
+    }
+    let canonical = match lexical(path).canonicalize() {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            return PathClass::Unreadable {
+                root,
+                error: error.to_string(),
+            }
+        }
+    };
+    if !canonical.starts_with(&canonical_root) {
+        return PathClass::Outside {
+            roots: configured_roots(libraries),
+        };
+    }
+    PathClass::Inside {
+        library,
+        root,
+        canonical,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::LibraryKind;
+
+    fn library(id: i64, roots: &[&Path]) -> Library {
+        Library {
+            id,
+            name: format!("library {id}"),
+            kind: LibraryKind::Movies,
+            paths: roots.iter().map(|root| root.to_path_buf()).collect(),
+            anime: false,
+            created_at: 0,
+            scan_interval_mins: 0,
+            refresh_interval_mins: 0,
+            last_scan_at: None,
+            last_refresh_at: None,
+        }
+    }
+
+    #[test]
+    fn lexical_containment_comes_before_the_filesystem() {
+        let dir = tempfile::tempdir().expect("dir");
+        let movies = dir.path().join("movies");
+        let kids = movies.join("kids");
+        std::fs::create_dir_all(kids.join("Film (2001)")).expect("tree");
+        let libraries = vec![library(1, &[&movies]), library(2, &[&kids])];
+
+        assert!(matches!(
+            classify_path(&libraries, &dir.path().join("elsewhere/x.mkv")),
+            PathClass::Outside { .. }
+        ));
+        assert!(
+            matches!(
+                classify_path(&libraries, &movies.join("../elsewhere")),
+                PathClass::Outside { .. }
+            ),
+            "`..` is resolved before containment"
+        );
+        let sibling = dir.path().join("moviesx");
+        std::fs::create_dir_all(&sibling).expect("sibling");
+        assert!(
+            matches!(
+                classify_path(&libraries, &sibling),
+                PathClass::Outside { .. }
+            ),
+            "component-wise, not a string prefix"
+        );
+        match classify_path(&libraries, &kids.join("Film (2001)")) {
+            PathClass::Inside { library, .. } => assert_eq!(library.id, 2, "longest root wins"),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            matches!(
+                classify_path(&libraries, &movies.join("Not There (1999)")),
+                PathClass::Unreadable { .. }
+            ),
+            "missing under a known root is transient, not outside"
+        );
+
+        // An unmounted share: the root itself is gone.
+        let share = dir.path().join("share");
+        let unmounted = vec![library(3, &[&share])];
+        assert!(matches!(
+            classify_path(&unmounted, &share.join("Show/Season 1")),
+            PathClass::Unreadable { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_its_root_is_outside() {
+        let dir = tempfile::tempdir().expect("dir");
+        let movies = dir.path().join("movies");
+        let secret = dir.path().join("secret");
+        std::fs::create_dir_all(&movies).expect("movies");
+        std::fs::create_dir_all(&secret).expect("secret");
+        std::os::unix::fs::symlink(&secret, movies.join("escape")).expect("symlink");
+        let libraries = vec![library(1, &[&movies])];
+        assert!(matches!(
+            classify_path(&libraries, &movies.join("escape")),
+            PathClass::Outside { .. }
+        ));
+    }
+}

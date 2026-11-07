@@ -4,6 +4,7 @@
 mod cache_preparation;
 #[path = "library_work.rs"]
 mod library_work;
+pub use library_work::ScanAdmission;
 #[path = "subtitle_work.rs"]
 mod subtitle_work;
 

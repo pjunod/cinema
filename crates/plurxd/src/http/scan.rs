@@ -6,17 +6,22 @@
 //! [`crate::http::extract::ScopedKey`] for why the wall runs both ways.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use axum::extract::{Path as UrlPath, State};
 use axum::http::request::Parts;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
-use plurx_core::domain::{scopes, Library};
+use plurx_core::domain::scopes;
+use plurx_core::scan::containment::{self, PathClass};
 use plurx_core::scan::TargetError;
+use plurx_core::store::scan_request_v2::{ExpectedFile, ScanRequestV2Seed};
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
 use super::extract::ScopedKey;
-use crate::state::{AppState, BookHints, IdHints, ScanRequest};
+use crate::state::{AppState, BookHints, IdHints, ScanAdmission, ScanRequest};
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Ids {
@@ -40,10 +45,33 @@ pub struct BookMetadataBody {
     pub cover_url: Option<String>,
 }
 
+/// One file the caller placed under `path` (contract v2 §4.2).
+#[derive(Debug, Deserialize)]
+pub struct ExpectedFileBody {
+    pub path: String,
+    pub bytes: i64,
+    pub mtime_ns: i64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ScanRequestBody {
-    /// Absolute path — a directory or a single file.
-    pub path: String,
+    /// Absolute path — a directory or a single file. Optional only so that a
+    /// `probe_paths` connection test can omit it; a scan without it is a 400
+    /// `path_required` from the handler, not the extractor's 422.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Curator's idempotency key, `<transfer>/<generation>/<dir>/<attempt>`.
+    /// A repeated key returns the request it created; a new attempt suffix
+    /// is a new request.
+    #[serde(default)]
+    pub request_key: Option<String>,
+    /// Hold the response up to this long (capped at 15 s) for the result.
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
+    /// The media files this import placed under `path`. Each is probed
+    /// whatever its size and mtime say, and reported per file.
+    #[serde(default)]
+    pub expected_files: Option<Vec<ExpectedFileBody>>,
     #[serde(default)]
     pub ids: Option<Ids>,
     /// `movie` | `episode` | `season` | `book`. Advisory: the library's own kind
@@ -75,27 +103,77 @@ pub struct ScanAccepted {
     pub correlation_id: Option<String>,
 }
 
+/// The longest a `POST /scan` holds its response for a result.
+pub const MAX_WAIT_MS: u64 = 15_000;
+/// How long a caller should wait before retrying a `path_unreadable`.
+pub const PATH_UNREADABLE_RETRY_S: u64 = 60;
+
 /// POST /api/v1/scan (scope `scan:trigger`)
 pub async fn scan(
     State(state): State<AppState>,
     parts: Parts,
     Json(body): Json<ScanRequestBody>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+) -> Result<Response, ApiError> {
     let mut parts = parts;
-    let _key = ScopedKey::require(&mut parts, &state, scopes::SCAN_TRIGGER).await?;
+    let key = ScopedKey::require(&mut parts, &state, scopes::SCAN_TRIGGER).await?;
     // Counted here, before the path is resolved: a request rejected for a
     // path-mapping mistake still proves the other application reached plurx
     // with a working key, and that is the first thing anyone debugging this
     // needs to rule in or out.
     state.jobs.metrics().count_notification();
 
-    let path = PathBuf::from(&body.path);
+    let Some(raw_path) = body.path.clone() else {
+        return Err(ApiError::Typed {
+            status: StatusCode::BAD_REQUEST,
+            code: "path_required",
+            message: "`path` is required unless the request is a `probe_paths` test".into(),
+        });
+    };
+    let path = PathBuf::from(&raw_path);
     if !path.is_absolute() {
         return Err(ApiError::BadRequest(format!(
-            "`{}` is not an absolute path — plurx and the caller may not share a \
-             working directory, so relative paths cannot be resolved",
-            body.path
+            "`{raw_path}` is not an absolute path — plurx and the caller may not share a \
+             working directory, so relative paths cannot be resolved"
         )));
+    }
+    let request_key = body.request_key.clone().unwrap_or_default();
+    let expected_files = body
+        .expected_files
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|file| ExpectedFile {
+            path: file.path.clone(),
+            bytes: file.bytes,
+            mtime_ns: file.mtime_ns,
+        })
+        .collect::<Vec<_>>();
+    if expected_files
+        .iter()
+        .any(|file| !std::path::Path::new(&file.path).is_absolute())
+    {
+        return Err(ApiError::BadRequest(
+            "every `expected_files[].path` must be absolute".to_owned(),
+        ));
+    }
+    let seed = ScanRequestV2Seed {
+        key_id: key.0.id,
+        request_key,
+        expected_files,
+    };
+    seed.validate()
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let wait = Duration::from_millis(body.wait_ms.unwrap_or(0).min(MAX_WAIT_MS));
+
+    // Idempotency first: a lost response must not become a second request.
+    if !seed.request_key.is_empty() {
+        if let Some(existing) = state
+            .store
+            .scan_request_by_key(seed.key_id, &seed.request_key)
+            .await?
+        {
+            return answer(&state, &existing, wait, body.correlation_id.clone()).await;
+        }
     }
     if body
         .series
@@ -110,19 +188,29 @@ pub async fn scan(
 
     // plurx resolves the library, so the caller never needs to know plurx's
     // library ids — one less thing to keep in sync between two applications.
+    // Containment is lexical first, so "not ours" (permanent) is never
+    // confused with "ours, but the share is not mounted right now".
     let libraries = state.store.list_libraries().await?;
-    let Some(library) = library_for_path(&libraries, &path) else {
-        // Self-explaining on purpose: a path-mapping mistake between two
-        // containers is the likeliest cause by a wide margin, and naming the
-        // roots turns a support conversation into a glance.
-        return Err(ApiError::Unprocessable(serde_json::json!({
-            "error": "path is not under any library root",
-            "path": body.path,
-            "roots": libraries
-                .iter()
-                .flat_map(|l| l.paths.iter().map(|p| p.display().to_string()))
-                .collect::<Vec<_>>(),
-        })));
+    let classified = {
+        let libraries = libraries.clone();
+        let path = path.clone();
+        tokio::task::spawn_blocking(
+            move || match containment::classify_path(&libraries, &path) {
+                PathClass::Outside { roots } => Err(Err(roots)),
+                PathClass::Unreadable { root, error } => Err(Ok((root, error))),
+                PathClass::Inside { library, .. } => Ok(library.id),
+            },
+        )
+        .await
+        .map_err(|error| ApiError::Internal(format!("path classification: {error}")))?
+    };
+    let library = match classified {
+        Ok(id) => libraries
+            .iter()
+            .find(|library| library.id == id)
+            .ok_or_else(|| ApiError::Internal("classified library vanished".into()))?,
+        Err(Err(roots)) => return Err(outside_roots(&raw_path, roots)),
+        Err(Ok((root, error))) => return Ok(path_unreadable(&raw_path, &root, &error)),
     };
 
     let book = body.book.as_ref().map(validate_book_hints).transpose()?;
@@ -157,43 +245,125 @@ pub async fn scan(
         source: body.source.clone(),
     };
 
-    match state.jobs.request_scan(req).await {
-        Ok(Some(scan)) => Ok((
-            axum::http::StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "scanned",
-                "library_id": library.id,
-                "request_id": request_id,
-                "report": scan.report,
-                "items": scan.items,
-                "correlation_id": body.correlation_id,
-            })),
-        )),
-        // Busy: queued rather than dropped. 202 with an id to poll, because
-        // silently losing the request would leave a season half-indexed.
-        Ok(None) => Ok((
-            axum::http::StatusCode::ACCEPTED,
-            Json(serde_json::to_value(ScanAccepted {
-                status: "queued",
-                request_id,
-                correlation_id: body.correlation_id,
-            })?),
-        )),
-        Err(TargetError::OutsideRoots { path, roots }) => {
-            Err(ApiError::Unprocessable(serde_json::json!({
-                "error": "path is not under any library root",
-                "path": path,
-                "roots": roots,
-            })))
+    // The sidecar is written in the admission transaction itself, so even a
+    // worker that claims and finishes this request before the response is
+    // built probes the expected files (contract v2 §5.1).
+    let request_id = match state.jobs.request_scan_v2(req, seed).await {
+        Ok(ScanAdmission::Admitted(id) | ScanAdmission::Replay(id)) => id,
+        Err(TargetError::OutsideRoots { path, roots }) => return Err(outside_roots(&path, roots)),
+        Err(TargetError::Unreadable { path, root, error }) => {
+            return Ok(path_unreadable(&path, std::path::Path::new(&root), &error))
         }
         // Refused, not failed: the queue is full or the request is being
         // cancelled. 503 tells a caller like Monarr to retry later, where a
         // 500 would tell it plurx is broken.
         Err(error @ TargetError::Refused(_)) => {
-            Err(ApiError::ServiceUnavailable(error.to_string()))
+            return Err(ApiError::ServiceUnavailable(error.to_string()))
         }
-        Err(TargetError::Store(e)) => Err(ApiError::from(e)),
+        Err(TargetError::Store(e)) => return Err(ApiError::from(e)),
+    };
+    answer(&state, &request_id, wait, body.correlation_id).await
+}
+
+/// The answer for one request: `200 scanned` with its result and per-file
+/// report once it is done, `202 queued` while it is not (after waiting up to
+/// `wait` for it), and the failure a finished request recorded.
+async fn answer(
+    state: &AppState,
+    request_id: &str,
+    wait: Duration,
+    correlation_id: Option<String>,
+) -> Result<Response, ApiError> {
+    let record = if wait.is_zero() {
+        state.jobs.scan_request(request_id).await
+    } else {
+        state.jobs.await_scan_request(request_id, wait).await
+    };
+    let record = record.ok_or(ApiError::NotFound("scan request"))?;
+    let correlation_id = record.correlation_id.clone().or(correlation_id);
+    match record.status.as_str() {
+        "done" => {
+            let files = state
+                .store
+                .scan_request_v2(request_id)
+                .await?
+                .map(|row| row.files)
+                .unwrap_or_default();
+            Ok((
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "scanned",
+                    "library_id": record.library_id,
+                    "request_id": record.request_id,
+                    "report": record.report,
+                    "items": record.items,
+                    "files": files,
+                    "correlation_id": correlation_id,
+                })),
+            )
+                .into_response())
+        }
+        "failed" => {
+            let error = record.error.unwrap_or_default();
+            if error.starts_with(PATH_UNREADABLE) {
+                // The share dropped between admission and the scan.
+                return Ok(path_unreadable(
+                    &record.path,
+                    std::path::Path::new(""),
+                    &error,
+                ));
+            }
+            Err(ApiError::Internal(error))
+        }
+        // Busy: queued rather than dropped. 202 with an id to poll, because
+        // silently losing the request would leave a season half-indexed.
+        _ => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::to_value(ScanAccepted {
+                status: "queued",
+                request_id: record.request_id,
+                correlation_id,
+            })?),
+        )
+            .into_response()),
     }
+}
+
+/// The error prefix a request failed by an unreadable root records.
+const PATH_UNREADABLE: &str = "path_unreadable";
+
+/// `422 path_outside_roots` — permanent. Self-explaining on purpose: a
+/// path-mapping mistake between two containers is the likeliest cause by a
+/// wide margin, and naming the roots turns a support conversation into a
+/// glance. `error` and `roots` keep their old meaning for older callers.
+fn outside_roots(path: &str, roots: Vec<String>) -> ApiError {
+    ApiError::Unprocessable(serde_json::json!({
+        "code": "path_outside_roots",
+        "error": "path is not under any library root",
+        "path": path,
+        "roots": roots,
+    }))
+}
+
+/// `503 path_unreadable` — transient: the path is under a library root that
+/// cannot be read right now (an unmounted share, `ENOTCONN`, `EIO`), so the
+/// same request succeeds once it is back.
+fn path_unreadable(path: &str, root: &std::path::Path, error: &str) -> Response {
+    let mut body = serde_json::json!({
+        "code": PATH_UNREADABLE,
+        "error": format!("library root could not be read: {error}"),
+        "path": path,
+        "retry_after_s": PATH_UNREADABLE_RETRY_S,
+    });
+    if !root.as_os_str().is_empty() {
+        body["root"] = serde_json::json!(root.display().to_string());
+    }
+    let mut response = (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from(PATH_UNREADABLE_RETRY_S),
+    );
+    response
 }
 
 fn validate_book_hints(body: &BookMetadataBody) -> Result<BookHints, ApiError> {
@@ -269,29 +439,4 @@ pub async fn request_status(
         Some(rec) => Ok(Json(serde_json::to_value(rec)?)),
         None => Err(ApiError::NotFound("scan request")),
     }
-}
-
-/// The library whose roots contain `path`.
-///
-/// Longest matching root wins, so a library nested inside another (`/media`
-/// and `/media/kids`) resolves to the more specific one rather than to
-/// whichever happened to be created first.
-fn library_for_path<'a>(libraries: &'a [Library], path: &std::path::Path) -> Option<&'a Library> {
-    let canonical = path.canonicalize().ok()?;
-    libraries
-        .iter()
-        .filter_map(|lib| {
-            lib.paths
-                .iter()
-                .filter_map(|root| {
-                    let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-                    // Component-wise: `/data` must not match `/database`.
-                    (canonical == root || canonical.starts_with(&root))
-                        .then(|| root.components().count())
-                })
-                .max()
-                .map(|depth| (depth, lib))
-        })
-        .max_by_key(|(depth, _)| *depth)
-        .map(|(_, lib)| lib)
 }

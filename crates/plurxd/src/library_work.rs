@@ -5,7 +5,16 @@ use plurx_core::store::background_jobs_library::{
     LibraryTrigger, LibraryWorkInput, LibraryWorkQuery, LibraryWorkRecord, LibraryWorkResult,
     NewLibraryWork, MAX_LIBRARY_RESULT_BYTES,
 };
-use plurx_core::store::scan_request_v2::{ExpectedFile, PlacedReport};
+use plurx_core::store::scan_request_v2::{ExpectedFile, PlacedReport, ScanRequestV2Seed};
+
+/// How a contract v2 request was admitted.
+#[derive(Debug)]
+pub enum ScanAdmission {
+    /// A new request, under this id.
+    Admitted(String),
+    /// The caller's `request_key` already names this request.
+    Replay(String),
+}
 #[path = "library_work/env.rs"]
 mod env;
 #[path = "library_work/probe_input.rs"]
@@ -77,8 +86,80 @@ impl JobManager {
         }
     }
 
+    /// Contract v2 admission (§5.1): the request and its sidecar in one
+    /// transaction. A `request_key` another request of the same API key
+    /// already holds — a replay, or a concurrent identical POST that won —
+    /// answers with that request instead.
+    pub async fn request_scan_v2(
+        self: &Arc<Self>,
+        req: ScanRequest,
+        seed: ScanRequestV2Seed,
+    ) -> Result<ScanAdmission, TargetError> {
+        let (key_id, request_key) = (seed.key_id, seed.request_key.clone());
+        let input = NewLibraryWork {
+            request_id: req.id.clone(),
+            library_id: req.library_id,
+            input: LibraryWorkInput::Targeted {
+                path: req.path,
+                ids: req.ids,
+                book: req.book.map(Box::new),
+                correlation_id: req.correlation_id,
+                source: req.source,
+            },
+            now_ms: clock_ms(),
+        };
+        match self.store.enqueue_library_work_v2(input, seed).await {
+            Ok(outcome) => self
+                .admission_outcome(outcome)
+                .map(|_| ScanAdmission::Admitted(req.id)),
+            Err(error) => {
+                if !request_key.is_empty() {
+                    if let Some(existing) =
+                        self.store.scan_request_by_key(key_id, &request_key).await?
+                    {
+                        return Ok(ScanAdmission::Replay(existing));
+                    }
+                }
+                Err(TargetError::Store(error))
+            }
+        }
+    }
+
+    /// Wait up to `wait` for a request to finish, on its local completion
+    /// signal and a bounded re-read of the durable record — the request may
+    /// be finished by another node, whose completion this one never hears.
+    pub async fn await_scan_request(
+        &self,
+        request_id: &str,
+        wait: Duration,
+    ) -> Option<ScanRequestRecord> {
+        let deadline = tokio::time::Instant::now() + wait;
+        let waiter = self.scan_waiter(request_id);
+        let record = loop {
+            let record = self.scan_request(request_id).await;
+            let finished = record
+                .as_ref()
+                .is_some_and(|record| matches!(record.status.as_str(), "done" | "failed"));
+            let now = tokio::time::Instant::now();
+            if finished || now >= deadline {
+                break record;
+            }
+            tokio::select! {
+                () = waiter.notified() => {}
+                () = tokio::time::sleep((deadline - now).min(Duration::from_millis(500))) => {}
+            }
+        };
+        self.forget_scan_waiter(request_id);
+        record
+    }
+
     async fn admit_library(&self, input: NewLibraryWork) -> Result<bool, TargetError> {
-        match self.store.enqueue_library_work(input).await? {
+        let outcome = self.store.enqueue_library_work(input).await?;
+        self.admission_outcome(outcome)
+    }
+
+    fn admission_outcome(&self, outcome: EnqueueOutcome) -> Result<bool, TargetError> {
+        match outcome {
             EnqueueOutcome::Accepted { .. } => {
                 self.library_wake.notify_one();
                 Ok(true)
@@ -406,6 +487,12 @@ impl JobManager {
                         LibraryWorkResult::Completed { scan }
                     }
                     Err(error @ TargetError::OutsideRoots { .. }) => LibraryWorkResult::Failed {
+                        error: error.to_string(),
+                    },
+                    // The share dropped between admission and the scan. The
+                    // error names it `path_unreadable:` so the caller retries
+                    // rather than discarding a valid notification.
+                    Err(error @ TargetError::Unreadable { .. }) => LibraryWorkResult::Failed {
                         error: error.to_string(),
                     },
                     Err(TargetError::Store(error)) => return Err(error),
