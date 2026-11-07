@@ -10,6 +10,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A targeted scan of a path under a library root that cannot be read right now
+  (an unmounted share, an empty mount point, `ENOTCONN`, `EIO`) answers
+  `503 {"code":"path_unreadable","retry_after_s":60}` with `Retry-After`,
+  instead of the permanent `422` that discarded a valid Curator notification.
+  A path under no root is `422 {"code":"path_outside_roots"}`, decided lexically
+  before the filesystem is consulted; the body still names every root.
+
 - macOS source installs discover full Xcode when Command Line Tools are selected,
   find renamed or relocated copies through the macOS application index,
   preserve explicit developer-directory overrides, and install missing Xcode
@@ -61,6 +68,25 @@ bump may break compatibility and a **patch** bump never does.
 - Apple TV Settings enters each category at its first setting and restores the
   category when returning with Back. Picker controls expose their names and
   selected values to accessibility.
+
+### Added
+
+- Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
+  `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
+  request and result), `wait_ms` (hold the answer up to 15 s for a `200` with
+  the result), `expected_files` (probed whatever the size+mtime cache says, and
+  reported per file as `placed` with a fresh nanosecond mtime, `skipped` or
+  `missing`), and `probe_paths` (a connection test answering which library
+  roots plurx can see, without scanning).
+- The key that created a scan request may read it with `scan:trigger` alone;
+  the record carries `waiting_on` and the per-file `files`, and reports
+  `running` while a worker holds it.
+- Targeted scan requests run as their own job, claimed ahead of a pending full
+  scan with a probe admission (no heavy-lane permit) and never concurrently
+  with a running one; Activity shows what a waiting one is waiting on.
+- New libraries scan every six hours by default. Existing libraries keep their
+  schedule; a library at Never shows what that costs and offers a one-click
+  "Enable 6-hourly reconcile".
 
 ## [0.8.0] — 2026-10-29
 

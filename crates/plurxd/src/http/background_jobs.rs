@@ -37,6 +37,9 @@ fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
         "id": job.id, "kind": kind, "state": job.state, "priority": job.priority,
         "file_id": file_id.map(|id| id.to_string()),
         "library_id": job.payload.get("library_id").and_then(Value::as_i64),
+        // Contract v2 targeted library work: its own job on the scan kind.
+        "targeted": job.payload.get("generation").and_then(Value::as_str)
+            == Some(plurx_core::store::background_jobs_library::LIBRARY_TARGETED_GENERATION),
         "fence": job.fence,
         "owner_node_id": job.token.as_ref().map(|token| &token.node_id),
         "target_node_id": job.supported_payload().ok().and_then(|payload| payload.target_node_id().map(str::to_owned)),
@@ -126,7 +129,31 @@ pub async fn list(
         }
         row
     };
-    let jobs = page.jobs.iter().map(&labeled).collect::<Vec<_>>();
+    let mut jobs = page.jobs.iter().map(&labeled).collect::<Vec<_>>();
+    // A queued targeted request says what it waits on (contract v2 §5.1):
+    // the oldest pending request of the job carries it.
+    for row in jobs
+        .iter_mut()
+        .filter(|row| row["targeted"] == true && row["state"] == "queued")
+    {
+        let Some(job_id) = row["id"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let pending = state
+            .store
+            .library_work_requests(plurx_core::store::background_jobs::LibraryWorkQuery {
+                job_id: Some(job_id),
+                pending_only: true,
+                limit: 1,
+                ..Default::default()
+            })
+            .await?;
+        if let Some(request) = pending.first() {
+            if let Some(sidecar) = state.store.scan_request_v2(&request.request_id).await? {
+                row["waiting_on"] = json!(sidecar.waiting_on);
+            }
+        }
+    }
     let active_jobs = running
         .jobs
         .iter()

@@ -1,12 +1,12 @@
 # Integration — plurx's seams with Curator, and how to prove they work
 
-> **Being replaced by** [PIPELINE-CONTRACT.md](features/PIPELINE-CONTRACT.md)
-> (pipeline contract v2, §4–§6). The scan seam described in §1 below changes
-> on `effort/pipeline-v2`: idempotent `request_key`, `wait_ms`,
-> `expected_files` with a per-file report, typed `422 path_outside_roots` /
-> `503 path_unreadable`, a status read for the creating key, and
-> `probe_paths`. Until that effort lands on `main`, this page describes the
-> code as it is; afterwards it is rewritten from the contract.
+> **Pipeline contract v2.** The scan seam in §1 is the one
+> [PIPELINE-CONTRACT.md](features/PIPELINE-CONTRACT.md) §4–§6 specifies:
+> idempotent `request_key`, `wait_ms`, `expected_files` with a per-file report,
+> typed `422 path_outside_roots` / `503 path_unreadable`, a status read for the
+> creating key, `probe_paths`, and targeted requests as their own job under
+> the library's mutation fence. Built on `effort/pipeline-v2`; the full rewrite
+> of this page from the contract is milestone M6.
 
 Companion to [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) (the master plan and
 why each seam exists) and [OPERATIONS.md](OPERATIONS.md) (running it day to
@@ -201,25 +201,75 @@ standalone EPUBs contribute bounded package metadata.
 in the response and written to the log, so one grep across three applications
 reconstructs a single transfer.
 
-Two success shapes, and the difference matters:
+**Contract v2 fields** (all optional; older callers send none):
+
+```json
+{"path":"/media/tv/Show/Season 02","series":{"tmdb":1399},
+ "correlation_id":"t-42-a3f9c1","source":"monarr",
+ "request_key":"t-42-a3f9c1/1/9c2e/1","wait_ms":10000,
+ "expected_files":[{"path":"/media/tv/Show/Season 02/Show.S02E01.mkv",
+                    "bytes":8123456789,"mtime_ns":1794076138123456789}]}
+```
+
+- `request_key` — Curator's idempotency key, attempt number last. The same key
+  from the same API key returns the same `request_id` and result, so a lost
+  response is never a second scan; a new attempt is a fresh scan. Curator
+  reuses the key after an ambiguous outcome and advances the attempt after a
+  confirmed retryable one.
+- `expected_files` — the files this import placed. Each is probed regardless
+  of plurx's size+mtime cache (a same-path replacement with equal size and
+  whole-second mtime looks unchanged to it) and reported per file in `files`:
+  `placed {item_id, file_id, bytes, mtime_ns}` from a fresh `stat`,
+  `skipped {reason}`, or `missing`. Curator calls a directory **visible** only
+  when every expected file is `placed` with matching `bytes` and `mtime_ns`.
+- `wait_ms` — plurx may hold the answer up to this long (cap 15 s) and reply
+  `200` with the result if the targeted scan finishes in time.
 
 | Code | Body | Means |
 |---|---|---|
-| `202` | `{"status":"queued","request_id":…,"correlation_id":…}` | the usual answer: the request is queued as library work and a worker scans it — queued, not dropped |
-| `200` | `{"status":"scanned","library_id":…,"request_id":…,"report":…,"items":…,"correlation_id":…}` | the replay case: the request had already finished by the time the handler re-read it, so the result is in the body |
+| `200` | `{"status":"scanned","library_id","request_id","report","items","files","correlation_id"}` | finished — within `wait_ms`, before the handler re-read it, or a replay of a finished `request_key` |
+| `202` | `{"status":"queued","request_id","correlation_id"}` | durably queued — not dropped; poll it |
+| `422` | `{"code":"path_outside_roots","error":"path is not under any library root","path","roots":[…]}` | the path is under no library root — **permanent**; `roots` is included because "wrong path" is only actionable if you can see the right ones |
+| `503` | `{"code":"path_unreadable","error","path","root","retry_after_s":60}` + `Retry-After: 60` | the path is under a root plurx cannot read right now (unmounted share, empty mount point, `ENOTCONN`, `EIO`, or missing beneath it) — **transient**; the same request succeeds once the share is back |
+| `400` | `{"code":"path_required",…}` or `{"error":…}` | no `path` (and no `probe_paths`), a relative path, or a malformed field |
 
-The handler does not wait for the scan: it enqueues, re-reads the request once,
-and answers `200` only when a worker happened to finish it in between. Expect
-`202` and poll.
+Containment is decided **lexically first** (`..` resolved, no symlink
+followed), so an unmounted share is never mistaken for a wrong path; a
+symlink that resolves outside its root is still `path_outside_roots`.
 
-Poll `GET /api/v1/scan/requests/{id}` (scope `status:read`) for
-`queued | running | done | failed`. Silently losing a request would leave a
-season half-indexed, so a busy plurx queues rather than refusing.
+Poll `GET /api/v1/scan/requests/{id}` for `queued | running | done | failed`.
+The key that created the request may read it with `scan:trigger` alone
+(another `scan:trigger` key gets 403; a `status:read` key reads any request).
+While queued the record says what it waits on in `waiting_on` —
+`full_scan:<library>` while a full scan holds the library, or
+`root_unreadable:<path>` — and once done it carries `files`. A failed record
+whose root dropped mid-scan carries `code: "path_unreadable"`; treat it as
+retryable. Silently losing a request would leave a season half-indexed, so a
+busy plurx queues rather than refusing.
 
-The out-of-roots rejection is a `422` with
-`{"error":"path is not under any library root","path":…,"roots":[…]}` — the
-`roots` list is deliberately included, because "wrong path" is only actionable
-if you can see what the right ones would have been.
+**The targeted job.** A targeted request is its own job,
+`library:targeted:{library_id}`, separate from the library's full scan. It is
+claimed ahead of a *pending* full scan and with a probe admission — `stat` and
+`ffprobe` only, no heavy-lane permit, so a busy GPU, a title scan or a playing
+viewer never delays it. It never runs beside a *running* full scan: both take
+the library's mutation fence, so the full scan's reconcile cannot prune what
+the targeted scan just inserted; the request waits (`waiting_on:
+full_scan:<library>`) and runs within one idle poll of the fence's release.
+Fragment index, Dolby Vision and cache work for the new item stay on the
+heavy lane as before. Settings → **Activity** lists the waiting job with its
+`waiting_on` and a Cancel.
+
+**Connection test.** `{"probe_paths":["/media/tv","/media/movies"]}` with no
+`path` answers `200 {"roots","visible","missing","outside_roots"}`: which of
+Curator's library roots plurx can see. Only a configured root or a path under
+one is ever `stat`ed; nothing is scanned. Needs `scan:trigger`.
+
+**Reconcile.** A library created now scans every six hours, so a notification
+that never arrived is found by the next sweep. Libraries that already existed
+keep their schedule — `Never` stays `Never` — and Settings → **Libraries**
+offers each one a one-click "Enable 6-hourly reconcile" beside the notice:
+*"Never: a missed Curator notification is found only by a manual scan, or at
+startup if 'Scan every library at startup' is on (it is off by default)."*
 
 **Where you see it.** Settings → **Libraries** shows the scan itself running:
 `scanning… N / M files` → `fetching metadata…` → `X added, Y updated, Z
@@ -241,12 +291,14 @@ curl -sS -X POST "$PLURX/api/v1/scan" \
        "correlation_id":"t-0-verify"}'
 ```
 
-**How to read it.** A rejection naming *"under any library root"* proves the
-key, the scope and the route all work — it is the wrong path and nothing else.
-A 401 means the key is wrong or revoked; a 403 means the key is real but
-lacks `scan:trigger`. `202` with `"status":"queued"` and a request id means
-plurx took it (there is no `accepted` status); whether the file was *usable*
-is the scan's business, not the seam's.
+**How to read it.** A `422 path_outside_roots` proves the key, the scope and
+the route all work — it is the wrong path and nothing else. A `503
+path_unreadable` means the path maps to a library root plurx cannot read right
+now: check the mount on the plurx side. A 401 means the key is wrong or
+revoked; a 403 means the key is real but lacks `scan:trigger`. `202` with
+`"status":"queued"` and a request id means plurx took it (there is no
+`accepted` status); whether the file was *usable* is what `files` answers once
+it is done.
 
 ---
 

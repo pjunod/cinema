@@ -555,6 +555,22 @@ test("durable owners, attempts and repair destinations use roster names", () => 
   Object.assign(painter.durable,{rows:[],repairs:[],detail:null});
 });
 
+test("a waiting targeted library request names what it waits on", () => {
+  const reason = new Function(
+    `let ACTIVITY_SNAPSHOT={}; const ME={is_admin:true}; function activitySourceRecovery(){ return []; }
+     ${shippedSource("durableJobReason")} return durableJobReason;`,
+  )();
+  const job = (waiting_on) => ({ kind: "library_scan", targeted: true, state: "queued", library_id: 3, waiting_on });
+  assert.equal(reason(job("full_scan:Movies")), "Waiting on: full scan of Movies");
+  assert.equal(reason(job("heavy_lane:title scan")), "Waiting on: heavy lane: title scan");
+  assert.equal(reason(job("root_unreadable:/20t/tv")), "Waiting on: root unreadable: /20t/tv");
+  assert.equal(reason(job("queue_position:2")), "Waiting on: queue position 2");
+  assert.equal(reason(job("")), "", "nothing in the way, nothing said");
+  assert.equal(reason({ ...job("full_scan:Movies"), targeted: false }), "", "a full scan has no waiting_on");
+  // The row prints it through esc(), like every other reason.
+  assert.match(shippedSource("durableQueueHtml"), /esc\(durableJobReason\(job\)/);
+});
+
 test("expired durable leases do not masquerade as live executions", () => {
   const now=Date.now();
   const job={id:"expired",kind:"subtitle_extract",state:"running",owner_node_id:"owner-id",

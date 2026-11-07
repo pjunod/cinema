@@ -132,6 +132,13 @@ function durableStateLabel(job){
 }
 function durableJobReason(job){
   if(job.error_code)return job.error_code;
+  // A targeted library request (pipeline contract v2 §5.1) says what it is
+  // waiting on; Cancel reaches it like any other queued library job.
+  if(job.targeted&&job.waiting_on){
+    const w=String(job.waiting_on),at=w.indexOf(":"),detail=w.slice(at+1);
+    const label=at<0?"":{full_scan:`full scan of ${detail}`,heavy_lane:`heavy lane: ${detail}`,root_unreadable:`root unreadable: ${detail}`,queue_position:`queue position ${detail}`}[w.slice(0,at)];
+    if(label)return `Waiting on: ${label}`;
+  }
   // The title scan also measures a Profile 7 FEL title for the reconstructed
   // Profile 8.1, on this node's GPU, while it runs (FEL-P81-RECONSTRUCTION.md).
   if(job.kind==="dv_title_scan"&&job.state==="running")return "Complete-title Dolby Vision scan. A Profile 7 FEL title is also measured on the GPU (render, encode and compare sample windows) to decide whether it is served the reconstructed Profile 8.1.";
