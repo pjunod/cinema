@@ -1894,20 +1894,20 @@ assert.equal(context.ACT_TIMER, null);
             "\n  cluster_store_legacy:", 1
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
-        # Full run 5274 exhausted twenty minutes during all-target checking;
-        # the compiler lanes share the effort's bounded thirty-minute allowance.
-        self.assertIn("timeout-minutes: 30", fast_rust)
-        metadata_jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        self.assertIn("timeout-minutes: 60", fast_rust)
+        compiler_pool = "runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]"
         for compiler_job in (
             metadata_jobs["rust_compile"],
+            workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
+        ):
+            compiler_header = compiler_job.split("    steps:", 1)[0]
+            self.assertIn(compiler_pool, compiler_header)
+        for compiler_job in (
+            fast_rust,
             metadata_jobs["cluster_wal"],
             workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
         ):
             compiler_header = compiler_job.split("    steps:", 1)[0]
-            self.assertIn(
-                "runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]",
-                compiler_header,
-            )
             self.assertRegex(
                 compiler_header,
                 r'(?m)^      CARGO_BUILD_JOBS: "1"$',
@@ -2602,8 +2602,8 @@ assert.equal(context.ACT_TIMER, null);
         # unchanged all-target compile and vendored denied-warning Clippy.
         full_jobs = workflow_job_blocks(".github/workflows/ci.yml")
         for lane, rust_job, minutes in (
-            ("effort", effort_jobs["rust_compile"], 30),
-            ("full compiler", full_jobs["rust_compile"], 30),
+            ("effort", effort_jobs["rust_compile"], 60),
+            ("full compiler", full_jobs["rust_compile"], 60),
         ):
             with self.subTest(lane=lane):
                 self.assertRegex(rust_job, rf"(?m)^    timeout-minutes: {minutes}$")
@@ -2624,7 +2624,7 @@ assert.equal(context.ACT_TIMER, null);
         # cannot authenticate; effort retains its separate finite budget.
         self.assertIn("timeout-minutes: 30", fast_jobs["preflight"])
         self.assertIn("timeout-minutes: 15", effort_jobs["preflight"])
-        self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 60", effort_jobs["rust_compile"])
         effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"', effort_rust_header)
         self.assertEqual(
@@ -4577,7 +4577,7 @@ assert.equal(context.ACT_TIMER, null);
                     }
                     and name == "rust_compile"
                 ):
-                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
+                    expected = high_cpu
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",
