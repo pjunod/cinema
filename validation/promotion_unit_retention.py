@@ -779,10 +779,17 @@ def verify_identity(api, raw, expected_digest, binding, candidate, attachment_id
     document = r.bounded_json(raw)
     pull = api.get('/pulls/' + str(r.positive(binding['pull_request'])))
     repository = r.positive(api.get('')['id'])
-    r.require(pull['state'] == 'open' and pull.get('merged') is False
-              and pull['head']['repo']['id'] == repository == pull['base']['repo']['id']
+    if 'landing_sha' in binding:
+        from validation.postmerge_unit_retention import landing_binding
+
+        r.require(landing_binding(api, binding['pull_request'], binding['landing_sha']) == binding,
+                  'Post-merge retention binding differs from authenticated main')
+    else:
+        r.require(pull['state'] == 'open' and pull.get('merged') is False
+                  and pull['base']['sha'] == binding['base_sha'],
+                  'Retention live promotion identity mismatch')
+    r.require(pull['head']['repo']['id'] == repository == pull['base']['repo']['id']
               and pull['head']['sha'] == candidate == binding['head_sha']
-              and pull['base']['sha'] == binding['base_sha']
               and pull['head']['ref'] == binding['head_ref'] and pull['base']['ref'] == 'main'
               and document['repository'] == repository and document['pr'] == pull['number']
               and document['branch'] == binding['head_ref']
