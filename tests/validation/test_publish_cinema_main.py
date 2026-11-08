@@ -109,6 +109,67 @@ class CinemaPublisherCase(unittest.TestCase):
         with self.assertRaises(ReceiptError):
             publish.successful_job(api, 9, expected)
 
+    def test_native_completion_requires_explicit_single_expected_success(self):
+        name = 'fixture::one'
+        for output in (
+            'test fixture::one ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n',
+            'test fixture::one ... diagnostic\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n',
+        ):
+            publish.require_single_native_pass(output, name)
+        for output in (
+            'test fixture::other ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n',
+            'test fixture::one ... pending\n\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n',
+            *('test fixture::one ... ' + disposition + '\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n'
+              for disposition in ('FAILED', 'ignored', 'diagnostic\nFAILED', 'diagnostic\nignored')),
+        ):
+            with self.subTest(output=output), self.assertRaises(ReceiptError):
+                publish.require_single_native_pass(output, name)
+
+    def test_native_partition_refuses_missing_overlapping_and_unknown_names(self):
+        inventory = {str(i) for i in range(4927)}
+        ignored = {str(i) for i in range(49)}
+        passing = inventory - ignored
+        publish.validate_daemon_partition(inventory, ignored, passing)
+        for invalid in (passing - {'49'}, passing | {'0'}, passing | {'unknown'}):
+            with self.subTest(invalid=len(invalid)), self.assertRaises(ReceiptError):
+                publish.validate_daemon_partition(inventory, ignored, invalid)
+
+    def test_filtered_native_outcomes_keep_targets_and_refuse_replayed_names(self):
+        rust = {'retained': {'fixture@src/lib.rs': ['retained']}}
+        raw = ('    Running unittests src/lib.rs (/x/fixture-aaaaaaaaaaaaaaaa)\n'
+               'fixture@src/lib.rs: 2 discovered, 1 authenticated passes, 1 selected\n'
+               'running 1 test\ntest fresh ... ok\n'
+               'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.01s\n'
+               '    Running unittests src/main.rs (/x/plurxd-bbbbbbbbbbbbbbbb)\n'
+               'plurxd@src/main.rs: 1 discovered, 0 authenticated passes, 1 selected\n'
+               'running 1 test\nfatal runtime error: stack overflow, aborting\n')
+        result = publish.partial_workspace_outcomes(raw.encode(), rust)
+        self.assertEqual(result['fixture@src/lib.rs']['outcomes'], {'fresh': 'pass'})
+        self.assertTrue(result['plurxd@src/main.rs']['interrupted'])
+        for invalid in (raw.replace('test fresh ...', 'test retained ...'),
+                        raw.replace('test fresh ... ok', 'test fresh ... ok\ntest fresh ... ok'),
+                        raw.replace('1 filtered out', '0 filtered out')):
+            with self.subTest(invalid=invalid), self.assertRaises(ReceiptError):
+                publish.partial_workspace_outcomes(invalid.encode(), rust)
+
+    def test_evidence_cache_preserves_values_and_refreshes_main(self):
+        class API:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, path, query=None):
+                self.calls += 1
+                return {'values': [self.calls]}
+
+        origin = API()
+        cached = publish.CachedReadAPI(origin)
+        first = cached.get('/actions/runs/1')
+        first['values'].append('mutated')
+        self.assertEqual(cached.get('/actions/runs/1'), {'values': [1]})
+        self.assertEqual(origin.calls, 1)
+        self.assertEqual(cached.get('/branches/main'), {'values': [2]})
+        self.assertEqual(cached.get('/branches/main'), {'values': [3]})
+
 
 if __name__ == '__main__':
     unittest.main()

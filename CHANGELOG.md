@@ -10,6 +10,18 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Jobs includes fresh CPU, GPU and heavy-worker capacity from learner nodes.
+  Worker observations use the member-scoped operations channel and remain
+  independent of voter-only playback and recording authority.
+- Pending native HLS segments advertise their bounded Retry-After interval.
+
+- Subtitle workers preserve a completed publication when a concurrent pressure
+  check observes that its source authority has retired. Changed original files
+  retain the existing not-found response instead of returning an internal error.
+- Source-retirement and deferred-companion diagnostics remain in their parent
+  operator log channels. Verified fleet publication checks the exact reviewed
+  image configuration before advancing the main tag.
+
 - Linux Dolby Vision reconstruction avoids inherited display adjustments and
   preserves software planar 10-bit samples. Its final Vulkan RGB cache rounds
   to the exact nearest 16-bit value. Shared PQ mapping retains small
