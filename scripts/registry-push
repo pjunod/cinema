@@ -43,7 +43,6 @@ index_digest() {
 
 verify_image() {
   local ref="$1" reported identity
-  docker pull --platform "linux/$EXPECTED_ARCH" "$ref"
   test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$ref")" \
     = "linux/$EXPECTED_ARCH"
   test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$ref")" \
@@ -61,34 +60,57 @@ verify_image() {
   scripts/container-restore-smoke "$ref"
 }
 
-if docker buildx imagetools inspect "$IMMUTABLE_REF" \
-    > /dev/null 2> inspect.err; then
-  echo "reusing existing immutable image $IMMUTABLE_REF"
-elif is_missing_ref "$IMMUTABLE_REF" inspect.err; then
-  docker build --target runtime-cluster \
-    --build-arg PLURX_BUILD_REF="$REF" \
-    --build-arg PLURX_BUILD_SHA="$FULL_SHA" \
-    --build-arg PLURX_BUILD_TREE="$SOURCE_TREE" \
-    --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-    --label "org.opencontainers.image.source=$SOURCE_URL" \
-    --label "org.opencontainers.image.revision=$FULL_SHA" \
-    --label "tv.plurx.build-ref=$REF" \
-    --label "tv.plurx.distribution=cluster" \
-    -t "$IMMUTABLE_REF" .
-  docker push "$IMMUTABLE_REF"
-else
-  cat inspect.err >&2
-  echo "registry state is indeterminate; refusing to publish" >&2
-  exit 1
-fi
+ensure_immutable() {
+  if docker buildx imagetools inspect "$IMMUTABLE_REF" \
+      > /dev/null 2> inspect.err; then
+    echo "reusing existing immutable image $IMMUTABLE_REF"
+  elif is_missing_ref "$IMMUTABLE_REF" inspect.err; then
+    docker build --target runtime-cluster \
+      --build-arg PLURX_BUILD_REF="$REF" \
+      --build-arg PLURX_BUILD_SHA="$FULL_SHA" \
+      --build-arg PLURX_BUILD_TREE="$SOURCE_TREE" \
+      --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+      --label "org.opencontainers.image.source=$SOURCE_URL" \
+      --label "org.opencontainers.image.revision=$FULL_SHA" \
+      --label "tv.plurx.build-ref=$REF" \
+      --label "tv.plurx.distribution=cluster" \
+      -t "$IMMUTABLE_REF" .
+    docker push "$IMMUTABLE_REF"
+  else
+    cat inspect.err >&2
+    echo "registry state is indeterminate; refusing to publish" >&2
+    exit 1
+  fi
+}
 
-verify_image "$IMMUTABLE_REF"
-immutable_digest="$(index_digest "$IMMUTABLE_REF")"
-test -n "$immutable_digest"
+if [[ ${PLURX_EXPECTED_IMAGE_ID+x} ]]; then
+  [[ "$PLURX_EXPECTED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    echo "PLURX_EXPECTED_IMAGE_ID must be a full sha256 image configuration ID" >&2
+    exit 1
+  }
+  immutable_digest="$(index_digest "$IMMUTABLE_REF")"
+  [[ "$immutable_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    echo "verified publication requires an existing immutable manifest" >&2
+    exit 1
+  }
+  pinned_ref="$IMAGE@$immutable_digest"
+  docker pull --platform "linux/$EXPECTED_ARCH" "$pinned_ref"
+  test "$(docker image inspect --format '{{.Id}}' "$pinned_ref")" = "$PLURX_EXPECTED_IMAGE_ID"
+  verify_image "$PLURX_EXPECTED_IMAGE_ID"
+  test "$(index_digest "$IMMUTABLE_REF")" = "$immutable_digest"
+  publish_from="$PLURX_EXPECTED_IMAGE_ID"
+else
+  ensure_immutable
+  docker pull --platform "linux/$EXPECTED_ARCH" "$IMMUTABLE_REF"
+  verify_image "$IMMUTABLE_REF"
+  immutable_digest="$(index_digest "$IMMUTABLE_REF")"
+  test -n "$immutable_digest"
+  publish_from="$IMMUTABLE_REF"
+fi
 
 # The moving alias changes only after the immutable registry copy passes its
 # architecture, provenance, binary-identity, and runtime smoke checks.
-docker tag "$IMMUTABLE_REF" "$FLEET_REF"
+docker tag "$publish_from" "$FLEET_REF"
 docker push "$FLEET_REF"
 fleet_digest="$(index_digest "$FLEET_REF")"
 test "$fleet_digest" = "$immutable_digest"

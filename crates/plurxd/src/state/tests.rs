@@ -2242,8 +2242,12 @@ async fn full_subtitle_coverage_settles_ready_without_spawning_a_pass() {
 
 #[tokio::test]
 async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_through_repair() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
     use crate::subtitle_ride_along::testing::{fixture, Sub};
-    use plurx_core::store::BackgroundJobStore;
+    use plurx_core::store::BackgroundJobStore as _;
 
     let fixture = fixture(9, &[Sub::Srt, Sub::Srt, Sub::Srt]);
     let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -2299,6 +2303,17 @@ async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_t
     assert_ne!(repair.request_id, initial.request_id);
     assert!(
         jobs.self_claim_subtitle_source(&repair.request_id, work.path())
+            .await,
+        "repair request: {:?}; jobs: {:?}",
+        store.analysis_request(&repair.request_id).await,
+        store
+            .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                node_id: None,
+                state: None,
+                kind: None,
+                after_id: None,
+                limit: 10,
+            })
             .await
     );
     let after = store

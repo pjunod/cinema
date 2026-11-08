@@ -2045,7 +2045,7 @@
     /// ceiling. Its producer bank must not enlarge the publication clock's
     /// separate advertised endpoint allowance.
     #[test]
-    fn rolling_flow_release_target_is_capped_by_the_publication_allowance() {
+    fn rolling_flow_release_target_keeps_the_bounded_private_source_bank() {
         let limits = AheadLimits {
             max_secs: HLS_AHEAD_MAX_SECS_DEFAULT,
             max_bytes: HLS_AHEAD_MAX_BYTES_DEFAULT,
@@ -2409,6 +2409,11 @@
         // Elapsed wall time cannot spend publication budget before delivery;
         // keep the 48 s capacity sample below the actual 58 s startup gate.
         session.start_seconds = 10.0;
+        session
+            .publication
+            .lock()
+            .await
+            .bind_startup_candidate_for_test(RollingStartupPolicy::Conservative);
         let started = Instant::now();
         // Even a slow producer is not judged below the fixed initial runway.
         session.progress.recent_milli.store(500, Relaxed);

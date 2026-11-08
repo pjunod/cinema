@@ -913,7 +913,7 @@ async fn own_rolling_retirement(
                     .restore_fallback_analysis_interest(store.as_ref())
                     .await
                 {
-                    tracing::warn!(target: "plurxd::transcode", %error,session=%session_log_id(&session_id),"exact fallback interest restore will retry after physical retirement");
+                    tracing::warn!(target: "plurxd::transcode", %error, session = %session_log_id(&session_id), "exact fallback interest restore will retry after physical retirement");
                     tokio::time::sleep(PREPUBLICATION_REAP_RETRY).await;
                     continue;
                 }

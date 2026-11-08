@@ -1785,7 +1785,8 @@ async fn accepted_hold_and_active_control_signal_the_real_producer_immediately()
     };
     assert!(
         !behind_status.suspended,
-        "a producer short of the next publication must resume"
+        "a producer short of the next publication must resume: hold={:?}; demand={:?}",
+        behind_status.hold_reason, behind_status.control_demand
     );
     assert_eq!(behind_status.hold_reason, None);
     assert_eq!(behind_status.control_demand, Some("active"));

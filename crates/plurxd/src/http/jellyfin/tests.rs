@@ -192,6 +192,10 @@ async fn jellyfin_native_hls_duplicate_entries_share_one_activation_and_preserve
 }
 #[tokio::test]
 async fn jellyfin_native_hls_encoded_without_copy_index_preserves_ranges_clock_and_stop() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
     Box::pin(native_hls_copy_flow(false, true)).await;
 }
 async fn retry_native_pending(
@@ -209,6 +213,7 @@ async fn retry_native_pending(
         if response.status() != StatusCode::SERVICE_UNAVAILABLE {
             break;
         }
+        let retry_after = response.headers().get("retry-after").cloned();
         let pending = response
             .into_body()
             .collect()
@@ -216,6 +221,12 @@ async fn retry_native_pending(
             .expect("pending body")
             .to_bytes();
         let pending: Value = serde_json::from_slice(&pending).expect("typed pending response");
+        if pending["code"] == "segment_pending" {
+            assert_eq!(
+                retry_after.as_ref().and_then(|v| v.to_str().ok()),
+                Some("1")
+            );
+        }
         assert!(
             pending["code"] == code || pending["code"] == "response_state_changed",
             "only native pending or a stale response cut is retryable: {pending}"

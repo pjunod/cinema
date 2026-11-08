@@ -14,6 +14,15 @@ source mapping**, not an automatic refinement proof. Source hashes in
 that set complete or that the abstractions are correct.
 
 
+## Source custody fixture review on 2026-11-08
+
+Integrating `d0e9349cb` into `0e2e8dd76` adds an explicit settlement to
+the lost claim acknowledgement test. The fixture joins its predecessor
+heartbeat and settles that owner's source custody before the successor claim.
+The cache-part producer change adds whitespace to its existing warning.
+The mapped claim, renewal, retirement and publication operations retain
+their reviewed behavior.
+
 ## Producer wait diagnostic on 2026-11-07
 
 Against `e2cdb1c4d`, the cache-part producer logs a failed child wait under

@@ -1903,6 +1903,10 @@ mod tests {
                     width: Some(3840),
                     height: Some(2160),
                     bit_depth: Some(10),
+                    dolby_vision: plurx_core::domain::DolbyVisionFacts {
+                        profile: Some(5),
+                        ..Default::default()
+                    },
                     hdr: Some("dolby_vision".into()),
                     hdr_format: Some("Dolby Vision · Profile 5".into()),
                     audio_streams: vec![AudioStream {
@@ -1919,6 +1923,65 @@ mod tests {
             )
             .await
             .expect("profile 5 file")
+    }
+
+    /// Enqueue captures demand and a source-free recipe. Only the claimed
+    /// executor may spend source-reader custody on a Profile 5 proof.
+    #[tokio::test]
+    async fn offline_request_defers_profile5_proof_until_owned_execution() {
+        use std::sync::atomic::Ordering;
+        let fixture = fixture_with_system(crate::state::SystemInfo {
+            dovi_reshape: true,
+            ..Default::default()
+        })
+        .await;
+        let file_id = insert_profile5(&fixture).await;
+        let hooks = fixture.state.transcode.test_hooks();
+        hooks
+            .dovi_pixel_proof_script
+            .lock()
+            .expect("script")
+            .push_back(crate::ffmpeg::DoviPixelProof::Inconclusive(
+                "proof must wait for a source owner".into(),
+            ));
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (code, body) = create_response(
+            &fixture,
+            file_id,
+            CreatePackage {
+                request_id,
+                height: 720,
+                audio_index: Some(0),
+                subtitle_index: None,
+            },
+        )
+        .await;
+        assert_eq!(code, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body["state"], "queued", "{body}");
+        assert_eq!(
+            hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+            0,
+            "HTTP enqueue must not open an original source"
+        );
+        assert_eq!(
+            hooks
+                .dovi_pixel_proof_script
+                .lock()
+                .expect("unspent script")
+                .len(),
+            1
+        );
+        let stats = fixture
+            .state
+            .store
+            .offline_package_stats("test-node", now_unix())
+            .await
+            .expect("offline package stats");
+        assert_eq!(
+            (stats.queued, stats.preparing, stats.ready, stats.failed),
+            (1, 0, 0, 0),
+            "demand is durable without claiming execution or a proved package"
+        );
     }
 
     /// Queueing captures metadata without reading the source. Only the claimed

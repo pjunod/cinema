@@ -2958,7 +2958,7 @@ async fn seed_real_file(store: &Arc<dyn Store>, path: &std::path::Path) -> i64 {
             movie,
             &path.to_string_lossy(),
             meta.len() as i64,
-            1,
+            crate::fragment_index_cluster::source_stamp(&meta).mtime,
             &ProbeResult {
                 duration_ms: Some(6_000),
                 container: Some("mkv".into()),
