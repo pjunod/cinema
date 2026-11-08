@@ -484,6 +484,8 @@ pub(crate) async fn subtitle_range(
     let payload = super::peer_transport::signed_response_payload(StatusCode::OK.as_u16(), &body);
     let signature = state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
         .sign_internal_peer_response(
             &auth.node_id,
             &auth.nonce,
@@ -511,6 +513,8 @@ pub(crate) async fn authorize(
     let node_id = auth.node_id.clone();
     if state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
         .authorize_internal_peer_request(&auth, method, path, body)
         .await
         .unwrap_or(false)

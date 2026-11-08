@@ -87,6 +87,27 @@ pub(crate) const SOURCE_PROOF_PENDING_RETRY_AFTER_SECS: u64 = 5;
 const PREDECESSOR_PROJECTION_FAST_WINDOW: Duration = Duration::from_secs(5);
 const PREDECESSOR_PROJECTION_RETRY_DELAY: Duration = Duration::from_secs(1);
 
+pub(super) async fn pin_shared_session_before_deadline<F>(
+    deadline: tokio::time::Instant,
+    pin: F,
+) -> Result<bool, String>
+where
+    F: std::future::Future<Output = Result<bool, plurx_core::error::StoreError>>,
+{
+    tokio::time::timeout_at(deadline, pin)
+        .await
+        .map_err(|_| {
+            crate::transcode::start_infrastructure_error(
+                "shared cache pin exceeded the start deadline",
+            )
+        })?
+        .map_err(|error| {
+            crate::transcode::start_infrastructure_error(format!(
+                "pinning the shared cache session: {error}"
+            ))
+        })
+}
+
 async fn pin_shared_session_for_local_start<F>(
     deadline: tokio::time::Instant,
     pin: F,
@@ -94,7 +115,7 @@ async fn pin_shared_session_for_local_start<F>(
 where
     F: std::future::Future<Output = Result<bool, StoreError>>,
 {
-    super::internal_media_sessions::pin_shared_session_before_deadline(deadline, pin)
+    pin_shared_session_before_deadline(deadline, pin)
         .await
         .map_err(|error| {
             if crate::transcode::is_start_infrastructure_error(&error) {

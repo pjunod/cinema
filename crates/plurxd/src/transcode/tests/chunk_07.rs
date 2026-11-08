@@ -250,7 +250,10 @@ async fn cancelled_copy_registration_rejection_keeps_exact_cleanup_ownership() {
 /// A process that outlives the test unless lifecycle cleanup reaps it.
 fn long_running_child() -> Child {
     let mut cmd = tokio::process::Command::new("sleep");
-    cmd.arg("60").process_group(0).kill_on_drop(true);
+    // AttemptChild applies Linux stop/resume/terminate to the producer group.
+    #[cfg(target_os = "linux")]
+    cmd.process_group(0);
+    cmd.arg("60").kill_on_drop(true);
     cmd.spawn().expect("spawn sleep")
 }
 
@@ -2526,7 +2529,7 @@ async fn offline_preempts_speculation_and_resumes_its_published_part() {
         )
         .audio
         .expect("canonical producer audio");
-    let package_id = "0f362c6d-9f82-49c1-bce4-0f2f62f32308";
+    let package_id = uuid::Uuid::new_v4().to_string();
     let requested = NewOfflinePackage {
         audio_recipe: Some(serde_json::to_string(&audio_delivery).expect("audio recipe")),
         id: package_id.to_owned(),
@@ -2548,7 +2551,7 @@ async fn offline_preempts_speculation_and_resumes_its_published_part() {
         subtitle_mode: "none".to_owned(),
         estimated_bytes: 1_000_000,
         reserved_bytes: 1_100_000,
-        expires_at: crate::state::clock_ms() / 1_000 + 600,
+        expires_at: crate::media_sessions::unix_ms() / 1000 + 3_600,
     };
     assert!(matches!(
         store

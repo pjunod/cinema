@@ -1,0 +1,23 @@
+[package]
+name = "plurx-storage-migrate"
+description = "Version-matched, separately packaged legacy storage migration helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+plurx-core = { path = "../plurx-core", features = ["hiqlite-store"] }
+clap = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-util = { workspace = true }
+libc = { workspace = true }
+
+[lints]
+workspace = true

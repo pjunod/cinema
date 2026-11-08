@@ -906,6 +906,7 @@ pub(crate) struct LiveTvSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "cluster")]
 pub(crate) struct SnapshotRequest {
     pub(crate) generation: i64,
     pub(crate) force: bool,
@@ -5498,10 +5499,7 @@ impl LiveTvManager {
         let mut applied = None;
         let mut watch_open = true;
         loop {
-            if self.transports_held() > 0
-                || !proved
-                || matches!(changes, SettingsChangeSource::Polled)
-            {
+            if self.transports_held() > 0 || !proved || changes.requires_polling() {
                 self.metrics
                     .settings_watched
                     .store(false, Ordering::Release);
@@ -6146,6 +6144,7 @@ impl LiveTvManager {
         .then(|| guide.clone())
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn remember_relayed_guide(&self, generation: i64, guide: LiveTvGuide) {
         if guide.freshness != GuideFreshness::Unavailable {
             let cached = CachedGuide {

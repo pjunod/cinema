@@ -18,10 +18,11 @@ use plurx_core::cluster::coordination::LeaseClaim;
 use plurx_core::cluster::coordination::{ClusterJobAuthority, StoreCoordinator};
 #[cfg(test)]
 use plurx_core::domain::ArtworkAttempt;
+#[cfg(any(test, feature = "cluster"))]
+use plurx_core::domain::ItemKind;
 use plurx_core::domain::{
-    BookMetadataPatch, BookMetadataSource, Item, ItemKind, Library, LibraryKind, MediaFile,
-    MetadataPatch, NewPretranscodeJob, OfflinePackageStats, PlaybackEvent,
-    PretranscodeRequirements,
+    BookMetadataPatch, BookMetadataSource, Item, Library, LibraryKind, MediaFile, MetadataPatch,
+    NewPretranscodeJob, OfflinePackageStats, PlaybackEvent, PretranscodeRequirements,
 };
 use plurx_core::error::StoreError;
 use plurx_core::metadata::book::BookEnrichReport;
@@ -746,22 +747,31 @@ pub struct AppState {
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
     pub catalogue: CatalogueReader,
     /// Read-only projection of the selected backend's watch-state convergence.
-    pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    #[cfg(feature = "cluster")]
+    pub replication: Option<plurx_core::cluster::migration::status::ReplicationMonitor>,
     /// Monotonic, Store-free authority for mutable media and readiness.
     pub(crate) serving: crate::serving_fence::ServingFence,
     /// Join/add/remove lifecycle and privacy-safe per-node health.
-    pub membership: plurx_core::cluster::membership::MembershipManager,
+    #[cfg(feature = "cluster")]
+    pub membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    /// Actual durable deployment mode, selected before constructing services.
+    pub(crate) storage_mode: plurx_core::storage::mode::StorageMode,
+    pub(crate) local_source: Option<plurx_core::sharing_source_sessions::LocalSourceAuthority>,
     /// Shared complete observation owner. Pending startup hands this exact
     /// handle to normal HTTP; a second loop cannot claim its receiver.
-    pub(crate) clock_observer: crate::clock_offset::ClockObserver,
+    #[cfg(feature = "cluster")]
+    pub(crate) clock_observer: Option<crate::clock_offset::ClockObserver>,
     /// Bounded authenticated client for node-local activity snapshots.
     #[allow(dead_code)] // aggregation child #326 is the first consumer
-    pub peer_activity: crate::http::internal_activity::PeerActivityClient,
+    #[cfg(feature = "cluster")]
+    pub peer_activity: Option<crate::http::internal_activity::PeerActivityClient>,
     /// Five-second cache for authenticated, bounded cluster-status fan-out.
     /// This is process-local diagnostics state and never writes to Store.
+    #[cfg(feature = "cluster")]
     pub(crate) peer_status_cache: crate::http::cluster_operations::PeerStatusCache,
     /// Five-second, background-refreshed committed-membership projection for
     /// operations requests. Request handlers cannot reach Store through it.
+    #[cfg(feature = "cluster")]
     pub(crate) membership_status_cache: crate::http::cluster_operations::MembershipStatusCache,
     /// Fresh, authenticated media-capability snapshots and diagnostics-only
     /// placement offers. P4 observes candidates; it never starts a session.
@@ -770,6 +780,7 @@ pub struct AppState {
     pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     /// What tells an idle reader of replicated settings that a save may have
     /// landed on another node. Each reader takes its own clone.
+    #[cfg(feature = "cluster")]
     pub(crate) settings_changes: crate::settings_changes::SettingsChangeSource,
     /// Always-compiled HDHomeRun configuration, readiness, and lineup owner.
     pub(crate) live_tv: Arc<crate::live_tv::LiveTvManager>,
@@ -971,6 +982,41 @@ fn stored_luminance(probe_json: &str) -> plurx_core::domain::ProbeResult {
 }
 
 impl AppState {
+    pub(crate) fn is_replicated(&self) -> bool {
+        #[cfg(feature = "cluster")]
+        {
+            self.membership
+                .as_ref()
+                .is_some_and(|membership| membership.is_replicated())
+        }
+        #[cfg(not(feature = "cluster"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(any(test, feature = "cluster"))]
+    pub(crate) fn cluster_clock_guard(&self) -> Arc<plurx_core::cluster::clock::ClusterClockGuard> {
+        #[cfg(feature = "cluster")]
+        if let Some(membership) = &self.membership {
+            return membership.clock_guard();
+        }
+        Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(false))
+    }
+
+    pub(crate) fn local_maintenance_active(&self) -> bool {
+        #[cfg(feature = "cluster")]
+        {
+            self.membership
+                .as_ref()
+                .is_some_and(|membership| membership.local_maintenance_active())
+        }
+        #[cfg(not(feature = "cluster"))]
+        {
+            false
+        }
+    }
+
     /// Whether PGS subtitle tracks are served through the `pgs-v1` overlay.
     ///
     /// Read at the request boundary rather than latched at boot, so an
@@ -1009,13 +1055,15 @@ impl AppState {
     /// once one is going to consult the store, so a manifest poll for a warm
     /// overlay generation pays nothing for it.
     pub(crate) fn subtitle_source_access(&self) -> crate::subtitle_source::StoreAccess {
-        crate::subtitle_source::StoreAccess::from_setting(
+        let access = crate::subtitle_source::StoreAccess::from_setting(
             Arc::clone(&self.store),
             &self.runtime_cache_dir,
         )
         .on_node(Some(&self.node_id))
-        .with_membership(self.membership.clone())
-        .with_jobs(Arc::clone(&self.jobs))
+        .with_jobs(Arc::clone(&self.jobs));
+        #[cfg(feature = "cluster")]
+        let access = access.with_membership(self.membership.clone());
+        access
     }
 
     pub(crate) async fn subtitle_backfill_status(
@@ -1087,16 +1135,28 @@ impl AppState {
                 // data directory to resolve it from, so nothing sealed under
                 // it is expected to outlive the process.
                 credential_key: Arc::new(CredentialKey::generate()),
-                replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-                membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+                #[cfg(feature = "cluster")]
+                replication: None,
+                #[cfg(feature = "cluster")]
+                membership: None,
                 cluster_id: String::new(),
                 shared_cache_dir: PathBuf::new(),
                 shared_cache_id: String::new(),
                 catalogue,
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
                 data_dir: PathBuf::new(),
-                credential_key_path: PathBuf::new(),
-                backup_client: None,
+                storage_mode: plurx_core::storage::mode::StorageMode::Sqlite,
+                local_source: None,
+                settings_changes: crate::settings_changes::SettingsChangeSource::LocalOnly,
+                backup_provider: crate::backup::native::NativeBackupProvider::new(
+                    PathBuf::new(),
+                    PathBuf::new(),
+                    plurx_core::storage::LocalIdentity {
+                        instance_id: String::new(),
+                        node_id: String::new(),
+                    },
+                    String::new(),
+                ),
             },
             store,
             dirs,
@@ -1126,7 +1186,9 @@ impl AppState {
             trusted_proxies,
             scan_prune_percent,
             credential_key,
+            #[cfg(feature = "cluster")]
             replication,
+            #[cfg(feature = "cluster")]
             membership,
             cluster_id,
             shared_cache_dir,
@@ -1134,11 +1196,32 @@ impl AppState {
             catalogue,
             snapshot_recovery_budgets,
             data_dir,
-            credential_key_path,
-            backup_client,
+            storage_mode,
+            local_source,
+            settings_changes,
+            backup_provider,
         } = config;
+        #[cfg(not(feature = "cluster"))]
+        let membership: Option<crate::cluster_capability::Membership> = None;
         crate::source_custody::configure_settlement_journal(&data_dir);
-        let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
+        let serving = match storage_mode {
+            plurx_core::storage::mode::StorageMode::Sqlite => {
+                crate::serving_fence::ServingFence::local()
+            }
+            #[cfg(feature = "cluster")]
+            plurx_core::storage::mode::StorageMode::Cluster => {
+                crate::serving_fence::ServingFence::new(
+                    replication
+                        .as_ref()
+                        .expect("cluster mode requires actual replication service")
+                        .metrics_handle(),
+                )
+            }
+            #[cfg(not(feature = "cluster"))]
+            plurx_core::storage::mode::StorageMode::Cluster => {
+                panic!("cluster storage cannot be composed by a standalone build")
+            }
+        };
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -1163,13 +1246,28 @@ impl AppState {
         // registry can distinguish active tuner scratch from restart debris.
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
+        let job_authority: Arc<dyn ClusterJobAuthority> = match storage_mode {
+            plurx_core::storage::mode::StorageMode::Sqlite => {
+                Arc::new(crate::job_lease::LocalJobAuthority)
+            }
+            #[cfg(feature = "cluster")]
+            plurx_core::storage::mode::StorageMode::Cluster => Arc::new(
+                membership
+                    .clone()
+                    .expect("cluster mode requires actual membership"),
+            ),
+            #[cfg(not(feature = "cluster"))]
+            plurx_core::storage::mode::StorageMode::Cluster => {
+                panic!("cluster work cannot be composed by a standalone build")
+            }
+        };
         let jobs = Arc::new(
             JobManager::new_with_scan_prune_percent(
                 Arc::clone(&store),
                 artwork_dir.clone(),
                 scan_prune_percent,
                 node_id.clone(),
-                Arc::new(membership.clone()),
+                job_authority,
             )
             .with_source_checkpoint_dir(
                 (!data_dir.as_os_str().is_empty())
@@ -1183,30 +1281,11 @@ impl AppState {
             data_dir.join("sharing-tls"),
             sharing_network,
         ));
-        // A replicated daemon applies the Raft log in this process; that watch
-        // is how an idle settings reader (the Live TV observer, the takeover
-        // gate, the clock-enforcement follower) learns of a save elsewhere.
-        let settings_changes = match backup_client
-            .as_ref()
-            .and_then(|client| client.local_db_raft_metrics().ok())
-        {
-            Some(applied) => crate::settings_changes::SettingsChangeSource::Applied(applied),
-            None if membership.is_replicated() => {
-                crate::settings_changes::SettingsChangeSource::Polled
-            }
-            None => crate::settings_changes::SettingsChangeSource::LocalOnly,
-        };
         let subtitle_models = Arc::new(crate::subtitle_models::Runtime::new(&data_dir));
-        let backup = crate::backup::BackupManager::new(
+        let backup = crate::backup::BackupManager::new_with_provider(
             Arc::clone(&store),
             Arc::clone(&jobs),
-            backup_client,
-            data_dir,
-            credential_key_path,
-            node_id.clone(),
-            credential_key.id().to_owned(),
-            Duration::from_secs(snapshot_recovery_budgets.transfer_secs)
-                .saturating_add(Duration::from_secs(45)),
+            backup_provider,
         );
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
@@ -1258,7 +1337,7 @@ impl AppState {
                 renditions,
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
-                Some(membership.clone()),
+                membership.clone(),
             )
             .with_subtitle_jobs(Arc::clone(&jobs))
             .with_serving_authority(serving.authority())
@@ -1304,9 +1383,17 @@ impl AppState {
             membership.clone(),
             Arc::clone(&store),
         );
-        let cache_only_admin_proofs =
-            crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
-        let live_tv_peers = crate::http::live_tv::LiveTvPeers::new(membership.clone());
+        let cache_only_admin_proofs = crate::http::CacheOnlyAdminProofCache::new(
+            storage_mode == plurx_core::storage::mode::StorageMode::Cluster,
+        );
+        #[cfg(feature = "cluster")]
+        let live_tv_peers = membership
+            .as_ref()
+            .map_or_else(crate::http::live_tv::LiveTvPeers::new_local, |membership| {
+                crate::http::live_tv::LiveTvPeers::new(membership.clone())
+            });
+        #[cfg(not(feature = "cluster"))]
+        let live_tv_peers = crate::http::live_tv::LiveTvPeers::new_local();
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),
             Arc::clone(&system),
@@ -1329,18 +1416,29 @@ impl AppState {
             jellyfin_standard_port: Default::default(),
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
+            #[cfg(feature = "cluster")]
             replication,
-            peer_activity: crate::http::internal_activity::PeerActivityClient::new(
-                membership.clone(),
-            ),
+            storage_mode,
+            local_source,
+            #[cfg(feature = "cluster")]
+            peer_activity: membership.as_ref().map(|membership| {
+                crate::http::internal_activity::PeerActivityClient::new(membership.clone())
+            }),
+            #[cfg(feature = "cluster")]
             peer_status_cache: Default::default(),
+            #[cfg(feature = "cluster")]
             membership_status_cache: Default::default(),
             serving,
-            clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
-            node_hostname: membership.local_hostname(),
+            #[cfg(feature = "cluster")]
+            clock_observer: membership
+                .as_ref()
+                .map(|membership| crate::clock_offset::ClockObserver::new(membership.clone())),
+            node_hostname: crate::system_hostname(),
+            #[cfg(feature = "cluster")]
             membership,
             media_pool,
             media_sessions,
+            #[cfg(feature = "cluster")]
             settings_changes,
             live_tv,
             live_tv_peers,
@@ -1390,6 +1488,43 @@ impl AppState {
             hls_route_hooks: crate::http::hls::unfilled_hls_route_hooks(),
             started_at: Instant::now(),
         }
+    }
+
+    pub(crate) fn source_authority_provider(
+        &self,
+    ) -> crate::source_authority::SourceAuthoritySource {
+        match self.storage_mode {
+            plurx_core::storage::mode::StorageMode::Sqlite => {
+                crate::source_authority::SourceAuthoritySource::local(
+                    self.local_source.clone(),
+                    self.sharing.accepted_drivers.boot_id(),
+                )
+            }
+            #[cfg(feature = "cluster")]
+            plurx_core::storage::mode::StorageMode::Cluster => match self.membership.clone() {
+                Some(membership) => {
+                    crate::cluster_runtime::source_admission::from_membership(membership)
+                }
+                None => crate::source_authority::SourceAuthoritySource::local(
+                    None,
+                    self.sharing.accepted_drivers.boot_id(),
+                ),
+            },
+            #[cfg(not(feature = "cluster"))]
+            plurx_core::storage::mode::StorageMode::Cluster => {
+                crate::source_authority::SourceAuthoritySource::local(
+                    None,
+                    self.sharing.accepted_drivers.boot_id(),
+                )
+            }
+        }
+    }
+
+    pub(crate) async fn source_admission_members(
+        &self,
+    ) -> Result<Option<plurx_core::sharing_source_sessions::SourceAdmissionMembers>, StoreError>
+    {
+        self.source_authority_provider().observe().await
     }
 
     /// Refresh all Store-backed Prometheus gauges as one complete sample.
@@ -1525,16 +1660,20 @@ pub struct AppConfig {
     /// existing Trakt rows fails before any subsystem starts.
     pub credential_key: Arc<CredentialKey>,
     /// Actual backend selected before HTTP starts; tests default to SQLite.
-    pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    pub membership: plurx_core::cluster::membership::MembershipManager,
+    #[cfg(feature = "cluster")]
+    pub replication: Option<plurx_core::cluster::migration::status::ReplicationMonitor>,
+    #[cfg(feature = "cluster")]
+    pub membership: Option<plurx_core::cluster::membership::MembershipManager>,
     pub cluster_id: String,
     pub shared_cache_dir: PathBuf,
     pub shared_cache_id: String,
     pub catalogue: CatalogueReader,
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
     pub data_dir: PathBuf,
-    pub credential_key_path: PathBuf,
-    pub backup_client: Option<hiqlite::Client>,
+    pub storage_mode: plurx_core::storage::mode::StorageMode,
+    pub local_source: Option<plurx_core::sharing_source_sessions::LocalSourceAuthority>,
+    pub settings_changes: crate::settings_changes::SettingsChangeSource,
+    pub backup_provider: Arc<dyn crate::backup::BackupProvider>,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.
@@ -1722,7 +1861,7 @@ pub struct JobManager {
     job_authority: Arc<dyn ClusterJobAuthority>,
     /// Exact committed membership and internal addressing for optional peer
     /// hydration. Tests and recovery-only construction deliberately omit it.
-    membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    membership: Option<crate::cluster_capability::Membership>,
     artwork_dir: PathBuf,
     scan_prune_percent: u8,
     /// Test-only provider override so the targeted-scan seam can be exercised
@@ -1832,6 +1971,7 @@ pub struct JobManager {
     /// EPUB parsing uses `spawn_blocking`, which cannot be cancelled by the
     /// artwork lease. Keep timed-out reads single-flight until the blocking
     /// worker itself exits so a slow mount cannot accumulate detached reads.
+    #[cfg(feature = "cluster")]
     book_cover_workers: metadata::book::CoverMaterializationWorkers,
     /// What the last genre-backfill pass did. Server-wide rather than per
     /// library because the backfill is: it walks item ids, not libraries.
@@ -1957,6 +2097,7 @@ fn is_zero_usize(value: &usize) -> bool {
 
 #[cfg(test)]
 impl AnalysisProgress {
+    #[cfg(feature = "cluster")]
     pub(crate) fn test_row(job_id: &str, title: &str) -> Self {
         Self {
             job_id: job_id.to_owned(),
@@ -3814,6 +3955,7 @@ impl JobManager {
             subtitle_backfill_enqueued_process: AtomicU64::new(0),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "cluster")]
             book_cover_workers: metadata::book::CoverMaterializationWorkers::default(),
             last_genre_backfill: Mutex::new(None),
         }
@@ -3821,9 +3963,9 @@ impl JobManager {
 
     fn with_membership(
         mut self,
-        membership: plurx_core::cluster::membership::MembershipManager,
+        membership: Option<crate::cluster_capability::Membership>,
     ) -> Self {
-        self.membership = Some(membership);
+        self.membership = membership;
         self
     }
 
@@ -5743,6 +5885,7 @@ impl JobManager {
 
     /// Leader-arbitrated repair path. Every replicated provider mutation is
     /// conditioned on this owner/term proof inside its database statement.
+    #[cfg(feature = "cluster")]
     pub async fn refresh_item_artwork_fenced(
         &self,
         item_id: i64,
@@ -5843,6 +5986,7 @@ impl JobManager {
     /// publishing catalogue fields. Books includes EPUB and audiobook covers;
     /// `None` means the library is provider-backed and therefore requires the
     /// cluster-wide source fence.
+    #[cfg(feature = "cluster")]
     pub async fn materialize_local_item_artwork(
         &self,
         item_id: i64,

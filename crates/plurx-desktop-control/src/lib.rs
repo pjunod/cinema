@@ -10,6 +10,8 @@ pub mod ipc;
 #[cfg(unix)]
 pub mod launch_lock;
 #[cfg(unix)]
+pub mod migration_helper;
+#[cfg(unix)]
 pub mod native;
 #[cfg(unix)]
 pub mod package;

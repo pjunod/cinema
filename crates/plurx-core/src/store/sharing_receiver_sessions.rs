@@ -1844,13 +1844,60 @@ mod tests {
                     .await
                     .expect("no fabricated custody")
                     .is_none());
+                // A native Receiver uses the actual published relay proof and
+                // its local registry identity, with no replicated roster.
+                let boot = Uuid::new_v4();
+                let registration = crate::sharing_ingress_custody::IngressRegistration {
+                    node_id: route.owner_node_id.clone(),
+                    boot_id: boot,
+                    connection_id: Uuid::new_v4(),
+                    driver_sequence: 1,
+                    registration_sequence: 1,
+                    closed_confirmation: None,
+                };
+                let mut wrong_node = registration.clone();
+                wrong_node.node_id = "different-native-owner".into();
+                assert_eq!(
+                    store
+                        .register_receiver_ingress(&proof, None, boot, &wrong_node)
+                        .await
+                        .expect("native owner mismatch refuses"),
+                    crate::sharing_ingress_custody::CustodyMutation::Refused
+                );
+                assert_eq!(
+                    store
+                        .register_receiver_ingress(&proof, None, Uuid::new_v4(), &registration)
+                        .await
+                        .expect("native registry boot mismatch refuses"),
+                    crate::sharing_ingress_custody::CustodyMutation::Refused
+                );
+                assert!(store
+                    .receiver_ingress_snapshot(&route)
+                    .await
+                    .expect("refused registrations cannot fabricate custody")
+                    .is_none());
+                if pooled {
+                    assert_eq!(
+                        store
+                            .register_receiver_ingress(&proof, None, boot, &registration)
+                            .await
+                            .expect("actual native relay and local registry admit"),
+                        crate::sharing_ingress_custody::CustodyMutation::Applied
+                    );
+                    let registered = store
+                        .receiver_ingress_snapshot(&route)
+                        .await
+                        .expect("native custody snapshot")
+                        .expect("native Register retained its physical obligation");
+                    assert!(registered.state.contains_driver(&registration));
+                }
                 let sealed = store
                     .seal_receiver_ingress_route(&route, &proof.owner_identity())
                     .await
                     .expect("install absent retirement fence")
                     .expect("sealed fence");
                 assert!(sealed.state.is_sealed());
-                let boot = Uuid::new_v4();
+                assert_eq!(sealed.state.contains_driver(&registration), pooled);
                 let late = crate::sharing_ingress_custody::IngressRegistration {
                     node_id: route.owner_node_id.clone(),
                     boot_id: boot,
@@ -1875,6 +1922,39 @@ mod tests {
                     .expect("never missing-row proof");
                 assert!(after.state.is_sealed());
                 assert!(!after.state.contains_driver(&late));
+                if pooled {
+                    assert_eq!(after.state.open().count(), 1);
+                    assert!(!after.state.settled());
+                    // Core registered only model metadata, not an HTTP driver.
+                    // Close that exact model slot before the later retirement
+                    // matrix; this ACK exercises SQL fencing, not a physical
+                    // driver-closure receipt or Source settlement evidence.
+                    let confirmation =
+                        crate::auth::hash_token("metadata-only native ingress closure");
+                    assert_eq!(
+                        store
+                            .acknowledge_receiver_ingress(
+                                &route,
+                                &after,
+                                &registration,
+                                &confirmation,
+                            )
+                            .await
+                            .expect("exact model ingress closure"),
+                        crate::sharing_ingress_custody::CustodyMutation::Applied
+                    );
+                    let closed = store
+                        .receiver_ingress_snapshot(&route)
+                        .await
+                        .expect("model closure readback")
+                        .expect("closure fence retained");
+                    assert!(closed.state.is_sealed());
+                    assert_eq!(closed.state.open().count(), 0);
+                    assert!(closed.state.settled());
+                    assert!(closed
+                        .state
+                        .registration_fenced_after_closure(&registration));
+                }
                 let mut stale = route.clone();
                 stale.owner_epoch += 1;
                 assert!(store

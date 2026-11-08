@@ -30,6 +30,7 @@
 //! questions, not a gap to be closed by relaxing a threshold.
 
 use axum::{extract::State, Json};
+#[cfg(feature = "cluster")]
 use plurx_core::cluster::membership::MembershipError;
 use plurx_core::domain::{PlaybackEvent, PlaybackEventQuery};
 use serde::Serialize;
@@ -109,9 +110,53 @@ pub(crate) struct DeveloperReadiness {
 
 /// The clock guard's enable switch. Every row is advisory: an operator can
 /// turn enforcement on with any of them unmet, and off at any time.
+fn absent_cluster_requirement(
+    state: &AppState,
+    id: &'static str,
+    title: &'static str,
+) -> DeveloperRequirement {
+    let native = state.storage_mode == plurx_core::storage::mode::StorageMode::Sqlite;
+    DeveloperRequirement {
+        id,
+        title,
+        status: if native { RequirementStatus::Unobservable } else { RequirementStatus::Unavailable },
+        evidence: if native {
+            "This process uses native SQLite and has no cluster membership runtime. No peer roster, quorum or heartbeat capability was observed. Saved preferences remain unchanged."
+        } else {
+            "The selected storage mode has no available membership runtime in this process. No peer roster, quorum or heartbeat capability can be reported."
+        }.to_owned(),
+    }
+}
+
 fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref().filter(|_| state.is_replicated()) {
+        return replicated_clock_measurement(membership, enforced);
+    }
+    DeveloperEnableItem {
+        id: "cluster_clock",
+        title: "Cluster clock guard enforcement",
+        enabled: Some(enforced),
+        setting: Some("cluster_clock_guard_enforced"),
+        requirements: [
+            ("coverage", "Every voter reachable and observed"),
+            ("upper_bound", "Worst observed offset within 2 s"),
+            ("ntp", "NTP running on every node"),
+            ("consequence", "What enforcement refuses"),
+        ]
+        .into_iter()
+        .map(|(id, title)| absent_cluster_requirement(state, id, title))
+        .collect(),
+    }
+}
+
+#[cfg(feature = "cluster")]
+fn replicated_clock_measurement(
+    membership: &plurx_core::cluster::membership::MembershipManager,
+    enforced: bool,
+) -> DeveloperEnableItem {
     use plurx_core::cluster::clock::{ClusterClockState, CLOCK_OFFSET_REFUSAL_MS};
-    let guard = state.membership.clock_guard();
+    let guard = membership.clock_guard();
     let snapshot = guard.snapshot();
     let would_refuse = guard.check_evidence().err();
     let peers = snapshot.peers.len();
@@ -645,16 +690,23 @@ fn playback_switch(settings: &std::collections::BTreeMap<String, String>, key: &
 /// How many nodes could own a playback session, as far as this node can read.
 /// `Ok(1)` for a standalone install, which has no roster to read.
 async fn session_owner_candidates(state: &AppState) -> Result<usize, String> {
-    if !state.membership.is_replicated() {
+    if state.storage_mode == plurx_core::storage::mode::StorageMode::Sqlite {
         return Ok(1);
     }
-    match tokio::time::timeout(std::time::Duration::from_secs(3), state.membership.status()).await {
-        Ok(Ok(status)) => Ok(status.nodes.len()),
-        Ok(Err(error)) => Err(format!("the local roster could not be read ({error})")),
-        Err(_) => Err(
-            "the local roster did not answer within the three-second observation budget".to_owned(),
-        ),
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref().filter(|_| state.is_replicated()) {
+        return match tokio::time::timeout(std::time::Duration::from_secs(3), membership.status())
+            .await
+        {
+            Ok(Ok(status)) => Ok(status.nodes.len()),
+            Ok(Err(error)) => Err(format!("the local roster could not be read ({error})")),
+            Err(_) => Err(
+                "the local roster did not answer within the three-second observation budget"
+                    .to_owned(),
+            ),
+        };
     }
+    Err("the replicated membership runtime is unavailable".to_owned())
 }
 
 /// Fit Auto to display (`playback.display_aware_auto`), and what it silently
@@ -1092,14 +1144,17 @@ async fn bounded_catalogue_reads(state: &AppState, enabled: bool) -> DeveloperEn
             }.into(),
         }, DeveloperRequirement {
             id: "watch_floor", title: "Watch state consistency", status: RequirementStatus::Met,
-            evidence: "Watch reads require a valid client write-position echo and a sufficiently applied replica. Missing, expired or unknown positions use authority; authentication always uses authority.".into(),
+            evidence: if state.is_replicated() {
+                "Watch reads require a valid client write-position echo and a sufficiently applied replica. Missing, expired or unknown positions use authority; authentication always uses authority."
+            } else {
+                "Watch reads and authentication use the authoritative local Store. This process performs no replica read or quorum-watermark optimization."
+            }.into(),
         }],
     }
 }
 
 /// Facts only: these observations are never consulted by settings updates.
 async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
-    use plurx_core::cluster::coordination::ClusterJobAuthority;
     use plurx_core::store::background_jobs::JobKind;
     use RequirementStatus::{Met, Unavailable, Unknown, Unmet};
     let (queue_status, queue_evidence) = match tokio::time::timeout(
@@ -1118,24 +1173,31 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
         Met
     };
     let capacity_idle = state.transcode.pretranscode_worker_idle();
-    let (peer_status, peer_evidence) = match tokio::time::timeout(
-        std::time::Duration::from_secs(3), state.membership.media_peers()
-    ).await {
-        Ok(Ok(peers)) => (Unknown, format!(
-            "{} reachable media peers are reported. Reachability does not prove each job's payload version, source access or encoder recipe; workers check those individually.",
-            peers.iter().filter(|peer| peer.reachable).count())),
-        Ok(Err(error)) => (Unavailable, format!("The peer directory could not be observed: {error}")),
-        Err(_) => (Unavailable, "The peer directory did not answer within the three-second observation budget.".into()),
-    };
+    let (peer_status, peer_evidence) = durable_peer_observation(state).await;
+    let authority = state.jobs.execution_authority();
     let (role_status, role_evidence) = match tokio::time::timeout(
-        std::time::Duration::from_secs(3), async {
-            tokio::join!(state.membership.may_execute_job(JobKind::FragmentIndexBuild),
-                state.membership.may_run_cluster_jobs())
-        }
-    ).await {
-        Ok((artifact, catalogue)) => (if artifact { Met } else { Unmet }, format!(
-            "This node currently has artifact execution authority: {artifact}; catalogue/provider coordination authority: {catalogue}. Ready learners may execute immutable preparation, but scans and provider ownership remain voter work.")),
-        Err(_) => (Unavailable, "Worker authority did not answer within the three-second observation budget.".into()),
+        std::time::Duration::from_secs(3),
+        async {
+            tokio::join!(
+                authority.may_execute_job(JobKind::FragmentIndexBuild),
+                authority.may_run_cluster_jobs()
+            )
+        },
+    )
+    .await
+    {
+        Ok((artifact, catalogue)) => (
+            if artifact { Met } else { Unmet },
+            if state.is_replicated() {
+                format!("This node currently has artifact execution authority: {artifact}; catalogue/provider coordination authority: {catalogue}. Ready learners may execute immutable preparation, but scans and provider ownership remain voter work.")
+            } else {
+                format!("The selected local worker authority currently permits artifact execution: {artifact}; catalogue/provider coordination: {catalogue}. Jobs still acquire durable Store claims and their resource leases; no quorum authority was observed.")
+            },
+        ),
+        Err(_) => (
+            Unavailable,
+            "Worker authority did not answer within the three-second observation budget.".into(),
+        ),
     };
     DeveloperEnableItem {
         id: "durable_cluster_work", title: "Durable cluster work", enabled: None, setting: None,
@@ -1155,6 +1217,49 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
     }
 }
 
+async fn durable_peer_observation(state: &AppState) -> (RequirementStatus, String) {
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref().filter(|_| state.is_replicated()) {
+        return match tokio::time::timeout(std::time::Duration::from_secs(3), membership.media_peers()).await {
+            Ok(Ok(peers)) => (RequirementStatus::Unknown, format!(
+                "{} reachable media peers are reported. Reachability does not prove each job's payload version, source access or encoder recipe; workers check those individually.",
+                peers.iter().filter(|peer| peer.reachable).count())),
+            Ok(Err(error)) => (RequirementStatus::Unavailable, format!("The peer directory could not be observed: {error}")),
+            Err(_) => (RequirementStatus::Unavailable, "The peer directory did not answer within the three-second observation budget.".into()),
+        };
+    }
+    let observation = absent_cluster_requirement(state, "durable_peers", "Compatible peers");
+    (observation.status, observation.evidence)
+}
+
+async fn subtitle_peer_observation(state: &AppState) -> (RequirementStatus, String) {
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref().filter(|_| state.is_replicated()) {
+        return match membership.media_peers().await {
+            Ok(peers) if peers.iter().any(|peer| peer.reachable) => (
+                RequirementStatus::Met,
+                format!(
+                    "{} reachable media peer(s) currently advertise capacity.",
+                    peers.iter().filter(|peer| peer.reachable).count()
+                ),
+            ),
+            Ok(peers) => (
+                RequirementStatus::Unmet,
+                format!(
+                    "{} media peer(s) are known, but none currently advertises reachable capacity.",
+                    peers.len()
+                ),
+            ),
+            Err(error) => (
+                RequirementStatus::Unobservable,
+                format!("The media peer directory could not be read: {error}"),
+            ),
+        };
+    }
+    let observation = absent_cluster_requirement(state, "reachable_peer", "A reachable media peer");
+    (observation.status, observation.evidence)
+}
+
 /// Readiness is a report about this node and the peers it can currently see.
 /// Saving either switch goes through Settings without consulting these rows.
 async fn subtitle_cluster_sources(
@@ -1170,27 +1275,7 @@ async fn subtitle_cluster_sources(
     } else {
         state.runtime_cache_dir.clone()
     };
-    let peers = state.membership.media_peers().await;
-    let (peer_status, peer_evidence) = match peers {
-        Ok(peers) if peers.iter().any(|peer| peer.reachable) => (
-            RequirementStatus::Met,
-            format!(
-                "{} reachable media peer(s) currently advertise capacity.",
-                peers.iter().filter(|peer| peer.reachable).count()
-            ),
-        ),
-        Ok(peers) => (
-            RequirementStatus::Unmet,
-            format!(
-                "{} media peer(s) are known, but none currently advertises reachable capacity.",
-                peers.len()
-            ),
-        ),
-        Err(error) => (
-            RequirementStatus::Unobservable,
-            format!("The media peer directory could not be read: {error}"),
-        ),
-    };
+    let (peer_status, peer_evidence) = subtitle_peer_observation(state).await;
     let (filesystem_status, filesystem_evidence) = match local_filesystem(&checked) {
         Ok(kind) => (
             RequirementStatus::Met,
@@ -1221,13 +1306,17 @@ async fn subtitle_cluster_sources(
                 id: "analysis_queue",
                 title: "Cluster analysis queue is enabled",
                 status: if queue_enabled { RequirementStatus::Met } else { RequirementStatus::Unmet },
-                evidence: format!("The cluster analysis scheduler currently reports {}.", if queue_enabled { "available" } else { "unavailable" }),
+                evidence: format!("The {} analysis scheduler currently reports {}.", if state.is_replicated() { "cluster" } else { "local durable" }, if queue_enabled { "available" } else { "unavailable" }),
             },
             DeveloperRequirement {
                 id: "schema_v47",
                 title: "Every voter runs schema 47",
                 status: RequirementStatus::Unobservable,
-                evidence: "This binary supports schema 47. The daemon has no per-voter schema-version reading; inspect the committed voter fleet before enabling.".to_owned(),
+                evidence: if state.is_replicated() {
+                    "This binary supports schema 47. The daemon has no per-voter schema-version reading; inspect the committed voter fleet before enabling."
+                } else {
+                    "This process uses native SQLite with no voter schema observations. Stored subtitle tracks and the local analysis queue remain available; cross-node sharing needs a cluster runtime."
+                }.to_owned(),
             },
             DeveloperRequirement { id: "reachable_peer", title: "A reachable media peer", status: peer_status, evidence: peer_evidence },
             DeveloperRequirement { id: "local_cache", title: "A local subtitle store", status: filesystem_status, evidence: filesystem_evidence },
@@ -1322,7 +1411,7 @@ fn cluster_backup(state: &AppState, destination: Option<&String>) -> DeveloperEn
     let recent = last > 0 && now.saturating_sub(last) < 26 * 60 * 60;
     DeveloperEnableItem {
         id: "cluster_backup",
-        title: "Portable cluster backup",
+        title: if state.is_replicated() { "Portable cluster backup" } else { "Portable backup" },
         enabled: Some(configured),
         setting: None,
         requirements: vec![
@@ -2280,13 +2369,15 @@ async fn cluster_transport_recovery(state: &AppState) -> DeveloperEnableItem {
         id: "recovery_budgets",
         title: "Recovery budgets fit the deployment",
         status: RequirementStatus::Unobservable,
-        evidence: format!(
+        evidence: if !state.is_replicated() {
+            format!("Saved cluster recovery budgets are chunk {} s, whole transfer {} s and final install {} s. Native SQLite does not run replicated snapshot recovery, so these values were not validated as active recovery budgets at native startup.", budgets.chunk_secs, budgets.transfer_secs, budgets.install_secs)
+        } else { format!(
             "This node is configured for chunk {} s, whole transfer {} s, final install {} s, and \
              startup validation accepted them (it requires chunk \u{2264} transfer). Whether they \
              cover your measured state size, and whether the container's health start period \
              leaves room for a final install, are facts the daemon does not hold.",
             budgets.chunk_secs, budgets.transfer_secs, budgets.install_secs
-        ),
+        ) },
     });
 
     requirements.push(cluster_api_requirement(state).await);
@@ -2328,17 +2419,32 @@ async fn cluster_transport_recovery(state: &AppState) -> DeveloperEnableItem {
 /// exposed to the public Internet. So the best case is `Unobservable` with the
 /// roster reported, not `Met`.
 async fn cluster_api_requirement(state: &AppState) -> DeveloperRequirement {
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref().filter(|_| state.is_replicated()) {
+        return replicated_cluster_api_requirement(membership).await;
+    }
+    absent_cluster_requirement(
+        state,
+        "cluster_api_advertised",
+        "Authenticated diagnostics are reachable",
+    )
+}
+
+#[cfg(feature = "cluster")]
+async fn replicated_cluster_api_requirement(
+    membership: &plurx_core::cluster::membership::MembershipManager,
+) -> DeveloperRequirement {
     const ID: &str = "cluster_api_advertised";
     const TITLE: &str = "Authenticated diagnostics are reachable";
 
-    let status = match state.membership.status().await {
+    let status = match membership.status().await {
         Ok(status) => status,
         Err(MembershipError::Unavailable) => {
             return DeveloperRequirement {
                 id: ID,
                 title: TITLE,
                 status: RequirementStatus::Unobservable,
-                evidence: "This node is not replicated, so it holds no committed roster to read."
+                evidence: "The membership runtime could not supply a committed roster. No roster observation was obtained."
                     .to_owned(),
             };
         }
@@ -2434,21 +2540,25 @@ async fn cluster_api_requirement(state: &AppState) -> DeveloperRequirement {
 /// capability in its current heartbeat" on an install that has no committed
 /// nodes and takes no heartbeats. The replication check has to come first.
 async fn cache_revocation_requirement(state: &AppState) -> DeveloperRequirement {
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref().filter(|_| state.is_replicated()) {
+        return replicated_cache_revocation_requirement(membership).await;
+    }
+    absent_cluster_requirement(
+        state,
+        "cache_revocation_capability",
+        "Every committed node proves cache revocation",
+    )
+}
+
+#[cfg(feature = "cluster")]
+async fn replicated_cache_revocation_requirement(
+    membership: &plurx_core::cluster::membership::MembershipManager,
+) -> DeveloperRequirement {
     const ID: &str = "cache_revocation_capability";
     const TITLE: &str = "Every committed node proves cache revocation";
 
-    if !state.membership.is_replicated() {
-        return DeveloperRequirement {
-            id: ID,
-            title: TITLE,
-            status: RequirementStatus::Unobservable,
-            evidence: "This node is not replicated: there is no committed configuration, so there \
-                       is nothing that could have proven the capability."
-                .to_owned(),
-        };
-    }
-
-    match state.membership.cache_admin_revocation_ready().await {
+    match membership.cache_admin_revocation_ready().await {
         Ok(true) => DeveloperRequirement {
             id: ID,
             title: TITLE,
@@ -2472,10 +2582,7 @@ async fn cache_revocation_requirement(state: &AppState) -> DeveloperRequirement 
         // on this fleet — where the guard has not activated — was a reading
         // the function never took.
         Ok(false) => {
-            let activated = state
-                .membership
-                .cache_admin_revocation_activated_locally()
-                .await;
+            let activated = membership.cache_admin_revocation_activated_locally().await;
             let evidence = match activated {
                 Ok(false) => "The credential guard has never activated on this cluster \
                               (`cluster_credential_guard_activation` is empty), which closes \
@@ -2827,7 +2934,7 @@ async fn dvr(
         id: "every_node_mounts_root",
         title: "Every node can read the DVR root",
         status: RequirementStatus::Unobservable,
-        evidence: if state.membership.is_replicated() {
+        evidence: if state.is_replicated() {
             "The owner writes recordings and any node may serve them, so the root has to be a \
              mount every node has. This process can see its own filesystem and no peer's."
                 .to_owned()
@@ -3110,13 +3217,40 @@ fn sharing_endpoint_requirement(
 async fn cinema_sharing(state: &AppState, enabled: bool) -> DeveloperEnableItem {
     // Refresh through this existing admin read, without a background task or
     // mutating the saved enablement choice.
+    let native = state.storage_mode == plurx_core::storage::mode::StorageMode::Sqlite;
+    let source_ready = if native {
+        state
+            .source_admission_members()
+            .await
+            .ok()
+            .map(|proof| proof.is_some())
+    } else {
+        #[cfg(feature = "cluster")]
+        {
+            match state.membership.as_ref() {
+                Some(membership) => membership.source_layout_ready().await.ok(),
+                None => None,
+            }
+        }
+        #[cfg(not(feature = "cluster"))]
+        {
+            None
+        }
+    };
     state
         .sharing
-        .observe_source_activation_current(state.membership.source_layout_ready().await.ok());
+        .observe_source_activation_current(source_ready);
     let endpoints = sharing_endpoint_requirement(state.store.sharing_endpoint_manifest().await);
     let status = state.sharing.status();
+    let source_evidence = match (native, status.source_activation_current) {
+        (true, Some(true)) => "Native SQLite Source startup prepared this process's local generation and sealed keys. Requests still verify local authority, grants and application leases before sending.".to_owned(),
+        (true, Some(false)) => "Local Source authority is unavailable on this process. Your saved choice is unchanged.".to_owned(),
+        (_, Some(true)) => "The current Source layout is verified. Startup activation remains a separate historical observation; playback still requires its live authority checks.".to_owned(),
+        (_, Some(false)) => "Source activation is pending. It completes automatically once cluster compatibility and authority checks pass; a coordinated restart is not required. Your saved choice is unchanged.".to_owned(),
+        (_, None) => "The current Source layout could not be verified. Readiness is advisory and saving remains available.".to_owned(),
+    };
     DeveloperEnableItem {id:"cinema_sharing",title:"Cinema shared libraries",enabled:Some(enabled),setting:Some("sharing_enabled"),requirements:vec![
-        DeveloperRequirement {id:"source_activation",title:"Current Source activation",status:match status.source_activation_current {Some(true)=>RequirementStatus::Met,Some(false)=>RequirementStatus::Unmet,None=>RequirementStatus::Unknown},evidence:match status.source_activation_current {Some(true)=>"The current Source layout is verified. Startup activation remains a separate historical observation; playback still requires its live authority checks.".into(),Some(false)=>"Source activation is pending. It completes automatically once cluster compatibility and authority checks pass; a coordinated restart is not required. Your saved choice is unchanged.".into(),None=>"The current Source layout could not be verified. Readiness is advisory and saving remains available.".into()}},
+        DeveloperRequirement {id:"source_activation",title:"Current Source activation",status:match status.source_activation_current {Some(true)=>RequirementStatus::Met,Some(false)=>RequirementStatus::Unmet,None=>RequirementStatus::Unknown},evidence:source_evidence},
         DeveloperRequirement {id:"listener",title:"Private sharing listener",status:if status.listener=="listening" {RequirementStatus::Met}else{RequirementStatus::Unmet},evidence:format!("This node reports {} at {} inside its process network namespace. A listening socket does not prove another Cinema can reach it. Ordinary local APIs never mount private peer routes.",status.listener,status.listener_address)},
         DeveloperRequirement {id:"tls",title:"Node certificate and pin",status:if status.certificate.is_some() && status.certificate_renewal=="healthy" {RequirementStatus::Met}else{RequirementStatus::Unknown},evidence:status.certificate.map(|certificate|format!("Certificate expires at {} ms UTC. Renewal status: {}. The identity pin is shown under sharing status.",certificate.expires_at_ms,status.certificate_renewal)).unwrap_or_else(||"No active node certificate was observed. Enabling may create one; a missing key beside an existing certificate requires repair.".into())},
         endpoints,
@@ -3222,6 +3356,123 @@ async fn display_target_hdr10(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_developer_observes_local_work_without_inventing_cluster_readiness() {
+        let state = crate::http::source_actor_test_state();
+        assert!(!state.is_replicated());
+        let settings = state
+            .store
+            .settings_snapshot()
+            .await
+            .expect("saved settings");
+        for enabled in [false, true] {
+            let clock = clock_measurement(&state, enabled);
+            assert_eq!(clock.enabled, Some(enabled));
+            assert_eq!(clock.setting, Some("cluster_clock_guard_enforced"));
+            assert!(clock
+                .requirements
+                .iter()
+                .all(|row| row.status == RequirementStatus::Unobservable));
+            let subtitles = subtitle_cluster_sources(&state, enabled, true).await;
+            assert_eq!(subtitles.enabled, Some(enabled));
+            assert_eq!(
+                subtitles
+                    .requirements
+                    .iter()
+                    .find(|row| row.id == "reachable_peer")
+                    .expect("peer row")
+                    .status,
+                RequirementStatus::Unobservable
+            );
+        }
+        assert_eq!(
+            cluster_api_requirement(&state).await.status,
+            RequirementStatus::Unobservable
+        );
+        assert_eq!(
+            cache_revocation_requirement(&state).await.status,
+            RequirementStatus::Unobservable
+        );
+        assert_eq!(
+            session_owner_candidates(&state).await.expect("local owner"),
+            1
+        );
+        let work = durable_cluster_work(&state).await;
+        assert_eq!(
+            work.requirements
+                .iter()
+                .find(|row| row.id == "durable_store")
+                .expect("real Store row")
+                .status,
+            RequirementStatus::Met
+        );
+        let role = work
+            .requirements
+            .iter()
+            .find(|row| row.id == "durable_role")
+            .expect("actual worker authority");
+        assert_eq!(role.status, RequirementStatus::Met);
+        assert!(role.evidence.contains("selected local worker authority"));
+        assert_eq!(
+            work.requirements
+                .iter()
+                .find(|row| row.id == "durable_peers")
+                .expect("peer row")
+                .status,
+            RequirementStatus::Unobservable
+        );
+        let source = cinema_sharing(&state, true).await;
+        assert_eq!(source.enabled, Some(true));
+        assert_eq!(
+            source
+                .requirements
+                .iter()
+                .find(|row| row.id == "source_activation")
+                .expect("actual native Source observation")
+                .status,
+            RequirementStatus::Unmet,
+            "the fixture owns no local Source proof"
+        );
+        assert_eq!(
+            state
+                .store
+                .settings_snapshot()
+                .await
+                .expect("unchanged saved settings"),
+            settings
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_cluster_provider_reports_unavailable_not_empty_roster_success() {
+        let mut state = crate::http::source_actor_test_state();
+        state.storage_mode = plurx_core::storage::mode::StorageMode::Cluster;
+        let clock = clock_measurement(&state, true);
+        assert!(clock
+            .requirements
+            .iter()
+            .all(|row| row.status == RequirementStatus::Unavailable));
+        assert_eq!(
+            cluster_api_requirement(&state).await.status,
+            RequirementStatus::Unavailable
+        );
+        assert_eq!(
+            cache_revocation_requirement(&state).await.status,
+            RequirementStatus::Unavailable
+        );
+        assert!(session_owner_candidates(&state).await.is_err());
+        let sharing = cinema_sharing(&state, true).await;
+        assert_eq!(
+            sharing
+                .requirements
+                .iter()
+                .find(|row| row.id == "source_activation")
+                .expect("unknown Source row")
+                .status,
+            RequirementStatus::Unknown
+        );
+    }
 
     #[test]
     fn sharing_endpoint_readiness_distinguishes_missing_configured_and_unreadable() {

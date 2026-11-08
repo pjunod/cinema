@@ -20,12 +20,41 @@ help: ## List available targets
 ## ---- day to day --------------------------------------------------------
 
 .PHONY: build
-build: ## Debug build of the whole workspace
-	$(CARGO) build --workspace
+build: standalone-graph-check ## Debug build of the standalone daemon
+	$(CARGO) build --locked --no-default-features -p plurxd
+
+.PHONY: standalone-graph-check build-cluster run-cluster build-workspace
+standalone-graph-check: ## Check all standalone shipping components and build dependencies
+	CARGO="$(CARGO_RAW)" scripts/check-standalone-graph
+
+build-cluster: ## Build the explicitly selected cluster daemon
+	$(CARGO) build --locked --no-default-features -p plurxd --features cluster
+
+run-cluster: ## Run the explicitly selected cluster daemon
+	$(CARGO) run --locked --no-default-features -p plurxd --features cluster
+
+build-workspace: ## Build every developer/cluster/helper tool intentionally
+	$(CARGO) build --locked --workspace
+
+.PHONY: build-migration-helper
+build-migration-helper: ## Build the separate version-matched migration helper (includes cluster SDKs)
+	@set -eu; helper_sha="$(BUILD_SHA)"; helper_tree="$(BUILD_TREE)"; \
+	  test "$${#helper_sha}" = 40 && test "$${#helper_tree}" = 40; \
+	  case "$$helper_sha$$helper_tree" in *[!0-9a-f]*) exit 1 ;; esac; \
+	  PLURX_BUILD_SHA="$$helper_sha" PLURX_BUILD_TREE="$$helper_tree" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" $(CARGO) build --locked --release -p plurx-storage-migrate
+
+# CARGO is one executable path for these recipes, not a shell command string.
+# Run compilation on non-voter capacity, or inside scripts/voter-build caps.
+.PHONY: build-daemon-dev build-daemon-dev-lld
+build-daemon-dev: ## Build the daemon with the system development linker
+	CARGO="$(CARGO)" scripts/build-daemon-dev --linker system
+
+build-daemon-dev-lld: ## Build the Linux GNU daemon with final-target LLD linking
+	CARGO="$(CARGO)" scripts/build-daemon-dev --linker lld
 
 .PHONY: run
 run: ## Run the server (http://localhost:32400)
-	$(CARGO) run -p plurxd
+	$(CARGO) run --locked --no-default-features -p plurxd
 
 .PHONY: fmt
 fmt: ## Auto-format all code
@@ -42,12 +71,12 @@ test-socket-permission-check: ## Verify unit tests may bind loopback mock-server
 		|| { echo >&2 "unit tests require permission to bind local loopback sockets; rerun outside the network-restricted sandbox or grant local-socket access"; exit 1; }
 
 unit: spike-lock-check test-socket-permission-check ## Run the fast Rust unit and SQLite contract lane
-	$(CARGO) test --workspace --exclude plurx-cluster-check --no-fail-fast
+	$(CARGO) test --workspace --exclude plurx-cluster-check --exclude plurx-storage-migrate --no-fail-fast
 	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
 
 # A focused core run must opt into the replicated-store implementation. The
-# workspace lane above gets it through feature unification from `plurxd`; a
-# bare `cargo test -p plurx-core --lib` does not.
+# standalone workspace lane excludes SDK tools and does not enable it; a
+# bare `cargo test -p plurx-core --lib` does not exercise replicated storage.
 unit-core: override CARGO := PLURX_EXPECT_TEST_COUNT_AT_LEAST=$${PLURX_EXPECT_TEST_COUNT_AT_LEAST:-1100} scripts/require-test-count $(CARGO_RAW)
 unit-core: ## Run plurx-core with replicated-store tests and enforce the count floor
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib
@@ -75,10 +104,10 @@ test-full: test-socket-permission-check ## Run every Rust test, including replic
 # dependency feature unification and rebuilds the already-tested daemon. The
 # exact filters still execute only the two resource-heavy restart regressions.
 vodencode-restart-check: ## Run resource-heavy real-FFmpeg restart regressions serially
-	$(CARGO) test --locked --workspace --exclude plurx-cluster-check \
+	$(CARGO) test --locked --workspace --exclude plurx-cluster-check --exclude plurx-storage-migrate \
 	  vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid \
 	  -- --exact --ignored --test-threads=1
-	$(CARGO) test --locked --workspace --exclude plurx-cluster-check \
+	$(CARGO) test --locked --workspace --exclude plurx-cluster-check --exclude plurx-storage-migrate \
 	  vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing \
 	  -- --exact --ignored --test-threads=1
 
@@ -92,8 +121,14 @@ fmt-check: ## Verify formatting without changing files
 # evidence. Compile every target so production and test-only code must remain
 # type-correct, but leave execution to focused local checks and the final
 # effort-to-main qualification run.
-.PHONY: effort-rust-check
-effort-rust-check: fmt-check spike-lock-check ## Compile every Rust target without running the test suite
+.PHONY: standalone-rust-check cluster-rust-check effort-rust-check
+standalone-rust-check: standalone-graph-check ## Compile native daemon targets without workspace feature unification
+	$(CARGO) check --locked --no-default-features -p plurxd --all-targets
+
+cluster-rust-check: ## Compile explicit cluster daemon targets without workspace feature inference
+	$(CARGO) check --locked --no-default-features -p plurxd --features cluster --all-targets
+
+effort-rust-check: fmt-check spike-lock-check standalone-rust-check cluster-rust-check ## Compile every Rust target without running the test suite
 	$(CARGO) check --workspace --locked --all-targets
 
 .PHONY: bans-check license-check lint
@@ -125,8 +160,8 @@ dv-rgb-conversion-check: ## Check HDR measurement colour conversion with an expl
 	PLURX_FFMPEG="$(PLURX_FFMPEG)" python3 -m unittest discover -s tests/media -p test_dv_rgb_conversion.py -v
 
 .PHONY: ci-rust-gate
-ci-rust-gate: fmt-check spike-lock-check lint test-socket-permission-check ## CI Rust gate: format, Clippy, and fast workspace tests
-	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
+ci-rust-gate: fmt-check spike-lock-check standalone-rust-check cluster-rust-check lint test-socket-permission-check ## CI Rust gate: format, Clippy, and fast workspace tests
+	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --exclude plurx-storage-migrate --no-fail-fast
 	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
 
 # The real mount-namespace exercises for scratch aliasing and mount points
@@ -744,124 +779,124 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  client::mgmt::tests::production_transport_client_rejects_oversized_unframed_response_body \
 	  --lib -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::peer_fanout_applies_the_one_second_per_peer_deadline \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::peer_fanout_never_exceeds_the_eight_peer_bound \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::production_collector_labels_directory_overflow_without_probing_it \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::peer_status_cache_is_fresh_for_five_seconds_then_expires \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_local_cache_time \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::remote_status_freshness_uses_local_monotonic_age_despite_clock_skew \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::stale_peer_sample_uses_local_elapsed_time_and_cannot_become_healthy \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::absent_and_expired_cache_are_unavailable_never_peer_limited \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::membership_status_cache_is_fresh_for_five_seconds_then_expires \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::membership_projection_refresh_is_bounded_and_preserves_last_good_sample \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::long_install_crosses_to_stalled_then_expires_after_the_post_deadline_window \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cached_fresh_active_transport_stalls_exactly_when_deadline_reaches_zero \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cached_deadline_less_active_transport_uses_the_producer_fallback_boundary \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cached_terminal_transport_observation_expires_at_five_minutes \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::transport_projection_uses_local_monotonic_age_despite_remote_clock_skew \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::peer_status_refresh_keeps_strict_cycle_overhead_margin \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::aggregate_request_reads_only_node_owned_projections \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::unclustered_membership_cache_loop_exits_without_refresh_or_retry \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::mutation_preflight_refreshes_roster_directory_and_bounded_peer_observations \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::mutation_preflight_bounds_the_current_membership_read \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::mutation_preflight_ages_local_transport_across_peer_collection \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::planned_outage_lease_blocks_membership_mutation_during_fresh_preflight \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::failed_fresh_preflight_releases_its_planned_outage_lease \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::aborted_fresh_preflight_releases_the_exact_planned_outage_claim \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cancelled_acquisition_waiter_releases_only_after_ambiguous_outcome_is_known \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::abort_during_drain_cancels_the_guard_owned_local_fence \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::restart_cancellation_cannot_clear_a_maintenance_owned_fence \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::delayed_same_owner_cleanup_cannot_clear_a_successor_generation \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::overlapping_cleanup_tokens_are_resolved_independently \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::confirmed_release_resolves_latch_but_preserves_timed_fence \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::confirmed_current_restart_cancel_resolves_a_preexisting_exact_latch \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::confirmed_current_restart_cancel_resolves_an_expired_exact_latch \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::confirmed_maintenance_exit_resolves_an_expired_exact_latch \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::confirmed_maintenance_exit_preserves_a_restart_owned_latch \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  serving_fence::tests::stuck_restart_admission_cannot_outlive_the_exact_fence \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::restart_preparation_claims_and_releases_the_replicated_outage_slot \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cancelled_maintenance_waiter_does_not_cancel_the_owned_commit \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::cleanup_retry_backoff_is_capped_and_shutdown_interruptible \
 	  -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
@@ -924,82 +959,82 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::activated_guard_with_live_mutation_lease_is_not_an_activation_candidate \
 	  --lib -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_honor_digest_and_user_invalidation \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::active_revocation_blocks_ticket_publication_until_guard_drop \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::commit_ambiguous_local_mutation_retains_one_bounded_fail_closed_fence \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::replicated_capability_loss_clears_proofs_and_invalidates_in_flight_publication \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::cache_admin_revocation_operation_queue_is_bounded_and_raii_released \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::capability_refresh_error_and_rollback_clear_cache_only_admin_authority \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::automatic_activation_runs_outside_the_membership_projection \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::full_roster_projection_activates_without_a_credential_mutation \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::permanent_activation_stops_the_one_time_worker \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::stuck_automatic_activation_does_not_block_membership_refresh_or_shutdown \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  startup_tests::console_password_reset_fails_closed_before_any_store_mutation \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::remote_revocation_fence_expires_bounded_and_reinvalidates \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::remote_revocation_fences_have_a_hard_capacity \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::poisoned_proof_cache_fails_closed_for_authentication_and_revocation \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::digest_and_user_revocation_on_a_invalidate_primed_b_before_success \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::credential_revocation_uses_the_exact_committed_security_roster \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::credential_revocation_accepts_more_than_the_diagnostics_probe_limit \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::membership_added_between_begin_passes_is_fenced_before_store_admission \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::replicated_membership_exclusion_spans_final_roster_read_and_peer_end \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::local_apply_ack_wire_version_rejects_pre_barrier_receivers \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::begin_ack_installs_memory_fence_before_waiting_for_exact_local_apply \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::cancelled_local_apply_wait_leaves_peer_memory_fence_closed \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::origin_waits_for_exact_claim_apply_before_observing_added_member \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::internal_auth_revocation::tests::automatic_activation_checks_the_permanent_marker_before_taking_the_gate \
 	  -- --exact
 	$(CARGO) test --locked -p plurx-core --lib \
@@ -1021,31 +1056,31 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::concurrent_admin_demote_and_delete_preserve_one_administrator \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_have_a_hard_capacity \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::logout_revocation_generation_rejects_an_in_flight_store_result \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::user_revocation_generation_rejects_all_in_flight_store_results \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::extract::tests::authentication_and_revocation_callers_bracket_store_work_with_generations \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::production_collector_preserves_private_transport_when_public_listener_is_closed \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::peer_transport_age_retains_request_to_receipt_uncertainty \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::slow_public_probe_cannot_discard_completed_private_transport \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::identity_mismatch_discards_peer_local_state \
 	  -- --exact
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked -p plurxd --features cluster --bin plurxd \
 	  http::cluster_operations::tests::public_transport_fallback_requires_matching_observer_identity \
 	  -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -1681,6 +1716,7 @@ BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)
 # the same checkout, never from a SOURCE_DATE_EPOCH some other tool left
 # exported in the shell. A deliberate override is still
 # `make docker SOURCE_DATE_EPOCH=<seconds>`, which Make lets win.
+BUILD_TREE := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git rev-parse HEAD^{tree} 2>/dev/null))
 SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git log -1 --format=%ct 2>/dev/null))
 HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)
 
@@ -1702,15 +1738,22 @@ docker: ## Build the container image (amd64 + PLURX_LINUX_DOLBY_PACKAGE adds the
 	case "$$platform" in linux/amd64|linux/x86_64) arch=amd64 ;; linux/arm64|linux/aarch64) arch=arm64 ;; \
 	*) echo "Unsupported container platform $$platform" >&2; exit 1 ;; esac; \
 	if test "$$arch" = amd64 && test -n "$${PLURX_LINUX_DOLBY_PACKAGE:-}"; then \
-	  python3 scripts/build-linux-dolby-ffmpeg --step docker-build --root "$$(pwd)" --output "$$PLURX_LINUX_DOLBY_PACKAGE" --image plurx/plurxd:latest --plurx-build-ref "$(BUILD_REF)" --plurx-build-sha "$(BUILD_SHA)" --source-date-epoch "$(SOURCE_DATE_EPOCH)"; \
+	  python3 scripts/build-linux-dolby-ffmpeg --step docker-build --root "$$(pwd)" --output "$$PLURX_LINUX_DOLBY_PACKAGE" --image plurx/plurxd:latest --plurx-build-ref "$(BUILD_REF)" --plurx-build-sha "$(BUILD_SHA)" --plurx-build-tree "$(BUILD_TREE)" --source-date-epoch "$(SOURCE_DATE_EPOCH)"; \
 	else \
-	  docker build --target runtime --platform "linux/$$arch" --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .; \
+	  docker build --target runtime --platform "linux/$$arch" --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg PLURX_BUILD_TREE="$(BUILD_TREE)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .; \
 	fi
 
-.PHONY: container-smoke
-container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
+.PHONY: docker-cluster
+docker-cluster: ## Build the explicit cluster image with cluster diagnostics
+	docker build --target runtime-cluster --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg PLURX_BUILD_TREE="$(BUILD_TREE)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:cluster .
+
+.PHONY: container-smoke container-cluster-smoke
+container-smoke: docker ## Build and exercise standalone container stop/start
 	@scripts/container-smoke plurx/plurxd:latest
-	@scripts/container-restore-smoke plurx/plurxd:latest
+
+container-cluster-smoke: docker-cluster ## Exercise explicit cluster container backup and restore
+	@scripts/container-smoke plurx/plurxd:cluster
+	@scripts/container-restore-smoke plurx/plurxd:cluster
 
 # The Compose deploy, as one command that cannot forget the stamp.
 #
@@ -1784,7 +1827,7 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
 	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" PLURX_BUILD_TREE="$(BUILD_TREE)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe
@@ -2155,3 +2198,25 @@ web-shared-library-browser-check: ## Check Shared browse and enriched details at
 	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
 		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
 		--test tests/web/shared-libraries.browser.cjs
+
+.PHONY: standalone-storage-test standalone-storage-process-test
+standalone-storage-test: ## Native storage, local authority and backup contracts
+	$(CARGO) test --locked -p plurx-core --no-default-features --lib storage::
+	$(CARGO) test --locked -p plurx-core --no-default-features --lib native_sharing::tests::
+	$(CARGO) test --locked -p plurx-core --no-default-features --lib sharing_source_session
+	$(CARGO) test --locked -p plurx-core --no-default-features --lib config::tests::
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib cluster::migration::standalone_export::tests::
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib cluster::migration::native_import::tests::
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib cluster::migration::native_promotion::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd storage_runtime::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd source_authority::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd source_copy_attachment_registers_current_producer_and_reaps_owned_permit
+	$(CARGO) test --locked -p plurxd --bin plurxd source_copy_cold_index_refuses_expired_original_observation_before_child
+	$(CARGO) test --locked -p plurxd --bin plurxd sharing_source_http_real_h1_h2_playlist_init_and_segment_echo_exact_lineage
+	$(CARGO) test --locked -p plurxd --bin plurxd cluster_runtime::create::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd cluster_runtime::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd serving_fence::tests::
+	$(CARGO) test --locked -p plurxd --bin plurxd backup::
+
+standalone-storage-process-test: ## Shipping daemon converts an actual private singleton without lost writes
+	$(CARGO) test --locked -p plurxd --features cluster-integration-tests --test standalone_conversion

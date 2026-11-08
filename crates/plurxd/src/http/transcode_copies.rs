@@ -348,8 +348,11 @@ async fn prepare(
             .await
             .map_err(|error| error.to_string())?;
     }
-    let peers = state
+    let membership = state
         .membership
+        .as_ref()
+        .ok_or("cluster membership is unavailable")?;
+    let peers = membership
         .operations_peers()
         .await
         .map_err(|error| error.to_string())?;
@@ -660,7 +663,10 @@ async fn pass(
 }
 
 pub(crate) async fn run(state: AppState) {
-    let transport = PeerTransport::new(state.membership.clone());
+    let Some(membership) = state.membership.clone() else {
+        return;
+    };
+    let transport = PeerTransport::new(membership);
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
     let mut pacing = crate::background_jobs::IdlePoll::new();

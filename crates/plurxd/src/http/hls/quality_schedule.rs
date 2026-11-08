@@ -3,6 +3,7 @@ use super::*;
 use crate::vodserve::QualityScheduleRequest;
 pub(crate) const QUALITY_SCHEDULE_PATH: &str = "/internal/cluster/media/sessions/quality-schedule";
 pub(crate) const QUALITY_SCHEDULE_MAX_BYTES: usize = 160 * 1024;
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) const QUALITY_SCHEDULE_MAX_RESPONSE_BYTES: usize =
     2 * plurx_core::playback::continuous_quality::MAX_QUALITY_LEDGER_BYTES + 8192;
 #[derive(Clone, Debug, Serialize, Deserialize)]

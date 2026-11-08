@@ -2,6 +2,7 @@ use super::*;
 
 impl VodServe {
     #[cfg(test)]
+    #[cfg(feature = "cluster")]
     pub(crate) async fn source_control_observation_for_test(
         &self,
         session_id: &str,

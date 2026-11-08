@@ -638,11 +638,15 @@ mod tests {
         // Source-bound pixel, subtitle-offset and VTT probes use
         // BoundedDiagnosticChild; its spawn remains registered by the launcher.
         let expected = BTreeMap::from([
+            // The framemd5 fixture lives in ffmpeg/tests.rs and is not a
+            // production caller. The three capability/burst probes are.
             ("ffmpeg.rs".to_owned(), 3),
             ("live_tv.rs".to_owned(), 1),
             ("live_tv/caption_probe.rs".to_owned(), 1),
             ("pipeprobe.rs".to_owned(), 2),
             ("subtitle_ride_along.rs".to_owned(), 1),
+            // Source probing and extraction moved to owned bounded children
+            // in dac9e2c7e; neither still calls this output collector.
             ("transcode/media_origin.rs".to_owned(), 1),
         ]);
         let mut actual = BTreeMap::new();

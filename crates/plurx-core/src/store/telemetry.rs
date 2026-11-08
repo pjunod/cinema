@@ -471,6 +471,7 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, S
     Ok(false)
 }
 
+#[cfg(any(test, feature = "hiqlite-store"))]
 fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
     let found: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",

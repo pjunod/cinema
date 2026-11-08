@@ -53,6 +53,7 @@ pub struct AdminUser(pub User);
 /// write mid-flight — that write is an idempotent activity stamp whose own
 /// caller already tolerates losing it, and the ordinary [`AuthUser`] path
 /// makes the same write with no bound at all.
+#[cfg(feature = "cluster")]
 pub struct CacheOnlyAdminUser;
 
 const CACHE_ONLY_ADMIN_PROOF_TTL: Duration = Duration::from_secs(5 * 60);
@@ -91,9 +92,11 @@ impl Default for CacheOnlyAdminProofCache {
 /// waiting, leaving a queue seven deep behind a contract that says eight.
 pub(crate) struct RevocationAdmission {
     _operation: tokio::sync::OwnedMutexGuard<()>,
+    #[cfg(feature = "cluster")]
     deadline: tokio::time::Instant,
 }
 
+#[cfg(feature = "cluster")]
 impl RevocationAdmission {
     /// The end of this caller's admission window. In a cluster the window
     /// also covers waiting for the replicated membership exclusion that a
@@ -111,6 +114,7 @@ pub(crate) fn record_revocation_complete() {
     REVOCATION_COMPLETE.fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) fn record_revocation_propagation_failed() {
     REVOCATION_PROPAGATION_FAILED.fetch_add(1, Ordering::Relaxed);
 }
@@ -177,6 +181,7 @@ pub(crate) struct CacheOnlyAdminAuthenticationTicket(u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CacheOnlyAdminRevocationTarget {
+    #[cfg(feature = "cluster")]
     All,
     Digest(String),
     User(i64),
@@ -186,7 +191,9 @@ struct RemoteCacheOnlyAdminRevocation {
     expires_at: tokio::time::Instant,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 const MAX_REMOTE_CACHE_ONLY_ADMIN_REVOCATIONS: usize = 128;
+#[cfg(any(test, feature = "cluster"))]
 const REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL: Duration = CACHE_ONLY_ADMIN_PROOF_TTL;
 
 /// Brackets a Store mutation with two cache generations. The first removes
@@ -236,6 +243,7 @@ impl CacheOnlyAdminRevocation {
 impl CachedAdminProofState {
     fn invalidate_target(&mut self, target: &CacheOnlyAdminRevocationTarget) {
         match target {
+            #[cfg(feature = "cluster")]
             CacheOnlyAdminRevocationTarget::All => self.proofs.clear(),
             CacheOnlyAdminRevocationTarget::Digest(digest) => {
                 self.proofs.remove(digest);
@@ -315,6 +323,7 @@ impl CacheOnlyAdminProofCache {
         drop(waiting);
         Ok(RevocationAdmission {
             _operation: operation,
+            #[cfg(feature = "cluster")]
             deadline,
         })
     }
@@ -410,6 +419,7 @@ impl CacheOnlyAdminProofCache {
     /// Fence and invalidate every local proof while the cluster permanently
     /// activates the current revocation protocol. Activation has no Store
     /// credential target, so its safe scope is the complete bounded cache.
+    #[cfg(feature = "cluster")]
     pub(crate) fn begin_global_revocation(&self) -> CacheOnlyAdminRevocation {
         let target = CacheOnlyAdminRevocationTarget::All;
         self.begin_local_revocation(&target);
@@ -433,6 +443,7 @@ impl CacheOnlyAdminProofCache {
     /// carries no token digest or user identifier; the cache is bounded and a
     /// short global refusal is preferable to transmitting credential-derived
     /// data between processes.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn begin_remote_revocation(&self, operation_id: &str) -> Result<(), &'static str> {
         let mut state = self.inner.lock().map_err(|_| "cache unavailable")?;
         let now = tokio::time::Instant::now();
@@ -454,6 +465,7 @@ impl CacheOnlyAdminProofCache {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn end_remote_revocation(&self, operation_id: &str) -> Result<(), &'static str> {
         let mut state = self.inner.lock().map_err(|_| "cache unavailable")?;
         state.prune_revocations(tokio::time::Instant::now());
@@ -480,6 +492,7 @@ impl CacheOnlyAdminProofCache {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn authenticate(&self, token_digest: &str) -> bool {
         let Ok(mut state) = self.inner.lock() else {
             return false;
@@ -501,6 +514,7 @@ impl CacheOnlyAdminProofCache {
     /// revocation or the ambiguity fence has just lapsed. Same behaviour as
     /// the call that preceded it, so it introduces no hazard of its own — but
     /// it is a state transition, not an observation.
+    #[cfg(feature = "cluster")]
     pub(crate) fn closure_reason(&self) -> CacheOnlyAdminClosure {
         let Ok(mut state) = self.inner.lock() else {
             return CacheOnlyAdminClosure::Poisoned;
@@ -521,6 +535,7 @@ impl CacheOnlyAdminProofCache {
 
 /// The named reasons a Store-free admin proof was not available.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "cluster")]
 pub(crate) enum CacheOnlyAdminClosure {
     /// Every committed member has not yet proven it runs the revocation
     /// protocol, so no proof may be published or honoured on this node. This
@@ -536,6 +551,7 @@ pub(crate) enum CacheOnlyAdminClosure {
     Poisoned,
 }
 
+#[cfg(feature = "cluster")]
 impl CacheOnlyAdminClosure {
     pub(crate) fn describe(self) -> &'static str {
         match self {
@@ -885,6 +901,7 @@ impl FromRequestParts<AppState> for AdminUser {
     }
 }
 
+#[cfg(feature = "cluster")]
 impl FromRequestParts<AppState> for CacheOnlyAdminUser {
     type Rejection = ApiError;
 
@@ -953,12 +970,14 @@ impl FromRequestParts<AppState> for CacheOnlyAdminUser {
 /// it cannot authorize. Deliberately shorter than any page's own patience:
 /// the point of the bound is that a wedged Store degrades this guard to a
 /// named refusal instead of hanging the request that reports the wedge.
+#[cfg(feature = "cluster")]
 const CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A cluster recovery read this node could not authorize. The code is stable
 /// so a client can tell it apart from a verdict on the credential; the sentence
 /// says which of the two it is and nothing else, because the caller has not
 /// authenticated. The specific condition is logged.
+#[cfg(feature = "cluster")]
 fn cache_only_admin_unavailable() -> ApiError {
     ApiError::typed(
         axum::http::StatusCode::SERVICE_UNAVAILABLE,

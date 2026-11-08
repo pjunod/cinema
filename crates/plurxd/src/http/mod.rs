@@ -15,7 +15,9 @@ pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
 pub(crate) use browse::index_refusal_summary;
 pub(crate) mod chapter_thumbs;
+#[cfg(feature = "cluster")]
 mod cluster;
+#[cfg(feature = "cluster")]
 pub(crate) mod cluster_operations;
 pub mod comingsoon;
 pub use comingsoon::ComingSoonCache;
@@ -33,10 +35,20 @@ mod https_admin;
 pub(crate) mod images;
 pub(crate) mod index_coverage;
 pub(crate) mod internal_activity;
+#[cfg(feature = "cluster")]
 pub(crate) mod internal_auth_revocation;
+mod native_auth_revocation;
+#[cfg(not(feature = "cluster"))]
+pub(crate) mod internal_auth_revocation {
+    pub(crate) use super::native_auth_revocation::NativeCacheRevocation as ClusterCacheRevocation;
+}
+#[cfg(feature = "cluster")]
 pub(crate) mod internal_clock;
+#[cfg(feature = "cluster")]
 pub(crate) mod internal_live_tv;
+#[cfg(feature = "cluster")]
 pub(crate) mod internal_media;
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) mod internal_media_sessions;
 mod items;
 mod jellyfin;
@@ -66,7 +78,7 @@ pub(crate) mod shared_captions;
 pub(crate) mod shared_library;
 pub(crate) mod shared_playback;
 pub(crate) mod shared_receiver_assets;
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 mod shared_receiver_fixture;
 #[allow(
     dead_code,
@@ -94,6 +106,7 @@ pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
 mod trakt;
+#[cfg(feature = "cluster")]
 pub(crate) mod transcode_copies;
 
 /// Unmodified User-Agent strings as the shipping clients actually send them.
@@ -118,8 +131,22 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use crate::state::AppState;
+#[cfg(feature = "cluster")]
 use plurx_core::cluster::membership::LocalServingRole;
 use serde::{Deserialize, Serialize};
+
+macro_rules! cluster_route {
+    ($route:expr) => {{
+        #[cfg(feature = "cluster")]
+        {
+            $route
+        }
+        #[cfg(not(feature = "cluster"))]
+        {
+            Router::new()
+        }
+    }};
+}
 
 const JSON_SHORT_DEADLINE: Duration = Duration::from_secs(30);
 const JSON_LONG_DEADLINE: Duration = Duration::from_secs(300);
@@ -514,6 +541,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/server"
         | "/api/v1/server/node"
         | "/api/v1/settings"
+        | "/api/v1/backups"
         | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-translation"
         | "/api/v1/subtitle-translation/models"
@@ -615,9 +643,9 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         crate::diagnostics::PEER_PATH
         | internal_activity::PATH
-        | internal_clock::PATH
-        | cluster_operations::INTERNAL_PATH
-        | internal_auth_revocation::PATH
+        | "/_internal/v1/clock"
+        | "/api/v1/internal/cluster/operations-status"
+        | "/api/v1/internal/auth/cache-revocation"
         | crate::subtitle_ranges::PATH
         | crate::media_pool::SNAPSHOT_PATH
         | crate::media_pool::QUALITY_CANDIDATES_PATH
@@ -646,6 +674,7 @@ fn http_route_group(path: &str) -> usize {
     }
 }
 
+#[cfg(feature = "cluster")]
 fn http_node_role(
     local_source: bool,
     watermark_source: bool,
@@ -668,7 +697,7 @@ fn http_node_role(
 }
 
 async fn http_store_attribution(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -676,12 +705,23 @@ async fn http_store_attribution(
         .extensions()
         .get::<MatchedPath>()
         .map_or(8, |path| http_route_group(path.as_str()));
-    let raft = state.replication.metrics_handle().snapshot();
-    let role = http_node_role(
-        raft.local_source,
-        raft.watermark_source,
-        state.membership.local_serving_role().await.map_err(|_| ()),
-    );
+    #[cfg(feature = "cluster")]
+    let state = &_state;
+    #[cfg(feature = "cluster")]
+    let role = match (state.replication.as_ref(), state.membership.as_ref()) {
+        (Some(replication), Some(membership)) => {
+            let raft = replication.metrics_handle().snapshot();
+            http_node_role(
+                raft.local_source,
+                raft.watermark_source,
+                membership.local_serving_role().await.map_err(|_| ()),
+            )
+        }
+        (None, None) => 0,
+        _ => 5,
+    };
+    #[cfg(not(feature = "cluster"))]
+    let role = 0;
     let counts = plurx_core::store::HttpStoreOperationCounts::default();
     let watch_ack = plurx_core::store::HttpWatchWriteAck::default();
     let started_at = Instant::now();
@@ -691,6 +731,10 @@ async fn http_store_attribution(
     )
     .await;
     HTTP_ROUTE_METRICS.record(group, role, counts.snapshot(), started_at.elapsed());
+    // Retain the actual inner accounting for route regressions; an outer test
+    // task-local scope would be replaced by this middleware and prove nothing.
+    #[cfg(test)]
+    response.extensions_mut().insert(counts);
     // K-04 M2: offer the acknowledged watch-write position so a client can
     // echo it as `X-Plurx-Read-After` to whichever node serves its next read,
     // or say that a watch write's position is unknown so it drops its echo.
@@ -1606,16 +1650,24 @@ pub fn router(state: AppState) -> Router {
         .route("/system", get(system::system_info))
         .route("/system/logs", get(system::logs))
         .route("/system/playback-events", get(system::playback_events))
-        .route("/cluster/nodes", get(cluster::nodes))
-        .route("/cluster/status", get(cluster_operations::aggregate))
+        .merge(cluster_route!(
+            Router::new().route("/cluster/nodes", get(cluster::nodes))
+        ))
+        .merge(cluster_route!(
+            Router::new().route("/cluster/status", get(cluster_operations::aggregate))
+        ))
         .route("/cluster/jobs", get(background_jobs::list))
         .route(
             "/cluster/work/storage-domains",
             get(background_jobs::storage_domains),
         )
         .route("/cluster/jobs/{id}", get(background_jobs::detail))
-        .route("/cluster/ingress", get(cluster::ingress))
-        .route("/cluster/media", get(internal_media::directory))
+        .merge(cluster_route!(
+            Router::new().route("/cluster/ingress", get(cluster::ingress))
+        ))
+        .merge(cluster_route!(
+            Router::new().route("/cluster/media", get(internal_media::directory))
+        ))
         // Any signed-in user can post a client-side playback error here so it
         // lands in the admin log (browsers that reject a stream produce no
         // server log on their own). A playback handoff token may too.
@@ -1911,28 +1963,33 @@ pub fn router(state: AppState) -> Router {
         .route("/trakt/sync", post(trakt::sync_now))
         // Membership control is admin-only. Join tokens remain the narrow
         // credential for role-specific peer admission.
-        .route("/cluster/join-tokens", post(cluster::issue_join_token))
-        .route(
+        .merge(cluster_route!(Router::new().route(
+            "/cluster/join-tokens",
+            post(cluster::issue_join_token)
+        )))
+        .merge(cluster_route!(Router::new().route(
             "/cluster/learner-join-tokens",
             post(cluster::issue_learner_join_token),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             "/cluster/support-bundle",
             get(cluster_operations::support_bundle),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             "/cluster/nodes/{node_id}/restart-preparation",
             post(cluster_operations::prepare_restart).delete(cluster_operations::cancel_restart),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             "/cluster/nodes/{node_id}/promote",
             post(cluster::promote_node),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             "/cluster/nodes/{node_id}/maintenance",
             post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
-        )
-        .route("/cluster/election", post(cluster::force_election))
+        )))
+        .merge(cluster_route!(
+            Router::new().route("/cluster/election", post(cluster::force_election))
+        ))
         .route(
             "/cluster/work/storage-domains",
             put(background_jobs::replace_storage_domains),
@@ -1940,26 +1997,36 @@ pub fn router(state: AppState) -> Router {
         .route("/cluster/jobs/{id}/cancel", post(background_jobs::cancel))
         .route("/cluster/jobs/{id}/retry", post(background_jobs::retry))
         .route("/cluster/backups", post(crate::backup::create))
-        .route("/cluster/leave", post(cluster::leave))
-        .route(
+        .route("/backups", post(crate::backup::create))
+        .merge(cluster_route!(
+            Router::new().route("/cluster/leave", post(cluster::leave))
+        ))
+        .merge(cluster_route!(Router::new().route(
             "/cluster/protocol/learner/activate",
             post(cluster::activate_learner_protocol),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             "/cluster/protocol/learner/deactivate",
             post(cluster::deactivate_learner_protocol),
-        )
-        .route("/cluster/nodes/{node_id}", delete(cluster::remove_node))
-        .route("/cluster/join/redeem", post(cluster::redeem_join))
-        .route("/cluster/join/finalize", post(cluster::finalize_join))
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
+            "/cluster/nodes/{node_id}",
+            delete(cluster::remove_node)
+        )))
+        .merge(cluster_route!(
+            Router::new().route("/cluster/join/redeem", post(cluster::redeem_join))
+        ))
+        .merge(cluster_route!(
+            Router::new().route("/cluster/join/finalize", post(cluster::finalize_join))
+        ))
+        .merge(cluster_route!(Router::new().route(
             "/cluster/learner/join/redeem",
             post(cluster::redeem_learner_join),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             "/cluster/learner/join/finalize",
             post(cluster::finalize_learner_join),
-        )
+        )))
         .route("/system/library-shape", get(system::library_shape))
         .route("/system/storage", post(system::remeasure_storage))
         .route(
@@ -2071,11 +2138,13 @@ pub fn router(state: AppState) -> Router {
             "/live-tv/starts/{request_id}/resume",
             post(live_tv::resume_start),
         )
-        .route(
+        .merge(cluster_route!(Router::new().route(
             "/cluster/media/offers",
             post(internal_media::diagnostic_offers),
-        )
-        .route("/cluster/artwork/{filename}", get(images::serve_peer))
+        )))
+        .merge(cluster_route!(
+            Router::new().route("/cluster/artwork/{filename}", get(images::serve_peer))
+        ))
         .route("/items/{id}/photo", get(photos::serve))
         .route("/offline/media/{token}/master.m3u8", get(offline::master))
         .route("/offline/media/{token}/index.m3u8", get(offline::playlist))
@@ -2299,164 +2368,169 @@ pub fn router(state: AppState) -> Router {
     // their ownership protocols, so this group deliberately has none.
     let public_media = Router::new()
         .route("/download/plurx-android.apk", get(web::download_android))
-        .route(internal_activity::PATH, get(internal_activity::snapshot))
-        .route(internal_clock::PATH, get(internal_clock::snapshot))
-        .route(
-            cluster_operations::INTERNAL_PATH,
+        .merge(cluster_route!(Router::new().route(
+            internal_activity::PATH,
+            get(internal_activity::snapshot)
+        )))
+        .merge(cluster_route!(
+            Router::new().route("/_internal/v1/clock", get(internal_clock::snapshot))
+        ))
+        .merge(cluster_route!(Router::new().route(
+            "/api/v1/internal/cluster/operations-status",
             get(cluster_operations::local),
-        )
-        .route(
-            internal_auth_revocation::PATH,
+        )))
+        .merge(cluster_route!(Router::new().route(
+            "/api/v1/internal/auth/cache-revocation",
             post(internal_auth_revocation::receive).layer(DefaultBodyLimit::max(
                 internal_auth_revocation::MAX_REQUEST_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::media_pool::SNAPSHOT_PATH,
             get(internal_media::snapshot),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::media_pool::QUALITY_CANDIDATES_V2_PATH,
             post(internal_media::quality_candidates_v2)
                 .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::media_pool::QUALITY_CANDIDATES_PATH,
             post(internal_media::quality_candidates)
                 .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::media_pool::OFFERS_PATH,
             post(internal_media::offers)
                 .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::shared_cache::CANARY_PATH,
             post(internal_media::shared_cache_canary).layer(DefaultBodyLimit::max(
                 crate::shared_cache::MAX_CANARY_REQUEST_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::live_tv::SNAPSHOT_PATH,
             post(internal_live_tv::snapshot).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::live_tv::START_PATH,
             post(internal_live_tv::start).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::live_tv::START_V2_PATH,
             post(internal_live_tv::start_v2).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::live_tv::ACTIVATE_PATH,
             post(internal_live_tv::activate).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::live_tv::RESOURCE_PATH,
             post(internal_live_tv::resource).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::live_tv::STOP_PATH,
             post(internal_live_tv::stop).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::live_tv::RETIRE_PATH,
             post(internal_live_tv::retire).layer(DefaultBodyLimit::max(1_024)),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::live_tv::RESUME_PATH,
             post(internal_live_tv::resume).layer(DefaultBodyLimit::max(1_024)),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::live_tv::START_STATE_PATH,
             post(internal_live_tv::start_state).layer(DefaultBodyLimit::max(1_024)),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::live_tv::GUIDE_PATH,
             post(internal_live_tv::guide).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             "/internal/media/cache-copy/{recipe}/{digest}/{object}",
             get(transcode_copies::serve),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             "/internal/media/fragment-index/{cache_key}",
             get(internal_media::fragment_index),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::subtitle_ranges::PATH,
             post(internal_media::subtitle_range).layer(DefaultBodyLimit::max(4096)),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}",
             get(internal_media::subtitle_source),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::media_sessions::START_PATH,
             post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
             )),
-        )
+        )))
         .merge(shared_receiver_playback::internal_forwarding_router())
-        .route(
+        .merge(cluster_route!(Router::new().route(
             crate::media_sessions::ACTIVATE_PATH,
             post(internal_media_sessions::activate).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_ACTIVATION_REQUEST_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::media_sessions::PREPARE_PATH,
             post(internal_media_sessions::prepare).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::media_sessions::ABORT_PATH,
             post(internal_media_sessions::abort).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::sharing_connection_custody::CLOSE_PATH,
             post(crate::sharing_connection_custody::close_http).layer(DefaultBodyLimit::max(2048)),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::media_sessions::RELAY_PATH,
             post(internal_media_sessions::relay).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
             )),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             hls::QUALITY_CONTROL_PATH,
             post(internal_media_sessions::quality_control)
                 .layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             hls::QUALITY_SCHEDULE_PATH,
             post(internal_media_sessions::quality_schedule)
                 .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
-        )
-        .route(
+        )))
+        .merge(cluster_route!(Router::new().route(
             crate::media_sessions::CONTROL_PATH,
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
             )),
-        )
+        )))
         .merge(shared_source_playback::internal_forwarding_router());
 
     Router::new()
@@ -2513,7 +2587,9 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+#[cfg(feature = "cluster")]
 const LEARNER_ROUTE_INELIGIBLE_JSON: &str = r#"{"code":"learner_route_ineligible","message":"this non-voting learner serves only bounded catalogue reads and declared node-local media routes"}"#;
+#[cfg(feature = "cluster")]
 const NODE_REMOVAL_FENCED_JSON: &str = r#"{"code":"node_removal_fenced","message":"this cluster node is draining or has been removed"}"#;
 const NODE_MAINTENANCE_JSON: &str = r#"{"code":"node_maintenance","message":"this cluster node is in maintenance mode and is not accepting new work"}"#;
 
@@ -2552,8 +2628,8 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/support-bundle"
                 | "/api/v1/cluster/media"
                 | "/api/v1/cluster/ingress"
-                | cluster_operations::INTERNAL_PATH
-                | internal_clock::PATH
+                | "/api/v1/internal/cluster/operations-status"
+                | "/_internal/v1/clock"
         )
     {
         return true;
@@ -2561,7 +2637,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
     if method == Method::POST && matches!(path, "/api/v1/auth/login" | "/api/v1/auth/logout") {
         return true;
     }
-    if method == Method::POST && path == internal_auth_revocation::PATH {
+    if method == Method::POST && path == "/api/v1/internal/auth/cache-revocation" {
         return true;
     }
     if method == Method::POST && path == "/api/v1/cluster/election" {
@@ -2654,6 +2730,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
 /// other application route retains Authority/voter semantics. Media paths are
 /// admitted only through the existing serving fence, so a learner also needs
 /// a fresh quorum/apply proof before any node-local work starts.
+#[cfg(any(test, feature = "cluster"))]
 fn learner_route_eligible(method: &Method, path: &str) -> bool {
     if https_admin::eligible(method, path)
         || remote::eligible(method, path)
@@ -2679,8 +2756,8 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
             "/api/v1/cluster/nodes"
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
-                | cluster_operations::INTERNAL_PATH
-                | internal_clock::PATH
+                | "/api/v1/internal/cluster/operations-status"
+                | "/_internal/v1/clock"
         )
     {
         return true;
@@ -2690,7 +2767,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         // membership mutation a learner may originate locally.
         return true;
     }
-    if method == Method::POST && path == internal_auth_revocation::PATH {
+    if method == Method::POST && path == "/api/v1/internal/auth/cache-revocation" {
         return true;
     }
     // The content-addressed fragment-index read. `fragment_index_cluster`
@@ -2712,7 +2789,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     if file_id.parse::<i64>().is_ok_and(|value| value > 0)
                     && ordinal.parse::<i64>().is_ok_and(|value| value >= 0))
             });
-    if (method == Method::GET && transcode_copies::route_eligible(path))
+    if (method == Method::GET && cluster_cache_copy_route_eligible(path))
         || fragment_index_read
         || subtitle_source_read
         || (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
@@ -2838,6 +2915,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     node_local_get || node_local_create || node_local_close || live_keepalive
 }
 
+#[cfg(feature = "cluster")]
 fn capacity_role_refusal(
     role: Option<LocalServingRole>,
     method: &Method,
@@ -2889,15 +2967,18 @@ async fn cluster_capacity_gate(
     next: Next,
 ) -> Response {
     if let Some(refusal) = capacity_maintenance_refusal(
-        state.membership.local_maintenance_active(),
+        state.local_maintenance_active(),
         request.method(),
         request.uri().path(),
     ) {
         return refusal;
     }
-    let role = state.membership.local_serving_role().await.ok();
-    if let Some(refusal) = capacity_role_refusal(role, request.method(), request.uri().path()) {
-        return refusal;
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref() {
+        let role = membership.local_serving_role().await.ok();
+        if let Some(refusal) = capacity_role_refusal(role, request.method(), request.uri().path()) {
+            return refusal;
+        }
     }
     next.run(request).await
 }
@@ -2977,14 +3058,18 @@ pub(crate) struct ReadinessEvaluation {
 /// Only while the operator has turned the clock guard on: otherwise one
 /// skewed node would take every node's `/readyz` down. The measurement stays
 /// visible in the Developer readiness rows and the clock metrics either way.
-fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
-    let guard = state.membership.clock_guard();
-    (guard.is_enforced() && guard.snapshot().readiness.is_unbounded()).then_some(
-        ReadinessEvaluation {
-            ready: false,
-            reason: Some(ReadinessFailure::ClockUnbounded),
-        },
-    )
+fn clock_readiness_failure(_state: &AppState) -> Option<ReadinessEvaluation> {
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = _state.membership.as_ref() {
+        let guard = membership.clock_guard();
+        return (guard.is_enforced() && guard.snapshot().readiness.is_unbounded()).then_some(
+            ReadinessEvaluation {
+                ready: false,
+                reason: Some(ReadinessFailure::ClockUnbounded),
+            },
+        );
+    }
+    None
 }
 
 /// One typed readiness decision shared by `/readyz` and cluster status.
@@ -2992,7 +3077,7 @@ fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
 /// Replicated nodes use only the passive serving fence. A local SQLite node
 /// retains its existing bounded Store ping because it has no quorum proof.
 pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation {
-    if state.membership.local_maintenance_active() {
+    if state.local_maintenance_active() {
         return ReadinessEvaluation {
             ready: false,
             reason: Some(ReadinessFailure::Maintenance),
@@ -3067,8 +3152,8 @@ async fn desktop_http_admission_gate(
     // work it must drain. These read-only observations also keep cluster
     // diagnostics and authenticated clock sampling usable while fenced.
     let control_plane = path.starts_with("/api/v1/cluster/")
-        || path == cluster_operations::INTERNAL_PATH
-        || path == internal_clock::PATH
+        || path == "/api/v1/internal/cluster/operations-status"
+        || path == "/_internal/v1/clock"
         || matches!(
             path,
             "/healthz" | "/readyz" | "/metrics" | "/api/v1/server" | "/api/v1/server/node"
@@ -3228,3 +3313,36 @@ pub(crate) fn source_actor_test_state() -> AppState {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) async fn local_owned_media_sessions(state: &AppState) -> usize {
+    let (hls, offline) = tokio::join!(
+        state.transcode.active_sessions(),
+        state.offline.active_preparations()
+    );
+    hls.saturating_add(state.streams.active_count())
+        .saturating_add(offline)
+        .saturating_add(state.live_tv.activities().len())
+        .saturating_add(state.live_tv.recording_activities().len())
+}
+
+#[cfg(any(test, feature = "cluster"))]
+fn cluster_cache_copy_route_eligible(path: &str) -> bool {
+    #[cfg(feature = "cluster")]
+    {
+        transcode_copies::route_eligible(path)
+    }
+    #[cfg(not(feature = "cluster"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+#[cfg(feature = "cluster")]
+fn cluster_membership(
+    state: &AppState,
+) -> Result<&plurx_core::cluster::membership::MembershipManager, error::ApiError> {
+    state.membership.as_ref().ok_or_else(|| {
+        cluster::api_error(plurx_core::cluster::membership::MembershipError::Unavailable)
+    })
+}

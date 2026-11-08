@@ -997,9 +997,9 @@ macos_native_source_install() {
   macos_refuse_root
   [ -z "$prefix" ] || die "macOS tray installs use the fixed per-user runtime and ~/Applications/Plurx Server.app; use --server-only for custom service prefixes"
   command -v python3 >/dev/null 2>&1 || die 'source tray installation requires Python 3, Rust and Swift; use a complete release archive without developer tools'
+  [ -z "$binary" ] || die 'native macOS source packages rebuild the exact standalone daemon; use --server-only for an explicitly supplied prebuilt binary'
   package=$root/target/macos-source-runtime-$(date +%Y%m%d%H%M%S)-$$
   set -- --output "$package"
-  [ -z "$binary" ] || set -- "$@" --binary "$binary"
   [ -z "$ffmpeg_archive" ] || set -- "$@" --ffmpeg-archive "$ffmpeg_archive"
   [ -z "$ffmpeg_package" ] || set -- "$@" --ffmpeg-package "$ffmpeg_package"
   [ -z "$source_parser" ] || set -- "$@" --source-parser "$source_parser"

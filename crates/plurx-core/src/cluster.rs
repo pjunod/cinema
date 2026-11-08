@@ -1,25 +1,20 @@
-//! Cluster identity compatibility for the Phase 4 transition.
-//!
-//! M0 introduced this seam while SQLite was the production store. Its job is
-//! to stop using the logical server id as an implicit machine id without
-//! changing the ownership key of any bytes already on disk. The first node
-//! therefore seeds `<data_dir>/node.id` from the existing `instance.id`;
-//! future join work may create a distinct local id.
-
-#[cfg(unix)]
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::{ErrorKind, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+//! Compatibility adapters for cluster identity and legacy SQLite import.
+//! Native storage and application identity live in [`crate::storage`].
 
 use crate::config::Config;
 use crate::error::StoreError;
-use crate::secrets::{self, CredentialKey};
-use crate::store::{SettingsStore, SharingStore, SqliteStore, Store};
+use crate::secrets::CredentialKey;
+#[cfg(all(test, unix))]
+use crate::storage::identity::mode_is_owner_only;
+#[cfg(test)]
+use crate::storage::identity::publish_with_rename_fallback;
+use crate::store::Store;
+#[cfg(test)]
+use crate::store::{SharingStore, SqliteStore};
+#[cfg(all(test, unix))]
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::sync::Arc;
 
 pub mod clock;
 pub mod coordination;
@@ -27,166 +22,68 @@ pub mod coordination;
 pub mod membership;
 pub mod migration;
 
-pub const NODE_ID_FILENAME: &str = "node.id";
-/// The M0/M2 path starts with one voter; later membership assigns other ids.
+pub use crate::storage::identity::NODE_ID_FILENAME;
 pub const SINGLE_VOTER_RAFT_ID: u64 = 1;
 
-/// The three identities that must not collapse into one value once clustering
-/// starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterIdentity {
-    /// Stable logical-server identifier stored as `instance.id`.
     pub cluster_id: String,
-    /// Stable application-node identifier stored only in `<data_dir>/node.id`.
     pub node_id: String,
-    /// Non-zero hiqlite membership id. M0 has exactly one voter.
     pub raft_id: u64,
 }
 
-/// Legacy SQLite opening result retained for recovery and identity tests.
+impl From<ClusterIdentity> for crate::storage::LocalIdentity {
+    fn from(identity: ClusterIdentity) -> Self {
+        Self {
+            instance_id: identity.cluster_id,
+            node_id: identity.node_id,
+        }
+    }
+}
+
+impl From<&ClusterIdentity> for crate::storage::LocalIdentity {
+    fn from(identity: &ClusterIdentity) -> Self {
+        Self {
+            instance_id: identity.cluster_id.clone(),
+            node_id: identity.node_id.clone(),
+        }
+    }
+}
+
+/// Legacy import/recovery result. The coordinator owns the directory lock.
 pub struct StoreHandle {
     pub store: Arc<dyn Store>,
     pub identity: ClusterIdentity,
-    /// Node-local key for durable credentials that must be replayed rather
-    /// than verified. It is deliberately not part of `Store`: the store's job
-    /// is to persist the envelope, and only a caller making an outbound call
-    /// has any business unwrapping one.
     pub credential_key: Arc<CredentialKey>,
 }
 
-/// Open the legacy SQLite store and initialize the node-local identity.
-///
-/// The activation coordinator uses this only for the recovery boot after an
-/// interrupted import; ordinary daemon startup selects the replicated store.
+/// Compatibility wrapper for the existing import/recovery coordinator.
+/// Its caller already holds the exclusive data-directory lock.
 pub async fn open_store(config: &Config) -> Result<StoreHandle, StoreError> {
-    std::fs::create_dir_all(&config.storage.data_dir).map_err(|error| {
-        StoreError::Identity(format!(
-            "creating data directory {}: {error}",
-            config.storage.data_dir.display()
-        ))
-    })?;
-    let db_path = config.storage.data_dir.join("plurx.db");
-    let sqlite = SqliteStore::open(&db_path)?;
-    let cluster_id = sqlite.instance_id().await?;
-    let identity = initialize_identity(&config.storage.data_dir, &cluster_id)?;
-    if identity.node_id != cluster_id {
-        let legacy_rows = sqlite.local_ownership_rows(&cluster_id).await?;
-        if legacy_rows > 0 {
-            return Err(StoreError::Identity(format!(
-                "node.id {} differs from instance.id {cluster_id}, but {legacy_rows} cache or \
-                 offline row(s) still use instance.id; refusing to strand owned bytes",
-                identity.node_id
-            )));
-        }
-        tracing::warn!(
-            node_id = %identity.node_id,
-            cluster_id,
-            "using a node-local identity distinct from instance.id"
-        );
-    }
-
-    let credential_key = open_credential_key_for(config, &sqlite, &identity).await?;
-    sqlite.migrate_trakt_credentials(&credential_key).await?;
-
+    let native = crate::storage::native::open_store_parts(config).await?;
     Ok(StoreHandle {
-        store: Arc::new(sqlite),
-        identity,
-        credential_key: Arc::new(credential_key),
+        store: native.store,
+        identity: ClusterIdentity {
+            cluster_id: native.identity.instance_id,
+            node_id: native.identity.node_id,
+            raft_id: SINGLE_VOTER_RAFT_ID,
+        },
+        credential_key: native.credential_key,
     })
 }
 
-/// Resolve the credential key before anything can read a Trakt row, and refuse
-/// to continue if the rows on disk are sealed under a key this node does not
-/// hold.
-///
-/// Order matters. Taking the census first is what turns one key file into three
-/// different answers: a fresh install mints a key, an install whose key file was
-/// lost or never restored from backup stops with the path it wants, and an
-/// install sitting beside somebody else's key file stops naming the key it
-/// actually needs. Every silent alternative — minting a key, or keeping one that
-/// opens nothing, or reading the rows as cleartext — leaves a household either
-/// unable to sync with no error to search for, or newly exposed without being
-/// told.
-async fn open_credential_key_for(
-    config: &Config,
-    sqlite: &SqliteStore,
-    identity: &ClusterIdentity,
-) -> Result<CredentialKey, StoreError> {
-    use crate::store::SharingPurposeKeyStore;
-    #[cfg(feature = "hiqlite-store")]
-    let claim = crate::store::sharing_purpose_keys::begin_local_census(
-        sqlite,
-        identity,
-        i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| crate::sharing::invalid())?
-                .as_millis(),
-        )
-        .map_err(|_| crate::sharing::invalid())?,
-    )
-    .await?;
-    #[cfg(not(feature = "hiqlite-store"))]
-    let _ = identity;
-    sqlite.inspect_sharing_purpose_material().await?;
-    let path = config.cluster.credential_key_path(&config.storage.data_dir);
-    let mut census = sqlite.sealed_trakt_row_census().await?;
-    census.merge(sqlite.sharing_sealed_census().await?);
-    let key = secrets::open_credential_key(&path, &census)
-        .map_err(|error| StoreError::Identity(error.to_string()))?;
-    sqlite.verify_sharing_purpose_material(&key).await?;
-    #[cfg(feature = "hiqlite-store")]
-    crate::store::sharing_purpose_keys::finish_census(sqlite, claim).await?;
-    tracing::debug!(
-        key_id = %key.id(),
-        wrapped_rows = census.sealed_rows(),
-        "opened the node-local credential key"
-    );
-    Ok(key)
-}
-
-/// Read or atomically create this process's local identity.
-///
-/// The initial value is the logical id on purpose: all cache locations and
-/// offline packages written before M0 use that exact string as their owner.
-/// Seeding rather than minting preserves those rows and their bytes without a
-/// data migration.
 pub fn initialize_identity(
     data_dir: &Path,
     cluster_id: &str,
 ) -> Result<ClusterIdentity, StoreError> {
-    std::fs::create_dir_all(data_dir).map_err(|error| {
-        StoreError::Identity(format!(
-            "creating data directory {}: {error}",
-            data_dir.display()
-        ))
-    })?;
-
-    let path = data_dir.join(NODE_ID_FILENAME);
-    let raw_node_id = match read_node_id(&path) {
-        Ok(id) => id,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            create_node_id_noclobber(data_dir, &path, cluster_id)?;
-            read_node_id(&path).map_err(|error| identity_io("reading", &path, error))?
-        }
-        Err(error) => return Err(identity_io("reading", &path, error)),
-    };
-    let node_id = normalize_node_id(cluster_id, &raw_node_id)?;
-
+    let local = crate::storage::identity::initialize_local_identity(data_dir, cluster_id)?;
     Ok(ClusterIdentity {
-        cluster_id: cluster_id.to_owned(),
-        node_id,
+        cluster_id: local.instance_id,
+        node_id: local.node_id,
         raft_id: SINGLE_VOTER_RAFT_ID,
     })
 }
 
-/// Create the node-local identity for a fresh machine joining an existing
-/// logical server.
-///
-/// A joining directory has no legacy cache/offline ownership to preserve, so
-/// it must mint its own node id rather than copying the cluster's
-/// `instance.id`. The caller has already proved the directory is fresh and the
-/// Raft id came from a single-use admission token.
 #[cfg(feature = "hiqlite-store")]
 pub(crate) fn initialize_join_identity(
     data_dir: &Path,
@@ -198,176 +95,12 @@ pub(crate) fn initialize_join_identity(
             "a joining node received Raft id zero".to_owned(),
         ));
     }
-    std::fs::create_dir_all(data_dir).map_err(|error| {
-        StoreError::Identity(format!(
-            "creating data directory {}: {error}",
-            data_dir.display()
-        ))
-    })?;
-    let path = data_dir.join(NODE_ID_FILENAME);
-    if !path.exists() {
-        create_node_id_noclobber(data_dir, &path, &uuid::Uuid::new_v4().to_string())?;
-    }
-    let raw_node_id = read_node_id(&path).map_err(|error| identity_io("reading", &path, error))?;
-    let node_id = normalize_node_id(&raw_node_id, &raw_node_id)?;
+    let local = crate::storage::identity::initialize_join_node_identity(data_dir, cluster_id)?;
     Ok(ClusterIdentity {
-        cluster_id: cluster_id.to_owned(),
-        node_id,
+        cluster_id: local.instance_id,
+        node_id: local.node_id,
         raft_id,
     })
-}
-
-fn read_node_id(path: &Path) -> std::io::Result<String> {
-    let raw = std::fs::read_to_string(path)?;
-    let id = raw.trim();
-    if id.is_empty() {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "the file is empty",
-        ));
-    }
-    Ok(id.to_owned())
-}
-
-/// Publish a complete, fsynced file without ever replacing an identity another
-/// process won the race to create.
-fn create_node_id_noclobber(
-    data_dir: &Path,
-    destination: &Path,
-    seed: &str,
-) -> Result<(), StoreError> {
-    let temporary = temporary_path(data_dir);
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-
-    let result = (|| -> Result<(), StoreError> {
-        let mut file = options
-            .open(&temporary)
-            .map_err(|error| identity_io("creating", &temporary, error))?;
-        file.write_all(seed.as_bytes())
-            .and_then(|_| file.write_all(b"\n"))
-            .and_then(|_| file.sync_all())
-            .map_err(|error| identity_io("writing", &temporary, error))?;
-
-        #[cfg(unix)]
-        {
-            let mode = file
-                .metadata()
-                .map_err(|error| identity_io("reading metadata for", &temporary, error))?
-                .permissions()
-                .mode()
-                & 0o777;
-            if !mode_is_owner_only(mode) {
-                tracing::warn!(
-                    path = %temporary.display(),
-                    mode = format_args!("{mode:o}"),
-                    "cluster identity filesystem exposed group or other permissions despite requesting mode 600"
-                );
-            }
-        }
-        drop(file);
-
-        match std::fs::hard_link(&temporary, destination) {
-            Ok(()) => sync_directory(data_dir),
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
-            Err(error) if hard_links_unavailable(&error) => {
-                publish_with_rename_fallback(data_dir, &temporary, destination)
-            }
-            Err(error) => Err(identity_io("publishing", destination, error)),
-        }
-    })();
-
-    let cleanup = std::fs::remove_file(&temporary);
-    if let Err(error) = cleanup {
-        if error.kind() != ErrorKind::NotFound && result.is_ok() {
-            return Err(identity_io("removing temporary", &temporary, error));
-        }
-    }
-    result
-}
-
-fn hard_links_unavailable(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        ErrorKind::PermissionDenied | ErrorKind::Unsupported
-    )
-}
-
-#[cfg(unix)]
-fn mode_is_owner_only(mode: u32) -> bool {
-    mode & 0o077 == 0
-}
-
-/// Best-effort no-clobber fallback for filesystems that cannot create hard
-/// links. A create-new destination probe elects one publisher; only that
-/// process may replace its own empty placeholder with the already-fsynced
-/// temporary file.
-fn publish_with_rename_fallback(
-    data_dir: &Path,
-    temporary: &Path,
-    destination: &Path,
-) -> Result<(), StoreError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-
-    match options.open(destination) {
-        Ok(placeholder) => {
-            drop(placeholder);
-            std::fs::rename(temporary, destination)
-                .map_err(|error| identity_io("publishing", destination, error))?;
-            sync_directory(data_dir)
-        }
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(identity_io("reserving", destination, error)),
-    }
-}
-
-fn temporary_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(format!(".{NODE_ID_FILENAME}.{}.tmp", uuid::Uuid::new_v4()))
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), StoreError> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| identity_io("syncing directory", path, error))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), StoreError> {
-    Ok(())
-}
-
-fn validate_uuid(label: &str, value: &str) -> Result<uuid::Uuid, StoreError> {
-    let id = uuid::Uuid::parse_str(value)
-        .map_err(|error| StoreError::Identity(format!("{label} is not a UUID: {error}")))?;
-    if id.is_nil() {
-        return Err(StoreError::Identity(format!("{label} must not be nil")));
-    }
-    Ok(id)
-}
-
-fn normalize_node_id(cluster_id: &str, node_id: &str) -> Result<String, StoreError> {
-    if node_id == cluster_id {
-        return Ok(cluster_id.to_owned());
-    }
-
-    let parsed = validate_uuid("node.id", node_id)?;
-    if uuid::Uuid::parse_str(cluster_id).is_ok_and(|cluster| cluster == parsed) {
-        // Preserve the exact legacy ownership key stored in instance.id even
-        // if an operator wrote an equivalent UUID spelling to node.id.
-        Ok(cluster_id.to_owned())
-    } else {
-        Ok(parsed.to_string())
-    }
-}
-
-fn identity_io(action: &str, path: &Path, error: std::io::Error) -> StoreError {
-    StoreError::Identity(format!("{action} {}: {error}", path.display()))
 }
 
 #[cfg(test)]

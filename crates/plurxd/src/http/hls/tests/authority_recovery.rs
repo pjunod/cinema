@@ -9,10 +9,8 @@ async fn fenced_manager() -> (
     tokio::task::JoinHandle<()>,
     tempfile::TempDir,
 ) {
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
     let base = crate::test_tempdir().expect("manager dir");
-    let fence =
-        crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+    let fence = crate::serving_fence::ServingFence::local();
     let manager = std::sync::Arc::new(
         crate::transcode::TranscodeManager::new(
             std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store")),
@@ -85,7 +83,11 @@ async fn an_arrival_six_seconds_into_an_outage_fails_fast() {
         .wait_for_outage_resolution(baseline, far_deadline())
         .await;
     assert_eq!(outcome, crate::serving_fence::OutageWait::Expired);
-    assert_eq!(arrived.elapsed(), Duration::ZERO, "nothing is left to wait for");
+    assert_eq!(
+        arrived.elapsed(),
+        Duration::ZERO,
+        "nothing is left to wait for"
+    );
 
     // Still expired a full grace later, and a recovery then reopens normally:
     // the next loss gets a grace of its own.
@@ -134,7 +136,11 @@ async fn a_loss_landing_before_the_recovery_is_published_is_not_reported_recover
     assert_eq!(baseline, first_loss, "the generation last held");
     let waiter = tokio::spawn({
         let manager = std::sync::Arc::clone(&manager);
-        async move { manager.wait_for_outage_resolution(baseline, far_deadline()).await }
+        async move {
+            manager
+                .wait_for_outage_resolution(baseline, far_deadline())
+                .await
+        }
     });
     settle().await;
 
@@ -183,7 +189,11 @@ async fn flapping_across_several_requests_spends_one_budget_and_cancelling_does_
     let first = fence.authority().outage_baseline().expect("fenced");
     let held = tokio::spawn({
         let manager = std::sync::Arc::clone(&manager);
-        async move { manager.wait_for_outage_resolution(first, far_deadline()).await }
+        async move {
+            manager
+                .wait_for_outage_resolution(first, far_deadline())
+                .await
+        }
     });
     tokio::time::advance(Duration::from_secs(1)).await;
     fence.validation_set_ready(true).await;
@@ -202,7 +212,11 @@ async fn flapping_across_several_requests_spends_one_budget_and_cancelling_does_
     for _ in 0..4 {
         let cancelled = tokio::spawn({
             let manager = std::sync::Arc::clone(&manager);
-            async move { manager.wait_for_outage_resolution(second, far_deadline()).await }
+            async move {
+                manager
+                    .wait_for_outage_resolution(second, far_deadline())
+                    .await
+            }
         });
         settle().await;
         cancelled.abort();
@@ -438,7 +452,9 @@ async fn a_session_retired_during_the_wait_is_refused_after_recovery() {
         async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let (_, ()) = tokio::join!(
-                state.transcode.begin_session_publication_fence("vod-retired"),
+                state
+                    .transcode
+                    .begin_session_publication_fence("vod-retired"),
                 state.serving.validation_set_ready(true),
             );
         }
@@ -527,7 +543,9 @@ async fn a_held_read_runs_after_recovery_while_creates_and_control_fail_fast() {
         "held exactly until the recovery"
     );
     assert_ne!(
-        response.extensions().get::<crate::http::error::ApiErrorCode>(),
+        response
+            .extensions()
+            .get::<crate::http::error::ApiErrorCode>(),
         Some(&crate::http::error::ApiErrorCode("serving_fenced")),
         "the held read ran after recovery instead of being fenced"
     );

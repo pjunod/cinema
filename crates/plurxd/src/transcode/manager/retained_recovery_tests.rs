@@ -676,6 +676,7 @@ async fn first_preparation_fences_the_admitted_predecessor_epoch_not_its_current
 }
 
 #[tokio::test]
+#[cfg(feature = "cluster")]
 async fn first_preparation_seals_actual_choice_and_replay_keeps_owner() {
     use plurx_core::store::{MediaSessionStore, UserStore};
     for absence in [false, true] {

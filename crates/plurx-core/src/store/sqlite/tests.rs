@@ -864,8 +864,9 @@ async fn v6_rebuild_preserves_everything() {
     // v121 appends the managed v3 view for verified text-artifact inference.
     // v122 adds source custody; v123 gives prepared artifacts the v4 view;
     // v124 appends shared dispatch turns.
+    // v125 records standalone storage identity and its ownership census.
     assert_eq!(
-        version, 124,
+        version, 125,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

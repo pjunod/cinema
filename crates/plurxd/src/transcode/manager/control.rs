@@ -267,6 +267,7 @@ impl TranscodeManager {
         self.vod.display_target_usage().await
     }
 
+    #[cfg(feature = "cluster")]
     pub(crate) async fn vod_delivery_infos_bounded(
         &self,
         limit: usize,
@@ -1767,6 +1768,7 @@ impl TranscodeManager {
     /// slot, and §7.2's "a delete racing takeover resolves to ended without a
     /// replacement child remaining alive" holds only by the slower lease-loss
     /// path.
+    #[cfg(any(test, feature = "cluster"))]
     async fn rolling_session_for_request(
         &self,
         request_id: &str,
@@ -1829,6 +1831,7 @@ impl TranscodeManager {
         true
     }
 
+    #[cfg(feature = "cluster")]
     pub(crate) async fn owns_session_for_owner(
         &self,
         incarnation_id: &str,
@@ -1870,6 +1873,7 @@ impl TranscodeManager {
             .is_ok_and(|outcome| outcome.removed)
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub async fn stop_session_for_request(
         &self,
         request_id: &str,
@@ -1925,6 +1929,7 @@ impl TranscodeManager {
     /// that guard while the child is still alive lets the next start for the
     /// same player through, and since a takeover deliberately supersedes
     /// nothing, the result is two encoders for one player.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn stop_session_until<T: Send + 'static>(
         self: &Arc<Self>,
         session_id: &str,

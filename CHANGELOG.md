@@ -10,12 +10,21 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Jobs includes fresh CPU, GPU and heavy-worker capacity from learner nodes.
+  Worker observations use the member-scoped operations channel and remain
+  independent of voter-only playback and recording authority.
+- Pending native HLS segments advertise their bounded Retry-After interval.
+
 - Subtitle workers preserve a completed publication when a concurrent pressure
   check observes that its source authority has retired. Changed original files
   retain the existing not-found response instead of returning an internal error.
 - Source-retirement and deferred-companion diagnostics remain in their parent
   operator log channels. Verified fleet publication checks the exact reviewed
   image configuration before advancing the main tag.
+
+- Original HDR enhancements preserve their measured video bitrate budget, select
+  legal HEVC/Dolby Vision levels and bind quality receipts to the actual
+  encoder recipe instead of lowering the source budget.
 
 - Linux Dolby Vision reconstruction avoids inherited display adjustments and
   preserves software planar 10-bit samples. Its final Vulkan RGB cache rounds
@@ -35,6 +44,16 @@ bump may break compatibility and a **patch** bump never does.
 - Activity shows blocked shared reads above both tabs, identifies the originating
   worker and job when available, and reports overdue manual scans alongside
   five-minute completion and failure rates for the cluster and each worker.
+
+- Standalone build recipes omit the cluster SDK from the selected daemon,
+  controller and tray graph. Explicit cluster profiles keep their own images;
+  legacy data uses a separately authenticated migration helper or an explicit
+  verified-source migration command. Distribution qualification is in progress.
+
+- Standalone servers use native SQLite without Raft or quorum serving checks.
+  Verified private singleton upgrades preserve current data, identities, sealed
+  keys and local observations; clusters require explicit creation or joining.
+  Native backup, restore and maintenance have independent storage adapters.
 
 - macOS source installs discover full Xcode when Command Line Tools are selected,
   find renamed or relocated copies through the macOS application index,

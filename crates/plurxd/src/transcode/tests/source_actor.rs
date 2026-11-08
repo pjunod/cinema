@@ -255,9 +255,10 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     let state_mut = Arc::get_mut(&mut state).expect("sole fixture state");
     eprintln!("Source fixture: state constructed without Router");
     state_mut.store = Arc::clone(&selected.store);
-    state_mut.membership = membership.clone();
+    state_mut.membership = Some(membership.clone());
+    state_mut.storage_mode = plurx_core::storage::mode::StorageMode::Cluster;
     state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
-        membership.clone(),
+        Some(membership.clone()),
         Arc::clone(&state_mut.store),
     );
     state_mut.sharing = Arc::new(crate::sharing::SharingManager::new(
@@ -268,9 +269,13 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     state_mut.node_id = selected.identity.node_id.clone();
     state_mut
         .membership
+        .as_ref()
+        .expect("actual selected voter membership")
         .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
     state_mut
         .membership
+        .as_ref()
+        .expect("actual selected voter membership")
         .publish_ingress_custody_boot()
         .await
         .expect("actual registry boot publication before admission");
@@ -869,7 +874,10 @@ async fn source_actual_copy_attachment(
     assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
 ) {
     let store = &state.store;
-    let membership = &state.membership;
+    let membership = state
+        .membership
+        .as_ref()
+        .expect("actual selected voter membership");
     let master = &state.sharing.key;
     let binding = assignment.binding();
     use plurx_core::{
@@ -943,7 +951,9 @@ async fn source_actual_copy_attachment(
     .await;
     let gate = Arc::new(SourceProducerAuthority {
         store: Arc::clone(store),
-        membership: membership.clone(),
+        source_authority: crate::cluster_runtime::source_admission::from_membership(
+            membership.clone(),
+        ),
         master: Arc::clone(master),
         registry_boot_id: state.sharing.accepted_drivers.boot_id(),
         ingress: ingress_fixture.permission().await,
@@ -1126,6 +1136,8 @@ async fn source_actual_actor(
     }
     let members = state
         .membership
+        .as_ref()
+        .expect("actual selected voter membership")
         .observe_source_admission_members()
         .await
         .expect("actual members")
@@ -1175,7 +1187,7 @@ async fn source_actual_actor(
     if mode == 52 {
         let gate = SourceProducerAuthority {
             store: Arc::clone(&state.store),
-            membership: state.membership.clone(),
+            source_authority: state.source_authority_provider(),
             master: Arc::clone(&state.sharing.key),
             registry_boot_id: state.sharing.accepted_drivers.boot_id(),
             ingress: ingress_permission.clone(),
@@ -1295,6 +1307,8 @@ async fn source_actual_actor(
         ingress_fixture.close_transport(false, None).await;
         let fresh = state
             .membership
+            .as_ref()
+            .expect("actual selected voter membership")
             .observe_source_admission_members()
             .await
             .expect("gap members")
@@ -2793,6 +2807,8 @@ impl SourceFactoryIngressFixture {
         };
         let members = state
             .membership
+            .as_ref()
+            .expect("actual selected voter membership")
             .observe_source_admission_members()
             .await
             .expect("fresh registration members")
@@ -2827,6 +2843,8 @@ impl SourceFactoryIngressFixture {
         let members = self
             .state
             .membership
+            .as_ref()
+            .expect("actual selected voter membership")
             .observe_source_admission_members()
             .await
             .expect("actual ingress members")
@@ -2964,6 +2982,8 @@ async fn source_two_owner_generation_fixture(
     let initial_a = ingress_a.permission().await;
     let members = state
         .membership
+        .as_ref()
+        .expect("actual selected voter membership")
         .observe_source_admission_members()
         .await
         .expect("first members")
@@ -2999,6 +3019,8 @@ async fn source_two_owner_generation_fixture(
     let initial_b = ingress_b.permission().await;
     let members = state
         .membership
+        .as_ref()
+        .expect("actual selected voter membership")
         .observe_source_admission_members()
         .await
         .expect("second members")
@@ -3164,6 +3186,8 @@ async fn source_actual_unknown_register_reconciliation(
     );
     let members = state
         .membership
+        .as_ref()
+        .expect("actual selected voter membership")
         .observe_source_admission_members()
         .await
         .expect("current members")

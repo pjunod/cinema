@@ -7,6 +7,7 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
+| [CINEMA-MODULAR-BUILD-ASTRA-REVIEW.md](CINEMA-MODULAR-BUILD-ASTRA-REVIEW.md) | Astra review of the modular build plan: whole-distribution dependency omission, migration helper handoff, sealed authority, timing parity and individual dispositions. | done |
 | [CINEMA-END-TO-END-REVIEW-2026-11-07.md](CINEMA-END-TO-END-REVIEW-2026-11-07.md) | End-to-end review of the playback start path against HEAD and the live fleet (2026-11-07): why starts are slow or fail (starved fragment-index queue, engine-keyed index identity, 16 s rolling gate, a 10-phase create, consensus for everything), how the October HDR/DV, capability and encoding changes sit on it, and the ranked design adjustments with their acceptance readings. | open |
 | [PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md](PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md) | Actual storage-owner implementation review: seven findings corrected and final focused evidence approved. | done |
 | [PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md](PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md) | Adversarial review of the October 8 playback-buffer repair: capacity handoff, early cancellation, restart and cleanup-failure ownership; findings and dispositions. | open |

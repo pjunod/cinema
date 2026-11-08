@@ -587,6 +587,7 @@ pub(super) async fn foreground_pressure<T: QueueSql>(
 
 /// Canonical SQLite definitions, used by the replicated extension installer.
 /// A marker alone cannot attest tables, views or physical-owner triggers.
+#[cfg(any(test, feature = "hiqlite-store"))]
 pub(crate) fn source_arbitration_objects() -> Result<Vec<(String, String)>, StoreError> {
     let conn = rusqlite::Connection::open_in_memory()?;
     conn.execute_batch("CREATE TABLE background_jobs(id TEXT PRIMARY KEY,state TEXT,fence INTEGER); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER);")?;

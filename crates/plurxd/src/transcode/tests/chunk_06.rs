@@ -1,4 +1,3 @@
-
     /// The derivation this whole milestone rests on, exercised through a real
     /// resolved plan rather than a hand-built estimate.
     ///
@@ -947,12 +946,10 @@
 
     #[tokio::test]
     async fn response_publication_observes_authority_loss_before_watch_delivery() {
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
         use plurx_core::store::SqliteStore;
 
         let root = crate::test_tempdir().expect("direct serving authority root");
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let manager = Arc::new(
             TranscodeManager::new(
@@ -995,12 +992,10 @@
 
     #[tokio::test]
     async fn registration_observes_authority_loss_before_watch_delivery() {
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
         use plurx_core::store::SqliteStore;
 
         let root = crate::test_tempdir().expect("direct registration authority root");
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let manager = Arc::new(
             TranscodeManager::new(
@@ -1033,14 +1028,12 @@
 
     #[tokio::test]
     async fn in_flight_vod_publication_rechecks_direct_serving_authority() {
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
         use plurx_core::store::SqliteStore;
 
         let root = crate::test_tempdir().expect("in-flight VOD authority root");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let manager = Arc::new(
             TranscodeManager::new(
                 Arc::clone(&store),
@@ -1095,14 +1088,12 @@
     /// `in_flight_vod_publication_rechecks_direct_serving_authority`.)
     #[tokio::test]
     async fn vod_publication_point_follows_the_serving_admission() {
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
         use plurx_core::store::SqliteStore;
 
         let root = crate::test_tempdir().expect("VOD admission root");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let manager = Arc::new(
             TranscodeManager::new(
                 Arc::clone(&store),
@@ -1191,14 +1182,12 @@
 
     #[tokio::test]
     async fn authorized_vod_eof_cannot_commit_after_direct_authority_loss() {
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
         use plurx_core::store::SqliteStore;
 
         let root = crate::test_tempdir().expect("VOD EOF authority root");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let manager = Arc::new(
             TranscodeManager::new(
                 store,
@@ -2306,13 +2295,11 @@
 
     #[tokio::test]
     async fn serving_fence_retires_sessions_after_a_sustained_loss_and_refuses_late_children() {
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
         use plurx_core::store::SqliteStore;
 
         let root = crate::test_tempdir().expect("serving-fence root");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let manager = Arc::new(
             TranscodeManager::new(
                 store,
@@ -2382,12 +2369,10 @@
         crate::serving_fence::ServingFence,
         Arc<Session>,
     ) {
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let manager = Arc::new(
             TranscodeManager::new(
                 store,
@@ -2470,13 +2455,16 @@
     #[tokio::test]
     async fn serving_fence_preserves_real_media_through_2468ms_and_reaps_after_grace() {
         super::require_ffmpeg();
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
         use plurx_core::store::SqliteStore;
         let root = crate::test_tempdir().expect("isolated real-media root");
         let media = root.path().join("media");
         std::fs::create_dir(&media).expect("owned publisher directory");
         let executable = crate::ffmpeg::encoder_executable_path().expect("pinned FFmpeg");
         let mut command = tokio::process::Command::new(&executable);
+        // AttemptChild owns and signals the publisher's process group on Linux.
+        // A raw test child must establish that same ownership before adoption.
+        #[cfg(target_os = "linux")]
+        command.process_group(0);
         command.args(["-v", "error", "-nostdin", "-re", "-f", "lavfi", "-i",
             "testsrc2=size=160x120:rate=10", "-t", "30", "-an", "-c:v", "libx264",
             "-threads", "1", "-preset", "ultrafast", "-g", "10", "-bf", "0",
@@ -2490,7 +2478,7 @@
         let child = command.spawn().expect("actual realtime media publisher");
         let publisher_pid = child.id().expect("live publisher pid");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let fence = crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let manager = Arc::new(TranscodeManager::new(store, root.path().join("manager"),
             EncoderCaps::default(), Pipeline::Cpu).with_serving_authority(fence.authority()));
         let existing = watchdog_session(&media, Some(child), false);

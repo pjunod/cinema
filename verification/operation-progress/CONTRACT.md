@@ -7,6 +7,23 @@ and [WAIT-MAP.md](WAIT-MAP.md) (source waits and external boundaries).
 This contract defines the meaning of `OperationProgress.tla`; it does not
 extend the original [safety contract](../durable-jobs/CONTRACT.md).
 
+## Source-budget recipe requests — source review on 2026-11-07
+
+Compared with main `02cdc98f4`, the shared queue adds only the
+`request_dv_fel_variant` trait method and its title-store delegation. The
+conformance parent adds that method to its inventory. Current source custody,
+claim, renewal, settlement, publication and authority bodies remain unchanged.
+The title store reopens its demand outbox for source-bound recipe requests,
+reuses queued work, and retains bounded peer receipts. These title-specific
+operations remain outside the modeled library publication path. The new
+runtime regression exercises them separately; defining it is not execution
+or formal qualification evidence.
+
+Only live whole-file fingerprints for the changed sources are refreshed.
+Current mappings, unique anchors, model/configuration bytes and historical
+qualification identities are preserved. This source review adds no fairness
+premise, model transition, TLC execution or refinement claim.
+
 ## Queue observation source review on 2026-11-07
 
 Compared with `4ddbf1229`, the shared queue adds read-only counts of recent

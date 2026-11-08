@@ -7,6 +7,11 @@ license.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+# This harness compiles the daemon's explicitly clustered policy modules.
+[features]
+default = ["cluster"]
+cluster = []
+
 [dependencies]
 anyhow = { workspace = true }
 futures-util = { workspace = true }

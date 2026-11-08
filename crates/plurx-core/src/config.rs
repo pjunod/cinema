@@ -247,6 +247,9 @@ impl ServerConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
+    /// Explicit cluster adoption. Omission defaults new installations to
+    /// native SQLite; an existing durable mode is never inferred from health.
+    pub mode: Option<crate::storage::mode::StorageMode>,
     /// Authoritative database, identity, secrets, and compatibility root.
     pub data_dir: PathBuf,
     /// Optional root for persistent node-local artwork, transcode, subtitle,
@@ -263,6 +266,7 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         StorageConfig {
+            mode: None,
             data_dir: PathBuf::from("./data"),
             cache_dir: PathBuf::new(),
             transcode_dir: PathBuf::new(),
@@ -371,6 +375,12 @@ impl ClusterConfig {
 }
 
 impl Config {
+    /// Credential ownership is shared by both storage backends. The legacy
+    /// configuration key stays supported so upgrades retain the same master.
+    pub fn credential_key_path(&self) -> PathBuf {
+        self.cluster.credential_key_path(&self.storage.data_dir)
+    }
+
     /// Load configuration.
     ///
     /// Precedence (lowest → highest): built-in defaults, TOML file, `PLURX_*`
@@ -435,7 +445,13 @@ impl Config {
                     .to_owned(),
             });
         }
-        if config.cluster.bounded_replica_max_lag_entries > MAX_BOUNDED_REPLICA_MAX_LAG_ENTRIES {
+        Ok(config)
+    }
+
+    /// Validate settings used only when constructing a replicated runtime.
+    /// Native loading and startup do not depend on unused Raft configuration.
+    pub fn validate_cluster_runtime(&self) -> Result<(), ConfigError> {
+        if self.cluster.bounded_replica_max_lag_entries > MAX_BOUNDED_REPLICA_MAX_LAG_ENTRIES {
             return Err(ConfigError::Value {
                 key: "cluster.bounded_replica_max_lag_entries".to_owned(),
                 message: format!(
@@ -443,14 +459,14 @@ impl Config {
                 ),
             });
         }
-        if !(1..=16).contains(&config.cluster.read_pool_size) {
+        if !(1..=16).contains(&self.cluster.read_pool_size) {
             return Err(ConfigError::Value {
                 key: "cluster.read_pool_size".to_owned(),
                 message: "must be between 1 and 16".to_owned(),
             });
         }
         if !(MIN_LOGS_UNTIL_SNAPSHOT..=MAX_LOGS_UNTIL_SNAPSHOT)
-            .contains(&config.cluster.logs_until_snapshot)
+            .contains(&self.cluster.logs_until_snapshot)
         {
             return Err(ConfigError::Value {
                 key: "cluster.logs_until_snapshot".to_owned(),
@@ -458,7 +474,7 @@ impl Config {
             });
         }
         if !(MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS..=MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS)
-            .contains(&config.cluster.install_snapshot_timeout_secs)
+            .contains(&self.cluster.install_snapshot_timeout_secs)
         {
             return Err(ConfigError::Value {
                 key: "cluster.install_snapshot_timeout_secs".to_owned(),
@@ -469,7 +485,7 @@ impl Config {
             });
         }
         if !(MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS..=MAX_SNAPSHOT_CHUNK_TIMEOUT_SECS)
-            .contains(&config.cluster.snapshot_chunk_timeout_secs)
+            .contains(&self.cluster.snapshot_chunk_timeout_secs)
         {
             return Err(ConfigError::Value {
                 key: "cluster.snapshot_chunk_timeout_secs".to_owned(),
@@ -480,7 +496,7 @@ impl Config {
             });
         }
         if !(MIN_SNAPSHOT_TRANSFER_TIMEOUT_SECS..=MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS)
-            .contains(&config.cluster.snapshot_transfer_timeout_secs)
+            .contains(&self.cluster.snapshot_transfer_timeout_secs)
         {
             return Err(ConfigError::Value {
                 key: "cluster.snapshot_transfer_timeout_secs".to_owned(),
@@ -490,15 +506,13 @@ impl Config {
                 ),
             });
         }
-        if config.cluster.snapshot_chunk_timeout_secs
-            > config.cluster.snapshot_transfer_timeout_secs
-        {
+        if self.cluster.snapshot_chunk_timeout_secs > self.cluster.snapshot_transfer_timeout_secs {
             return Err(ConfigError::Value {
                 key: "cluster.snapshot_chunk_timeout_secs".to_owned(),
                 message: "must not exceed cluster.snapshot_transfer_timeout_secs".to_owned(),
             });
         }
-        Ok(config)
+        Ok(())
     }
 
     fn from_file(path: &Path) -> Result<Config, ConfigError> {
@@ -838,6 +852,85 @@ mod tests {
         ));
     }
 
+    fn load_cluster_config(path: &Path) -> Result<Config, ConfigError> {
+        let config = Config::load(Some(path))?;
+        config.validate_cluster_runtime()?;
+        Ok(config)
+    }
+
+    #[test]
+    fn standalone_loading_ignores_unused_invalid_cluster_runtime_values() {
+        let dir = tempfile::tempdir().expect("native config fixture");
+        let path = dir.path().join("plurx.toml");
+        for (invalid, key) in [
+            (
+                "bounded_replica_max_lag_entries=10001",
+                "cluster.bounded_replica_max_lag_entries",
+            ),
+            ("read_pool_size=0", "cluster.read_pool_size"),
+            ("logs_until_snapshot=0", "cluster.logs_until_snapshot"),
+            (
+                "install_snapshot_timeout_secs=0",
+                "cluster.install_snapshot_timeout_secs",
+            ),
+            (
+                "snapshot_chunk_timeout_secs=0",
+                "cluster.snapshot_chunk_timeout_secs",
+            ),
+            (
+                "snapshot_transfer_timeout_secs=0",
+                "cluster.snapshot_transfer_timeout_secs",
+            ),
+            (
+                "snapshot_chunk_timeout_secs=300\nsnapshot_transfer_timeout_secs=60",
+                "cluster.snapshot_chunk_timeout_secs",
+            ),
+        ] {
+            std::fs::write(
+                &path,
+                format!("[storage]\nmode='sqlite'\n[cluster]\n{invalid}\n"),
+            )
+            .expect("unused invalid cluster setting");
+            let config =
+                Config::load(Some(&path)).expect("native loading validates common settings only");
+            assert_eq!(
+                config.storage.mode,
+                Some(crate::storage::mode::StorageMode::Sqlite)
+            );
+            assert!(
+                matches!(config.validate_cluster_runtime(),Err(ConfigError::Value{key:actual,..}) if actual==key),
+                "explicit cluster runtime rejects {key}"
+            );
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn cluster_entry_refuses_invalid_runtime_config_before_creating_state() {
+        let dir = tempfile::tempdir().expect("cluster entry fixture");
+        let root = dir.path().join("must-not-be-created");
+        let mut config = Config::default();
+        config.storage.data_dir = root.clone();
+        config.storage.mode = Some(crate::storage::mode::StorageMode::Cluster);
+        config.cluster.logs_until_snapshot = 0;
+        let selected = crate::cluster::migration::select_daemon_store(&config).await;
+        assert!(
+            matches!(selected,Err(crate::error::StoreError::Migration(message)) if message.contains("cluster.logs_until_snapshot"))
+        );
+        assert!(
+            !root.exists(),
+            "invalid cluster config cannot initialize storage or keys"
+        );
+        let connected = crate::cluster::migration::connect_activated_store(&config).await;
+        assert!(
+            matches!(connected,Err(crate::error::StoreError::Migration(message)) if message.contains("cluster.logs_until_snapshot"))
+        );
+        assert!(
+            !root.exists(),
+            "maintenance connections cannot initialize invalid clusters"
+        );
+    }
+
     #[test]
     fn shared_cache_mount_and_identity_are_paired_and_rollback_safe() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -885,7 +978,7 @@ mod tests {
         )
         .expect("write config");
         assert!(matches!(
-            Config::load(Some(&path)),
+            load_cluster_config(&path),
             Err(ConfigError::Value { key, .. })
                 if key == "cluster.bounded_replica_max_lag_entries"
         ));
@@ -904,7 +997,7 @@ mod tests {
                 ),
             )
             .expect("write split storage config");
-            let config = Config::load(Some(&path)).expect("load split storage config");
+            let config = load_cluster_config(&path).expect("load split storage config");
             assert_eq!(config.storage.cache_dir, PathBuf::from("/cache"));
             assert_eq!(config.storage.transcode_dir, PathBuf::from("/scratch"));
             assert_eq!(config.cluster.read_pool_size, size);
@@ -914,7 +1007,7 @@ mod tests {
             std::fs::write(&path, format!("[cluster]\nread_pool_size = {size}\n"))
                 .expect("write invalid read pool");
             assert!(matches!(
-                Config::load(Some(&path)),
+                load_cluster_config(&path),
                 Err(ConfigError::Value { key, .. }) if key == "cluster.read_pool_size"
             ));
         }
@@ -941,7 +1034,7 @@ mod tests {
             )
             .expect("write config");
             assert_eq!(
-                Config::load(Some(&path))
+                load_cluster_config(&path)
                     .expect("valid cadence")
                     .cluster
                     .logs_until_snapshot,
@@ -955,7 +1048,7 @@ mod tests {
             )
             .expect("write config");
             assert!(
-                matches!(Config::load(Some(&path)), Err(ConfigError::Value { key, .. }) if key == "cluster.logs_until_snapshot")
+                matches!(load_cluster_config(&path), Err(ConfigError::Value { key, .. }) if key == "cluster.logs_until_snapshot")
             );
         }
     }
@@ -975,7 +1068,7 @@ mod tests {
                 format!("[cluster]\ninstall_snapshot_timeout_secs = {seconds}\n"),
             )
             .expect("write valid snapshot timeout");
-            let config = Config::load(Some(&path)).expect("load valid snapshot timeout");
+            let config = load_cluster_config(&path).expect("load valid snapshot timeout");
             assert_eq!(config.cluster.install_snapshot_timeout_secs, seconds);
         }
 
@@ -989,7 +1082,7 @@ mod tests {
             )
             .expect("write invalid snapshot timeout");
             assert!(matches!(
-                Config::load(Some(&path)),
+                load_cluster_config(&path),
                 Err(ConfigError::Value { key, .. })
                     if key == "cluster.install_snapshot_timeout_secs"
             ));
@@ -1032,7 +1125,7 @@ mod tests {
             for seconds in values {
                 std::fs::write(&path, format!("[cluster]\n{key} = {seconds}\n"))
                     .expect("write valid snapshot budget");
-                Config::load(Some(&path)).expect("load valid snapshot budget");
+                load_cluster_config(&path).expect("load valid snapshot budget");
             }
         }
 
@@ -1057,7 +1150,7 @@ mod tests {
             std::fs::write(&path, format!("[cluster]\n{key} = {seconds}\n"))
                 .expect("write invalid snapshot budget");
             assert!(matches!(
-                Config::load(Some(&path)),
+                load_cluster_config(&path),
                 Err(ConfigError::Value { key: rejected, .. }) if rejected == format!("cluster.{key}")
             ));
         }
@@ -1068,7 +1161,7 @@ mod tests {
         )
         .expect("write overflowing millisecond conversion candidate");
         assert!(matches!(
-            Config::load(Some(&path)),
+            load_cluster_config(&path),
             Err(ConfigError::Parse { .. })
         ));
 
@@ -1079,7 +1172,7 @@ mod tests {
         )
         .expect("write invalid snapshot relationship");
         assert!(matches!(
-            Config::load(Some(&path)),
+            load_cluster_config(&path),
             Err(ConfigError::Value { key, .. }) if key == "cluster.snapshot_chunk_timeout_secs"
         ));
     }

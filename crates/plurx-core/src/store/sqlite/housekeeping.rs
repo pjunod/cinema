@@ -12,7 +12,9 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
+
+use super::{ConnectionGuard, ConnectionLifecycle, ConnectionSlot};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
@@ -181,7 +183,9 @@ pub(super) fn configure_writer(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    #[cfg(target_os = "macos")]
+    conn.pragma_update(None, "fullfsync", true)?;
     Ok(())
 }
 
@@ -252,15 +256,24 @@ fn validate(conn: &Connection, pool: Pool) -> Result<(), String> {
 /// different, empty database): there a connection that fails validation is
 /// `Failed` and the slot stays poisoned.
 pub(super) fn lock_or_recover<'a>(
-    slot: &'a Mutex<Connection>,
+    slot: &'a ConnectionSlot,
     pool: Pool,
     path: Option<&Path>,
-) -> Result<MutexGuard<'a, Connection>, StoreError> {
-    let poisoned = match slot.lock() {
-        Ok(guard) => return Ok(guard),
+) -> Result<ConnectionGuard<'a>, StoreError> {
+    let poisoned = match slot.connection.lock() {
+        Ok(guard) => {
+            if guard.is_none() {
+                return Err(StoreError::Task("SQLite connection is closed".into()));
+            }
+            return Ok(ConnectionGuard(guard));
+        }
         Err(poisoned) => poisoned,
     };
-    let mut guard = poisoned.into_inner();
+    let raw = poisoned.into_inner();
+    if raw.is_none() {
+        return Err(StoreError::Task("SQLite connection is closed".into()));
+    }
+    let mut guard = ConnectionGuard(raw);
     let outcome = match validate(&guard, pool) {
         Ok(()) => Recovery::Validated,
         Err(reason) => {
@@ -290,7 +303,7 @@ pub(super) fn lock_or_recover<'a>(
         outcome = outcome.label(),
         "recovered a sqlite connection poisoned by a panic"
     );
-    slot.clear_poison();
+    slot.connection.clear_poison();
     Ok(guard)
 }
 
@@ -363,6 +376,8 @@ pub(super) fn boot_integrity_check(
     conn: &Connection,
     path: &Path,
     budget: Duration,
+    lifetime_guard: Option<std::sync::Weak<dyn Send + Sync>>,
+    lifecycle: std::sync::Weak<ConnectionLifecycle>,
 ) -> Result<(), StoreError> {
     let checked = within_budget(conn, budget, |conn| {
         conn.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))
@@ -384,7 +399,7 @@ pub(super) fn boot_integrity_check(
                 "the boot integrity check did not finish in its budget; starting, and running \
                  the full integrity check in the background at the top of the next hour"
             );
-            background_integrity_check(path.to_owned());
+            background_integrity_check(path.to_owned(), lifetime_guard, lifecycle);
             Ok(())
         }
         // SQLITE_CORRUPT or SQLITE_NOTADB surface as errors, not findings.
@@ -408,7 +423,11 @@ pub(super) fn boot_integrity_check(
 /// read-only connection (WAL readers do not block the writer), starting at
 /// the top of the next wall-clock hour so it does not add to the load of
 /// the startup that just ran long.
-fn background_integrity_check(path: PathBuf) {
+fn background_integrity_check(
+    path: PathBuf,
+    lifetime_guard: Option<std::sync::Weak<dyn Send + Sync>>,
+    lifecycle: std::sync::Weak<ConnectionLifecycle>,
+) {
     let spawned = std::thread::Builder::new()
         .name("sqlite-integrity".to_owned())
         .spawn(move || {
@@ -417,6 +436,18 @@ fn background_integrity_check(path: PathBuf) {
                 .map(|elapsed| elapsed.as_secs())
                 .unwrap_or(0);
             std::thread::sleep(Duration::from_secs(3_600 - now % 3_600));
+            let Some(lifecycle) = lifecycle.upgrade() else { return; };
+            let Ok(_operation) = lifecycle.admit() else { return; };
+            // Sleeping does not pin an otherwise closed runtime for an hour.
+            // An obsolete deferred check never opens a replacement authority
+            // at this path; a live check pins its owner until its reader ends.
+            let _owner = match lifetime_guard {
+                Some(owner) => match owner.upgrade() {
+                    Some(owner) => Some(owner),
+                    None => return,
+                },
+                None => None,
+            };
             let finding = open_reader(&path).and_then(|conn| {
                 Ok(conn.query_row("PRAGMA integrity_check(1)", [], |row| row.get::<_, String>(0))?)
             });
@@ -676,7 +707,7 @@ mod tests {
             assert!(pages > 400, "{pool:?}: fixture has {pages} pages");
             conn.pragma_update(None, "busy_timeout", 1234)
                 .expect("marker");
-            let slot = Mutex::new(conn);
+            let slot = ConnectionSlot::new(conn);
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _held = slot.lock();
                 panic!("a closure bug while holding the connection");

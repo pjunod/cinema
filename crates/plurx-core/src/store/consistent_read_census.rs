@@ -54,7 +54,9 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_dv_conversion.rs", 13),
     ("hiqlite_dvr.rs", 19),
     ("hiqlite_fragment_index_cluster.rs", 35),
-    ("hiqlite_import.rs", 4),
+    // Fresh import validates canonical dispatch triggers before suspension and
+    // after restoration; one committed catalog read site serves both checks.
+    ("hiqlite_import.rs", 5),
     ("hiqlite_remote.rs", 4),
     ("hiqlite_invitations.rs", 22),
     ("hiqlite_jellyfin_catalog.rs", 3),

@@ -600,6 +600,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     // three methods on every backend in store_contract/dv_title_jobs.rs.
     "put_dv_fel_verdict",
     "request_dv_fel_requalification",
+    "request_dv_fel_variant",
     "dv_fel_verdict_counts",
     "dv_fel_stale_titles",
     "dv_title_readiness",
@@ -644,6 +645,39 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "join_artifact_viewer",
     "analysis_preparation_observation",
     "source_io_holders",
+    // Source service ownership added these BackgroundJobStore methods in
+    // dac9e2c7e without updating this name inventory. Their implementation
+    // delegates to background_jobs_resources' fenced custody/arbitration
+    // helpers; this inventory retains every declared trait entry point.
+    "register_foreground_source",
+    "project_foreground_source",
+    "release_foreground_source",
+    "foreground_source_pressure",
+    "list_foreground_source_owners",
+    "resolve_foreground_source",
+    "activate_foreground_source_custody",
+    "abort_foreground_source_activation",
+    "mark_foreground_source_settled",
+    "settled_foreground_source_custody",
+    "activate_background_source_custody",
+    "abort_background_source_activation",
+    "mark_background_source_settled",
+    "settled_background_source_custody",
+    "resolve_background_source_custody",
+    "register_background_source_custody",
+    "claim_background_source_service",
+    "release_background_source_custody",
+    "close_read_attestation_source_lease",
+    "suspend_playback_analysis_interest",
+    "restore_playback_analysis_interest",
+    "background_source_may_continue",
+    "pause_background_source",
+    "resume_background_source",
+    // Retained-artifact enumeration and exact-owner checkpoint publication
+    // are separate methods on that same trait, not new Store supertraits.
+    "source_checkpoint_artifacts",
+    "checkpoint_analysis_source",
+    "checkpoint_job",
     "sync_predictions",
     "embedding_for",
     "publish_embedding_job",
@@ -12847,6 +12881,8 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
         "translation-data",
         "translation-shape",
         "managed-data",
+        "source-data",
+        "source-index",
         "managed-marker",
         "managed-shape",
         "translation-marker",
@@ -12864,6 +12900,8 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
+            "source-data" => ("INSERT INTO background_source_service_epochs VALUES('source_io',42,7)".to_owned(), "DELETE FROM background_source_service_epochs WHERE resource_key='source_io' AND epoch_id=42".to_owned()),
+            "source-index" => ("CREATE INDEX fixture_unknown_source_index ON background_source_service_epochs(epoch_id)".to_owned(), "DROP INDEX fixture_unknown_source_index".to_owned()),
             "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,4)".to_owned()),
             "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
             "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
@@ -13082,7 +13120,7 @@ async fn replicated_source_tail_drops(
         source_counts.push((name.clone(), rows[0].value));
     }
     require_replicated_fixture_marker(client, "background_source_schema", 1).await;
-    validated_source_tail_drops(&source_shape, &source_counts, true, remove)
+    validated_source_tail_drops(&source_shape, &source_counts, true, false, remove)
 }
 
 /// A historical queue fixture cannot retain half of the independent managed
@@ -19009,7 +19047,8 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
     // The report covers the entire current import plan, including later families
-    // with no rows in v14. SQLite v122 added seven durable source-arbitration tables.
+    // with no rows in v14. SQLite v122 added the source-arbitration tables
+    // and v124 added the three dispatch-turn tables.
     let mut imported_tables = report
         .tables
         .iter()
@@ -19053,6 +19092,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "cluster_fragment_index_locations",
             "cluster_fragment_index_sources",
             "continuous_quality_ledgers",
+            "dispatch_turn_attempt",
+            "dispatch_turn_ready",
+            "dispatch_turn_wait",
             "dv_conversions",
             "dv_recovery_guards",
             "dvr_recordings",
@@ -19199,6 +19241,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     );
     assert!(report.imported_rows >= 16);
     for table in [
+        "dispatch_turn_attempt",
+        "dispatch_turn_ready",
+        "dispatch_turn_wait",
         "library_roots",
         "scan_reconcile_guards",
         "scan_reconcile_items",
@@ -20831,6 +20876,34 @@ async fn activation_node_observation_fixture() {
     )
     .expect("decode marker");
     assert_eq!(marker.source_schema_version, launch.source_version);
+    // The fixture starts the Core voter directly. Publish the same validated
+    // authority binding the daemon publishes for this explicit cluster before
+    // a maintenance client is allowed to attach. Preserve it on restart.
+    use plurx_core::storage::mode::{StorageManifest, StorageMode};
+    let manifest = match StorageManifest::read(&launch.data_dir).expect("read authority") {
+        Some(manifest) => manifest,
+        None => StorageManifest {
+            version: 1,
+            mode: StorageMode::Cluster,
+            database: HIQLITE_ACTIVE_DIRNAME.into(),
+            instance_id: selected.identity.cluster_id.clone(),
+            node_id: selected.identity.node_id.clone(),
+            generation: uuid::Uuid::new_v4().to_string(),
+            schema_version: marker.replicated_schema_version,
+        },
+    };
+    assert_eq!(manifest.instance_id, selected.identity.cluster_id);
+    assert_eq!(manifest.node_id, selected.identity.node_id);
+    plurx_core::cluster::migration::validate_cluster_storage_manifest(&launch.config(), &manifest)
+        .expect("bind the actual opened voter and committed activation identity");
+    if StorageManifest::read(&launch.data_dir)
+        .expect("read committed mode")
+        .is_none()
+    {
+        manifest
+            .publish(&launch.data_dir)
+            .expect("publish explicit cluster authority");
+    }
     println!("PLURX_ACTIVATION_NODE_READY");
     std::io::stdout()
         .flush()

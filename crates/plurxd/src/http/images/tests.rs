@@ -1,9 +1,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "cluster")]
 use axum::body::Bytes;
+#[cfg(feature = "cluster")]
 use axum::extract::Path;
 use axum::http::{HeaderMap, StatusCode};
+#[cfg(feature = "cluster")]
 use axum::routing::get;
+#[cfg(feature = "cluster")]
 use axum::Router;
 use plurx_core::store::SqliteStore;
 
@@ -893,6 +897,7 @@ fn peer_url_keeps_a_reverse_proxy_prefix_and_escapes_the_filename() {
 }
 
 #[test]
+#[cfg(feature = "cluster")]
 fn peer_proof_headers_are_complete_and_typed() {
     let mut headers = HeaderMap::new();
     headers.insert(NODE_ID_HEADER, "node-b".parse().expect("node"));
@@ -911,6 +916,7 @@ fn peer_proof_headers_are_complete_and_typed() {
 }
 
 #[tokio::test]
+#[cfg(feature = "cluster")]
 async fn sharing_art_single_peer_collector_keeps_owned_capacity_and_refuses_invalid_bytes() {
     let _fixture = super::super::shared_artwork::ART_FIXTURES.lock().await;
     async fn peer(Path(name): Path<String>, headers: HeaderMap) -> Response {
@@ -997,6 +1003,7 @@ async fn sharing_art_single_peer_collector_keeps_owned_capacity_and_refuses_inva
 }
 
 #[tokio::test]
+#[cfg(feature = "cluster")]
 async fn a_peer_miss_sends_node_proof_and_materializes_complete_bytes() {
     let coordinator = ArtworkCoordinator::new();
     async fn peer(

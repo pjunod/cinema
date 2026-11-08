@@ -19,6 +19,7 @@ use axum::{
     Json, Router,
 };
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
+#[cfg(feature = "cluster")]
 use plurx_core::cluster::{
     membership::MembershipStatus,
     migration::status::{ReplicationBackend, ReplicationHealth},
@@ -32,11 +33,38 @@ use sha2::{Digest, Sha256};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    http::cluster_operations::{self, PlannedOutageLeaseGuard, PlannedOutageOperation},
-    serving_fence::PlannedOutageFenceToken,
-    state::AppState,
-};
+use crate::{serving_fence::PlannedOutageFenceToken, state::AppState};
+
+#[cfg(feature = "cluster")]
+use crate::http::cluster_operations::{self, PlannedOutageLeaseGuard, PlannedOutageOperation};
+
+/// Native ownership is the held local admission token and process identity.
+/// Replicated ownership additionally retains its actual cluster lease.
+enum PreparationLease {
+    Local,
+    #[cfg(feature = "cluster")]
+    Cluster(PlannedOutageLeaseGuard),
+}
+impl PreparationLease {
+    async fn release(self, state: &AppState, token: PlannedOutageFenceToken) {
+        match self {
+            Self::Local => {
+                state
+                    .serving
+                    .cancel_planned_outage_preparation(token, 0)
+                    .await;
+            }
+            #[cfg(feature = "cluster")]
+            Self::Cluster(lease) => lease.release().await,
+        }
+    }
+    fn disarm(self) {
+        #[cfg(feature = "cluster")]
+        if let Self::Cluster(lease) = self {
+            lease.disarm();
+        }
+    }
+}
 
 const PREPARATION_MS: u64 = 60_000;
 const IPC_DRAIN: Duration = Duration::from_secs(5);
@@ -117,7 +145,7 @@ struct Preparation {
     capability: String,
     expires: u64,
     token: PlannedOutageFenceToken,
-    lease: Option<PlannedOutageLeaseGuard>,
+    lease: PreparationLease,
     committed: bool,
     // A preparation can only be exercised by its original OS process. Saved
     // admin tokens or a disclosed capability alone do not transfer ownership.
@@ -525,17 +553,16 @@ async fn prepare_owned(
         ));
     }
     if let Some(old) = operation.take() {
-        if let Some(lease) = old.lease {
-            lease.release().await;
-        } else {
-            state
-                .serving
-                .cancel_planned_outage_preparation(old.token, 0)
-                .await;
-        }
+        old.lease.release(&state, old.token).await;
     }
-    current_topology(&state).await?;
-    let active = cluster_operations::local_owned_media_sessions(&state).await;
+    if !state.serving.is_ready() {
+        return Err(unsafe_shutdown("local serving authority is unavailable"));
+    }
+    #[cfg(feature = "cluster")]
+    if state.storage_mode == plurx_core::storage::mode::StorageMode::Cluster {
+        current_topology(&state).await?;
+    }
+    let active = crate::http::local_owned_media_sessions(&state).await;
     if !state.serving.restart_drain_status(active).await.drained {
         return Err(unsafe_shutdown(
             "playback, recordings or response delivery remain active; wait for idle and try again",
@@ -554,39 +581,53 @@ async fn prepare_owned(
             "first-run shutdown requires verified native-owner authority",
         ));
     }
-    let (mut lease, evidence) = cluster_operations::acquire_planned_outage_preflight(
-        &state,
-        &state.node_id,
-        Duration::from_millis(PREPARATION_MS),
-        PlannedOutageOperation::Restart,
-    )
-    .await
-    .map_err(|_| unsafe_shutdown("cannot reserve the cluster planned-outage operation"))?;
-    let membership = evidence.membership;
-    if let Err(error) = topology_allowed(
-        &membership,
-        &state.node_id,
-        evidence.verdict.safe_to_restart_one,
-        evidence.verdict.candidate_node_id.as_deref(),
-    ) {
-        lease.release().await;
-        return Err(error);
-    }
-    let expires = unix_ms().saturating_add(PREPARATION_MS).min(
-        lease
-            .claim()
-            .preparation_expiry_unix_ms(Duration::from_millis(PREPARATION_MS))
-            .unwrap_or(0),
-    );
-    let Some(token) = state.serving.begin_desktop_preparation_until(expires).await else {
-        lease.release().await;
-        return Err(unsafe_shutdown(
-            "another local planned outage already owns admissions",
-        ));
-    };
-    lease.arm_local_fence(token);
-    if cluster_operations::local_owned_media_sessions(&state).await != 0 {
-        lease.release().await;
+    #[cfg(feature = "cluster")]
+    let (lease, token, expires, generation) =
+        if state.storage_mode == plurx_core::storage::mode::StorageMode::Cluster {
+            let (mut lease, evidence) = cluster_operations::acquire_planned_outage_preflight(
+                &state,
+                &state.node_id,
+                Duration::from_millis(PREPARATION_MS),
+                PlannedOutageOperation::Restart,
+            )
+            .await
+            .map_err(|_| unsafe_shutdown("cannot reserve the cluster planned-outage operation"))?;
+            let membership = evidence.membership;
+            if let Err(error) = topology_allowed(
+                &membership,
+                &state.node_id,
+                evidence.verdict.safe_to_restart_one,
+                evidence.verdict.candidate_node_id.as_deref(),
+            ) {
+                lease.release().await;
+                return Err(error);
+            }
+            let expires = unix_ms().saturating_add(PREPARATION_MS).min(
+                lease
+                    .claim()
+                    .preparation_expiry_unix_ms(Duration::from_millis(PREPARATION_MS))
+                    .unwrap_or(0),
+            );
+            let Some(token) = state.serving.begin_desktop_preparation_until(expires).await else {
+                lease.release().await;
+                return Err(unsafe_shutdown(
+                    "another local planned outage already owns admissions",
+                ));
+            };
+            lease.arm_local_fence(token);
+            (
+                PreparationLease::Cluster(lease),
+                token,
+                expires,
+                topology_generation(&membership),
+            )
+        } else {
+            begin_local_preparation(&state, control).await?
+        };
+    #[cfg(not(feature = "cluster"))]
+    let (lease, token, expires, generation) = begin_local_preparation(&state, control).await?;
+    if crate::http::local_owned_media_sessions(&state).await != 0 {
+        lease.release(&state, token).await;
         return Err(unsafe_shutdown(
             "playback or recordings remain active; wait for idle and try again",
         ));
@@ -601,19 +642,18 @@ async fn prepare_owned(
         .await,
         Ok(true)
     ) {
-        lease.release().await;
+        lease.release(&state, token).await;
         return Err(unsafe_shutdown(
             "preparation expired before media admissions drained",
         ));
     }
-    let active = cluster_operations::local_owned_media_sessions(&state).await;
+    let active = crate::http::local_owned_media_sessions(&state).await;
     if active != 0 || !state.serving.planned_outage_is_current(token).await {
-        lease.release().await;
+        lease.release(&state, token).await;
         return Err(unsafe_shutdown(
             "playback or recordings remain active; wait for idle and try again",
         ));
     }
-    let generation = topology_generation(&membership);
     let capability = random_capability();
     let response = ShutdownPreparedV1 {
         schema_version: 1,
@@ -629,7 +669,7 @@ async fn prepare_owned(
         capability,
         expires,
         token,
-        lease: Some(lease),
+        lease,
         committed: false,
         peer,
     });
@@ -668,37 +708,38 @@ async fn commit_owned(
     if prepared.committed {
         return Err(unsafe_shutdown("shutdown is already committed"));
     }
+    #[cfg(feature = "cluster")]
     // Reassert the exact original claim, retaining its original deadline.
     // The membership anti-replay receipt rejects a claim cancelled through
     // another administrator route; a token alone cannot outlive that lease.
-    let lease = prepared
-        .lease
-        .as_ref()
-        .ok_or_else(|| unsafe_shutdown("the replicated preparation owner is missing"))?;
-    state
-        .membership
-        .commit_cluster_operation_lease(lease.claim())
-        .await
-        .map_err(|_| {
-            unsafe_shutdown("the exact replicated preparation was cancelled or superseded")
-        })?;
-    current_topology(&state).await?;
-    let evidence = cluster_operations::recheck_desktop_preparation(&state, prepared.token)
-        .await
-        .map_err(|_| unsafe_shutdown("fresh cluster verdict is unavailable"))?;
-    let membership = evidence.membership;
-    topology_allowed(
-        &membership,
-        &state.node_id,
-        evidence.verdict.safe_to_restart_one,
-        evidence.verdict.candidate_node_id.as_deref(),
-    )?;
-    if topology_generation(&membership) != prepared.generation {
-        return Err(unsafe_shutdown(
-            "topology or protocol generation changed; prepare again",
-        ));
+    if let PreparationLease::Cluster(lease) = &prepared.lease {
+        state
+            .membership
+            .as_ref()
+            .ok_or_else(|| unsafe_shutdown("the replicated preparation owner is missing"))?
+            .commit_cluster_operation_lease(lease.claim())
+            .await
+            .map_err(|_| {
+                unsafe_shutdown("the exact replicated preparation was cancelled or superseded")
+            })?;
+        current_topology(&state).await?;
+        let evidence = cluster_operations::recheck_desktop_preparation(&state, prepared.token)
+            .await
+            .map_err(|_| unsafe_shutdown("fresh cluster verdict is unavailable"))?;
+        let membership = evidence.membership;
+        topology_allowed(
+            &membership,
+            &state.node_id,
+            evidence.verdict.safe_to_restart_one,
+            evidence.verdict.candidate_node_id.as_deref(),
+        )?;
+        if topology_generation(&membership) != prepared.generation {
+            return Err(unsafe_shutdown(
+                "topology or protocol generation changed; prepare again",
+            ));
+        }
     }
-    let active = cluster_operations::local_owned_media_sessions(&state).await;
+    let active = crate::http::local_owned_media_sessions(&state).await;
     binding(&context.control, &peer, &request.process_nonce)?;
     if !state
         .serving
@@ -710,9 +751,7 @@ async fn commit_owned(
         ));
     }
     prepared.committed = true;
-    if let Some(lease) = prepared.lease.take() {
-        lease.disarm();
-    }
+    std::mem::replace(&mut prepared.lease, PreparationLease::Local).disarm();
     state.shutdown.cancel();
     Ok(Json(ShutdownCommittedV1 {
         schema_version: 1,
@@ -736,14 +775,7 @@ async fn cancel(
         return Err(unsafe_shutdown("committed shutdown cannot be cancelled"));
     }
     let prepared = operation.take().expect("validated preparation");
-    if let Some(lease) = prepared.lease {
-        lease.release().await;
-    } else {
-        state
-            .serving
-            .cancel_planned_outage_preparation(prepared.token, 0)
-            .await;
-    }
+    prepared.lease.release(&state, prepared.token).await;
     Ok(Json(
         serde_json::json!({"schema_version":1,"cancelled":true}),
     ))
@@ -780,16 +812,41 @@ fn validate_preparation<'a>(
     }
     Ok(prepared)
 }
+async fn begin_local_preparation(
+    state: &AppState,
+    control: &DesktopControl,
+) -> Result<(PreparationLease, PlannedOutageFenceToken, u64, String), LocalError> {
+    let expires = unix_ms().saturating_add(PREPARATION_MS);
+    let token = state
+        .serving
+        .begin_desktop_preparation_until(expires)
+        .await
+        .ok_or_else(|| unsafe_shutdown("another local planned outage already owns admissions"))?;
+    let generation = hex::encode(Sha256::digest(format!(
+        "native:{}:{}:{}",
+        state.node_id, control.process.nonce, control.process.start_generation
+    )));
+    Ok((PreparationLease::Local, token, expires, generation))
+}
+
+#[cfg(feature = "cluster")]
 async fn current_topology(state: &AppState) -> Result<MembershipStatus, LocalError> {
     if !state.serving.is_ready() {
         return Err(unsafe_shutdown(
             "local serving authority is unavailable; use administrator maintenance",
         ));
     }
-    let status = tokio::time::timeout(Duration::from_secs(5), state.membership.status())
-        .await
-        .map_err(|_| unsafe_shutdown("topology observation timed out"))?
-        .map_err(|_| unsafe_shutdown("topology is unknown; use administrator maintenance"))?;
+    let status = tokio::time::timeout(
+        Duration::from_secs(5),
+        state
+            .membership
+            .as_ref()
+            .ok_or_else(|| unsafe_shutdown("cluster membership is unavailable"))?
+            .status(),
+    )
+    .await
+    .map_err(|_| unsafe_shutdown("topology observation timed out"))?
+    .map_err(|_| unsafe_shutdown("topology is unknown; use administrator maintenance"))?;
     if status.replication.backend != ReplicationBackend::Replicated
         || status.replication.health != ReplicationHealth::InSync
         || status.recovery.required
@@ -802,6 +859,7 @@ async fn current_topology(state: &AppState) -> Result<MembershipStatus, LocalErr
     }
     Ok(status)
 }
+#[cfg(feature = "cluster")]
 fn topology_allowed(
     status: &MembershipStatus,
     node: &str,
@@ -846,6 +904,7 @@ fn topology_allowed(
         ))
     }
 }
+#[cfg(feature = "cluster")]
 fn topology_generation(status: &MembershipStatus) -> String {
     let mut nodes: Vec<_> = status
         .nodes
@@ -973,7 +1032,6 @@ fn process_generation(pid: u32) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
     use tower::ServiceExt;
 
     fn peer() -> Peer {
@@ -1048,13 +1106,14 @@ mod tests {
                 capability,
                 expires,
                 token,
-                lease: None,
+                lease: PreparationLease::Local,
                 committed: false,
                 peer: peer(),
             },
             request,
         )
     }
+    #[cfg(feature = "cluster")]
     fn membership(voters: usize) -> MembershipStatus {
         let nodes: Vec<_> = (1..=voters).map(|i| serde_json::json!({"node_id":format!("node-{i}"),"hostname":format!("node-{i}"),"advertised_host":"localhost","raft_id":i,"role":"voter","is_voter":true,"is_leader":i==1,"reachable":true,"last_seen_at":1,"removal_pending":false,"learner_protocol_ready":true})).collect();
         serde_json::from_value(serde_json::json!({"local_node_id":"node-1","availability":"single_node","nodes":nodes,
@@ -1066,6 +1125,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cluster")]
     fn native_sole_voter_downtime_and_rolling_candidates_have_distinct_rules() {
         let sole = membership(1);
         assert!(topology_allowed(&sole, "node-1", false, None).is_ok());
@@ -1095,6 +1155,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cluster")]
     fn generation_binds_membership_and_protocol_without_heartbeat_churn() {
         let mut status = membership(1);
         let generation = topology_generation(&status);
@@ -1127,6 +1188,72 @@ mod tests {
             control.process.nonce,
             super::tests::control(PathBuf::new()).process.nonce
         );
+    }
+
+    #[tokio::test]
+    async fn standalone_prepare_commit_uses_local_admission_and_exact_process_owner() {
+        let state = crate::http::source_actor_test_state();
+        assert!(!state.is_replicated());
+        assert!(!state.serving.is_quorum_managed());
+        let control = control(PathBuf::new());
+        let context = context(Arc::clone(&control));
+        #[cfg(target_os = "linux")]
+        let native_peer = Peer { uid: 0, ..peer() };
+        #[cfg(target_os = "macos")]
+        let native_peer = peer();
+        let request = ShutdownPrepareRequestV1 {
+            schema_version: 1,
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            operation: Operation::Restart,
+            process_nonce: control.process.nonce.clone(),
+            confirm_interruption: true,
+            target_version: None,
+        };
+        let Json(prepared) = prepare_owned(
+            state.clone(),
+            Arc::clone(&context),
+            native_peer.clone(),
+            request,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("local preparation: {}", error.2));
+        assert!(!state.shutdown.is_cancelled());
+        let request = ShutdownCommitRequestV1 {
+            schema_version: 1,
+            operation_id: prepared.operation_id,
+            process_nonce: prepared.process_nonce,
+            generation: prepared.generation,
+            owner_capability: prepared.owner_capability,
+        };
+        let changed_owner = Peer {
+            connection_id: "another connection".into(),
+            ..native_peer.clone()
+        };
+        assert!(commit_owned(
+            state.clone(),
+            Arc::clone(&context),
+            changed_owner,
+            ShutdownCommitRequestV1 {
+                schema_version: request.schema_version,
+                operation_id: request.operation_id.clone(),
+                process_nonce: request.process_nonce.clone(),
+                generation: request.generation.clone(),
+                owner_capability: request.owner_capability.clone(),
+            }
+        )
+        .await
+        .is_err());
+        let Json(committed) = commit_owned(state.clone(), context, native_peer, request)
+            .await
+            .unwrap_or_else(|error| panic!("local commitment: {}", error.2));
+        assert!(committed.committed);
+        assert!(state.shutdown.is_cancelled());
+        assert!(state
+            .serving
+            .authority()
+            .try_restart_admission()
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -1254,8 +1381,7 @@ mod tests {
 
     #[tokio::test]
     async fn final_preparation_response_cannot_authorize_after_expiry_or_owner_change() {
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let (preparation, mut request) = prepared(&fence, unix_ms() + 30_000).await;
         let mut operation = Some(preparation);
         assert!(validate_preparation(&mut operation, &request, &peer()).is_ok());
@@ -1302,14 +1428,16 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "cluster")]
     #[tokio::test]
-    async fn unknown_or_sqlite_recovery_never_enters_native_downtime() {
+    async fn cluster_topology_check_refuses_sqlite_authority() {
         let state = crate::http::source_actor_test_state();
         assert!(current_topology(&state).await.is_err());
         assert!(!state.shutdown.is_cancelled());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "cluster")]
     async fn native_uninitialized_and_configured_sole_voter_commit_real_replicated_store() {
         for configured in [false, true] {
             let root =
@@ -1356,14 +1484,19 @@ mod tests {
                     .await
                     .expect("desktop control fixture");
             }
+            let services = crate::cluster_runtime::services(&selected, &config)
+                .expect("cluster fixture services");
             let mut state = crate::build_state(
                 &config,
                 selected.identity.node_id.clone(),
                 selected.identity.cluster_id.clone(),
                 Arc::clone(&selected.credential_key),
-                selected.local_client(),
-                selected.replication_monitor(),
-                selected.membership_manager(),
+                plurx_core::storage::mode::StorageMode::Cluster,
+                None,
+                services.settings_changes,
+                services.backup,
+                Some(selected.replication_monitor()),
+                Some(selected.membership_manager()),
                 selected.catalogue_reader(),
                 store,
                 crate::create_dirs_for_config(&config).expect("desktop control fixture"),
@@ -1375,9 +1508,11 @@ mod tests {
                     sharing: Arc::new(crate::logbuf::LogBuffer::new(32)),
                 },
             );
-            state.clock_observer = observation.observer().await.expect("startup clock owner");
+            state.clock_observer = Some(observation.observer().await.expect("startup clock owner"));
             state
                 .membership
+                .as_ref()
+                .expect("actual fixture membership")
                 .heartbeat()
                 .await
                 .expect("desktop control fixture");
@@ -1386,6 +1521,7 @@ mod tests {
                 state
                     .replication
                     .clone()
+                    .expect("actual fixture replication")
                     .passive_metrics_loop(stop.clone().cancelled_owned()),
             );
             let serving = tokio::spawn(state.serving.clone().monitor_loop(stop.clone()));
@@ -1471,8 +1607,7 @@ mod tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
             .expect("desktop control fixture");
         let control = control(dir.path().to_owned());
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let (mut preparation, _) = prepared(&fence, unix_ms() + 30_000).await;
         preparation.committed = true;
         let operation_id = preparation.operation_id.clone();

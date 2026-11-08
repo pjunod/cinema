@@ -14,7 +14,7 @@ fixtures = []
 # The workspace cluster harness enables the replicated backend, so feature
 # unification also runs these core unit tests during workspace checks. M2
 # enables the same backend on plurxd when the complete store becomes selectable.
-hiqlite-store = ["dep:hiqlite"]
+hiqlite-store = ["dep:hiqlite", "dep:openraft"]
 # Test-only operation accounting for deterministic three-voter read-cost gates.
 # The daemon does not enable this feature, so production requests pay no atomic
 # counter overhead.
@@ -40,6 +40,8 @@ dolby_vision = { workspace = true }
 async-trait = { workspace = true }
 bincode = { version = "2", features = ["serde"] }
 hiqlite = { workspace = true, optional = true }
+# The raw Raft encoding regressions are available only with cluster storage.
+openraft = { version = "0.9.25", features = ["serde"], optional = true }
 # Shared by pinned sharing TLS and the process-level Hiqlite provider. rustls panics instead of erroring when a process reaches TLS without
 # one, and `hiqlite::start_node` installs it only on the server side — which the
 # maintenance commands never reach. See `install_default_crypto_provider`.
@@ -111,7 +113,6 @@ windows-sys = { version = "0.61", features = [
 syn = { version = "2", features = ["full", "visit"] }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-openraft = { version = "0.9.25", features = ["serde"] }
 # The encoder `hiqlite-wal` writes Raft entries with. Tests only, and only so
 # the import transaction estimate can be checked against the real encoding
 # rather than trusted. Already in the tree via hiqlite, so this adds no new

@@ -1,29 +1,30 @@
 //! Actual candidate writes through both SQLite Store modes.
 use super::*;
+use crate::sharing_source_sessions::LocalSourceAuthority;
 use crate::{
-    cluster::membership::{
-        source_admission_members_with_purpose_for_unit_test,
-        SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY, SHARING_PURPOSE_KEYS_CAPABILITY,
-        SHARING_SESSION_PRINCIPAL_CAPABILITY,
-    },
     domain::{LibraryKind, NewLibrary},
     playback_principal::PlaybackPrincipal,
     secrets::CredentialKey,
     sharing::{InvitationRecord, ShareClaim, SourceId},
     sharing_catalogue_details::CatalogueRevisionKey,
     store::{
-        media_session_principal_rebuild_schema, LibraryStore, MediaSessionStore,
-        SharingSourceIngressCustodyStore, SharingStore, SqliteStore,
+        LibraryStore, MediaSessionStore, SettingsStore, SharingSourceIngressCustodyStore,
+        SharingStore, SqliteStore,
     },
 };
-use std::{collections::BTreeSet, path::PathBuf};
+use std::path::PathBuf;
 
-async fn setup(store: &SqliteStore) -> (Uuid, CredentialKey) {
+const NATIVE_SOURCE_NODE: &str = "native-source";
+
+async fn setup(store: &SqliteStore) -> (Uuid, CredentialKey, LocalSourceAuthority) {
     setup_with_media_id(store, 1).await
 }
 
-async fn setup_with_media_id(store: &SqliteStore, media_id: i64) -> (Uuid, CredentialKey) {
-    let identity = store.sharing_identity(1000).await.expect("identity");
+async fn setup_with_media_id(
+    store: &SqliteStore,
+    media_id: i64,
+) -> (Uuid, CredentialKey, LocalSourceAuthority) {
+    store.sharing_identity(1000).await.expect("identity");
     let library = store
         .create_library(&NewLibrary {
             name: "Source".into(),
@@ -68,60 +69,29 @@ async fn setup_with_media_id(store: &SqliteStore, media_id: i64) -> (Uuid, Crede
         .expect("claim");
     store.approve_share(grant, 1, 1002).await.expect("approve");
     let credential = CredentialKey::from_bytes([17; 32]);
-    let envelope =
-        CatalogueRevisionKey::generate_sealed(&credential, identity.clone()).expect("fixture key");
-    let mut ddl = super::super::sharing_catalogue_source::candidate_statements();
-    ddl.extend(super::super::sharing_catalogue_source::candidate_item_identity_statements());
-    ddl.push(super::super::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA.into());
-    ddl.extend(
-        media_session_principal_rebuild_schema()
-            .split("-- next statement\n")
-            .map(|s| s.trim().trim_end_matches(';').to_owned()),
-    );
-    ddl.extend(candidate_statements());
-    ddl.extend(["CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,raft_id INTEGER,last_seen_at INTEGER,removed_at INTEGER,role TEXT,api_address TEXT,raft_address TEXT)","CREATE TABLE cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER,PRIMARY KEY(node_id,capability))","CREATE TABLE cluster_node_join_staging(node_id TEXT)","CREATE TABLE cluster_node_removals(node_id TEXT)","CREATE TABLE cluster_node_removal_attempts(node_id TEXT,attempt_id TEXT)","CREATE TABLE cluster_join_tokens(token_hash TEXT,state TEXT,node_id TEXT,raft_id INTEGER)"].into_iter().map(str::to_owned));
-    ddl.extend(
-        [
-            "CREATE TABLE cluster_node_promotions(node_id TEXT,started_at INTEGER)",
-            "CREATE TABLE cluster_node_heartbeat_intents(node_id TEXT,last_seen_at INTEGER)",
-        ]
-        .into_iter()
-        .map(str::to_owned),
-    );
-    store
-        .sharing_txn(ddl.into_iter().map(|sql| (sql, vec![])).collect())
+    let instance = store
+        .instance_id()
         .await
-        .expect("all candidate objects");
-    let now = now_ms().expect("clock");
-    store.sharing_txn(vec![("INSERT INTO sharing_catalogue_keys VALUES(1,$1,$2,$3)".into(),vec![identity.server_id.into(),identity.catalogue_epoch.into(),envelope.as_stored().to_owned().into()]),("INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,$1,'movie','Movie','movie')".into(),vec![library.into()]),("INSERT INTO files(id,item_id,path,size,mtime) VALUES(1,1,'/private/synthetic.mkv',20,1000)".into(),vec![]),("INSERT INTO cluster_nodes VALUES('voter',1,$1,NULL,NULL,'api','raft')".into(),vec![now.into()]),("INSERT INTO cluster_node_capabilities VALUES('voter',$1,$3),('voter',$2,$3),('voter',$4,$3),('voter',$5,$3)".into(),vec![SHARING_SESSION_PRINCIPAL_CAPABILITY.to_owned().into(),SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY.to_owned().into(),now.into(),SHARING_PURPOSE_KEYS_CAPABILITY.to_owned().into(),format!("sharing_purpose_master_v1:{}",credential.sharing_purpose_master_fingerprint()).into()]),("INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1) ON CONFLICT(key) DO UPDATE SET value='true'".into(),vec![])]).await.expect("current Source fixture");
-    // These unit rows exercise routing/admission SQL only, never physical
-    // driver closure or a production registry owner.
+        .expect("actual native logical identity");
     store
         .sharing_txn(vec![(
-            "INSERT INTO cluster_node_capabilities VALUES('voter',$1,$3),('voter',$2,$3)".into(),
+            "INSERT INTO storage_identity VALUES(1,$1,$2,$3)".into(),
             vec![
-                crate::cluster::membership::SHARING_INGRESS_CUSTODY_CAPABILITY
-                    .to_owned()
-                    .into(),
-                "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213"
-                    .to_owned()
-                    .into(),
-                now.into(),
+                instance.into(),
+                NATIVE_SOURCE_NODE.to_owned().into(),
+                Uuid::new_v4().to_string().into(),
             ],
         )])
         .await
-        .expect("metadata-only current boot fixture");
-    store
-        .sharing_txn(
-            crate::cluster::membership::sharing_member_admission_guard_schema()
-                .into_iter()
-                .map(|sql| (sql, vec![]))
-                .collect(),
-        )
+        .expect("native storage ownership binding");
+    let native_boot = store
+        .prepare_native_source_before_serving(NATIVE_SOURCE_NODE, &credential)
         .await
-        .expect("guard factory");
-    (grant, credential)
+        .expect("actual native Source schema and purpose factory");
+    store.sharing_txn(vec![("INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,$1,'movie','Movie','movie')".into(),vec![library.into()]),("INSERT INTO files(id,item_id,path,size,mtime) VALUES(1,1,'/private/synthetic.mkv',20,1000)".into(),vec![]),("INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1) ON CONFLICT(key) DO UPDATE SET value='true'".into(),vec![])]).await.expect("current native Source fixture");
+    (grant, credential, native_boot)
 }
+
 async fn intent(
     store: &SqliteStore,
     grant: Uuid,
@@ -191,14 +161,13 @@ async fn intent_for_media(
         _ => panic!("intent"),
     }
 }
-fn proof() -> SourceAdmissionMembers {
-    source_admission_members_with_purpose_for_unit_test(
-        1,
-        &BTreeSet::from([1]),
-        now_ms().expect("Source candidate fixture operation"),
-        &CredentialKey::from_bytes([17; 32]),
-    )
-    .expect("Source candidate fixture operation")
+fn proof(native_boot: &LocalSourceAuthority) -> SourceAdmissionMembers {
+    native_boot
+        .admission(
+            Uuid::parse_str("01a1128a-944d-4f11-9bf2-c7599d355213")
+                .expect("SQL-only registry fixture UUID"),
+        )
+        .expect("actual native Source capability")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -214,7 +183,7 @@ enum AdmissionInterleave {
     WrongBoot,
     WrongInitialHash,
     MalformedRouting,
-    RemoveFloor,
+    ReplaceBoot,
 }
 
 /// This wrapper captures a real Store read, commits a real metadata operation,
@@ -263,7 +232,7 @@ impl super::super::sharing::Backend for AdmissionInterleavedStore<'_> {
                             .register_source_ingress_custody(
                                 self.assignment,
                                 &self.second,
-                                &proof()
+                                &self.assignment.members
                             )
                             .await?,
                         SourceCustodyWrite::Applied
@@ -315,17 +284,15 @@ impl super::super::sharing::Backend for AdmissionInterleavedStore<'_> {
                     ));
                 }
                 AdmissionInterleave::SqlFault => {}
-                AdmissionInterleave::RemoveFloor => {
-                    self.store
-                        .sharing_txn(vec![(
-                            "DELETE FROM cluster_node_capabilities WHERE capability=$1".into(),
-                            vec![
-                                crate::cluster::membership::SHARING_INGRESS_CUSTODY_CAPABILITY
-                                    .to_owned()
-                                    .into(),
-                            ],
-                        )])
+                AdmissionInterleave::ReplaceBoot => {
+                    let replacement = self
+                        .store
+                        .prepare_native_source_before_serving(
+                            NATIVE_SOURCE_NODE,
+                            &CredentialKey::from_bytes([17; 32]),
+                        )
                         .await?;
+                    replacement.revoke();
                 }
                 AdmissionInterleave::WrongOwner => {
                     self.store.sharing_txn(vec![("UPDATE sharing_ingress_custody SET owner_identity=$1,revision=revision+1 WHERE incarnation_id=$2".into(), vec!["f".repeat(64).into(), self.assignment.binding().incarnation_id().into()])]).await?;
@@ -398,11 +365,11 @@ async fn sharing_source_ingress_seal_retries_accounting_races_without_losing_clo
         (AdmissionInterleave::WrongOwner, 0),
     ] {
         let store = SqliteStore::open_in_memory().expect("actual Store");
-        let (grant, credential) = setup(&store).await;
-        install_fixture_ingress_context(&store).await;
+        let (grant, credential, native_boot) = setup(&store).await;
+        assert_fixture_ingress_context(&store).await;
         let planned = intent(&store, grant, &credential, "seal-interleave").await;
         let binding = match store
-            .claim_source_media_session(&planned, &proof())
+            .claim_source_media_session(&planned, &proof(&native_boot))
             .await
             .expect("claim")
         {
@@ -410,12 +377,12 @@ async fn sharing_source_ingress_seal_retries_accounting_races_without_losing_clo
             _ => panic!("fresh claim"),
         };
         let assignment = store
-            .assign_source_dispatch(&binding, &credential, &proof())
+            .assign_source_dispatch(&binding, &credential, &proof(&native_boot))
             .await
             .expect("assignment")
             .expect("exact owner");
         let first = IngressRegistration {
-            node_id: "voter".into(),
+            node_id: "native-source".into(),
             boot_id: planned.request.ingress_registry_boot_id,
             connection_id: Uuid::new_v4(),
             driver_sequence: 1,
@@ -424,7 +391,7 @@ async fn sharing_source_ingress_seal_retries_accounting_races_without_losing_clo
         };
         assert_eq!(
             store
-                .register_source_ingress_custody(&assignment, &first, &proof())
+                .register_source_ingress_custody(&assignment, &first, &proof(&native_boot))
                 .await
                 .expect("registration"),
             SourceCustodyWrite::Applied
@@ -475,11 +442,11 @@ async fn sharing_source_ingress_ack_retries_seal_race_without_losing_actual_rece
     use crate::sharing_ingress_custody::IngressRegistration;
     use crate::store::sharing_source_ingress_custody::SourceCustodyWrite;
     let store = SqliteStore::open_in_memory().expect("actual Store");
-    let (grant, credential) = setup(&store).await;
-    install_fixture_ingress_context(&store).await;
+    let (grant, credential, native_boot) = setup(&store).await;
+    assert_fixture_ingress_context(&store).await;
     let planned = intent(&store, grant, &credential, "ack-seal-interleave").await;
     let binding = match store
-        .claim_source_media_session(&planned, &proof())
+        .claim_source_media_session(&planned, &proof(&native_boot))
         .await
         .expect("claim")
     {
@@ -487,12 +454,12 @@ async fn sharing_source_ingress_ack_retries_seal_race_without_losing_actual_rece
         _ => panic!("fresh claim"),
     };
     let assignment = store
-        .assign_source_dispatch(&binding, &credential, &proof())
+        .assign_source_dispatch(&binding, &credential, &proof(&native_boot))
         .await
         .expect("assignment")
         .expect("exact owner");
     let first = IngressRegistration {
-        node_id: "voter".into(),
+        node_id: "native-source".into(),
         boot_id: planned.request.ingress_registry_boot_id,
         connection_id: Uuid::new_v4(),
         driver_sequence: 1,
@@ -501,7 +468,7 @@ async fn sharing_source_ingress_ack_retries_seal_race_without_losing_actual_rece
     };
     assert_eq!(
         store
-            .register_source_ingress_custody(&assignment, &first, &proof())
+            .register_source_ingress_custody(&assignment, &first, &proof(&native_boot))
             .await
             .expect("registration"),
         SourceCustodyWrite::Applied
@@ -543,11 +510,11 @@ async fn sharing_source_ingress_ack_preserves_authority_faults_and_retry_bounds(
         (None, 0),
     ] {
         let store = SqliteStore::open_in_memory().expect("actual Store");
-        let (grant, credential) = setup(&store).await;
-        install_fixture_ingress_context(&store).await;
+        let (grant, credential, native_boot) = setup(&store).await;
+        assert_fixture_ingress_context(&store).await;
         let planned = intent(&store, grant, &credential, "ack-retry-negative").await;
         let binding = match store
-            .claim_source_media_session(&planned, &proof())
+            .claim_source_media_session(&planned, &proof(&native_boot))
             .await
             .expect("claim")
         {
@@ -555,12 +522,12 @@ async fn sharing_source_ingress_ack_preserves_authority_faults_and_retry_bounds(
             _ => panic!("fresh claim"),
         };
         let assignment = store
-            .assign_source_dispatch(&binding, &credential, &proof())
+            .assign_source_dispatch(&binding, &credential, &proof(&native_boot))
             .await
             .expect("assignment")
             .expect("exact owner");
         let first = IngressRegistration {
-            node_id: "voter".into(),
+            node_id: "native-source".into(),
             boot_id: planned.request.ingress_registry_boot_id,
             connection_id: Uuid::new_v4(),
             driver_sequence: 1,
@@ -568,7 +535,7 @@ async fn sharing_source_ingress_ack_preserves_authority_faults_and_retry_bounds(
             closed_confirmation: None,
         };
         store
-            .register_source_ingress_custody(&assignment, &first, &proof())
+            .register_source_ingress_custody(&assignment, &first, &proof(&native_boot))
             .await
             .expect("registration");
         let second = IngressRegistration {
@@ -579,7 +546,7 @@ async fn sharing_source_ingress_ack_preserves_authority_faults_and_retry_bounds(
         };
         if matches!(action, Some(AdmissionInterleave::RepeatedAck)) {
             store
-                .register_source_ingress_custody(&assignment, &second, &proof())
+                .register_source_ingress_custody(&assignment, &second, &proof(&native_boot))
                 .await
                 .expect("independent slot for repeated exact accounting ACK");
         }
@@ -663,14 +630,14 @@ async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses
         AdmissionInterleave::WrongBoot,
         AdmissionInterleave::WrongInitialHash,
         AdmissionInterleave::MalformedRouting,
-        AdmissionInterleave::RemoveFloor,
+        AdmissionInterleave::ReplaceBoot,
     ] {
         let store = SqliteStore::open_in_memory().expect("actual Store");
-        let (grant, credential) = setup(&store).await;
-        install_fixture_ingress_context(&store).await;
+        let (grant, credential, native_boot) = setup(&store).await;
+        assert_fixture_ingress_context(&store).await;
         let planned = intent(&store, grant, &credential, "admission-interleave").await;
         let binding = match store
-            .claim_source_media_session(&planned, &proof())
+            .claim_source_media_session(&planned, &proof(&native_boot))
             .await
             .expect("actual claim")
         {
@@ -678,13 +645,13 @@ async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses
             _ => panic!("fresh claim"),
         };
         let assignment = store
-            .assign_source_dispatch(&binding, &credential, &proof())
+            .assign_source_dispatch(&binding, &credential, &proof(&native_boot))
             .await
             .expect("actual assignment")
             .expect("exact assignment");
         let boot = planned.request.ingress_registry_boot_id;
         let first = IngressRegistration {
-            node_id: "voter".into(),
+            node_id: "native-source".into(),
             boot_id: boot,
             connection_id: Uuid::new_v4(),
             driver_sequence: 1,
@@ -699,7 +666,7 @@ async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses
         };
         assert_eq!(
             store
-                .register_source_ingress_custody(&assignment, &first, &proof())
+                .register_source_ingress_custody(&assignment, &first, &proof(&native_boot))
                 .await
                 .expect("first metadata registration"),
             SourceCustodyWrite::Applied
@@ -707,14 +674,14 @@ async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses
         if !matches!(action, AdmissionInterleave::Register) {
             assert_eq!(
                 store
-                    .register_source_ingress_custody(&assignment, &second, &proof())
+                    .register_source_ingress_custody(&assignment, &second, &proof(&native_boot))
                     .await
                     .expect("second metadata registration"),
                 SourceCustodyWrite::Applied
             );
         }
         let retained = store
-            .prepare_source_ingress_admission(&assignment, boot, &proof())
+            .prepare_source_ingress_admission(&assignment, boot, &proof(&native_boot))
             .await
             .expect("initial admission")
             .expect("current open registration");
@@ -732,7 +699,7 @@ async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses
             second,
         };
         let result = interleaved
-            .prepare_source_ingress_admission(&assignment, boot, &proof())
+            .prepare_source_ingress_admission(&assignment, boot, &proof(&native_boot))
             .await;
         if matches!(
             action,
@@ -761,7 +728,7 @@ async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses
         if matches!(action, AdmissionInterleave::AckAll) {
             assert!(
                 store
-                    .refresh_source_ingress_admission(&retained, &proof())
+                    .refresh_source_ingress_admission(&retained, &proof(&native_boot))
                     .await
                     .expect("retained refresh")
                     .is_some(),
@@ -775,26 +742,29 @@ async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses
 /// qualify SQL accounting, not physical closure. Advance their exact retained
 /// empty ledger through the production CAS; do not bypass the sealed predicate
 /// or manufacture a joined-driver receipt from metadata.
-async fn install_fixture_ingress_context(store: &SqliteStore) {
-    // This SQL-only fixture installs the canonical private cleanup context.
-    // It admitted no transport or producer; these rows are not physical proof.
-    use crate::store::sharing_source_schema as layout;
-    store.sharing_txn(vec![
-        ("CREATE TABLE cluster_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL,protocol_min INTEGER NOT NULL,protocol_max INTEGER NOT NULL,migrated_at INTEGER NOT NULL) STRICT".into(), vec![]),
-        (layout::BOOT_INTENTS_SCHEMA.into(), vec![]),
-        (layout::INSTALLATION_SCHEMA.into(), vec![]),
-        (layout::TRANSACTION_SCHEMA.into(), vec![]),
-        ("INSERT INTO cluster_meta VALUES(1,$1,1,1,1)".into(), vec![layout::SOURCE_SCHEMA_VERSION.into()]),
-        ("INSERT INTO sharing_source_schema_installation VALUES(1,$1,$2,1)".into(), vec![layout::SOURCE_LAYOUT_VERSION.into(), "a".repeat(64).into()]),
-        ("INSERT INTO sharing_source_schema_transaction_guard VALUES(1,1)".into(), vec![]),
-    ]).await.expect("actual private schema cleanup context");
+async fn assert_fixture_ingress_context(store: &SqliteStore) {
+    let ready = store
+        .sharing_read(
+            &format!(
+                "SELECT json_array(CASE WHEN ({}) THEN 1 ELSE 0 END) AS payload",
+                crate::store::sharing_source_schema::native_installed_guard()
+            ),
+            vec![],
+        )
+        .await
+        .expect("actual native cleanup context");
+    assert_eq!(
+        ready,
+        ["[1]"],
+        "fixture startup installed real native authority"
+    );
 }
 
 async fn seal_fixture_owned_empty_ingress(
     store: &SqliteStore,
     assignment: &SourceDispatchAssignment,
 ) {
-    install_fixture_ingress_context(store).await;
+    assert_fixture_ingress_context(store).await;
     let snapshot = store
         .source_ingress_custody(assignment)
         .await
@@ -828,10 +798,10 @@ async fn sharing_source_retained_zero_media_ids_claim_assign_and_release() {
         SqliteStore::open_in_memory().expect("memory"),
         SqliteStore::open(&directory.path().join("zero.db")).expect("pool"),
     ] {
-        let (grant, key) = setup_with_media_id(&store, 0).await;
+        let (grant, key, native_boot) = setup_with_media_id(&store, 0).await;
         let request = intent_for_media(&store, grant, &key, "zero-media", 0).await;
         let SourceClaimOutcome::Acquired(binding) = store
-            .claim_source_media_session(&request, &proof())
+            .claim_source_media_session(&request, &proof(&native_boot))
             .await
             .expect("legacy zero admission")
         else {
@@ -841,7 +811,7 @@ async fn sharing_source_retained_zero_media_ids_claim_assign_and_release() {
         assert_eq!(binding.item_id().as_str(), "0");
         assert_eq!(binding.file_id().as_str(), "0");
         let assignment = store
-            .assign_source_dispatch(&binding, &key, &proof())
+            .assign_source_dispatch(&binding, &key, &proof(&native_boot))
             .await
             .expect("zero dispatch")
             .expect("assigned zero media");
@@ -881,18 +851,18 @@ async fn sharing_source_dispatch_assignment_current_rotation_and_corruption_fenc
         SqliteStore::open_in_memory().expect("memory store"),
         SqliteStore::open(&dir.path().join("dispatch.db")).expect("pooled store"),
     ] {
-        let (grant, key) = setup(&store).await;
+        let (grant, key, native_boot) = setup(&store).await;
         let first = intent(&store, grant, &key, "dispatch-one").await;
         let second = intent(&store, grant, &key, "dispatch-two").await;
         let SourceClaimOutcome::Acquired(first) = store
-            .claim_source_media_session(&first, &proof())
+            .claim_source_media_session(&first, &proof(&native_boot))
             .await
             .expect("first claim")
         else {
             panic!("acquired first")
         };
         let SourceClaimOutcome::Acquired(second) = store
-            .claim_source_media_session(&second, &proof())
+            .claim_source_media_session(&second, &proof(&native_boot))
             .await
             .expect("second claim")
         else {
@@ -908,18 +878,21 @@ async fn sharing_source_dispatch_assignment_current_rotation_and_corruption_fenc
             .await
             .expect("rotate fixture credential");
         let assigned = store
-            .assign_source_dispatch(&first, &key, &proof())
+            .assign_source_dispatch(&first, &key, &proof(&native_boot))
             .await
             .expect("assignment write")
             .expect("actual local assignment");
-        assert_eq!(assigned.owner_node_id(), "voter");
+        assert_eq!(assigned.owner_node_id(), "native-source");
         assert_eq!(assigned.dispatch_generation(), 1);
-        assert!(assigned
-            .validate_observation_freshness(now_ms().expect("clock") + 6000)
-            .is_err());
+        assert!(
+            assigned
+                .validate_observation_freshness(now_ms().expect("clock") + 6000)
+                .is_ok(),
+            "native serving authority does not expire a quorum lease"
+        );
         assert_eq!(assigned.binding().incarnation_id(), first.incarnation_id());
         let replay = store
-            .assign_source_dispatch(&first, &key, &proof())
+            .assign_source_dispatch(&first, &key, &proof(&native_boot))
             .await
             .expect("assignment replay")
             .expect("same committed assignment");
@@ -939,7 +912,7 @@ async fn sharing_source_dispatch_assignment_current_rotation_and_corruption_fenc
             .await
             .expect("saved switch off");
         assert!(store
-            .assign_source_dispatch(&second, &key, &proof())
+            .assign_source_dispatch(&second, &key, &proof(&native_boot))
             .await
             .expect("disabled assignment")
             .is_none());
@@ -951,7 +924,7 @@ async fn sharing_source_dispatch_assignment_current_rotation_and_corruption_fenc
         assert!(unchanged.request_owner.is_none());
         store.sharing_txn(vec![("UPDATE settings SET value='true' WHERE key='sharing_enabled'".into(), vec![]),("UPDATE sharing_source_session_bindings SET dispatch_generation=1 WHERE incarnation_id=$1".into(), vec![second.incarnation_id.into()])]).await.expect("inject incomplete dispatch pair");
         assert!(store
-            .assign_source_dispatch(&second, &key, &proof())
+            .assign_source_dispatch(&second, &key, &proof(&native_boot))
             .await
             .expect("corruption refusal")
             .is_none());
@@ -973,22 +946,22 @@ async fn sharing_source_activation_authority_assertion_rolls_back_and_preserves_
         SqliteStore::open_in_memory().expect("memory"),
         SqliteStore::open(&dir.path().join("activation-guard.db")).expect("pool"),
     ] {
-        let (grant, key) = setup(&store).await;
+        let (grant, key, native_boot) = setup(&store).await;
         let intent = intent(&store, grant, &key, "guarded-start").await;
         let SourceClaimOutcome::Acquired(binding) = store
-            .claim_source_media_session(&intent, &proof())
+            .claim_source_media_session(&intent, &proof(&native_boot))
             .await
             .expect("claim")
         else {
             panic!("acquired")
         };
         let assignment = store
-            .assign_source_dispatch(&binding, &key, &proof())
+            .assign_source_dispatch(&binding, &key, &proof(&native_boot))
             .await
             .expect("assignment")
             .expect("assigned local worker");
         let SourceWriteAuthorityRead::Ready(authority) = store
-            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("private authority")
         else {
@@ -1005,7 +978,7 @@ async fn sharing_source_activation_authority_assertion_rolls_back_and_preserves_
             fence_predecessor: true,
             request_id: Some(binding.request_id.clone()),
             request_fingerprint: binding.request_fingerprint.clone(),
-            owner_node_id: "voter".into(),
+            owner_node_id: "native-source".into(),
             recipe_json: "{}".into(),
             response_json: "{}".into(),
             publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -1024,7 +997,7 @@ async fn sharing_source_activation_authority_assertion_rolls_back_and_preserves_
         let guard = source_activation_guard(&authority, &activation)
             .expect("closed assertion")
             .expect("matching tuple");
-        let error=store.sharing_txn(vec![guard,("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES('guard-sentinel','voter',1,1,$1,$2)".into(),vec![(now+60000).into(),now.into()])]).await.expect_err("same transaction refuses");
+        let error=store.sharing_txn(vec![guard,("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES('guard-sentinel','native-source',1,1,$1,$2)".into(),vec![(now+60000).into(),now.into()])]).await.expect_err("same transaction refuses");
         assert!(source_write_refused(&error));
         assert_eq!(count(&store, "job_leases").await, 0);
         store
@@ -1037,7 +1010,7 @@ async fn sharing_source_activation_authority_assertion_rolls_back_and_preserves_
         let guard = source_activation_guard(&authority, &activation)
             .expect("valid assertion")
             .expect("matching authority");
-        let error=store.sharing_txn(vec![guard,("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES(NULL,'voter',1,1,$1,$2)".into(),vec![(now+60000).into(),now.into()])]).await.expect_err("genuine storage fault");
+        let error=store.sharing_txn(vec![guard,("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES(NULL,'native-source',1,1,$1,$2)".into(),vec![(now+60000).into(),now.into()])]).await.expect_err("genuine storage fault");
         assert!(!source_write_refused(&error));
         assert_eq!(count(&store, "job_leases").await, 0);
         store
@@ -1049,7 +1022,7 @@ async fn sharing_source_activation_authority_assertion_rolls_back_and_preserves_
             .expect("file race");
         assert!(matches!(
             store
-                .prepare_source_activation_authority(&assignment, &key, &proof())
+                .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
                 .await
                 .expect("revalidate actual file"),
             SourceWriteAuthorityRead::Unavailable
@@ -1065,22 +1038,22 @@ async fn sharing_source_sqlite_first_activation_current_authority_and_lineage() 
         SqliteStore::open_in_memory().expect("memory"),
         SqliteStore::open(&dir.path().join("source-activation.db")).expect("pool"),
     ] {
-        let (grant, key) = setup(&store).await;
+        let (grant, key, native_boot) = setup(&store).await;
         let request = intent(&store, grant, &key, "first-activation").await;
         let SourceClaimOutcome::Acquired(binding) = store
-            .claim_source_media_session(&request, &proof())
+            .claim_source_media_session(&request, &proof(&native_boot))
             .await
             .expect("claim")
         else {
             panic!("Source reservation")
         };
         let assignment = store
-            .assign_source_dispatch(&binding, &key, &proof())
+            .assign_source_dispatch(&binding, &key, &proof(&native_boot))
             .await
             .expect("assignment")
             .expect("actual local worker");
         let SourceWriteAuthorityRead::Ready(authority) = store
-            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("authority")
         else {
@@ -1097,7 +1070,7 @@ async fn sharing_source_sqlite_first_activation_current_authority_and_lineage() 
             fence_predecessor: true,
             request_id: Some(binding.request_id.clone()),
             request_fingerprint: binding.request_fingerprint.clone(),
-            owner_node_id: "voter".into(),
+            owner_node_id: "native-source".into(),
             recipe_json: "{}".into(),
             response_json: "{}".into(),
             publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -1133,7 +1106,7 @@ async fn sharing_source_sqlite_first_activation_current_authority_and_lineage() 
             .is_none());
         assert!(matches!(
             store
-                .prepare_source_activation_authority(&assignment, &key, &proof())
+                .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
                 .await
                 .expect("foreign mint refusal"),
             SourceWriteAuthorityRead::Unavailable
@@ -1180,7 +1153,7 @@ async fn sharing_source_sqlite_first_activation_current_authority_and_lineage() 
             .await
             .expect("restore fixture file");
         let SourceWriteAuthorityRead::Ready(authority) = store
-            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("fresh authority")
         else {
@@ -1214,7 +1187,7 @@ async fn sharing_source_sqlite_first_activation_current_authority_and_lineage() 
         // Fault propagation and race refusals above may consume the five-second
         // authority/operation lifetime. The successful write needs a fresh proof.
         let SourceWriteAuthorityRead::Ready(authority) = store
-            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("fresh authority after fault checks")
         else {
@@ -1245,7 +1218,7 @@ async fn sharing_source_sqlite_first_activation_current_authority_and_lineage() 
             .expect("expired operation refusal")
             .is_none());
         let SourceWriteAuthorityRead::Ready(replay_authority) = store
-            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("current replay authority")
         else {
@@ -1286,10 +1259,10 @@ async fn sharing_source_claim_atomic_replay_caps_authority_and_never_dispatched_
         SqliteStore::open(&dir.path().join("source.db"))
             .expect("Source candidate fixture operation"),
     ] {
-        let (grant, credential) = setup(&store).await;
+        let (grant, credential, native_boot) = setup(&store).await;
         let first = intent(&store, grant, &credential, "first").await;
         let binding = match store
-            .claim_source_media_session(&first, &proof())
+            .claim_source_media_session(&first, &proof(&native_boot))
             .await
             .expect("claim")
         {
@@ -1300,7 +1273,7 @@ async fn sharing_source_claim_atomic_replay_caps_authority_and_never_dispatched_
         assert_eq!(count(&store, "media_session_requests").await, 1);
         let retry = intent(&store, grant, &credential, "first").await;
         match store
-            .claim_source_media_session(&retry, &proof())
+            .claim_source_media_session(&retry, &proof(&native_boot))
             .await
             .expect("Source candidate fixture operation")
         {
@@ -1312,7 +1285,7 @@ async fn sharing_source_claim_atomic_replay_caps_authority_and_never_dispatched_
         let second = intent(&store, grant, &credential, "second").await;
         assert!(matches!(
             store
-                .claim_source_media_session(&second, &proof())
+                .claim_source_media_session(&second, &proof(&native_boot))
                 .await
                 .expect("Source candidate fixture operation"),
             SourceClaimOutcome::Acquired(_)
@@ -1320,7 +1293,7 @@ async fn sharing_source_claim_atomic_replay_caps_authority_and_never_dispatched_
         let third = intent(&store, grant, &credential, "third").await;
         assert!(matches!(
             store
-                .claim_source_media_session(&third, &proof())
+                .claim_source_media_session(&third, &proof(&native_boot))
                 .await
                 .expect("Source candidate fixture operation"),
             SourceClaimOutcome::Capacity(SourceCapacity::PendingStarts)
@@ -1339,7 +1312,7 @@ async fn sharing_source_claim_atomic_replay_caps_authority_and_never_dispatched_
             .expect("Source candidate fixture operation");
         assert!(matches!(
             store
-                .claim_source_media_session(&third, &proof())
+                .claim_source_media_session(&third, &proof(&native_boot))
                 .await
                 .expect("Source candidate fixture operation"),
             SourceClaimOutcome::Unavailable
@@ -1353,7 +1326,7 @@ async fn sharing_source_claim_atomic_replay_caps_authority_and_never_dispatched_
             .expect("bounded invalid saved switch fixture");
         assert!(matches!(
             store
-                .claim_source_media_session(&third, &proof())
+                .claim_source_media_session(&third, &proof(&native_boot))
                 .await
                 .expect("bounded saved choice refusal"),
             SourceClaimOutcome::Unavailable
@@ -1382,14 +1355,14 @@ async fn sharing_source_claim_atomic_replay_caps_authority_and_never_dispatched_
             .expect("Source candidate fixture operation");
         assert!(matches!(
             store
-                .claim_source_media_session(&retry, &proof())
+                .claim_source_media_session(&retry, &proof(&native_boot))
                 .await
                 .expect("Source candidate fixture operation"),
             SourceClaimOutcome::Retired(_)
         ));
         assert!(matches!(
             store
-                .claim_source_media_session(&third, &proof())
+                .claim_source_media_session(&third, &proof(&native_boot))
                 .await
                 .expect("Source candidate fixture operation"),
             SourceClaimOutcome::Acquired(_)
@@ -1404,7 +1377,7 @@ async fn sharing_source_claim_atomic_replay_caps_authority_and_never_dispatched_
             .expect("Source candidate fixture operation");
         assert!(matches!(
             store
-                .claim_source_media_session(&fourth, &proof())
+                .claim_source_media_session(&fourth, &proof(&native_boot))
                 .await
                 .expect("Source candidate fixture operation"),
             SourceClaimOutcome::Unavailable
@@ -1490,12 +1463,12 @@ async fn sharing_source_capacity_keeps_expired_and_resolved_starts_until_proven_
         SqliteStore::open_in_memory().expect("Source candidate fixture operation"),
         SqliteStore::open(&dir.path().join("caps.db")).expect("Source candidate fixture operation"),
     ] {
-        let (grant, credential) = setup(&store).await;
+        let (grant, credential, native_boot) = setup(&store).await;
         let mut bindings = Vec::new();
         for n in 0..4 {
             let i = intent(&store, grant, &credential, &format!("grant-{n}")).await;
             let b = match store
-                .claim_source_media_session(&i, &proof())
+                .claim_source_media_session(&i, &proof(&native_boot))
                 .await
                 .expect("Source candidate fixture operation")
             {
@@ -1509,7 +1482,7 @@ async fn sharing_source_capacity_keeps_expired_and_resolved_starts_until_proven_
         assert!(
             matches!(
                 store
-                    .claim_source_media_session(&fifth, &proof())
+                    .claim_source_media_session(&fifth, &proof(&native_boot))
                     .await
                     .expect("Source candidate fixture operation"),
                 SourceClaimOutcome::Capacity(SourceCapacity::GrantSlots)
@@ -1529,7 +1502,7 @@ async fn sharing_source_capacity_keeps_expired_and_resolved_starts_until_proven_
                 .await;
                 assert!(matches!(
                     store
-                        .claim_source_media_session(&i, &proof())
+                        .claim_source_media_session(&i, &proof(&native_boot))
                         .await
                         .expect("Source candidate fixture operation"),
                     SourceClaimOutcome::Acquired(_)
@@ -1540,7 +1513,7 @@ async fn sharing_source_capacity_keeps_expired_and_resolved_starts_until_proven_
         let ninth = intent_hash(&store, other, &credential, "ninth", format!("{:064x}", 103)).await;
         assert!(matches!(
             store
-                .claim_source_media_session(&ninth, &proof())
+                .claim_source_media_session(&ninth, &proof(&native_boot))
                 .await
                 .expect("Source candidate fixture operation"),
             SourceClaimOutcome::Capacity(SourceCapacity::SourceSlots)
@@ -1559,11 +1532,11 @@ async fn sharing_source_capacity_keeps_expired_and_resolved_starts_until_proven_
 #[tokio::test]
 async fn sharing_source_request_insert_failure_rolls_back_and_foreign_pin_blocks_release() {
     let store = SqliteStore::open_in_memory().expect("Source candidate fixture operation");
-    let (grant, credential) = setup(&store).await;
+    let (grant, credential, native_boot) = setup(&store).await;
     let i = intent(&store, grant, &credential, "injected").await;
     store.sharing_txn(vec![("CREATE TRIGGER source_test_request_failure BEFORE INSERT ON media_session_requests WHEN NEW.request_id='injected' BEGIN SELECT RAISE(ABORT,'injected request failure'); END".into(),vec![])]).await.expect("Source candidate fixture operation");
     assert!(store
-        .claim_source_media_session(&i, &proof())
+        .claim_source_media_session(&i, &proof(&native_boot))
         .await
         .is_err());
     assert_eq!(count(&store, "sharing_source_session_bindings").await, 0);
@@ -1576,7 +1549,7 @@ async fn sharing_source_request_insert_failure_rolls_back_and_foreign_pin_blocks
         .await
         .expect("Source candidate fixture operation");
     let b = match store
-        .claim_source_media_session(&i, &proof())
+        .claim_source_media_session(&i, &proof(&native_boot))
         .await
         .expect("Source candidate fixture operation")
     {
@@ -1615,10 +1588,10 @@ async fn sharing_source_schema_and_request_corruption_refuse_without_repair() {
         SqliteStore::open(&dir.path().join("corrupt.db"))
             .expect("Source candidate fixture operation"),
     ] {
-        let (grant, credential) = setup(&store).await;
+        let (grant, credential, native_boot) = setup(&store).await;
         let first = intent(&store, grant, &credential, "first").await;
         let b = match store
-            .claim_source_media_session(&first, &proof())
+            .claim_source_media_session(&first, &proof(&native_boot))
             .await
             .expect("Source candidate fixture operation")
         {
@@ -1633,7 +1606,7 @@ async fn sharing_source_schema_and_request_corruption_refuse_without_repair() {
         assert!(
             matches!(
                 store
-                    .claim_source_media_session(&first, &proof())
+                    .claim_source_media_session(&first, &proof(&native_boot))
                     .await
                     .expect("Source candidate fixture operation"),
                 SourceClaimOutcome::Unavailable
@@ -1651,7 +1624,7 @@ async fn sharing_source_schema_and_request_corruption_refuse_without_repair() {
         assert!(
             matches!(
                 store
-                    .claim_source_media_session(&first, &proof())
+                    .claim_source_media_session(&first, &proof(&native_boot))
                     .await
                     .expect("Source candidate fixture operation"),
                 SourceClaimOutcome::Unavailable
@@ -1680,7 +1653,7 @@ async fn sharing_source_schema_and_request_corruption_refuse_without_repair() {
         assert!(
             matches!(
                 store
-                    .claim_source_media_session(&next, &proof())
+                    .claim_source_media_session(&next, &proof(&native_boot))
                     .await
                     .expect("Source candidate fixture operation"),
                 SourceClaimOutcome::Unavailable
@@ -1694,11 +1667,11 @@ async fn sharing_source_schema_and_request_corruption_refuse_without_repair() {
 #[tokio::test]
 async fn sharing_source_retained_bound_preserves_exact_replay_and_rejects_new_identity() {
     let store = SqliteStore::open_in_memory().expect("Source candidate fixture operation");
-    let (grant, credential) = setup(&store).await;
+    let (grant, credential, native_boot) = setup(&store).await;
     let first = intent(&store, grant, &credential, "first").await;
     assert!(matches!(
         store
-            .claim_source_media_session(&first, &proof())
+            .claim_source_media_session(&first, &proof(&native_boot))
             .await
             .expect("Source candidate fixture operation"),
         SourceClaimOutcome::Acquired(_)
@@ -1708,7 +1681,7 @@ async fn sharing_source_retained_bound_preserves_exact_replay_and_rejects_new_id
     let retry = intent(&store, grant, &credential, "first").await;
     assert!(matches!(
         store
-            .claim_source_media_session(&retry, &proof())
+            .claim_source_media_session(&retry, &proof(&native_boot))
             .await
             .expect("Source candidate fixture operation"),
         SourceClaimOutcome::InFlight(_)
@@ -1716,7 +1689,7 @@ async fn sharing_source_retained_bound_preserves_exact_replay_and_rejects_new_id
     let next = intent(&store, grant, &credential, "next").await;
     assert!(matches!(
         store
-            .claim_source_media_session(&next, &proof())
+            .claim_source_media_session(&next, &proof(&native_boot))
             .await
             .expect("Source candidate fixture operation"),
         SourceClaimOutcome::Capacity(SourceCapacity::RetainedBindings)
@@ -1727,11 +1700,11 @@ async fn sharing_source_retained_bound_preserves_exact_replay_and_rejects_new_id
 #[tokio::test]
 async fn sharing_source_replay_conflict_does_not_bypass_revoked_current_authority() {
     let store = SqliteStore::open_in_memory().expect("SQLite");
-    let (grant, credential) = setup(&store).await;
+    let (grant, credential, native_boot) = setup(&store).await;
     let first = intent(&store, grant, &credential, "first").await;
     assert!(matches!(
         store
-            .claim_source_media_session(&first, &proof())
+            .claim_source_media_session(&first, &proof(&native_boot))
             .await
             .expect("initial claim"),
         SourceClaimOutcome::Acquired(_)
@@ -1740,7 +1713,7 @@ async fn sharing_source_replay_conflict_does_not_bypass_revoked_current_authorit
     changed.request.request_fingerprint = "e".repeat(64);
     assert!(matches!(
         store
-            .claim_source_media_session(&changed, &proof())
+            .claim_source_media_session(&changed, &proof(&native_boot))
             .await
             .expect("authorized changed identity"),
         SourceClaimOutcome::Conflict
@@ -1754,7 +1727,7 @@ async fn sharing_source_replay_conflict_does_not_bypass_revoked_current_authorit
         .expect("grant disabled between intent and replay");
     assert!(matches!(
         store
-            .claim_source_media_session(&changed, &proof())
+            .claim_source_media_session(&changed, &proof(&native_boot))
             .await
             .expect("current authority refusal"),
         SourceClaimOutcome::Unavailable
@@ -1769,22 +1742,22 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
         SqliteStore::open_in_memory().expect("memory"),
         SqliteStore::open(&dir.path().join("source-activation.db")).expect("pool"),
     ] {
-        let (grant, key) = setup(&store).await;
+        let (grant, key, native_boot) = setup(&store).await;
         let request = intent(&store, grant, &key, "first-activation").await;
         let SourceClaimOutcome::Acquired(binding) = store
-            .claim_source_media_session(&request, &proof())
+            .claim_source_media_session(&request, &proof(&native_boot))
             .await
             .expect("claim")
         else {
             panic!("Source reservation")
         };
         let assignment = store
-            .assign_source_dispatch(&binding, &key, &proof())
+            .assign_source_dispatch(&binding, &key, &proof(&native_boot))
             .await
             .expect("assignment")
             .expect("actual local worker");
         let SourceWriteAuthorityRead::Ready(authority) = store
-            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("authority")
         else {
@@ -1801,7 +1774,7 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
             fence_predecessor: true,
             request_id: Some(binding.request_id.clone()),
             request_fingerprint: binding.request_fingerprint.clone(),
-            owner_node_id: "voter".into(),
+            owner_node_id: "native-source".into(),
             recipe_json: "{}".into(),
             response_json: "{}".into(),
             publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -1817,7 +1790,7 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
             .expect("Source route");
         assert!(matches!(
             store
-                .prepare_source_owned_route_authority(&assignment, &key, &proof())
+                .prepare_source_owned_route_authority(&assignment, &key, &proof(&native_boot))
                 .await
                 .expect("unresolved mint"),
             SourceOwnedRouteAuthorityRead::Unavailable
@@ -1826,7 +1799,7 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
         // renewal, not a producer or a production readiness transition.
         store.sharing_txn(vec![("UPDATE media_sessions SET publication_ready_at_ms=0 WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into()]),("UPDATE media_session_requests SET state='resolved',response_json='{}' WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into()]),("UPDATE sharing_source_session_bindings SET start_resolved_at_ms=$2 WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into(),now.into()])]).await.expect("fixture-only resolved route");
         let SourceOwnedRouteAuthorityRead::Ready(owned) = store
-            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .prepare_source_owned_route_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("owned witness")
         else {
@@ -1842,7 +1815,7 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
         let at = now_ms().expect("clock");
         let expiry = created.route.lease_expires_at_ms + 60000;
         assert!(store
-            .renew_media_sessions("voter", std::slice::from_ref(&renewal), at, expiry)
+            .renew_media_sessions("native-source", std::slice::from_ref(&renewal), at, expiry)
             .await
             .expect("ordinary refusal")
             .is_empty());
@@ -1893,7 +1866,7 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
             .await
             .expect("restore fixture");
         let SourceOwnedRouteAuthorityRead::Ready(owned) = store
-            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .prepare_source_owned_route_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("fresh witness")
         else {
@@ -1907,7 +1880,7 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
             .is_none());
         assert!(matches!(
             store
-                .prepare_source_owned_route_authority(&assignment, &key, &proof())
+                .prepare_source_owned_route_authority(&assignment, &key, &proof(&native_boot))
                 .await
                 .expect("foreign lease mint refusal"),
             SourceOwnedRouteAuthorityRead::Unavailable
@@ -1918,7 +1891,7 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
         assert_eq!(row["expiry"], created.route.lease_expires_at_ms);
         store
             .sharing_txn(vec![(
-                "UPDATE job_leases SET owner_node_id='voter' WHERE resource=$1".into(),
+                "UPDATE job_leases SET owner_node_id='native-source' WHERE resource=$1".into(),
                 vec![format!("session:{}", binding.incarnation_id).into()],
             )])
             .await
@@ -1954,7 +1927,7 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
             .expect("stale lease proof")
             .is_none());
         let SourceOwnedRouteAuthorityRead::Ready(fresh) = store
-            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .prepare_source_owned_route_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("fresh lease proof")
         else {
@@ -1964,24 +1937,32 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
         let rows=store.sharing_read("SELECT json_quote(expires_at_ms) AS payload FROM cache_consumer_pins WHERE consumer_id='unrelated-retained'",vec![]).await.expect("foreign pin retained");
         assert_eq!(rows[0], "1");
         tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
-        assert!(store
+        let delayed = store
             .renew_source_media_session(&fresh, &renewal, now_ms().expect("clock"), expiry + 60000)
             .await
-            .expect("delayed current observation refused")
+            .expect("local authority survives delay while its application lease is current")
+            .expect("same current native owner");
+        assert_eq!(delayed.lease_expires_at_ms, expiry + 60000);
+        assert!(store
+            .renew_source_media_session(&fresh, &renewal, now_ms().expect("clock"), expiry + 120000)
+            .await
+            .expect("the successful delayed renewal fences its old lease revision")
             .is_none());
         let SourceOwnedRouteAuthorityRead::Ready(current) = store
-            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .prepare_source_owned_route_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("old assignment fresh observation")
         else {
             panic!("old assignment is lineage, not a perpetual freshness veto")
         };
+        assert_eq!(current.lease_revision, fresh.lease_revision + 1);
+        assert_eq!(current.lease_expires_at_ms, delayed.lease_expires_at_ms);
         assert!(store
             .renew_source_media_session(
                 &current,
                 &renewal,
                 now_ms().expect("clock"),
-                expiry + 60000
+                current.lease_expires_at_ms + 60000
             )
             .await
             .expect("fresh observation renews old assignment")
@@ -2011,22 +1992,22 @@ async fn sharing_source_publication_atomic_ready_zero_and_exact_replay() {
         SqliteStore::open_in_memory().expect("memory"),
         SqliteStore::open(&dir.path().join("source-publication.db")).expect("pool"),
     ] {
-        let (grant, key) = setup(&store).await;
+        let (grant, key, native_boot) = setup(&store).await;
         let request = intent(&store, grant, &key, "publication").await;
         let SourceClaimOutcome::Acquired(binding) = store
-            .claim_source_media_session(&request, &proof())
+            .claim_source_media_session(&request, &proof(&native_boot))
             .await
             .expect("claim")
         else {
             panic!("binding")
         };
         let assignment = store
-            .assign_source_dispatch(&binding, &key, &proof())
+            .assign_source_dispatch(&binding, &key, &proof(&native_boot))
             .await
             .expect("assignment")
             .expect("worker");
         let SourceWriteAuthorityRead::Ready(authority) = store
-            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("activation authority")
         else {
@@ -2043,7 +2024,7 @@ async fn sharing_source_publication_atomic_ready_zero_and_exact_replay() {
             fence_predecessor: true,
             request_id: Some(binding.request_id.clone()),
             request_fingerprint: binding.request_fingerprint.clone(),
-            owner_node_id: "voter".into(),
+            owner_node_id: "native-source".into(),
             recipe_json: "{}".into(),
             response_json: "{}".into(),
             publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -2070,7 +2051,7 @@ async fn sharing_source_publication_atomic_ready_zero_and_exact_replay() {
             "ordinary Shared publication stays closed"
         );
         let SourcePublicationAuthorityRead::Ready(publication) = store
-            .prepare_source_publication_authority(&assignment, &key, &proof())
+            .prepare_source_publication_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("publication permission")
         else {
@@ -2130,7 +2111,7 @@ async fn sharing_source_publication_atomic_ready_zero_and_exact_replay() {
         assert_eq!(route.principal, binding.principal);
         assert_eq!(route.session_id, activation.session_id);
         assert!(
-            matches!(store.claim_source_media_session(&request,&proof()).await.expect("ready-zero exact replay"),SourceClaimOutcome::Resolved{binding:replayed,..} if replayed.same_identity(&binding))
+            matches!(store.claim_source_media_session(&request,&proof(&native_boot)).await.expect("ready-zero exact replay"),SourceClaimOutcome::Resolved{binding:replayed,..} if replayed.same_identity(&binding))
         );
         assert!(store
             .complete_source_media_session_publication(&publication)
@@ -2138,7 +2119,7 @@ async fn sharing_source_publication_atomic_ready_zero_and_exact_replay() {
             .expect("old pending phase refuses")
             .is_none());
         let SourcePublicationAuthorityRead::Ready(replay) = store
-            .prepare_source_publication_authority(&assignment, &key, &proof())
+            .prepare_source_publication_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("published exact permission")
         else {
@@ -2166,17 +2147,17 @@ async fn sharing_source_assigned_no_spawn_settlement_is_atomic_and_independent_o
         SqliteStore::open_in_memory().expect("memory"),
         SqliteStore::open(&dir.path().join("no-spawn.db")).expect("pooled"),
     ] {
-        let (grant, key) = setup(&store).await;
+        let (grant, key, native_boot) = setup(&store).await;
         let intent = intent(&store, grant, &key, "no-spawn").await;
         let SourceClaimOutcome::Acquired(binding) = store
-            .claim_source_media_session(&intent, &proof())
+            .claim_source_media_session(&intent, &proof(&native_boot))
             .await
             .expect("claim")
         else {
             panic!("acquired")
         };
         let assignment = store
-            .assign_source_dispatch(&binding, &key, &proof())
+            .assign_source_dispatch(&binding, &key, &proof(&native_boot))
             .await
             .expect("assignment")
             .expect("actual worker");
@@ -2257,22 +2238,22 @@ async fn sharing_source_terminal_settlement_fences_physical_rows_and_rolls_back(
             SqliteStore::open(&dir.path().join(format!("terminal-{published}.db")))
                 .expect("pooled"),
         ] {
-            let (grant, key) = setup(&store).await;
+            let (grant, key, native_boot) = setup(&store).await;
             let intent = intent(&store, grant, &key, "terminal-worker").await;
             let SourceClaimOutcome::Acquired(binding) = store
-                .claim_source_media_session(&intent, &proof())
+                .claim_source_media_session(&intent, &proof(&native_boot))
                 .await
                 .expect("claim")
             else {
                 panic!("acquired")
             };
             let assignment = store
-                .assign_source_dispatch(&binding, &key, &proof())
+                .assign_source_dispatch(&binding, &key, &proof(&native_boot))
                 .await
                 .expect("assign")
                 .expect("owned");
             let SourceWriteAuthorityRead::Ready(authority) = store
-                .prepare_source_activation_authority(&assignment, &key, &proof())
+                .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
                 .await
                 .expect("authority")
             else {
@@ -2289,7 +2270,7 @@ async fn sharing_source_terminal_settlement_fences_physical_rows_and_rolls_back(
                 fence_predecessor: true,
                 request_id: Some(binding.request_id().to_owned()),
                 request_fingerprint: binding.request_fingerprint().to_owned(),
-                owner_node_id: "voter".into(),
+                owner_node_id: "native-source".into(),
                 recipe_json: "{}".into(),
                 response_json: "{}".into(),
                 publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -2313,7 +2294,7 @@ async fn sharing_source_terminal_settlement_fences_physical_rows_and_rolls_back(
             );
             if published {
                 let SourcePublicationAuthorityRead::Ready(permission) = store
-                    .prepare_source_publication_authority(&assignment, &key, &proof())
+                    .prepare_source_publication_authority(&assignment, &key, &proof(&native_boot))
                     .await
                     .expect("publication")
                 else {
@@ -2390,7 +2371,7 @@ async fn sharing_source_terminal_settlement_fences_physical_rows_and_rolls_back(
                 SourceReleaseOutcome::Refused
             );
             assert_eq!(count(&store, "job_leases").await, 1);
-            store.sharing_txn(vec![("UPDATE job_leases SET owner_node_id='voter' WHERE resource='session:'||$1".into(),vec![binding.incarnation_id().into()]),("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign','foreign','foreign','media_session',$1,2,0)".into(),vec![binding.incarnation_id().into()])]).await.expect("foreign pin");
+            store.sharing_txn(vec![("UPDATE job_leases SET owner_node_id='native-source' WHERE resource='session:'||$1".into(),vec![binding.incarnation_id().into()]),("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign','foreign','foreign','media_session',$1,2,0)".into(),vec![binding.incarnation_id().into()])]).await.expect("foreign pin");
             assert_eq!(
                 store
                     .settle_source_terminal_worker(&assignment, &terminal)
@@ -2470,7 +2451,7 @@ async fn sharing_source_index_permission_and_bounded_evidence_preserve_lineage()
         SqliteStore::open_in_memory().expect("memory"),
         SqliteStore::open(&dir.path().join("source-index-permission.db")).expect("pool"),
     ] {
-        let (grant, key) = setup(&store).await;
+        let (grant, key, native_boot) = setup(&store).await;
         store
             .sharing_txn(vec![(
                 "UPDATE files SET probe_json='{}' WHERE id=1".into(),
@@ -2480,19 +2461,19 @@ async fn sharing_source_index_permission_and_bounded_evidence_preserve_lineage()
             .expect("stored bounded completion data");
         let request = intent(&store, grant, &key, "index-permission").await;
         let SourceClaimOutcome::Acquired(binding) = store
-            .claim_source_media_session(&request, &proof())
+            .claim_source_media_session(&request, &proof(&native_boot))
             .await
             .expect("claim")
         else {
             panic!("binding")
         };
         let assignment = store
-            .assign_source_dispatch(&binding, &key, &proof())
+            .assign_source_dispatch(&binding, &key, &proof(&native_boot))
             .await
             .expect("assignment")
             .expect("worker");
         let SourceWriteAuthorityRead::Ready(authority) = store
-            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .prepare_source_activation_authority(&assignment, &key, &proof(&native_boot))
             .await
             .expect("authority")
         else {
@@ -2556,7 +2537,7 @@ async fn sharing_source_index_permission_and_bounded_evidence_preserve_lineage()
         assert_eq!(count(&store, "sharing_source_session_bindings").await, 1);
         store
             .sharing_txn(vec![(
-                "DROP TABLE cluster_node_capabilities".into(),
+                "DROP TABLE sharing_native_source_boot".into(),
                 vec![],
             )])
             .await
@@ -2578,7 +2559,7 @@ async fn sharing_source_retained_planned_intent_fences_only_exact_boot_bound_uni
         SqliteStore::open_in_memory().expect("memory Source"),
         SqliteStore::open(&dir.path().join("uncertain-g0.db")).expect("file Source"),
     ] {
-        let (grant, credential) = setup(&store).await;
+        let (grant, credential, native_boot) = setup(&store).await;
         let planned = intent(&store, grant, &credential, "uncertain-g0").await;
         assert_eq!(
             store
@@ -2589,7 +2570,7 @@ async fn sharing_source_retained_planned_intent_fences_only_exact_boot_bound_uni
             "absence cannot discharge an uncertain invocation"
         );
         let acquired = match store
-            .claim_source_media_session(&planned, &proof())
+            .claim_source_media_session(&planned, &proof(&native_boot))
             .await
             .expect("actual claim mutation")
         {
@@ -2633,7 +2614,7 @@ async fn sharing_source_retained_planned_intent_fences_only_exact_boot_bound_uni
 
         let assigned_intent = intent(&store, grant, &credential, "historical-g1").await;
         let binding = match store
-            .claim_source_media_session(&assigned_intent, &proof())
+            .claim_source_media_session(&assigned_intent, &proof(&native_boot))
             .await
             .expect("second claim")
         {
@@ -2641,7 +2622,7 @@ async fn sharing_source_retained_planned_intent_fences_only_exact_boot_bound_uni
             _ => panic!("fresh assigned fixture"),
         };
         store
-            .assign_source_dispatch(&binding, &credential, &proof())
+            .assign_source_dispatch(&binding, &credential, &proof(&native_boot))
             .await
             .expect("actual dispatch assignment")
             .expect("assigned");

@@ -1,8 +1,7 @@
 //! Actual Source owner adapters. Transport observations never become factory authority.
-use super::forwarding::{
-    CustodyAction, CustodyReply, ForwardAuthority, ForwardCustody, ForwardIngress, ForwardRoute,
-    FreshAuthority,
-};
+#[cfg(feature = "cluster")]
+use super::forwarding::{CustodyAction, CustodyReply, ForwardCustody, ForwardIngress};
+use super::forwarding::{ForwardAuthority, ForwardRoute, FreshAuthority};
 use super::*;
 use plurx_core::{
     playback_principal::PlaybackPrincipal, sharing_ingress_custody::IngressRegistration,
@@ -126,6 +125,7 @@ pub(super) fn actual_assignment(entry: &SourceStartEntry) -> Option<SourceDispat
         _ => None,
     }
 }
+#[cfg(feature = "cluster")]
 fn retained(
     state: &crate::state::AppState,
     wire: &ForwardAuthority,
@@ -171,6 +171,7 @@ fn retained(
     }
     Err(unavailable())
 }
+#[cfg(feature = "cluster")]
 fn authority(
     state: &crate::state::AppState,
     entry: &SourceStartEntry,
@@ -404,6 +405,7 @@ pub(super) async fn resolve_forward_route(
         request_id: input.request_id,
     })))
 }
+#[cfg(feature = "cluster")]
 pub(super) async fn prepare_forward_start(
     state: &crate::state::AppState,
     wire: &FreshAuthority,
@@ -452,6 +454,7 @@ pub(super) async fn prepare_forward_start(
     }
     Ok(authority(state, &entry, &value, &hash))
 }
+#[cfg(feature = "cluster")]
 fn registration(ingress: &ForwardIngress) -> Result<IngressRegistration, ApiError> {
     Ok(IngressRegistration {
         node_id: ingress.node_id.clone(),
@@ -462,6 +465,7 @@ fn registration(ingress: &ForwardIngress) -> Result<IngressRegistration, ApiErro
         closed_confirmation: None,
     })
 }
+#[cfg(feature = "cluster")]
 pub(super) async fn validate_retained_forward(
     state: &crate::state::AppState,
     wire: &ForwardAuthority,
@@ -502,6 +506,7 @@ pub(super) async fn validate_retained_forward(
     }
     Ok(())
 }
+#[cfg(feature = "cluster")]
 pub(super) async fn apply_forward_custody(
     state: &crate::state::AppState,
     wire: &ForwardAuthority,
@@ -525,8 +530,7 @@ pub(super) async fn apply_forward_custody(
             );
             current_reference(state, &headers, &wire.reference).await?;
             let members = state
-                .membership
-                .observe_source_admission_members()
+                .source_admission_members()
                 .await
                 .map_err(|_| unavailable())?
                 .ok_or_else(unavailable)?;
@@ -563,6 +567,7 @@ pub(super) async fn apply_forward_custody(
         SourceCustodyWrite::Refused => CustodyReply::Unresolved,
     })
 }
+#[cfg(feature = "cluster")]
 pub(super) async fn execute_forward_unassigned_cleanup(
     state: &crate::state::AppState,
     wire: &FreshAuthority,
@@ -644,8 +649,7 @@ async fn register_local_locked(
         return Err(unavailable());
     }
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .source_admission_members()
         .await
         .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.members_store", error_class = "store", "Source admission refused"); unavailable() })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.register.snapshot_1", error_class = "absent", "Source admission refused"); unavailable() })?;
@@ -959,8 +963,7 @@ pub(super) async fn publication_allowed(
     value: &SourceDispatchAssignment,
 ) -> Result<(), ApiError> {
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .source_admission_members()
         .await
         .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.members_store", error_class = "store", "Source admission refused"); unavailable() })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_ingress.publish.snapshot_0", error_class = "absent", "Source admission refused"); unavailable() })?;
@@ -1004,8 +1007,7 @@ pub(super) async fn source_forward_locality(
     #[cfg(test)]
     eprintln!("Source locate actual owner current reference accepted");
     state
-        .membership
-        .observe_source_admission_members()
+        .source_admission_members()
         .await
         .map_err(|_error| {
             #[cfg(test)]

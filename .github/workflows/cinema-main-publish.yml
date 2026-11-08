@@ -73,7 +73,8 @@ jobs:
           elif grep -Eqi 'unauthorized|denied|forbidden|timeout|connection|TLS|certificate' "$RUNNER_TEMP/cinema-manifest-error"; then
             cat "$RUNNER_TEMP/cinema-manifest-error" >&2
             exit 1
-          elif grep -Eqi 'manifest unknown|name unknown' "$RUNNER_TEMP/cinema-manifest-error"; then
+          elif grep -Eqi 'manifest unknown|name unknown' "$RUNNER_TEMP/cinema-manifest-error" ||
+               [ "$(cat "$RUNNER_TEMP/cinema-manifest-error")" = "ERROR: $immutable: not found" ]; then
             docker tag "$EXPECTED_IMAGE_ID" "$immutable"
             docker push "$immutable"
           else
@@ -81,12 +82,27 @@ jobs:
             echo 'Registry state is indeterminate; refusing publication' >&2
             exit 1
           fi
-      - name: Reverify the immutable image and advance the fleet main tag
+      - name: Verify and record the immutable main artifact
         working-directory: source
         env:
-          PLURX_EXPECTED_IMAGE_ID: ${{ steps.verified.outputs.image_id }}
-          PLURX_BUILD_REF: ${{ inputs.source_sha }}
-          PLURX_BUILD_SHA: ${{ inputs.source_sha }}
-          PLURX_REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
-          PLURX_SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
-        run: "$GITHUB_WORKSPACE/controller/scripts/registry-push"
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EXPECTED_IMAGE_ID: ${{ steps.verified.outputs.image_id }}
+          REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, re, subprocess
+          source = os.environ['SOURCE_SHA']
+          reference = os.environ['REGISTRY'] + '/noirr/plurxd:sha-' + source[:12]
+          manifest = subprocess.check_output(['docker','buildx','imagetools','inspect',reference],text=True)
+          digest, = re.findall(r'(?m)^Digest:\s*(sha256:[0-9a-f]{64})$',manifest)
+          exact = reference + '@' + digest
+          subprocess.run(['docker','pull','--platform','linux/amd64',exact],check=True)
+          image, = json.loads(subprocess.check_output(['docker','image','inspect',exact],text=True))
+          assert image['Id'] == os.environ['EXPECTED_IMAGE_ID']
+          assert image['Config']['Labels']['org.opencontainers.image.revision'] == source
+          identity = subprocess.check_output(['docker','run','--rm','--entrypoint','/usr/local/bin/plurx-cluster-check',exact,'build-identity'],text=True).strip()
+          assert identity == source
+          record = {'source':source,'image_id':image['Id'],'digest':digest,'reference':reference,
+                    'moving_alias_changed':False}
+          print('CINEMA_PUBLISHED_IMAGE=' + json.dumps(record,sort_keys=True,separators=(',',':')),flush=True)
+          PYTHON

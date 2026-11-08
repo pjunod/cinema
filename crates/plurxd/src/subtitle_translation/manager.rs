@@ -104,6 +104,7 @@ async fn bound_this_boot(
 }
 
 /// Existing signed node observations decide availability; no new liveness timer.
+#[cfg(feature = "cluster")]
 fn incumbent_unavailable(
     outcome: &crate::http::internal_activity::PeerActivityOutcome,
     node: &str,
@@ -160,11 +161,21 @@ pub(crate) async fn reconcile_producer(
         return Ok(());
     };
     if target != state.node_id {
-        let Ok(outcome) = state.peer_activity.owner_snapshot(target).await else {
+        #[cfg(not(feature = "cluster"))]
+        {
             return Ok(());
-        };
-        if !incumbent_unavailable(&outcome, target, crate::state::clock_ms()) {
-            return Ok(());
+        }
+        #[cfg(feature = "cluster")]
+        {
+            let Some(peer_activity) = &state.peer_activity else {
+                return Ok(());
+            };
+            let Ok(outcome) = peer_activity.owner_snapshot(target).await else {
+                return Ok(());
+            };
+            if !incumbent_unavailable(&outcome, target, crate::state::clock_ms()) {
+                return Ok(());
+            }
         }
     } else if op["preparation_state"] == "queued"
         || op["preparation_state"] == "running"

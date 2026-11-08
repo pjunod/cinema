@@ -558,11 +558,12 @@ pub(super) fn vod_error(session: &str, err: crate::vodserve::VodError) -> ApiErr
         VodError::Pending { retry_after } => {
             let secs = retry_after.as_secs().max(1);
             log("segment_pending", "the segment is not materialized yet");
-            ApiError::typed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "segment_pending",
-                format!("the segment is being produced; retry in {secs}s"),
-            )
+            ApiError::TypedRetry {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "segment_pending",
+                message: format!("the segment is being produced; retry in {secs}s"),
+                retry_after_seconds: secs,
+            }
         }
         // Two caps, two answers. The client can act on the difference — one
         // says this player is asking for too much at once and should slow its

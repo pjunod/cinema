@@ -1,9 +1,11 @@
 //! Dedicated support transport: never forwards Cinema request credentials.
 use crate::{http::extract::AuthUser, state::AppState};
+#[cfg(any(test, feature = "cluster"))]
+use axum::http::Method;
 use axum::{
     body::Bytes,
     extract::State,
-    http::{Method, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
@@ -149,6 +151,7 @@ pub(crate) fn router() -> Router<AppState> {
             post(enroll).delete(revoke),
         )
 }
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) fn eligible(method: &Method, path: &str) -> bool {
     method == Method::POST && path == "/api/v1/diagnostics/upload-grants"
         || (method == Method::POST || method == Method::DELETE)

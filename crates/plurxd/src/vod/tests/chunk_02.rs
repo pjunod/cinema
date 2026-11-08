@@ -1,4 +1,3 @@
-
     /// Liveness is the engine's half, and it answers before the slot is
     /// touched: a session that has ended takes no successor, and one that is
     /// gone from the registry has no gate at all.
@@ -2294,10 +2293,7 @@
     /// current serving generation and refuses once serving is lost.
     #[tokio::test]
     async fn vod_serving_admission_shipped_shape() {
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
-
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let authority = fence.authority();
         let generation = authority.admit().expect("initial serving authority");
         let admission = VodServingAdmission::new(
@@ -2322,12 +2318,9 @@
 
     #[tokio::test]
     async fn serving_loss_racing_final_cluster_attachment_leaves_no_session() {
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
-
         let base = crate::test_tempdir().expect("cluster serving fence base");
         let (serve, file) = serve_on(base.path()).await;
-        let fence =
-            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = crate::serving_fence::ServingFence::local();
         let authority = fence.authority();
         let generation = authority.admit().expect("initial serving authority");
         let pause = crate::seam_hooks::AsyncPause::new("vod serving admission before commit");

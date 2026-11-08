@@ -1910,6 +1910,7 @@ mod tests {
 
     /// Local, Authority and write operations one handler performed, in the
     /// order the route layer exports them (`plurx_http_store_reads_total{class}`).
+    #[cfg(feature = "cluster")]
     async fn route_reads_of<T: serde::Serialize>(
         handler: impl std::future::Future<Output = Result<Json<T>, super::ApiError>>,
     ) -> ([u64; 3], u64) {
@@ -1935,10 +1936,12 @@ mod tests {
     /// design (§3.3), so those counts are asserted as they stand, for the §7
     /// Q1 ruling rather than as a regression.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[cfg(feature = "cluster")]
     async fn browse_routes_meet_the_k04_authority_bar_on_a_replicated_voter() {
         Box::pin(browse_routes_k04_bar()).await;
     }
 
+    #[cfg(feature = "cluster")]
     async fn browse_routes_k04_bar() {
         plurx_core::testfixtures::require_ffmpeg();
         let root = crate::test_tempdir().expect("replicated browse fixture");

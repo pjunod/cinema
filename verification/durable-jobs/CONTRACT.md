@@ -3,7 +3,7 @@
 **Status:** original package qualified; all 18 updated configurations checked
 locally; CI and promotion qualification separate ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`460d8e6d3` plus the pinned scan/bootstrap corrections (2026-11-04 audits below) · **Scope:** bound `library_scan` and
+`10f9b3fd5209895f668aceb624f4fd617999e797` + `72409a430` (2026-11-04 integration review below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -13,6 +13,63 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+
+This imported review records immutable main `ce11e8fd2` as published in
+`aa68c00ee`. Its source locations and fingerprints describe that historical
+tree; the native integration reviews and live mappings retain their separate
+source identities.
+
+## Main direct-push source drift — scoped review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed the authority-source drift that direct
+pushes left on main `ce11e8fd2`, against the last reviewed bytes. This is an
+author review awaiting an independent check, not execution evidence.
+
+| Changed source (commit) | Change | Model action or property | Still holds? |
+|---|---|---|---|
+| `plurxd/background_jobs.rs` (4f417e852) | Test-only: inside `#[cfg(test)] mod tests`, the fixture `lost_claim_acknowledgement_resolves_the_original_attempt` stops the heartbeat and settles joined source custody before reading the candidate | None; no production code changes. `ReplayClaim`/`ResolveClaim` correspondence and every claim/settlement body are unchanged | Yes |
+| `plurxd/main.rs` (d9a0ebc76) | `spawn_background_loops` also starts `worker_status_cache_loop`, a read-only, cancellable once-per-interval refresh of local worker capacity for Activity | None; the selected worker spawn, its wait/lock order and the queue/domain authority paths are unchanged | Yes |
+| `plurxd/transcode/manager/produce.rs` (0a33ddc02) | One `tracing::warn!` gains `target: "plurxd::transcode"` | None; no control flow change | Yes |
+
+No model, configuration or property changes; only whole-file pins are
+refreshed.
+
+## Source-budget recipe requests — source review on 2026-11-07
+
+Compared with main `02cdc98f4`, the shared queue adds only the
+`request_dv_fel_variant` trait method and its title-store delegation. The
+conformance parent adds that method to its inventory. Current source custody,
+claim, renewal, settlement, publication and authority bodies remain unchanged.
+The title store reopens its demand outbox for source-bound recipe requests,
+reuses queued work, and retains bounded peer receipts. These title-specific
+operations remain outside the modeled library publication path. The new
+runtime regression exercises them separately; defining it is not execution
+or formal qualification evidence.
+
+Only live whole-file fingerprints for the changed sources are refreshed.
+Current mappings, unique anchors, model/configuration bytes and historical
+qualification identities are preserved. This source review adds no fairness
+premise, model transition, TLC execution or refinement claim.
+
+## Source custody fixture review on 2026-11-08
+
+Integration at `244a7d04b` duplicated source custody settlement in the
+lost claim acknowledgement test. The corrected fixture joins its predecessor
+heartbeat, attempts takeover after lease expiry, and verifies that outstanding
+custody yields contention with one attempt on record. It then settles the
+predecessor's exact receipt and recovers the successor's committed claim
+after a lost acknowledgement. The cache-part producer change from
+`d0e9349cb` adds whitespace to its existing warning.
+The mapped claim, renewal, retirement and publication operations retain
+their reviewed behavior.
+
+## Producer wait diagnostic on 2026-11-07
+
+Against `e2cdb1c4d`, the cache-part producer logs a failed child wait under
+`plurxd::transcode`. It retries the kill and wait while holding capacity, then
+releases the child job after the wait succeeds. Both mapped anchors in
+`transcode/manager/produce.rs` still identify the producer and its fenced
+publication path.
 
 ## Source custody replay on 2026-11-07
 
@@ -32,6 +89,85 @@ queries count expired source custody, and the daemon caches that count for
 Activity and its sampler warning. These reads have no effect on claim,
 renewal, physical settlement, or any modeled transition. The focused queue
 regressions cover the observable rates and warnings.
+
+## Native and recovery integration — scoped review on 2026-11-04
+
+Astra independently reviewed the merge of effort
+`10f9b3fd5209895f668aceb624f4fd617999e797` and main `72409a430`.
+Both parent audits below retain their original scope and attribution. This
+integration preserves the native runtime entry, the exact-owner recovery
+lookup, the active/abort journal integration, and the scan-stack/bootstrap
+corrections. No modeled action or source authority is inferred from a refreshed
+whole-file hash.
+
+The combined [startup](../../crates/plurxd/src/main.rs) registers the exact
+`Arc<dyn Store>` returned by `RuntimeStore::store` and replays custody with
+`RuntimeStore::identity().node_id` before producers. Marking this selected
+Store authoritative in both modes is justified by
+[selection](../../crates/plurxd/src/storage_runtime.rs): native selection owns
+its actual retained database; [cluster opening](../../crates/plurxd/src/cluster_runtime.rs)
+explicitly refuses `SelectedBackend::SqliteRecovery`. It does not promote the
+old activation-recovery projection to authority. The
+[recovery registry](../../crates/plurxd/src/source_custody/recovery.rs) still
+matches the exact Store by `Arc::ptr_eq`, clones its context before awaits,
+and requires same-host/different-boot evidence before settling retained owners.
+Native local job admission remains separate from this physical-stop proof;
+cluster jobs retain real membership admission and the existing refusal paths.
+
+The merged [state](../../crates/plurxd/src/state.rs) retains mode-specific job
+authority and adds verified recovery before ordinary settled-custody replay.
+The inspected queue/domain/publication SQL, acquisition and retirement bodies
+remain unchanged. Recovery can add filesystem and Store waits before worker
+dispatch; unavailable host proof can retain custody indefinitely. Neither the
+finite progress premises nor local admission promises recovery or scan success.
+The host helper is an operator-on-actual-host prerequisite; the daemon still
+requires its explicitly bound host identity files. Neither supplies a modeled
+physical-termination transition.
+
+Six durable rows and four operation-progress rows receive the combined
+`state.rs`/`main.rs` fingerprints. Other row identities retain the appropriate
+reviewed parent, including both native-entry and recovery dependency pins.
+Worker correspondence composes the native lease, queue-cleanup and boxed-work
+pins and preserves the expanded `FinishRetire` gap. Exact selected anchors,
+models, configurations, bounds, properties, fairness and validators are unchanged.
+Fresh mapping checks and bounded smoke receipts are separate evidence. This
+source review is not merged-runtime execution, a refinement theorem, or renewed
+historical/promotion qualification. Runtime regression of both native and
+cluster recovery composition remains a separate integration obligation.
+
+## Native runtime entry — scoped source review on 2026-11-04
+
+Astra independently compared the admitted fingerprints with runtime candidate
+`cf095b203ec78d083385cbb6ecce13dc01378256`. The five reviewed source files
+also have identical bytes in the local integration `0cd29c10b`. The old
+SQLite pin matches `dac9e2c7`, the job-lease pin `431581e2`, and the state pin
+`bd3bfffb`; the review used those exact prior contents, not just a newer merge
+base. Twelve whole-file rows follow the inspected source.
+
+The new `LocalJobAuthority` grants local job admission only in the native
+runtime composition. It does not replace durable claim/domain leases or
+publication fences. The selected acquisition, heartbeat, release, publication
+facade, queue SQL and SQLite `with_fenced_conn` transaction remain unchanged.
+`AppState` selects real membership authority in cluster mode. Native selection
+is a separate startup prerequisite, not a model-derived grant.
+
+SQLite v124 adds native identity/census tables without changing the selected
+queue/resource guards. `RetainedConnection` and the read pool retain the native
+directory lease through queued blocking work and connection drop. The existing
+transaction body and lock acquisition are unchanged; this stronger lifetime
+binding is not a model proof of directory locking, restart, migration or
+shutdown. The native opener validates that its held lock belongs to the same
+directory before attaching it to the Store.
+
+Runtime proof obligations remain with
+`native_store_restarts_with_the_same_identity_and_excludes_other_daemons` and
+`cloned_native_writers_retain_the_directory_lease_after_handle_drop` in
+[native storage tests](../../crates/plurx-core/src/storage/native.rs), and
+`standalone_default_and_explicit_sqlite_start_with_cluster_ports_unavailable`
+in [daemon selection tests](../../crates/plurxd/src/storage_runtime/tests.rs).
+These are source test references, not execution credit from this review.
+Model/configuration/property/fairness bytes and historical qualification
+receipts remain unchanged. Current static and TLC results are separate evidence.
 
 ## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
 

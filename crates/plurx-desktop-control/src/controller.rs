@@ -375,6 +375,7 @@ pub fn check_updates(i: &InstallationV1) -> Result<ControlResultV1> {
 }
 pub fn prepare_update(i: &InstallationV1, version: &str) -> Result<ControlResultV1> {
     require_owner(i)?;
+    crate::migration_helper::require_no_pending_migration(i)?;
     let store = TransactionStore::locked(i)?;
     let client = PublicReleaseClient::new()?;
     let (candidate, bytes, signature) =
@@ -414,6 +415,9 @@ pub fn prepare_update(i: &InstallationV1, version: &str) -> Result<ControlResult
             let package_root = native::archive_package_root(&extracted_path, asset, version)?;
             native::verify_closure(&package_root, version)?;
         }
+        crate::migration_helper::prepare_legacy_update(
+            i, &store, &dir, &candidate, &bytes, &signature, &client,
+        )?;
         store.accept(&candidate)?;
         store.save(&j)?;
         Ok(update_result(
@@ -453,6 +457,7 @@ fn ensure_space(path: &Path, required: u64) -> Result<()> {
 )]
 pub fn apply_update(i: &InstallationV1, id: &str) -> Result<ControlResultV1> {
     require_owner(i)?;
+    crate::migration_helper::require_no_pending_migration(i)?;
     let store = TransactionStore::locked(i)?;
     let mut j = store.load(id)?;
     if j.phase != Phase::Prepared || j.operation != Operation::Upgrade {
@@ -607,6 +612,7 @@ fn perform_update(i: &InstallationV1, store: &TransactionStore, j: &mut JournalV
             return Err(error);
         }
     }
+    crate::migration_helper::require_no_pending_migration(i)?;
     j.transition(Phase::Installing)?;
     store.save(j)?;
     if let Some(plan) = package_plan {
@@ -645,6 +651,12 @@ fn perform_update(i: &InstallationV1, store: &TransactionStore, j: &mut JournalV
     installed.trust_key_ids = native::installed_trust_keys(&installed, candidate.key_id())?;
     installed.last_transaction_id = Some(j.transaction_id.clone());
     save_installation(&installed)?;
+    crate::migration_helper::activate_prepared(
+        &installed,
+        store,
+        &store.dir(&j.transaction_id)?,
+        &candidate,
+    )?;
     transaction::revalidate_policy(&installed, j)?;
     j.transition(Phase::Restoring)?;
     store.save(j)?;

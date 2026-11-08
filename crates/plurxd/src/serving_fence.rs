@@ -1,22 +1,17 @@
-//! Store-free serving authority derived from the passive Raft quorum proof.
+//! Common serving admission, publication generations and local restart drains.
 //!
-//! Readiness and media teardown cannot wait for a fresh Store call after a
-//! partition: that call owns a multi-second timeout, while the quorum
-//! watermark is already a short monotonic lease refreshed by the replication
-//! monitor. This projection turns that lease into one process-wide watch.
-//!
-//! Authority is current when this node has applied a quorum confirmation of
-//! the current generation that is still inside its own lease: the newest
-//! one at zero apply lag, or any one the passive metrics still keep
-//! (`PassiveRaftMetrics::eligible_serving_proof`). A newer confirmation this
-//! node has not applied yet does not take that away. No lease is extended.
+//! Native service has no external readiness provider. Clustered service composes
+//! the optional quorum adapter; its proof types and sampling remain outside
+//! this common local lifecycle.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use plurx_core::cluster::migration::status::{PassiveRaftMetrics, ServingProof};
+#[cfg(feature = "cluster")]
+#[path = "serving_fence/quorum.rs"]
+mod quorum;
 
 const SERVING_FENCE_POLL: Duration = Duration::from_millis(25);
 
@@ -36,6 +31,7 @@ pub(crate) struct RestartDrainStatus {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum PlannedOutageFenceOwner {
     Restart,
+    #[cfg(any(test, feature = "cluster"))]
     Maintenance,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     DesktopShutdown,
@@ -51,6 +47,7 @@ impl PlannedOutageFenceToken {
     pub(crate) fn identity(self) -> String {
         let owner = match self.owner {
             PlannedOutageFenceOwner::Restart => "restart",
+            #[cfg(any(test, feature = "cluster"))]
             PlannedOutageFenceOwner::Maintenance => "maintenance",
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             PlannedOutageFenceOwner::DesktopShutdown => "desktop-shutdown",
@@ -151,6 +148,7 @@ impl AuthorityWord {
     /// Set `ready` to `desired`, bumping the generation when that is a loss.
     /// Returns the value now published, or `None` when `ready` already was
     /// `desired`.
+    #[cfg(any(test, feature = "cluster"))]
     fn publish(&self, desired: bool) -> Option<AuthorityWordValue> {
         let mut published = None;
         let _ = self
@@ -559,49 +557,58 @@ pub(crate) struct ServingHttpPolicy {
     pub(crate) code: Option<&'static str>,
 }
 
+/// Backend-neutral readiness boundary. Diagnostics remain with the provider
+/// so common admission never imports a backend proof or snapshot type.
+pub(crate) trait ServingReadinessSource: Send + Sync {
+    #[cfg(any(test, feature = "cluster"))]
+    fn ready(&self, previously_ready: bool) -> bool;
+    #[cfg(any(test, feature = "cluster"))]
+    fn loss_observed(&self, _next_generation: u64) {}
+    #[cfg(any(test, feature = "cluster"))]
+    fn published(&self, _ready: bool) {}
+}
+
 #[derive(Clone)]
 pub(crate) struct ServingFence {
-    metrics: PassiveRaftMetrics,
-    quorum_managed: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "cluster"))]
+    readiness_source: Option<Arc<dyn ServingReadinessSource>>,
+    provider_managed: Arc<AtomicBool>,
     word: AuthorityWord,
     loss_transitions_pending: Arc<AtomicU64>,
     transition: Arc<tokio::sync::RwLock<()>>,
     state: tokio::sync::watch::Sender<ServingState>,
     restart_drain: Arc<RestartDrain>,
-    /// The proof this node is currently serving under, captured while it was
-    /// eligible. Only ever read as a fallback, and only ever holds a proof
-    /// this node genuinely earned — see `refresh`.
-    ///
-    /// A `std::sync::Mutex` rather than an atomic because the value is a small
-    /// record, and rather than a `tokio` one because the only holder is the
-    /// 25 ms poller and nothing awaits inside it.
-    retained_proof: Arc<StdMutex<Option<ServingProof>>>,
 }
 
 impl ServingFence {
-    pub(crate) fn new(metrics: PassiveRaftMetrics) -> Self {
-        let quorum_managed = metrics.snapshot().watermark_source;
-        let ready = !quorum_managed;
+    /// Native admission and drain state. No external metrics, proof source or
+    /// distributed authority object is created on this path.
+    pub(crate) fn local() -> Self {
+        Self::with_readiness_source(None)
+    }
+
+    fn with_readiness_source(source: Option<Arc<dyn ServingReadinessSource>>) -> Self {
+        let managed = source.is_some();
+        let ready = !managed;
         let initial = ServingState {
             ready,
             loss_generation: 0,
         };
         let (state, _) = tokio::sync::watch::channel(initial);
-        let transition = Arc::new(tokio::sync::RwLock::new(()));
         Self {
-            metrics,
-            quorum_managed: Arc::new(AtomicBool::new(quorum_managed)),
+            #[cfg(any(test, feature = "cluster"))]
+            readiness_source: source,
+            provider_managed: Arc::new(AtomicBool::new(managed)),
             word: AuthorityWord::new(ready),
             loss_transitions_pending: Arc::new(AtomicU64::new(0)),
-            transition,
+            transition: Arc::new(tokio::sync::RwLock::new(())),
             state,
             restart_drain: Arc::new(RestartDrain::default()),
-            retained_proof: Arc::new(StdMutex::new(None)),
         }
     }
 
     pub(crate) fn is_quorum_managed(&self) -> bool {
-        self.quorum_managed.load(Ordering::Acquire)
+        self.provider_managed.load(Ordering::Acquire)
     }
 
     pub(crate) fn is_ready(&self) -> bool {
@@ -774,6 +781,7 @@ impl ServingFence {
     /// Cleanup created by an already-admitted owner may wait behind that one
     /// owner. External requests use the fail-fast acquire above, so this queue
     /// has at most the cleanup belonging to the accepted operation.
+    #[cfg(feature = "cluster")]
     pub(crate) async fn planned_outage_cleanup_guard(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.restart_drain.operation_gate)
             .lock_owned()
@@ -837,6 +845,7 @@ impl ServingFence {
         true
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn begin_maintenance_preparation_until(
         &self,
         expires_at_unix_ms: u64,
@@ -897,6 +906,7 @@ impl ServingFence {
     /// definitive response. This synchronous latch is safe to set from a
     /// guard's `Drop` before its asynchronous cleanup task can be scheduled.
     /// Only a confirmed exact release clears it.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn retain_planned_outage_preparation_until_cancelled(
         &self,
         token: PlannedOutageFenceToken,
@@ -912,6 +922,7 @@ impl ServingFence {
     /// Own the direct restart-cancellation request independently of the exact
     /// preparation it observed. The operation gate prevents a successor from
     /// beginning before this token is resolved.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn retain_restart_cancellation(&self) -> PlannedOutageFenceToken {
         let generation = self
             .restart_drain
@@ -943,6 +954,7 @@ impl ServingFence {
     /// no successor of the same owner can be admitted while this set is
     /// drained. Tokens belonging to the other planned-outage lifecycle remain
     /// authoritative.
+    #[cfg(any(test, feature = "cluster"))]
     fn resolve_planned_outage_owner_releases(&self, owner: PlannedOutageFenceOwner) {
         self.restart_drain
             .unresolved_releases
@@ -1004,6 +1016,7 @@ impl ServingFence {
     /// only owner allowed to clear a non-exact restart generation, and callers
     /// hold `planned_outage_operation_guard` across the complete operation so
     /// a successor cannot appear between replicated deletion and this step.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn cancel_current_restart_preparation(
         &self,
         cancellation: PlannedOutageFenceToken,
@@ -1032,6 +1045,7 @@ impl ServingFence {
     /// Clear the durable maintenance row's local timed owner after the target
     /// has proved it is safe to resume. The caller holds the operation gate,
     /// so this cannot race a new local preparation.
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn cancel_current_maintenance_preparation(
         &self,
         active_sessions: usize,
@@ -1093,6 +1107,7 @@ impl ServingFence {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     async fn publish(&self, desired: bool) {
         if self.word.load().ready == desired {
             return;
@@ -1120,6 +1135,7 @@ impl ServingFence {
 
 /// What the poll should do with the proof it is holding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "cluster"))]
 enum Retain {
     /// Capture the eligible proof this node is serving under now, replacing
     /// whatever was held. A new eligible proof is always preferred.
@@ -1131,6 +1147,7 @@ enum Retain {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "cluster"))]
 struct AuthorityOutcome {
     ready: bool,
     retain: Retain,
@@ -1162,6 +1179,7 @@ struct AuthorityOutcome {
 /// returning on a retained proof would resume service on grounds this node
 /// had already declared insufficient. Recovery is a live confirmation's job,
 /// and only a live confirmation's.
+#[cfg(any(test, feature = "cluster"))]
 fn decide_authority(
     unmanaged: bool,
     authority_is_current: bool,
@@ -1188,104 +1206,22 @@ fn decide_authority(
 }
 
 impl ServingFence {
-    /// Whether serving may continue on the proof this node already held.
-    ///
-    /// A fallback, reached only when the current snapshot is not eligible, and
-    /// only after that snapshot has been given its chance — a new eligible
-    /// proof is always preferred and always replaces the retained one.
-    ///
-    /// The retained proof keeps its *original* deadline. Nothing here rewrites
-    /// it: a catch-up does not restamp it, the newer watermark that caused
-    /// this path does not extend it, and a sampling error does not refresh it.
-    /// So the window is strictly no longer than the one this node already had,
-    /// and strictly shorter than the newer proof's, which means an isolated
-    /// node still loses authority at exactly the instant it does today. What
-    /// changes is only this: a node that is *in* the quorum, holding a live
-    /// proof, no longer loses serving the moment a newer committed index
-    /// arrives ahead of its local apply — which is a self-inflicted outage on
-    /// a node nothing is actually wrong with.
-    ///
-    /// Every other reason to drop it is still a hard drop, checked against
-    /// live state on each poll rather than trusted from capture time: the
-    /// original expiry, an explicit invalidation, a term or leader or epoch
-    /// that no longer matches the generation the proof was issued in, a stale
-    /// local sample, a lost leader, a regressed committed index.
-    fn continues_on_the_retained_proof(&self) -> bool {
-        let mut retained = self.retained_proof.lock().unwrap_or_else(|poisoned| {
-            // A poisoned lock is a panic somewhere in this poller. Fail closed
-            // rather than serve on a proof whose provenance is now in doubt.
-            poisoned.into_inner()
-        });
-        let Some(proof) = *retained else {
-            return false;
-        };
-        if self.metrics.serving_proof_remains_valid(&proof) {
-            return true;
-        }
-        // Cleared on the way out, so a proof that has died cannot be revived
-        // by anything that happens later.
-        *retained = None;
-        false
-    }
-
-    fn retain(&self, proof: Option<ServingProof>) {
-        *self
-            .retained_proof
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = proof;
-    }
-
+    #[cfg(any(test, feature = "cluster"))]
     async fn refresh(&self) {
-        let snapshot = self.metrics.snapshot();
-        // On a locally bound node, any live confirmation of the current
-        // generation that this node has applied is current authority, not
-        // only the newest one at zero lag (rule 4, amended). Read once, so
-        // the proof captured below is the one that made this poll ready.
-        let applied_proof = snapshot
-            .watermark_requires_local_binding
-            .then(|| self.metrics.eligible_serving_proof())
-            .flatten();
-        let authority_is_current = applied_proof.is_some()
-            || (snapshot.watermark_valid
-                && snapshot.watermark.is_some_and(|watermark| {
-                    if snapshot.watermark_requires_local_binding {
-                        snapshot.local_source && watermark.apply_lag_entries == Some(0)
-                    } else {
-                        !snapshot.local_source && watermark.apply_lag_entries.is_none()
-                    }
-                }));
         let previous = self.is_ready();
-        let outcome = decide_authority(
-            !self.is_quorum_managed(),
-            authority_is_current,
-            previous,
-            // Evaluated lazily: the retained proof is only consulted on the
-            // one branch that may use it, so an eligible snapshot never pays
-            // for it and a lost node never resurrects one by reading it.
-            || self.continues_on_the_retained_proof(),
-        );
-        match outcome.retain {
-            Retain::FromCurrentProof => {
-                self.retain(applied_proof.or_else(|| self.metrics.eligible_serving_proof()))
-            }
-            Retain::Clear => self.retain(None),
-            Retain::Unchanged => {}
-        }
-        let desired = outcome.ready;
-        // Capture at the loss boundary, before media teardown can await. A later
-        // sampler timeout joins by sequence and cannot renew this generation.
+        let desired = self
+            .readiness_source
+            .as_ref()
+            .is_none_or(|source| source.ready(previous));
         if previous && !desired {
-            tracing::warn!(attempt = ?self.metrics.quorum_attempt(),
-                proof = ?self.metrics.snapshot(),
-                loss_generation = self.authority().state().loss_generation.saturating_add(1),
-                "serving authority expiring; in-flight quorum evidence");
+            if let Some(source) = &self.readiness_source {
+                source.loss_observed(self.authority().state().loss_generation.saturating_add(1));
+            }
         }
         self.publish(desired).await;
         if previous != desired {
-            if desired {
-                tracing::info!("serving authority recovered from a fresh quorum watermark");
-            } else {
-                tracing::warn!("serving authority expired; mutable media is self-fenced");
+            if let Some(source) = &self.readiness_source {
+                source.published(desired);
             }
         }
     }
@@ -1299,11 +1235,15 @@ impl ServingFence {
 
     #[cfg(test)]
     pub(crate) async fn validation_set_ready(&self, ready: bool) {
-        self.quorum_managed.store(true, Ordering::Release);
+        self.provider_managed.store(true, Ordering::Release);
         self.publish(ready).await;
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn monitor_loop(self, shutdown: tokio_util::sync::CancellationToken) {
+        if self.readiness_source.is_none() {
+            return;
+        }
         loop {
             self.refresh().await;
             tokio::select! {
@@ -1357,17 +1297,21 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
 }
 
+#[cfg(any(test, feature = "cluster"))]
 struct PendingLossTransition {
     pending: Arc<AtomicU64>,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl PendingLossTransition {
+    #[cfg(any(test, feature = "cluster"))]
     fn new(pending: Arc<AtomicU64>) -> Self {
         pending.fetch_add(1, Ordering::AcqRel);
         Self { pending }
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 impl Drop for PendingLossTransition {
     fn drop(&mut self) {
         self.pending.fetch_sub(1, Ordering::AcqRel);
@@ -1377,7 +1321,6 @@ impl Drop for PendingLossTransition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
 
     /// M2: in the pending-loss window `.admit()` already refuses while the
     /// generation has not moved, so the previous outage's `Recovered` is
@@ -1386,7 +1329,7 @@ mod tests {
     /// last held, and only a newer, non-pending resolution answers it.
     #[tokio::test(start_paused = true)]
     async fn a_stale_recovered_from_the_previous_loss_does_not_answer_this_one() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         fence.validation_set_ready(false).await;
         fence.validation_set_ready(true).await;
         let authority = fence.authority();
@@ -1447,7 +1390,7 @@ mod tests {
     /// enforces, budget carry-over and fresh budget alike.
     #[tokio::test(start_paused = true)]
     async fn the_published_outage_deadline_is_the_enforced_one() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let mut serving = fence.subscribe();
         let mut grace = SessionGrace::default();
         fence.validation_set_ready(false).await;
@@ -1607,16 +1550,64 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn local_admission_has_no_external_provider_or_expiring_proof() {
+        let fence = ServingFence::local();
+        assert!(fence.readiness_source.is_none());
+        assert!(!fence.is_quorum_managed());
+        let authority = fence.authority();
+        let generation = authority.admit().expect("local admission");
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(authority.is_current(generation));
+        // Even an accidental monitor request creates no polling task when
+        // local service has no provider. The production bootstrap omits it.
+        fence
+            .clone()
+            .monitor_loop(tokio_util::sync::CancellationToken::new())
+            .await;
+        assert!(fence.is_ready());
+        assert_eq!(fence.authority().state().loss_generation, 0);
+    }
+
+    #[tokio::test]
+    async fn an_external_readiness_provider_preserves_loss_generations() {
+        struct TestSource(AtomicBool);
+        impl ServingReadinessSource for TestSource {
+            fn ready(&self, _previous: bool) -> bool {
+                self.0.load(Ordering::Acquire)
+            }
+        }
+        let source = Arc::new(TestSource(AtomicBool::new(true)));
+        let fence = ServingFence::with_readiness_source(Some(source.clone()));
+        assert!(
+            !fence.is_ready(),
+            "external service needs its first observation"
+        );
+        fence.refresh().await;
+        let authority = fence.authority();
+        let admitted = authority.admit().expect("observed external authority");
+        source.0.store(false, Ordering::Release);
+        fence.refresh().await;
+        assert!(authority.admit().is_none());
+        source.0.store(true, Ordering::Release);
+        fence.refresh().await;
+        assert!(fence.is_ready());
+        assert!(
+            !authority.is_current(admitted),
+            "recovery cannot undo a published loss"
+        );
+    }
+
     #[test]
     fn sqlite_is_ready_without_a_quorum_sampler() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         assert!(fence.is_ready());
         assert!(!fence.is_quorum_managed());
     }
 
     #[tokio::test]
     async fn loss_generation_survives_a_coalesced_recovery() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let mut state = fence.subscribe();
         let admitted = state.borrow_and_update().loss_generation;
         fence.validation_set_ready(false).await;
@@ -1629,7 +1620,7 @@ mod tests {
 
     #[tokio::test]
     async fn authority_state_is_retained_before_the_first_subscriber() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         fence.validation_set_ready(false).await;
         fence.validation_set_ready(true).await;
 
@@ -1641,7 +1632,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_drain_linearizes_against_in_flight_admission() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let admission = fence
             .try_restart_admission()
             .await
@@ -1681,7 +1672,7 @@ mod tests {
     /// for an older drain cannot commit under a later one.
     #[tokio::test]
     async fn planned_outage_identity_is_exact_and_controls_new_placement() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         assert!(fence.accepting_new_media().await);
 
         let first = fence
@@ -1708,7 +1699,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stuck_restart_admission_cannot_outlive_the_exact_fence() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let admission = fence
             .try_restart_admission()
             .await
@@ -1751,7 +1742,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn restart_drain_expires_and_accepts_new_work_again() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         assert!(fence
             .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
             .await
@@ -1764,7 +1755,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_drain_advertises_exactly_the_replicated_bound() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let replicated_expiry = unix_ms().saturating_add(60_000);
         assert!(fence
             .begin_restart_preparation_until(replicated_expiry)
@@ -1780,7 +1771,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let token = fence
             .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
             .await
@@ -1801,7 +1792,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_cancellation_cannot_clear_a_maintenance_owned_fence() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let maintenance = fence
             .begin_maintenance_preparation_until(unix_ms().saturating_add(60_000))
             .await
@@ -1831,7 +1822,7 @@ mod tests {
 
     #[tokio::test]
     async fn confirmed_current_restart_cancel_resolves_a_preexisting_exact_latch() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let restart = fence
             .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
             .await
@@ -1849,7 +1840,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn confirmed_current_restart_cancel_resolves_an_expired_exact_latch() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let restart = fence
             .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
             .await
@@ -1869,7 +1860,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn confirmed_maintenance_exit_resolves_an_expired_exact_latch() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let maintenance = fence
             .begin_maintenance_preparation_until(unix_ms().saturating_add(60_000))
             .await
@@ -1886,7 +1877,7 @@ mod tests {
 
     #[tokio::test]
     async fn confirmed_maintenance_exit_preserves_a_restart_owned_latch() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let restart = fence
             .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
             .await
@@ -1903,7 +1894,7 @@ mod tests {
 
     #[tokio::test]
     async fn delayed_same_owner_cleanup_cannot_clear_a_successor_generation() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let first = fence
             .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
             .await
@@ -1925,7 +1916,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn overlapping_cleanup_tokens_are_resolved_independently() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let maintenance = fence
             .begin_maintenance_preparation_until(unix_ms().saturating_add(60_000))
             .await
@@ -1948,7 +1939,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn confirmed_release_resolves_latch_but_preserves_timed_fence() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let maintenance = fence
             .begin_maintenance_preparation_until(unix_ms().saturating_add(60_000))
             .await
@@ -1963,7 +1954,7 @@ mod tests {
 
     #[tokio::test]
     async fn pending_loss_blocks_new_admission_before_existing_commit_finishes() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let authority = fence.authority();
         let admitted = authority.admit().expect("initial authority");
         let commit = authority
@@ -1992,11 +1983,10 @@ mod tests {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod desktop_shutdown_tests {
     use super::*;
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
 
     #[tokio::test]
     async fn desktop_commit_is_nonexpiring_and_cancellation_cannot_reopen_it() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let token = fence
             .begin_desktop_preparation_until(unix_ms() + 100)
             .await
@@ -2024,7 +2014,7 @@ mod desktop_shutdown_tests {
 
     #[tokio::test]
     async fn desktop_commit_refuses_an_intervening_local_authority_loss() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let token = fence
             .begin_desktop_preparation_until(unix_ms() + 10_000)
             .await
@@ -2036,7 +2026,7 @@ mod desktop_shutdown_tests {
 
     #[tokio::test]
     async fn direct_read_and_background_recording_admission_races_block_commit() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let read = fence
             .try_restart_admission()
             .await
@@ -2061,7 +2051,7 @@ mod desktop_shutdown_tests {
 
     #[tokio::test]
     async fn abandoned_preparation_expires_but_delayed_commit_never_succeeds() {
-        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let fence = ServingFence::local();
         let token = fence
             .begin_desktop_preparation_until(unix_ms() + 30)
             .await

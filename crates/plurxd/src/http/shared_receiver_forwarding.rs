@@ -444,6 +444,7 @@ pub(super) async fn exchange_custody(
     serde_json::from_slice(&response.body).map_err(|_| ReceiverStartError::Unresolved)
 }
 
+#[cfg(feature = "cluster")]
 async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
@@ -460,6 +461,8 @@ async fn authenticate(
         tokio::time::Instant::from_std(deadline),
         state
             .membership
+            .as_ref()
+            .ok_or_else(unavailable)?
             .authorize_internal_peer_request(&auth, "POST", path, body),
     )
     .await
@@ -470,6 +473,7 @@ async fn authenticate(
     }
     Ok(auth)
 }
+#[cfg(feature = "cluster")]
 async fn signed(
     state: &AppState,
     auth: &plurx_core::cluster::membership::InternalPeerAuth,
@@ -486,6 +490,8 @@ async fn signed(
     }
     let signature = state
         .membership
+        .as_ref()
+        .ok_or_else(unavailable)?
         .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload)
         .map_err(|_| unavailable())?;
     axum::response::Response::builder()
@@ -673,6 +679,7 @@ pub(super) async fn relay_operation(
     }
 }
 
+#[cfg(feature = "cluster")]
 pub(super) async fn receive_media(
     axum::extract::State(state): axum::extract::State<AppState>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
@@ -693,6 +700,7 @@ pub(super) async fn receive_media(
         Err(error) => error.into_response(),
     }
 }
+#[cfg(feature = "cluster")]
 pub(super) async fn receive_control(
     axum::extract::State(state): axum::extract::State<AppState>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
@@ -713,6 +721,7 @@ pub(super) async fn receive_control(
         Err(error) => error.into_response(),
     }
 }
+#[cfg(feature = "cluster")]
 async fn receive_operation(
     state: AppState,
     connection: Option<crate::SharingConnectionCancellation>,
@@ -847,6 +856,7 @@ async fn receive_operation(
     }
 }
 
+#[cfg(feature = "cluster")]
 pub(super) async fn receive_register(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: HeaderMap,
@@ -858,6 +868,7 @@ pub(super) async fn receive_register(
         Err(error) => error.into_response(),
     }
 }
+#[cfg(feature = "cluster")]
 pub(super) async fn receive_ack(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: HeaderMap,
@@ -869,6 +880,7 @@ pub(super) async fn receive_ack(
         Err(error) => error.into_response(),
     }
 }
+#[cfg(feature = "cluster")]
 async fn receive_custody(
     state: AppState,
     headers: HeaderMap,
@@ -937,6 +949,7 @@ async fn receive_custody(
     .await
 }
 
+#[cfg(feature = "cluster")]
 pub(super) fn internal_router() -> axum::Router<AppState> {
     axum::Router::new()
         .route(FORWARD_PATH, axum::routing::post(receive_media))

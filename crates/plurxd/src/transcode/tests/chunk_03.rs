@@ -907,6 +907,8 @@
         .await;
         // The existing capacity rule permits a 0.05x measurement margin.
         // Use a known deficit outside that margin, not its 0.95x boundary.
+        // Capacity is measurable only after the fixed 48 s initial runway;
+        // a 32 s bootstrap alone is not evidence of sustained production.
         session.progress.recent_milli.store(900, Relaxed);
         tokio::fs::write(
             directory.path().join("index.m3u8"),
@@ -2039,8 +2041,9 @@
         assert_rolling_test_frontiers(&run, 1.0);
     }
 
-    /// Private production banks a bounded shared-read turn while advertised
-    /// publication continues to obey its separate allowance.
+    /// Physical Source pacing retains hysteresis within its paid reserve
+    /// ceiling. Its producer bank must not enlarge the publication clock's
+    /// separate advertised endpoint allowance.
     #[test]
     fn rolling_flow_release_target_keeps_the_bounded_private_source_bank() {
         let limits = AheadLimits {
@@ -2050,7 +2053,8 @@
         };
         let evaluate = |demand: &crate::playback_control::PlaybackDemandSnapshot,
                         age: Duration,
-                        produced_end_ms: i64| {
+                        produced_end_ms: i64,
+                        currently_suspended: bool| {
             evaluate_flow(FlowInputs {
                 physical_ahead: None,
                 produced_end_ms: Some(produced_end_ms),
@@ -2063,32 +2067,51 @@
                 global_live_bytes: 0,
                 global_ahead_bytes: 0,
                 limits,
-                currently_suspended: false,
+                currently_suspended,
                 scratch_grant_exhausted: None,
             })
             .hold
             .map(|hold| hold.reason)
         };
-        // At 1x the private bank is 80s plus the 10s exchange guard.
-        // Faster play reaches the common 124s physical reserve ceiling.
-        // Advertised publication limits are checked independently above.
-        for (rate, bank_ms) in [(1.0, 90_000), (1.6, 124_000), (2.0, 124_000), (4.0, 124_000)] {
+        // The physical Source bank has separate running/held watermarks;
+        // it does not expand the clock's advertised allowance. At 1x the
+        // running bank is 48 + two 16 s batches + the 10 s guard = 90 s,
+        // releasing below 48 s. Faster banks saturate at the paid 124 s
+        // reserve ceiling instead of accumulating an unbounded allowance.
+        for (rate, running_ms, held_ms) in [
+            (1.0, 90_000, 48_000),
+            (1.6, 124_000, 76_800),
+            (2.0, 124_000, 96_000),
+            (4.0, 124_000, 124_000),
+        ] {
             let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Web,
             );
             demand.playback_rate = rate;
             let age = Duration::from_secs(3);
-            let consumed = 10_000 + ((3_000.0 * rate) as i64) - 5_000;
+            let ends = rolling_explicit_publication_ends(&demand, age, 5_000);
             assert_eq!(
-                evaluate(&demand, age, consumed + bank_ms),
-                Some(AheadHoldReason::Time),
-                "hold at the bounded private bank at {rate}x"
+                ends.consumed_end_ms,
+                10_000 + ((3_000.0 * rate) as i64) - 5_000,
+                "the flow reads the clock's projected position at {rate}x"
             );
             assert_eq!(
-                evaluate(&demand, age, consumed + bank_ms - 1_000),
-                None,
-                "finish the private read turn before yielding at {rate}x"
+                ends.allowed_end_ms - ends.desired_end_ms,
+                16_000,
+                "Source hysteresis must not enlarge the publication cut envelope"
             );
+            for (suspended, target_ms) in [(false, running_ms), (true, held_ms)] {
+                assert_eq!(
+                    evaluate(&demand, age, ends.consumed_end_ms + target_ms, suspended),
+                    Some(AheadHoldReason::Time),
+                    "held at the physical bank boundary at {rate}x, suspended={suspended}"
+                );
+                assert_eq!(
+                    evaluate(&demand, age, ends.consumed_end_ms + target_ms - 1, suspended),
+                    None,
+                    "one millisecond below the bank boundary must produce at {rate}x, suspended={suspended}"
+                );
+            }
         }
     }
 
@@ -2382,8 +2405,14 @@
     ) {
         let directory = crate::test_tempdir().expect("publication deadline");
         let mut session = test_session(directory.path().to_path_buf());
+        // A requested position spends the first ten seconds of inventory.
+        // Elapsed wall time cannot spend publication budget before delivery;
+        // keep the 48 s capacity sample below the actual 58 s startup gate.
         session.start_seconds = 10.0;
-        session.publication.lock().await
+        session
+            .publication
+            .lock()
+            .await
             .bind_startup_candidate_for_test(RollingStartupPolicy::Conservative);
         let started = Instant::now();
         // Even a slow producer is not judged below the fixed initial runway.
@@ -2394,8 +2423,8 @@
             .publication_cycle_at("scratch-hold-prepublication", started)
             .await
             .expect("below the initial runway nothing is judged");
-        // Exactly the initial runway, measured at half speed, staged ten
-        // seconds later: the legacy budget now wants 58 s, so nothing
+        // Exactly the initial runway, measured at half speed: the requested
+        // position plus the 48 s initial reserve wants 58 s, so nothing
         // publishes and the session stays in its pre-publication state.
         scratch_hold_write_playlist(&session, &[16.0, 16.0, 16.0]).await;
         scratch_hold_set(&session, Some(AheadHoldReason::Global), started).await;
@@ -3665,9 +3694,9 @@
         // resolver must not hand that hold back as the answer to the freeze.
         //
         // In explicit lease mode the production target is measured from the
-        // client's own buffer anchor, so a player frozen at 120 s with an empty
-        // buffer asks for 30 s of reserve, already has 60 s published, and is
-        // held on time. Testing the resolver alone would prove half of it —
+        // client's position. A player frozen at 120 s has 100 s of produced
+        // reserve, exceeding the running Source bank's 90 s high watermark,
+        // and one full publication batch staged, so it is held on time. Testing the resolver alone would prove half of it —
         // that a hold can be withheld — and none of the part that matters,
         // which is that this is the hold a stalled client actually meets.
         let limits = AheadLimits {
@@ -3680,20 +3709,17 @@
         );
         demand.position_ms = 120_000;
         // An empty buffer at the frozen position: nothing behind it, nothing
-        // ahead of it. This is the reading that collapses the target.
+        // ahead of it. Empty client runway does not invalidate Source pacing.
         demand.buffered_from_ms = Some(120_000);
         demand.buffered_through_ms = 120_000;
         demand.playback_rate = 1.0;
         let flow = |currently_suspended| {
             evaluate_flow(FlowInputs {
                 physical_ahead: Some(Ahead {
-                    seconds: 60,
+                    seconds: 100,
                     bytes: 1_000,
                 }),
-                produced_end_ms: Some(
-                    20_000 + rolling_source_bank_target_ms(1.0, false)
-                        + ROLLING_PUBLICATION_GUARD_MS,
-                ),
+                produced_end_ms: Some(120_000),
                 staged_publication_seconds: Some(16),
                 // Pre-existing coverage: the startup grant is already spent, so
                 // these assertions are about steady-state flow control.
@@ -3734,7 +3760,7 @@
         let wedged = crate::playback_control::DeliveryView {
             presentation: "live-recovery".to_owned(),
             producer_state: "held".to_owned(),
-            produced_through_ms: Some(180_000),
+            produced_through_ms: Some(220_000),
             fetched_through_ms: 150_000,
             delivered_bps: Some(4_000_000),
             delivered_idle_ms: Some(20_000),
@@ -3778,10 +3804,10 @@
         loaded_demand.buffered_through_ms = 142_000;
         let loaded_flow = evaluate_flow(FlowInputs {
             physical_ahead: Some(Ahead {
-                seconds: 60,
+                seconds: 100,
                 bytes: 1_000,
             }),
-            produced_end_ms: Some(20_000 + rolling_source_bank_target_ms(1.0, false) + ROLLING_PUBLICATION_GUARD_MS),
+            produced_end_ms: Some(120_000),
             staged_publication_seconds: Some(16),
             startup_protected: false,
             media_origin_ms: 100_000,

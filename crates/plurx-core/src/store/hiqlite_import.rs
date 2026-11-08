@@ -456,6 +456,50 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "dispatch_turn_ready",
+        columns: &["job_id", "node_id", "revision", "expires_at_ms", "roots"],
+        order_by: "job_id, node_id",
+        minimum_schema: 124,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "dispatch_turn_attempt",
+        columns: &[
+            "singleton",
+            "owner",
+            "work",
+            "keys_json",
+            "now_ms",
+            "queued_ms",
+            "allowed",
+            "winner",
+            "interactive",
+        ],
+        order_by: "singleton",
+        minimum_schema: 124,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "dispatch_turn_wait",
+        columns: &[
+            "owner",
+            "work",
+            "keys_json",
+            "queued_ms",
+            "last_seen_ms",
+            "credits",
+        ],
+        order_by: "owner, work",
+        minimum_schema: 124,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "background_job_migration",
         columns: &["singleton", "format_version", "source_count"],
         order_by: "singleton",
@@ -2464,7 +2508,52 @@ fn param_payload_bytes(param: &Param) -> usize {
     }
 }
 
+struct DispatchImportTriggerRow {
+    name: String,
+    sql: String,
+}
+impl From<&mut Row<'_>> for DispatchImportTriggerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            name: row.get("name"),
+            sql: row.get("sql"),
+        }
+    }
+}
+
+const DISPATCH_IMPORT_TRIGGERS: &str = "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name GLOB 'dispatch_turn_*' ORDER BY name";
+
+fn canonical_dispatch_import_triggers() -> Result<Vec<(String, String)>, StoreError> {
+    let witness = Connection::open_in_memory()?;
+    witness.execute_batch("CREATE TABLE background_jobs(id TEXT); CREATE TABLE analysis_requests(request_id TEXT); CREATE TABLE background_source_custody(custody_id TEXT);")?;
+    witness.execute_batch(super::background_job_turns::SCHEMA)?;
+    let mut statement = witness.prepare(DISPATCH_IMPORT_TRIGGERS)?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.len() != 5 {
+        return Err(import_error(
+            "review the exact dispatch import trigger boundary",
+        ));
+    }
+    Ok(rows)
+}
+
 impl HiqliteAuthStore {
+    async fn import_dispatch_trigger_catalog(&self) -> Result<Vec<(String, String)>, StoreError> {
+        Ok(self
+            .client()
+            // authority: fresh isolated import requires exact committed dispatch guards before suspension and after restoration.
+            .query_consistent_map::<DispatchImportTriggerRow, _>(
+                DISPATCH_IMPORT_TRIGGERS.to_owned(),
+                params!(),
+            )
+            .await?
+            .into_iter()
+            .map(|row| (row.name, row.sql))
+            .collect())
+    }
+
     /// Import one immutable, content-addressed SQLite backup into a fresh
     /// Hiqlite target and prove exact row parity before returning evidence.
     ///
@@ -2547,8 +2636,43 @@ impl HiqliteAuthStore {
             .await?;
         self.import_instance_setting(&metadata).await?;
 
+        // This target is fresh and cannot serve until import succeeds. Its
+        // dispatch triggers are admission code, not data-copy code: replaying
+        // them would recompute retained verdicts and mutate queue fairness.
+        let dispatch_triggers = canonical_dispatch_import_triggers()?;
+        if self.import_dispatch_trigger_catalog().await? != dispatch_triggers {
+            return Err(import_error(
+                "fresh import target has unrecognized dispatch triggers",
+            ));
+        }
+        self.client()
+            .txn(dispatch_triggers.iter().map(|(name, _)| {
+                (
+                    format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\"")),
+                    params!(),
+                )
+            }))
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
         for table in TABLES {
             self.import_table(&source, schema_version, *table).await?;
+        }
+        self.client()
+            .txn(
+                dispatch_triggers
+                    .iter()
+                    .map(|(_, sql)| (sql.clone(), params!())),
+            )
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if self.import_dispatch_trigger_catalog().await? != dispatch_triggers {
+            return Err(import_error(
+                "dispatch triggers were not restored after import",
+            ));
         }
 
         // This CAS counter is derived coordination state, not application
@@ -3028,6 +3152,7 @@ fn open_validated_source(
         )));
     }
     verify_source(&source)?;
+    verify_native_runtime_metadata(&source)?;
     verify_source_dv_recovery_guards(&source, schema_version)?;
     let (instance_id, instance_updated_at) = source
         .query_row(
@@ -3045,6 +3170,54 @@ fn open_validated_source(
             instance_updated_at,
         },
     ))
+}
+
+/// These two exact native runtime tables never become replicated state.
+/// The first binds a local database file/generation; the second belongs to a
+/// stopped native boot. Domain sharing tables remain in the ordinary import
+/// inventory and must not acquire a prefix-based exclusion.
+const NATIVE_RUNTIME_TABLES: [&str; 2] = ["storage_identity", "sharing_local_census"];
+
+fn verify_native_runtime_metadata(source: &Connection) -> Result<(), StoreError> {
+    let canonical = super::sqlite::NATIVE_AUTHORITY_SCHEMA;
+    for name in NATIVE_RUNTIME_TABLES {
+        let mut rows = source.prepare("SELECT type,sql FROM sqlite_master WHERE name=?1")?;
+        let definitions = rows
+            .query_map([name], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if definitions.is_empty() {
+            continue;
+        }
+        let expected = canonical
+            .split(';')
+            .find(|sql| sql.split_whitespace().nth(2) == Some(name))
+            .ok_or_else(|| import_error("native runtime metadata has no canonical schema"))?;
+        let normalize = |sql: &str| {
+            sql.chars()
+                .filter(|c| !c.is_ascii_whitespace())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        };
+        if !matches!(definitions.as_slice(),[(kind,sql)] if kind=="table" && normalize(sql)==normalize(expected))
+        {
+            return Err(import_error(format!(
+                "native-only table {name} has an unrecognized schema"
+            )));
+        }
+        let triggers: i64 = source.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name=?1",
+            [name],
+            |row| row.get(0),
+        )?;
+        if triggers != 0 {
+            return Err(import_error(format!(
+                "native-only table {name} has unexpected triggers"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn source_schema_version(source: &Connection) -> Result<i64, StoreError> {
@@ -3671,3 +3844,35 @@ impl From<&mut Row<'_>> for ParityPageRow {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_runtime_metadata_tests {
+    use super::*;
+    #[test]
+    fn native_boot_metadata_is_classified_by_exact_table_and_shape() {
+        let source = Connection::open_in_memory().expect("native metadata fixture");
+        source
+            .execute_batch(super::super::sqlite::NATIVE_AUTHORITY_SCHEMA)
+            .expect("native metadata fixture");
+        source
+            .execute(
+                "INSERT INTO storage_identity VALUES(1,'server','node',?1)",
+                [uuid::Uuid::new_v4().to_string()],
+            )
+            .expect("native metadata fixture");
+        source
+            .execute(
+                "INSERT INTO sharing_local_census VALUES('node',?1,1,1000)",
+                [uuid::Uuid::new_v4().to_string()],
+            )
+            .expect("native metadata fixture");
+        verify_native_runtime_metadata(&source).expect("native metadata fixture");
+        for name in NATIVE_RUNTIME_TABLES {
+            assert!(!TABLES.iter().any(|table| table.name == name));
+        }
+        source
+            .execute_batch("ALTER TABLE sharing_local_census ADD COLUMN application_secret TEXT")
+            .expect("native metadata fixture");
+        assert!(verify_native_runtime_metadata(&source).is_err());
+    }
+}

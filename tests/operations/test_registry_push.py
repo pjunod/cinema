@@ -24,6 +24,7 @@ case "$1 $2" in
       *Architecture*) echo linux/amd64 ;;
       *revision*) echo "$PLURX_BUILD_SHA" ;;
       *source*) echo "$PLURX_SOURCE_URL" ;;
+      *tv.plurx.distribution*) echo cluster ;;
       *) exit 2 ;;
     esac ;;
   'run --rm') if [[ "${!#}" == --version ]]; then echo "plurxd ($PLURX_BUILD_REF)"; else echo "$PLURX_BUILD_SHA"; fi ;;
@@ -49,7 +50,10 @@ class RegistryPushCase(unittest.TestCase):
             smoke = root / "scripts/container-smoke"
             smoke.write_text('#!/bin/sh\necho "smoke $1" >> "$TRANSCRIPT"\n')
             smoke.chmod(0o755)
-            ref = "registry.invalid/noirr/plurxd"
+            restore_smoke = root / "scripts/container-restore-smoke"
+            restore_smoke.write_text('#!/bin/sh\necho "restore-smoke $1" >> "$TRANSCRIPT"\n')
+            restore_smoke.chmod(0o755)
+            ref = "registry.invalid/noirr/plurxd-cluster"
             immutable = f"{ref}:sha-{sha[:12]}"
             for scenario in ("missing", "conflict", "moved", "empty", "malformed", "match"):
                 with self.subTest(scenario=scenario):
@@ -73,6 +77,7 @@ class RegistryPushCase(unittest.TestCase):
                     self.assertIn(f"pull --platform linux/amd64 {ref}@{DIGEST}", calls)
                     self.assertIn(f"image inspect --format {{{{.Id}}}} {ref}@{DIGEST}", calls)
                     self.assertIn(f"smoke {IMAGE_ID}", calls)
+                    self.assertIn(f"restore-smoke {IMAGE_ID}", calls)
                     self.assertIn(f"tag {IMAGE_ID} {ref}:main", calls)
                     self.assertEqual(calls[-2:], [f"push {ref}:main", f"buildx imagetools inspect {ref}:main"])
                     self.assertEqual(calls.count(f"buildx imagetools inspect {immutable}"), 2)

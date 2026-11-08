@@ -45,6 +45,15 @@ missing = "fail"
 timeout_seconds = 180
 
 [[checks]]
+id = "standalone-storage"
+title = "Standalone storage and real singleton conversion"
+command = "make standalone-storage-test standalone-storage-process-test"
+profiles = ["full"]
+requires = ["cargo", "ffmpeg", "ffprobe"]
+missing = "fail"
+timeout_seconds = 1800
+
+[[checks]]
 id = "knowledge-contract"
 title = "Engineering knowledge schema and references"
 command = "scripts/knowledge lint --scope pilot"
@@ -552,9 +561,33 @@ paths = [
 checks = ["rust-gate", "rust-gate-ci", "unit-core"]
 
 [[points]]
+id = "storage.standalone"
+title = "Native SQLite standalone lifecycle"
+contract = "Standalone service uses native SQLite with no Raft node, quorum sampler or cluster listener. Durable backend manifests bind local identity and generation; private legacy singletons convert from a fully applied verified cut, preserve all classified current data and keys, and recover a journaled authority handoff without reopening stale rollback databases. Local claim/publication and restart safety remain active. Native backup/restore and Source startup use local transaction authority, independent of replication implementations."
+paths = [
+  "crates/plurx-core/src/storage/**",
+  "crates/plurx-core/src/store/sqlite/native_sharing.rs",
+  "crates/plurx-core/src/store/sqlite/lifecycle.rs",
+  "crates/plurx-core/src/store/sqlite/lifecycle/**",
+  "crates/plurx-core/src/store/sqlite/native_backup.rs",
+  "crates/plurx-storage-migrate/**",
+  "crates/plurxd/src/cluster_capability.rs",
+  "crates/plurxd/src/http/native_auth_revocation.rs",
+  "crates/plurxd/src/storage_helper.rs",
+  "crates/plurxd/src/storage_helper/**",
+  "crates/plurxd/src/storage_runtime.rs",
+  "crates/plurxd/src/storage_runtime/**",
+  "crates/plurxd/src/source_authority.rs",
+  "crates/plurxd/src/backup/native.rs",
+  "crates/plurxd/tests/standalone_conversion.rs",
+]
+checks = ["rust-gate", "rust-gate-ci", "unit-core", "standalone-storage"]
+depends_on = ["core.media"]
+
+[[points]]
 id = "persistence.upgrades"
 title = "Persistent database compatibility"
-contract = "Existing libraries upgrade without losing data; a newer unsupported database is refused without changing staging state; clustering publishes a durable content-addressed SQLite backup, imports v14 through current durable rows into a fresh one-voter Hiqlite target, rebuilds derived FTS, and returns only after exact per-table parity. A fsynced completion marker and atomic rename make the verified target active; a failed or interrupted pre-rename attempt is cleaned before one unchanged-SQLite recovery boot, while post-rename recovery selects only the completed target. An ambiguous active target refuses the boot instead of reverting to SQLite, an activated directory that lost its target refuses to re-import the retained source, and retained source backups are bounded. Synchronous source reads stay on one blocking worker, while target parity uses bounded primary-key pages and an incremental digest."
+contract = "Standalone defaults to manifest-bound native SQLite, while explicit cluster adoption and historical private-singleton conversion verify all durable and node-local data before journaled authority publication; an existing cluster never downgrades on peer loss. Existing libraries upgrade without losing data; a newer unsupported database is refused without changing staging state; the legacy clustering importer publishes a durable content-addressed SQLite backup, imports v14 through current durable rows into a fresh one-voter Hiqlite target, rebuilds derived FTS, and returns only after exact per-table parity. A fsynced completion marker and atomic rename make the verified target active; a failed or interrupted pre-rename attempt is cleaned before one unchanged-SQLite recovery boot, while post-rename recovery selects only the completed target. An ambiguous active target refuses the boot instead of reverting to SQLite, an activated directory that lost its target refuses to re-import the retained source, and retained source backups are bounded. Synchronous source reads stay on one blocking worker, while target parity uses bounded primary-key pages and an incremental digest."
 paths = [
   "crates/plurx-core/src/store/hiqlite_import/tests.rs",
   "crates/plurx-core/src/store/sqlite/tests.rs",
@@ -564,8 +597,14 @@ paths = [
   "crates/plurx-core/src/cluster/migration/**",
   "crates/plurx-core/src/store/schema_lineage.rs",
   "crates/plurx-core/tests/schema_lineage_upgrade.rs",
+  "crates/plurx-core/tests/support/historical_sqlite.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
+  # These native Store slices also participate in import/backup and backend parity.
+  "crates/plurx-core/src/store/sqlite/lifecycle.rs",
+  "crates/plurx-core/src/store/sqlite/lifecycle/**",
+  "crates/plurx-core/src/store/sqlite/native_backup.rs",
+  "crates/plurx-core/src/store/sqlite/native_sharing.rs",
   # K-05 section 3.9: poisoned-connection recovery and the boot integrity
   # check that refuses a corrupt database before migration touches it.
   "crates/plurx-core/src/store/sqlite/housekeeping.rs",
@@ -712,6 +751,9 @@ paths = [
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/media_sessions/**",
   "crates/plurxd/src/settings_changes.rs",
+  "crates/plurxd/src/serving_fence/quorum.rs",
+  "crates/plurxd/src/cluster_runtime.rs",
+  "crates/plurxd/src/cluster_runtime/**",
   "crates/plurxd/src/shared_cache.rs",
   "crates/plurxd/src/store_result.rs",
   "crates/plurxd/src/http/{cluster,background_jobs,internal_media_sessions,peer_transport}.rs",
@@ -785,6 +827,7 @@ contract = "The admin status surface starts from committed membership and direct
 paths = [
   "crates/plurxd/src/http/cluster_operations/tests.rs",
   "crates/plurxd/src/backup.rs",
+  "crates/plurxd/src/backup/cluster.rs",
   "crates/plurxd/src/http/cluster_operations.rs",
   "crates/plurxd/src/wal_cli.rs",
   "crates/plurxd/src/wal_offline_tests.rs",
@@ -1546,6 +1589,9 @@ paths = [
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/k08-build-measure",
+  "scripts/build-measure",
+  "scripts/check-standalone-graph",
+  "scripts/package-storage-migration-helper",
   "scripts/ci-require-disk",
   "scripts/ci-runner-cache-audit",
   "scripts/release-package-candidate",
@@ -1660,6 +1706,7 @@ paths = [
   "crates/plurx-core/src/store/sharing_source_sessions.rs",
   "crates/plurx-core/src/store/sharing_source_ingress_custody.rs",
   "crates/plurx-core/src/store/sharing_source_schema.rs",
+  "crates/plurx-core/src/store/sharing_source_schema/**",
   "crates/plurx-core/src/store/sharing_source_legacy_schema.json",
   "crates/plurx-core/src/cluster/membership/sharing_source_schema.rs",
   "crates/plurx-core/src/store/sharing_source_session_bindings_schema.sql",

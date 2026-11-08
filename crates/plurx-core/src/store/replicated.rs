@@ -158,6 +158,24 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    // Native import validates/rebuilds the Source layout and checks foreign
+    // keys before committing. This is local schema ownership, not a Raft port.
+    SqliteTransactionSite {
+        module: "native_sharing.rs",
+        method: "create_native_import_target_layout",
+        is_async: false,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    // Native boot validates the storage/master identity and layout before
+    // advancing the boot generation and installing its persisted guards.
+    SqliteTransactionSite {
+        module: "native_sharing.rs",
+        method: "prepare_native_source_before_serving",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
     // Replace the provider scores and their fetch marker in one boundary.
     SqliteTransactionSite {
         module: "annotations.rs",
@@ -1208,6 +1226,7 @@ mod tests {
             include_str!("sqlite/jellyfin_login.rs"),
         ),
         ("library.rs", include_str!("sqlite/library.rs")),
+        ("lifecycle.rs", include_str!("sqlite/lifecycle.rs")),
         (
             "library_channels.rs",
             include_str!("sqlite/library_channels.rs"),
@@ -1218,6 +1237,11 @@ mod tests {
         ),
         ("media.rs", include_str!("sqlite/media.rs")),
         ("mod.rs", include_str!("sqlite/mod.rs")),
+        ("native_backup.rs", include_str!("sqlite/native_backup.rs")),
+        (
+            "native_sharing.rs",
+            include_str!("sqlite/native_sharing.rs"),
+        ),
         ("offline.rs", include_str!("sqlite/offline.rs")),
         ("outbox.rs", include_str!("sqlite/outbox.rs")),
         (
@@ -1259,39 +1283,59 @@ mod tests {
 
     fn method_source(site: &SqliteTransactionSite) -> &'static str {
         let source = source_for(site.module);
-        let keyword = if site.is_async { "async fn" } else { "fn" };
-        let declaration = format!("{keyword} {}", site.method);
+        method_source_in(source, site.method, site.is_async)
+    }
+
+    fn method_source_in<'a>(source: &'a str, method: &str, is_async: bool) -> &'a str {
+        let keyword = if is_async { "async fn" } else { "fn" };
+        let declaration = format!("{keyword} {method}");
         let start = source
             .match_indices(&declaration)
             .find_map(|(start, _)| {
-                (source[..start]
-                    .rsplit('\n')
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .is_empty()
-                    && matches!(
-                        source.as_bytes().get(start + declaration.len()),
-                        Some(b'(' | b'<')
-                    ))
+                (matches!(
+                    source[..start]
+                        .rsplit('\n')
+                        .next()
+                        .unwrap_or_default()
+                        .trim(),
+                    "" | "pub"
+                ) && matches!(
+                    source.as_bytes().get(start + declaration.len()),
+                    Some(b'(' | b'<')
+                ))
                 .then_some(start)
             })
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing {declaration}( or {declaration}< in {}",
-                    site.module
-                )
-            });
+            .unwrap_or_else(|| panic!("missing {declaration}( or {declaration}<"));
         let tail = &source[start + declaration.len()..];
         // Classify the actual boundary owner, including the shared free
         // activation/renewal helpers, rather than their delegating methods.
-        let end = ["\n    async fn ", "\n    fn ", "\nasync fn ", "\nfn "]
-            .map(|declaration| tail.find(declaration))
-            .into_iter()
-            .flatten()
-            .min()
-            .map_or(source.len(), |offset| start + declaration.len() + offset);
+        let end = [
+            "\n    async fn ",
+            "\n    fn ",
+            "\nasync fn ",
+            "\nfn ",
+            "\n    pub async fn ",
+            "\n    pub fn ",
+            "\npub async fn ",
+            "\npub fn ",
+        ]
+        .map(|declaration| tail.find(declaration))
+        .into_iter()
+        .flatten()
+        .min()
+        .map_or(source.len(), |offset| start + declaration.len() + offset);
         &source[start..end]
+    }
+
+    #[test]
+    fn transaction_source_inventory_keeps_public_boundaries_separate() {
+        let source = "impl Store {\n    fn import() { unchecked_transaction(); }\n    pub async fn boot() { unchecked_transaction(); }\n    pub fn other() { unchecked_transaction(); }\n}";
+        for (method, is_async) in [("import", false), ("boot", true), ("other", false)] {
+            let body = method_source_in(source, method, is_async);
+            assert_eq!(body.matches("unchecked_transaction").count(), 1, "{method}");
+        }
+        assert!(!method_source_in(source, "import", false).contains("boot"));
+        assert!(!method_source_in(source, "boot", true).contains("other"));
     }
 
     #[test]
@@ -1440,7 +1484,9 @@ mod tests {
         // Playback handoff redemption adds one fixed claim/mint batch.
         // Node removal retires the removed node's analysis requests and their
         // attempts in one batch (`retire_analysis_requests_for_node`).
-        assert_eq!(methods.len(), 117);
+        // Native import/boot add two guarded local schema transactions. The
+        // lifecycle and backup ownership modules open no explicit boundaries.
+        assert_eq!(methods.len(), 119);
     }
 
     mod source_inventory {

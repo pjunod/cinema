@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-28, plurx has 409 routes declared by the ordinary listener's
+As of 2026-11-03, plurx has 410 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 409 routes across the registered routers.
+plurx has 410 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -412,7 +412,8 @@ stranger should not read. The cluster's other ingress origins are therefore
 
 Fields: `name`, `version` (bare semver, which is what clients compare), `build`
 (git description), `built_at`, `instance_id`, `node_id`,
-`cluster_advertisement`, `uptime_seconds`, `setup_required`, `android_app`,
+`cluster_advertisement`, `storage_mode` (`sqlite` or `cluster`), `cluster_enabled`
+(the committed mode, independent of peer reachability), `uptime_seconds`, `setup_required`, `android_app`,
 `playback_auto_abr`, `display_mode_match` (the replicated Android-TV cadence
 switch; missing storage is `false`). Also `decoder_compaction_contract`,
 `display_aware_auto_protocol` (always `"route-v1"` on this build) and
@@ -3636,6 +3637,7 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 | GET | `/api/v1/cluster/status` | admin (cache-only ok) | The aggregate: roster + own snapshot + cached peer observations |
 | GET | `/api/v1/cluster/support-bundle` | admin (cache-only ok) | ZIP: the aggregate, a redacted log tail, a README, a manifest |
 | POST | `/api/v1/cluster/backups` | admin | Builds one portable, checksummed backup from this voter's published snapshot; skips with `status: skipped` when another voter holds the lease |
+| POST | `/api/v1/backups` | admin | Builds a backend-appropriate portable backup: native SQLite image/key or a cluster consistent cut. Optional JSON `output` overrides the saved destination; the same scheduler, lease, retention and response shape apply. |
 | POST/DELETE | `/api/v1/cluster/nodes/{node_id}/restart-preparation` | admin | Fences and unfences new mutable media work on **this** process |
 | POST | `/api/v1/cluster/nodes/{node_id}/promote` | admin | Promotes a ready learner to voter |
 | POST/DELETE | `/api/v1/cluster/nodes/{node_id}/maintenance` | admin | Enters and clears the durable maintenance fence on **this** process |

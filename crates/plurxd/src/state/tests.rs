@@ -1147,7 +1147,7 @@ async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() 
         !jobs
             .analysis_source_may_continue(&transcode, Some(&request))
             .await,
-        "queued viewer demand wakes the worker but does not grant source ownership"
+        "a queued request cannot authorize source input before the worker claims it"
     );
     assert!(
         !jobs.analysis_source_may_continue(&transcode, None).await,
@@ -1174,6 +1174,7 @@ async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() 
         "a busy worker must admit a source read with any live request waiter: {:?}",
         store.analysis_request(&request.request_id).await
     );
+    let admitted = admitted.expect("observed the actual foreground claim");
     let interest = plurx_core::store::AnalysisViewerInterest {
         analysis_request_id: request.request_id.clone(),
         requested_generation: request.requested_generation.clone(),
@@ -1199,7 +1200,7 @@ async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() 
         Duration::from_secs(1),
         jobs.wait_for_cluster_fragment_index_stop(
             &transcode,
-            Some(&request),
+            Some(&admitted),
             &lost,
             &AnalysisAttestationBudget::default(),
         ),
@@ -2266,7 +2267,10 @@ async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_t
         .expect("initial request");
     assert!(
         jobs.self_claim_subtitle_source(&initial.request_id, work.path())
-            .await
+            .await,
+        "initial subtitle extraction failed: request={:?}; history={:?}",
+        store.analysis_request(&initial.request_id).await,
+        store.media_preparation_history(file.id).await
     );
     let stamp = SubtitleSourceStamp {
         file_id: file.id,

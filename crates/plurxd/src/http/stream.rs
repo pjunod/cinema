@@ -3695,9 +3695,12 @@ pub(crate) async fn serve_original_file_range(
     };
     // Opening/stat'ing a capability performs no original byte read. The
     // replicated owner is bound to this exact object before its first read.
-    let source = crate::fragment_index_cluster::open_source_playback_fence(file, None)
+    let source = crate::fragment_index_cluster::open_source_playback_fence_io(file, None)
         .await
-        .map_err(|_| ApiError::NotFound("file on disk"))?;
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ApiError::NotFound("file on disk"),
+            _ => ApiError::Internal(error.to_string()),
+        })?;
     let body = crate::source_custody::file_body(source, start, length, request)
         .await
         .map_err(ApiError::Internal)?;

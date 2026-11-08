@@ -5,20 +5,28 @@
 //! node to inspect replicated facts, recent readability, and its local cache.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(any(test, feature = "cluster"))]
+use std::collections::BTreeSet;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+#[cfg(any(test, feature = "cluster"))]
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::cluster_capability::Membership as MembershipManager;
+#[cfg(any(test, feature = "cluster"))]
 use futures_util::{stream, StreamExt};
-use plurx_core::cluster::membership::{ActivityPeer, MembershipError, MembershipManager};
+#[cfg(feature = "cluster")]
+use plurx_core::cluster::membership::{ActivityPeer, MembershipError};
 use plurx_core::domain::MediaFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
-use crate::http::peer_transport::{deadline_after, PeerAuthMode, PeerTransport};
+use crate::http::peer_transport::deadline_after;
+#[cfg(feature = "cluster")]
+use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 use crate::state::AppState;
 
 pub(crate) const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
@@ -35,25 +43,37 @@ pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
 /// line instead of failing mid-start. Old ingress and sessions must be drained
 /// on rollout.
 pub(crate) const PROTOCOL_VERSION: i64 = 9;
+#[cfg(feature = "cluster")]
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
+#[cfg(feature = "cluster")]
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
 pub(crate) const OFFER_DEADLINE: Duration = Duration::from_millis(200);
+#[cfg(feature = "cluster")]
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024;
+#[cfg(feature = "cluster")]
 const MAX_OFFER_BYTES: usize = 64 * 1024;
+#[cfg(feature = "cluster")]
 pub(crate) const MAX_REQUEST_BYTES: usize = 64 * 1024;
+#[cfg(any(test, feature = "cluster"))]
 const MAX_PEERS: usize = 64;
+#[cfg(any(test, feature = "cluster"))]
 const MAX_CAPABILITIES: usize = 16;
 const MAX_CAPABILITY_BYTES: usize = 64;
 const MAX_TRACK_INDEX: i64 = 1_024;
 const MAX_START_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
+#[cfg(feature = "cluster")]
 const ROOT_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const ROOT_READABILITY_TTL: Duration = Duration::from_secs(45);
+#[cfg(feature = "cluster")]
 const ROOT_PROBE_COLLECTION_DEADLINE: Duration = Duration::from_secs(2);
+#[cfg(any(test, feature = "cluster"))]
 const MAX_LIBRARY_ROOTS: usize = 64;
 // One complete timed-out predecessor generation cannot prevent the current
 // configured generation from being observed. The process ceiling remains
 // hard; exhaustion fails source evidence closed.
+#[cfg(any(test, feature = "cluster"))]
 const MAX_ROOT_PROBE_CHILDREN: usize = MAX_LIBRARY_ROOTS * 2;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +294,7 @@ impl QualityCatalogRequest {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn is_valid(&self) -> bool {
         self.validate().is_ok()
     }
@@ -338,6 +359,7 @@ impl PlanningBinding {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "cluster")]
 pub(crate) struct BudgetedCatalogRequest {
     pub expected_binding: Option<PlanningBinding>,
     pub budget_ms: u32,
@@ -715,6 +737,7 @@ pub(crate) struct PlacementDiagnostics {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg(feature = "cluster")]
 pub(crate) struct MediaDirectoryDiagnostics {
     pub protocol_version: i64,
     pub remote_placement_enabled: bool,
@@ -740,6 +763,7 @@ struct RootReadability {
     observed_at: tokio::time::Instant,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 struct RootProbe {
     child: tokio::process::Child,
     kill_sent: bool,
@@ -748,6 +772,7 @@ struct RootProbe {
 }
 
 #[derive(Default)]
+#[cfg(any(test, feature = "cluster"))]
 struct RootProbeRegistry {
     running: BTreeMap<PathBuf, RootProbe>,
     completed: Vec<(PathBuf, RootReadability)>,
@@ -755,11 +780,14 @@ struct RootProbeRegistry {
 
 #[derive(Clone)]
 pub(crate) struct MediaPool {
-    membership: MembershipManager,
-    transport: PeerTransport,
+    membership: Option<MembershipManager>,
+    #[cfg(feature = "cluster")]
+    transport: Option<PeerTransport>,
     snapshots: Arc<RwLock<BTreeMap<String, CachedSnapshot>>>,
     root_readability: Arc<RwLock<BTreeMap<PathBuf, RootReadability>>>,
+    #[cfg(any(test, feature = "cluster"))]
     root_probes: Arc<Mutex<RootProbeRegistry>>,
+    #[cfg(feature = "cluster")]
     root_probe_launcher: Arc<tokio::sync::Semaphore>,
 }
 
@@ -806,59 +834,75 @@ impl MediaPool {
             },
         );
     }
-    pub(crate) fn new(membership: MembershipManager) -> Arc<Self> {
+    pub(crate) fn new(membership: Option<MembershipManager>) -> Arc<Self> {
         Arc::new(Self {
-            transport: PeerTransport::new(membership.clone()),
+            #[cfg(feature = "cluster")]
+            transport: membership
+                .as_ref()
+                .map(|member| PeerTransport::new(member.clone())),
             membership,
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
+            #[cfg(any(test, feature = "cluster"))]
             root_probes: Arc::new(Mutex::new(RootProbeRegistry::default())),
+            #[cfg(feature = "cluster")]
             root_probe_launcher: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) async fn poll_loop(self: Arc<Self>) {
-        let mut interval = tokio::time::interval(SNAPSHOT_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            interval.tick().await;
-            if let Err(error) = self.poll_once().await {
-                tracing::debug!(%error, "media snapshot poll unavailable");
+        #[cfg(feature = "cluster")]
+        {
+            let mut interval = tokio::time::interval(SNAPSHOT_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(error) = self.poll_once().await {
+                    tracing::debug!(%error, "media snapshot poll unavailable");
+                }
             }
         }
     }
 
     /// Refresh root-scoped source facts independently of placement traffic.
     /// Offers only read this memory; they never wake every candidate NAS.
+    #[cfg(feature = "cluster")]
     pub(crate) async fn root_readability_loop(
         self: Arc<Self>,
         store: Arc<dyn plurx_core::store::Store>,
     ) {
-        let mut interval = tokio::time::interval(ROOT_REFRESH_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            interval.tick().await;
-            self.refresh_root_readability(store.as_ref()).await;
+        #[cfg(feature = "cluster")]
+        {
+            let mut interval = tokio::time::interval(ROOT_REFRESH_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                self.refresh_root_readability(store.as_ref()).await;
+            }
         }
     }
 
+    #[cfg(feature = "cluster")]
     async fn refresh_root_readability(&self, store: &dyn plurx_core::store::Store) {
-        let peers = match tokio::time::timeout(
-            ROOT_PROBE_COLLECTION_DEADLINE,
-            self.membership.media_peers(),
-        )
-        .await
-        {
-            Ok(Ok(peers)) => peers,
-            Ok(Err(error)) => {
-                tracing::debug!(%error, "media root probe membership unavailable");
-                return;
-            }
-            Err(_) => {
-                tracing::debug!("media root probe membership timed out");
-                return;
-            }
+        let Some(membership) = &self.membership else {
+            return;
         };
+
+        let peers =
+            match tokio::time::timeout(ROOT_PROBE_COLLECTION_DEADLINE, membership.media_peers())
+                .await
+            {
+                Ok(Ok(peers)) => peers,
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "media root probe membership unavailable");
+                    return;
+                }
+                Err(_) => {
+                    tracing::debug!("media root probe membership timed out");
+                    return;
+                }
+            };
         if !has_reachable_media_peer(&peers) {
             self.root_readability.write().await.clear();
             return;
@@ -920,6 +964,7 @@ impl MediaPool {
         }
     }
 
+    #[cfg(feature = "cluster")]
     async fn start_root_probes(&self, roots: &BTreeSet<PathBuf>, deadline: tokio::time::Instant) {
         if tokio::time::Instant::now() >= deadline {
             return;
@@ -994,10 +1039,12 @@ impl MediaPool {
         let _ = tokio::time::timeout_at(deadline, launcher).await;
     }
 
+    #[cfg(feature = "cluster")]
     fn reap_root_probes(&self) -> Vec<(PathBuf, RootReadability)> {
         self.reap_root_probes_with_deadline(None)
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn reap_root_probes_until(
         &self,
         roots: &BTreeSet<PathBuf>,
@@ -1006,6 +1053,7 @@ impl MediaPool {
         self.reap_root_probes_with_deadline(Some((roots, deadline)))
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn reap_root_probes_with_deadline(
         &self,
         deadline: Option<(&BTreeSet<PathBuf>, tokio::time::Instant)>,
@@ -1071,6 +1119,7 @@ impl MediaPool {
         outcomes
     }
 
+    #[cfg(feature = "cluster")]
     fn has_running_root_probe(&self, roots: &BTreeSet<PathBuf>) -> bool {
         self.root_probes
             .lock()
@@ -1080,6 +1129,7 @@ impl MediaPool {
             .any(|(root, probe)| roots.contains(root) && !probe.kill_sent)
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     fn signal_timed_out_root_probes(&self, roots: &BTreeSet<PathBuf>) {
         let mut registry = self
             .root_probes
@@ -1107,9 +1157,13 @@ impl MediaPool {
             })
     }
 
+    #[cfg(feature = "cluster")]
     async fn poll_once(&self) -> Result<(), MembershipError> {
-        let peers = self
-            .membership
+        let Some(membership) = &self.membership else {
+            return Ok(());
+        };
+
+        let peers = membership
             .media_peers()
             .await?
             .into_iter()
@@ -1121,7 +1175,7 @@ impl MediaPool {
             return Ok(());
         }
         let deadline = deadline_after(SNAPSHOT_DEADLINE);
-        let transport = self.transport.clone();
+        let transport = self.transport.clone().expect("actual cluster transport");
         let outcomes = stream::iter(peers.into_iter().map(|peer| {
             let transport = transport.clone();
             async move {
@@ -1157,30 +1211,49 @@ impl MediaPool {
 
     /// Observed capacity ranks candidates; the selected worker still reserves
     /// the actual delivery plan atomically before starting its encoder.
+    #[cfg_attr(not(feature = "cluster"), allow(unused_variables))]
     pub(crate) async fn live_tv_worker(&self, state: &AppState) -> String {
-        if !self.remote_placement_ready(state).await {
-            return state.node_id.clone();
+        #[cfg(not(feature = "cluster"))]
+        {
+            state.node_id.clone()
         }
-        let voters = match self.membership.activity_peers().await {
-            Ok(peers) => peers
-                .into_iter()
-                .filter(|p| p.reachable)
-                .map(|p| p.node_id)
-                .collect::<BTreeSet<_>>(),
-            Err(_) => return state.node_id.clone(),
-        };
-        self.expire().await;
-        let mut nodes = vec![local_snapshot(state).await];
-        nodes.extend(
-            self.snapshots
-                .read()
+        #[cfg(feature = "cluster")]
+        {
+            if self.membership.is_none() {
+                return state.node_id.clone();
+            }
+
+            if !self.remote_placement_ready(state).await {
+                return state.node_id.clone();
+            }
+            let voters = match self
+                .membership
+                .as_ref()
+                .expect("actual cluster membership")
+                .activity_peers()
                 .await
-                .values()
-                .map(|e| e.snapshot.clone()),
-        );
-        select_live_tv_worker(nodes, &voters, &state.node_id)
+            {
+                Ok(peers) => peers
+                    .into_iter()
+                    .filter(|p| p.reachable)
+                    .map(|p| p.node_id)
+                    .collect::<BTreeSet<_>>(),
+                Err(_) => return state.node_id.clone(),
+            };
+            self.expire().await;
+            let mut nodes = vec![local_snapshot(state).await];
+            nodes.extend(
+                self.snapshots
+                    .read()
+                    .await
+                    .values()
+                    .map(|e| e.snapshot.clone()),
+            );
+            select_live_tv_worker(nodes, &voters, &state.node_id)
+        }
     }
 
+    #[cfg(feature = "cluster")]
     pub(crate) async fn diagnostics(&self, state: &AppState) -> MediaDirectoryDiagnostics {
         self.expire().await;
         let mut nodes = vec![local_snapshot(state).await];
@@ -1201,7 +1274,7 @@ impl MediaPool {
             .as_deref()
             == Some("1");
         let remote_placement_rollout_ready = self.remote_rollout_ready().await;
-        let remote_placement_ready = remote_placement_enabled;
+        let remote_placement_ready = remote_placement_enabled && self.membership.is_some();
         let session_takeover_enabled = state
             .store
             .get_setting(plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
@@ -1227,6 +1300,10 @@ impl MediaPool {
     /// The saved operator preference controls placement. Compatibility and
     /// capacity are evaluated for each candidate, independently of other peers.
     pub(crate) async fn remote_placement_ready(&self, state: &AppState) -> bool {
+        if self.membership.is_none() {
+            return false;
+        }
+
         state
             .store
             .get_setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
@@ -1249,33 +1326,58 @@ impl MediaPool {
     /// learner, so it was structurally false there and no learner could ever
     /// accept a delegated session or place one.
     pub(crate) async fn remote_rollout_ready(&self) -> bool {
-        if !self.membership.is_replicated() {
-            return false;
+        #[cfg(not(feature = "cluster"))]
+        {
+            false
         }
-        self.expire().await;
-        let deadline = deadline_after(SNAPSHOT_DEADLINE);
-        let directory = tokio::time::timeout_at(deadline, async {
-            tokio::join!(
-                self.membership.activity_peers(),
-                self.membership.activity_voter_count(),
-                self.membership.local_node_is_committed_voter()
+        #[cfg(feature = "cluster")]
+        {
+            if self.membership.is_none() {
+                return false;
+            }
+
+            if !self
+                .membership
+                .as_ref()
+                .expect("actual cluster membership")
+                .is_replicated()
+            {
+                return false;
+            }
+            self.expire().await;
+            let deadline = deadline_after(SNAPSHOT_DEADLINE);
+            let directory = tokio::time::timeout_at(deadline, async {
+                tokio::join!(
+                    self.membership
+                        .as_ref()
+                        .expect("actual cluster membership")
+                        .activity_peers(),
+                    self.membership
+                        .as_ref()
+                        .expect("actual cluster membership")
+                        .activity_voter_count(),
+                    self.membership
+                        .as_ref()
+                        .expect("actual cluster membership")
+                        .local_node_is_committed_voter()
+                )
+            })
+            .await;
+            let Ok((Ok(peers), Ok(voter_count), Ok(local_is_voter))) = directory else {
+                return false;
+            };
+            if voter_count <= 1 {
+                return false;
+            }
+            let snapshots = self.snapshots.read().await;
+            remote_directory_ready(
+                &peers,
+                voter_count,
+                local_is_voter,
+                std::ops::Deref::deref(&snapshots),
+                tokio::time::Instant::now(),
             )
-        })
-        .await;
-        let Ok((Ok(peers), Ok(voter_count), Ok(local_is_voter))) = directory else {
-            return false;
-        };
-        if voter_count <= 1 {
-            return false;
         }
-        let snapshots = self.snapshots.read().await;
-        remote_directory_ready(
-            &peers,
-            voter_count,
-            local_is_voter,
-            std::ops::Deref::deref(&snapshots),
-            tokio::time::Instant::now(),
-        )
     }
 
     /// Local and remote catalogs share one deadline. Missing/old/busy workers
@@ -1333,9 +1435,18 @@ impl MediaPool {
             .ok()
             .flatten();
         let local = local_quality_catalog(state, &request, deadline, expected_binding.as_ref());
+        #[cfg(not(feature = "cluster"))]
+        let remote = async { Vec::<QualityCatalogResult>::new() };
+        #[cfg(feature = "cluster")]
         let remote = async {
-            let peers = match tokio::time::timeout_at(deadline, self.membership.media_peers()).await
-            {
+            let Some(membership) = &self.membership else {
+                return Vec::new();
+            };
+            let Some(transport) = &self.transport else {
+                return Vec::new();
+            };
+
+            let peers = match tokio::time::timeout_at(deadline, membership.media_peers()).await {
                 Ok(Ok(peers)) => peers,
                 _ => return vec![QualityCatalogResult::unavailable(CatalogCause::Transport)],
             };
@@ -1379,8 +1490,7 @@ impl MediaPool {
                                     CatalogCause::PeerProtocol,
                                 );
                             }
-                            let response = self
-                                .transport
+                            let response = transport
                                 .request(
                                     &peer.node_id,
                                     base,
@@ -1410,8 +1520,7 @@ impl MediaPool {
                                         CatalogCause::PeerProtocol,
                                     );
                                 }
-                                response = match self
-                                    .transport
+                                response = match transport
                                     .request(
                                         &peer.node_id,
                                         base,
@@ -1557,48 +1666,51 @@ impl MediaPool {
             Ok((offer, snapshot)) => (vec![offer], Some(snapshot)),
             Err(_) => (Vec::new(), None),
         };
-        let peers = tokio::time::timeout_at(deadline, self.membership.media_peers())
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|peer| {
-                peer.reachable
-                    && peer.http_base.is_some()
-                    && snapshots
-                        .get(&peer.node_id)
-                        .is_some_and(|snapshot| snapshot_can_answer(snapshot, &request))
-            })
-            .take(MAX_PEERS)
-            .collect::<Vec<_>>();
-        if !peers.is_empty() && tokio::time::Instant::now() < deadline {
-            let body = serde_json::to_vec(&request).unwrap_or_default();
-            let transport = self.transport.clone();
-            let remote = stream::iter(peers.into_iter().map(|peer| {
-                let transport = transport.clone();
-                let body = body.clone();
-                let fingerprint = request.request_fingerprint.clone();
-                let scratch_bytes_required = request.scratch_bytes_required;
-                async move {
-                    fetch_offer(
-                        &transport,
-                        peer,
-                        body,
-                        &fingerprint,
-                        scratch_bytes_required,
-                        deadline,
-                    )
-                    .await
-                }
-            }))
-            .buffer_unordered(MAX_PEERS)
-            .filter_map(|offer| async move { offer })
-            .collect::<Vec<_>>();
-            let remote = tokio::time::timeout_at(deadline, remote)
+        #[cfg(feature = "cluster")]
+        if let Some(membership) = &self.membership {
+            let peers = tokio::time::timeout_at(deadline, membership.media_peers())
                 .await
-                .unwrap_or_default();
-            offers.extend(remote);
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|peer| {
+                    peer.reachable
+                        && peer.http_base.is_some()
+                        && snapshots
+                            .get(&peer.node_id)
+                            .is_some_and(|snapshot| snapshot_can_answer(snapshot, &request))
+                })
+                .take(MAX_PEERS)
+                .collect::<Vec<_>>();
+            if !peers.is_empty() && tokio::time::Instant::now() < deadline {
+                let body = serde_json::to_vec(&request).unwrap_or_default();
+                let transport = self.transport.clone().expect("actual cluster transport");
+                let remote = stream::iter(peers.into_iter().map(|peer| {
+                    let transport = transport.clone();
+                    let body = body.clone();
+                    let fingerprint = request.request_fingerprint.clone();
+                    let scratch_bytes_required = request.scratch_bytes_required;
+                    async move {
+                        fetch_offer(
+                            &transport,
+                            peer,
+                            body,
+                            &fingerprint,
+                            scratch_bytes_required,
+                            deadline,
+                        )
+                        .await
+                    }
+                }))
+                .buffer_unordered(MAX_PEERS)
+                .filter_map(|offer| async move { offer })
+                .collect::<Vec<_>>();
+                let remote = tokio::time::timeout_at(deadline, remote)
+                    .await
+                    .unwrap_or_default();
+                offers.extend(remote);
+            }
         }
         let mut ranking_snapshots = snapshots;
         if let Some(local_snapshot) = local_snapshot {
@@ -1623,6 +1735,7 @@ impl MediaPool {
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn select_live_tv_worker(
     nodes: Vec<MediaNodeSnapshot>,
     voters: &BTreeSet<String>,
@@ -1647,6 +1760,7 @@ fn select_live_tv_worker(
         .map_or_else(|| local_node_id.to_owned(), |n| n.node_id)
 }
 
+#[cfg(feature = "cluster")]
 fn remote_directory_ready(
     peers: &[ActivityPeer],
     voter_count: usize,
@@ -1664,6 +1778,7 @@ fn remote_directory_ready(
         })
 }
 
+#[cfg(feature = "cluster")]
 async fn fetch_snapshot(
     transport: &PeerTransport,
     peer: ActivityPeer,
@@ -1701,6 +1816,7 @@ fn command_safe_path(path: &Path) -> PathBuf {
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn bounded_command_safe_roots(roots: impl IntoIterator<Item = PathBuf>) -> BTreeSet<PathBuf> {
     roots
         .into_iter()
@@ -1720,6 +1836,7 @@ fn bounded_command_safe_roots(roots: impl IntoIterator<Item = PathBuf>) -> BTree
 /// `try_wait` confirms exit: SIGKILL cannot immediately release a process in
 /// uninterruptible filesystem I/O, and dropping/resubmitting it would turn a
 /// hard mount into unbounded PID growth.
+#[cfg(feature = "cluster")]
 fn spawn_library_root_probe(
     root: &Path,
 ) -> std::io::Result<(tokio::process::Child, crate::process_control::ChildJob)> {
@@ -1743,6 +1860,7 @@ fn spawn_library_root_probe(
     )
 }
 
+#[cfg(feature = "cluster")]
 async fn fetch_offer(
     transport: &PeerTransport,
     peer: ActivityPeer,
@@ -1811,8 +1929,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         io: media_io_observation(),
         // Older owners must not dispatch their removed relay endpoint here.
         live_tv_processing: false,
-        live_tv_resource_processing: state.serving.is_ready()
-            && !state.membership.local_maintenance_active(),
+        live_tv_resource_processing: state.serving.is_ready() && !state.local_maintenance_active(),
     }
 }
 
@@ -1839,7 +1956,7 @@ pub(crate) async fn local_quality_catalog(
     if let Err(error) = request.validate() {
         return QualityCatalogResult::unavailable(CatalogCause::RequestInvalid(error));
     }
-    if state.membership.local_maintenance_active() {
+    if state.local_maintenance_active() {
         return QualityCatalogResult::unavailable(CatalogCause::Maintenance);
     }
     let progress = std::sync::Mutex::new(Vec::new());
@@ -2023,7 +2140,7 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
             ..base()
         };
     }
-    if state.membership.local_maintenance_active() {
+    if state.local_maintenance_active() {
         return MediaOffer {
             refusal_code: Some("node_maintenance".to_owned()),
             ..base()
@@ -2143,12 +2260,14 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
     }
 }
 
+#[cfg(feature = "cluster")]
 fn has_reachable_media_peer(peers: &[ActivityPeer]) -> bool {
     peers
         .iter()
         .any(|peer| peer.reachable && peer.http_base.is_some())
 }
 
+#[cfg(any(test, feature = "cluster"))]
 const fn snapshot_fanout_concurrency() -> usize {
     MAX_PEERS
 }
@@ -2166,6 +2285,7 @@ fn requested_tracks_exist(
         })
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn snapshot_can_answer(snapshot: &MediaNodeSnapshot, request: &MediaOfferRequest) -> bool {
     snapshot.protocol_version == PROTOCOL_VERSION
         && snapshot.egress_pressure != PressureBand::Unavailable
@@ -2179,6 +2299,7 @@ fn snapshot_can_answer(snapshot: &MediaNodeSnapshot, request: &MediaOfferRequest
         && (!request.hdr10 || !snapshot.tone_map.is_empty())
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn snapshot_is_bounded(snapshot: &MediaNodeSnapshot, expected_node_id: &str) -> bool {
     snapshot.node_id == expected_node_id
         && !snapshot.node_id.is_empty()
@@ -2203,6 +2324,7 @@ fn snapshot_is_bounded(snapshot: &MediaNodeSnapshot, expected_node_id: &str) -> 
         })
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn accepted_snapshot(
     snapshot: MediaNodeSnapshot,
     expected_node_id: &str,
@@ -2217,12 +2339,14 @@ fn accepted_snapshot(
     })
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn snapshot_remaining_ttl(observed_at_unix_ms: i64) -> Option<Duration> {
     let budget_ms = u64::try_from(SNAPSHOT_EXPIRY.as_millis()).unwrap_or(u64::MAX);
     let age_ms = unix_ms().abs_diff(observed_at_unix_ms);
     budget_ms.checked_sub(age_ms).map(Duration::from_millis)
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn offer_is_bounded(
     offer: &MediaOffer,
     expected_node_id: &str,
@@ -2405,6 +2529,7 @@ fn bounded_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn root_probe_capacity_remaining(running: usize) -> usize {
     MAX_ROOT_PROBE_CHILDREN.saturating_sub(running)
 }
@@ -2425,7 +2550,7 @@ mod tests {
 
     #[tokio::test]
     async fn retained_receipt_receiver_requires_fresh_actual_peer_advertisement() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(None);
         assert!(!pool.retained_output_receiver("worker").await);
         let legacy = snapshot("worker", &["h264"], 1080);
         let mut wire = serde_json::to_value(&legacy).expect("snapshot");
@@ -2741,6 +2866,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cluster")]
     fn advisory_rollout_observation_reports_every_voter_on_the_current_protocol() {
         let now = tokio::time::Instant::now();
         let peers = vec![ActivityPeer {
@@ -2867,6 +2993,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cluster")]
     fn root_probes_require_a_reachable_remote_media_consumer() {
         assert!(!has_reachable_media_peer(&[]));
         assert!(!has_reachable_media_peer(&[ActivityPeer {
@@ -2915,7 +3042,7 @@ mod tests {
 
     #[tokio::test]
     async fn deadline_fencing_retains_children_and_rejects_delayed_success() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(None);
         let running_root = PathBuf::from("/media/running");
         let running_child = tokio::process::Command::new("sh")
             .arg("-c")
@@ -3065,7 +3192,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn snapshots_expire_after_fifteen_seconds() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(None);
         pool.snapshots.write().await.insert(
             "peer".to_owned(),
             CachedSnapshot {
@@ -3102,7 +3229,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn receipt_cannot_restart_an_old_snapshots_full_ttl() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(None);
         let mut old = snapshot("peer", &["h264"], 1080);
         old.observed_at_unix_ms = unix_ms() - 10_000;
         let cached = accepted_snapshot(old, "peer").expect("ten-second-old snapshot remains fresh");
@@ -3118,7 +3245,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn root_readability_is_specific_and_age_bounded() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(None);
         let observed_at = tokio::time::Instant::now();
         pool.root_readability.write().await.extend([
             (
@@ -3170,8 +3297,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_single_node_poll_performs_no_peer_http_work() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(None);
+        #[cfg(feature = "cluster")]
         pool.poll_once().await.expect("empty membership is a no-op");
+        #[cfg(not(feature = "cluster"))]
+        Arc::clone(&pool).poll_loop().await;
         assert!(pool.snapshots.read().await.is_empty());
     }
 }

@@ -20,6 +20,7 @@ use crate::transcode::{HlsSessionInfo, SessionKind};
 
 pub(crate) const PROTOCOL_V1: &str = "plurx-playback-control-v1";
 pub(crate) const MAX_REQUEST_BYTES: usize = 16 * 1024;
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) const MAX_RELAY_BYTES: usize = 20 * 1024;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub(crate) const EXCHANGE_DEADLINE: Duration = Duration::from_secs(4);
@@ -2394,6 +2395,7 @@ pub(crate) struct ControlErrorBody {
 }
 
 impl ControlErrorBody {
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn is_valid_for_status(&self, status: u16) -> bool {
         matches!(
             (status, self.code.as_str()),
@@ -2437,6 +2439,7 @@ pub(crate) struct ControlRelayRequest {
 }
 
 impl ControlRelayRequest {
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.session_id).is_ok()
             && uuid::Uuid::parse_str(&self.generation).is_ok()
@@ -14872,19 +14875,25 @@ static ROLLING_PRODUCER_ACTION_DEADLINES: [AtomicU64; 2] = [const { AtomicU64::n
 /// records won/already-terminal independently.
 static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
 
+#[cfg(feature = "cluster")]
 const RELAY_VALID_RESPONSE: usize = 0;
+#[cfg(feature = "cluster")]
 const RELAY_TRANSPORT_ERROR: usize = 1;
+#[cfg(feature = "cluster")]
 const RELAY_INVALID_RESPONSE: usize = 2;
 
 /// Records every outbound control relay even when `?` exits its caller. The
 /// default outcome is transport failure; callers promote it only after a
 /// bounded response has passed the protocol schema and tuple checks.
+#[cfg(feature = "cluster")]
 pub(crate) struct RelayMetricGuard {
     started: Instant,
     outcome: usize,
 }
 
+#[cfg(feature = "cluster")]
 impl RelayMetricGuard {
+    #[cfg(feature = "cluster")]
     pub(crate) fn new() -> Self {
         Self {
             started: Instant::now(),
@@ -14892,15 +14901,18 @@ impl RelayMetricGuard {
         }
     }
 
+    #[cfg(feature = "cluster")]
     pub(crate) fn invalid_response(&mut self) {
         self.outcome = RELAY_INVALID_RESPONSE;
     }
 
+    #[cfg(feature = "cluster")]
     pub(crate) fn valid_response(&mut self) {
         self.outcome = RELAY_VALID_RESPONSE;
     }
 }
 
+#[cfg(feature = "cluster")]
 impl Drop for RelayMetricGuard {
     fn drop(&mut self) {
         let elapsed = self.started.elapsed();

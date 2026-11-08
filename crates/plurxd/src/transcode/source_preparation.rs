@@ -120,23 +120,28 @@ impl SourceProbeHookOwner {
             .downcast_ref()
             .expect("Source probe test hooks")
     }
+    #[cfg(feature = "cluster")]
     pub(crate) fn pause_before_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks().before.arm("source_probe_before_spawn")
     }
+    #[cfg(feature = "cluster")]
     pub(crate) fn pause_after_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks().after.arm("source_probe_after_spawn")
     }
+    #[cfg(feature = "cluster")]
     pub(crate) fn pause_after_wait_failure(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks()
             .failed_wait
             .store(true, std::sync::atomic::Ordering::Release);
         self.test_hooks().retry.arm("source_probe_reap_retry")
     }
+    #[cfg(feature = "cluster")]
     pub(crate) fn pause_after_evidence(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks()
             .evidence
             .arm("source_probe_after_evidence")
     }
+    #[cfg(feature = "cluster")]
     pub(crate) fn spawned_pid(&self) -> u32 {
         self.test_hooks()
             .spawned_pid
@@ -165,6 +170,7 @@ pub(crate) fn close_source_before_settlement(
 
 #[cfg(all(test, unix))]
 impl SourceProbeHookOwner {
+    #[cfg(feature = "cluster")]
     pub(crate) fn assert_closed_parent_settlements(&self) {
         let hooks = self.test_hooks();
         assert!(

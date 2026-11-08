@@ -1533,7 +1533,8 @@ pub(crate) async fn digest_subtitle(file: &std::fs::File) -> Result<String, Stri
     let read = async {
         input.rewind().await?;
         let mut hash = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
+        // Keep the read buffer off the stack of the enclosing VOD preparation future.
+        let mut buffer = vec![0u8; 64 * 1024];
         let mut total = 0u64;
         loop {
             let count = input.read(&mut buffer).await?;

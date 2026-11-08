@@ -15,6 +15,18 @@ use std::{
     time::Duration,
 };
 
+mod helper;
+#[cfg(test)]
+pub(crate) use helper::tests::{
+    helper as helper_fixture_metadata, installation as helper_fixture_installation,
+    manifest as helper_fixture_manifest, signer as helper_fixture_signer,
+};
+pub use helper::{
+    select_migration_helper, MigrationBuildV1, MigrationHelperArtifactV1, MigrationHelperProfile,
+    MigrationHelperPurpose, MigrationHelperV1, MigrationOutputV1, MigrationSourceCohortV1,
+    UpdateManifestV2, VerifiedMigrationHelper,
+};
+
 pub const MAX_MANIFEST: usize = 1024 * 1024;
 pub const MAX_ARTIFACT: u64 = 8 * 1024 * 1024 * 1024;
 pub const MANIFEST_NAME: &str = "plurx-update-v1.json";
@@ -179,12 +191,16 @@ pub struct AcceptedReleasesV1 {
 #[derive(Debug, Clone)]
 pub struct VerifiedManifest {
     manifest: UpdateManifestV1,
+    migration_helpers: Vec<MigrationHelperV1>,
     digest: String,
     key_id: String,
 }
 impl VerifiedManifest {
     pub fn manifest(&self) -> &UpdateManifestV1 {
         &self.manifest
+    }
+    pub(crate) fn migration_helpers(&self) -> &[MigrationHelperV1] {
+        &self.migration_helpers
     }
     pub fn digest(&self) -> &str {
         &self.digest
@@ -224,6 +240,54 @@ pub fn verify_manifest(
     ledger: &AcceptedReleasesV1,
     now: u64,
 ) -> Result<VerifiedManifest> {
+    verify_manifest_with_policy(
+        bytes,
+        signature,
+        keys,
+        installed,
+        ledger,
+        now,
+        ManifestPolicy::Upgrade,
+    )
+}
+
+/// Authenticate persisted accepted release bytes for the exact installed
+/// daemon. This never admits a new release or advances the acceptance ledger.
+pub fn verify_accepted_installed_manifest(
+    bytes: &[u8],
+    signature: &[u8],
+    keys: &[TrustKey],
+    installed: &InstallationV1,
+    ledger: &AcceptedReleasesV1,
+    now: u64,
+    actual_daemon: &MigrationBuildV1,
+) -> Result<VerifiedManifest> {
+    verify_manifest_with_policy(
+        bytes,
+        signature,
+        keys,
+        installed,
+        ledger,
+        now,
+        ManifestPolicy::AcceptedInstalled(actual_daemon),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ManifestPolicy<'a> {
+    Upgrade,
+    AcceptedInstalled(&'a MigrationBuildV1),
+}
+
+fn verify_manifest_with_policy(
+    bytes: &[u8],
+    signature: &[u8],
+    keys: &[TrustKey],
+    installed: &InstallationV1,
+    ledger: &AcceptedReleasesV1,
+    now: u64,
+    policy: ManifestPolicy<'_>,
+) -> Result<VerifiedManifest> {
     if keys.is_empty() {
         return Err(untrusted("production update trust roots have not been provisioned; use a verified manual bootstrap release"));
     }
@@ -243,27 +307,52 @@ pub fn verify_manifest(
             "signing key is not part of installed trusted key bridge",
         ));
     }
-    let m: UpdateManifestV1 = serde_json::from_slice(bytes)
-        .map_err(|_| untrusted("malformed/unsupported signed manifest"))?;
+    let (m, migration_helpers) = helper::parse_signed_manifest(bytes)?;
     let version = semver::Version::parse(&m.version)
         .map_err(|_| untrusted("invalid signed application version"))?;
     let current = semver::Version::parse(&installed.current_version)
         .map_err(|_| untrusted("invalid installed version"))?;
     let controller = semver::Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|_| untrusted("invalid controller version"))?;
-    if m.schema_version != 1
+    if !matches!(m.schema_version, 1 | 2)
         || m.repository != REPOSITORY
         || m.channel != "stable"
         || m.tag != format!("v{version}")
         || !version.pre.is_empty()
-        || version <= current
         || m.sequence == 0
-        || m.sequence < ledger.highest_sequence
-        || (m.sequence == ledger.highest_sequence && !ledger.manifests.contains_key(&m.tag))
+        || (matches!(policy, ManifestPolicy::Upgrade)
+            && (m.sequence < ledger.highest_sequence
+                || (m.sequence == ledger.highest_sequence
+                    && !ledger.manifests.contains_key(&m.tag))))
     {
         return Err(untrusted(
             "wrong schema/repository/channel/tag or replay/downgrade",
         ));
+    }
+    match policy {
+        ManifestPolicy::Upgrade if version <= current => {
+            return Err(untrusted(
+                "update candidate is not newer than the installed version",
+            ));
+        }
+        ManifestPolicy::AcceptedInstalled(actual) => {
+            // Discovery accepts offered releases before installation. A newer
+            // offer must not revoke the exact still-installed cohort; the
+            // signed sequence is bounded by highwater and its exact tag/digest
+            // must already exist in the ledger below.
+            helper::validate_installation_target(installed, actual)?;
+            if version != current
+                || m.tag != installed.current_tag
+                || m.repository != installed.repository
+                || m.source_commit != installed.current_commit
+                || m.source_commit != actual.commit
+                || m.source_tree != actual.tree
+                || m.sequence > ledger.highest_sequence
+            {
+                return Err(untrusted("accepted manifest does not identify the exact installed daemon and accepted highwater"));
+            }
+        }
+        ManifestPolicy::Upgrade => {}
     }
     if !hash(&m.source_commit, 40) || !hash(&m.source_tree, 40) || !hash(&m.packaging_commit, 40) {
         return Err(untrusted("invalid signed source provenance"));
@@ -285,18 +374,18 @@ pub fn verify_manifest(
             "a verified controller bridge/bootstrap upgrade is required",
         ));
     }
-    if m.upgrade_from.is_empty()
-        || m.upgrade_from.len() > 32
-        || !m
-            .upgrade_from
-            .iter()
-            .map(|r| {
-                semver::VersionReq::parse(r)
-                    .map_err(|_| untrusted("invalid upgrade-from constraint"))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .iter()
-            .any(|r| r.matches(&current))
+    if m.upgrade_from.is_empty() || m.upgrade_from.len() > 32 {
+        return Err(untrusted("unsupported upgrade-from version"));
+    }
+    let upgrade_from = m
+        .upgrade_from
+        .iter()
+        .map(|r| {
+            semver::VersionReq::parse(r).map_err(|_| untrusted("invalid upgrade-from constraint"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if matches!(policy, ManifestPolicy::Upgrade)
+        && !upgrade_from.iter().any(|r| r.matches(&current))
     {
         return Err(untrusted("unsupported upgrade-from version"));
     }
@@ -350,7 +439,15 @@ pub fn verify_manifest(
             return Err(untrusted("artifact platform/format mismatch"));
         }
     }
+    helper::validate_helpers(&m, &migration_helpers)?;
     let digest = hex::encode(Sha256::digest(bytes));
+    if matches!(policy, ManifestPolicy::AcceptedInstalled(_))
+        && ledger.manifests.get(&m.tag) != Some(&digest)
+    {
+        return Err(untrusted(
+            "installed manifest was not previously accepted with this exact digest",
+        ));
+    }
     if ledger
         .manifests
         .get(&m.tag)
@@ -362,6 +459,7 @@ pub fn verify_manifest(
     }
     let verified = VerifiedManifest {
         manifest: m,
+        migration_helpers,
         digest,
         key_id: key.id.to_string(),
     };
@@ -636,6 +734,25 @@ impl PublicReleaseClient {
         }
         Ok((verified, bytes, signature))
     }
+    pub(crate) fn helper_response(
+        &self,
+        selected: &VerifiedMigrationHelper<'_>,
+    ) -> Result<reqwest::blocking::Response> {
+        let artifact = selected.artifact();
+        let response = self
+            .get(&release_url(selected.release_tag(), &artifact.name))?
+            .error_for_status()
+            .map_err(|_| untrusted("migration helper asset unavailable"))?;
+        if response
+            .content_length()
+            .is_some_and(|n| n != artifact.size)
+        {
+            return Err(untrusted(
+                "migration helper Content-Length differs from signed size",
+            ));
+        }
+        Ok(response)
+    }
     pub fn stage(
         &self,
         release: &VerifiedManifest,
@@ -671,6 +788,15 @@ pub fn bounded_read(reader: &mut impl Read, max: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 pub fn stage_artifact(reader: &mut impl Read, asset: &ArtifactV1, dir: &SecureDir) -> Result<()> {
+    stage_bounded_artifact(reader, &asset.name, asset.size, &asset.sha256, dir)
+}
+pub(crate) fn stage_bounded_artifact(
+    reader: &mut impl Read,
+    name: &str,
+    size: u64,
+    sha256: &str,
+    dir: &SecureDir,
+) -> Result<()> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let temp = format!(".{}.download", uuid::Uuid::new_v4());
     let cname = std::ffi::CString::new(temp.as_str()).map_err(|_| untrusted("bad staging name"))?;
@@ -699,13 +825,13 @@ pub fn stage_artifact(reader: &mut impl Read, asset: &ArtifactV1, dir: &SecureDi
             total = total
                 .checked_add(n as u64)
                 .ok_or_else(|| untrusted("download size overflow"))?;
-            if total > asset.size || total > MAX_ARTIFACT {
+            if total > size || total > MAX_ARTIFACT {
                 return Err(untrusted("download exceeds signed size"));
             }
             digest.update(&buffer[..n]);
             file.write_all(&buffer[..n])?;
         }
-        if total != asset.size || hex::encode(digest.finalize()) != asset.sha256 {
+        if total != size || hex::encode(digest.finalize()) != sha256 {
             return Err(untrusted("download size/hash mismatch"));
         }
         // SAFETY: owned staging descriptor; immutable to normal consumers after publication.
@@ -713,9 +839,8 @@ pub fn stage_artifact(reader: &mut impl Read, asset: &ArtifactV1, dir: &SecureDi
             return Err(std::io::Error::last_os_error().into());
         }
         file.sync_all()?;
-        let target =
-            std::ffi::CString::new(asset.name.as_str()).map_err(|_| untrusted("bad asset name"))?;
-        if !asset_name(&asset.name) {
+        let target = std::ffi::CString::new(name).map_err(|_| untrusted("bad asset name"))?;
+        if !asset_name(name) {
             return Err(untrusted("bad asset name"));
         }
         // SAFETY: validated leaf names on same authority directory.

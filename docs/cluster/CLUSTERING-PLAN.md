@@ -27,10 +27,15 @@ durable write through one node loss, run singleton work once, and resume a
 viewer within 10 seconds after the serving node dies. Web, Apple, and Android
 must all consume the same node-list and retry contract before REQ-HA-6 is done.
 
-One node remains the default deployment and uses the same one-voter replicated
-store as three nodes. Zero configuration means no required cluster stanza or
-manual secret generation; it does not mean zero physical overhead. The
-single-node gate is:
+One node remains the default deployment and uses native SQLite with no Raft or
+quorum lifecycle. Explicit cluster creation/join selects this plan's replicated
+backend. A durable cluster never downgrades because voters are unreachable.
+The [standalone mode decision](STANDALONE-SQLITE-MODE-PROPOSAL.md) supersedes
+the former unconditional one-voter policy and defines safe conversion.
+
+The following budgets and M0/M2 evidence describe the historical replicated
+singleton comparison; they remain useful cluster overhead measurements, not
+qualification of the native mode's durability or playback behavior:
 
 | Measure | Budget against the SQLite baseline | Why this is the gate |
 |---|---:|---|
@@ -65,8 +70,9 @@ hiqlite auth/settings backend; M1c adds libraries, media, watch state,
 node-local FTS, and bounded root-aware reconciliation; and M1d completes the
 120-method store plus the progress write-rate gate. M2 adds the
 content-addressed source backup, fresh-target import with per-table parity,
-fsynced completion marker, and atomic one-voter activation; after that verified
-import, the daemon selects Hiqlite instead of SQLite. Membership/join,
+fsynced completion marker, and atomic one-voter activation. That historical
+first-boot activation is now restricted to explicit cluster adoption; normal
+startup selects native SQLite. Membership/join,
 lease-fenced publication and serving self-fencing are implemented. Replicated
 session takeover and client failover remain open.
 

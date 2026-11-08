@@ -1,3 +1,99 @@
+# Historical main census review imported from aa68c00ee (2026-11-08).
+# The following comments describe main ce11e8fd2, before this branch's native
+# SQLite/helper integration and cluster-runtime extraction. They do not set
+# current counts or locate the observer in native main; the live source audit
+# and actual count fields below govern the combined tree.
+# 19 -> 20 with bee39df0e (test: expose the blocked retirement phase on a cleanup failure):
+# `test_support.rs::worker_retirement_debug` formats `child_transition.try_lock().is_ok()` into a
+# failure message. A test-only, non-blocking probe whose guard drops at once; no transition owner.
+# 36 -> 38 with bee39df0e: the same test-only debug helper names `child_transition` twice
+# (its `child_transition_available` label and the `try_lock()` probe above). No new owner.
+# d9a0ebc76 (learner worker accounting): `spawn_background_loops` also starts
+# `http::cluster_operations::worker_status_cache_loop`, a read-only refresh of local worker
+# capacity for Activity. It owns no child or source, and returns on `background_shutdown`, the
+# same cancellation as its sibling peer-status loop.
+# +6 after the Cinema dispatch/release pushes. Two belong to d9a0ebc76's
+# `worker_status_cache_loop`: a 1 s `timeout` around one local capacity read, and the
+# `sleep_until` to its next refresh, both raced against shutdown. One is ad4acb07c's test-only
+# `interval_at` in `subtitle_pressure_preserves_committed_success_after_join`
+# (`foreground_admission_tests`). Three are Jellyfin native-HLS test retries (d25a35ea3,
+# 9fde9d148, 55f84b0e8): 250 ms and 1 s sleeps while a fixture response is `503` pending.
+# No production producer, child or detached owner is added.
+# +3 in `http/jellyfin/tests.rs` (d25a35ea3, 9fde9d148, 55f84b0e8): HTTP
+# `response.status()` reads in the pending-segment retry loops above. They match the
+# `.status(` shape but launch no process.
+#
+# Cluster worker-capacity observer ownership audit (2026-11-08): current
+# merge of main 78544ee against HEAD 7d4c37f8. This is source review, not
+# runtime qualification. One production tokio::spawn is added in
+# cluster_runtime/background.rs, after explicit Cluster mode and real
+# membership/replication checks. The task retains its AppState and the boot
+# BackgroundLoopGuard cancellation token. worker_status_cache_loop selects
+# shutdown while awaiting one one-second local-capacity sample, then selects
+# shutdown while awaiting its existing-cadence sleep_until. These are the
+# only two new timer sites; neither timeout nor cancellation claims a reap.
+# The sampler starts no child/session/source read and adds no detached helper.
+# New cluster cache fixtures add no task, timer-constructor or process site.
+# Per-file structural deltas: background.rs tasks 9->10; cluster_operations.rs
+# timers 12->14; the other four changed Rust files contribute zero sites.
+# Global counts: namespaced tasks 1087->1088, timers 2100->2102. Every other
+# count, root, regex, alias guard, forbidden zero and historical audit stays.
+#
+# Standalone SQLite/helper source ownership audit (2026-11-07), comparing
+# 8c654d37b to e6b7a3de9. This is a source census/review, not a substitute for
+# the runtime qualification recorded in PR #1396 and the build ledger.
+# Nine cluster background tasks moved from main.rs to cluster_runtime/background.rs;
+# backup's task/three timers moved to backup/cluster.rs. They retain their
+# existing owners and now require the explicit cluster composition. Purpose-key
+# timeout moved main -> cluster_runtime; shared-pin timeout moved internal media
+# sessions -> hls. Those relocations contribute no net task/timer increase.
+#
+# Seven new namespaced task-shaped sites: storage_helper::settle transfers its
+# config/root/request/operation owner to a detached settlement task; process.rs
+# transfers generation/inherited leases/cancellation to the exact child owner
+# and constructs retained bounded stdout/stderr reader tasks (one lexical
+# spawn site invoked twice). Success joins the
+# readers after actual child wait. Cancellation/drop requests kill, while the
+# retained cleanup worker waits/reaps the Child and drains both readers before
+# releasing generation/ChildJob; unavailable reap/runtime deliberately retains
+# unproven ownership. Its runtime.spawn is the one method-spawn addition.
+# Four other task sites are fixtures: the real singleton serving monitor is
+# cancelled and joined; startup_tests' native cfg alternative retains/joins its
+# HTTP task; native_source_actor's HTTP owner joins on success and aborts on
+# failed teardown; process/tests' cancellation waiter is aborted/awaited while
+# the transferred owner independently proves reap. Native Source's HTTP fixture
+# is also the sole +1 detached-tokio-task match in the transcode source scope.
+#
+# Seventeen added timer sites relative to that main: managed cluster-create
+# fixture +1; cluster operation fixture's readiness polls/deadlines +4; native
+# Live TV's awaited original request-budget bound +1; native revocation's test
+# barrier/operation bound +2; helper execution and reader-drain deadlines +2;
+# child-owner fixtures +4; native-startup fixture +1; native Source's joined
+# HTTP drain/producer retirement bounds +2. None makes a timeout prove reap.
+# The prior 2071 census additionally omitted two already-integrated main
+# subtitle_work fixture constructors (interval_at and timeout) introduced by
+# #1390; its pinned driver is directly polled/awaited, with no new task/child.
+#
+# Three Commands are the helper (spawn_job_owned/ChildJob, kill-on-drop and
+# actual wait) and test-only finite FFmpeg/FFprobe fixture setup, both collected
+# through awaited output. The latter establish successful-fixture collection,
+# not asynchronous cancellation guarantees. Five launch-shaped additions are
+# the retained runtime cleanup spawn, those two outputs and two HTTP status
+# readbacks. Six lifecycle methods are the helper's two start_kill/three wait
+# sites plus an in-process native revocation test barrier.wait. One free/UFCS
+# lifecycle addition is fixture waitpid(WNOHANG) checking ECHILD after real reap.
+# The sole kill_on_drop addition belongs to the helper's actual Child command.
+#
+# Low-level-start 0->1 is only the new `fn clone(&self)` definition in
+# settings_changes.rs's Clone implementation for boxed observer cursors: the
+# detector intentionally also matches bare clone syntax. No fork/clone syscall,
+# posix_spawn, process-group signal, or independent OS launcher was introduced.
+# Exact deltas: detached 121->122; namespaced tasks 1079->1086; method spawn
+# 89->90; timers 2071->2090; Commands 325->328; launch shapes 879->884;
+# low-level lexical starts 0->1; lifecycle methods 378->384; free/UFCS lifecycle
+# 83->84; kill-on-drop 122->123. Every detector, root, alias guard, other
+# forbidden zero and historical audit remains unchanged.
+#
 # P42 source-custody recovery ownership audit (2026-11-04), relative to
 # edf6d08fa. This is authored source review, including Astra's fixture-cleanup
 # corrections; it establishes no runtime or host-reboot qualification.
@@ -687,7 +783,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # `post_media_retirement_keeps_exact_resources_after_caller_cancellation` asserts that
 # `child_transition.try_lock()` fails while retirement is held at its cleanup-handoff point. A
 # test-only probe that is expected to fail and takes nothing; no transition owner is created.
-expected_occurrences = 19
+# Incoming fixture diagnostics take one joined child-transition lock; no runtime owner added.
+expected_occurrences = 20
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -1013,7 +1110,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # awaits its JoinHandle before asserting.
 # PR1341: +1 test-only spawn in chunk_06.rs (M5 init-wait driver); the
 # test joins it under its deadline.
-expected_occurrences = 121
+expected_occurrences = 122
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -1164,7 +1261,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # fixtures under a paused clock; one in publication.rs is a source-pin
 # string (`match_indices`) proving the 100 ms init poll is the only sleep in
 # both pre-object wait branches. No shipped sleep is added.
-expected_occurrences = 88
+# Reachable retention history awaits the real 250ms control limit between observations.
+expected_occurrences = 89
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1310,7 +1408,8 @@ pattern = "child_transition"
 # 34 -> 35 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # test-only failing `try_lock()` probe at the retirement handoff point.
 # S10 retained attachment initializes its existing response transition mutex.
-expected_occurrences = 36
+# Incoming worker_retirement_debug names the same fixture lock twice and borrows it once.
+expected_occurrences = 38
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -2546,7 +2645,9 @@ pattern = "(?:VodPreparationGuard|preparing_sessions|begin_preparing_session|own
 # PR1369: +1 test-only registry read in settle_publication_control. It observes
 # preparing/live sessions while stopping this isolated control's survivors;
 # the ten-second settlement deadline never supplies closure evidence.
-expected_occurrences = 41
+# The encoded HTTP retry helper checks the existing live/preparing registry
+# remains exactly one; this inspection creates no owner.
+expected_occurrences = 42
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -3659,7 +3760,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # warm_inventory awaits the existing refresh owner and spawns no extra task.
 # Cinema manual-scan dispatch adds the driver in the busy-worker renewal
 # regression. The test releases its BeforeScan barrier and awaits the handle.
-expected_occurrences = 1080
+expected_occurrences = 1088
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3902,7 +4003,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # the listener owner. Both parent additions are present in the source union.
 # Subtitle cue index (#1340): +1 scope.spawn in mkv_sparse::parallel; the
 # reader threads are scoped and joined by std::thread::scope before it returns.
-expected_occurrences = 89
+expected_occurrences = 90
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5419,7 +5520,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # commit and pressure-check event ordering (15 s), scan acknowledgement
 # (3 s), and renewal visibility (12 s with a 50 ms poll).
 # The worker's existing idle sleep changes delay in place (zero net sites).
-expected_occurrences = 2080
+# Encoded Jellyfin qualification follows at most four typed pending replies
+# per phase on the original activation; the one-second awaited retry adds
+# one timer site and retains all native byte/clock/Stop assertions.
+# Incoming completion pressure test adds one interval; reachable retention
+# history adds one awaited cadence site. Neither introduces a detached owner.
+# Reachable retention history awaits the real 250ms control limit between observations.
+expected_occurrences = 2102
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5910,7 +6017,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # normal exit under a 20-second timeout with kill_on_drop as cancellation's
 # backstop. They run only after the session and reconstruction slot settle;
 # neither launches a production producer or turns timeout into valid evidence.
-expected_occurrences = 325
+expected_occurrences = 328
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6581,7 +6688,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # are unchanged; the two joined fixture tasks are classified above separately.
 # PR1369: +2 output() calls for the same bounded offline FFmpeg/FFprobe
 # controls inventoried above, not additional children or detached owners.
-expected_occurrences = 879
+# Encoded HTTP retry inspects Response::status(); it starts no OS process.
+# Final native/cluster route assertions retain the prior structural count:
+# per-file review against the integrated base found no spawn/output/status delta.
+expected_occurrences = 885
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6591,7 +6701,7 @@ expected_occurrences = 0
 [[module_structures]]
 id = "low-level-process-start"
 pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:fork|vfork|posix_spawn|posix_spawnp)|(?:(?:libc|nix|rustix)(?:::[A-Za-z_]\\w*)*)::(?:clone|clone3)|(?<![:.\\w])(?:fork|vfork|clone|clone3|posix_spawn|posix_spawnp))\\s*\\("
-expected_occurrences = 0
+expected_occurrences = 1
 
 [[module_structures]]
 id = "process-lifecycle-method"
@@ -6877,7 +6987,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 378
+expected_occurrences = 384
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6956,7 +7066,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 83
+expected_occurrences = 84
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7106,7 +7216,7 @@ pattern = "kill_on_drop\\s*\\("
 # PR1369: +2 cancellation backstops on those same physical-control diagnostics.
 # Successful evidence requires collected exit status and decoded/probed media;
 # a timeout drops the guarded child and fails the control.
-expected_occurrences = 122
+expected_occurrences = 123
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

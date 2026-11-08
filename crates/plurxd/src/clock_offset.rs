@@ -113,12 +113,9 @@ impl RosterProof {
     }
 
     fn for_membership(membership: &MembershipManager) -> Self {
-        Self::new(match membership.local_db_raft_metrics() {
-            Some(applied) => SettingsChangeSource::Applied(applied),
-            // Without a replicated store the roster is empty and read from
-            // nothing; no other process can change it.
-            None => SettingsChangeSource::LocalOnly,
-        })
+        Self::new(crate::cluster_runtime::settings_changes_for_membership(
+            membership,
+        ))
     }
 
     /// The held roster while it stands, otherwise one consistent read, held
@@ -814,14 +811,20 @@ async fn follow_stored_enforcement<S, F>(
 pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::CancellationToken) {
     // The store is readable here (startup stays advisory because it is not):
     // apply the stored switch immediately, then keep following it.
-    let guard = state.membership.clock_guard();
+    let Some(membership) = &state.membership else {
+        return;
+    };
+    let Some(observer) = &state.clock_observer else {
+        return;
+    };
+    let guard = membership.clock_guard();
     let enforcement = follow_stored_enforcement(
         state.store.as_ref(),
         state.settings_changes.clone(),
         |enforced| guard.set_enforced(enforced),
         shutdown.clone(),
     );
-    tokio::join!(state.clock_observer.run(shutdown.clone()), enforcement);
+    tokio::join!(observer.run(shutdown.clone()), enforcement);
 }
 
 async fn observation_round(

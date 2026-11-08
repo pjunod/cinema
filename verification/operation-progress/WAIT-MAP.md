@@ -5,6 +5,26 @@
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
 
+This imported review records immutable main `ce11e8fd2` as published in
+`aa68c00ee`. Its source locations and fingerprints describe that historical
+tree; the native integration reviews and live mappings retain their separate
+source identities.
+
+## Main direct-push source drift — scoped review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed the authority-source drift that direct
+pushes left on main `ce11e8fd2`, against the last reviewed bytes. This is an
+author review awaiting an independent check, not execution evidence.
+
+| Changed source (commit) | Change | Model action or property | Still holds? |
+|---|---|---|---|
+| `plurxd/background_jobs.rs` (4f417e852) | Test-only: inside `#[cfg(test)] mod tests`, the fixture `lost_claim_acknowledgement_resolves_the_original_attempt` stops the heartbeat and settles joined source custody before reading the candidate | None; no production code changes. `ReplayClaim`/`ResolveClaim` correspondence and every claim/settlement body are unchanged | Yes |
+| `plurxd/main.rs` (d9a0ebc76) | `spawn_background_loops` also starts `worker_status_cache_loop`, a read-only, cancellable once-per-interval refresh of local worker capacity for Activity | None; the selected worker spawn, its wait/lock order and the queue/domain authority paths are unchanged | Yes |
+| `plurxd/transcode/manager/produce.rs` (0a33ddc02) | One `tracing::warn!` gains `target: "plurxd::transcode"` | None; no control flow change | Yes |
+
+No model, configuration or property changes; only whole-file pins are
+refreshed.
+
 ## Source custody replay on 2026-11-07
 
 Compared with `cc2ca1338`, scheduler upkeep preserves the interval from a
@@ -13,6 +33,104 @@ evidence, including after its authority expires. The cleanup transaction
 rechecks the current owner after its initial read. The selected library
 worker's token and publication-lock waits retain their existing order.
 The focused Store regression covers the activation and renewal interleavings.
+
+## Optional cluster composition and SQLite close — scoped review on 2026-11-04
+
+Astra independently compared the candidate with effort `6545218`. The workspace
+selects the daemon by default and adds a separate migration executable. The
+Hiqlite and Tokio package versions pinned by these mappings are identical.
+The feature condition on `source_arbitration_objects` selects an installer and
+test helper. The underlying queue SQL, custody resolution and native schema
+still use the audited definitions.
+
+`AppState` selects `LocalJobAuthority` from native storage mode. Cluster mode
+requires the selected membership manager. The feature condition on the
+maintenance-only `AdmittedRoleJobAuthority` confines the persisted learner
+refusal to builds that can open the cluster. Worker admission still reaches
+`acquire_cluster_job_with_policy`, including the Store claim and domain lease.
+The reviewed `run_scan`, `run_targeted`, scheduler, background worker,
+`admit_fragment`, lease renewal, publisher and settlement anchors preserve
+their prior control flow. Transcode construction supplies optional membership
+only for peer access. Startup still registers the selected authoritative Store
+and replays source recovery against the selected node ID before worker launch.
+
+SQLite now admits a worker permit before it schedules blocking SQL. Shutdown
+closes admission, drains the actual workers and explicitly closes reader and
+writer connections. `with_fenced_conn` retains its transaction-time lease,
+extension and publication predicates. The existing model covers work with an
+open Store. Physical close, backup drainage, helper process lifetime, startup
+conversion, and shutdown completion require their own runtime evidence.
+
+Maintenance now checks pending helper intent while holding the actual native
+root before opening the writer. Replicated maintenance validates the committed
+cluster manifest against the existing node ID and activation marker, and refuses
+pending conversion before connecting. The integration fixture publishes the
+validated binding for its actual selected voter before signaling readiness.
+Its formal-publication module reference retains the same meaning.
+
+The durable and progress mappings refresh 17 and 12 existing whole-file rows.
+Worker refinement refreshes 20 references to `job_lease.rs` and the containing
+correspondence digest. The historical design-time source anchors and earlier
+native and recovery audits remain available below. This review establishes
+source correspondence for the existing models and adds no fairness premise.
+
+## Native and recovery integration — scoped review on 2026-11-04
+
+Astra independently reviewed effort `10f9b3fd5209895f668aceb624f4fd617999e797`
+combined with main `72409a430`; retain both dated parent audits below.
+[The integration audit](../durable-jobs/CONTRACT.md#native-and-recovery-integration--scoped-review-on-2026-11-04)
+records why the selected native and replicated Stores may both register as
+authoritative, while the old SQLite activation-recovery projection cannot.
+Startup uses the exact selected Store and node identity; the combined scheduler
+retains native/cluster admission and retries verified recovery before ordinary
+settlement replay. These additional filesystem/Store waits and the physical
+host-reboot premise remain outside the finite progress model.
+
+Refresh four existing whole-file rows for combined `main.rs`/`state.rs` bytes;
+retain both native-entry rows and all recovery dependency rows. All selected
+anchors, model/configuration/fairness inputs and historical source anchors and
+qualification receipts remain unchanged. Fresh mapping/smoke evidence does not
+prove merged runtime execution, directory custody, physical recovery or scan
+completion. Native and cluster recovery-composition regressions remain separate.
+
+## Native runtime entry — scoped source review on 2026-11-04
+
+Astra independently inspected runtime candidate
+`cf095b203ec78d083385cbb6ecce13dc01378256`; these source bytes are also present
+in local integration `0cd29c10b`. Previous admitted fingerprints match
+`431581e2` for `job_lease.rs`, `d03c8abd` for membership, `bd3bfffb` for state,
+and `dac9e2c7` for main. Nine existing whole-file pins follow those reviewed
+deltas; two additional source rows identify the new local authority entry and
+mode-specific composition as external prerequisites, not modeled transitions.
+
+`LocalJobAuthority::may_run_cluster_jobs` returns true without membership or
+quorum I/O. `AppState` selects it only for the mode supplied by the selected
+`RuntimeStore`; cluster mode still supplies the actual `MembershipManager`.
+Both cluster `may_run_cluster_jobs` and `may_execute_job`, including committed
+voter/member and local-maintenance refusals, are byte-identical to their prior
+pins. The local authority removes an external admission wait; it does not
+bypass queue claim, domain acquisition or publication fencing. Maintenance CLI
+native admission holds an opened native Store and its directory lease.
+
+Domain lease timing, renewal drainage, release/retry/drop, selected library
+callers, schedule/worker-loop signatures and the main worker-spawn anchor are
+unchanged. Cluster background loops moved to
+[cluster composition](../../crates/plurxd/src/cluster_runtime/background.rs)
+and still start for cluster mode, including membership heartbeat, clock and
+serving-fence observation. Native mode deliberately starts none of those.
+The new membership import helpers require an actual committed singleton and
+install the existing fencing statements; they do not change the selected
+live cluster authority methods or grant jobs from a synthetic voter.
+
+The model starts after native selection. Exclusive directory ownership,
+storage conversion/recovery, new SQLite v124 identity tables, capability
+construction and shutdown remain outside its state/action/fairness mapping.
+The retained connection lifetime and startup test references are described in
+[the durable-job audit](../durable-jobs/CONTRACT.md#native-runtime-entry--scoped-source-review-on-2026-11-04).
+Neither unconditional local admission nor the existing backend-return premise
+proves OS/SQLite progress or physical worker drainage. Existing custody and
+pause/reacquisition gaps remain open. No model/configuration/fairness changes,
+new runtime execution, or renewal of historical qualification is claimed.
 
 ## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
 

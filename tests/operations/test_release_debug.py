@@ -8,7 +8,9 @@ import unittest
 
 from validation.release_artifact import create, verify
 from validation.release_debug import Elf, MAX_METADATA, verify_packed_pair
-from validation.release_dockerfile import required_debug_binaries, render, render_binary_export
+from validation.release_dockerfile import (
+    required_debug_binaries, render, render_binary_export, select_distribution,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -165,14 +167,48 @@ class PackedDebugCase(unittest.TestCase):
 
     def test_export_and_runtime_keep_debug_beside_every_binary(self):
         source = (ROOT / "Dockerfile").read_text()
-        names = ("plurxd", "plurx-cluster-check")
-        self.assertEqual(required_debug_binaries(source), names)
-        exported, runtime = render_binary_export(source), render(source)
-        for name in names:
-            self.assertIn(f"COPY --from=build /{name}.dwp /{name}.dwp", exported)
-            self.assertIn(f"COPY --chmod=0644 release-bin/{name}.dwp /usr/local/bin/{name}.dwp", runtime)
-        with self.assertRaisesRegex(ValueError, "every binary"):
-            required_debug_binaries(source.replace("COPY --from=build /plurxd.dwp /usr/local/bin/plurxd.dwp", ""))
+        profiles = {
+            "standalone": ("plurxd",),
+            "cluster": ("plurxd", "plurx-cluster-check"),
+        }
+        for profile, names in profiles.items():
+            with self.subTest(profile=profile):
+                selected = select_distribution(source, profile)
+                self.assertEqual(required_debug_binaries(selected), names)
+                exported, runtime = render_binary_export(selected), render(selected)
+                for name in names:
+                    self.assertIn(f"COPY --from=build /{name}.dwp /{name}.dwp", exported)
+                    self.assertIn(
+                        f"COPY --chmod=0644 release-bin/{name}.dwp /usr/local/bin/{name}.dwp",
+                        runtime,
+                    )
+                if profile == "standalone":
+                    self.assertNotIn("plurx-cluster-check.dwp", exported)
+                    self.assertNotIn("plurx-cluster-check.dwp", runtime)
+
+    def test_explicit_profiles_refuse_missing_all_or_partial_debug_sidecars(self):
+        source = (ROOT / "Dockerfile").read_text()
+        profiles = {
+            "standalone": ("plurxd",),
+            "cluster": ("plurxd", "plurx-cluster-check"),
+        }
+        for profile, names in profiles.items():
+            selected = select_distribution(source, profile)
+            missing_sets = [names]
+            if len(names) > 1:
+                missing_sets.extend((name,) for name in names)
+            for missing in missing_sets:
+                with self.subTest(profile=profile, missing=missing):
+                    damaged = selected
+                    for name in missing:
+                        directive = f"COPY --from=build /{name}.dwp /usr/local/bin/{name}.dwp"
+                        self.assertIn(directive, damaged)
+                        damaged = damaged.replace(directive, "")
+                    for consume in (required_debug_binaries, render_binary_export, render):
+                        with self.subTest(consumer=consume.__name__), self.assertRaisesRegex(
+                            ValueError, "every binary"
+                        ):
+                            consume(damaged)
 
     def test_historical_runtime_does_not_invent_a_debug_requirement(self):
         source = "FROM rust:1-bookworm AS build\nWORKDIR /src\nRUN true\nFROM debian:bookworm-slim\nCOPY --from=build /plurxd /usr/local/bin/plurxd\n"

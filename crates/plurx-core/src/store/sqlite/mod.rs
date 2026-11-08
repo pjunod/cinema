@@ -27,8 +27,11 @@ mod jellyfin_login;
 mod jellyfin_play;
 mod library;
 mod library_channels;
+mod lifecycle;
 mod live_tv_resource;
 mod media;
+mod native_backup;
+mod native_sharing;
 mod offline;
 mod outbox;
 mod playback_handoffs;
@@ -47,7 +50,11 @@ mod watch;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "fixtures")]
+use std::sync::Mutex;
+
+use lifecycle::{ConnectionGuard, ConnectionLifecycle, ConnectionSlot};
 
 use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -131,6 +138,8 @@ const _: () = assert!(
 /// applied index + 1. Never edit an entry that has shipped — append instead.
 /// Visible to the import inventory guard, which needs to know which migration
 /// first creates each table it plans to read.
+pub(crate) const NATIVE_AUTHORITY_SCHEMA: &str = "CREATE TABLE storage_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance_id TEXT NOT NULL, node_id TEXT NOT NULL, generation TEXT NOT NULL) STRICT; CREATE TABLE sharing_local_census (node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),generation INTEGER NOT NULL CHECK(generation>0),claimed_at_ms INTEGER NOT NULL CHECK(claimed_at_ms>0)) STRICT;";
+
 pub(crate) const MIGRATIONS: &[&str] = &[
     // v1: settings KV — the seed of all replicated durable state.
     "CREATE TABLE settings (
@@ -1335,6 +1344,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::PREPARED_MIGRATION,
     // v124: shared dispatch turns for interactive library work.
     super::background_job_turns::SCHEMA,
+    // v125: native storage authority and local boot census. Older binaries
+    // refuse this schema before trying to activate native SQLite into Raft.
+    NATIVE_AUTHORITY_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1499,7 +1511,8 @@ fn user_from_row(row: &Row<'_>) -> rusqlite::Result<User> {
 }
 
 pub struct SqliteStore {
-    conn: Arc<Mutex<Connection>>,
+    lifecycle: Arc<ConnectionLifecycle>,
+    conn: Arc<RetainedConnection>,
     /// Dedicated read-only connections, for file-backed stores.
     ///
     /// Serializing writes through the one guarded connection is right;
@@ -1527,14 +1540,32 @@ pub struct SqliteStore {
     settings_reads: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
+/// Connection work owns this shared state, including after its async caller
+/// was cancelled. The opaque owner is dropped only after the connection.
+/// Storage runtimes can retain their own lifetime authority without teaching
+/// the SQLite backend anything about a directory, deployment mode or Raft.
+struct RetainedConnection {
+    connection: ConnectionSlot,
+    _lifetime_guard: Option<Arc<dyn Send + Sync>>,
+}
+
+impl std::ops::Deref for RetainedConnection {
+    type Target = ConnectionSlot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
 pub use housekeeping::prometheus_sqlite_health;
 
 /// A few read-only connections picked round-robin. Opened READ_ONLY so a
 /// routing mistake is a loud error instead of a write sneaking around the
 /// writer's serialization.
 struct ReadPool {
-    conns: Vec<Mutex<Connection>>,
+    conns: Vec<ConnectionSlot>,
     next: AtomicUsize,
+    _lifetime_guard: Option<Arc<dyn Send + Sync>>,
 }
 
 /// Two: enough that a settings read and a metadata read can overlap, few
@@ -1571,19 +1602,44 @@ impl SqliteStore {
         path: &Path,
         read_connections: usize,
     ) -> Result<Self, StoreError> {
+        Self::open_retaining(path, read_connections, None)
+    }
+
+    /// Retain a caller-owned lifetime capability in every writer, reader and
+    /// queued blocking operation. The guard contains no backend policy here.
+    pub(crate) fn open_with_lifetime_guard(
+        path: &Path,
+        guard: Arc<dyn Send + Sync>,
+    ) -> Result<Self, StoreError> {
+        Self::open_retaining(path, READ_CONNS, Some(guard))
+    }
+
+    fn open_retaining(
+        path: &Path,
+        read_connections: usize,
+        guard: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<Self, StoreError> {
+        let lifecycle = Arc::new(ConnectionLifecycle::default());
         let conn = Connection::open(path)?;
-        housekeeping::boot_integrity_check(&conn, path, housekeeping::BOOT_CHECK_BUDGET)?;
-        let mut store = Self::init(conn)?;
+        housekeeping::boot_integrity_check(
+            &conn,
+            path,
+            housekeeping::BOOT_CHECK_BUDGET,
+            guard.as_ref().map(Arc::downgrade),
+            Arc::downgrade(&lifecycle),
+        )?;
+        let mut store = Self::init_retaining(conn, guard.clone(), lifecycle)?;
         store.path = Some(Arc::new(path.to_owned()));
         // After init: the writer has migrated, so the schema the readers see
         // is the one this binary expects.
         let mut conns = Vec::with_capacity(read_connections.max(1));
         for _ in 0..read_connections.max(1) {
-            conns.push(Mutex::new(housekeeping::open_reader(path)?));
+            conns.push(ConnectionSlot::new(housekeeping::open_reader(path)?));
         }
         store.reads = Some(Arc::new(ReadPool {
             conns,
             next: AtomicUsize::new(0),
+            _lifetime_guard: guard,
         }));
         Ok(store)
     }
@@ -1612,11 +1668,23 @@ impl SqliteStore {
     }
 
     fn init(conn: Connection) -> Result<Self, StoreError> {
+        Self::init_retaining(conn, None, Arc::new(ConnectionLifecycle::default()))
+    }
+
+    fn init_retaining(
+        conn: Connection,
+        guard: Option<Arc<dyn Send + Sync>>,
+        lifecycle: Arc<ConnectionLifecycle>,
+    ) -> Result<Self, StoreError> {
         housekeeping::configure_writer(&conn)?;
         Self::migrate(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
-            conn: Arc::new(Mutex::new(conn)),
+            lifecycle,
+            conn: Arc::new(RetainedConnection {
+                connection: ConnectionSlot::new(conn),
+                _lifetime_guard: guard,
+            }),
             reads: None,
             token_activity: Arc::default(),
             path: None,
@@ -1818,6 +1886,10 @@ impl SqliteStore {
     }
 
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
+        Self::migrate_schema(conn, true)
+    }
+
+    fn migrate_schema(conn: &Connection, initialize_instance: bool) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
         if current > target {
@@ -1899,7 +1971,7 @@ impl SqliteStore {
                 |row| row.get(0),
             )
             .optional()?;
-        if existing.is_none() {
+        if initialize_instance && existing.is_none() {
             let id = uuid::Uuid::new_v4().to_string();
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)",
@@ -1980,9 +2052,11 @@ impl SqliteStore {
         F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
         T: Send + 'static,
     {
+        let operation = self.lifecycle.admit()?;
         let conn = Arc::clone(&self.conn);
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
+            let _operation = operation;
             let guard = housekeeping::lock_or_recover(
                 &conn,
                 housekeeping::Pool::Writer,
@@ -1992,6 +2066,39 @@ impl SqliteStore {
         })
         .await
         .map_err(|e| StoreError::Task(e.to_string()))?
+    }
+
+    /// Stop new SQL, drain already admitted blocking readers/writers, and
+    /// explicitly close every SQLite connection. Retained Store handles refuse
+    /// further work. Cancellation of this waiter does not cancel its close
+    /// owner or release the runtime's retained lifetime capability.
+    pub async fn close(&self) -> Result<(), StoreError> {
+        self.lifecycle.begin_close();
+        let lifecycle = Arc::clone(&self.lifecycle);
+        let conn = Arc::clone(&self.conn);
+        let reads = self.reads.clone();
+        // Wait outside the blocking pool. Admitted SQL may still be queued
+        // there; close waiters must not occupy the workers that drain it.
+        tokio::spawn(async move {
+            lifecycle.wait_idle().await;
+            tokio::task::spawn_blocking(move || {
+                let _owner = lifecycle
+                    .close_owner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(reads) = reads {
+                    for reader in &reads.conns {
+                        reader.close()?;
+                    }
+                }
+                conn.connection.close()?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| StoreError::Task(error.to_string()))?
+        })
+        .await
+        .map_err(|error| StoreError::Task(error.to_string()))?
     }
 
     /// Execute a durable job publication only while its exact lease token is
@@ -2117,8 +2224,10 @@ impl SqliteStore {
         let Some(pool) = self.reads.clone() else {
             return self.with_conn(f).await;
         };
+        let operation = self.lifecycle.admit()?;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
+            let _operation = operation;
             let idx = pool.next.fetch_add(1, Ordering::Relaxed) % pool.conns.len();
             let guard = housekeeping::lock_or_recover(
                 &pool.conns[idx],

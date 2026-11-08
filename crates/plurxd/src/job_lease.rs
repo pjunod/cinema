@@ -10,6 +10,17 @@ use plurx_core::cluster::coordination::{ClusterJobAuthority, Lease, LeaseClaim, 
 use plurx_core::error::StoreError;
 use plurx_core::store::{PublicationFence, PublicationStore, Store};
 
+/// An exclusively owned native database has one local job executor. This
+/// authority performs no membership or quorum observation.
+pub(crate) struct LocalJobAuthority;
+
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+impl ClusterJobAuthority for LocalJobAuthority {
+    async fn may_run_cluster_jobs(&self) -> bool {
+        true
+    }
+}
+
 /// The job authority for a process that has no Raft membership handle.
 ///
 /// The maintenance commands attach to a running voter as a remote client, so
@@ -19,14 +30,17 @@ use plurx_core::store::{PublicationFence, PublicationStore, Store};
 /// `plurxd refresh-metadata` on a learner from taking the cluster-wide artwork
 /// lease away from the voters, and is never used to grant anything a live
 /// check would deny.
+#[cfg(feature = "cluster")]
 pub(crate) struct AdmittedRoleJobAuthority(plurx_core::cluster::membership::ClusterRole);
 
+#[cfg(feature = "cluster")]
 impl AdmittedRoleJobAuthority {
     pub(crate) fn new(role: plurx_core::cluster::membership::ClusterRole) -> Self {
         Self(role)
     }
 }
 
+#[cfg(feature = "cluster")]
 #[plurx_core::cluster::coordination::cluster_job_async_trait]
 impl ClusterJobAuthority for AdmittedRoleJobAuthority {
     async fn may_run_cluster_jobs(&self) -> bool {
@@ -313,8 +327,9 @@ pub(crate) async fn acquire_cluster_job_with_policy(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster"))]
 mod tests {
+    #[cfg(feature = "cluster")]
     use plurx_core::cluster::membership::ClusterRole;
 
     use super::*;
@@ -326,6 +341,7 @@ mod tests {
     /// client and cannot read committed membership, so this record is the only
     /// thing standing between a learner and the cluster-wide artwork lease.
     /// Deleting the negation left every test green.
+    #[cfg(feature = "cluster")]
     #[tokio::test]
     async fn a_host_admitted_as_a_learner_is_refused_cluster_wide_work() {
         assert!(

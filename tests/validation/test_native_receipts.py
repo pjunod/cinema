@@ -3,6 +3,7 @@ import copy
 import io
 import hashlib
 import json
+import re
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -280,6 +281,7 @@ class NativeCaseReceiptTests(unittest.TestCase):
         source = {path: (root / path).read_bytes() for path in specs}
         tree = ''.join('100644 blob ' + 'a' * 40 + '\t' + path + '\0' for path in specs)
         project = 'clients/apple/project.yml'
+        changed_path = project
         extension = b''
 
         def show(command, timeout):
@@ -289,19 +291,47 @@ class NativeCaseReceiptTests(unittest.TestCase):
             commit, path = command[2].split(':', 1)
             self.assertIn(commit, ('original', 'current'))
             self.assertIn(path, specs)
-            return source[path] + (extension if path == project else b'')
+            return source[path] + (extension if path == changed_path else b'')
 
         with patch.object(native, 'regular_inputs'), \
                 patch.object(native, 'git', return_value=tree), \
                 patch.object(native.subprocess, 'check_output', side_effect=show):
             self.assertEqual(native.case_input_compatibility('original', 'current'), set())
             # Equal inputs still need the independently reviewed build boundary.
-            for extension in [b'\n  - path: "../../extra/F.swift"\n',
-                    b'\npackages: {Extra: ../Extra}\n',
-                    b'\npreBuildScripts: [{script: cat ../../extra/file}]\n']:
-                with self.subTest(extension=extension), self.assertRaisesRegex(
-                        ReceiptError, '^Unreviewed native build specification: clients/apple/project[.]yml$'):
+            for changed_path, extension in [
+                    (project, b'\n  - path: "../../extra/F.swift"\n'),
+                    (project, b'\npackages: {Extra: ../Extra}\n'),
+                    (project, b'\npreBuildScripts: [{script: cat ../../extra/file}]\n'),
+                    ('Makefile', b'\napple-tv-navigation-test: extra-native-input\n'),
+                    ('Makefile', b'\ndesktop-macos-test:\n\tcat ../../extra/file\n'),
+                    ('Makefile', b'\ninclude ../../extra/native.mk\n')]:
+                with self.subTest(path=changed_path, extension=extension), self.assertRaisesRegex(
+                        ReceiptError, '^Unreviewed native build specification: ' +
+                        re.escape(changed_path) + '$'):
                     native.case_input_compatibility('original', 'current')
+
+    def test_prior_makefile_boundary_cannot_supply_current_case_receipts(self):
+        root = Path(__file__).resolve().parents[2]
+        specs = native.FAMILY_SPECS['tv_navigation']
+        source = {path: (root / path).read_bytes() for path in specs}
+        prior_makefile = source['Makefile'].replace(
+            b'-p plurxd --features cluster --bin plurxd \\\n',
+            b'-p plurxd --bin plurxd \\\n')
+        self.assertEqual(hashlib.sha256(prior_makefile).hexdigest(),
+                         '7e12d06f8372e36a851f58ad5846f303b00cf87bca13717193dafd2a23068443')
+        tree = ''.join('100644 blob ' + 'a' * 40 + '\t' + path + '\0' for path in specs)
+        for previous_sources in [('original',), ('original', 'current')]:
+            def show(command, timeout):
+                commit, path = command[2].split(':', 1)
+                return prior_makefile if path == 'Makefile' and commit in previous_sources else source[path]
+
+            with self.subTest(previous_sources=previous_sources), \
+                    patch.object(native, 'regular_inputs'), \
+                    patch.object(native, 'git', return_value=tree), \
+                    patch.object(native.subprocess, 'check_output', side_effect=show), \
+                    self.assertRaisesRegex(ReceiptError,
+                                           '^Unreviewed native build specification: Makefile$'):
+                native.case_input_compatibility('original', 'current')
 
     def receipt(self):
         selected = ['Suite/testOne', 'Suite/testTwo']

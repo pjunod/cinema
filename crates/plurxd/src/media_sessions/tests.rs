@@ -55,11 +55,14 @@ async fn takeover_clock_guard_expiry_requires_bound_and_discards_changed_page() 
     }
     for clock in [Arc::new(ClusterClockGuard::new(false)), clock_fixture(None)] {
         clock.roster(&[]);
-        assert!(clock_guarded_expiry_scan(&clock, |_| async {
+        let page = clock_guarded_expiry_scan(&clock, |_| async {
             Ok(plurx_core::domain::TakeoverInventory::Expired(Vec::new()))
         })
         .await
-        .is_ok());
+        .expect("valid empty expiry inventory")
+        .expect("the Store returned its expired route list");
+        assert!(page.contestable.is_empty());
+        assert!(page.cursor.is_none());
     }
     let clock = clock_fixture(Some((0, 1_000)));
     let error = clock_guarded_expiry_scan(&clock, |_| async {
@@ -129,20 +132,24 @@ async fn takeover_clock_guard_is_advisory_while_enforcement_is_off() {
     }
 }
 
+#[cfg(feature = "cluster")]
 struct FixedClockMembership(plurx_core::cluster::clock::ClockMembershipIdentity);
 
+#[cfg(feature = "cluster")]
 impl plurx_core::cluster::clock::ClockMembershipSource for FixedClockMembership {
     fn current(&self) -> Option<plurx_core::cluster::clock::ClockMembershipIdentity> {
         Some(self.0.clone())
     }
 }
 
+#[cfg(feature = "cluster")]
 fn clock_node(raft_id: u64) -> String {
     format!("00000000-0000-0000-0000-{raft_id:012}")
 }
 
 /// Local node 1; voters 1-3; node 4 a committed learner. The listed raft
 /// ids are measured within the bound, every other peer is Unknown.
+#[cfg(feature = "cluster")]
 fn learner_clock_fixture(bounded: &[u64], enforced: bool) -> Arc<ClusterClockGuard> {
     use plurx_core::cluster::clock::{ClockMembershipIdentity, PeerClockOffset};
     use plurx_core::cluster::membership::{ActivityPeer, ClockPeerRoster};
@@ -199,6 +206,7 @@ fn learner_clock_fixture(bounded: &[u64], enforced: bool) -> Arc<ClusterClockGua
 /// refused; the cursor still passes R1 so it cannot pin the scanner.
 /// Advisory mode contests both and counts what it would have refused.
 #[tokio::test(start_paused = true)]
+#[cfg(feature = "cluster")]
 async fn takeover_clock_guard_skips_routes_owned_by_an_unobserved_learner() {
     let learner_route = MediaSessionRoute {
         owner_node_id: clock_node(4),
@@ -3479,11 +3487,10 @@ fn stale_inventory_route_is_not_settled_after_its_lease_runway_is_spent() {
 /// sweep site the lookups pass through is recorded exactly once per pass.
 #[tokio::test]
 async fn a_cache_hit_and_a_store_read_are_counted_separately() {
-    use plurx_core::cluster::membership::MembershipManager;
     use plurx_core::store::SqliteStore;
 
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+    let coordinator = MediaSessionCoordinator::new(None, store);
     let metrics = coordinator.route_cache_metrics();
     let session_id = "00000000-0000-4000-8000-0000000000d1";
     let other_id = "00000000-0000-4000-8000-0000000000d2";
@@ -3565,11 +3572,10 @@ async fn a_cache_hit_and_a_store_read_are_counted_separately() {
 /// lookup deadline.
 #[tokio::test(start_paused = true)]
 async fn each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_lowers_the_gauge() {
-    use plurx_core::cluster::membership::MembershipManager;
     use plurx_core::store::SqliteStore;
 
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+    let coordinator = MediaSessionCoordinator::new(None, store);
     let metrics = coordinator.route_cache_metrics();
     let value = |name: &str| -> u64 {
         let exposition = metrics.prometheus();
@@ -3650,12 +3656,11 @@ async fn each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_low
 /// lookup has run as far as it can, so this does not pass by timing.
 #[tokio::test]
 async fn concurrent_lookups_of_one_session_produce_one_store_read() {
-    use plurx_core::cluster::membership::MembershipManager;
     use plurx_core::store::SqliteStore;
 
     const LOOKUPS: u64 = 8;
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+    let coordinator = MediaSessionCoordinator::new(None, store);
     let metrics = coordinator.route_cache_metrics();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     *coordinator
@@ -3745,11 +3750,10 @@ fn route_cache_exposition_is_bounded_and_its_labels_match_their_bounds() {
 
 #[tokio::test]
 async fn route_misses_are_single_flight_and_activation_supersedes_them() {
-    use plurx_core::cluster::membership::MembershipManager;
     use plurx_core::store::SqliteStore;
 
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+    let coordinator = MediaSessionCoordinator::new(None, store);
     let session_id = "00000000-0000-4000-8000-0000000000c1";
     assert!(coordinator
         .route(session_id)
@@ -3875,11 +3879,10 @@ async fn route_misses_are_single_flight_and_activation_supersedes_them() {
 
 #[tokio::test(start_paused = true)]
 async fn release_reconciliation_elects_once_and_retries_with_one_fence() {
-    use plurx_core::cluster::membership::MembershipManager;
     use plurx_core::store::SqliteStore;
 
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+    let coordinator = MediaSessionCoordinator::new(None, store);
     let session_id = "00000000-0000-4000-8000-0000000000d1";
 
     let winner = match coordinator.begin_release_reconciliation(session_id).await {

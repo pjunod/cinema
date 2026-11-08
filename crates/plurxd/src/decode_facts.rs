@@ -4994,8 +4994,9 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut retained = Vec::with_capacity(limit.min(8 * 1024));
-    // Both pipe readers remain live across awaits in the probe and idet
-    // supervisors. Keep their buffers out of those nested futures.
+    // Keep the pipe buffer out of every enclosing async poll/move frame.
+    // Two joined readers pass through generic pause/deadline scopes; inline
+    // arrays multiply their stack use even when the outer future is boxed.
     let mut scratch = vec![0_u8; 8 * 1024];
     let mut overflow = false;
     loop {

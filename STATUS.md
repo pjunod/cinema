@@ -1,11 +1,15 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-03 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-07 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
+
+- **2026-11-07 · HDR enhancement source budget:** [scope and validation](docs/streaming/HDR-ENHANCEMENT-SOURCE-BUDGET.md). Owner Codex. Current-main port preserves measured Original video rates, carries one coded envelope through admission/encoding/authoring, and binds FEL receipts to the exact backend recipe. Source reviewed; standalone/cluster compiler checks and all 32 focused regressions pass. Picture fidelity and deployment remain open.
 
 ## 2026-11-07 · Playback start: one engine, index by first play, one clock
 
 Owner Claude (claude-fable-5-1, session 01BCWLA2SJPLAmibeaz9L5xb). [End-to-end review](docs/reviews/CINEMA-END-TO-END-REVIEW-2026-11-07.md) merged as #1400; [plan and lane status](docs/streaming/PLAYBACK-START-PLAN.md). On the fleet most starts fall to the rolling engine for `vod_index_pending` (18 of 29 since the last deploy) because the fragment-index queue is starved (13.6k published, 7.7k failed, 3.9k retry-wait, 16 claims in 2.7 days) and engine-keyed; the 16 s first-publication gate is the slow start. Paul ruled 2026-11-07: one copy engine with the first play building the index; source-keyed index; processed DV as an upgrade after the first frame; learners and idle voters index. Plan revision 3 (Fable adversarial review and Astra independent review applied) is the first revision build agents may claim; Phase 1 order H2 → C2 → C3 → C1 → D2 → G1 → R1/H1 → D1 on `effort/playback-start`; the processed-DV switch mechanism is the M6 prepared replacement (Paul, 2026-11-07). Phase 1 build contract: [PLAYBACK-START-BUILD.md](docs/streaming/PLAYBACK-START-BUILD.md). Nothing deployed.
+
+**2026-11-08 · Standalone compilation and legacy migration packaging:** Native SQLite runtime, SDK-free daemon/controller/tray graphs and separate bound AUTH81/AUTH82 migration helpers are built. Actual warm rebuilds improve 10–14% on the measured compiler host; [all samples and limits](docs/ci/CINEMA-BUILD-MEASUREMENTS.md#6-integrated-standalone-build--2026-11-08). [Task #1442](http://forge.lan:3000/noirr/plurx/pulls/1442) and [promotion #1397](http://forge.lan:3000/noirr/plurx/pulls/1397) own current-tree qualification and landing. Further extraction is deferred.
 
 ## 2026-11-03 · Playback publication and Resume overlay
 

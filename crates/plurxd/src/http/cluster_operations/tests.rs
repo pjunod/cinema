@@ -247,7 +247,7 @@ async fn membership_status_cache_is_fresh_for_five_seconds_then_expires() {
 #[tokio::test(start_paused = true)]
 async fn unclustered_membership_cache_loop_exits_without_refresh_or_retry() {
     let (_app, state) = crate::http::tests::test_app_with_state();
-    assert!(!state.membership.is_replicated());
+    assert!(!state.is_replicated());
     let cache = state.membership_status_cache.clone();
     let shutdown = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(membership_status_cache_loop(state, shutdown));
@@ -273,7 +273,15 @@ fn automatic_activation_runs_outside_the_membership_projection() {
         .0;
     assert!(source.contains("cache_admin_revocation_ready()"));
     assert!(!source.contains("activate_if_ready"));
-    assert!(include_str!("../../main.rs")
+    let loops = include_str!("../../cluster_runtime/background.rs");
+    let activation = loops
+        .find("internal_auth_revocation::cache_admin_revocation_activation_loop")
+        .expect("activation has its own cluster worker");
+    let cluster_mode = loops
+        .find("state.storage_mode != StorageMode::Cluster")
+        .expect("explicit cluster mode guard");
+    assert!(cluster_mode < activation);
+    assert!(!include_str!("../../main.rs")
         .contains("internal_auth_revocation::cache_admin_revocation_activation_loop"));
 }
 
@@ -770,8 +778,67 @@ async fn aggregate_request_reads_only_node_owned_projections() {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    use futures_util::FutureExt;
+    use plurx_core::cluster::migration::PendingSelectedStore;
+    use plurx_core::store::HttpStoreOperationCounts;
+    let directory = crate::test_tempdir().expect("actual aggregate voter root");
+    let mut config = plurx_core::config::Config::default();
+    config.storage.data_dir = directory.path().join("database");
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve Raft port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve SQL API port");
+    config.cluster.raft_bind = raft.local_addr().expect("Raft address");
+    config.cluster.api_bind = api.local_addr().expect("SQL API address");
+    config.cluster.advertise_host = "localhost".into();
+    drop((raft, api));
+    let selected = PendingSelectedStore::new(
+        Box::pin(crate::sharing_fixture_clock::select_applied_singleton(
+            &config,
+        ))
+        .await
+        .expect("actual applied singleton"),
+    );
+    let mut sampler =
+        super::super::shared_source_playback::SourceFixtureMembershipOwner::start_replication(
+            selected.replication_monitor(),
+        );
+    let serving =
+        crate::serving_fence::ServingFence::new(selected.replication_monitor().metrics_handle());
+    let serving_stop = tokio_util::sync::CancellationToken::new();
+    let serving_task = tokio::spawn(serving.clone().monitor_loop(serving_stop.clone()));
+    let checks = Box::pin(std::panic::AssertUnwindSafe(async {
     let (_unused_app, mut state) = crate::http::tests::test_app_with_state();
-    state.node_id = "node-1".to_owned();
+    state.store = std::sync::Arc::clone(&selected.store);
+    state.node_id = selected.identity.node_id.clone();
+    state.storage_mode = plurx_core::storage::mode::StorageMode::Cluster;
+    state.local_source = None;
+    state.serving = serving.clone();
+    state.membership = Some(selected.membership_manager());
+    state.replication = Some(selected.replication_monitor());
+    state.catalogue = selected.catalogue_reader();
+    state.clock_observer = Some(crate::clock_offset::ClockObserver::new(selected.membership_manager()));
+    state.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+        state.membership.clone(), std::sync::Arc::clone(&state.store));
+    state.cache_only_admin_proofs = super::super::extract::CacheOnlyAdminProofCache::new(true);
+    let membership = state.membership.as_ref().expect("actual singleton membership");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            membership.heartbeat().await.expect("real singleton capability advertisement");
+            match super::super::internal_auth_revocation::ClusterCacheRevocation::activate_if_ready(&state)
+                .await.expect("real credential-revocation activation") {
+                super::super::internal_auth_revocation::CacheAdminRevocationActivation::Complete => break,
+                super::super::internal_auth_revocation::CacheAdminRevocationActivation::Pending => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }).await.expect("singleton protocol activation completes");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !state.serving.is_ready() { tokio::time::sleep(Duration::from_millis(50)).await; }
+    }).await.expect("actual sampled singleton serving proof");
+    assert!(refresh_cache_admin_revocation_capability_with(
+        &state.cache_only_admin_proofs, tokio::time::Instant::now(), || async {
+            membership.cache_admin_revocation_ready().await.map_err(|error| error.to_string())
+        }).await.expect("actual committed capability projection"));
     let admin = state
         .store
         .create_user("cluster-admin", "unused-test-hash", true)
@@ -800,32 +867,20 @@ async fn aggregate_request_reads_only_node_owned_projections() {
         .await
         .expect("authenticated response");
     assert_eq!(authenticated.status(), StatusCode::OK);
-    assert!(state
-        .store
-        .delete_token(&token_digest)
-        .await
-        .expect("make Store proof unavailable"));
-    assert!(state
-        .store
-        .user_for_token(&token_digest)
-        .await
-        .expect("read missing Store proof")
-        .is_none());
-
-    // The fixture is deliberately not a replicated cluster. A production
-    // request that reaches MembershipManager::status cannot succeed, and
-    // its current peer directory is empty. Seed only the two node-owned
-    // projections that GET and support are allowed to consume.
-    assert!(state.membership.status().await.is_err());
-    assert!(state
-        .membership
-        .operations_peers()
-        .await
-        .expect("unclustered peer directory")
-        .is_empty());
+    assert!(authenticated.extensions().get::<HttpStoreOperationCounts>()
+        .expect("actual authentication accounting").snapshot().iter().sum::<u64>() > 0,
+        "the Store-backed control request must demonstrate live accounting");
+    // The actual credential guard forbids an unclaimed token deletion. Keep
+    // the valid credential and prove each recovery request performs zero Store
+    // operations; the ordinary logout below must own its genuine claim.
+    assert!(membership.is_replicated());
+    assert!(membership.operations_peers().await.expect("actual singleton directory").is_empty());
+    let mut cached_membership = test_membership(&state.node_id, 2);
+    cached_membership.nodes[0].node_id = state.node_id.clone();
+    cached_membership.nodes[0].raft_id = selected.identity.raft_id;
     state
         .membership_status_cache
-        .store(test_membership("node-1", 2))
+        .store(cached_membership)
         .await;
     state
         .peer_status_cache
@@ -853,6 +908,7 @@ async fn aggregate_request_reads_only_node_owned_projections() {
     .expect("cache-only status request must not wait for Store")
     .expect("cluster status response");
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.extensions().get::<HttpStoreOperationCounts>().expect("actual recovery accounting").snapshot(), [0, 0, 0], "recovery GET contacts no Store");
     assert_eq!(
         response.headers().get(header::CACHE_CONTROL),
         Some(&HeaderValue::from_static("private, no-store"))
@@ -881,20 +937,14 @@ async fn aggregate_request_reads_only_node_owned_projections() {
     .expect("cache-only support request must not wait for Store")
     .expect("support bundle response");
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.extensions().get::<HttpStoreOperationCounts>().expect("actual support accounting").snapshot(), [0, 0, 0], "support GET contacts no Store");
     assert_eq!(
         response.headers().get(header::CONTENT_TYPE),
         Some(&HeaderValue::from_static("application/zip"))
     );
 
-    // Logout is a mutating route and therefore revalidates the bearer
-    // against Store before it may fan out a cluster-wide proof fence.
-    // Restore the same token only after the two cache-only reads have
-    // proved that their request paths do not touch Store.
-    state
-        .store
-        .create_token(&token_digest, admin.id, Some("cluster-status-test"))
-        .await
-        .expect("restore token for authenticated logout");
+    // Logout revalidates Store authentication and takes the actual replicated
+    // exclusion before deleting the credential and retiring its cached proof.
     let logout = app
         .clone()
         .oneshot(
@@ -1005,6 +1055,17 @@ async fn aggregate_request_reads_only_node_owned_projections() {
     assert_eq!(cache_extractor.matches("ApiError::Unauthorized").count(), 2);
     assert!(cache_extractor.contains("Err(ApiError::Forbidden)"));
     assert!(cache_extractor.contains("cache_only_admin_unavailable()"));
+    })).catch_unwind().await;
+    serving_stop.cancel();
+    serving_task.await.expect("owned serving monitor join");
+    sampler.finish().await;
+    selected
+        .shutdown()
+        .await
+        .expect("actual singleton writer drain");
+    if let Err(panic) = checks {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]
@@ -1232,10 +1293,7 @@ async fn wait_for_local_planned_outage_cleanup(serving: &crate::serving_fence::S
 
 #[tokio::test]
 async fn cancelled_acquisition_waiter_releases_only_after_ambiguous_outcome_is_known() {
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
-
-    let serving =
-        crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+    let serving = crate::serving_fence::ServingFence::local();
     let local_fence = serving
         .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
         .await
@@ -1270,10 +1328,7 @@ async fn cancelled_acquisition_waiter_releases_only_after_ambiguous_outcome_is_k
 
 #[tokio::test]
 async fn abort_during_drain_cancels_the_guard_owned_local_fence() {
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
-
-    let serving =
-        crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+    let serving = crate::serving_fence::ServingFence::local();
     let local_fence = serving
         .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
         .await
@@ -1331,10 +1386,7 @@ async fn cancelled_maintenance_waiter_does_not_cancel_the_owned_commit() {
 
 #[tokio::test]
 async fn cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner() {
-    use plurx_core::cluster::migration::status::ReplicationMonitor;
-
-    let serving =
-        crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+    let serving = crate::serving_fence::ServingFence::local();
     let first_started = std::sync::Arc::new(tokio::sync::Notify::new());
     let finish_first = std::sync::Arc::new(tokio::sync::Notify::new());
     let first_finished = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -2307,6 +2359,7 @@ fn test_local_status(node_id: &str, raft_id: Option<u64>) -> ClusterNodeOperatio
         },
         snapshot: SnapshotStatus::from(None),
         transport: None,
+        workers: None,
         media: MediaDrainStatus {
             local_active_sessions: 0,
             drained: true,
@@ -2408,4 +2461,143 @@ fn test_replication_status() -> plurx_core::cluster::migration::status::Replicat
         "explanation": "test"
     }))
     .expect("test replication status")
+}
+
+fn learner_worker_sample() -> super::super::internal_activity::ActivityWorkers {
+    serde_json::from_value(serde_json::json!({
+        "observed_at_ms": unix_ms() as i64, "heavy_limit": 1, "heavy_in_use": 1,
+        "heavy_available": 0, "accepting_work": true, "hardware_used": 1,
+        "hardware_limit": 3, "software_used": 2, "software_limit": 8,
+        "children": [], "child_count": 0
+    }))
+    .expect("worker sample")
+}
+
+#[tokio::test(start_paused = true)]
+async fn learner_workers_require_fresh_answered_bounded_identity() {
+    let cache = PeerStatusCache::default();
+    let mut status = test_local_status("learner-3", Some(4));
+    status.workers = Some(Box::new(learner_worker_sample()));
+    let good = PeerStatusOutcome {
+        node_id: "learner-3".into(),
+        state: ObservationState::Answered,
+        status: Some(status),
+        transport: None,
+    };
+    cache
+        .store(&BTreeMap::from([("learner-3".into(), good.clone())]))
+        .await;
+    let observations = cache.worker_observations().await;
+    assert_eq!(observations["learner-3"].software_used, 2);
+    tokio::time::advance(PEER_STATUS_CACHE_TTL).await;
+    assert!(
+        cache.worker_observations().await.is_empty(),
+        "expired capacity stays unknown"
+    );
+    for corruption in 0..5 {
+        let mut bad = good.clone();
+        match corruption {
+            0 => bad.state = ObservationState::Refused,
+            1 => bad.node_id = "other".into(),
+            2 => {
+                bad.status
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .node_id = "other".into()
+            }
+            3 => {
+                let w = bad
+                    .status
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .workers
+                    .as_mut()
+                    .expect("seeded worker test value");
+                w.children = vec!["child".into(); 33];
+                w.child_count = 33;
+            }
+            _ => {
+                bad.status
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .workers
+                    .as_mut()
+                    .expect("seeded worker test value")
+                    .analysis_engine = Some("invalid".into())
+            }
+        }
+        cache
+            .store(&BTreeMap::from([("learner-3".into(), bad)]))
+            .await;
+        assert!(
+            cache.worker_observations().await.is_empty(),
+            "invalid sample {corruption}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn learner_workers_reach_activity_without_voter_activity() {
+    let (_, state) = crate::http::tests::test_app_with_state();
+    let admin = state
+        .store
+        .create_user("worker-admin", "hash", true)
+        .await
+        .expect("admin");
+    let mut status = test_local_status("learner-3", Some(4));
+    status.workers = Some(Box::new(learner_worker_sample()));
+    state
+        .peer_status_cache
+        .store(&BTreeMap::from([(
+            "learner-3".into(),
+            PeerStatusOutcome {
+                node_id: "learner-3".into(),
+                state: ObservationState::Answered,
+                status: Some(status),
+                transport: None,
+            },
+        )]))
+        .await;
+    let axum::Json(reply) = crate::http::system::activity_detail(
+        crate::http::extract::AuthUser(admin),
+        axum::extract::State(state),
+    )
+    .await
+    .expect("activity");
+    assert_eq!(reply["workers"]["learner-3"]["software_used"], 2);
+    assert_eq!(reply["workers"]["learner-3"]["hardware_used"], 1);
+    assert!(reply["worker_observed_nodes"]
+        .as_array()
+        .expect("seeded worker test value")
+        .contains(&serde_json::json!("learner-3")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_operations_reads_cached_worker_capacity_and_never_refreshes_it() {
+    let (_, state) = crate::http::tests::test_app_with_state();
+    let replication = plurx_core::cluster::migration::status::ReplicationMonitor::sqlite();
+    let mut sample = learner_worker_sample();
+    sample.children = vec!["private process purpose".into()];
+    sample.child_count = 1;
+    sample.analysis_engine = Some("a".repeat(64));
+    state.peer_status_cache.store_local_workers(sample);
+    state
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "1")
+        .await
+        .expect("setting");
+    let status = local_snapshot(&state, &replication).await;
+    let workers = status.workers.expect("cached sample");
+    assert_eq!(
+        workers.software_limit, 8,
+        "handler must not recompute settings"
+    );
+    assert!(workers.children.is_empty());
+    assert!(workers.analysis_engine.is_none());
+    assert_eq!(workers.child_count, 1);
+    tokio::time::advance(PEER_STATUS_CACHE_TTL).await;
+    assert!(
+        local_snapshot(&state, &replication).await.workers.is_none(),
+        "stale sample is absent, not idle"
+    );
 }

@@ -4,8 +4,26 @@ import hashlib
 import json
 from pathlib import Path
 
-INPUTS = ('base_dv_renderer.h', 'display_target.h', 'dm_closed_form.h', 'dv_dm.h', 'dv_metadata.h', 'dv_trace.h', 'fel_renderer.h', 'hevc-rasl-frame-thread.patch', 'movie_source_io.h',
-          'nlq_clipping.h', 'nut_timing.h', 'rgb48.h', 'scan_title.c', 'segment_decode_render.c', 'source_reader.h', 'title_constants.h', 'yuv420p10.h')
+INPUTS = (
+    'author_p81.c',
+    'base_dv_renderer.h',
+    'display_target.h',
+    'dm_closed_form.h',
+    'dv_dm.h',
+    'dv_metadata.h',
+    'dv_trace.h',
+    'fel_renderer.h',
+    'hevc-rasl-frame-thread.patch',
+    'movie_source_io.h',
+    'nlq_clipping.h',
+    'nut_timing.h',
+    'rgb48.h',
+    'scan_title.c',
+    'segment_decode_render.c',
+    'source_reader.h',
+    'title_constants.h',
+    'yuv420p10.h',
+)
 GRAPH = "dv-native-master-or-closed-form-dm-v1"
 
 

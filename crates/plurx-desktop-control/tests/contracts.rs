@@ -232,19 +232,33 @@ fn signed_manifest_requires_real_signature_and_provisioned_roots() {
 fn signed_feed_rejects_wrong_repository_channel_expiry_and_upgrade_path() {
     let i = installed();
     let ledger = AcceptedReleasesV1::default();
-    for mutation in 0..8 {
+    // Schema 2 may omit the separately selected migration helper cohort.
+    // Both supported signed formats retain all ordinary update trust checks.
+    for schema_version in [1, 2] {
         let mut m = manifest();
-        match mutation {
-            0 => m.repository = "attacker/cinema".into(),
-            1 => m.channel = "nightly".into(),
-            2 => m.expires_unix = 1400,
-            3 => m.created_unix = 1900,
-            4 => m.upgrade_from = vec![">=0.8.0".into()],
-            5 => m.minimum_controller = "99.0.0".into(),
-            6 => m.release_notes_url = "https://evil.invalid/notes".into(),
-            _ => m.schema_version = 2,
-        };
-        assert!(signed(&m, &i, &ledger).is_err(), "mutation {mutation}");
+        m.schema_version = schema_version;
+        assert!(signed(&m, &i, &ledger).is_ok());
+        for mutation in 0..7 {
+            let mut mutated = m.clone();
+            match mutation {
+                0 => mutated.repository = "attacker/cinema".into(),
+                1 => mutated.channel = "nightly".into(),
+                2 => mutated.expires_unix = 1400,
+                3 => mutated.created_unix = 1900,
+                4 => mutated.upgrade_from = vec![">=0.8.0".into()],
+                5 => mutated.minimum_controller = "99.0.0".into(),
+                _ => mutated.release_notes_url = "https://evil.invalid/notes".into(),
+            };
+            assert!(
+                signed(&mutated, &i, &ledger).is_err(),
+                "schema {schema_version}, mutation {mutation}"
+            );
+        }
+    }
+    for unsupported in [0, 3, u32::MAX] {
+        let mut m = manifest();
+        m.schema_version = unsupported;
+        assert!(signed(&m, &i, &ledger).is_err(), "schema {unsupported}");
     }
 }
 #[test]

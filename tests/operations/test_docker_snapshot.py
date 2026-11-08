@@ -43,6 +43,38 @@ class DockerSnapshotTests(unittest.TestCase):
             self.assertIn("Suites: bookworm bookworm-updates", source.read_text())
             self.assertIn('Acquire::Retries "5";', (apt / "apt.conf.d/99plurx-snapshot").read_text())
 
+    def test_archive_metadata_requests_retain_filters_before_the_next_mirrorlist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            apt = Path(directory)
+            (apt / "sources.list.d").mkdir()
+            source = apt / "sources.list.d/debian.sources"
+            source.write_text(
+                "Types: deb\nURIs: http://deb.debian.org/debian\n"
+                "Suites: bookworm\nComponents: main\n\n"
+                "Types: deb\nURIs: http://deb.debian.org/debian-security\n"
+                "Suites: bookworm-security\nComponents: main\n"
+            )
+            subprocess.run([
+                "sh", str(ROOT / "scripts/configure-debian-snapshot"),
+                "20260928T000000Z", directory,
+            ], check=True)
+            configuration = (apt / "apt.conf.d/99plurx-snapshot").read_text()
+            def apply_hook(name):
+                command, = re.findall(rf'^APT::Update::{name} \{{ "([^"]+)"; \}};$', configuration, re.M)
+                subprocess.run(["sh", "-ec", command], check=True)
+
+            # A completed update enables exact-hash package mirrors. Starting
+            # another update pins both metadata lists before either archive is
+            # requested. An interrupted update must keep that safe state.
+            apply_hook("Post-Invoke-Success")
+            for _ in range(2):
+                apply_hook("Pre-Invoke")
+                for archive in ("debian", "debian-security"):
+                    mirrors = (apt / f"plurx-{archive}.mirrors").read_text().splitlines()
+                    self.assertEqual(len(mirrors), 2)
+                    self.assertTrue(all(f"/archive/{archive}/20260928T000000Z/" in row for row in mirrors))
+                    self.assertTrue(all("type:deb" not in row for row in mirrors))
+
     def test_every_snapshot_stage_configures_package_fallback(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
         for stage in dockerfile.split("\nFROM "):

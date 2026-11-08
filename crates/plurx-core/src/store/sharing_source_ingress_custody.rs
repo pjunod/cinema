@@ -7,7 +7,7 @@ use crate::{
     sharing::invalid,
     sharing_ingress_custody::{CustodyMutation, IngressRegistration},
     sharing_source_sessions::{
-        SourceAdmissionMembers, SourceDispatchAssignment, SourceIngressAdmissionPermission,
+        SourceAdmissionAuthority, SourceDispatchAssignment, SourceIngressAdmissionPermission,
     },
 };
 use async_trait::async_trait;
@@ -52,9 +52,10 @@ pub enum SourceCustodyWrite {
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
-// Bare Core has no replicated Source installation or admission authority.
-// Keep its SQL guard closed without importing the Hiqlite-only schema module.
-fn installed_source_guard() -> String {
+fn installed_source_guard(replicated: bool) -> String {
+    if !replicated {
+        return super::sharing_source_schema::native_installed_guard();
+    }
     #[cfg(feature = "hiqlite-store")]
     {
         super::sharing_source_schema::installed_guard()
@@ -82,7 +83,7 @@ fn source_guard(assignment: &SourceDispatchAssignment) -> String {
     );
     format!(
         "({}) AND EXISTS(SELECT 1 FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key JOIN sharing_identity s ON s.singleton=1 AND s.server_id=b.source_server_id AND s.catalogue_epoch=b.catalogue_epoch WHERE {exact} AND r.owner_node_id={} AND r.state IN('starting','resolved','failed'))",
-        installed_source_guard(),
+        installed_source_guard(assignment.members.is_replicated()),
         quote(assignment.owner_node_id())
     )
 }
@@ -223,7 +224,7 @@ async fn replace_closed<T: Backend>(
 fn admission_guard(
     assignment: &SourceDispatchAssignment,
     boot: Uuid,
-    members: &SourceAdmissionMembers,
+    members: &dyn SourceAdmissionAuthority,
 ) -> Result<(String, Vec<super::sharing::Value>), StoreError> {
     if boot.is_nil() || boot.get_version_num() != 4 {
         return Err(invalid());
@@ -231,19 +232,11 @@ fn admission_guard(
     let now = super::sharing::wall_clock_ms()?;
     let (guard, roster, cutoff, observed) =
         members.write_guard(now, 1, 2, 3).map_err(|_| invalid())?;
-    #[cfg(feature = "hiqlite-store")]
-    let floor = crate::cluster::membership::sharing_member_guard_predicate(
-        crate::cluster::membership::SharingMemberFloor::IngressCustody,
-        1,
-        2,
-        3,
-    );
-    #[cfg(not(feature = "hiqlite-store"))]
-    let floor = "0".to_owned();
-    let boot = format!(
-        "EXISTS(SELECT 1 FROM cluster_nodes n JOIN cluster_node_capabilities c ON c.node_id=n.node_id AND c.last_seen_at=n.last_seen_at WHERE n.node_id={} AND n.removed_at IS NULL AND c.capability={})",
-        quote(assignment.owner_node_id()),
-        quote(&format!("sharing_ingress_boot_v1:{boot}"))
+    let floor = super::sharing_source_sessions::ingress_floor(members);
+    let boot = super::sharing_source_sessions::ingress_boot_guard(
+        members,
+        assignment.owner_node_id(),
+        boot,
     );
     Ok((
         format!("{guard} AND {floor} AND {boot}"),
@@ -254,7 +247,7 @@ async fn ingress_admission<T: Backend>(
     store: &T,
     assignment: &SourceDispatchAssignment,
     boot: Uuid,
-    members: &SourceAdmissionMembers,
+    members: &dyn SourceAdmissionAuthority,
     fresh_factory: bool,
 ) -> Result<Option<Box<SourceIngressAdmissionPermission>>, StoreError> {
     let Some(snapshot) = snapshot(store, assignment).await? else {
@@ -284,7 +277,7 @@ async fn ingress_admission<T: Backend>(
     Ok(Some(Box::new(SourceIngressAdmissionPermission {
         assignment: assignment.clone(),
         registry_boot_id: boot,
-        members: members.clone(),
+        members: members.clone_authority(),
     })))
 }
 #[async_trait]
@@ -308,13 +301,13 @@ pub trait SharingSourceIngressCustodyStore: Send + Sync {
     async fn refresh_source_ingress_admission(
         &self,
         retained: &SourceIngressAdmissionPermission,
-        members: &SourceAdmissionMembers,
+        members: &dyn SourceAdmissionAuthority,
     ) -> Result<Option<Box<SourceIngressAdmissionPermission>>, StoreError>;
     async fn prepare_source_ingress_admission(
         &self,
         assignment: &SourceDispatchAssignment,
         registry_boot: Uuid,
-        members: &SourceAdmissionMembers,
+        members: &dyn SourceAdmissionAuthority,
     ) -> Result<Option<Box<SourceIngressAdmissionPermission>>, StoreError>;
     async fn initialize_source_ingress_custody(
         &self,
@@ -328,7 +321,7 @@ pub trait SharingSourceIngressCustodyStore: Send + Sync {
         &self,
         assignment: &SourceDispatchAssignment,
         registration: &IngressRegistration,
-        members: &SourceAdmissionMembers,
+        members: &dyn SourceAdmissionAuthority,
     ) -> Result<SourceCustodyWrite, StoreError>;
     async fn seal_source_ingress_custody(
         &self,
@@ -375,7 +368,7 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
     async fn refresh_source_ingress_admission(
         &self,
         retained: &SourceIngressAdmissionPermission,
-        members: &SourceAdmissionMembers,
+        members: &dyn SourceAdmissionAuthority,
     ) -> Result<Option<Box<SourceIngressAdmissionPermission>>, StoreError> {
         ingress_admission(
             self,
@@ -390,7 +383,7 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
         &self,
         assignment: &SourceDispatchAssignment,
         registry_boot: Uuid,
-        members: &SourceAdmissionMembers,
+        members: &dyn SourceAdmissionAuthority,
     ) -> Result<Option<Box<SourceIngressAdmissionPermission>>, StoreError> {
         ingress_admission(self, assignment, registry_boot, members, true).await
     }
@@ -410,7 +403,7 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
         &self,
         assignment: &SourceDispatchAssignment,
         registration: &IngressRegistration,
-        fresh_members: &SourceAdmissionMembers,
+        fresh_members: &dyn SourceAdmissionAuthority,
     ) -> Result<SourceCustodyWrite, StoreError> {
         if !registration.valid() || registration.closed_confirmation.is_some() {
             return Err(invalid());
@@ -427,19 +420,11 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
                 let (members, roster, cutoff, observed) = fresh_members
                     .write_guard(now, 1, 2, 3)
                     .map_err(|_| invalid())?;
-                #[cfg(feature = "hiqlite-store")]
-                let floor = crate::cluster::membership::sharing_member_guard_predicate(
-                    crate::cluster::membership::SharingMemberFloor::IngressCustody,
-                    1,
-                    2,
-                    3,
-                );
-                #[cfg(not(feature = "hiqlite-store"))]
-                let floor = "0".to_owned();
-                let boot = format!(
-                    "EXISTS(SELECT 1 FROM cluster_nodes n JOIN cluster_node_capabilities c ON c.node_id=n.node_id AND c.last_seen_at=n.last_seen_at WHERE n.node_id={} AND n.removed_at IS NULL AND c.capability={})",
-                    quote(&registration.node_id),
-                    quote(&format!("sharing_ingress_boot_v1:{}", registration.boot_id))
+                let floor = super::sharing_source_sessions::ingress_floor(fresh_members);
+                let boot = super::sharing_source_sessions::ingress_boot_guard(
+                    fresh_members,
+                    &registration.node_id,
+                    registration.boot_id,
                 );
                 replace(
                     self,
@@ -554,7 +539,7 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
         }
         let sql = format!(
             "SELECT json_quote(count(*)) AS payload FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key JOIN sharing_ingress_custody c ON c.principal_kind='source' AND c.incarnation_id=b.incarnation_id JOIN sharing_identity s ON s.singleton=1 AND s.server_id=b.source_server_id AND s.catalogue_epoch=b.catalogue_epoch WHERE b.incarnation_id=$1 AND b.dispatch_generation=1 AND b.reservation_state='held' AND r.owner_node_id=$2 AND c.owner_identity=$3 AND ({})",
-            installed_source_guard()
+            installed_source_guard(self.sharing_is_replicated())
         );
         Ok(self
             .sharing_read(

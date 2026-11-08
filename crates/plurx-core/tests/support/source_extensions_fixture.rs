@@ -57,9 +57,11 @@ pub(crate) const SOURCE_TAIL_SHAPE: &str = "SELECT type,name,sql FROM sqlite_mas
  name GLOB 'foreground_source_*' OR name GLOB 'background_source_*'
  OR name GLOB 'playback_analysis_*' OR name='analysis_source_checkpoints'
  OR name='source_io_occupancy' OR name GLOB 'dispatch_turn_*'
+ OR name GLOB 'storage_identity*' OR name GLOB 'sharing_local_census*'
  OR tbl_name GLOB 'foreground_source_*' OR tbl_name GLOB 'background_source_*'
  OR tbl_name GLOB 'playback_analysis_*' OR tbl_name='analysis_source_checkpoints'
- OR tbl_name GLOB 'dispatch_turn_*') ORDER BY type,name";
+ OR tbl_name GLOB 'dispatch_turn_*'
+ OR tbl_name GLOB 'storage_identity*' OR tbl_name GLOB 'sharing_local_census*') ORDER BY type,name";
 
 fn source_tail_objects(connection: &rusqlite::Connection) -> Vec<(String, String, String)> {
     connection
@@ -75,6 +77,7 @@ pub(crate) fn validated_source_tail_drops(
     objects: &[(String, String, String)],
     counts: &[(String, i64)],
     dispatch: bool,
+    native: bool,
     remove: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let expected = rusqlite::Connection::open_in_memory().expect("published source tail witness");
@@ -91,6 +94,9 @@ pub(crate) fn validated_source_tail_drops(
         expected
             .execute_batch(include_str!("../../src/store/background_job_turns.sql"))
             .expect("published v124 dispatch extension");
+    }
+    if native {
+        expected.execute_batch("CREATE TABLE storage_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance_id TEXT NOT NULL, node_id TEXT NOT NULL, generation TEXT NOT NULL) STRICT; CREATE TABLE sharing_local_census (node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),generation INTEGER NOT NULL CHECK(generation>0),claimed_at_ms INTEGER NOT NULL CHECK(claimed_at_ms>0)) STRICT;").expect("published v125 native authority extension");
     }
     assert_eq!(
         objects,
@@ -122,7 +128,7 @@ pub(crate) fn validated_source_tail_drops(
     statements
 }
 
-/// Rewind an owned, empty v122/v123/v124 source tail to published v121.
+/// Rewind an owned, empty v122–v125 source and native tail to published v121.
 /// Managed operations and receipts remain intact while their exact resource
 /// view and marker return to v3. Source custody, grants and checkpoints refuse.
 fn source_extension_rewind_plan(
@@ -133,7 +139,7 @@ fn source_extension_rewind_plan(
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture source extension ordinal");
     assert!(
-        matches!(version, 122..=124),
+        matches!(version, 122..=125),
         "only published source extensions may be rewound"
     );
     let objects = source_tail_objects(connection);
@@ -151,7 +157,8 @@ fn source_extension_rewind_plan(
             (name.clone(), count)
         })
         .collect::<Vec<_>>();
-    let mut statements = validated_source_tail_drops(&objects, &counts, version == 124, |_| true);
+    let mut statements =
+        validated_source_tail_drops(&objects, &counts, version >= 124, version >= 125, |_| true);
     let marker: i64 = connection
         .query_row(
             "SELECT count(*) FROM background_source_schema WHERE singleton=1 AND version=1",

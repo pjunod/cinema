@@ -118,10 +118,11 @@ pub(super) async fn authority<
     }
     // This is serving-read admission only. Future shared writes must carry
     // their capability floor and effective grant predicate atomically.
-    if state.membership.is_replicated() {
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref() {
         let ready = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            state.membership.sharing_member_floor_ready(
+            membership.sharing_member_floor_ready(
                 plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
             ),
         )
@@ -617,16 +618,17 @@ async fn source_content_current(state: &AppState, authority: &SourceContentAutho
         if !crate::sharing::enabled(state.store.as_ref()).await.ok()? {
             return Some(false);
         }
-        if state.membership.is_replicated()
-            && !state
-                .membership
+        #[cfg(feature = "cluster")]
+        if let Some(membership) = state.membership.as_ref() {
+            if !membership
                 .sharing_member_floor_ready(
                     plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
                 )
                 .await
                 .ok()?
-        {
-            return Some(false);
+            {
+                return Some(false);
+            }
         }
         let items_current = state
             .store

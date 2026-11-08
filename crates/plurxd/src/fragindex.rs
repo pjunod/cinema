@@ -1936,6 +1936,7 @@ impl SourceIndexHookOwner {
         }
     }
     #[cfg(all(test, unix))]
+    #[cfg(feature = "cluster")]
     pub(crate) fn assert_closed_parent_settlements(&self) {
         let hooks = self.test_hooks();
         assert!(
@@ -1958,18 +1959,22 @@ impl SourceIndexHookOwner {
             .downcast_ref()
             .expect("Source index test hooks")
     }
+    #[cfg(feature = "cluster")]
     pub(crate) fn pause_before_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks().before.arm("source_index_before_spawn")
     }
+    #[cfg(feature = "cluster")]
     pub(crate) fn pause_after_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks().after.arm("source_index_after_spawn")
     }
+    #[cfg(feature = "cluster")]
     pub(crate) fn pause_after_wait_failure(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks()
             .failed_wait
             .store(true, std::sync::atomic::Ordering::Release);
         self.test_hooks().retry.arm("source_index_reap_retry")
     }
+    #[cfg(feature = "cluster")]
     pub(crate) fn spawned_pid(&self) -> u32 {
         self.test_hooks()
             .spawned_pid

@@ -7,8 +7,10 @@ use crate::{
     },
     state::AppState,
 };
+#[cfg(feature = "cluster")]
+use axum::body::Bytes;
 use axum::{
-    body::{Body, Bytes},
+    body::Body,
     extract::{FromRequestParts, State},
     http::{request::Parts, Request},
     middleware::Next,
@@ -24,16 +26,20 @@ use std::{
     },
     time::{Duration, Instant},
 };
+#[cfg(feature = "cluster")]
 use tower::ServiceExt;
 
+#[cfg(feature = "cluster")]
 pub(crate) const LOCATE_PATH: &str = "/internal/cluster/sharing/source/locate";
 pub(crate) const PREPARE_PATH: &str = "/internal/cluster/sharing/source/prepare";
 pub(crate) const CONTROL_PATH: &str = "/internal/cluster/sharing/source/control";
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) const FORWARD_PATH: &str = "/internal/cluster/sharing/source/forward";
 pub(crate) const REGISTER_PATH: &str = "/internal/cluster/sharing/source/register";
 pub(crate) const ACK_PATH: &str = "/internal/cluster/sharing/source/ack";
 pub(crate) const MAX_WIRE_BYTES: usize = 1024 * 1024;
 const MAX_PUBLIC_BODY: usize = 128 * 1024;
+#[cfg(any(test, feature = "cluster"))]
 const MAX_REPLY_BYTES: usize = 64 * 1024;
 const HELD_MAX: usize = 512;
 static MEDIA_REQUESTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
@@ -116,6 +122,7 @@ pub(super) struct FreshAuthority {
     pub reference: SourcePlaybackTarget,
     pub request_id: Uuid,
 }
+#[cfg(feature = "cluster")]
 impl FreshAuthority {
     fn valid(&self) -> bool {
         valid_hash(&self.credential_hash)
@@ -155,6 +162,7 @@ pub(super) struct ForwardIngress {
     pub driver: AcceptedDriverId,
     pub registration_sequence: Option<u64>,
 }
+#[cfg(any(test, feature = "cluster"))]
 impl ForwardIngress {
     fn valid(&self) -> bool {
         valid_node(&self.node_id)
@@ -350,6 +358,7 @@ struct ForwardRequest {
     remaining_ms: u32,
     hop: u8,
 }
+#[cfg(any(test, feature = "cluster"))]
 impl ForwardRequest {
     fn valid_transport(&self, node: &str, ingress: &str, path: &str, parsed: Operation) -> bool {
         self.hop == 1
@@ -587,6 +596,7 @@ fn remaining(deadline: Instant) -> Result<u32, ApiError> {
     .filter(|value| *value > 100)
     .ok_or_else(unavailable)
 }
+#[cfg(any(test, feature = "cluster"))]
 fn received_deadline(remaining_ms: u32, budget: Duration) -> Result<Instant, ApiError> {
     if remaining_ms <= 100 || u128::from(remaining_ms) > budget.as_millis() {
         return Err(unavailable());
@@ -1278,6 +1288,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         decode_control(&response.body)
     }
 }
+#[cfg(feature = "cluster")]
 async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
@@ -1292,6 +1303,8 @@ async fn authenticate(
                 Duration::from_secs(9),
                 state
                     .membership
+                    .as_ref()
+                    .ok_or_else(unavailable)?
                     .authorize_internal_peer_request(&auth, "POST", path, body)
             )
             .await,
@@ -1304,6 +1317,7 @@ async fn authenticate(
     }
     Ok(auth)
 }
+#[cfg(feature = "cluster")]
 async fn signed(
     state: &AppState,
     auth: &plurx_core::cluster::membership::InternalPeerAuth,
@@ -1316,10 +1330,11 @@ async fn signed(
         return Err(unavailable());
     }
     let payload = crate::http::peer_transport::signed_response_payload(status.as_u16(), &body);
-    let signature =
-        state
-            .membership
-            .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload);
+    let signature = state
+        .membership
+        .as_ref()
+        .ok_or_else(unavailable)?
+        .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload);
     let signature = signature.map_err(|_| unavailable())?;
     remaining(deadline)?;
     Response::builder()
@@ -1332,6 +1347,7 @@ async fn signed(
         .body(Body::from(body))
         .map_err(|_| unavailable())
 }
+#[cfg(any(test, feature = "cluster"))]
 async fn pack_control(response: Response, deadline: Instant) -> Result<Vec<u8>, ApiError> {
     let (parts, body) = response.into_parts();
     let bytes = tokio::time::timeout_at(
@@ -1363,6 +1379,7 @@ async fn pack_control(response: Response, deadline: Instant) -> Result<Vec<u8>, 
         .filter(|body| body.len() <= MAX_REPLY_BYTES)
         .ok_or_else(unavailable)
 }
+#[cfg(feature = "cluster")]
 pub(crate) async fn receive(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1379,6 +1396,7 @@ pub(crate) async fn receive(
     .await
     .unwrap_or_else(|error| error.into_response())
 }
+#[cfg(feature = "cluster")]
 pub(crate) async fn receive_control(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1395,6 +1413,7 @@ pub(crate) async fn receive_control(
     .await
     .unwrap_or_else(|error| error.into_response())
 }
+#[cfg(feature = "cluster")]
 async fn receive_at(
     state: AppState,
     headers: HeaderMap,
@@ -1468,6 +1487,7 @@ async fn receive_at(
         .await
     }
 }
+#[cfg(feature = "cluster")]
 pub(crate) async fn prepare(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1477,6 +1497,7 @@ pub(crate) async fn prepare(
         .await
         .unwrap_or_else(|error| error.into_response())
 }
+#[cfg(feature = "cluster")]
 async fn prepare_inner(
     state: AppState,
     headers: HeaderMap,
@@ -1563,6 +1584,7 @@ async fn prepare_inner(
         }
     }
 }
+#[cfg(feature = "cluster")]
 pub(crate) async fn register_http(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1572,6 +1594,7 @@ pub(crate) async fn register_http(
         .await
         .unwrap_or_else(|error| error.into_response())
 }
+#[cfg(feature = "cluster")]
 pub(crate) async fn ack_http(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1585,6 +1608,7 @@ pub(crate) async fn ack_http(
             error.into_response()
         })
 }
+#[cfg(feature = "cluster")]
 async fn custody_inner(
     state: AppState,
     headers: HeaderMap,
@@ -1913,6 +1937,7 @@ mod tests {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "cluster")]
 struct LocateEnvelope {
     hop: u8,
     remaining_ms: u32,
@@ -1920,6 +1945,7 @@ struct LocateEnvelope {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(any(test, feature = "cluster"))]
 struct LocationReply {
     node_id: String,
     registry_boot_id: Uuid,
@@ -1928,6 +1954,7 @@ struct LocationReply {
     size: Option<i64>,
     mtime: Option<i64>,
 }
+#[cfg(any(test, feature = "cluster"))]
 impl LocationReply {
     fn exact(&self, node: &str, reference: &SourcePlaybackTarget) -> bool {
         self.node_id == node
@@ -1945,6 +1972,7 @@ impl LocationReply {
 /// Cold routing hints only. A timeout may try another read-only peer before
 /// any claim exists; once FreshPrepare is sent, its original candidate remains
 /// pinned and this collector must never be used to reconstruct its owner.
+#[cfg(feature = "cluster")]
 pub(super) async fn collect_fresh_location(
     state: &AppState,
     principal: &PlaybackPrincipal,
@@ -1953,10 +1981,13 @@ pub(super) async fn collect_fresh_location(
     request_id: Uuid,
     deadline: Instant,
 ) -> Result<Option<(String, Uuid)>, ApiError> {
+    let Some(membership) = state.membership.as_ref() else {
+        return Ok(None);
+    };
     let deadline = deadline.min(Instant::now() + Duration::from_secs(9));
     let mut peers = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        state.membership.media_peers(),
+        membership.media_peers(),
     )
     .await
     .map_err(|_| unavailable())?
@@ -2021,6 +2052,7 @@ pub(super) async fn collect_fresh_location(
     Ok(available.into_iter().next())
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn locate(
     State(state): State<AppState>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
@@ -2039,6 +2071,7 @@ pub(crate) async fn locate(
         Err(error) => error.into_response(),
     }
 }
+#[cfg(feature = "cluster")]
 async fn locate_received(
     state: &AppState,
     connection: Option<&crate::SharingConnectionCancellation>,
@@ -2168,4 +2201,18 @@ mod locality_tests {
             .expect("settled exact cache slot reclaimed");
         assert_eq!(registry.fresh.lock().expect("pins").len(), HELD_MAX);
     }
+}
+
+#[cfg(not(feature = "cluster"))]
+pub(super) async fn collect_fresh_location(
+    _state: &AppState,
+    _principal: &PlaybackPrincipal,
+    _credential_hash: &str,
+    _reference: &SourcePlaybackTarget,
+    _request_id: Uuid,
+    _deadline: Instant,
+) -> Result<Option<(String, Uuid)>, ApiError> {
+    // This searches only other members of this cluster. Independent remote
+    // sharing remains on the normal Source/Receiver HTTP paths.
+    Ok(None)
 }

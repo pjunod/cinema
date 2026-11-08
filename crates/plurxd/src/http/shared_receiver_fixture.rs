@@ -104,21 +104,24 @@ async fn build_receiver_fixture(
     let mut state = super::source_actor_test_state();
     state.store = Arc::clone(&selected.store);
     state.node_id = selected.identity.node_id.clone();
-    state.membership = selected.membership_manager();
+    state.membership = Some(selected.membership_manager());
+    state.storage_mode = plurx_core::storage::mode::StorageMode::Cluster;
     state.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
         state.membership.clone(),
         Arc::clone(&state.store),
     );
-    state.clock_observer = if let Some(clock) = &startup_clock {
+    state.clock_observer = Some(if let Some(clock) = &startup_clock {
         clock
             .observer()
             .await
             .expect("actual startup clock observer")
     } else {
-        crate::clock_offset::ClockObserver::new(state.membership.clone())
-    };
+        crate::clock_offset::ClockObserver::new(
+            state.membership.clone().expect("actual voter membership"),
+        )
+    });
     state.catalogue = selected.catalogue_reader();
-    state.replication = selected.replication_monitor();
+    state.replication = Some(selected.replication_monitor());
     state.sharing = Arc::new(crate::sharing::SharingManager::new(
         Arc::clone(&selected.credential_key),
         config.storage.data_dir.clone(),
@@ -130,9 +133,13 @@ async fn build_receiver_fixture(
     ));
     state
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
     state
         .membership
+        .as_ref()
+        .expect("actual voter membership")
         .publish_ingress_custody_boot()
         .await
         .expect("actual B fixture registry boot");

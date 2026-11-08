@@ -1,6 +1,5 @@
-//! Portable cluster backup ownership and scheduling.
+//! Backend-neutral portable backup ownership and scheduling.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -8,7 +7,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::Json;
-use plurx_core::cluster::migration::ClusterBackupManifest;
 use plurx_core::error::StoreError;
 use plurx_core::store::{keys, Store};
 
@@ -17,11 +15,25 @@ use crate::http::extract::AdminUser;
 use crate::state::AppState;
 use crate::state::JobManager;
 
-const BACKUP_RESOURCE: &str = "backup:cluster";
-/// The cut's anchor entry. It changes no row; the Raft log index that
-/// commits it is the point the snapshot must cover.
-const BACKUP_ANCHOR_SQL: &str = "UPDATE settings SET updated_at = updated_at WHERE 0";
-const POINTER_MAX_BYTES: u64 = 128;
+#[cfg(feature = "cluster")]
+pub(crate) mod cluster;
+pub(crate) mod native;
+
+#[cfg(all(test, feature = "cluster"))]
+use cluster::{backup_phase_before_deadline, wait_for_local_backup_apply, BACKUP_RESOURCE};
+
+pub(crate) struct BackupArtifact {
+    pub path: PathBuf,
+    pub manifest: serde_json::Value,
+    pub image_bytes: u64,
+}
+
+#[async_trait::async_trait]
+pub(crate) trait BackupProvider: Send + Sync {
+    fn lease_resource(&self) -> &'static str;
+    fn artifact_prefix(&self) -> &'static str;
+    async fn build(&self, destination: &Path) -> Result<BackupArtifact, StoreError>;
+}
 
 #[derive(Default)]
 pub(crate) struct BackupMetrics {
@@ -62,37 +74,21 @@ impl BackupMetrics {
 pub(crate) struct BackupManager {
     store: Arc<dyn Store>,
     jobs: Arc<JobManager>,
-    client: Option<hiqlite::Client>,
-    data_dir: PathBuf,
-    credential_key_path: PathBuf,
-    node_id: String,
-    credential_key_id: String,
-    snapshot_timeout: Duration,
+    provider: Arc<dyn BackupProvider>,
     metrics: Arc<BackupMetrics>,
     last_schedule_day: AtomicI64,
 }
 
 impl BackupManager {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub(crate) fn new_with_provider(
         store: Arc<dyn Store>,
         jobs: Arc<JobManager>,
-        client: Option<hiqlite::Client>,
-        data_dir: PathBuf,
-        credential_key_path: PathBuf,
-        node_id: String,
-        credential_key_id: String,
-        snapshot_timeout: Duration,
+        provider: Arc<dyn BackupProvider>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             jobs,
-            client,
-            data_dir,
-            credential_key_path,
-            node_id,
-            credential_key_id,
-            snapshot_timeout,
+            provider,
             metrics: Arc::new(BackupMetrics::default()),
             last_schedule_day: AtomicI64::new(-1),
         })
@@ -105,7 +101,7 @@ impl BackupManager {
     pub(crate) async fn build(
         &self,
         destination_override: Option<&Path>,
-    ) -> Result<Option<(PathBuf, ClusterBackupManifest)>, StoreError> {
+    ) -> Result<Option<BackupArtifact>, StoreError> {
         let destination = match destination_override {
             Some(path) => path.to_path_buf(),
             None => self
@@ -121,26 +117,24 @@ impl BackupManager {
                     )
                 })?,
         };
-        let Some(client) = self.client.as_ref() else {
-            self.metrics.error.fetch_add(1, Ordering::Relaxed);
-            return Err(StoreError::Task(
-                "portable cluster backup requires the activated replicated store".to_owned(),
-            ));
-        };
-        let Some(lease) = self.jobs.acquire_job(BACKUP_RESOURCE.to_owned()).await? else {
+        let Some(lease) = self
+            .jobs
+            .acquire_job(self.provider.lease_resource().to_owned())
+            .await?
+        else {
             self.metrics.skipped.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         };
-        let result = self.build_under_lease(client, &destination).await;
+        let result = self.provider.build(&destination).await;
         if let Err(error) = lease.release().await {
             tracing::warn!(error = %error, "backup lease cleanup was ambiguous");
         }
         match result {
-            Ok((path, manifest)) => {
+            Ok(artifact) => {
                 self.metrics.ok.fetch_add(1, Ordering::Relaxed);
                 self.metrics
                     .artifact_bytes
-                    .store(manifest.image_bytes, Ordering::Relaxed);
+                    .store(artifact.image_bytes, Ordering::Relaxed);
                 self.metrics.last_success_seconds.store(
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -162,138 +156,20 @@ impl BackupManager {
                         14
                     }
                 };
-                if let Err(error) = prune_artifacts(&destination, keep) {
+                if let Err(error) =
+                    prune_artifacts(&destination, keep, self.provider.artifact_prefix())
+                {
                     // Same boundary as above: pruning is maintenance after a
                     // successful publish, not part of publication itself.
                     tracing::warn!(error = %error, "backup retention prune failed");
                 }
-                Ok(Some((path, manifest)))
+                Ok(Some(artifact))
             }
             Err(error) => {
                 self.metrics.error.fetch_add(1, Ordering::Relaxed);
                 Err(error)
             }
         }
-    }
-
-    async fn build_under_lease(
-        &self,
-        client: &hiqlite::Client,
-        destination: &Path,
-    ) -> Result<(PathBuf, ClusterBackupManifest), StoreError> {
-        // One budget belongs to this already-acquired backup lease. Catch-up,
-        // the one snapshot trigger and publication all consume this deadline.
-        let deadline = tokio::time::Instant::now() + self.snapshot_timeout;
-        let local_progress = || async {
-            let metrics = client.metrics_db().await.map_err(|error| {
-                StoreError::Database(format!("reading local Raft metrics: {error}"))
-            })?;
-            Ok((
-                metrics.last_applied.as_ref().map(|log| log.index),
-                metrics.last_log_index,
-            ))
-        };
-        wait_for_local_backup_apply(deadline, 0, local_progress).await?;
-        // The lease holder is any voter, and only the leader may propose an
-        // entry itself. The anchor therefore goes through the write path that
-        // forwards to the leader and reports the committed index; this node
-        // then applies through it and cuts its own snapshot there.
-        let applied = backup_phase_before_deadline(deadline, "snapshot anchor", async {
-            client
-                .execute_acked(BACKUP_ANCHOR_SQL, hiqlite::macros::params!())
-                .await
-                .map_err(|error| {
-                    StoreError::Database(format!("anchoring the backup cut: {error}"))
-                })?
-                .log_index
-                .ok_or_else(|| {
-                    StoreError::Task(
-                        "the leader did not report the backup anchor's log index".to_owned(),
-                    )
-                })
-        })
-        .await?;
-        wait_for_local_backup_apply(deadline, applied, local_progress).await?;
-        backup_phase_before_deadline(deadline, "snapshot trigger", async {
-            client.trigger_local_db_snapshot().await.map_err(|error| {
-                StoreError::Database(format!("triggering database snapshot: {error}"))
-            })
-        })
-        .await?;
-        loop {
-            let metrics = backup_phase_before_deadline(deadline, "snapshot publication", async {
-                client.metrics_db().await.map_err(|error| {
-                    StoreError::Database(format!("waiting for database snapshot: {error}"))
-                })
-            })
-            .await?;
-            if metrics
-                .snapshot
-                .as_ref()
-                .is_some_and(|log| log.index >= applied)
-            {
-                break;
-            }
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + Duration::from_millis(50)),
-            )
-            .await;
-        }
-
-        let snapshot_dir = self
-            .data_dir
-            .join("hiqlite")
-            .join("state_machine")
-            .join("snapshots");
-        let pointer_path = snapshot_dir.join("current");
-        let pointer_metadata = tokio::fs::metadata(&pointer_path)
-            .await
-            .map_err(|error| StoreError::Task(format!("reading snapshot pointer: {error}")))?;
-        if pointer_metadata.len() > POINTER_MAX_BYTES {
-            return Err(StoreError::Task("snapshot pointer is oversized".to_owned()));
-        }
-        let snapshot_id = tokio::fs::read_to_string(&pointer_path)
-            .await
-            .map_err(|error| StoreError::Task(format!("reading snapshot pointer: {error}")))?;
-        let snapshot_id = snapshot_id.trim();
-        if snapshot_id.is_empty()
-            || snapshot_id == "none"
-            || !matches!(
-                Path::new(snapshot_id)
-                    .components()
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-                [std::path::Component::Normal(_)]
-            )
-        {
-            return Err(StoreError::Task(format!(
-                "snapshot pointer contains invalid generation {snapshot_id:?}"
-            )));
-        }
-        // Open before doing any other work. Snapshot cleanup can unlink this
-        // exact pathname as soon as a later generation publishes.
-        let snapshot = std::fs::File::open(snapshot_dir.join(snapshot_id)).map_err(|error| {
-            StoreError::Task(format!("opening published snapshot {snapshot_id}: {error}"))
-        })?;
-        let destination = destination.to_path_buf();
-        let data_dir = self.data_dir.clone();
-        let credential_key_path = self.credential_key_path.clone();
-        let node_id = self.node_id.clone();
-        let key_id = self.credential_key_id.clone();
-        tokio::task::spawn_blocking(move || {
-            plurx_core::cluster::migration::build_cluster_backup_artifact(
-                snapshot,
-                &destination,
-                &data_dir,
-                Some(&credential_key_path),
-                &node_id,
-                Some(&key_id),
-                crate::version::LONG,
-                applied,
-            )
-        })
-        .await
-        .map_err(|error| StoreError::Task(format!("joining backup builder: {error}")))?
     }
 
     pub(crate) async fn schedule_loop(
@@ -356,8 +232,8 @@ impl BackupManager {
 
                 // A transient winner failure must not spend the UTC day. Give
                 // this same owner another chance while the configured minute
-                // is still open; the cluster lease continues to serialize all
-                // voters. A crash remains fenced by the 90-second lease.
+                // is still open; the durable backup lease continues to serialize all
+                // eligible builders. A crash remains fenced by the 90-second lease.
                 let retry_now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -389,57 +265,6 @@ fn record_schedule_success(last_schedule_day: &AtomicI64, day: i64) {
     last_schedule_day.store(day, Ordering::Release);
 }
 
-async fn backup_phase_before_deadline<T>(
-    deadline: tokio::time::Instant,
-    phase: &str,
-    work: impl Future<Output = Result<T, StoreError>>,
-) -> Result<T, StoreError> {
-    if tokio::time::Instant::now() >= deadline {
-        return Err(StoreError::Task(format!(
-            "backup {phase} exceeded the original snapshot deadline"
-        )));
-    }
-    let result = tokio::time::timeout_at(deadline, work).await.map_err(|_| {
-        StoreError::Task(format!(
-            "backup {phase} exceeded the original snapshot deadline"
-        ))
-    })?;
-    // A ready future can win a poll against its simultaneously ready timer.
-    // Even then, completion at/after the original deadline is not admission.
-    if tokio::time::Instant::now() >= deadline {
-        return Err(StoreError::Task(format!(
-            "backup {phase} exceeded the original snapshot deadline"
-        )));
-    }
-    result
-}
-
-/// Observe only local metrics: no write, snapshot trigger, lease acquisition
-/// or deadline refresh is allowed while the local apply queue catches up.
-/// The wait ends once this replica has applied everything it holds and at
-/// least `through`, an index a follower may not have received yet.
-async fn wait_for_local_backup_apply<F, Fut>(
-    deadline: tokio::time::Instant,
-    through: u64,
-    mut read_progress: F,
-) -> Result<(), StoreError>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<(Option<u64>, Option<u64>), StoreError>>,
-{
-    loop {
-        let (applied, last_log) =
-            backup_phase_before_deadline(deadline, "local Raft catch-up", read_progress()).await?;
-        if applied == last_log && applied.unwrap_or(0) >= through {
-            return Ok(());
-        }
-        tokio::time::sleep_until(
-            deadline.min(tokio::time::Instant::now() + Duration::from_millis(50)),
-        )
-        .await;
-    }
-}
-
 pub(crate) fn parse_schedule_minute(value: &str) -> Option<u64> {
     let (hour, minute) = value.trim().split_once(':')?;
     let hour = hour.parse::<u64>().ok()?;
@@ -447,17 +272,12 @@ pub(crate) fn parse_schedule_minute(value: &str) -> Option<u64> {
     (hour < 24 && minute < 60).then_some(hour * 60 + minute)
 }
 
-fn prune_artifacts(destination: &Path, keep: usize) -> Result<(), StoreError> {
+fn prune_artifacts(destination: &Path, keep: usize, prefix: &str) -> Result<(), StoreError> {
     let mut artifacts = std::fs::read_dir(destination)
         .map_err(|error| StoreError::Task(format!("listing backup destination: {error}")))?
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("plurx-backup-")
-        })
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
         .collect::<Vec<_>>();
     artifacts.sort_by_key(std::fs::DirEntry::file_name);
     let remove = artifacts.len().saturating_sub(keep);
@@ -484,7 +304,7 @@ pub(crate) struct BackupResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    manifest: Option<ClusterBackupManifest>,
+    manifest: Option<serde_json::Value>,
 }
 
 pub(crate) async fn create(
@@ -493,10 +313,10 @@ pub(crate) async fn create(
     Json(request): Json<BackupRequest>,
 ) -> Result<Json<BackupResponse>, ApiError> {
     match state.backup.build(request.output.as_deref()).await? {
-        Some((path, manifest)) => Ok(Json(BackupResponse {
+        Some(artifact) => Ok(Json(BackupResponse {
             status: "ok",
-            path: Some(path),
-            manifest: Some(manifest),
+            path: Some(artifact.path),
+            manifest: Some(artifact.manifest),
         })),
         None => Ok(Json(BackupResponse {
             status: "skipped",
@@ -510,13 +330,18 @@ pub(crate) async fn create(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "cluster")]
     use plurx_core::cluster::coordination::{StoreCoordinator, UnclusteredJobAuthority};
+    #[cfg(feature = "cluster")]
     use plurx_core::cluster::membership::ClusterRole;
+    #[cfg(feature = "cluster")]
     use plurx_core::store::SqliteStore;
 
+    #[cfg(feature = "cluster")]
     use crate::job_lease::{acquire_cluster_job, AdmittedRoleJobAuthority};
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_waits_for_the_current_log_apply() {
         let mut samples = [(Some(1), Some(2)), (Some(2), Some(3)), (Some(3), Some(3))].into_iter();
         let start = tokio::time::Instant::now();
@@ -537,6 +362,7 @@ mod tests {
     /// by the leader before this replica has even received it, so a replica
     /// that has applied everything it holds is not yet at the cut.
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_waits_for_the_anchor_to_reach_this_replica() {
         let mut samples = [(Some(5), Some(5)), (Some(5), Some(7)), (Some(7), Some(7))].into_iter();
         let start = tokio::time::Instant::now();
@@ -554,6 +380,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_lag_cannot_refresh_the_original_deadline() {
         let start = tokio::time::Instant::now();
         let mut log = 2;
@@ -572,6 +399,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_stalled_metrics_read_is_bounded() {
         let start = tokio::time::Instant::now();
         let error = wait_for_local_backup_apply(start + Duration::from_millis(120), 0, || {
@@ -587,6 +415,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_metrics_error_is_not_retried() {
         let start = tokio::time::Instant::now();
         let mut reads = 0;
@@ -602,6 +431,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_phase_rejects_completion_at_the_original_deadline() {
         let start = tokio::time::Instant::now();
         let error = backup_phase_before_deadline(
@@ -618,6 +448,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "cluster")]
     async fn backup_snapshot_trigger_inherits_the_spent_catchup_budget() {
         let start = tokio::time::Instant::now();
         let deadline = start + Duration::from_millis(120);
@@ -663,6 +494,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "cluster")]
     async fn backup_ticks_are_one_voter_only_and_a_learner_never_claims() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("lease store"));
         let first = StoreCoordinator::new(Arc::clone(&store), "backup-node-a".to_owned())

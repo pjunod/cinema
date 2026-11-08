@@ -14,6 +14,9 @@ import subprocess
 import sys
 import tarfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from validation.migration_helper_release import from_description, validate_helpers
+
 REPOSITORY = "pjunod/cinema"
 MANIFEST = "plurx-update-v1.json"
 MAX_ARTIFACT_BYTES = 8 * 1024**3
@@ -50,9 +53,11 @@ def digest(path):
 
 
 def validate(value):
-    if not isinstance(value, dict) or set(value) != FIELDS:
+    if not isinstance(value, dict) or set(value) not in (FIELDS, FIELDS | {"migration_helpers"}):
         raise ValueError("unexpected manifest fields")
-    if type(value["schema_version"]) is not int or value["schema_version"] != 1 or value["repository"] != REPOSITORY or value["channel"] != "stable":
+    if "migration_helpers" in value and value.get("schema_version") != 2:
+        raise ValueError("V1 manifests cannot contain helper fields")
+    if type(value["schema_version"]) is not int or value["schema_version"] not in (1, 2) or value["repository"] != REPOSITORY or value["channel"] != "stable":
         raise ValueError("unsupported feed identity")
     version = value["version"]
     if not isinstance(version, str) or VERSION.fullmatch(version) is None or value["tag"] != f"v{version}":
@@ -92,6 +97,8 @@ def validate(value):
             raise ValueError("artifact/package identity mismatch")
         if type(artifact["size"]) is not int or not 0 < artifact["size"] <= MAX_ARTIFACT_BYTES or not isinstance(artifact["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"]) is None:
             raise ValueError("invalid artifact hash/size")
+    if "migration_helpers" in value:
+        validate_helpers(value["migration_helpers"], value)
     return value
 
 
@@ -181,6 +188,13 @@ def create(args):
                  upgrade_from=args.upgrade_from, data_compatibility=args.data_compatibility,
                  cluster_compatibility=args.cluster_compatibility, minimum_controller=args.minimum_controller,
                  rollback=args.rollback, release_notes_url=f"https://github.com/{REPOSITORY}/releases/tag/v{args.version}", artifacts=artifacts)
+    descriptions = getattr(args, "migration_helper_description", None) or []
+    if descriptions:
+        value["schema_version"] = 2
+        value["migration_helpers"] = sorted(
+            [from_description(path, args.assets, value, digest) for path in descriptions],
+            key=lambda helper: helper["daemon_build"]["target"],
+        )
     validate(value)
     args.output.write_bytes((json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
     if args.signing_key:
@@ -206,6 +220,7 @@ def main():
     parser.add_argument("--signing-key", type=Path)
     parser.add_argument("--production", action="store_true", help="require signer pinned in approved packaging and exact candidate production roots")
     parser.add_argument("--trusted-roots", type=Path, action="append")
+    parser.add_argument("--migration-helper-description", type=Path, action="append", help="explicit bounded native describe output; authenticate the separately built helper archive, never add it to the default native cohort")
     parser.add_argument("--inspect-packages", action="store_true", help="verify package payload identities without executing them")
     args = parser.parse_args()
     try:

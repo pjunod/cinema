@@ -68,6 +68,9 @@ pub(crate) struct ClusterNodeOperationsStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<SnapshotTransportStatus>,
     pub media: MediaDrainStatus,
+    /// Node-owned background observation; available for voter and learner workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<Box<super::internal_activity::ActivityWorkers>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -241,9 +244,16 @@ pub(crate) async fn local(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<ClusterNodeOperationsStatus>), StatusCode> {
-    let auth = exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    if !state
+    let membership = state
         .membership
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let replication = state
+        .replication
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let auth = exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    if !membership
         .authorize_internal_peer_read_request(&auth, "GET", INTERNAL_PATH, &[])
         .await
         .unwrap_or(false)
@@ -252,7 +262,7 @@ pub(crate) async fn local(
     }
     Ok((
         private_no_store_headers(),
-        Json(local_snapshot(&state).await),
+        Json(local_snapshot(&state, replication).await),
     ))
 }
 
@@ -280,10 +290,15 @@ where
 pub(crate) async fn collect_aggregate(
     state: &AppState,
 ) -> Result<ClusterOperationsAggregate, ApiError> {
+    super::cluster_membership(state)?;
+    let replication = state
+        .replication
+        .as_ref()
+        .ok_or_else(|| bundle_error("cluster replication is unavailable"))?;
     collect_aggregate_with_cached_sources(
         &state.node_id,
         || state.membership_status_cache.fresh(),
-        || local_snapshot(state),
+        || local_snapshot(state, replication),
         || state.peer_status_cache.fresh(),
     )
     .await
@@ -297,10 +312,16 @@ pub(crate) async fn collect_current_aggregate(
     state: &AppState,
 ) -> Result<ClusterOperationsAggregate, ApiError> {
     let deadline = deadline_after(AGGREGATE_TIMEOUT);
-    let membership_for_status = state.membership.clone();
-    let membership_for_directory = state.membership.clone();
-    let transport = PeerTransport::new(state.membership.clone());
-    let replication = state.replication.clone();
+    let membership = super::cluster_membership(state)?;
+    let membership_for_status = membership.clone();
+    let membership_for_directory = membership.clone();
+    let transport = PeerTransport::new(membership.clone());
+    let replication = state
+        .replication
+        .as_ref()
+        .ok_or_else(|| bundle_error("cluster replication is unavailable"))?
+        .clone();
+    let local_replication = replication.clone();
     collect_current_aggregate_with_sources(
         &state.node_id,
         deadline,
@@ -316,7 +337,7 @@ pub(crate) async fn collect_current_aggregate(
                 .await
                 .map_err(|error| error.to_string())
         },
-        || local_snapshot(state),
+        || local_snapshot(state, &local_replication),
         move |peers, deadline| async move {
             collect_peer_statuses(peers, transport, replication, deadline).await
         },
@@ -640,11 +661,11 @@ pub(crate) async fn acquire_planned_outage_preflight(
     // the commit attempt before this guard can perform an exact release.
     let lease = PlannedOutageLeaseGuard::new(
         prepared_lease,
-        state.membership.clone(),
+        super::cluster_membership(state)?.clone(),
         state.serving.clone(),
         state.shutdown.clone(),
     );
-    let membership = state.membership.clone();
+    let membership = super::cluster_membership(state)?.clone();
     let lease = run_planned_outage_task(async move {
         match membership
             .commit_cluster_operation_lease(lease.claim())
@@ -1114,8 +1135,12 @@ pub(crate) async fn cancel_restart(
         // own generations, so overlapping cleanup cannot overwrite or erase
         // either owner.
         let cancellation = state.serving.retain_restart_cancellation();
-        if let Err(error) =
-            release_current_restart_with_retry(&state.membership, &node_id, &state.shutdown).await
+        if let Err(error) = release_current_restart_with_retry(
+            super::cluster_membership(&state)?,
+            &node_id,
+            &state.shutdown,
+        )
+        .await
         {
             if !state.shutdown.is_cancelled() {
                 state.serving.resolve_planned_outage_release(cancellation);
@@ -1161,9 +1186,12 @@ fn bundle_error(error: impl std::fmt::Display) -> ApiError {
     )
 }
 
-async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
+async fn local_snapshot(
+    state: &AppState,
+    replication: &plurx_core::cluster::migration::status::ReplicationMonitor,
+) -> ClusterNodeOperationsStatus {
     let observed_at_unix_ms = unix_ms();
-    let view = state.replication.metrics_handle().snapshot();
+    let view = replication.metrics_handle().snapshot();
     let sample = view.sample;
     let valid_sample = view.valid.then_some(sample).flatten();
     let valid_watermark = view.watermark_valid.then_some(view.watermark).flatten();
@@ -1171,7 +1199,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
     snapshot.db_bytes = view.state_machine_bytes.map(|bytes| bytes.db);
     let active_sessions = local_owned_media_sessions(state).await;
     let drain = state.serving.restart_drain_status(active_sessions).await;
-    let mut wal_snapshot = state.replication.wal_status_snapshot();
+    let mut wal_snapshot = replication.wal_status_snapshot();
     if let Some(error) = wal_snapshot
         .as_mut()
         .and_then(|snapshot| snapshot.last_error.as_mut())
@@ -1212,8 +1240,9 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
             snapshot: wal_snapshot,
         },
         snapshot,
-        transport: state.replication.transport_status_snapshot(),
+        transport: replication.transport_status_snapshot(),
         media: media_drain_status(active_sessions, drain),
+        workers: state.peer_status_cache.cached_local_workers().map(Box::new),
     }
 }
 
@@ -1224,7 +1253,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
 /// so it reports unavailable rather than turning an operations request into a
 /// Store ping.
 pub(super) fn operations_readiness(state: &AppState) -> ReadinessEvaluation {
-    if state.membership.local_maintenance_active() {
+    if state.local_maintenance_active() {
         return ReadinessEvaluation {
             ready: false,
             reason: Some(ReadinessFailure::Maintenance),
@@ -1249,16 +1278,7 @@ pub(super) fn operations_readiness(state: &AppState) -> ReadinessEvaluation {
     }
 }
 
-pub(crate) async fn local_owned_media_sessions(state: &AppState) -> usize {
-    let (hls, offline) = tokio::join!(
-        state.transcode.active_sessions(),
-        state.offline.active_preparations()
-    );
-    hls.saturating_add(state.streams.active_count())
-        .saturating_add(offline)
-        .saturating_add(state.live_tv.activities().len())
-        .saturating_add(state.live_tv.recording_activities().len())
-}
+pub(crate) use super::local_owned_media_sessions;
 
 fn media_drain_status(
     active_sessions: usize,
@@ -1397,6 +1417,13 @@ impl MembershipStatusCache {
 #[derive(Clone, Default)]
 pub(crate) struct PeerStatusCache {
     inner: std::sync::Arc<tokio::sync::Mutex<Option<CachedPeerStatuses>>>,
+    local_workers: std::sync::Arc<std::sync::RwLock<Option<CachedLocalWorkers>>>,
+}
+
+#[derive(Clone)]
+struct CachedLocalWorkers {
+    stored_at: tokio::time::Instant,
+    workers: super::internal_activity::ActivityWorkers,
 }
 
 #[derive(Clone)]
@@ -1421,6 +1448,49 @@ impl From<BTreeMap<String, PeerStatusOutcome>> for PeerStatusCacheRead {
 }
 
 impl PeerStatusCache {
+    fn cached_local_workers(&self) -> Option<super::internal_activity::ActivityWorkers> {
+        self.local_workers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|cached| cached.stored_at.elapsed() < PEER_STATUS_CACHE_TTL)
+            .map(|cached| cached.workers.clone())
+    }
+
+    fn store_local_workers(&self, workers: super::internal_activity::ActivityWorkers) {
+        *self
+            .local_workers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(CachedLocalWorkers {
+            stored_at: tokio::time::Instant::now(),
+            workers: workers.capacity_only(),
+        });
+    }
+
+    pub(super) async fn worker_observations(
+        &self,
+    ) -> BTreeMap<String, super::internal_activity::ActivityWorkers> {
+        let PeerStatusCacheRead::Fresh(statuses, _) = self.fresh().await else {
+            return BTreeMap::new();
+        };
+        statuses
+            .into_iter()
+            .filter_map(|(id, outcome)| {
+                if outcome.state != ObservationState::Answered || outcome.node_id != id {
+                    return None;
+                }
+                let status = outcome.status?;
+                if status.node_id != id {
+                    return None;
+                }
+                let workers = status.workers?;
+                workers
+                    .bounded(&id)
+                    .then_some((id, workers.capacity_only()))
+            })
+            .collect()
+    }
+
     async fn fresh(&self) -> PeerStatusCacheRead {
         let cache = self.inner.lock().await;
         let Some(cached) = cache.as_ref() else {
@@ -1592,13 +1662,13 @@ pub(crate) async fn membership_status_cache_loop(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
-    if !state.membership.is_replicated() {
+    let Some(membership) = state.membership.as_ref() else {
         return;
-    }
+    };
     loop {
         let refresh_started = tokio::time::Instant::now();
-        let status_membership = state.membership.clone();
-        let capability_membership = state.membership.clone();
+        let status_membership = membership.clone();
+        let capability_membership = membership.clone();
         let (status_result, capability_result) = tokio::join!(
             refresh_membership_status_cache_with(
                 &state.membership_status_cache,
@@ -1636,15 +1706,41 @@ pub(crate) async fn membership_status_cache_loop(
 
 /// Refresh authenticated peer observations away from page renders and
 /// Prometheus scrapes. The request path reads the five-second cache only.
-pub(crate) async fn peer_status_cache_loop(
+/// Sampling may read settings, so it runs independently of the Store-free
+/// operations handlers and the peer refresh's fixed timing budget.
+pub(crate) async fn worker_status_cache_loop(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     loop {
+        let started = tokio::time::Instant::now();
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            result = tokio::time::timeout(Duration::from_secs(1), super::internal_activity::local_worker_capacity(&state)) => {
+                if let Ok(workers) = result { state.peer_status_cache.store_local_workers(workers); }
+            }
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep_until(started + PEER_STATUS_REFRESH_INTERVAL) => {}
+        }
+    }
+}
+
+pub(crate) async fn peer_status_cache_loop(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let (Some(membership), Some(replication)) =
+        (state.membership.as_ref(), state.replication.as_ref())
+    else {
+        return;
+    };
+    loop {
         let refresh_started = tokio::time::Instant::now();
-        let membership = state.membership.clone();
-        let transport = PeerTransport::new(state.membership.clone());
-        let replication = state.replication.clone();
+        let membership = membership.clone();
+        let transport = PeerTransport::new(membership.clone());
+        let replication = replication.clone();
         if let Err(error) = refresh_peer_status_cache_with(
             &state.peer_status_cache,
             refresh_started,
@@ -1852,7 +1948,12 @@ async fn fetch_peer_status(
     let (state, status) = match response {
         Ok(response) if response.status.is_success() => {
             match serde_json::from_slice::<ClusterNodeOperationsStatus>(&response.body) {
-                Ok(status) if status.node_id == expected_node_id => {
+                Ok(mut status) if status.node_id == expected_node_id => {
+                    status.workers = status.workers.take().and_then(|workers| {
+                        workers
+                            .bounded(expected_node_id)
+                            .then(|| Box::new(workers.capacity_only()))
+                    });
                     (ObservationState::Answered, Some(status))
                 }
                 Ok(_) => (ObservationState::IdentityMismatch, None),

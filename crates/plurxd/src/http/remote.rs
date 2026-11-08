@@ -2,33 +2,40 @@
 pub(crate) mod invitations;
 mod owner;
 pub(crate) mod wire;
-use super::{
-    error::ApiError,
-    extract::{authenticate_token_digest, authenticate_user_token},
-    peer_transport::{
-        exact_auth_from_headers, signed_response_payload, PeerAuthMode, PeerTransport,
-        RESPONSE_SIGNATURE_HEADER,
-    },
+#[cfg(feature = "cluster")]
+use super::extract::authenticate_token_digest;
+#[cfg(feature = "cluster")]
+use super::peer_transport::{
+    exact_auth_from_headers, signed_response_payload, PeerAuthMode, PeerTransport,
+    RESPONSE_SIGNATURE_HEADER,
 };
+use super::{error::ApiError, extract::authenticate_user_token};
 use crate::state::AppState;
+#[cfg(any(test, feature = "cluster"))]
+use axum::body::Body;
 use axum::{
-    body::{Body, Bytes},
+    body::Bytes,
     extract::{OriginalUri, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+#[cfg(feature = "cluster")]
 use futures_util::{stream, StreamExt};
 pub(crate) use owner::{Hub, FEATURE_KEY};
+#[cfg(feature = "cluster")]
+use plurx_core::store::TokenAudience;
 use plurx_core::{
     auth,
     remote_control::{Version, MAX_BODY_BYTES},
-    store::TokenAudience,
 };
 use serde_json::{json, Value};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(any(test, feature = "cluster"))]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use wire::*;
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) const INTERNAL_PATH: &str = "/internal/remote/v1/dispatch";
 pub(crate) fn fail(status: u16, code: &'static str) -> ApiError {
     ApiError::typed(
@@ -171,7 +178,7 @@ fn error_response(error: ApiError) -> Response {
     (status, [("cache-control", "no-store")], axum::Json(value)).into_response()
 }
 async fn enabled(state: &AppState) -> Result<(), ApiError> {
-    if state.membership.local_maintenance_active() {
+    if state.local_maintenance_active() {
         return Err(fail(503, "unavailable"));
     }
     #[cfg(test)]
@@ -191,36 +198,44 @@ async fn enabled(state: &AppState) -> Result<(), ApiError> {
 async fn route(state: &AppState, dispatch: Dispatch) -> Result<(u16, Value), ApiError> {
     if let Some(target) = dispatch.request.target() {
         if target.owner_node_id != state.node_id {
-            let peers = state
-                .membership
-                .operations_peers()
-                .await
-                .map_err(|_| fail(503, "unavailable"))?;
-            let peer = peers
-                .into_iter()
-                .find(|p| p.node_id == target.owner_node_id && p.reachable)
-                .ok_or_else(|| fail(503, "unavailable"))?;
-            let base = peer.http_base.ok_or_else(|| fail(503, "unavailable"))?;
-            let body = serde_json::to_vec(&dispatch).map_err(|_| fail(400, "invalid"))?;
-            let response = PeerTransport::new(state.membership.clone())
-                .request(
-                    &peer.node_id,
-                    &base,
-                    reqwest::Method::POST,
-                    INTERNAL_PATH,
-                    body,
-                    tokio::time::Instant::now() + Duration::from_secs(25),
-                    64 * 1024,
-                    PeerAuthMode::ExactRequestAndMemberResponse,
-                )
-                .await
-                .map_err(|_| fail(503, "unavailable"))?;
-            let value: Value =
-                serde_json::from_slice(&response.body).map_err(|_| fail(503, "unavailable"))?;
-            if value["version"] != "cinema.remote.v1" {
-                return Err(fail(503, "unavailable"));
+            #[cfg(not(feature = "cluster"))]
+            return Err(fail(503, "unavailable"));
+            #[cfg(feature = "cluster")]
+            {
+                let membership = state
+                    .membership
+                    .as_ref()
+                    .ok_or_else(|| fail(503, "unavailable"))?;
+                let peers = membership
+                    .operations_peers()
+                    .await
+                    .map_err(|_| fail(503, "unavailable"))?;
+                let peer = peers
+                    .into_iter()
+                    .find(|p| p.node_id == target.owner_node_id && p.reachable)
+                    .ok_or_else(|| fail(503, "unavailable"))?;
+                let base = peer.http_base.ok_or_else(|| fail(503, "unavailable"))?;
+                let body = serde_json::to_vec(&dispatch).map_err(|_| fail(400, "invalid"))?;
+                let response = PeerTransport::new(membership.clone())
+                    .request(
+                        &peer.node_id,
+                        &base,
+                        reqwest::Method::POST,
+                        INTERNAL_PATH,
+                        body,
+                        tokio::time::Instant::now() + Duration::from_secs(25),
+                        64 * 1024,
+                        PeerAuthMode::ExactRequestAndMemberResponse,
+                    )
+                    .await
+                    .map_err(|_| fail(503, "unavailable"))?;
+                let value: Value =
+                    serde_json::from_slice(&response.body).map_err(|_| fail(503, "unavailable"))?;
+                if value["version"] != "cinema.remote.v1" {
+                    return Err(fail(503, "unavailable"));
+                }
+                return Ok((response.status.as_u16(), value));
             }
-            return Ok((response.status.as_u16(), value));
         }
     }
     state.remote.perform(state, dispatch).await
@@ -240,58 +255,65 @@ async fn listings(state: &AppState, d: &Dispatch) -> Result<Value, ApiError> {
             },
         )
         .await?;
-    let mut summaries = local["sessions"].as_array().cloned().unwrap_or_default();
-    let mut unavailable = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let peers = tokio::time::timeout_at(deadline, state.membership.operations_peers())
-        .await
-        .map_err(|_| fail(503, "unavailable"))?
-        .map_err(|_| fail(503, "unavailable"))?;
-    let transport = PeerTransport::new(state.membership.clone());
-    let body = serde_json::to_vec(&Dispatch {
-        request: Request::ListSessions {
-            version: Version::V1,
-        },
-        ..d.clone()
-    })
-    .map_err(|_| fail(400, "invalid"))?;
-    let replies = stream::iter(peers.into_iter().map(|peer| {
-        let transport = transport.clone();
-        let body = body.clone();
-        async move {
-            let result = if let Some(base) = peer.http_base {
-                transport
-                    .request(
-                        &peer.node_id,
-                        &base,
-                        reqwest::Method::POST,
-                        INTERNAL_PATH,
-                        body,
-                        deadline,
-                        64 * 1024,
-                        PeerAuthMode::ExactRequestAndMemberResponse,
-                    )
-                    .await
-                    .ok()
-            } else {
-                None
-            };
-            (peer.node_id, result)
-        }
-    }))
-    .buffer_unordered(8)
-    .collect::<Vec<_>>()
-    .await;
-    for (node, reply) in replies {
-        if let Some(reply) = reply.filter(|r| r.status.is_success()) {
-            if let Ok(value) = serde_json::from_slice::<Value>(&reply.body) {
-                if let Some(list) = value["sessions"].as_array() {
-                    summaries.extend(list.iter().cloned());
-                    continue;
+    let summaries = local["sessions"].as_array().cloned().unwrap_or_default();
+    #[cfg(feature = "cluster")]
+    let mut summaries = summaries;
+    let unavailable: Vec<String> = Vec::new();
+    #[cfg(feature = "cluster")]
+    let mut unavailable = unavailable;
+    #[cfg(feature = "cluster")]
+    if let Some(membership) = state.membership.as_ref() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let peers = tokio::time::timeout_at(deadline, membership.operations_peers())
+            .await
+            .map_err(|_| fail(503, "unavailable"))?
+            .map_err(|_| fail(503, "unavailable"))?;
+        let transport = PeerTransport::new(membership.clone());
+        let body = serde_json::to_vec(&Dispatch {
+            request: Request::ListSessions {
+                version: Version::V1,
+            },
+            ..d.clone()
+        })
+        .map_err(|_| fail(400, "invalid"))?;
+        let replies = stream::iter(peers.into_iter().map(|peer| {
+            let transport = transport.clone();
+            let body = body.clone();
+            async move {
+                let result = if let Some(base) = peer.http_base {
+                    transport
+                        .request(
+                            &peer.node_id,
+                            &base,
+                            reqwest::Method::POST,
+                            INTERNAL_PATH,
+                            body,
+                            deadline,
+                            64 * 1024,
+                            PeerAuthMode::ExactRequestAndMemberResponse,
+                        )
+                        .await
+                        .ok()
+                } else {
+                    None
+                };
+                (peer.node_id, result)
+            }
+        }))
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+        for (node, reply) in replies {
+            if let Some(reply) = reply.filter(|r| r.status.is_success()) {
+                if let Ok(value) = serde_json::from_slice::<Value>(&reply.body) {
+                    if let Some(list) = value["sessions"].as_array() {
+                        summaries.extend(list.iter().cloned());
+                        continue;
+                    }
                 }
             }
+            unavailable.push(node);
         }
-        unavailable.push(node);
     }
     let receivers=receivers.into_iter().map(|r|{let live=unique_summary(&summaries,&r.id);json!({"receiver_id":r.id,"name":r.name,"platform":r.platform,"target":live.map(|s|s["target"].clone()),"available":live.is_some(),"busy":live.is_some_and(|s|s["busy"]==true),"paired":grants.iter().any(|g|g.receiver_id==r.id)})}).collect::<Vec<_>>();
     Ok(json!({"version":"cinema.remote.v1","receivers":receivers,"unavailable_nodes":unavailable}))
@@ -433,17 +455,20 @@ async fn public_inner(
     }
     route(state, Dispatch { request, ..d }).await
 }
+#[cfg(feature = "cluster")]
 pub(crate) async fn internal(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let Some(membership) = state.membership.as_ref() else {
+        return error_response(fail(503, "unavailable"));
+    };
     let auth = match exact_auth_from_headers(&headers) {
         Some(auth) => auth,
         None => return error_response(fail(401, "unauthorized")),
     };
-    if !state
-        .membership
+    if !membership
         .authorize_internal_peer_request(&auth, "POST", INTERNAL_PATH, &body)
         .await
         .unwrap_or(false)
@@ -491,7 +516,7 @@ pub(crate) async fn internal(
         _ => return error_response(fail(503, "unavailable")),
     };
     let payload = signed_response_payload(status, &bytes);
-    let signature = match state.membership.sign_internal_peer_response(
+    let signature = match membership.sign_internal_peer_response(
         &auth.node_id,
         &auth.nonce,
         INTERNAL_PATH,
@@ -508,6 +533,7 @@ pub(crate) async fn internal(
         .body(Body::from(bytes))
         .unwrap_or_else(|_| error_response(fail(503, "unavailable")))
 }
+#[cfg(any(test, feature = "cluster"))]
 pub(crate) fn eligible(method: &Method, path: &str) -> bool {
     if invitations::eligible(method, path) {
         return true;
@@ -554,10 +580,7 @@ pub(crate) fn router() -> axum::Router<AppState> {
                 .delete(public)
                 .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
         )
-        .route(
-            INTERNAL_PATH,
-            axum::routing::post(internal).layer(axum::extract::DefaultBodyLimit::max(68 * 1024)),
-        )
+        .merge(internal_router())
         .layer(axum::middleware::from_fn(limit_response))
 }
 async fn limit_response(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
@@ -584,3 +607,15 @@ mod live_fixture;
 #[cfg(test)]
 #[path = "remote/tests.rs"]
 mod tests;
+
+fn internal_router() -> axum::Router<AppState> {
+    // Merging even an empty router combines Axum's path-check policy. Keep the
+    // remote family compatible with the root's literal Plex colon segments.
+    let router = axum::Router::new().without_v07_checks();
+    #[cfg(feature = "cluster")]
+    let router = router.route(
+        INTERNAL_PATH,
+        axum::routing::post(internal).layer(axum::extract::DefaultBodyLimit::max(68 * 1024)),
+    );
+    router
+}

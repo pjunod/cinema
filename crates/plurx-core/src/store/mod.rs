@@ -43,7 +43,6 @@ pub mod sharing_receiver_retirement;
 pub use sharing_receiver_retirement::SharingReceiverRetirementStore;
 pub mod sharing_receiver_sessions;
 pub use sharing_receiver_progress::SharingReceiverProgressStore;
-#[cfg(feature = "hiqlite-store")]
 pub(crate) mod sharing_source_schema;
 pub use sharing_receiver_sessions::SharingReceiverSessionStore;
 pub mod sharing_source_ingress_custody;
@@ -145,7 +144,7 @@ pub use jellyfin_identity::{JellyfinEntityId, JellyfinEntityKind, JellyfinIdenti
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_jellyfin_identity;
 mod sqlite;
-mod telemetry;
+pub(crate) mod telemetry;
 mod timeline_annotations;
 
 mod publication;
@@ -428,6 +427,7 @@ impl CacheAdminMutationClaim {
 /// Nullable with no default on purpose: a row that predates the backfill and a
 /// record that genuinely reported zero have to stay distinguishable, or the
 /// fallback to parsing the display label can never know when to stop.
+#[cfg(any(test, feature = "hiqlite-store"))]
 const FILES_DOLBY_VISION_COLUMNS: &[&str] = &[
     "ALTER TABLE files ADD COLUMN dv_profile INTEGER",
     "ALTER TABLE files ADD COLUMN dv_level INTEGER",
@@ -464,6 +464,7 @@ const FILES_FIELD_ORDER_COLUMN: &str = "ALTER TABLE files ADD COLUMN field_order
 /// Source luminance facts used by the CPU tone-map recipe. Nullable values
 /// distinguish unknown rows from a completed probe whose `luminance_source`
 /// is `none`.
+#[cfg(any(test, feature = "hiqlite-store"))]
 pub(crate) const FILES_LUMINANCE_COLUMNS: &[&str] = &[
     "ALTER TABLE files ADD COLUMN max_cll INTEGER",
     "ALTER TABLE files ADD COLUMN max_fall INTEGER",
@@ -511,7 +512,6 @@ fn session_dependency_triggers() -> impl Iterator<Item = (&'static str, &'static
         )))
 }
 
-#[cfg(feature = "hiqlite-store")]
 fn session_dependency_guard() -> String {
     session_dependency_triggers().map(|(name, table, sql)| {
         let declaration = sql.trim_end_matches(';').replacen("CREATE TRIGGER IF NOT EXISTS", "CREATE TRIGGER", 1).replace('\'', "''");
@@ -522,14 +522,37 @@ fn session_dependency_guard() -> String {
 /// Current-schema orchestration around the unchanged frozen ownership layout.
 /// Execute every statement atomically; unrelated triggers stay installed.
 pub fn media_session_principal_rebuild_schema() -> String {
+    // The v122 interest trigger reads media_session_requests while attached to
+    // background_job_commands. SQLite validates it during each table rename.
+    let interest = sharing_source_schema::restore_interest_trigger();
+    let dependency_guard = session_dependency_guard();
+    format!(
+        "CREATE TABLE media_session_principal_dependency_guard(exact INTEGER NOT NULL CHECK(exact=1));
+-- next statement
+INSERT INTO media_session_principal_dependency_guard SELECT ({dependency_guard});
+-- next statement
+DROP TABLE media_session_principal_dependency_guard;
+-- next statement
+DROP TRIGGER playback_analysis_restore_effects;
+-- next statement
+{}
+-- next statement
+{interest}",
+        media_session_principal_rebuild_after_external_detach()
+    )
+}
+
+/// Source installers capture and detach the exact interest trigger, along
+/// with any audited membership triggers, before applying this inner layout.
+fn media_session_principal_rebuild_after_external_detach() -> String {
     let separator = "\n-- next statement\n";
-    let dependencies = session_dependency_triggers().collect::<Vec<_>>();
+    let dependencies = jellyfin_watch::session_dependency_triggers().collect::<Vec<_>>();
     let mut statements = dependencies
         .iter()
-        .map(|(name, _, _)| format!("DROP TRIGGER {name};"))
+        .map(|(name, _)| format!("DROP TRIGGER {name};"))
         .collect::<Vec<_>>();
     statements.push(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.to_owned());
-    statements.extend(dependencies.into_iter().map(|(_, _, sql)| sql.to_owned()));
+    statements.extend(dependencies.into_iter().map(|(_, sql)| sql.to_owned()));
     statements.join(separator)
 }
 
@@ -588,18 +611,23 @@ pub(crate) const MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA: &str = "ALTER TABLE media_
 /// `recovery_pending`, then the current owner freezes its alternate. Re-homing
 /// either consumed state moves to `rehome_pending` and clears both node-local
 /// recipe references, but can never return the budget to `primary`.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const OFFLINE_CLAIM_GENERATION_SCHEMA: &str = "ALTER TABLE offline_packages
         ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0
         CHECK (claim_generation >= 0)";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const OFFLINE_RECOVERY_STATE_SCHEMA: &str = "ALTER TABLE offline_packages
         ADD COLUMN decoder_recovery_state TEXT NOT NULL DEFAULT 'primary'
         CHECK (decoder_recovery_state IN
             ('primary', 'recovery_pending', 'rehome_pending', 'alternate'))";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const OFFLINE_ALTERNATE_RECIPE_SCHEMA: &str = "ALTER TABLE offline_packages
         ADD COLUMN alternate_recipe_hash TEXT";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const CACHE_PUBLICATION_GENERATION_SCHEMA: &str = "ALTER TABLE transcode_cache_locations
         ADD COLUMN publication_generation INTEGER NOT NULL DEFAULT 0
         CHECK (publication_generation >= 0)";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const CACHE_PUBLICATION_GENERATION_GUARD_SCHEMA: &str =
     "CREATE TRIGGER cache_publication_generation_guard
     BEFORE UPDATE OF complete, bytes, manifest_digest, relative_dir, storage_id,
@@ -615,6 +643,7 @@ pub(crate) const CACHE_PUBLICATION_GENERATION_GUARD_SCHEMA: &str =
     BEGIN
         SELECT RAISE(ABORT, 'cache publication requires a current-generation writer');
     END";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const OFFLINE_CLAIM_LIFECYCLE_GUARD_SCHEMA: &str =
     "CREATE TRIGGER offline_claim_lifecycle_guard
     BEFORE UPDATE OF state, claim_generation ON offline_packages
@@ -631,6 +660,7 @@ pub(crate) const OFFLINE_CLAIM_LIFECYCLE_GUARD_SCHEMA: &str =
     BEGIN
         SELECT RAISE(ABORT, 'invalid offline claim lifecycle transition');
     END";
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const OFFLINE_RECOVERY_GUARD_SCHEMA: &str = "CREATE TRIGGER offline_recovery_guard
     BEFORE UPDATE OF recipe_hash, decoder_recovery_state, alternate_recipe_hash
     ON offline_packages
@@ -999,14 +1029,17 @@ pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA: &str = concat!(
 );
 
 /// The column on its own, for the replicated migration's first statement.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_REVISION_COLUMN: &str =
     pointer_desired_revision_column!();
 
 /// The insert-path trigger on its own.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER: &str =
     pointer_desired_fence_insert_trigger!();
 
 /// The update-path trigger on its own.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER: &str =
     pointer_desired_fence_update_trigger!();
 
@@ -1086,9 +1119,11 @@ macro_rules! media_session_drain_ownership_fence_trigger {
 }
 
 /// The drain deadline column, for the replicated migration's first statement.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_COLUMN: &str = media_session_drain_deadline_column!();
 
 /// The ownership fence on its own, for the replicated migration and install.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) const MEDIA_SESSION_DRAIN_OWNERSHIP_FENCE_TRIGGER: &str =
     media_session_drain_ownership_fence_trigger!();
 
@@ -6013,6 +6048,7 @@ impl HttpStoreOperationCounts {
         std::time::Duration::from_nanos(self.store_nanos.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    #[cfg(feature = "hiqlite-store")]
     fn record(&self, class_index: usize, elapsed: std::time::Duration) {
         use std::sync::atomic::Ordering;
 
@@ -6049,6 +6085,7 @@ pub fn scope_http_store_operations<T>(
     HTTP_STORE_OPERATION_COUNTS.scope(counts, Box::pin(future))
 }
 
+#[cfg(feature = "hiqlite-store")]
 pub(super) fn record_http_store_operation(class_index: usize, elapsed: std::time::Duration) {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index, elapsed));
 }

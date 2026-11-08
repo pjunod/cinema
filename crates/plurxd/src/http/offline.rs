@@ -1984,6 +1984,218 @@ mod tests {
         );
     }
 
+    /// Queueing captures metadata without reading the source. Only the claimed
+    /// durable worker proves Profile 5 pixels, before binding or rendering an
+    /// output. An inconclusive proof yields and is retried; a refuted one refuses.
+    #[tokio::test]
+    async fn offline_request_defers_profile5_proof_to_owned_worker_and_refuses_unproved_output() {
+        use crate::transcode::{OfflineProduceOutcome, OfflineSpec, OfflineSubtitle};
+        use plurx_core::transcode::EffectiveRateControl;
+        use std::sync::atomic::Ordering;
+
+        let fixture = fixture_with_system(crate::state::SystemInfo {
+            dovi_reshape: true,
+            ..Default::default()
+        })
+        .await;
+        let file_id = insert_profile5(&fixture).await;
+        let hooks = fixture.state.transcode.test_hooks();
+        hooks
+            .dovi_pixel_proof_script
+            .lock()
+            .expect("proof script")
+            .extend([
+                crate::ffmpeg::DoviPixelProof::Inconclusive(
+                    "Dolby Vision pixel probe timed out".into(),
+                ),
+                crate::ffmpeg::DoviPixelProof::Refuted,
+            ]);
+        // Any attempt to reach rendering is recorded and safely refused.
+        fixture
+            .state
+            .transcode
+            .test_script_offline_production([OfflineProduceOutcome::Yielded(
+                "unexpected_unproved_render",
+            )]);
+        fn output_files(
+            root: &std::path::Path,
+        ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+            fn visit(
+                root: &std::path::Path,
+                path: &std::path::Path,
+                files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+            ) {
+                for entry in std::fs::read_dir(path).expect("output directory") {
+                    let entry = entry.expect("output entry");
+                    let kind = entry.file_type().expect("output type");
+                    if kind.is_dir() {
+                        visit(root, &entry.path(), files);
+                    } else {
+                        assert!(kind.is_file(), "unexpected output link");
+                        files.insert(
+                            entry
+                                .path()
+                                .strip_prefix(root)
+                                .expect("owned output")
+                                .to_path_buf(),
+                            std::fs::read(entry.path()).expect("output bytes"),
+                        );
+                    }
+                }
+            }
+            let mut files = std::collections::BTreeMap::new();
+            for name in ["cache", "transcode", "renditions"] {
+                visit(root, &root.join(name), &mut files);
+            }
+            files
+        }
+        let initial_output = output_files(fixture._root.path());
+        let assert_no_output = || {
+            assert!(fixture
+                .state
+                .transcode
+                .test_offline_produced_recipes()
+                .is_empty());
+            assert_eq!(fixture.state.transcode.test_manifests_published(), 0);
+            assert_eq!(
+                output_files(fixture._root.path()),
+                initial_output,
+                "an unproved package must create no media artifacts"
+            );
+        };
+        let (code, body) = create_response(
+            &fixture,
+            file_id,
+            CreatePackage {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                height: 720,
+                audio_index: Some(0),
+                subtitle_index: None,
+            },
+        )
+        .await;
+        assert_eq!(code, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body["state"], "queued", "{body}");
+        assert_eq!(
+            hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+            0,
+            "an HTTP enqueue must not read the source for a pixel proof"
+        );
+        assert_no_output();
+        let stats = fixture
+            .state
+            .store
+            .offline_package_stats("test-node", now_unix())
+            .await
+            .expect("queued metadata");
+        assert_eq!(
+            (
+                stats.queued,
+                stats.preparing,
+                stats.ready,
+                stats.failed,
+                stats.active_leases
+            ),
+            (1, 0, 0, 0, 0)
+        );
+        let package = fixture
+            .state
+            .store
+            .claim_next_offline_package("test-node")
+            .await
+            .expect("claim owned package")
+            .expect("queued package");
+        assert_eq!(package.id, body["id"].as_str().expect("package id"));
+        assert!(package.recipe_hash.is_none());
+        let file = fixture
+            .state
+            .store
+            .get_file(file_id)
+            .await
+            .expect("source row")
+            .expect("profile5 file");
+        let spec = OfflineSpec {
+            target_height: package.target_height,
+            audio_index: package.audio_index,
+            subtitle: OfflineSubtitle::None,
+            effective_rate_control: EffectiveRateControl::parse_snapshot(
+                &package.effective_rate_control,
+            )
+            .expect("captured rate control"),
+            audio_delivery: package
+                .audio_recipe
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .expect("captured audio recipe"),
+        };
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let pending = Box::pin(
+            fixture
+                .state
+                .transcode
+                .ensure_offline(&package, &file, &spec, deadline, &cancelled),
+        )
+        .await
+        .expect("unfinished proof yields");
+        assert!(
+            matches!(
+                pending,
+                OfflineProduceOutcome::Yielded("source_proof_pending")
+            ),
+            "{pending:?}"
+        );
+        assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 1);
+        assert_no_output();
+        let retained = fixture
+            .state
+            .store
+            .offline_package_for_user(&package.id, fixture.user.id)
+            .await
+            .expect("retained owner")
+            .expect("metadata package");
+        assert!(retained.recipe_hash.is_none());
+        assert!(retained.actual_bytes.is_none());
+        assert_eq!(retained.claim_generation, package.claim_generation);
+
+        // Nothing was memoized by the inconclusive proof. The same owner
+        // measures again, and a refuted proof refuses before production.
+        let refused = Box::pin(
+            fixture
+                .state
+                .transcode
+                .ensure_offline(&package, &file, &spec, deadline, &cancelled),
+        )
+        .await
+        .expect_err("refuted pixels cannot render a package");
+        assert!(
+            crate::transcode::unsupported_build_reason(&refused).is_some(),
+            "{refused}"
+        );
+        assert_eq!(hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst), 2);
+        assert_no_output();
+        let retained = fixture
+            .state
+            .store
+            .offline_package_for_user(&package.id, fixture.user.id)
+            .await
+            .expect("unproduced owner")
+            .expect("metadata package");
+        assert!(retained.recipe_hash.is_none());
+        assert!(retained.actual_bytes.is_none());
+        let stats = fixture
+            .state
+            .store
+            .offline_package_stats("test-node", now_unix())
+            .await
+            .expect("unproduced statistics");
+        assert_eq!(
+            (stats.ready, stats.ready_bytes, stats.failed_bytes),
+            (0, 0, 0)
+        );
+    }
+
     async fn insert_unprobed(fixture: &Fixture, duration_ms: Option<i64>) -> i64 {
         let item = fixture
             .state
@@ -3032,7 +3244,7 @@ mod tests {
             "media-a".to_owned(),
             "test-cluster",
             "reader-node".to_owned(),
-            plurx_core::cluster::membership::MembershipManager::unavailable(),
+            None,
             Arc::clone(&fixture.state.store),
         );
         shared

@@ -661,9 +661,13 @@ async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
     // The drain lists the row as queued; a node claims it in the window
     // between that list and the drain's cancel. The hook is that window.
     let token = Arc::new(std::sync::Mutex::new(None));
+    let owner = Arc::new(std::sync::Mutex::new(None));
+    let executor_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let claim_in_window = |job_id: String| {
         let store = Arc::clone(&store);
         let token = Arc::clone(&token);
+        let owner = Arc::clone(&owner);
+        let executor_alive = Arc::clone(&executor_alive);
         async move {
             let queued = store.background_job(&job_id).await.expect("job").expect("row");
             assert_eq!(queued.state, JobState::Queued, "the drain listed it as queued");
@@ -674,15 +678,17 @@ async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
                 kind: JobKind::CopyOutputPrepare, payload_version: 1, now_ms: now, dispatched_at_ms: now,
             }).await.expect("claim") {
                 ClaimOutcome::Claimed { job } => {
-                    // The executor accepts physical custody before the drain
-                    // cancels its claim; cancellation cannot create a new owner.
-                    let active = crate::background_jobs::ActiveBackgroundJob::start(
-                        Arc::clone(&store), Arc::new(CopyPreparationAuthority),
-                        job.token.expect("claimed owner"),
-                        tokio::time::Instant::now() + Duration::from_secs(30),
-                        JobKind::CopyOutputPrepare,
-                    ).await.expect("owner accepted before cancellation");
-                    *token.lock().expect("owner slot") = Some(active);
+                    let claimed = job.token.expect("claimed token");
+                    if executor_alive.load(std::sync::atomic::Ordering::Relaxed) {
+                        // Register source execution while the claim is running,
+                        // before the drain requests cancellation.
+                        let active = crate::background_jobs::ActiveBackgroundJob::start(
+                            Arc::clone(&store), Arc::new(CopyPreparationAuthority), claimed.clone(),
+                            tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
+                        ).await.expect("running owner");
+                        *owner.lock().expect("owner slot") = Some(active);
+                    }
+                    *token.lock().expect("token slot") = Some(claimed);
                 }
                 other => panic!("claim {other:?}"),
             }
@@ -699,11 +705,13 @@ async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
     );
     assert_eq!(d2_job_state(&store, &live).await, JobState::Cancelling,
         "a row claimed during the drain goes to cancelling, never back to queued");
-    let active = token.lock().expect("owner slot").take().expect("accepted before the drain");
+    let _claimed = token.lock().expect("token slot").take().expect("claimed in the window");
+    let active = owner.lock().expect("owner slot").take().expect("executor started before cancel");
     active.fence().settle(JobSettlement::Cancel).await.expect("owner settles the cancel");
     active.finish().await;
     assert_eq!(d2_job_state(&store, &live).await, JobState::Cancelled);
     // Executor gone: the same race, and store upkeep settles at lease expiry.
+    executor_alive.store(false, std::sync::atomic::Ordering::Relaxed);
     let orphaned = d2_queue_copy_row(&store, &file, "test-local", "orphaned").await;
     let now = crate::media_sessions::unix_ms();
     assert_eq!(
@@ -712,6 +720,7 @@ async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
         1
     );
     let _ = token.lock().expect("token slot").take().expect("claimed in the window");
+    assert!(owner.lock().expect("owner slot").is_none(), "the orphan never started source execution");
     assert_eq!(d2_job_state(&store, &orphaned).await, JobState::Cancelling);
     store.maintain_jobs(now + 24 * 60 * 60 * 1_000).await.expect("upkeep");
     assert_ne!(d2_job_state(&store, &orphaned).await, JobState::Cancelling,

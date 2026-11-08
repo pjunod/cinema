@@ -145,6 +145,15 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
         )
         .map_err(|_| MembershipError::Incompatible)?
     };
+    let dependencies = layout::capture_replicated_rebuild_dependencies(&inner.client)
+        .await
+        .map_err(|error| {
+            MembershipError::Internal(format!("Source rebuild dependency audit: {error}"))
+        })?;
+    let restored_dependencies = serde_json::to_string(&dependencies.detached).map_err(|error| {
+        MembershipError::Internal(format!("Source dependency capture: {error}"))
+    })?;
+    let inventory_guard = layout::rebuild_dependency_inventory_guard(5);
     let (floor, roster, cutoff, now) = members.write_guard(unix_ms()?, 1, 2, 3)?;
     let boot = if live {
         format!(
@@ -184,23 +193,33 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
         ),
         (
             format!(
-                "INSERT INTO sharing_purpose_transaction_guard VALUES(1,CASE WHEN ({authority}) AND ({}) THEN 1 ELSE 0 END)",
+                "INSERT INTO sharing_purpose_transaction_guard VALUES(1,CASE WHEN ({authority}) AND ({}) AND ({inventory_guard}) THEN 1 ELSE 0 END)",
                 predecessor
             ),
-            params!(roster.clone(), cutoff, now, captured.clone()),
+            params!(roster.clone(), cutoff, now, captured.clone(), dependencies.inventory),
         ),
     ];
+    for (name, _) in &dependencies.detached {
+        // Names are admitted only alongside exact closed trigger definitions.
+        statements.push((format!("DROP TRIGGER {name}"), params!()));
+    }
     statements.extend(
         layout::layout_statements()
             .into_iter()
             .map(|statement| (statement, params!())),
+    );
+    statements.extend(
+        dependencies
+            .detached
+            .into_iter()
+            .map(|(_, sql)| (sql, params!())),
     );
     statements.extend([
         (layout::INSTALLATION_SCHEMA.to_owned(),params!()),
         (format!("INSERT INTO sharing_source_schema_installation VALUES(1,{},$1,$2)", layout::SOURCE_LAYOUT_VERSION),params!(master.sharing_purpose_master_fingerprint(),now)),
         (layout::TRANSACTION_SCHEMA.to_owned(),params!()),
         (format!("UPDATE cluster_meta SET schema_version={},migrated_at=$1 WHERE singleton=1 AND schema_version={}", layout::SOURCE_SCHEMA_VERSION, layout::SOURCE_SCHEMA_PREDECESSOR),params!(now / 1000)),
-        (format!("INSERT INTO sharing_source_schema_transaction_guard VALUES(1,CASE WHEN ({authority}) AND ({}) THEN 1 ELSE 0 END)",layout::installed_shape_guard()),params!(roster,cutoff,now,captured)),
+        (format!("INSERT INTO sharing_source_schema_transaction_guard VALUES(1,CASE WHEN ({authority}) AND ({}) AND ({}) THEN 1 ELSE 0 END)",layout::installed_shape_guard(),layout::restored_dependency_guard(5)),params!(roster,cutoff,now,captured,restored_dependencies)),
 
     ]);
     let attempt = transaction(&inner.client, statements).await;

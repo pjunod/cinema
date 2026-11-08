@@ -14,6 +14,7 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [STANDALONE-SQLITE-MODE-PROPOSAL.md](STANDALONE-SQLITE-MODE-PROPOSAL.md) | Why standalone became one-voter Raft, and the approved native SQLite mode, safe existing-data conversion, explicit cluster adoption, implementation evidence and outstanding acceptance. | built |
 | [ASYNC-STORE-REFINEMENT-STATUS.md](ASYNC-STORE-REFINEMENT-STATUS.md) | Why the exhaustive async driver/Store refinement proof is parked, the state it reached, where the work is preserved and what restarting it needs. | open |
 | [RUST-ADMISSION-REFINEMENT-STATUS.md](RUST-ADMISSION-REFINEMENT-STATUS.md) | Production admission/start refinement pilot: scope, ownership, verifier feasibility, proof obligations and current delivery state. | built |
 | [WORKER-REFINEMENT-STATUS.md](WORKER-REFINEMENT-STATUS.md) | Built source correspondence and two full workers; PR receipt tracks qualification, ownership and landing. | built |

@@ -321,12 +321,12 @@ impl JobManager {
                     fence.source_budget(),
                     plurx_core::process::bounded::cancellable(
                         cancellation.clone(),
-                        self.resolve_durable_subtitle(
+                        Box::pin(self.resolve_durable_subtitle(
                             &request,
                             runtime_cache,
                             &fence,
                             &cancellation,
-                        ),
+                        )),
                     ),
                 );
                 tokio::pin!(work);

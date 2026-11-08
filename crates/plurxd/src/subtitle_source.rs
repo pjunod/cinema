@@ -34,12 +34,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use plurx_core::cluster::membership::MembershipManager;
+#[cfg(feature = "cluster")]
+use crate::cluster_capability::Membership as MembershipManager;
 use plurx_core::domain::MediaFile;
 use plurx_core::store::SubtitleSourcePublication;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "cluster")]
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 pub(crate) use crate::fragment_index_cluster::SourceStamp;
@@ -233,6 +235,7 @@ impl RepresentationFormat {
         }
     }
 
+    #[cfg(any(test, feature = "cluster"))]
     pub(crate) fn from_publication_name(name: &str) -> Option<Self> {
         match name {
             "sup" => Some(Self::Sup),
@@ -484,6 +487,7 @@ pub(crate) struct StoreAccess {
     /// then classified (`never_indexed`, `hydrated_only`, `absent`) off the
     /// request path. Without it such a miss is `absent`.
     node_id: Option<String>,
+    #[cfg(feature = "cluster")]
     membership: Option<MembershipManager>,
     jobs: Option<std::sync::Arc<crate::state::JobManager>>,
 }
@@ -504,6 +508,7 @@ impl StoreAccess {
             root,
             switch: Switch::Fixed(enabled),
             node_id: None,
+            #[cfg(feature = "cluster")]
             membership: None,
             jobs: None,
         }
@@ -530,6 +535,7 @@ impl StoreAccess {
             root: store_root(runtime_cache),
             switch: Switch::Setting(store),
             node_id: None,
+            #[cfg(feature = "cluster")]
             membership: None,
             jobs: None,
         }
@@ -542,8 +548,9 @@ impl StoreAccess {
         self
     }
 
-    pub(crate) fn with_membership(mut self, membership: MembershipManager) -> Self {
-        self.membership = Some(membership);
+    #[cfg(feature = "cluster")]
+    pub(crate) fn with_membership(mut self, membership: Option<MembershipManager>) -> Self {
+        self.membership = membership;
         self
     }
 
@@ -552,6 +559,7 @@ impl StoreAccess {
         self
     }
 
+    #[cfg(feature = "cluster")]
     pub(crate) fn membership(&self) -> Option<&MembershipManager> {
         self.membership.as_ref()
     }
@@ -830,10 +838,21 @@ pub(crate) async fn lookup(
     result
 }
 
+#[cfg(not(feature = "cluster"))]
+pub(crate) async fn hydrate_from_peers(
+    _access: &StoreAccess,
+    _file: &MediaFile,
+    _ordinal: i64,
+    _format: RepresentationFormat,
+) -> bool {
+    false // no peer capability exists; the real local miss path remains active
+}
+
 /// Fetch one representation from a reachable holder. Call this from a
 /// detached subtitle flight, never from a segment or session-start handler:
 /// the peer budget can be eight seconds. A false answer leaves the caller's
 /// existing miss path intact.
+#[cfg(feature = "cluster")]
 pub(crate) async fn hydrate_from_peers(
     access: &StoreAccess,
     file: &MediaFile,
@@ -952,12 +971,14 @@ pub(crate) async fn hydrate_from_peers(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "cluster"))]
 enum PeerArtifactVerdict {
     Accept,
     Skip,
     Forget,
 }
 
+#[cfg(any(test, feature = "cluster"))]
 fn peer_artifact_verdict(
     row: &SubtitleSourcePublication,
     response: &crate::http::peer_transport::PeerResponse,
@@ -976,6 +997,7 @@ fn peer_artifact_verdict(
     PeerArtifactVerdict::Accept
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn forget_stale_publication(
     catalog: &dyn plurx_core::store::Store,
     row: &SubtitleSourcePublication,
@@ -995,6 +1017,7 @@ async fn forget_stale_publication(
     }
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn install_hydrated(
     access: &StoreAccess,
     file: &MediaFile,
@@ -1130,6 +1153,7 @@ async fn install_hydrated(
     true
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn hydration_source_still_bound(
     held: &std::fs::File,
     path: &Path,
@@ -1931,6 +1955,7 @@ pub(crate) async fn read_manifest(dir: &Path) -> Option<Manifest> {
     parse_manifest(&bytes).ok()
 }
 
+#[cfg(any(test, feature = "cluster"))]
 async fn write_manifest_atomic(dir: &Path, manifest: &Manifest) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
 

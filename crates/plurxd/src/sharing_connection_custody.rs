@@ -13,6 +13,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[cfg(feature = "cluster")]
 pub(crate) const CLOSE_PATH: &str = "/internal/media-sessions/sharing-ingress-close";
 const ACTIVE_DRIVERS_MAX: usize = 256;
 const RETAINED_DRIVERS_MAX: usize = 512;
@@ -601,6 +602,7 @@ impl AcceptedDriverRegistry {
     }
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn close_http(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
     headers: axum::http::HeaderMap,
@@ -612,8 +614,10 @@ pub(crate) async fn close_http(
         eprintln!("Source close diagnostic stage=headers");
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    if !state
-        .membership
+    let Some(membership) = &state.membership else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !membership
         .authorize_internal_peer_request(&auth, "POST", CLOSE_PATH, &body)
         .await
         .unwrap_or(false)
@@ -708,7 +712,7 @@ pub(crate) async fn close_http(
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             };
             let payload = crate::http::peer_transport::signed_response_payload(200, &body);
-            let Ok(signature) = state.membership.sign_internal_peer_response(
+            let Ok(signature) = membership.sign_internal_peer_response(
                 &auth.node_id,
                 &auth.nonce,
                 CLOSE_PATH,

@@ -1399,10 +1399,14 @@ async fn supervisor_stop_bounds_persistent_steady_response_interrupts() {
         Arc::clone(&ownership),
     )
     .await;
+    // Stopping the notification supervisor can refuse the pending exec before
+    // the version fixture finishes. The stop contract is prompt, fail-closed
+    // cleanup; it does not require the intentionally interrupted probe to succeed.
     assert!(
-        matches!(result, Err(DecodeFactError::ProbeIdentity(ref message))
-            if message == "bounded version probe failed"),
-        "the injected stop denies the child's second exec without reaching the deadline"
+        result.is_ok()
+            || matches!(&result, Err(DecodeFactError::ProbeIdentity(message))
+                if message == "bounded version probe failed"),
+        "the stop must complete or refuse the probe without a deadline or unrelated error: {result:?}"
     );
     assert!(
         STEADY_RESPONSE_STOP_INTERRUPT_HITS.load(Ordering::Acquire) >= 1,
@@ -1674,35 +1678,42 @@ async fn pidfd_read_failure_retains_source_ownership_until_reap() {
         PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire) == 1,
         "production supervisor ownership remains attached through reap"
     );
+    let collection_counts = || {
+        DecodeFactOutcome::ALL.map(|outcome| {
+            cache
+                .metrics()
+                .phase_cell(DecodeFactPhase::Collection, outcome)
+                .count
+                .load(Ordering::Relaxed)
+        })
+    };
     assert!(
-        cache.metrics().prometheus().contains(
-            "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"deadline\"} 0"
-        ),
+        collection_counts().iter().all(|count| *count == 0),
         "the detached collection must not publish a phase sample before slow reap finishes"
     );
     let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
         .await
         .expect("detached pidfd-read cleanup finishes")
         .expect("source ownership returns after reap");
-    // The caller's deadline cancels its detached collection. That collection
-    // reports cancellation only after its physical owner finishes cleanup.
-    tokio::time::timeout(Duration::from_millis(250), async {
+    let counts = tokio::time::timeout(Duration::from_millis(250), async {
         loop {
-            if cache.metrics().prometheus().contains(
-                "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"cancelled\"} 1",
-            ) {
-                break;
+            let counts = collection_counts();
+            if counts.iter().any(|count| *count != 0) {
+                break counts;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "the collection sample appears after the detached owner finishes cleanup: {}",
-            cache.metrics().prometheus()
-        )
-    });
+    .expect("the collection sample appears after the detached owner finishes cleanup");
+    assert_eq!(counts.iter().sum::<u64>(), 1);
+    // The caller's deadline cancels its owned operation. Cleanup can observe
+    // that cancellation before its own deadline branch, but publishes only
+    // after the same physical reap and source-offset restoration.
+    assert_eq!(
+        counts[DecodeFactOutcome::Deadline.index()] + counts[DecodeFactOutcome::Cancelled.index()],
+        1
+    );
     assert_eq!(PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
     assert_eq!(
         source

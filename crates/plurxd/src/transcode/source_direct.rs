@@ -313,7 +313,7 @@ impl TranscodeManager {
             manager: Arc::downgrade(self),
             gate: Arc::new(SourceProducerAuthority {
                 store: Arc::clone(&self.store),
-                membership: state.membership.clone(),
+                source_authority: state.source_authority_provider(),
                 master: Arc::clone(&state.sharing.key),
                 registry_boot_id,
                 ingress,
@@ -375,8 +375,8 @@ impl TranscodeManager {
         };
         let members = owner
             .gate
-            .membership
-            .observe_source_admission_members()
+            .source_authority
+            .observe()
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?
             .ok_or(SourceWorkerError::Unavailable)?;
@@ -437,8 +437,8 @@ impl TranscodeManager {
         }
         let members = owner
             .gate
-            .membership
-            .observe_source_admission_members()
+            .source_authority
+            .observe()
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?
             .ok_or(SourceWorkerError::Unavailable)?;
