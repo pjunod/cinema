@@ -278,7 +278,11 @@ async fn output_command_environment(
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
     if !matches!(environment, Environment::Inherited) {
+        let descriptor_handoff = super::source_lifetime::has_descriptor_handoff(command.as_std());
         command.env_clear().env("LC_ALL", "C");
+        if descriptor_handoff {
+            super::source_lifetime::tag_descriptor_handoff(command);
+        }
     }
     command
         .stdin(std::process::Stdio::null())
