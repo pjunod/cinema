@@ -1655,6 +1655,7 @@ async fn custody_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header;
     #[test]
     fn public_headers_cannot_construct_forwarded_authority() {
         let mut raw = HeaderMap::new();

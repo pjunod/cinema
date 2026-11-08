@@ -1499,13 +1499,12 @@ async fn source_actual_actor(
         .await
         .expect("actual published actor");
     assert!(response.control.is_some());
-    if let Some((before, after)) = native_parked.as_ref() {
+    if native_parked.is_some() {
         assert_eq!(
             manager.source_workers.native_hooks.spawned_pid(),
             0,
             "no native extraction child exists before or after a start"
         );
-        drop((before, after));
     }
     if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
         let value = serde_json::to_value(&response).expect("complete encoded response");

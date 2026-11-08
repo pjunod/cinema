@@ -1802,24 +1802,6 @@ impl SharingManager {
         .map_err(|_| PeerError::Unavailable)?
     }
 
-    /// A fresh pinned read of the exact opaque artwork resource. No offline
-    /// cache hit can substitute for this opened-byte digest proof.
-    pub async fn read_artwork(
-        &self,
-        state: &AppState,
-        reference: &plurx_core::sharing_artwork::ReceiverArtReference,
-    ) -> Result<
-        (
-            plurx_core::sharing::ImportSummary,
-            crate::sharing_client::PeerArtwork,
-        ),
-        crate::sharing_client::PeerError,
-    > {
-        let import = self.artwork_authority(state, reference).await?;
-        let asset = self.fetch_artwork(state, reference, &import).await?;
-        Ok((import.summary, asset))
-    }
-
     /// Every local authority check an artwork read needs, with no peer call:
     /// the import is active for this lifecycle, names this Source, grant and
     /// catalogue epoch, is current, and the user is assigned the item's

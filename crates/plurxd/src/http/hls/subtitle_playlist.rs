@@ -535,12 +535,17 @@ pub(super) async fn source_window_cues_with<S: SubtitleSegmentSource + ?Sized>(
     window_seconds: i64,
     deadline: Instant,
 ) -> (Vec<u8>, bool) {
-    let bounded = |fut| tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), fut);
-    if let Ok(Ok(Some(bytes))) = bounded(source.read_whole(dir, file, index)).await {
+    macro_rules! bounded {
+        ($future:expr) => {
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), $future)
+        };
+    }
+    if let Ok(Ok(Some(bytes))) = bounded!(source.read_whole(dir, file, index)).await {
         return (bytes, true);
     }
     let anchor = crate::subtitles::window_anchor_seconds(demand_seconds, window_seconds);
-    let window = match bounded(source.read_window(dir, file, index, anchor, window_seconds)).await {
+    let window = match bounded!(source.read_window(dir, file, index, anchor, window_seconds)).await
+    {
         Ok(Ok(Some(bytes))) => Some(bytes),
         _ if source
             .window_flight_is_live(dir, file, index, anchor, window_seconds)
@@ -552,14 +557,14 @@ pub(super) async fn source_window_cues_with<S: SubtitleSegmentSource + ?Sized>(
         _ => None,
     };
     if let Some(bytes) = window {
-        let _ = bounded(source.warm_whole(dir, file, index)).await;
+        let _ = bounded!(source.warm_whole(dir, file, index)).await;
         return (bytes, true);
     }
     if source.whole_track_state(dir, file, index).await != crate::subtitles::SidecarState::Failed {
-        let _ = bounded(source.warm_whole(dir, file, index)).await;
+        let _ = bounded!(source.warm_whole(dir, file, index)).await;
     }
     let _ =
-        bounded(source.warm_window(session, None, dir, file, index, anchor, window_seconds)).await;
+        bounded!(source.warm_window(session, None, dir, file, index, anchor, window_seconds)).await;
     (b"WEBVTT\n\n".to_vec(), false)
 }
 

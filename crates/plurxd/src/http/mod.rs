@@ -2864,12 +2864,8 @@ fn capacity_role_refusal(
     path: &str,
 ) -> Option<Response> {
     match role {
-        Some(role @ (LocalServingRole::Unclustered | LocalServingRole::Voter))
-        | Some(role @ LocalServingRole::Learner)
-            if serving_role_admits(role, method, path) =>
-        {
-            None
-        }
+        Some(LocalServingRole::Unclustered | LocalServingRole::Voter) => None,
+        Some(role @ LocalServingRole::Learner) if serving_role_admits(role, method, path) => None,
         Some(LocalServingRole::Learner) => Some(
             (
                 StatusCode::SERVICE_UNAVAILABLE,

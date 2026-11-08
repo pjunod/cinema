@@ -1156,6 +1156,7 @@ mod registration_coordination_tests {
 #[cfg(test)]
 mod placement_credit_tests {
     use super::*;
+    use axum::{http::header, response::IntoResponse};
 
     #[test]
     fn full_placement_pool_answers_429_with_retry_after() {
