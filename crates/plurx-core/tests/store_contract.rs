@@ -601,6 +601,8 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "analysis_completions_executed_by",
+    "analysis_source_admission",
     // Both-backend title publication/cancellation/reprobe and priority
     // contracts in store_contract/dv_title_jobs.rs exercise these five.
     // The source-fenced FEL verdict/requalification contract exercises these
@@ -856,6 +858,7 @@ const COORDINATION_METHODS: &[&str] = &[
     "lease_expiry_hint",
 ];
 const MEDIA_SESSION_METHODS: &[&str] = &[
+    "media_session_request_progress",
     // `first_preparation_output_seal_is_exact_and_idempotent_on_every_backend`.
     "seal_prepared_output",
     // Same scenario: the complete seal is confirmed by a read, not a replay.
@@ -948,7 +951,10 @@ const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "delete_dv_recovery_guard_fenced",
     "mark_dv_conversion_failed_fenced",
 ];
-const METRICS_METHODS: &[&str] = &["prometheus_store_snapshot"];
+const METRICS_METHODS: &[&str] = &[
+    "prometheus_store_snapshot",
+    "prometheus_store_snapshot_with",
+];
 
 struct StoreFixture {
     name: &'static str,
@@ -21271,7 +21277,10 @@ fn contract_inventory_matches_every_store_method() {
     // +6: the contract v2 scan request sidecar methods in
     // BACKGROUND_JOB_METHODS (pipeline v2 T1).
     // +1: `create_library_with_scan_interval` in LIBRARY_METHODS (T5).
-    assert_eq!(declared.len(), 554, "review the Store method count");
+    // +4: main's analysis_completions_executed_by, analysis_source_admission,
+    // media_session_request_progress and prometheus_store_snapshot_with, which
+    // main declared (551) without naming them here; named above.
+    assert_eq!(declared.len(), 558, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
