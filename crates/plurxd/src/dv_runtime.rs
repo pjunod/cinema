@@ -760,6 +760,45 @@ pub(crate) struct RuntimeRecipe {
 
 #[cfg(target_os = "linux")]
 impl RuntimeRecipe {
+    /// The cache key and the window encoder must use the same destination and driver policy.
+    fn completed_output_for<'a>(
+        &self,
+        source: &'a plurx_core::transcode::ResolvedTranscode,
+    ) -> Option<plurx_core::transcode::CompletedReconstructedOutputPlan<'a>> {
+        use plurx_core::transcode::dv_processing::DvDestination;
+        let output = source
+            .completed_reconstructed_output(self.encoder)?
+            .with_vaapi_hdr_policy(self.vaapi_hdr_policy);
+        Some(match self.destination {
+            DvDestination::Hdr10 => output,
+            DvDestination::Profile81 => output.with_reconstructed_profile81(),
+            DvDestination::Sdr => output.with_sdr_output(),
+        })
+    }
+
+    pub(crate) fn window_encoder_args(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        execution: &plurx_core::transcode::TranscodeExecution,
+        grid: plurx_core::transcode::VodFrameGrid,
+        end_seconds: f64,
+    ) -> Result<Vec<String>, &'static str> {
+        let output = self
+            .completed_output_for(plan)
+            .ok_or("unsupported reconstructed output encoder")?;
+        plurx_core::transcode::vod_completed_reconstructed_pipe_args(
+            file,
+            &output,
+            execution,
+            grid,
+            end_seconds,
+            "/proc/self/fd/3",
+            "/proc/self/fd/4",
+            self.source_clock,
+        )
+    }
+
     /// Physical/internal callers resolve before constructing the export policy;
     /// a frozen live target is rechecked and cannot acquire another floor.
     pub(crate) async fn resolve_display_target(
@@ -1098,16 +1137,6 @@ impl RuntimeRecipe {
             let execution =
                 TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
                     .map_err(|e| e.to_string())?;
-            let mut output = plan
-                .completed_reconstructed_output(self.encoder)
-                .ok_or("unsupported reconstructed output encoder")?
-                .with_vaapi_hdr_policy(self.vaapi_hdr_policy);
-            if self.destination == DvDestination::Sdr {
-                output = output.with_sdr_output();
-            }
-            if self.destination == DvDestination::Profile81 {
-                output = output.with_reconstructed_profile81();
-            }
             let raster = plan
                 .output_contract()
                 .effective_width()
@@ -1123,17 +1152,9 @@ impl RuntimeRecipe {
             let export_raster = export_policy
                 .raster(self.native_bl)
                 .map_err(|e| e.to_string())?;
-            let args = plurx_core::transcode::vod_completed_reconstructed_pipe_args(
-                file,
-                &output,
-                &execution,
-                grid,
-                end_seconds,
-                "/proc/self/fd/3",
-                "/proc/self/fd/4",
-                self.source_clock,
-            )
-            .map_err(str::to_owned)?;
+            let args = self
+                .window_encoder_args(file, plan, &execution, grid, end_seconds)
+                .map_err(str::to_owned)?;
             tracing::debug!(target: "plurxd::dv", entry = entry.index, encoder = ?args,
                 "processed window encoder recipe");
             let deadline = crate::media_pool::create_stage_deadline(self.preparation_budget);

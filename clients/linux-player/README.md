@@ -24,6 +24,38 @@ The package (`debian/`, see below) installs the code under `/usr/lib/plurx-playe
 
 The launcher runs mpv with `--config-dir=$XDG_CONFIG_HOME/plurx-player/mpv` (by default `~/.config/plurx-player/mpv`), so plurx Player has its own optional mpv configuration and never reads the general `~/.config/mpv`: a stray `vo=` or `tone-mapping=` there would silently defeat the closed-form mapping. The directory does not exist by default; an `mpv.conf`, `input.conf` or script placed there applies to plurx Player only. Two Dolby Vision options belong there: `dv-brightness=absolute` maps for the panel's real luminance (Dolby's absolute rendering) instead of the default `relative`, which follows the desktop's HDR brightness setting; `dv-cm4-trims=no` / `dv-cm29-trims=no` turn off each family's creative trims. Cinema's bundled on-screen controls work without it (the launcher does not pass `--no-config`). The options the player depends on (`--vo=gpu-next --gpu-api=vulkan --hwdec=auto-safe --target-colorspace-hint=yes`, the IPC socket, `--idle=yes --keep-open=yes`) are on the command line, which mpv applies over any config file. `--ytdl=no` is always passed: the player only opens plurx URLs from an allowed server, and mpv's ytdl hook would otherwise run `yt-dlp` on anything else. mpv also starts without `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT`, which would otherwise outrank the private build's own library path or inject code into it (see [Packaging](#packaging)).
 
+## Dolby Vision reconstruction and HDR10 sampling precision
+
+The 0.4.2 candidate normalizes only the local reconstruction frame's color
+metadata to BT.2020/PQ. This avoids a second shadow adjustment from retained
+mastering or scene fields before the RPU's closed-form display mapping. The
+RPU, creative trims and selected display target remain authoritative.
+
+Software native-endian planar 10-bit DV planes and limited-range BT.2020
+non-constant-luminance/PQ planes use owned high-aligned UNORM16 staging for
+bilinear sampling. The latter includes ordinary HDR10 and server-produced
+HDR10-E. Other non-DV color descriptions, including SDR, HLG and full range,
+retain their paths.
+Hardware imports, P010 and integer-format fallback retain their existing paths.
+Accidentally missing or unusable required FEL input, and reported
+reconstruction errors, cannot be accepted as a completed mapped frame. The
+existing `--vf=format:enhancement-layer=no` option explicitly suppresses FEL
+application while retaining RPU reconstruction and display management; the EL
+decoder still runs. Staging
+adds a CPU copy; playback performance remains a hardware qualification item.
+
+The package CPU regression compiles the actual shipped helper and upload code:
+`python3 -B clients/linux-player/tests/test_dv_render_precision.py` from the
+repository root. It checks all 1,024 codes, padded/negative strides, ownership
+on failures, required-EL cleanup, and the actual color/layout eligibility rules.
+A private GPU ablation first verified 48 exact CUDA/software decoded YUV frames;
+its software HDR10 captures at two frames then matched the existing NVDEC PNG
+and RGB hashes, while an NVDEC control and two Dolby controls stayed unchanged.
+This bounds the upload-precision finding to those controls. It does not establish
+the generalized patch's exact native build, hardware playback, or universal
+Dolby Vision conformance. See the
+[Linux player plan](../../docs/clients/LINUX-PLAYER-PLAN.md) for remaining evidence.
+
 ## Playback controls
 
 The native player draws Cinema-style controls inside mpv's video surface:

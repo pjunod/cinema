@@ -186,9 +186,8 @@ note_unreachable_demand() {
   unreachable_reported=true
 }
 
-# Idle means the unit's cgroup holds nothing but the daemon itself. A running
-# job is a tree of shells and compilers under that same cgroup, so this is a
-# local answer that needs no API token on a runner host.
+# Host-executor jobs have processes in the runner's cgroup. Docker jobs and
+# assignments that arrive after this observation have separate guards below.
 unit_is_idle() {
   local unit main_pid procs
   unit=$1
@@ -233,12 +232,14 @@ unit_is_idle() {
 # exactly as it was before this existed.
 containerised_job_running() {
   local names
+  local -a query=(ps -a --filter status=running --filter status=created
+    --filter status=paused --filter status=restarting
+    --filter 'name=ACTIONS-TASK-' --format '{{.Names}}')
   command -v "$DOCKER" >/dev/null 2>&1 || return 1
   if command -v timeout >/dev/null 2>&1; then
-    names=$(timeout "$DOCKER_QUERY_TIMEOUT" "$DOCKER" ps \
-      --filter 'name=ACTIONS-TASK-' --format '{{.Names}}' 2>/dev/null) || return 0
+    names=$(timeout "$DOCKER_QUERY_TIMEOUT" "$DOCKER" "${query[@]}" 2>/dev/null) || return 0
   else
-    names=$("$DOCKER" ps --filter 'name=ACTIONS-TASK-' --format '{{.Names}}' 2>/dev/null) ||
+    names=$("$DOCKER" "${query[@]}" 2>/dev/null) ||
       return 0
   fi
   [ -n "$names" ]
@@ -256,6 +257,63 @@ cache_dir_for_config() {
       exit
     }
   ' "$1"
+}
+
+# A new assignment can arrive after both local idle checks. Stopping is only
+# safe when TERM goes to the runner alone and its loaded configuration gives
+# that assignment its entire execution budget before either layer can kill it.
+runner_can_drain() {
+  local unit config settings
+  unit=$1
+  config=$2
+  settings=$(systemctl show "$unit" --timestamp=unix -p ExecMainStartTimestamp \
+    -p KillMode -p KillSignal -p ExecStop -p TimeoutStopUSec) || return 1
+  python3 - "$config" "$settings" "$STOP_TIMEOUT" <<'PYTHON'
+import os
+import re
+import sys
+
+def seconds(value):
+    if value == "infinity":
+        return float("inf")
+    match = re.fullmatch(r"([1-9][0-9]*)(s|min|m|h)", value)
+    if not match:
+        raise ValueError("unrecognized duration")
+    return int(match[1]) * {"s": 1, "m": 60, "min": 60, "h": 3600}[match[2]]
+
+try:
+    unit = dict(line.split("=", 1) for line in sys.argv[2].splitlines())
+    started = int(unit["ExecMainStartTimestamp"].removeprefix("@"))
+    if (unit["KillMode"] != "mixed" or unit["KillSignal"] != "15"
+            or unit["ExecStop"] or os.stat(sys.argv[1]).st_mtime >= started):
+        sys.exit(1)
+    # Only the fleet's unambiguous block mapping and literal Go durations
+    # qualify. Indirect, overridden or missing settings defer maintenance.
+    with open(sys.argv[1], encoding="utf-8") as source:
+        text = source.read()
+    # Reject alternate key spellings, merge keys, aliases, tags and multiple
+    # documents rather than misreading configurations outside this subset.
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if (not line.startswith(" ") and not re.match(r"^[A-Za-z_][\w-]*:", line)
+                or re.match(r"^\s*(?:<<:|[\x22\x27?!&*%]|---|\.\.\.)", line)):
+            sys.exit(1)
+    blocks = re.findall(r"^runner:[ \t]*(?:#[^\n]*)?\n((?:[ \t][^\n]*\n|\n)*)", text + "\n", re.M)
+    if len(blocks) != 1 or len(re.findall(r"^runner:", text, re.M)) != 1:
+        sys.exit(1)
+    def setting(key):
+        rows = re.findall(r"^  " + key + r":[ \t]*([^#\n]+)", blocks[0], re.M)
+        if len(rows) != 1 or not re.fullmatch(r"[1-9][0-9]*[smh]", rows[0].strip()):
+            raise ValueError("unverified runner setting")
+        return seconds(rows[0].strip())
+    job = setting("timeout")
+    drain = setting("shutdown_timeout")
+    safe = job < drain <= seconds(unit["TimeoutStopUSec"]) and drain <= int(sys.argv[3])
+except (OSError, ValueError, KeyError):
+    sys.exit(1)
+sys.exit(0 if safe else 1)
+PYTHON
 }
 
 stop_runner() {
@@ -288,6 +346,10 @@ reset_cache() {
   fi
   if ! unit_is_idle "$unit"; then
     say "$unit is running a job; leaving its $((used_kb / 1024 / 1024))G cache for the next pass"
+    return 0
+  fi
+  if ! runner_can_drain "$unit" "$4"; then
+    say "$unit cannot prove a safe drain for a new assignment; leaving its cache for the next pass"
     return 0
   fi
   if [ "$dry_run" = true ]; then
@@ -358,7 +420,13 @@ while IFS= read -r unit; do
   fi
   over_budget=$((over_budget + 1))
   reset_before=$reset_count
-  reset_cache "$unit" "$dir" "$used_kb"
+  # Match the macOS janitor's useful-reset floor, except when a smaller
+  # cache would itself close the measured gap.
+  if [ "$used_kb" -lt 1048576 ] && [ "$((available_kb + used_kb))" -lt "$floor_kb" ]; then
+    say "$unit: disk below reserve but cache below 1G and smaller than the deficit; no useful reset"
+    continue
+  fi
+  reset_cache "$unit" "$dir" "$used_kb" "$config"
 
   # And the part that was invisible: a reset that does not reach the floor. The
   # janitor can only free the cache and Docker -- the OS, the toolchains and
@@ -421,7 +489,8 @@ elif command -v "$DOCKER" >/dev/null 2>&1 && "$DOCKER" info >/dev/null 2>&1; the
         say "would prune Docker: $((available_kb / 1024 / 1024))G free, reserve $((floor_kb / 1024 / 1024))G"
       else
         say "pruning Docker: $((available_kb / 1024 / 1024))G free, reserve $((floor_kb / 1024 / 1024))G"
-        "$DOCKER" container prune -f >/dev/null || true
+        # A freshly created job may appear after the host-wide Docker check.
+        "$DOCKER" container prune -f --filter "until=$BUILD_CACHE_AGE" >/dev/null || true
         "$DOCKER" image prune -af --filter "until=$IMAGE_AGE" >/dev/null || true
         "$DOCKER" builder prune -f --filter "until=$BUILD_CACHE_AGE" >/dev/null || true
         docker_pruned=true

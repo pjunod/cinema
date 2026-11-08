@@ -687,7 +687,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # `post_media_retirement_keeps_exact_resources_after_caller_cancellation` asserts that
 # `child_transition.try_lock()` fails while retirement is held at its cleanup-handoff point. A
 # test-only probe that is expected to fail and takes nothing; no transition owner is created.
-expected_occurrences = 19
+# Main merged into the effort (2026-11-08): main's reviewed additions and the
+# effort's are both present; the total is the merged tree's exact count.
+expected_occurrences = 20
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -1310,7 +1312,9 @@ pattern = "child_transition"
 # 34 -> 35 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # test-only failing `try_lock()` probe at the retirement handoff point.
 # S10 retained attachment initializes its existing response transition mutex.
-expected_occurrences = 36
+# Main merged into the effort (2026-11-08): main's reviewed additions and the
+# effort's are both present; the total is the merged tree's exact count.
+expected_occurrences = 38
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -3673,6 +3677,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # joined after an unwind-safe Release guard releases the blocked scan. The
 # actual blocking scan keeps its io_slot credit until it returns. Production
 # warm_inventory awaits the existing refresh owner and spawns no extra task.
+# Cinema manual-scan dispatch adds the driver in the busy-worker renewal
+# regression. The test releases its BeforeScan barrier and awaits the handle.
 # R1: +3 test-only `RollingControlHandle::spawn_for_test` actors in
 # `release_projection_is_the_first_terminal_and_keeps_its_cause`, each owned by
 # its handle and dropped at the end of the test.
@@ -3694,7 +3700,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # viewer's own change). It holds the trial's prepared root only through a
 # `ProcessedUpgradeRootLease` that frees it on drop, and starts no process of
 # its own: the trial and the successor's prime use the existing owners.
-expected_occurrences = 1089
+# Main merged into the effort (2026-11-08): main's and the effort's reviewed
+# additions are both counted; the total is the merged tree's exact count.
+expected_occurrences = 1090
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5446,6 +5454,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # create 30s, GET 20s, body 10s, stop 5s, offline decode/probe 20s each, and
 # settlement 10s with 500-ms stop attempts and a 10-ms condition poll. Its
 # caught errors/panics still settle all isolated sessions before offline checks.
+# PR #1390 (c2a29aac5): two timers belong to the paused-clock test
+# subtitle_pressure_checks_keep_polling_the_write_that_holds_the_fence.
+# Its local interval_at exercises the tick and notification paths. The 20ms
+# timeout bounds the borrowed driver after the write reply; success still
+# requires the work to settle, the token to stay live and the fence to unlock.
+# The production 250ms pressure interval remains owned by the subtitle job.
+# Cinema library dispatch and subtitle pressure ownership, 2026-11-07.
+# The inherited subtitle_work.rs regression (c2a29aac5) owns the paused-clock
+# interval_at and a 20 ms timeout that bounds its awaited write driver.
+# The dispatch worker bounds interactive heavy admission at one second and
+# renews ready successors every three seconds while its library scan runs.
+# Five fixture timers watch the source permission check (2 s), the write
+# commit and pressure-check event ordering (15 s), scan acknowledgement
+# (3 s), and renewal visibility (12 s with a 50 ms poll).
+# The worker's existing idle sleep changes delay in place (zero net sites).
 # R1: +1 production `timeout_at` in `Session::end_activity_until`: a released
 # or stopped generation's retirement observes the actor's committed cause
 # through a snapshot bounded by the caller's existing replacement deadline;
@@ -5465,7 +5488,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Review 2 fixes (#1438): +6 are test-only bounds — the fleet route test's two
 # timeouts and one poll sleep, the replay/direct settle test's two poll sleeps,
 # and the cross-node exclusion test's one sleep. No production timer is added.
-expected_occurrences = 2090
+# Main merged into the effort (2026-11-08): main's and the effort's reviewed
+# additions are both counted; the total is the merged tree's exact count.
+expected_occurrences = 2100
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6634,7 +6659,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # and `runtime.spawn` in `OwnedCreate::drop` (the task counted by method-spawn).
 # Review 2 fixes (#1438): +5 are `reqwest::Response::status()` calls in the
 # fleet route and settle tests matched by the launch-method shape; no process.
-expected_occurrences = 888
+# Main merged into the effort (2026-11-08): main's reviewed additions and the
+# effort's are both present; the total is the merged tree's exact count.
+expected_occurrences = 890
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

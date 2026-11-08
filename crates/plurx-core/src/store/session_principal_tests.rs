@@ -56,6 +56,25 @@ fn rebuild(conn: &Connection) {
         .expect("rebuild all tables");
     conn.execute_batch("COMMIT").expect("commit rebuild");
 }
+#[test]
+fn principal_rebuild_preserves_the_source_restore_trigger_and_refuses_substitution() {
+    let conn = current_database();
+    let trigger_sql = |db: &Connection| -> String {
+        db.query_row("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='playback_analysis_restore_effects'", [], |row| row.get(0)).expect("source restore trigger")
+    };
+    let original = trigger_sql(&conn);
+    rebuild(&conn);
+    assert_eq!(trigger_sql(&conn), original);
+    let guard = format!("SELECT {}", super::session_dependency_guard());
+    let guarded = |db: &Connection| {
+        db.query_row(&guard, [], |row| row.get::<_, bool>(0))
+            .expect("closed session dependencies")
+    };
+    assert!(guarded(&conn));
+    conn.execute_batch("DROP TRIGGER playback_analysis_restore_effects; CREATE TRIGGER playback_analysis_restore_effects AFTER INSERT ON background_job_commands BEGIN SELECT 1; END;").expect("substitute trigger");
+    assert!(!guarded(&conn));
+}
+
 fn insert_shared_request(
     conn: &Connection,
     owner: &str,

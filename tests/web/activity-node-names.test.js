@@ -74,6 +74,7 @@ const BORROWED = [
   "activityInspectorHtml",
   "activityJobProgress",
   "fmtDur",
+  "durableProcessingHtml",
   "durableQueueHtml",
   "clusterWorkersHtml",
   "activityIsClustered",
@@ -755,11 +756,32 @@ function sourceObservation(holders, overrides={}) {
 function sourceHolder(overrides={}) {
   return {active_occupancy:true,work_id:"pruned-job",resource_key:"source_io",lease_expires_at_ms:0,phase:"cleanup_pending",...overrides};
 }
+test("Jobs reports independent worker rates and flags overdue scans even when other workers finish", () => {
+  const prior={...painter.durable}, tab=painter.view.tab;
+  try {
+    painter.view.tab="jobs";
+    Object.assign(painter.durable,{observed:Date.now(),error:null,state:"running",rows:[],
+      counts:[{kind:"library_scan",state:"queued",count:3,overdue_manual:3}],
+      processing:{window_ms:300000,nodes:[{node_id:NODE_A,succeeded:10,failed:2}]}});
+    const d=snapshot({clustered:true,node_hostnames:{[NODE_A]:"alpha",[NODE_B]:"bravo"},
+      analysis:sourceObservation([sourceHolder({work_id:"prior-job",origin_node_id:NODE_A,origin_job_kind:"subtitle_extract",origin_job_state:"succeeded"})])});
+    const html=paint(d);
+    assert.match(html,/2.0 completed\/min.*0.4 failed\/min/);
+    assert.match(html,/<td>alpha<\/td><td>2.0<\/td><td>0.4<\/td>/);
+    assert.match(html,/<td>bravo<\/td><td>0.0<\/td><td>0.0<\/td>/);
+    assert.match(html,/3 manual library jobs have been due/);
+    assert.match(html,/href="#\/activity\/jobs\/prior-job">subtitle extract<\/a> · job now succeeded/);
+    assert.match(html,/reader on alpha/);
+    assert.ok(html.indexOf("data-activity-source-recovery")<html.indexOf('id="activity-status"'));
+    painter.durable.error="observation failed";
+    assert.match(paint(d),/Job processing rate unavailable/);
+  } finally {Object.assign(painter.durable,prior,{processing:prior.processing});painter.view.tab=tab;}
+});
 test("expired source custody stays prominent after its job disappears and escapes identities", () => {
   Object.assign(painter.durable,{rows:[],activeJobs:[]});
   const html=paint(snapshot({analysis:sourceObservation([sourceHolder({work_id:'gone-<reader>"',resource_key:'source_io:<disk>'})])}));
   const banner=html.indexOf("data-activity-source-recovery");
-  assert.ok(banner>html.indexOf('id="activity-status"'));
+  assert.ok(banner>=0 && banner<html.indexOf('id="activity-status"'));
   assert.ok(banner<html.indexOf('id="cluster-workers"'));
   assert.match(html,/Shared source reads need recovery/);
   assert.match(html,/even when their jobs are no longer listed/);

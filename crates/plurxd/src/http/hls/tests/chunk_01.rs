@@ -1733,7 +1733,7 @@
             }
         })
         .await
-        .expect("detached DELETE cleanup survives caller cancellation");
+        .unwrap_or_else(|_| panic!("detached DELETE cleanup survives caller cancellation: {}", fixture.worker_retirement_debug(&session_id)));
     }
 
     #[tokio::test]

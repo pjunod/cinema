@@ -6,6 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use plurx_core::store::background_jobs::{
     BackgroundJob, CancelJob, EnqueueOutcome, JobKind, JobPayload, JobQuery, JobState, WaiterQuery,
+    JOB_PROCESSING_WINDOW_MS,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -79,7 +80,7 @@ pub async fn list(
         ));
     }
     let now_ms = crate::state::clock_ms();
-    let (page, counts, migration, repairs, running, cancelling) = tokio::try_join!(
+    let (page, counts, completions, migration, repairs, running, cancelling) = tokio::try_join!(
         state.store.list_jobs(JobQuery {
             node_id: query.node_id,
             state: query.state,
@@ -88,6 +89,7 @@ pub async fn list(
             limit
         }),
         state.store.job_counts(now_ms),
+        state.store.recent_job_completions(now_ms),
         state.store.job_migration_status(),
         state.store.artifact_repairs(false),
         state.store.list_jobs(JobQuery {
@@ -141,6 +143,7 @@ pub async fn list(
     })).collect::<Vec<_>>();
     Ok(Json(json!({"jobs": jobs, "repairs":repairs,
         "active_jobs": active_jobs, "active_truncated": active_truncated,
+        "processing": {"window_ms": JOB_PROCESSING_WINDOW_MS, "nodes": completions},
         "counts": counts, "migration": migration, "next_cursor": page.next_after_id, "observed_at_ms": now_ms})))
 }
 

@@ -3523,6 +3523,9 @@ mod tests {
             lease_expires_at_ms: 0,
             phase: None,
             last_phase_at_ms: None,
+            origin_node_id: None,
+            origin_job_kind: None,
+            origin_job_state: None,
         };
         let readers = domain_readers(&[
             holder("source_io:nas-a", "one", true),
