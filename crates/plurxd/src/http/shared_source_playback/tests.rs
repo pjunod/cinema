@@ -926,33 +926,48 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
                 "subs/1/seg00000.vtt",
             ] {
                 recipe["resource"] = json!(resource);
-                let response = actual_resource_request(
-                    address,
-                    h2,
-                    &url,
-                    fixture.headers.clone(),
-                    serde_json::to_vec(&recipe).expect("native request"),
-                )
-                .await;
-                assert_eq!(response.status(), StatusCode::OK, "native {resource}");
-                assert_eq!(response.headers()["cinemashare-resource"], resource);
-                let mime = response.headers()["content-type"]
-                    .to_str()
-                    .expect("actual MIME")
-                    .to_owned();
-                let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-                    .await
-                    .expect("actual native bytes");
+                // Subtitles never gate a start, so a cold window answers an
+                // empty document (still timestamp-mapped) and warms behind it;
+                // a player retries, as this loop does, until the cues arrive.
+                let caption = if resource.starts_with("subs/1/") {
+                    "Alternative HTTP Source caption"
+                } else {
+                    "Actual HTTP Source caption"
+                };
+                let mut attempts = 0;
+                let (mime, bytes) = loop {
+                    attempts += 1;
+                    let response = actual_resource_request(
+                        address,
+                        h2,
+                        &url,
+                        fixture.headers.clone(),
+                        serde_json::to_vec(&recipe).expect("native request"),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::OK, "native {resource}");
+                    assert_eq!(response.headers()["cinemashare-resource"], resource);
+                    let mime = response.headers()["content-type"]
+                        .to_str()
+                        .expect("actual MIME")
+                        .to_owned();
+                    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                        .await
+                        .expect("actual native bytes");
+                    if !resource.ends_with(".vtt")
+                        || attempts >= 100
+                        || String::from_utf8_lossy(&bytes).contains(caption)
+                    {
+                        break (mime, bytes);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                };
                 if resource.ends_with(".vtt") {
                     assert_eq!(mime, "text/vtt");
                     let text = std::str::from_utf8(&bytes).expect("actual VTT UTF8");
                     assert!(text.starts_with("WEBVTT"));
                     assert!(text.contains("X-TIMESTAMP-MAP"));
-                    assert!(text.contains(if resource.starts_with("subs/1/") {
-                        "Alternative HTTP Source caption"
-                    } else {
-                        "Actual HTTP Source caption"
-                    }));
+                    assert!(text.contains(caption));
                 } else {
                     if resource.starts_with("master.") {
                         assert!(
