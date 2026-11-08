@@ -13110,7 +13110,10 @@ async fn replicated_scan_request_drops(client: &Client) -> Vec<String> {
         validated_scan_request_drops, SCAN_REQUEST_FIXTURE_SHAPE_SQL,
     };
     let shape: Vec<_> = client
-        .query_consistent(SCAN_REQUEST_FIXTURE_SHAPE_SQL.to_owned(), hiqlite::params!())
+        .query_consistent(
+            SCAN_REQUEST_FIXTURE_SHAPE_SQL.to_owned(),
+            hiqlite::params!(),
+        )
         .await
         .expect("replicated scan request sidecar inventory")
         .iter_mut()
