@@ -935,8 +935,8 @@ async fn receiver_login_current(
 /// to come back. A grid burst can exceed the 32 concurrent scope checks; each
 /// takes milliseconds, so a short bounded wait absorbs the burst.
 const ART_SCOPE_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
-/// What the loader is told when the scope proof could not be completed in
-/// time. It is not a refusal: nothing was found revoked.
+/// What the loader is told when scope-check capacity is exhausted. It is not
+/// a refusal: nothing was found revoked, and the proof never started.
 const ART_SCOPE_RETRY_AFTER_SECS: u64 = 1;
 fn art_scope_busy() -> ApiError {
     ApiError::TypedRetry {
@@ -948,9 +948,10 @@ fn art_scope_busy() -> ApiError {
 }
 /// The live revocation proof for one artwork body, same checks as
 /// [`receiver_content_current`] (nothing cached, a fresh Source scope request
-/// per response). It differs only in how it fails: saturated capacity or a
-/// missed deadline is a typed 429 the loader retries, while a refused or
-/// failed proof stays 503 `sharing_body_authority_unavailable`.
+/// per response). It differs only in how it fails: no capacity permit within
+/// the admission wait, or a Source that itself answers 429, is a typed 429 the
+/// loader retries; a refused, timed-out or unreachable proof stays 503
+/// `sharing_body_authority_unavailable`, since a retry hint would mislead.
 async fn receiver_art_content_current(
     state: &AppState,
     authority: &ReceiverContentAuthority,

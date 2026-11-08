@@ -2025,8 +2025,8 @@ impl SharingManager {
             .ok()
     }
     /// The live Source scope check, with its capacity already held. `Ok(false)`
-    /// and `Authentication` are refusals; a deadline is `Busy` (not proven
-    /// either way), so callers can tell "revoked" from "too slow right now".
+    /// and `Authentication` are refusals; a missed deadline or unreachable
+    /// Source is `Unavailable`. Only a peer that itself answers 429 is `Busy`.
     pub(crate) async fn scope_proof(
         &self,
         state: &AppState,
@@ -2093,9 +2093,7 @@ impl SharingManager {
             peer.current_scope(&credentials.credential, &request).await
         })
         .await
-        .map_err(|_| PeerError::Busy {
-            retry_after_secs: 1,
-        })?
+        .map_err(|_| PeerError::Unavailable)?
     }
     pub async fn read_admin_libraries(
         &self,
