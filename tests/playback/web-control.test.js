@@ -4308,6 +4308,7 @@ async function main() {
         shippedSource("exposePreparedReplacement"),
         // D1: the seam's outcome, reported (beacon only).
         shippedSource("reportPreparedSeam"), shippedSource("reportPreparedSeamAfterWindow"),
+        shippedSource("preparedSeamReopenMark"), shippedSource("preparedSeamReopened"),
         // M3's instruments. Sliced rather than stubbed, so a commit in this
         // harness exercises the real recording and the assertions below can
         // read what it recorded.
