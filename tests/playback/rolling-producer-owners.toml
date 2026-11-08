@@ -687,7 +687,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # `post_media_retirement_keeps_exact_resources_after_caller_cancellation` asserts that
 # `child_transition.try_lock()` fails while retirement is held at its cleanup-handoff point. A
 # test-only probe that is expected to fail and takes nothing; no transition owner is created.
-expected_occurrences = 19
+# 19 -> 20 with bee39df0e (test: expose the blocked retirement phase on a cleanup failure):
+# `test_support.rs::worker_retirement_debug` formats `child_transition.try_lock().is_ok()` into a
+# failure message. A test-only, non-blocking probe whose guard drops at once; no transition owner.
+expected_occurrences = 20
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -1310,7 +1313,9 @@ pattern = "child_transition"
 # 34 -> 35 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # test-only failing `try_lock()` probe at the retirement handoff point.
 # S10 retained attachment initializes its existing response transition mutex.
-expected_occurrences = 36
+# 36 -> 38 with bee39df0e: the same test-only debug helper names `child_transition` twice
+# (its `child_transition_available` label and the `try_lock()` probe above). No new owner.
+expected_occurrences = 38
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -3659,7 +3664,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # warm_inventory awaits the existing refresh owner and spawns no extra task.
 # Cinema manual-scan dispatch adds the driver in the busy-worker renewal
 # regression. The test releases its BeforeScan barrier and awaits the handle.
-expected_occurrences = 1080
+# d9a0ebc76 (learner worker accounting): `spawn_background_loops` also starts
+# `http::cluster_operations::worker_status_cache_loop`, a read-only refresh of local worker
+# capacity for Activity. It owns no child or source, and returns on `background_shutdown`, the
+# same cancellation as its sibling peer-status loop.
+expected_occurrences = 1081
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5419,7 +5428,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # commit and pressure-check event ordering (15 s), scan acknowledgement
 # (3 s), and renewal visibility (12 s with a 50 ms poll).
 # The worker's existing idle sleep changes delay in place (zero net sites).
-expected_occurrences = 2080
+# +6 after the Cinema dispatch/release pushes. Two belong to d9a0ebc76's
+# `worker_status_cache_loop`: a 1 s `timeout` around one local capacity read, and the
+# `sleep_until` to its next refresh, both raced against shutdown. One is ad4acb07c's test-only
+# `interval_at` in `subtitle_pressure_preserves_committed_success_after_join`
+# (`foreground_admission_tests`). Three are Jellyfin native-HLS test retries (d25a35ea3,
+# 9fde9d148, 55f84b0e8): 250 ms and 1 s sleeps while a fixture response is `503` pending.
+# No production producer, child or detached owner is added.
+expected_occurrences = 2086
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6581,7 +6597,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # are unchanged; the two joined fixture tasks are classified above separately.
 # PR1369: +2 output() calls for the same bounded offline FFmpeg/FFprobe
 # controls inventoried above, not additional children or detached owners.
-expected_occurrences = 879
+# +3 in `http/jellyfin/tests.rs` (d25a35ea3, 9fde9d148, 55f84b0e8): HTTP
+# `response.status()` reads in the pending-segment retry loops above. They match the
+# `.status(` shape but launch no process.
+expected_occurrences = 882
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
