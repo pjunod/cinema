@@ -54,8 +54,12 @@ pub(super) async fn scan(
         Duration::from_secs(6 * 60 * 60),
         64 * 1024,
         plurx_core::process::ChildWork::background("complete-title Dolby Vision scan"),
-    )
-    .await;
+    );
+    let output = if input.is_some() {
+        plurx_core::process::source_lifetime::mediated(output).await
+    } else {
+        output.await
+    };
     if let Some(input) = input {
         input
             .close_and_wait()
