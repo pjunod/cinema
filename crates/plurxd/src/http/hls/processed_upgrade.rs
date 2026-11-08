@@ -143,6 +143,7 @@ pub(in crate::http) fn take_on_first_frame(
             session_id: session_id.to_owned(),
             claim,
             cancelled,
+            presented_at: std::time::Instant::now(),
         },
     ))
 }
@@ -153,6 +154,10 @@ pub(in crate::http) struct UpgradeRun {
     session_id: String,
     claim: u64,
     cancelled: tokio_util::sync::CancellationToken,
+    /// When the picture this run answers was reported. Before the first
+    /// control exchange is accepted, the film has played from the session's
+    /// start for this long; see [`viewer_film_time_ms`].
+    presented_at: std::time::Instant,
 }
 
 impl UpgradeRun {
@@ -246,8 +251,105 @@ fn start_upgrade(state: &AppState, intent: Box<UpgradeIntent>, run: UpgradeRun) 
     });
 }
 
+/// What the trial step answers; see [`run_upgrade_with`].
+pub(in crate::http) type TrialOutcome =
+    Result<Option<crate::transcode::ProcessedUpgradeTrial>, String>;
+
 /// One upgrade, start to staged. Returns its outcome label.
 async fn run_upgrade(state: &AppState, intent: &UpgradeIntent, run: &UpgradeRun) -> &'static str {
+    run_upgrade_with(state, intent, run, |request, recovery| async move {
+        state
+            .transcode
+            .prepare_processed_upgrade(
+                &intent.session_id,
+                &request,
+                &recovery,
+                intent.hdr10_intent,
+            )
+            .await
+    })
+    .await
+}
+
+/// A film position bounded by the film: a successor may not begin past its
+/// end, and never before its start.
+fn bounded_film_ms(ms: i64, duration_ms: Option<i64>) -> i64 {
+    match duration_ms {
+        Some(duration) if duration > 0 => ms.clamp(0, duration),
+        _ => ms.max(0),
+    }
+}
+
+/// Where the viewer of the upgraded session is now, on the source timeline.
+///
+/// The successor has to begin where the viewer is, as an ordinary prepared
+/// successor does from its control ask's accepted position — not at the
+/// create's `start_seconds`, which a viewer reaches the first frame of and
+/// then leaves behind for as long as the trial and the staging take. This is
+/// the predecessor's latest accepted demand advanced by its age, the playhead
+/// estimate the producers already read
+/// ([`crate::playback_control::rolling_estimated_position_ms`]). Before any
+/// exchange has been accepted, the first frame was at the start position and
+/// the film has played since.
+pub(in crate::http) async fn viewer_film_time_ms(
+    state: &AppState,
+    intent: &UpgradeIntent,
+    run: &UpgradeRun,
+) -> i64 {
+    if let Some(estimated) = state
+        .transcode
+        .session_playhead_estimate_ms(&intent.session_id)
+        .await
+    {
+        return estimated.max(0);
+    }
+    let start_ms = (intent.request.start_seconds.max(0.0) * 1_000.0).round() as i64;
+    let played_ms = i64::try_from(run.presented_at.elapsed().as_millis()).unwrap_or(i64::MAX);
+    start_ms.saturating_add(played_ms)
+}
+
+/// The processed candidate this upgrade's trial would produce, when this node
+/// has already described it for the session's catalog query: a processed row
+/// of the ordinary catalog, on this node, at the height the trial renders.
+/// Its recipe digest and bitrate are what recovery and link evidence are kept
+/// under, so admission can refuse it before the trial spends the GPU.
+fn projected_processed_candidate(
+    state: &AppState,
+    intent: &UpgradeIntent,
+    source: &plurx_core::domain::MediaFile,
+) -> Option<plurx_core::playback::candidate::QualityCandidate> {
+    let ordinary = intent.request.candidate_context.as_ref()?;
+    let source_height = source.height.filter(|height| *height > 0)?;
+    let height = source_height.min(i64::from(ordinary.selected_candidate.target_height)) & !1;
+    intent
+        .request
+        .quality_catalog
+        .as_deref()?
+        .candidates
+        .iter()
+        .find(|entry| {
+            entry.node_id == state.node_id
+                && entry.candidate.processed_dv
+                && i64::from(entry.candidate.target_height) == height
+        })
+        .map(|entry| entry.candidate.clone())
+}
+
+/// [`run_upgrade`] with its trial supplied: production passes
+/// `prepare_processed_upgrade`, and tests pass a trial of their own, so the
+/// upgrade's decisions around the trial are exercised without a renderer.
+/// The trial is given the request to verify (positioned at the viewer) and
+/// the identity of the successor it is verified for.
+pub(in crate::http) async fn run_upgrade_with<F, Fut>(
+    state: &AppState,
+    intent: &UpgradeIntent,
+    run: &UpgradeRun,
+    run_trial: F,
+) -> &'static str
+where
+    F: FnOnce(crate::transcode::SessionRequest, crate::transcode::SessionRecoveryIdentity) -> Fut,
+    Fut: std::future::Future<Output = TrialOutcome>,
+{
     let session = crate::transcode::session_log_id(&intent.session_id);
     // One preparation slot per playback: a viewer's own change in flight wins,
     // and a viewer's change arriving during the trial cancels this one.
@@ -286,21 +388,51 @@ async fn run_upgrade(state: &AppState, intent: &UpgradeIntent, run: &UpgradeRun)
     {
         return "not_applicable";
     }
+    let Ok(Some(source)) = state.store.get_file(intent.request.file_id).await else {
+        return "not_applicable";
+    };
+    // Admission before the GPU (review 3 S6): when this node has already
+    // described the processed recipe for this query, the evidence kept under
+    // its digest and bitrate decides now, and a refused recipe costs no
+    // trial. Without a description there is no evidence about the recipe yet
+    // (recovery and link memory are kept under its digest, which only exists
+    // once it has been rendered), and the check after the trial is the
+    // admission.
+    let projected = projected_processed_candidate(state, intent, &source);
+    if let Some(projected) = projected.as_ref() {
+        if let Err(reason) =
+            admit_processed_candidate(state, intent, &source, &route, projected).await
+        {
+            tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
+                "processed upgrade not admitted before its trial; the ordinary session keeps playing");
+            return "admission_refused";
+        }
+    }
     let ids = super::preparation::StagedSuccessorIds::mint();
     let recovery = crate::transcode::SessionRecoveryIdentity {
         principal: route.principal.clone(),
         incarnation_id: ids.incarnation_id.clone(),
         recovery_epoch: route.recovery_epoch.clone(),
     };
+    // The trial verifies its first window where the viewer will be when it
+    // ends: at most its own budget past where the viewer is now, so the
+    // verified window is never behind the successor's start, and the
+    // successor's producer takes it when it reaches that segment.
+    let trial_budget_ms =
+        i64::try_from(crate::transcode::PROCESSED_UPGRADE_TRIAL_BUDGET.as_millis())
+            .unwrap_or(i64::MAX);
+    let mut trial_request = intent.request.clone();
+    trial_request.start_seconds = bounded_film_ms(
+        viewer_film_time_ms(state, intent, run)
+            .await
+            .saturating_add(trial_budget_ms),
+        source.duration_ms,
+    ) as f64
+        / 1_000.0;
     let superseded = pending.cancellation_token();
     let trial = tokio::select! {
         () = superseded.cancelled() => return "cancelled",
-        trial = state.transcode.prepare_processed_upgrade(
-            &intent.session_id,
-            &intent.request,
-            &recovery,
-            intent.hdr10_intent,
-        ) => trial,
+        trial = run_trial(trial_request, recovery) => trial,
     };
     let trial = match trial {
         Ok(Some(trial)) => trial,
@@ -324,19 +456,41 @@ async fn run_upgrade(state: &AppState, intent: &UpgradeIntent, run: &UpgradeRun)
     {
         return "not_applicable";
     }
-    let Ok(Some(source)) = state.store.get_file(intent.request.file_id).await else {
-        return "not_applicable";
-    };
     let crate::transcode::ProcessedUpgradeTrial {
         request: mut processed,
         candidate,
         root,
     } = trial;
-    if let Err(reason) = admit_processed_candidate(state, intent, &source, &route, &candidate).await
+    // The recipe the trial actually froze is admitted unless it is exactly
+    // the one admitted before the trial: same digest, same bitrate.
+    let admitted_before = projected.as_ref().is_some_and(|projected| {
+        projected.recipe_digest == candidate.recipe_digest
+            && projected.average_bps == candidate.average_bps
+            && projected.peak_bps == candidate.peak_bps
+    });
+    if !admitted_before {
+        if let Err(reason) =
+            admit_processed_candidate(state, intent, &source, &route, &candidate).await
+        {
+            tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
+                "processed upgrade not admitted; the ordinary session keeps playing");
+            return "admission_refused";
+        }
+    }
+    // Where the successor begins: where the viewer is now, as an ordinary
+    // prepared successor begins at its ask's accepted position (B1). The
+    // ordinary request a dispatch falls back to begins there too, or a
+    // degraded successor would restart the film at the create's start.
+    let film_time_ms = bounded_film_ms(
+        viewer_film_time_ms(state, intent, run).await,
+        source.duration_ms,
+    );
+    if let Some(ordinary) = processed
+        .candidate_context
+        .as_mut()
+        .and_then(|context| context.ordinary_request.as_mut())
     {
-        tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
-            "processed upgrade not admitted; the ordinary session keeps playing");
-        return "admission_refused";
+        ordinary.start_seconds = film_time_ms as f64 / 1_000.0;
     }
     let Some(context) = processed.candidate_context.as_deref().cloned() else {
         return "declined";
@@ -367,7 +521,6 @@ async fn run_upgrade(state: &AppState, intent: &UpgradeIntent, run: &UpgradeRun)
         .transcode
         .hold_processed_upgrade_root(&ids.incarnation_id, context, root);
     let primes = state.hls_route_hooks.get().primes_prepared_successor();
-    let film_time_ms = (processed.start_seconds * 1_000.0).round() as i64;
     let staged = super::preparation::stage_prepared_successor_as(
         state,
         &intent.session_id,
@@ -379,7 +532,7 @@ async fn run_upgrade(state: &AppState, intent: &UpgradeIntent, run: &UpgradeRun)
         super::preparation::PreparationPurpose::SelectionChange,
         super::preparation::AcceptedAsk {
             prepared_proof: None,
-            film_time_ms: film_time_ms.max(0),
+            film_time_ms,
             desired_digest: None,
             planning_cancellation: Some(pending.cancellation_token()),
             planning_registration: Some(pending.registration()),
