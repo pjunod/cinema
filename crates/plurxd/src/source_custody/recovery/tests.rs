@@ -907,11 +907,14 @@ fn recovery_process_fixture() {
                 node_id: NODE.into(),
                 records: vec![record.clone()],
             };
-            std::fs::write(
-                fixture.root.path().join("prepared.json"),
-                serde_json::to_vec(&envelope).expect("prepared"),
-            )
-            .expect("prepare child ownership");
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let prepared = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(fixture.root.path().join("prepared.json"))
+                .expect("create private child ownership");
+            serde_json::to_writer(prepared, &envelope).expect("prepare child ownership");
             std::fs::write(fixture.root.path().join("source.bin"), [42_u8; 4096])
                 .expect("source fixture");
             let daemon =
