@@ -862,7 +862,14 @@ async fn playback_fixture() -> PlaybackFixture {
         .expect("canonical media root")
         .join("movie.mp4");
     std::fs::write(&path, b"0123456789abcdef").expect("bytes");
-    state.store.upsert_file(native_item,path.to_str().expect("path"),16,1,&ProbeResult {duration_ms:Some(100_000),container:Some("mp4".into()),video_codec:Some("h264".into()),video_codec_tag:Some("avc1".into()),video_profile:Some("Main".into()),width:Some(1920),height:Some(1080),bit_depth:Some(8),bitrate:Some(100_000),audio_streams:vec![AudioStream {index:0,codec:"aac".into(), channel_layout: None,channels:Some(2),sample_rate:Some(48_000),language:None,title:None,default:true}],raw_json:Some(json!({"streams":[{"index":0,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"},{"index":1,"codec_type":"video","codec_name":"h264","width":1920,"height":1080}]}).to_string()),..Default::default()}).await.expect("file");
+    let mtime = std::fs::metadata(&path)
+        .expect("source metadata")
+        .modified()
+        .expect("source mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("source epoch")
+        .as_secs() as i64;
+    state.store.upsert_file(native_item,path.to_str().expect("path"),16,mtime,&ProbeResult {duration_ms:Some(100_000),container:Some("mp4".into()),video_codec:Some("h264".into()),video_codec_tag:Some("avc1".into()),video_profile:Some("Main".into()),width:Some(1920),height:Some(1080),bit_depth:Some(8),bitrate:Some(100_000),audio_streams:vec![AudioStream {index:0,codec:"aac".into(), channel_layout: None,channels:Some(2),sample_rate:Some(48_000),language:None,title:None,default:true}],raw_json:Some(json!({"streams":[{"index":0,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"},{"index":1,"codec_type":"video","codec_name":"h264","width":1920,"height":1080}]}).to_string()),..Default::default()}).await.expect("file");
     let (token, user) = facade_login(&app).await;
     let (status, page) = json_call(
         &app,
