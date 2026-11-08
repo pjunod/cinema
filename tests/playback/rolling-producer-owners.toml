@@ -5402,7 +5402,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # create 30s, GET 20s, body 10s, stop 5s, offline decode/probe 20s each, and
 # settlement 10s with 500-ms stop attempts and a 10-ms condition poll. Its
 # caught errors/panics still settle all isolated sessions before offline checks.
-expected_occurrences = 2071
+# PR #1390 (c2a29aac5): two timers belong to the paused-clock test
+# subtitle_pressure_checks_keep_polling_the_write_that_holds_the_fence.
+# Its local interval_at exercises the tick and notification paths. The 20ms
+# timeout bounds the borrowed driver after the write reply; success still
+# requires the work to settle, the token to stay live and the fence to unlock.
+# The production 250ms pressure interval remains owned by the subtitle job.
+expected_occurrences = 2073
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
