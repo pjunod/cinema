@@ -1606,6 +1606,126 @@ mod tests {
         file
     }
 
+    /// Review #1405 (2): a targeted job the claim refuses for a reason other
+    /// than its own library's fence — here the provider cap, with two other
+    /// libraries' running scans holding both `provider:tmdb` slots — does not
+    /// keep the `waiting_on` an earlier fence refusal wrote. With its fence
+    /// free it names no wait; with the fence held it names that.
+    #[tokio::test]
+    async fn a_targeted_claim_refused_by_the_provider_cap_refreshes_waiting_on() {
+        use plurx_core::store::background_jobs::{ClaimJob, ClaimOutcome, JobKind};
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let volume = crate::test_tempdir().expect("volume");
+        let mut libraries = Vec::new();
+        for name in ["Alpha", "Beta", "Gamma"] {
+            let root = volume.path().join(name);
+            std::fs::create_dir_all(&root).expect("library root");
+            media_file(&root, &format!("{name} Film (2001)"));
+            libraries.push(
+                store
+                    .create_library(&NewLibrary {
+                        name: name.into(),
+                        kind: LibraryKind::Movies,
+                        paths: vec![root],
+                        anime: false,
+                    })
+                    .await
+                    .expect("library"),
+            );
+        }
+        // One storage domain each, so the two full scans do not share a reader.
+        let mappings = libraries
+            .iter()
+            .flat_map(|library| {
+                library.paths.iter().map(|root| {
+                    plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                        library_id: library.id,
+                        root_path: root.display().to_string(),
+                        domain_id: format!("volume-{}", library.id),
+                    }
+                })
+            })
+            .collect();
+        assert!(store
+            .replace_storage_domains(mappings, clock_ms())
+            .await
+            .expect("storage domains"));
+        for (library, request) in [(&libraries[1], "beta-full"), (&libraries[2], "gamma-full")] {
+            enqueue_full(store.as_ref(), library.id, request, false).await;
+            let job_id = request_record(store.as_ref(), request).await.job_id;
+            let job = store
+                .background_job(&job_id)
+                .await
+                .expect("read job")
+                .expect("full scan job");
+            let now_ms = clock_ms();
+            let claim = store
+                .claim_job(ClaimJob {
+                    job_id: job.id,
+                    expected_revision: job.revision,
+                    node_id: "remote-worker".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::LibraryScan,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                })
+                .await
+                .expect("remote full scan claim");
+            assert!(matches!(claim, ClaimOutcome::Claimed { .. }), "{claim:?}");
+        }
+        let new = media_file(&libraries[0].paths[0], "Alpha Import (2025)");
+        enqueue_targeted(
+            store.as_ref(),
+            libraries[0].id,
+            "alpha-targeted",
+            new.parent().expect("folder"),
+            &[&new],
+        )
+        .await;
+        let alpha_job = request_record(store.as_ref(), "alpha-targeted").await.job_id;
+        // What an earlier fence refusal wrote, before Alpha's fence was released.
+        crate::background_jobs::note_targeted_wait(store.as_ref(), &alpha_job, "full_scan:Alpha")
+            .await;
+        let waiting_on = || async {
+            store
+                .scan_request_v2("alpha-targeted")
+                .await
+                .expect("sidecar")
+                .expect("v2 request")
+                .waiting_on
+        };
+        let jobs = JobManager::test_new_for_node(
+            Arc::clone(&store),
+            volume.path().join("artwork-w2"),
+            "w2",
+        );
+        let transcode = transcode_for(Arc::clone(&store), &volume.path().join("transcode-w2"));
+        assert!(
+            !jobs.work_library_queue(&transcode, None).await,
+            "the provider cap refuses the targeted claim"
+        );
+        assert_eq!(
+            request_record(store.as_ref(), "alpha-targeted").await.state,
+            "pending"
+        );
+        assert_eq!(waiting_on().await, "", "Alpha's fence is free: no named wait");
+
+        let fence = jobs
+            .acquire_job(format!("scan:library:{}", libraries[0].id))
+            .await
+            .expect("acquire Alpha's fence")
+            .expect("Alpha's fence was free");
+        assert!(!jobs.work_library_queue(&transcode, None).await);
+        assert_eq!(
+            waiting_on().await,
+            "full_scan:Alpha",
+            "with its fence held, the refusal names it"
+        );
+        drop(fence);
+    }
+
     /// Contract v2 §5.1: a targeted request is its own job. Behind a
     /// *pending* full scan of a 1,000-file library it is claimed first; beside
     /// a *running* full scan of another library on the same volume it runs,

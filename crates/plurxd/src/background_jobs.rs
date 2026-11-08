@@ -2783,10 +2783,16 @@ async fn library_candidate_readiness(
         }
         _ => false,
     };
+    if protected && targeted {
+        // Playback protection holds it, not the fence: drop a reason an
+        // earlier pass wrote that may no longer be true.
+        refresh_targeted_wait(store, &candidate.id, library_id, library.as_ref()).await;
+    }
     Ok((!protected).then_some(LibraryCandidateReadiness {
         kind,
         interactive,
         targeted,
+        library_id,
     }))
 }
 
@@ -2797,6 +2803,7 @@ struct LibraryCandidateReadiness {
     kind: plurx_core::store::background_jobs::JobKind,
     interactive: bool,
     targeted: bool,
+    library_id: i64,
 }
 
 async fn library_candidates(
@@ -2881,6 +2888,7 @@ pub(crate) async fn claim_library(
                 kind,
                 interactive,
                 targeted,
+                library_id,
             }) = library_candidate_readiness(
                 store.as_ref(),
                 authority.as_ref(),
@@ -2934,6 +2942,25 @@ pub(crate) async fn claim_library(
             )
             .await?
             else {
+                if targeted {
+                    // Refused while still queued — the provider cap, or a
+                    // claim this pass raced — rather than lost to another
+                    // worker: say what it waits on now, not what an earlier
+                    // pass saw.
+                    let queued = store.background_job(&candidate.id).await?.is_some_and(|job| {
+                        job.state == plurx_core::store::background_jobs::JobState::Queued
+                    });
+                    if queued {
+                        let library = store.get_library(library_id).await?;
+                        refresh_targeted_wait(
+                            store.as_ref(),
+                            &candidate.id,
+                            library_id,
+                            library.as_ref(),
+                        )
+                        .await;
+                    }
+                }
                 continue;
             };
             let active = ActiveBackgroundJob::start(
@@ -2954,6 +2981,42 @@ pub(crate) async fn claim_library(
         }
     }
     Ok(None)
+}
+
+/// A targeted candidate this pass could not claim for a reason other than an
+/// unreadable root (playback protection, the provider cap, a raced claim).
+/// Its one named wait is its own library's fence: `full_scan:<library>`
+/// while that lease is visibly live, otherwise nothing, so a reason written
+/// by an earlier fence refusal or root check does not outlive it. The lease
+/// read is this node's local hint and the write is advisory and idempotent.
+async fn refresh_targeted_wait(
+    store: &dyn Store,
+    job_id: &str,
+    library_id: i64,
+    library: Option<&plurx_core::domain::Library>,
+) {
+    let Ok(now_ms) = unix_ms() else {
+        return;
+    };
+    let fenced = match store
+        .lease_expiry_hint(&format!("scan:library:{library_id}"))
+        .await
+    {
+        Ok(expires) => expires.is_some_and(|expires| expires > now_ms),
+        Err(error) => {
+            tracing::warn!(%error, job_id, "reading the library fence for waiting_on");
+            return;
+        }
+    };
+    let waiting_on = if fenced {
+        format!(
+            "full_scan:{}",
+            library.map_or_else(|| library_id.to_string(), |library| library.name.clone())
+        )
+    } else {
+        String::new()
+    };
+    note_targeted_wait(store, job_id, &waiting_on).await;
 }
 
 /// Record, on every pending request of a targeted library job, what it is
