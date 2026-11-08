@@ -1,3 +1,28 @@
+# Historical main census review imported from aa68c00ee (2026-11-08).
+# The following comments describe main ce11e8fd2, before this branch's native
+# SQLite/helper integration and cluster-runtime extraction. They do not set
+# current counts or locate the observer in native main; the live source audit
+# and actual count fields below govern the combined tree.
+# 19 -> 20 with bee39df0e (test: expose the blocked retirement phase on a cleanup failure):
+# `test_support.rs::worker_retirement_debug` formats `child_transition.try_lock().is_ok()` into a
+# failure message. A test-only, non-blocking probe whose guard drops at once; no transition owner.
+# 36 -> 38 with bee39df0e: the same test-only debug helper names `child_transition` twice
+# (its `child_transition_available` label and the `try_lock()` probe above). No new owner.
+# d9a0ebc76 (learner worker accounting): `spawn_background_loops` also starts
+# `http::cluster_operations::worker_status_cache_loop`, a read-only refresh of local worker
+# capacity for Activity. It owns no child or source, and returns on `background_shutdown`, the
+# same cancellation as its sibling peer-status loop.
+# +6 after the Cinema dispatch/release pushes. Two belong to d9a0ebc76's
+# `worker_status_cache_loop`: a 1 s `timeout` around one local capacity read, and the
+# `sleep_until` to its next refresh, both raced against shutdown. One is ad4acb07c's test-only
+# `interval_at` in `subtitle_pressure_preserves_committed_success_after_join`
+# (`foreground_admission_tests`). Three are Jellyfin native-HLS test retries (d25a35ea3,
+# 9fde9d148, 55f84b0e8): 250 ms and 1 s sleeps while a fixture response is `503` pending.
+# No production producer, child or detached owner is added.
+# +3 in `http/jellyfin/tests.rs` (d25a35ea3, 9fde9d148, 55f84b0e8): HTTP
+# `response.status()` reads in the pending-segment retry loops above. They match the
+# `.status(` shape but launch no process.
+#
 # Cluster worker-capacity observer ownership audit (2026-11-08): current
 # merge of main 78544ee against HEAD 7d4c37f8. This is source review, not
 # runtime qualification. One production tokio::spawn is added in

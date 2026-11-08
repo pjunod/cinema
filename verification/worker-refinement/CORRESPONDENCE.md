@@ -29,6 +29,26 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+This imported review records immutable main `ce11e8fd2` as published in
+`aa68c00ee`. Its source locations and fingerprints describe that historical
+tree; the native integration reviews and live mappings retain their separate
+source identities.
+
+## Main direct-push source drift — scoped review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed the authority-source drift that direct
+pushes left on main `ce11e8fd2`, against the last reviewed bytes. This is an
+author review awaiting an independent check, not execution evidence.
+
+| Changed source (commit) | Change | Model action or property | Still holds? |
+|---|---|---|---|
+| `plurxd/background_jobs.rs` (4f417e852) | Test-only: inside `#[cfg(test)] mod tests`, the fixture `lost_claim_acknowledgement_resolves_the_original_attempt` stops the heartbeat and settles joined source custody before reading the candidate | None; no production code changes. `ReplayClaim`/`ResolveClaim` correspondence and every claim/settlement body are unchanged | Yes |
+| `plurxd/main.rs` (d9a0ebc76) | `spawn_background_loops` also starts `worker_status_cache_loop`, a read-only, cancellable once-per-interval refresh of local worker capacity for Activity | None; the selected worker spawn, its wait/lock order and the queue/domain authority paths are unchanged | Yes |
+| `plurxd/transcode/manager/produce.rs` (0a33ddc02) | One `tracing::warn!` gains `target: "plurxd::transcode"` | None; no control flow change | Yes |
+
+No model, configuration or property changes; only whole-file pins are
+refreshed.
+
 ## Native and recovery integration — scoped review on 2026-11-04
 
 Astra independently reviewed effort `10f9b3fd5209895f668aceb624f4fd617999e797`
