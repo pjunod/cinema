@@ -1133,6 +1133,15 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
     // A member envelope never carries the sharing bearer credential or public
     // headers. The untouched complete recipe remains in the original body.
     let canonical_body = String::from_utf8(bytes.to_vec()).map_err(|_| invalid())?;
+    // A forwarded Start honours the viewer's clock here, at the ingress the
+    // receiver spoke to: since the clock bounds answers only (never the
+    // owner's preparation), answering by it needs nothing from the owner.
+    // The owner keeps its Start entry and owned work when this waiter's
+    // answer comes, and the same request rejoins it through the pinned or
+    // retained route. Owner refusals, including a full owner credit pool,
+    // come back typed in the signed reply and pass through unchanged.
+    let clock = super::SourceStartClock::new(&parts.headers);
+    let clocked = op == Operation::Start && clock.clocked();
     if !remote_operation_allowed(&route, op) {
         return Err(unavailable());
     }
@@ -1165,26 +1174,31 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
             }
             let driver =
                 capture_driver(&state, &connection, &fresh.candidate_node_id, deadline).await?;
+            let prepare = FreshRequest {
+                path: path.clone(),
+                canonical_body: canonical_body.clone(),
+                operation: op,
+                ingress: ForwardIngress {
+                    node_id: state.node_id.clone(),
+                    driver: driver.id().clone(),
+                    registration_sequence: None,
+                },
+                authority: (*fresh).clone(),
+                remaining_ms: remaining(deadline)?,
+                hop: 1,
+            };
             let prepared = bounded(
                 &state,
                 &fresh.candidate_node_id,
                 PREPARE_PATH,
-                &FreshRequest {
-                    path: path.clone(),
-                    canonical_body: canonical_body.clone(),
-                    operation: op,
-                    ingress: ForwardIngress {
-                        node_id: state.node_id.clone(),
-                        driver: driver.id().clone(),
-                        registration_sequence: None,
-                    },
-                    authority: (*fresh).clone(),
-                    remaining_ms: remaining(deadline)?,
-                    hop: 1,
-                },
+                &prepare,
                 deadline,
-            )
-            .await?;
+            );
+            let prepared = if clocked {
+                clock.answer(prepared).await??
+            } else {
+                prepared.await?
+            };
             #[cfg(test)]
             eprintln!(
                 "Source forwarding prepare reply status={} bytes={}",
@@ -1284,8 +1298,12 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
             CONTROL_PATH,
             &wire,
             deadline,
-        )
-        .await?;
+        );
+        let response = if clocked {
+            clock.answer(response).await??
+        } else {
+            response.await?
+        };
         if !response.status.is_success() {
             return Err(unavailable());
         }
@@ -1420,13 +1438,30 @@ async fn receive_at(
     let auth = authenticate(&state, &headers, path, &body).await?;
     let wire: ForwardRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
     let op = operation(&wire.path, wire.canonical_body.as_bytes())?;
-    let permit = credit(op)?;
     if !wire.valid_transport(&state.node_id, &auth.node_id, path, op) {
         return Err(unavailable());
     }
     let deadline = received_deadline(wire.remaining_ms, op.budget())?
         .min(began + Duration::from_millis(u64::from(wire.remaining_ms - 100)));
     remaining(deadline)?;
+    let permit = match credit(op) {
+        Ok(permit) => permit,
+        // A full owner pool is load: a control reply carries its typed 429
+        // and Retry-After in the signed envelope, which the ingress hands on
+        // unchanged, instead of an unsigned refusal it can only call 503.
+        Err(error) if !op.media() => {
+            return signed(
+                &state,
+                &auth,
+                path,
+                StatusCode::OK,
+                pack_control(error.into_response(), deadline).await?,
+                deadline,
+            )
+            .await;
+        }
+        Err(error) => return Err(error),
+    };
     tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         super::validate_retained_forward(
@@ -1513,10 +1548,24 @@ async fn prepare_inner(
     {
         return Err(unavailable());
     }
-    let _permit = credit(wire.operation)?;
     let deadline = received_deadline(wire.remaining_ms, wire.operation.budget())?
         .min(began + Duration::from_millis(u64::from(wire.remaining_ms - 100)));
     remaining(deadline)?;
+    // As at the control path: a full owner pool answers typed, signed.
+    let _permit = match credit(wire.operation) {
+        Ok(permit) => permit,
+        Err(error) => {
+            return signed(
+                &state,
+                &auth,
+                PREPARE_PATH,
+                StatusCode::CONFLICT,
+                pack_control(error.into_response(), deadline).await?,
+                deadline,
+            )
+            .await;
+        }
+    };
     if wire.operation != Operation::Start {
         let response = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),

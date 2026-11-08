@@ -1804,6 +1804,10 @@ impl SourceStartClock {
             fixed: std::time::Instant::now() + std::time::Duration::from_secs(305),
         }
     }
+    /// Whether the caller sent the viewer's clock.
+    pub(super) fn clocked(&self) -> bool {
+        self.budget.is_some()
+    }
     /// The bound of the entry's owned work, whatever the viewer sent.
     fn work_deadline(&self) -> std::time::Instant {
         self.fixed
