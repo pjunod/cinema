@@ -2928,12 +2928,9 @@ async fn create_with_purpose(
     req: CreateSession,
     purpose: ServiceCreatePurpose,
 ) -> Result<Json<StartResponse>, ApiError> {
-    let remaining = headers
-        .get("x-plurx-startup-remaining-ms")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(10_000);
+    let remaining = startup_allowance_ms(&headers);
     if remaining == 0 {
+        crate::telemetry::record_create_seconds(Some("startup_timeout"), std::time::Duration::ZERO);
         return Err(ApiError::typed(
             StatusCode::SERVICE_UNAVAILABLE,
             "startup_timeout",
@@ -2946,15 +2943,21 @@ async fn create_with_purpose(
     let store_before = counts.store_time();
     let started = tokio::time::Instant::now();
     budget.begin_phases(before);
-    let result = budget
-        .scope(plurx_core::store::scope_http_store_operations(
+    // The create runs as its own task. Until it holds its durable request
+    // claim it is this request and is cancelled with it; from the claim on it
+    // is the claim's one owner and runs on to activation, bounded by the
+    // claim's window, whether or not anyone is still waiting for the answer.
+    // A viewer whose allowance ends first is told `startup_timeout`, and its
+    // retry with the same `request_id` joins this owner through the claim
+    // row instead of starting a second producer.
+    let mut create = crate::media_pool::OwnedCreate::spawn(
+        &budget,
+        budget.scope(plurx_core::store::scope_http_store_operations(
             counts.clone(),
-            tokio::time::timeout_at(
-                budget.deadline,
-                create_with_purpose_inner(user, state, id, headers, remote, req, purpose),
-            ),
-        ))
-        .await;
+            create_with_purpose_inner(user, state, id, headers, remote, req, purpose),
+        )),
+    );
+    let result = tokio::time::timeout_at(budget.deadline, create.join()).await;
     let after = counts.snapshot();
     // Whatever ran after the last mark: an early return, or the answer.
     budget.mark_phase("tail", after);
@@ -2971,70 +2974,56 @@ async fn create_with_purpose(
         phases = %budget.phases(),
         "create startup read budget finished"
     );
-    result.map_err(|_| {
-        ApiError::typed(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "startup_timeout",
+    let result = match result {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(error)) => Err(ApiError::Internal(format!(
+            "the session create task failed: {error}"
+        ))),
+        Err(_) => Err(create_still_starting(
             "session creation exceeded its remaining startup allowance",
-        )
-    })?
+        )),
+    };
+    crate::telemetry::record_create_seconds(
+        result.as_ref().err().map_or(Some("ok"), ApiError::code),
+        started.elapsed(),
+    );
+    result
 }
 
-/// Duplicate compatibility entries wait on the exact existing native claim. This
-/// holds only the caller's bounded create context, not a task or a second owner.
-async fn wait_for_compatibility_activation(
-    state: &AppState,
-    user_id: i64,
-    playback_id: &str,
-    fingerprint: &str,
-    incarnation_id: &str,
-) -> Result<(), ApiError> {
-    let deadline = crate::media_pool::create_stage_deadline(std::time::Duration::from_secs(15));
-    let timeout = || {
-        ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "startup_timeout",
-            "the shared native start did not publish before its remaining deadline",
-        )
-    };
-    let mut backoff = std::time::Duration::from_millis(25);
-    loop {
-        let route = tokio::time::timeout_at(
-            deadline,
-            state
-                .store
-                .media_session_route_by_incarnation(incarnation_id),
-        )
-        .await
-        .map_err(|_| timeout())?
-        .map_err(|error| session_store_error("observing the shared start", error))?;
-        if let Some(route) = route {
-            if route.principal.local_user_id() != Some(user_id)
-                || route.playback_id != playback_id
-                || route.request_fingerprint != fingerprint
-            {
-                return Err(ApiError::Conflict(
-                    "the shared native start changed identity".into(),
-                ));
-            }
-            if route.state == "ended" {
-                return Err(ApiError::typed(
-                    StatusCode::GONE,
-                    "media_session_ended",
-                    "the shared native start ended",
-                ));
-            }
-            if resolved_replay_is_live(&route, unix_ms()) {
-                return Ok(());
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(timeout());
-        }
-        tokio::time::sleep_until((tokio::time::Instant::now() + backoff).min(deadline)).await;
-        backoff = (backoff * 2).min(std::time::Duration::from_millis(500));
+/// What the viewer has left of its own start, from the client's
+/// `x-plurx-startup-remaining-ms`. The server waits at most 10 s for any one
+/// create answer whatever the client sends (`CreateStartupBudget::new`
+/// clamps); a client with more time left re-posts on `startup_timeout` and
+/// joins the same owner. Only a create with no header gets the 10 s default.
+pub(super) fn startup_allowance_ms(headers: &HeaderMap) -> u64 {
+    headers
+        .get("x-plurx-startup-remaining-ms")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(10_000)
+}
+
+/// The answer for a create whose owner is still working: `startup_timeout`,
+/// which every client's create ladder re-posts with the same `request_id`,
+/// and that re-post joins the owner through the durable claim.
+fn create_still_starting(message: &'static str) -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "startup_timeout",
+        message: message.to_owned(),
+        retry_after_seconds: CREATE_STILL_STARTING_RETRY_AFTER_SECS,
     }
 }
+
+/// How long a viewer told `startup_timeout` waits before re-posting: about
+/// one placement step of the owner it is about to join.
+const CREATE_STILL_STARTING_RETRY_AFTER_SECS: u64 = 1;
+/// How long a create's durable request claim lasts once acquired.
+const MEDIA_SESSION_REQUEST_CLAIM_MS: i64 = 60_000;
+/// The owner stops this long before its claim expires, so its last durable
+/// write (publication or settlement) lands while the claim is still its own
+/// and no second claimant can re-acquire the same request underneath it.
+const OWNED_CREATE_CLAIM_MARGIN: std::time::Duration = std::time::Duration::from_secs(5);
 
 async fn create_with_purpose_inner(
     user: plurx_core::domain::User,
@@ -3358,7 +3347,6 @@ async fn create_with_purpose_inner(
     let mut processing_decline: Option<String> = None;
     let native_subtitles = resolved.native_subtitles;
     let native_subtitle = resolved.native_subtitle;
-    let now_ms = unix_ms();
     let mut incarnation_id = uuid::Uuid::new_v4().to_string();
     // Every create occupies a durable admission row. A caller-supplied key
     // keeps public idempotency; an ordinary create uses its unguessable
@@ -3369,168 +3357,85 @@ async fn create_with_purpose_inner(
         .clone()
         .unwrap_or_else(|| incarnation_id.clone());
     crate::media_pool::mark_create_phase("plan");
-    match state
-        .store
-        .claim_media_session_request(
-            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
-            &request_claim_id,
-            &fingerprint,
-            &request.playback_id,
-            &incarnation_id,
-            now_ms,
-            now_ms.saturating_add(60_000),
-        )
-        .await
-        .map_err(|error| session_store_error("claiming the media-session request", error))?
-    {
-        MediaSessionRequestClaim::Acquired {
-            incarnation_id: acquired,
-        } => incarnation_id = acquired,
-        MediaSessionRequestClaim::Resolved(route) if resolved_replay_is_live(&route, unix_ms()) => {
-            let replay_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
-            let _response_publication = ingress_serving_authority
-                .commit_guard_before(ingress_serving_generation, replay_deadline.into_std())
-                .await
-                .ok_or_else(|| {
-                    ApiError::ServiceUnavailable(
-                        "the ingress lost serving authority before resolved replay".to_owned(),
-                    )
-                })?;
-            let route = tokio::time::timeout_at(
-                replay_deadline,
-                state
-                    .store
-                    .media_session_route_by_incarnation(&route.incarnation_id),
+    // A retry of a request whose owner is still starting joins it through the
+    // replicated claim row, on any ingress, for as long as this viewer's
+    // allowance lasts: it answers with the owner's activation once that is
+    // published, or becomes the owner itself if the first one let go.
+    let join_deadline = crate::media_pool::create_stage_deadline(START_DEADLINE);
+    let mut join_backoff = std::time::Duration::from_millis(50);
+    loop {
+        let claim_now_ms = unix_ms();
+        let claim_window_ends = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(MEDIA_SESSION_REQUEST_CLAIM_MS as u64);
+        match state
+            .store
+            .claim_media_session_request(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                &request_claim_id,
+                &fingerprint,
+                &request.playback_id,
+                &incarnation_id,
+                claim_now_ms,
+                claim_now_ms.saturating_add(MEDIA_SESSION_REQUEST_CLAIM_MS),
             )
             .await
-            .map_err(|_| {
-                ApiError::ServiceUnavailable(
-                    "resolved media-session replay freshness check timed out".to_owned(),
-                )
-            })?
-            .map_err(|error| session_store_error("rechecking the resolved replay", error))?
-            .filter(|current| {
-                replay_route_identity_matches(current, &route)
-                    && resolved_replay_is_live(current, unix_ms())
-            })
-            .ok_or_else(|| {
-                ApiError::ServiceUnavailable(
-                    "the resolved media-session replay is no longer current".to_owned(),
-                )
-            })?;
-            let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
-            response.effective_processing = state
-                .transcode
-                .dv_effective_report(&route.session_id, &route.incarnation_id)
-                .await;
-            // Same-session owner takeover advances only the control epoch.
-            // Replaying the persisted create must not hand a restarted client
-            // the stale epoch embedded when owner 1 first activated.
-            if let Some(control) = response.control.as_ref() {
-                response.control =
-                    control.refreshed(&route.session_id, &route.incarnation_id, route.owner_epoch);
-            }
-            return Ok(Json(response));
-        }
-        MediaSessionRequestClaim::Resolved(route)
-            if route.state == "active" && route.publication_ready_at_ms != 0 =>
+            .map_err(|error| session_store_error("claiming the media-session request", error))?
         {
-            if continuous.is_some() {
-                return Err(continuous_handoff_pending(&route.session_id));
+            MediaSessionRequestClaim::Acquired {
+                incarnation_id: acquired,
+            } => {
+                incarnation_id = acquired;
+                // From here this create is the claim's owner, not the viewer's
+                // request: it runs to activation inside the claim's window.
+                crate::media_pool::own_create_until(
+                    claim_window_ends
+                        .checked_sub(OWNED_CREATE_CLAIM_MARGIN)
+                        .unwrap_or(claim_window_ends),
+                );
+                break;
             }
-            return Err(ApiError::typed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "media_session_handoff_pending",
-                "the predecessor owner has not completed session handoff yet; retry shortly",
-            ));
-        }
-        MediaSessionRequestClaim::Resolved(_) => {
-            return Err(ApiError::typed(
-                StatusCode::GONE,
-                "media_session_ended",
-                "this idempotent session was already released",
-            ));
-        }
-        MediaSessionRequestClaim::InFlight {
-            incarnation_id: in_flight_incarnation,
-            ..
-        } => {
-            if matches!(&purpose, ServiceCreatePurpose::PassiveCompatibility { .. }) {
-                wait_for_compatibility_activation(
-                    &state,
-                    user.id,
-                    &request.playback_id,
-                    &fingerprint,
-                    &in_flight_incarnation,
-                )
-                .await?;
-            }
-            let observed_at_ms = unix_ms();
-            let route = tokio::time::timeout(
-                ACTIVATION_STORE_DEADLINE,
-                state
-                    .store
-                    .media_session_route_by_incarnation(&in_flight_incarnation),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .flatten()
-            .filter(|route| {
-                route.principal.local_user_id() == Some(user.id)
-                    && route.playback_id == request.playback_id
-                    && route.request_fingerprint == fingerprint
-                    && route.state == "active"
-                    && route.publication_ready_at_ms == 0
-                    && route.lease_expires_at_ms > observed_at_ms
-            });
-            if let Some(route) = route {
-                let publication_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+            MediaSessionRequestClaim::Resolved(route)
+                if resolved_replay_is_live(&route, unix_ms()) =>
+            {
+                let replay_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
                 let _response_publication = ingress_serving_authority
-                    .commit_guard_before(
-                        ingress_serving_generation,
-                        publication_deadline.into_std(),
-                    )
+                    .commit_guard_before(ingress_serving_generation, replay_deadline.into_std())
                     .await
                     .ok_or_else(|| {
                         ApiError::ServiceUnavailable(
-                            "the ingress lost serving authority before replay publication"
-                                .to_owned(),
+                            "the ingress lost serving authority before resolved replay".to_owned(),
                         )
                     })?;
                 let route = tokio::time::timeout_at(
-                    publication_deadline,
-                    state.store.publish_media_session_activation(
-                        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                            user_id: user.id,
-                        },
-                        &request_claim_id,
-                        &in_flight_incarnation,
-                        unix_ms(),
-                    ),
+                    replay_deadline,
+                    state
+                        .store
+                        .media_session_route_by_incarnation(&route.incarnation_id),
                 )
                 .await
                 .map_err(|_| {
                     ApiError::ServiceUnavailable(
-                        "media-session replay publication exceeded its fixed deadline".to_owned(),
+                        "resolved media-session replay freshness check timed out".to_owned(),
                     )
                 })?
-                .map_err(|error| session_store_error("publishing the session replay", error))?
-                .filter(|published| replay_publication_matches(published, &route))
+                .map_err(|error| session_store_error("rechecking the resolved replay", error))?
+                .filter(|current| {
+                    replay_route_identity_matches(current, &route)
+                        && resolved_replay_is_live(current, unix_ms())
+                })
                 .ok_or_else(|| {
                     ApiError::ServiceUnavailable(
-                        "the media-session replay lost its exact activation".to_owned(),
+                        "the resolved media-session replay is no longer current".to_owned(),
                     )
                 })?;
-                state.media_sessions.cache_route(route.clone()).await;
-                if route.owner_node_id == state.node_id {
-                    state.media_sessions.seed_owned_lease(&route).await;
-                }
                 let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
                 response.effective_processing = state
                     .transcode
                     .dv_effective_report(&route.session_id, &route.incarnation_id)
                     .await;
+                // Same-session owner takeover advances only the control epoch.
+                // Replaying the persisted create must not hand a restarted client
+                // the stale epoch embedded when owner 1 first activated.
                 if let Some(control) = response.control.as_ref() {
                     response.control = control.refreshed(
                         &route.session_id,
@@ -3540,21 +3445,130 @@ async fn create_with_purpose_inner(
                 }
                 return Ok(Json(response));
             }
-            return Err(ApiError::typed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "media_session_starting",
-                "an identical session request is still starting; retry shortly",
-            ));
-        }
-        MediaSessionRequestClaim::Conflict => {
-            return Err(ApiError::Conflict(
-                "request_id was already used for a different session intent".to_owned(),
-            ));
-        }
-        MediaSessionRequestClaim::Overloaded => {
-            return Err(ApiError::ServiceUnavailable(
-                "too many session starts are already active for this user".to_owned(),
-            ));
+            MediaSessionRequestClaim::Resolved(route)
+                if route.state == "active" && route.publication_ready_at_ms != 0 =>
+            {
+                if continuous.is_some() {
+                    return Err(continuous_handoff_pending(&route.session_id));
+                }
+                return Err(ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "media_session_handoff_pending",
+                    "the predecessor owner has not completed session handoff yet; retry shortly",
+                ));
+            }
+            MediaSessionRequestClaim::Resolved(_) => {
+                return Err(ApiError::typed(
+                    StatusCode::GONE,
+                    "media_session_ended",
+                    "this idempotent session was already released",
+                ));
+            }
+            MediaSessionRequestClaim::InFlight {
+                incarnation_id: in_flight_incarnation,
+                ..
+            } => {
+                let observed_at_ms = unix_ms();
+                let route = tokio::time::timeout(
+                    ACTIVATION_STORE_DEADLINE,
+                    state
+                        .store
+                        .media_session_route_by_incarnation(&in_flight_incarnation),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .filter(|route| {
+                    route.principal.local_user_id() == Some(user.id)
+                        && route.playback_id == request.playback_id
+                        && route.request_fingerprint == fingerprint
+                        && route.state == "active"
+                        && route.publication_ready_at_ms == 0
+                        && route.lease_expires_at_ms > observed_at_ms
+                });
+                if let Some(route) = route {
+                    let publication_deadline =
+                        tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+                    let _response_publication = ingress_serving_authority
+                        .commit_guard_before(
+                            ingress_serving_generation,
+                            publication_deadline.into_std(),
+                        )
+                        .await
+                        .ok_or_else(|| {
+                            ApiError::ServiceUnavailable(
+                                "the ingress lost serving authority before replay publication"
+                                    .to_owned(),
+                            )
+                        })?;
+                    let route = tokio::time::timeout_at(
+                        publication_deadline,
+                        state.store.publish_media_session_activation(
+                            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                                user_id: user.id,
+                            },
+                            &request_claim_id,
+                            &in_flight_incarnation,
+                            unix_ms(),
+                        ),
+                    )
+                    .await
+                    .map_err(|_| {
+                        ApiError::ServiceUnavailable(
+                            "media-session replay publication exceeded its fixed deadline"
+                                .to_owned(),
+                        )
+                    })?
+                    .map_err(|error| session_store_error("publishing the session replay", error))?
+                    .filter(|published| replay_publication_matches(published, &route))
+                    .ok_or_else(|| {
+                        ApiError::ServiceUnavailable(
+                            "the media-session replay lost its exact activation".to_owned(),
+                        )
+                    })?;
+                    state.media_sessions.cache_route(route.clone()).await;
+                    if route.owner_node_id == state.node_id {
+                        state.media_sessions.seed_owned_lease(&route).await;
+                    }
+                    let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
+                    response.effective_processing = state
+                        .transcode
+                        .dv_effective_report(&route.session_id, &route.incarnation_id)
+                        .await;
+                    if let Some(control) = response.control.as_ref() {
+                        response.control = control.refreshed(
+                            &route.session_id,
+                            &route.incarnation_id,
+                            route.owner_epoch,
+                        );
+                    }
+                    return Ok(Json(response));
+                }
+                // The owner has not activated yet. Wait on the durable row rather
+                // than answer a code no client retries; past this viewer's
+                // allowance the claim stays and the next re-post joins again.
+                // The last look lands on the deadline itself, so a joiner
+                // spends its whole allowance on the owner before answering.
+                let now = tokio::time::Instant::now();
+                if now >= join_deadline {
+                    return Err(create_still_starting(
+                        "an identical session request is still starting; retry shortly",
+                    ));
+                }
+                tokio::time::sleep_until((now + join_backoff).min(join_deadline)).await;
+                join_backoff = (join_backoff * 2).min(std::time::Duration::from_millis(500));
+            }
+            MediaSessionRequestClaim::Conflict => {
+                return Err(ApiError::Conflict(
+                    "request_id was already used for a different session intent".to_owned(),
+                ));
+            }
+            MediaSessionRequestClaim::Overloaded => {
+                return Err(ApiError::ServiceUnavailable(
+                    "too many session starts are already active for this user".to_owned(),
+                ));
+            }
         }
     }
     crate::media_pool::mark_create_phase("admission");
@@ -4066,8 +4080,8 @@ async fn create_with_purpose_inner(
     let mut last_error = None;
     for candidate in owner_candidates {
         if tokio::time::Instant::now() >= placement_deadline {
-            last_error = Some(ApiError::ServiceUnavailable(
-                "media worker placement exceeded its common deadline".to_owned(),
+            last_error = Some(create_still_starting(
+                "media worker placement exceeded its common deadline",
             ));
             break;
         }
@@ -4161,24 +4175,18 @@ async fn create_with_purpose_inner(
                     "local media worker task failed: {error}"
                 ))),
                 Err(_) => {
+                    // The placement deadline is the owner's, not the viewer's:
+                    // this create owns its claim, so it reaches here only when
+                    // the claim's own window is spent and no activation could
+                    // still land inside it. The late worker is abandoned — its
+                    // dropped guard stops it and settles the claim — and a
+                    // retry starts afresh rather than joining a dead owner.
                     tokio::spawn(async move {
                         // Dropping a successful output drops its armed guard.
                         let _ = start_task.await;
                     });
-                    // Deliberately still codeless, i.e. still not retried.
-                    //
-                    // Both 50-second failures on lab6 came through here rather
-                    // than through `session_start_error`, so naming it was
-                    // tempting. But with the burn sidecar bounded above, a cold
-                    // sidecar no longer reaches this arm at all — what does is
-                    // a start that spent 50 s queuing for an encoder slot, and
-                    // there the codeless 503 is correct back-pressure. Making
-                    // it retryable would add three more create posts per viewer
-                    // at exactly the moment the node is saturated, and the
-                    // abandoned start is detached rather than aborted, so the
-                    // node still pays for every one of them.
-                    Err(ApiError::ServiceUnavailable(
-                        "local media worker exceeded the placement deadline".to_owned(),
+                    Err(create_still_starting(
+                        "local media worker exceeded the placement deadline",
                     ))
                 }
             }
@@ -4188,11 +4196,27 @@ async fn create_with_purpose_inner(
                 .retained_output_receiver(&candidate)
                 .await
                 .then_some(1);
-            match state
+            let mut remote_start = state
                 .media_sessions
                 .start_remote(&candidate, &remote_request, placement_deadline)
-                .await
+                .await;
+            // A reply lost in transit leaves the worker holding a session keyed
+            // by this create's incarnation (the worker request's id). Asking the
+            // same worker again recovers that session (`Recovered`) instead of
+            // placing a second producer elsewhere, so the claim keeps one owner.
+            if matches!(
+                remote_start,
+                Err(crate::media_sessions::RemoteStartFailure::Transport(
+                    PeerTransportError::Unreachable | PeerTransportError::TimedOut
+                ))
+            ) && tokio::time::Instant::now() < placement_deadline
             {
+                remote_start = state
+                    .media_sessions
+                    .start_remote(&candidate, &remote_request, placement_deadline)
+                    .await;
+            }
+            match remote_start {
                 Ok(started) => {
                     let target_generation = started.info.activation_generation;
                     let guard = match started.ownership {

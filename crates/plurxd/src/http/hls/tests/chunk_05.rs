@@ -1956,6 +1956,21 @@ fn bounded_admission_failure_is_a_retryable_503() {
     ));
 }
 
+/// D2 item 1: the create's allowance is the client's own remaining start
+/// time when it sends one; the 10 s default is only for a client that does
+/// not.
+#[test]
+fn create_allowance_is_the_clients_remaining_time() {
+    let mut headers = HeaderMap::new();
+    assert_eq!(startup_allowance_ms(&headers), 10_000);
+    headers.insert("x-plurx-startup-remaining-ms", "4200".parse().expect("value"));
+    assert_eq!(startup_allowance_ms(&headers), 4_200);
+    headers.insert("x-plurx-startup-remaining-ms", "0".parse().expect("value"));
+    assert_eq!(startup_allowance_ms(&headers), 0, "an exhausted client is not given 10 s");
+    headers.insert("x-plurx-startup-remaining-ms", "soon".parse().expect("value"));
+    assert_eq!(startup_allowance_ms(&headers), 10_000);
+}
+
 /// D2 item 2: every capacity refusal reaches the client with a code. The one
 /// failure a retry would cure — a slot, a CPU share, a queue position — is the
 /// `create_503_not_yet` code with a wait; each refusal no retry can cure names
