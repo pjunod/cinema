@@ -10,6 +10,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- New daemon-mediated source readers retain kernel lifetime witnesses on
+  native macOS, Linux and containers, allowing exact-owner recovery after
+  Cinema exits without rebooting the server. Legacy readers without this
+  evidence remain held pending a separate physical stop proof.
+
 - Jobs includes fresh CPU, GPU and heavy-worker capacity from learner nodes.
   Worker observations use the member-scoped operations channel and remain
   independent of voter-only playback and recording authority.
