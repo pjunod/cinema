@@ -1019,15 +1019,7 @@ impl TranscodeManager {
             )
             .await?;
         encoder = admission.encoder;
-        if grade == OutputGrade::Hdr10
-            && target_height == HDR10_4K_HEIGHT
-            && encoder != Encoder::Qsv
-        {
-            return Err(terminal_capacity_error(
-                TRANSCODE_HEIGHT_UNAVAILABLE,
-                "the proved 4K HDR10 QuickSync slot is busy; retry at 1080p",
-            ));
-        }
+        hdr10_4k_encoder_refusal(grade, target_height, encoder)?;
         let hw_slot = admission.hw_slot;
         let sw_permit = admission.sw_permit;
         let session_id = takeover
@@ -2621,4 +2613,23 @@ pub(crate) fn rolling_copy_video_options(
     } else {
         options
     }
+}
+
+/// A 4K HDR10 output is proved on QuickSync only, so a start for one that
+/// admission placed on any other encoder (the QuickSync slot busy, software
+/// admitted instead) is refused, terminally: the same request can only be
+/// served on that one slot again, and the viewer's client has to ask for a
+/// smaller height.
+pub(super) fn hdr10_4k_encoder_refusal(
+    grade: OutputGrade,
+    target_height: i64,
+    encoder: Encoder,
+) -> Result<(), String> {
+    if grade == OutputGrade::Hdr10 && target_height == HDR10_4K_HEIGHT && encoder != Encoder::Qsv {
+        return Err(terminal_capacity_error(
+            TRANSCODE_HEIGHT_UNAVAILABLE,
+            "the proved 4K HDR10 QuickSync slot is busy; retry at 1080p",
+        ));
+    }
+    Ok(())
 }
