@@ -726,6 +726,7 @@ fn test_session_with_optional_child(
 ) -> Session {
     let child = stand_in_child.then(|| {
         let child = tokio::process::Command::new("sleep")
+            .process_group(0)
             .arg("30")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
