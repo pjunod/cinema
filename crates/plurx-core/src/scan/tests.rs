@@ -593,8 +593,10 @@ async fn a_symlink_escaping_the_root_is_refused() {
 }
 
 /// A path that does not exist is refused rather than silently scanning
-/// nothing — Curator sending a path plurx cannot see (the classic
-/// container path-mapping mistake) must hear about it.
+/// nothing — Curator sending a path plurx cannot see must hear about it. Under
+/// one of the library's roots it is *unreadable*, not outside: an unmounted
+/// share looks exactly like this, and the same request succeeds once it is
+/// back (contract v2 §5.1), so the refusal is transient.
 #[tokio::test]
 async fn a_missing_path_is_refused() {
     let store = SqliteStore::open_in_memory().expect("store");
@@ -602,7 +604,7 @@ async fn a_missing_path_is_refused() {
     let lib = movie_library(&store, dir.path()).await;
     assert!(matches!(
         scan_path(&store, &lib, &dir.path().join("nope")).await,
-        Err(TargetError::OutsideRoots { .. })
+        Err(TargetError::Unreadable { .. })
     ));
 }
 

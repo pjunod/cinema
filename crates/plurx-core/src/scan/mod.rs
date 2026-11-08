@@ -6,6 +6,7 @@
 //! cheap and easy on shared storage. Probing runs sequentially for the same
 //! reason — a scan should not thrash a NAS.
 
+pub mod containment;
 pub mod dv_title;
 pub mod exif;
 pub mod home;
@@ -1208,6 +1209,14 @@ pub enum TargetError {
         path: String,
         roots: Vec<String>,
     },
+    /// The path is under a configured root that cannot be read right now —
+    /// an unmounted share, `ENOTCONN`, `EIO` — or is missing under it.
+    /// Transient: the same request can succeed once the root is back.
+    Unreadable {
+        path: String,
+        root: String,
+        error: String,
+    },
     Store(StoreError),
     /// The durable queue would not admit the request — it is full, or the
     /// same request is being cancelled. Nothing is broken and nothing was
@@ -1224,6 +1233,10 @@ impl std::fmt::Display for TargetError {
                 f,
                 "`{path}` is not under any root of this library ({})",
                 roots.join(", ")
+            ),
+            TargetError::Unreadable { path, root, error } => write!(
+                f,
+                "path_unreadable: `{path}` is under library root `{root}`, which could not be read: {error}"
             ),
             TargetError::Store(e) => write!(f, "{e}"),
             TargetError::Refused(outcome) => {
@@ -1335,11 +1348,23 @@ pub async fn scan_path_targeted(
     })?;
     let (canonical, target_is_file, canonical_roots) = match canonicalized {
         Ok(result) => result,
-        Err(_) => {
-            return Err(TargetError::OutsideRoots {
-                path: target.display().to_string(),
-                roots,
-            })
+        // Lexically under one of this library's roots: the share dropped
+        // between admission and now, so the failure is transient. Anything
+        // else never belonged to this library.
+        Err(error) => {
+            return Err(
+                match containment::lexical_root(std::slice::from_ref(library), target) {
+                    Some((_, root)) => TargetError::Unreadable {
+                        path: target.display().to_string(),
+                        root: root.display().to_string(),
+                        error: error.to_string(),
+                    },
+                    None => TargetError::OutsideRoots {
+                        path: target.display().to_string(),
+                        roots,
+                    },
+                },
+            )
         }
     };
     let under_root = canonical_roots.iter().any(|root| {

@@ -14,6 +14,24 @@ source mapping**, not an automatic refinement proof. Source hashes in
 that set complete or that the abstractions are correct.
 
 
+## Pipeline v2 request handler (T3) — scoped correspondence review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed PR #1406
+(`claude/pipeline-v2-m5-t3-handler`) against its parent T2. This is an
+author review awaiting an independent check, not execution evidence. T3
+adds typed path outcomes, `request_key` replay, `wait_ms` and
+`expected_files` to `POST /api/v1/scan`.
+
+| T3 behaviour (source) | Model action or property | Still holds? | Model change |
+|---|---|---|---|
+| `request_scan_v2`: admission through `enqueue_library_work_v2` (reviewed with T1); a colliding `request_key` answers with the existing request; an advisory `queue_position:<n>` write when the request joins a running targeted job ([`library_work.rs`](../../crates/plurxd/src/library_work.rs)) | None in the worker models: each starts with one selected durable request already admitted | Yes: admission creates or joins demand through the unchanged `ENQUEUE_SQL`; the replay read and the advisory write change no queue, domain, binding or publication state | None |
+| `await_scan_request`: the HTTP caller waits on a per-request local `Notify` with a bounded re-read of the durable record, then forgets the signal | None; caller-side waiting outside the worker | Yes: the worker's completion transaction and its waiter settlement are unchanged; the durable record stays the authority | None |
+| A target under a root that cannot be read becomes `TargetError::Unreadable`, recorded as the request's failed result; a target outside every root stays `OutsideRoots` ([`library_work.rs`](../../crates/plurxd/src/library_work.rs), [`scan/mod.rs`](../../crates/plurx-core/src/scan/mod.rs), new `scan/containment.rs`) | Durable jobs `ApplyPublication` (none happens); operation progress `CompleteSend`/`StoreApply` (`complete_library_work` records the per-request result); worker refinement `CompleteSend` | Yes: the scan publishes nothing for that target and completes the request through the same fenced `complete_library_work` path that already recorded `OutsideRoots` failures | None |
+| `ScanAdmission` re-export ([`state.rs`](../../crates/plurxd/src/state.rs)) | None | Yes | None |
+
+Whole-file pins only are refreshed; models, configurations and properties are
+unchanged.
+
 ## Pipeline v2 targeted job (T2) — scoped correspondence review on 2026-11-08
 
 Claude (`claude-opus-5-5`, the pipeline-v2 builder) reviewed PR #1405
